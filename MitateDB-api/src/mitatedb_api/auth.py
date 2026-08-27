@@ -10,7 +10,7 @@ from threading import RLock
 from typing import Optional
 
 from .audit import AuditSink
-from .errors import AuthenticationError, AuthorizationStateUnavailable
+from .errors import AuthenticationError, AuthorizationStateUnavailable, NotFoundError
 
 
 class Role(str, Enum):
@@ -83,10 +83,14 @@ class CredentialStore:
     def revoke(self, credential_id):
         with self._lock:
             item = self._credentials.get(credential_id) if isinstance(credential_id, str) else None
-            if item is not None:
-                item.enabled = False
-                self.audit.record("credential_revoked", item.application_id,
-                                  credential_id)
+            if item is None:
+                # Fail closed rather than silently accepting an unknown id:
+                # a control-plane operator must not be able to believe a
+                # credential was revoked when no such credential exists.
+                raise NotFoundError("credential not found")
+            item.enabled = False
+            self.audit.record("credential_revoked", item.application_id,
+                              credential_id)
 
     def disable_application(self, application_id):
         with self._lock:

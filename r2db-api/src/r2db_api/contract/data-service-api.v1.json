@@ -1,0 +1,142 @@
+{
+  "$id": "https://example.invalid/data-service-api/v1/contract",
+  "title": "Common Data Service API contract",
+  "document_type": "machine-readable-api-contract",
+  "description": "Platform-independent structured Data Service API semantics for r2db-api and MitateDB-api.",
+  "contract_version": "1.0.0",
+  "media_type": "application/json",
+  "security": {
+    "schemes": {
+      "application_credential": {
+        "type": "http",
+        "scheme": "Bearer",
+        "description": "Opaque credential presented over TLS. The service stores only a verifier/digest and never returns the secret."
+      },
+      "control_credential": {
+        "type": "http",
+        "scheme": "Bearer",
+        "description": "A separately authenticated Control/Audit authority; application credentials are not accepted."
+      }
+    },
+    "roles": ["runtime", "developer", "control", "audit"],
+    "scope": "Application and role are derived from authoritative credential state; request fields cannot select either.",
+    "failure": "Unknown, expired, revoked, disabled, or unavailable authorization state fails closed."
+  },
+  "versioning": {
+    "base_path": "/v1",
+    "compatibility": "Additive fields and capabilities are allowed; removal or semantic change requires a new major version.",
+    "discovery": "GET /v1/capabilities returns the negotiated contract version, capabilities, roles, and finite limits.",
+    "unknown_capability": "The service returns CAPABILITY_UNSUPPORTED without executing a fallback."
+  },
+  "capability_status": {
+    "contract_target": "Endpoint and schema sections describe peer-target semantics; an implementation publishes its own status for each capability.",
+    "status_enum": ["enabled", "partial", "unavailable", "planned"],
+    "enforcement_enum": ["enforced", "reference_wall_clock", "deployment_required", "unavailable"],
+    "rules": ["A capability must not be advertised as enabled unless its operations are executable.", "Optional target operations may be unavailable and must fail with CAPABILITY_UNSUPPORTED.", "Every discovered finite limit names its enforcement layer; deployment_required is not an application-code proof."]
+  },
+  "endpoints": {
+    "capabilities": {
+      "method": "GET",
+      "path": "/v1/capabilities",
+      "auth": "application or control",
+      "response": "CapabilityDocument"
+    },
+    "query": {
+      "method": "POST",
+      "path": "/v1/data/{entity}/query",
+      "auth": "runtime or developer",
+      "request": "QueryRequest",
+      "response": "QueryResult",
+      "semantics": "Entity and fields are validated identifiers; predicates/operators are from the structured allowlist; values are bound, never executable text."
+    },
+    "mutate": {
+      "method": "POST",
+      "path": "/v1/data/{entity}/mutations",
+      "auth": "runtime or developer",
+      "request": "MutationRequest",
+      "response": "MutationResult",
+      "semantics": "A batch is atomic unless explicitly declared best_effort by a capability that defines partial-result semantics."
+    },
+    "catalog": {
+      "method": "GET",
+      "path": "/v1/catalog",
+      "auth": "runtime or developer",
+      "response": "CatalogDocument"
+    },
+    "schema": {
+      "method": "POST",
+      "path": "/v1/schema/operations",
+      "auth": "developer",
+      "request": "SchemaOperationRequest",
+      "response": "SchemaOperationResult",
+      "semantics": "Schema changes are structured and attributable; destructive changes require explicit destructive semantics and appropriate authority."
+    },
+    "audit_query": {
+      "method": "POST",
+      "path": "/v1/audit/query",
+      "auth": "control or audit",
+      "request": "AuditQueryRequest",
+      "response": "AuditResult",
+      "semantics": "Application credentials are denied. Emission is a service consequence and cannot be authored by an application caller."
+    }
+  },
+  "structured_operations": {
+    "allowed_query_operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"],
+    "allowed_mutations": ["insert", "update", "upsert", "delete"],
+    "allowed_schema_operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"],
+    "identifier": "ASCII letters, digits, and underscore; first character must be a letter or underscore; implementation may apply a stricter known-catalog policy.",
+    "values": "JSON values are passed through a parameter-binding boundary; values are never interpolated into native command text.",
+    "sql": "No public operation accepts SQL, database-native command text, scripts, or connection credentials.",
+    "scope": "The target Application is the authenticated credential's server-derived scope. A client application_id, database, schema, or role field is not authority."
+  },
+  "transactions": {
+    "default": "atomic",
+    "atomic": "All operations in the declared atomic unit commit together or leave no externally visible partial state.",
+    "best_effort": "Only a capability that declares best_effort may return per-item outcomes; the contract must identify partial effects.",
+    "retry": "Clients use idempotency_key, revision preconditions, or explicit conflict handling; retries do not silently widen scope."
+  },
+  "errors": {
+    "content_type": "application/problem+json",
+    "shape": {"type": "string", "code": "string", "message": "string", "request_id": "string", "details": "object"},
+    "codes": ["AUTH_REQUIRED", "AUTH_INVALID", "AUTH_REVOKED", "APPLICATION_DISABLED", "AUTH_STATE_UNAVAILABLE", "FORBIDDEN", "SCOPE_MISMATCH", "VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED", "NOT_FOUND", "CONFLICT", "PRECONDITION_FAILED", "LIMIT_EXCEEDED", "DESTRUCTIVE_CONFIRMATION_REQUIRED", "ATOMICITY_FAILED", "SERVICE_UNAVAILABLE"],
+    "disclosure": "No credential material, SQL, row values, stack traces, database names, role names, connection details, or sensitive existence distinctions are returned. Safe field-level diagnostics remain allowed."
+  },
+  "limits": {
+    "finite_required": true,
+    "profile": "Limits are deployment-profile values and are returned by capability discovery.",
+    "classes": ["request_bytes", "batch_items", "result_items", "query_complexity", "execution_ms", "concurrency", "requests_per_minute", "schema_objects", "operation_depth"],
+    "example_profile": {"request_bytes": 1048576, "batch_items": 100, "result_items": 1000, "query_complexity": 50, "execution_ms": 5000, "concurrency": 32, "requests_per_minute": 600, "schema_objects": 1000, "operation_depth": 8}
+  },
+  "lifecycle": {
+    "credential": "Control authority may issue, rotate, revoke, or disable credentials. A revoked credential is rejected on subsequent authorization after the documented propagation bound.",
+    "application": "A disabled Application rejects all application-facing operations; authorization state unavailable for a protected operation fails closed.",
+    "user_session": "Where Application User/Identity is enabled, user/session status and policy are server-bound and revocation is fail-closed within the published bound.",
+    "propagation_bound": "Each deployment publishes a finite authorization-state propagation bound in its profile; indefinite stale authorization is non-conformant."
+  },
+  "audit": {
+    "emission": "The service emits canonical attributable events for authentication/authorization denials, lifecycle changes, destructive and privilege-sensitive operations, and security-control failures.",
+    "sink_failure_policy": "Failure to durably record an authentication/authorization denial, a credential or Application lifecycle change, a destructive or privilege-sensitive operation, or a security-control failure fails the operation closed. Failure to record an ordinary data-operation event may be absorbed by a bounded buffer that raises an explicit operational alert; it must not silently discard events without that alert.",
+    "fields": ["event_id", "event_class", "occurred_at", "request_id", "application_id", "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code"],
+    "forbidden_fields": ["credential", "token", "password", "secret", "private_key", "sql", "row_value"],
+    "immutability": "Application authority cannot author, override, update, or delete security evidence. The sink is append-only and externally governed where required by the deployment.",
+    "query_authority": "Audit evidence query is separate from emission and requires control/audit authority."
+  },
+  "schemas": {
+    "QueryRequest": {"type": "object", "additionalProperties": false, "required": ["select"], "properties": {"select": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "order_by": {"type": "array", "maxItems": 10, "items": {"$ref": "#/definitions/Order"}}, "page": {"$ref": "#/definitions/Page"}}},
+    "MutationRequest": {"type": "object", "additionalProperties": false, "required": ["operations"], "properties": {"operations": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/definitions/Mutation"}}, "transaction": {"enum": ["atomic", "best_effort"]}, "idempotency_key": {"type": "string", "maxLength": 128}}},
+    "SchemaOperationRequest": {"type": "object", "additionalProperties": false, "required": ["operation", "entity"], "properties": {"operation": {"enum": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"]}, "entity": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "field_type": {"enum": ["string", "integer", "number", "boolean", "object", "array"]}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}, "revision": {"type": "string", "maxLength": 128}}},
+    "CapabilityDocument": {"type": "object", "additionalProperties": false, "required": ["contract_version", "capabilities", "limits", "limit_enforcement", "authorization_propagation_bound_ms"], "properties": {"contract_version": {"type": "string"}, "capabilities": {"type": "object", "additionalProperties": {"type": "object", "required": ["status"], "properties": {"status": {"enum": ["enabled", "partial", "unavailable", "planned"]}}}}, "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}, "limit_enforcement": {"type": "object", "additionalProperties": {"enum": ["enforced", "reference_wall_clock", "deployment_required", "unavailable"]}}, "authorization_propagation_bound_ms": {"type": "integer", "minimum": 0}, "application_scope": {"type": "string"}, "role": {"enum": ["runtime", "developer", "control", "audit"]}}},
+    "QueryResult": {"type": "object", "required": ["items", "next_page"], "properties": {"items": {"type": "array"}, "next_page": {"type": ["string", "null"]}}},
+    "MutationResult": {"type": "object", "required": ["committed", "affected"], "properties": {"committed": {"type": "boolean"}, "affected": {"type": "integer", "minimum": 0}}},
+    "CatalogDocument": {"type": "object", "required": ["application_scope", "entities"], "properties": {"application_scope": {"type": "string"}, "entities": {"type": "array"}}},
+    "SchemaOperationResult": {"type": "object", "required": ["committed", "revision"], "properties": {"committed": {"type": "boolean"}, "revision": {"type": "string"}}},
+    "AuditQueryRequest": {"type": "object", "properties": {"event_classes": {"type": "array", "maxItems": 20}, "after": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}}},
+    "AuditResult": {"type": "object", "required": ["events"], "properties": {"events": {"type": "array", "items": {"type": "object"}}}}
+  },
+  "definitions": {
+    "Predicate": {"type": "object", "additionalProperties": false, "required": ["field", "operator"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "operator": {"enum": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"]}, "value": {}}},
+    "Order": {"type": "object", "additionalProperties": false, "required": ["field", "direction"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "direction": {"enum": ["asc", "desc"]}}},
+    "Page": {"type": "object", "additionalProperties": false, "properties": {"size": {"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": {"type": "string", "maxLength": 512}}},
+    "Mutation": {"type": "object", "additionalProperties": false, "required": ["operation"], "properties": {"operation": {"enum": ["insert", "update", "upsert", "delete"]}, "values": {"type": "object", "maxProperties": 100}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "expected_revision": {"type": "string", "maxLength": 128}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}}}
+  }
+}

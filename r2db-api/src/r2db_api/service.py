@@ -9,21 +9,37 @@ import uuid
 
 from .audit import AuditSink
 from .auth import AuthContext, CredentialStore
+from .backend import StorageBackend
 from .errors import FoundationError, fail
 from .limits import ResourceLimits
 from .structured import ApplicationCell, parse_predicate
 from .topology import AuthorityTopology
 
+# Default cell factory (design D-1 step 2): builds the existing in-memory
+# `ApplicationCell`, unchanged, so every caller that does not pass
+# `cell_factory` gets exactly today's behavior. A deployment that wants
+# `PostgresCell` (or any other `StorageBackend`) instead passes its own
+# factory -- `DataService` itself never imports `postgres.py` or references
+# PostgreSQL, keeping this module backend-agnostic (D-1: "in-memory backend
+# and PostgreSQL backend pass through the same validation boundary" without
+# either backend leaking into this facade).
+CellFactory = Callable[[str, dict[str, list[dict[str, Any]]] | None], StorageBackend]
+
+
+def _default_cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> StorageBackend:
+    return ApplicationCell(application_id, entities or {})
+
 
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, ApplicationCell] | None = None, clock: Callable[[], float] | None = None) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None) -> None:
         self._credentials = credentials
         self.limits = limits or ResourceLimits()
         self.topology = topology or AuthorityTopology()
         self._audit = audit or AuditSink()
-        self._cells: dict[str, ApplicationCell] = dict(initial_cells or {})
+        self._cell_factory: CellFactory = cell_factory or _default_cell_factory
+        self._cells: dict[str, StorageBackend] = dict(initial_cells or {})
         self._disabled_apps: set[str] = set()
         self._active = 0
         self._active_lock = threading.Lock()
@@ -32,13 +48,15 @@ class DataService:
         self._clock = clock or time.monotonic
         self.topology.validate()
 
-    def authenticate(self, secret: str | None) -> AuthContext:
+    def authenticate(self, secret: str | None, *, request_id: str | None = None) -> AuthContext:
         try:
             context = self._credentials.authenticate(secret)
-            self._event(context, "authentication", "authenticate", "allow", "application")
+            if context.application_id in self._disabled_apps:
+                fail("APPLICATION_DISABLED", "Application is disabled.", status=403)
+            self._event(context, "authentication", "authenticate", "allow", "application", request_id=request_id)
             return context
         except FoundationError as exc:
-            self._audit.append(event_class="authentication_denial", request_id=str(uuid.uuid4()), application_id=None, actor_type="unknown", actor_id=None, role=None, operation="authenticate", target_kind="application", outcome="deny", reason_code=exc.code)
+            self._audit.append(event_class="authentication_denial", request_id=request_id or str(uuid.uuid4()), application_id=None, actor_type="unknown", actor_id=None, role=None, operation="authenticate", target_kind="application", outcome="deny", reason_code=exc.code)
             raise
 
     def capabilities(self, context: AuthContext) -> dict[str, Any]:
@@ -58,11 +76,19 @@ class DataService:
                 },
                 "limits": self.limits.as_dict(),
                 "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},
+                # `_check()` (called by `_slot()` above) re-validates
+                # credential/application authorization state on every
+                # single application-plane operation; there is no cache, so
+                # revoke/disable/state-unavailable propagation is
+                # synchronous (see also the identical reasoning in
+                # `conformance/conformance_adapter_r2db.py`'s
+                # `propagation_bound_ms()`).
+                "authorization_propagation_bound_ms": 0,
                 "application_scope": canonical.application_id,
                 "role": canonical.role
             }
 
-    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100) -> list[dict[str, Any]]:
+    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, request_id: str | None = None) -> list[dict[str, Any]]:
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
@@ -75,13 +101,13 @@ class DataService:
                 predicates = [parse_predicate(item) for item in (where or [])]
                 deadline = self._clock() + self.limits.execution_ms / 1000
                 result = self._cells[canonical.application_id].query(entity, select=select, where=predicates, page_size=page_size, limits=self.limits, deadline=deadline, clock=self._clock)
-                self._event(canonical, "data_operation", "query", "allow", "entity")
+                self._event(canonical, "data_operation", "query", "allow", "entity", request_id=request_id)
                 return result
         except FoundationError as exc:
-            self._event(context, "authorization_denial", "query", "deny", "entity", exc.code)
+            self._event(context, "authorization_denial", "query", "deny", "entity", exc.code, request_id=request_id)
             raise
 
-    def mutate(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic") -> int:
+    def mutate(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None) -> int:
         try:
             with self._slot(context) as canonical:
                 if transaction != "atomic":
@@ -93,13 +119,13 @@ class DataService:
                 self.limits.check_depth(request)
                 deadline = self._clock() + self.limits.execution_ms / 1000
                 affected = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock)
-                self._event(canonical, "data_operation", "mutate", "allow", "entity")
+                self._event(canonical, "data_operation", "mutate", "allow", "entity", request_id=request_id)
                 return affected
         except FoundationError as exc:
-            self._event(context, "operation_denial", "mutate", "deny", "entity", exc.code)
+            self._event(context, "operation_denial", "mutate", "deny", "entity", exc.code, request_id=request_id)
             raise
 
-    def schema(self, context: AuthContext, operation: dict[str, Any] | None) -> int:
+    def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
@@ -108,10 +134,20 @@ class DataService:
                 self.limits.check_depth(operation)
                 deadline = self._clock() + self.limits.execution_ms / 1000
                 revision = self._cells[canonical.application_id].apply_schema(operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline, clock=self._clock)
-                self._event(canonical, "privilege_sensitive", "schema", "allow", "entity")
+                self._event(canonical, "privilege_sensitive", "schema", "allow", "entity", request_id=request_id)
                 return revision
         except FoundationError as exc:
-            self._event(context, "privilege_denial", "schema", "deny", "entity", exc.code)
+            self._event(context, "privilege_denial", "schema", "deny", "entity", exc.code, request_id=request_id)
+            raise
+
+    def catalog(self, context: AuthContext, *, request_id: str | None = None) -> dict[str, Any]:
+        try:
+            with self._slot(context) as canonical:
+                entities = self._cells[canonical.application_id].catalog()
+                self._event(canonical, "data_operation", "catalog", "allow", "entity", request_id=request_id)
+                return {"application_scope": canonical.application_id, "entities": entities}
+        except FoundationError as exc:
+            self._event(context, "authorization_denial", "catalog", "deny", "entity", exc.code, request_id=request_id)
             raise
 
     @contextmanager
@@ -147,14 +183,14 @@ class DataService:
                 fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit": self.limits.requests_per_minute})
             window.append(now)
 
-    def _event(self, context: AuthContext, event_class: str, operation: str, outcome: str, target_kind: str, reason_code: str | None = None) -> None:
+    def _event(self, context: AuthContext, event_class: str, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, *, request_id: str | None = None) -> None:
         canonical = self._credentials.canonical_context(context)
-        self._audit.append(event_class=event_class, request_id=str(uuid.uuid4()), application_id=canonical.application_id if canonical else None, actor_type="application_credential" if canonical else "unknown", actor_id=canonical.credential_id if canonical else None, role=canonical.role if canonical else None, operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code)
+        self._audit.append(event_class=event_class, request_id=request_id or str(uuid.uuid4()), application_id=canonical.application_id if canonical else None, actor_type="application_credential" if canonical else "unknown", actor_id=canonical.credential_id if canonical else None, role=canonical.role if canonical else None, operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code)
 
     def _register_application(self, application_id: str, entities: dict[str, list[dict[str, Any]]] | None = None) -> None:
         if application_id in self._cells:
             fail("CONFLICT", "Application already exists.", status=409)
-        self._cells[application_id] = ApplicationCell(application_id, entities or {})
+        self._cells[application_id] = self._cell_factory(application_id, entities)
 
     def _set_application_disabled(self, application_id: str, disabled: bool) -> None:
         if application_id not in self._cells:

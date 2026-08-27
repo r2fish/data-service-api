@@ -330,6 +330,64 @@ class ApplicationRuntime:
         self.__authorize()
         return self.__cell.transact(self.__principal, operations)
 
+    def capabilities(self):
+        """Minimal capability/discovery document, per this session's own
+        server-bound scope. Statuses reflect what this foundation actually
+        executes today, not the common contract's peer-target surface: an
+        operation this foundation cannot run is never advertised "enabled"
+        (spec `capability_status.rules`).
+        """
+        self.__authorize()
+        principal = self.__principal
+        is_developer = principal.role == Role.DEVELOPER
+        config = self.__cell.config
+        return {
+            "contract_version": "1.0.0",
+            "capabilities": {
+                # `_OPS` (this module) has no "contains" / "is_null" entry,
+                # so those two contract-listed operators are not executable
+                # here: "enabled" would misrepresent them as available.
+                "structured_query": {"status": "partial", "operators": list(_OPS), "unsupported": ["contains", "is_null"]},
+                # `ApplicationCell.transact` only accepts operation type
+                # "insert"; there is no "upsert" surface anywhere on this
+                # peer.
+                "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},
+                # No public "list collections" operation exists on this peer.
+                "application_catalog": {"status": "unavailable"},
+                "schema_operations": {"status": "partial", "operations": ["create_entity"] if is_developer else [], "unsupported": ["add_field", "alter_field", "create_index", "drop_index", "drop_entity", "jobs"]},
+                "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
+                "best_effort_transactions": {"status": "unavailable"},
+                "idempotency": {"status": "unavailable"},
+                "revision_preconditions": {"status": "unavailable"}
+            },
+            "limits": {
+                "batch_items": config.max_batch_items,
+                "result_items": config.max_result_rows,
+                "fields": config.max_fields,
+                "filter_terms": config.max_filter_terms,
+                "request_bytes": config.max_request_bytes,
+                "schema_objects": config.max_schema_objects
+            },
+            "limit_enforcement": {
+                "batch_items": "enforced",
+                "result_items": "enforced",
+                "fields": "enforced",
+                "filter_terms": "enforced",
+                # `FoundationConfig.validate_request_size` exists but is not
+                # wired into any request path yet (no caller in `cell.py` /
+                # `service.py`): reporting "enforced" here would be false.
+                "request_bytes": "unavailable",
+                "schema_objects": "enforced"
+            },
+            # `CredentialStore.assert_active` (auth.py) is invoked by
+            # `__authorize` above on every single session operation, with
+            # no cache: revoke/disable/state-unavailable propagation is
+            # synchronous.
+            "authorization_propagation_bound_ms": 0,
+            "application_scope": principal.application_id,
+            "role": principal.role.value
+        }
+
 
 class ApplicationDeveloper(ApplicationRuntime):
     """Developer authority adds structured schema operations only."""

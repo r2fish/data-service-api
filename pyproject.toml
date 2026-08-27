@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+pythonpath = ["r2db-api/src", "MitateDB-api/src", "conformance-tests"]
+testpaths = ["conformance-tests", "r2db-api/tests", "MitateDB-api/tests"]
+markers = ["condition(cid): common conformance condition identifier"]

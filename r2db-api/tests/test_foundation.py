@@ -108,6 +108,35 @@ def test_revoke_disable_and_unavailable_state_fail_closed(service):
     assert exc.value.code == "AUTH_STATE_UNAVAILABLE"
 
 
+def test_authenticate_fails_closed_for_disabled_application(service):
+    control = ControlAuthority(service)
+    control.set_application_enabled("app-a", enabled=False)
+    with pytest.raises(FoundationError) as exc:
+        service.authenticate("secret-a")
+    assert exc.value.code == "APPLICATION_DISABLED"
+    denials = [event for event in control.audit_events() if event.get("operation") == "authenticate" and event.get("outcome") == "deny"]
+    assert denials and denials[-1]["reason_code"] == "APPLICATION_DISABLED"
+    control.set_application_enabled("app-a", enabled=True)
+    assert service.authenticate("secret-a").application_id == "app-a"
+
+
+def test_catalog_returns_shaped_document_scoped_to_application(service):
+    runtime = service.authenticate("secret-a")
+    document = service.catalog(runtime)
+    assert document == {"application_scope": "app-a", "entities": [{"entity": "notes", "fields": ["body", "id"]}]}
+    other = service.authenticate("secret-b")
+    assert service.catalog(other) == {"application_scope": "app-b", "entities": [{"entity": "notes", "fields": ["body", "id"]}]}
+
+
+def test_catalog_denied_for_revoked_credential_exactly_as_query(service):
+    runtime = service.authenticate("secret-a")
+    control = ControlAuthority(service)
+    control.set_credential_state("cred-a", revoked=True)
+    with pytest.raises(FoundationError) as exc:
+        service.catalog(runtime)
+    assert exc.value.code == "AUTH_REVOKED"
+
+
 def test_finite_limits_are_enforced_and_discoverable(service):
     runtime = service.authenticate("secret-a")
     response = service.capabilities(runtime)

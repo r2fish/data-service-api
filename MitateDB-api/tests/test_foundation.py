@@ -8,7 +8,8 @@ from mitatedb_api import (ControlPlane, Filter, FoundationConfig,
                           MitateDataService, Role)
 from mitatedb_api.errors import (AuthenticationError,
                                  AuthorizationStateUnavailable,
-                                 ResourceLimitError, ValidationError)
+                                 NotFoundError, ResourceLimitError,
+                                 ValidationError)
 
 
 class FoundationTests(unittest.TestCase):
@@ -73,6 +74,18 @@ class FoundationTests(unittest.TestCase):
         self.control.credentials.authorization_state_available = False
         with self.assertRaises(AuthorizationStateUnavailable):
             self.service.open_session(self.dev_id, self.dev_secret)
+
+    def test_revoke_of_unknown_credential_id_is_rejected_not_silently_ignored(self):
+        # Control-plane fail-open: an operator revoking a credential id that
+        # does not exist must not be told (by silence) that the revoke
+        # succeeded, since no such credential was ever active in the first
+        # place.
+        with self.assertRaises(NotFoundError):
+            self.control.revoke_credential("no-such-credential-id")
+        # A real credential is unaffected by the failed call above.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "still-active"})
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "still-active")
 
     def test_bounded_inputs_and_explicit_destructive_confirmation(self):
         config = FoundationConfig(max_batch_items=1)

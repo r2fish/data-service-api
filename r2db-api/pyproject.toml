@@ -7,7 +7,25 @@ name = "data-service-r2db-foundation"
 version = "0.1.0"
 description = "Reference foundation for the common structured Data Service API contract"
 requires-python = ">=3.11"
+dependencies = [
+    "starlette>=1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "httpx>=0.28",
+    "anyio>=4.0",
+]
+
+[tool.setuptools.package-data]
+# Packaged copy of the common contract (see r2db_api/http.py's contract
+# loader comment): ships inside this distribution so a deployed unit is
+# self-contained without the sibling spec/ checkout (docs/design/
+# R2DB_SERVICE_LAYER_ARCHITECTURE.md §5.3, C-1).
+r2db_api = ["contract/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+anyio_mode = "auto"
