@@ -8,8 +8,11 @@ The target is that an AI agent can use either implementation from:
 2. a base URL, and
 3. an authorized API key.
 
-The common contract will be extracted from the validated r2db-api behavior before MitateDB-api implementation expands it. It should cover at least endpoint semantics, request/response shapes, authentication roles, error codes, filtering/query semantics, structured schema operations, security invariants, and versioning/compatibility rules.
+`data-service-api.v1.json` is the initial machine-readable contract. It covers endpoint semantics, request/response shapes, authentication roles, error codes, structured query/schema operations, finite resource limits, lifecycle, audit semantics, and versioning/compatibility rules. `CCR_DISPOSITION.md` records the formal disposition of CCR-01 through CCR-12.
 
-Do not treat current implementation details such as VPS paths, nginx, localhost PostgreSQL, Cloud Run, or Cloud SQL connection mechanics as part of the common API contract.
+Do not treat deployment-specific paths, proxies, database connection mechanics,
+or cloud-provider products as part of the common API contract.
 
-An authoritative machine-readable OpenAPI artifact should live here once extracted and validated; do not hand-invent a schema that is not supported by implementation/tests.
+The JSON artifact is a contract document rather than a JSON Schema for one
+request body: endpoint payload schemas are named under `schemas`, and each
+implementation must expose equivalent semantics through its adapter.

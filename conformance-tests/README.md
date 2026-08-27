@@ -32,3 +32,9 @@ Existing validated r2db-api tests are evidence candidates, not the source of tru
 Likely reusable areas include authentication, CRUD, filtering/sorting/pagination, JSONB behavior, application isolation, SQL-injection resistance, request transaction rollback, and Runtime/Developer schema privilege separation.
 
 Platform-specific deployment/provisioning mechanics do not belong in the common test suite, but evidence that a platform-specific control satisfies a common invariant belongs in `security/CONTROL_MAPPING.md`.
+
+`CONDITIONS.md` is the implementation-independent condition register. The
+initial executable `test_contract.py` verifies that the common contract is
+machine-readable, has separate application/control authority, and records all
+CCR dispositions. Peer adapters run the same condition IDs for runtime
+behavior; the r2db foundation adapter is exercised under `r2db-api/tests/`.
