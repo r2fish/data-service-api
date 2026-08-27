@@ -1,0 +1,29 @@
+# Non-secret topology declaration for the first Cloud Run / Cloud SQL adapter.
+# This is an intent/configuration skeleton, not deployment evidence by itself.
+apiVersion: mitatedb.foundation/v1
+kind: AuthorityTopology
+workloads:
+  application_data_runtime:
+    trust_boundary: application-facing
+    credentials_from: external-secret-manager
+    allowed_targets:
+      - application-data-storage
+    denied_targets:
+      - control-plane-storage
+      - provisioning-plane
+      - platform-metadata
+  control_plane:
+    trust_boundary: privileged
+    credentials_from: external-secret-manager
+    allowed_targets:
+      - control-plane-storage
+      - provisioning-plane
+    application_credentials_allowed: false
+  audit_sink:
+    trust_boundary: append-only-evidence
+    application_mutation_allowed: false
+    deletion_allowed: false
+rules:
+  - application_data_runtime_must_not_receive_control_plane_credentials
+  - application_data_runtime_must_not_select_application_scope_from_request
+  - provisioning_must_not_be_reachable_from_public_request_path

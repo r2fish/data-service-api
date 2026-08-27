@@ -1,0 +1,44 @@
+{
+  "contract_kind": "implementation-foundation",
+  "version": "0.1",
+  "status": "local-executable-foundation",
+  "public_contract": {
+    "source_of_truth": "../../spec/",
+    "ownership": "common-contract-owned-by-r2db-api-workstream",
+    "implementation_must_not_define_public_endpoints_here": true
+  },
+  "authority_topology": {
+    "application_data_plane": "one ApplicationCell per application; application-facing sessions hold only their bound cell",
+    "control_plane": "ControlPlane owns lifecycle, credential registry, and cell provisioning",
+    "provisioning_plane": "ControlPlane.provision_application; not reachable from ApplicationRuntime or ApplicationDeveloper",
+    "audit_plane": "immutable-snapshot AuditSink on the local API path; application sessions have no mutation API",
+    "deployment_skeleton": "../docker/authority-topology.yaml",
+    "production_evidence_status": "not_yet_available"
+  },
+  "credential_semantics": {
+    "scope": "server-bound application_id and role",
+    "roles": ["runtime", "developer"],
+    "secret_storage": "pepper-backed digest only; secret returned once at issuance",
+    "revocation": "checked on every session opening and operation; unavailable authorization state fails closed"
+  },
+  "structured_operations": {
+    "database_native_command_text": false,
+    "values": "parameter-bound",
+    "identifiers": "validated before quoted construction",
+    "transaction": "all operations commit or rollback as one local transaction",
+    "destructive_data_operation": "explicit confirm required"
+  },
+  "resource_bounds": {
+    "configuration": "FoundationConfig / MITATEDB_* environment variables",
+    "finite_by_default": true,
+    "classes": ["batch_items", "result_rows", "fields", "filter_terms", "request_bytes", "schema_objects"]
+  },
+  "evidence": {
+    "automated_suite": "../tests/test_foundation.py",
+    "platform_evidence_required_before_production": [
+      "Cloud Run identity has no Control Plane or provisioning credentials",
+      "Cloud SQL access is restricted to the application data authority",
+      "audit sink is append-only and separately governed"
+    ]
+  }
+}

@@ -5,3 +5,8 @@ This folder is reserved only for Data Service-specific container/deployment supp
 It is not an additional application layer and must not contain business logic, database credentials, or Agent/Application code.
 
 If implementation does not require a dedicated folder, this folder should be removed rather than used as a generic dumping area.
+
+`authority-topology.yaml` is the non-secret runtime-boundary skeleton for the
+future Cloud Run/Cloud SQL adapter. It records intended workload separation
+and deny rules, but is not platform evidence until deployed IAM, network and
+secret-manager controls are configured and independently verified.
