@@ -1,5 +1,23 @@
 # r2db-api 次期正式実装 作業指示書
 
+## 文書情報
+
+- 版数: 1.2
+- 発行日: 2026-08-27
+- 発行者: 依頼者
+- 改訂履歴:
+  - 1.0 (2026-08-27) 初版
+  - 1.1 (2026-08-27) 位置づけ・作業順序の明記、報告先・裁定ルール追加、公開Repository上の記載注意を追加
+  - 1.2 (2026-08-27) MitateDB-api側先行成果(local foundation、CCR-01〜12)の反映、共通契約整備へのCCR採否プロセス追加、旧実装参照先の提示方式を明確化
+
+## 位置づけ・作業順序
+
+- 本作業はMitateDB-api次期正式実装([MITATEDB_API_WORK_INSTRUCTION.md](MITATEDB_API_WORK_INSTRUCTION.md))と同時進行とする。優先は本作業(r2db-api)側にある。
+- 共通契約(`data-service-api/spec/`)の整備は本作業が主導する。MitateDB-api側から提起されるMitate由来の要求を共通契約へ取り込む方向で設計し、r2db-api固有の暗黙前提を共通契約へ持ち込まない。
+- MitateDB-api側は先行してlocal executable foundationおよび共通契約変更要求書(`MitateDB-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md`、CCR-01〜12)を作成済みである。本作業はCCR-01〜12を共通契約整備の正式な入力として扱う。先行はあくまでlocal foundationであり、共通契約の主導権は本作業にある。
+- data-service-api(r2db-api、MitateDB-api)の成立後に、Mitate本体の本格着手を行う。
+- 期限・マイルストーンは本指示書では定めない。
+
 ## 1. 作業体制
 
 - 実装担当: Luna
@@ -42,6 +60,8 @@ data-service-api/r2db-api
 ```text
 project/r2-vps/apps/r2db-api
 ```
+
+旧実装は本Repositoryの外にある。ローカル参照先は依頼者が作業開始時に提示する。実パス・本番運用情報を本公開Repositoryへ記載しない。
 
 旧実装はCapability、実運用知識、テスト観点を確認するために参照してよいが、構造・API・内部実装を維持する義務はない。
 
@@ -174,7 +194,13 @@ deployment/profileによって適切に設定可能な構造とする。
 
 ### 7.1 Machine-readable contract
 
-`spec/` 等に、実装と独立した正式契約を置く。
+`spec/` 等に、実装と独立した正式契約を置く。共通契約の整備は本作業が主導する。
+
+整備にあたり、MitateDB-api側から提起されたCCR-01〜12(`MitateDB-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md`)を正式入力として採否判断する。
+
+- 採用するsemanticsは共通契約とconformance条件へ反映する
+- 却下・保留は理由と再検討条件を記録する
+- 採否はr2db-api固有都合ではなく、共通Capability・Security Invariants・peer成立性で判断する
 
 対象には最低限、次を含める。
 
@@ -195,6 +221,8 @@ OpenAPI / JSON Schema等を利用してよい。
 ### 7.2 Conformance conditions / tests
 
 Security Invariantsから実装非依存のconformance conditionを導出し、可能なものから自動テスト化する。
+
+MitateDB-api側の初期conformance整理(`MitateDB-api/tests/CONFORMANCE.md`)を参照し、共通conformanceが両peer implementationへ適用可能であることを維持する。conformance条件をr2db-api実装の追認にしない。
 
 旧r2db-apiの既存テストは正本ではない。
 ただし以下の観点は再利用する。
@@ -329,6 +357,7 @@ secret、token、password、row value、SQLをaudit logへ記録しない。
 - 設計書だけ作って実装価値ループを止めない。
 - 実装方法を細かなPhaseへ過剰分割しない。
 - pushは依頼されない限り行わない。
+- 稼働中の本番運用の非公開情報(ホスト名、内部アドレス、実credential、ローカルパス等)を本公開Repositoryへ記載しない。
 
 既存の無関係な変更が存在する場合は保持し、stash/reset/clean等で消さない。
 
@@ -347,8 +376,10 @@ secret、token、password、row value、SQLをaudit logへ記録しない。
 7. test / lint / compile等、Repositoryで妥当なquality gateを実行し結果を報告する。
 8. 旧正本を変更していない。
 9. 未解決事項がある場合は、実装を止めるblocking issueと将来改善を分けて報告する。
+10. CCR-01〜12の採否と理由が記録され、採用したsemanticsが共通契約とconformance条件へ反映されている。
 
 Lunaは完了時に、変更概要、主要設計判断、Security Invariant対応、テスト結果、残課題を簡潔に報告する。
+完了報告は依頼者へ提出する。Terraのレビュー結果とSolの判定は最終報告に含め、報告経路を一本化する。
 
 ---
 
@@ -367,6 +398,8 @@ Lunaの成果に対し、最低限以下を独立確認する。
 - error / auditにsecretや内部topologyが漏れないか
 - revoke / disableが契約したbound内でfail-closedになるか
 - conformance testsが実装追認ではなくInvariant由来になっているか
+- CCR-01〜12の採否判断がr2db-api固有都合になっていないか
+- 共通契約・conformanceがMitateDB-api側のpeer implementationとしても成立するか
 - 旧正本や無関係資産を変更していないか
 
 指摘は `Critical / High / Medium / Low` で分類する。
@@ -390,6 +423,7 @@ Solは次を基準にLuna/Terraの作業を監督する。
 8. 現行実装の模倣ではなく、次期正式サービスとしての一貫性を維持する。
 9. 設計・テスト・レビューを反復すること自体を目的化しない。
 10. Foundation成立後はData Plane等の実Capability実装へ速やかに進める。
+11. Luna/Terraで判断が割れた場合はSolが裁定する。Solが決せない事項は依頼者へエスカレーションする。
 
 ---
 

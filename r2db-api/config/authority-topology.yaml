@@ -1,0 +1,35 @@
+version: "1"
+contract: data-service-api.v1
+planes:
+  application_data:
+    identity: app-runtime
+    scope: authenticated_application
+    egress_allow: [application_data]
+    egress_deny: [application_development, control, provisioning, audit]
+  application_development:
+    identity: app-developer
+    scope: authenticated_application
+    egress_allow: [application_development]
+    egress_deny: [control, provisioning, audit]
+  application_identity:
+    identity: app-identity
+    scope: authenticated_application
+    egress_allow: [application_identity]
+  control:
+    identity: control-operator
+    egress_allow: [control, provisioning, audit]
+  provisioning:
+    identity: provisioner
+    egress_allow: [provisioning]
+  audit:
+    identity: external-audit-writer
+    mode: append_only
+boundaries:
+  application_cells: "Each request resolves one cell from credential state; client scope fields are non-authoritative."
+  database: "Application data authorities are independently scoped; no application authority receives control or provisioning credentials."
+  audit: "Application code can request brokered event emission only; it cannot query, alter, or delete the sink."
+evidence:
+  si_00: "negative reachability checks plus deployment identity/network/database-grant evidence"
+  si_02: "public and developer egress deny control/provisioning"
+  si_03: "runtime/developer identities are distinct"
+  si_14: "append-only external sink required before production claim"

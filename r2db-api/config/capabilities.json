@@ -1,0 +1,17 @@
+{
+  "implementation": "r2db_foundation",
+  "status": "partial",
+  "enabled": ["structured_query", "atomic_mutation", "application_catalog", "schema.create_entity", "schema.add_field", "schema.drop_entity"],
+  "unavailable": ["best_effort_transactions", "idempotency", "revision_preconditions", "ordering", "cursor_pagination", "audit_query", "schema.alter_field", "schema.create_index", "schema.drop_index", "schema.jobs"],
+  "limit_enforcement": {
+    "request_bytes": "enforced",
+    "batch_items": "enforced",
+    "result_items": "enforced",
+    "query_complexity": "enforced",
+    "execution_ms": "reference_wall_clock",
+    "concurrency": "enforced",
+    "requests_per_minute": "enforced",
+    "schema_objects": "enforced",
+    "operation_depth": "enforced"
+  }
+}
