@@ -50,9 +50,12 @@ backends still reject bad identifiers/operators/shapes identically.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Sequence
 
 import psycopg
@@ -126,6 +129,13 @@ class _RolePool:
         self._queue: "queue.Queue[psycopg.Connection[Any]]" = queue.Queue(maxsize=self._maxconn)
         self._lock = threading.Lock()
         self._created = 0
+        # Set by `retire()` (called only by `SharedPoolManager`, below, when
+        # this pool is evicted -- idle timeout or LRU cap). A retired pool
+        # keeps serving any connection a caller already checked out (see
+        # `connection()`'s `finally` below), it simply never re-queues one on
+        # return; the pool drains to zero connections and stops being handed
+        # out for new acquisitions once every outstanding checkout returns.
+        self._retired = False
 
     def _connect(self) -> "psycopg.Connection[Any]":
         conn = psycopg.connect(self._dsn, autocommit=False)
@@ -145,11 +155,40 @@ class _RolePool:
                 return self._connect()
         return self._queue.get()
 
+    def _liveness_check(self, conn: "psycopg.Connection[Any]") -> bool:
+        """`pool_pre_ping` equivalent: a connection dequeued from `self._
+        queue` may have been sitting idle long enough for the *server* to
+        have terminated it (an operator's `pg_terminate_backend`, an idle
+        session timeout, a network blip) without the client-side socket
+        ever observing that -- `psycopg.Connection.closed` stays `0` in
+        that case until something actually tries to use the connection.
+        Checking `conn.closed` alone therefore misses exactly the failure
+        mode a pool most needs to catch. This runs one cheap round trip
+        (`SELECT 1`) on every checkout and reports whether the connection is
+        actually usable; a dead connection is closed here (the caller is
+        responsible for replacing it, not for reusing it in this state).
+        """
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            # A `SELECT` inside `autocommit=False` opens a transaction; roll
+            # it back immediately so the connection is handed to the caller
+            # IDLE, exactly as `_connect()` leaves a freshly opened one --
+            # the ping itself must be invisible to whatever runs next.
+            conn.rollback()
+            return True
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return False
+
     @contextmanager
     def connection(self) -> Iterator["psycopg.Connection[Any]"]:
         conn = self._acquire()
         try:
-            if conn.closed:
+            if conn.closed or not self._liveness_check(conn):
                 conn = self._connect()
             yield conn
         finally:
@@ -174,8 +213,10 @@ class _RolePool:
                     conn.rollback()
             except Exception:
                 keep = False
+            with self._lock:
+                retired = self._retired
             recycled = False
-            if keep and not conn.closed:
+            if keep and not retired and not conn.closed:
                 try:
                     self._queue.put_nowait(conn)
                     recycled = True
@@ -202,26 +243,256 @@ class _RolePool:
         with self._lock:
             self._created = 0
 
+    def retire(self) -> None:
+        """Take this pool permanently out of service: called only by
+        `SharedPoolManager` when this pool is evicted (idle timeout or LRU
+        cap), never by `PostgresCell` directly. Every connection currently
+        sitting idle in the queue is closed immediately -- those are safe to
+        drop right now. Any connection presently checked out by a caller
+        (mid-query, mid-transaction) is left completely alone here: closing
+        it out from under an in-flight operation is exactly the "random
+        failure under load" hazard this method exists to avoid. Setting
+        `self._retired` instead makes `connection()`'s own `finally` block
+        (above) close that connection -- instead of re-queuing it -- the
+        moment its caller returns it normally, which is the only place a
+        checked-out connection is ever safe to retire.
+        """
+        with self._lock:
+            self._retired = True
+        self.close_all()
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an `int`-valued setting the way the rest of this package does
+    (`R2DB_`-prefixed environment variables, e.g. `R2DB_CREDENTIAL_PEPPER`
+    in `auth.py`) -- a bare `os.environ.get` rather than a `pydantic`
+    settings object, since this package (unlike the SQLAlchemy-based
+    reference implementation this design is adapted from) has no
+    `Settings`/`get_settings()` of its own. An unset, empty, or unparsable
+    value silently falls back to `default` rather than raising: these are
+    pool-tuning knobs, not required configuration, and a malformed value at
+    startup should degrade to a sane default, not crash the process.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+@dataclass
+class _PoolManagerEntry:
+    pool: "_RolePool"
+    last_used: float
+
+
+class SharedPoolManager:
+    """The fix for this module's connection-pooling defect: a single,
+    process-wide cache of `_RolePool` instances keyed by `(application_id,
+    role)`, shared across every `PostgresCell` -- not one pair of pools per
+    cell, held forever, as before.
+
+    Design, adapted from the currently deployed reference implementation
+    (`r2-vps/apps/r2db-api/src/r2db_api/pools.py::AppPoolManager`, a
+    SQLAlchemy engine cache with the same two properties) to this package's
+    hand-rolled psycopg pooling:
+
+    - **Idle eviction.** A pool unused for `R2DB_POOL_IDLE_SECONDS` (default
+      300) is retired the next time *any* key is looked up here -- eviction
+      is swept lazily, on access, exactly like the reference implementation,
+      not on a background timer.
+    - **An LRU cap on live pools (`R2DB_POOL_CACHE_MAX`, default 32).** This
+      is the property that actually decouples the connection ceiling from
+      the number of applications: `PostgresCell.__init__` no longer creates
+      a pool eagerly at all, it only registers a `(dsn, schema, maxconn)`
+      recipe with this manager and asks for the live pool by key on every
+      use (`_PoolHandle`, below). However many applications exist, at most
+      `cache_max` *pools* are ever open at once, each capped at
+      `maxconn` connections (default `R2DB_POOL_SIZE + R2DB_POOL_MAX_
+      OVERFLOW` = 2 + 2 = 4, matching the reference implementation's
+      effective per-application capacity) -- an absolute ceiling of
+      `cache_max * maxconn` connections cluster-wide (default 32 * 4 = 128,
+      itself still an operator-facing figure to size against `max_
+      connections`, but no longer one that grows with application count).
+
+    Eviction never closes a connection a caller currently has checked out
+    -- see `_RolePool.retire()`. It closes idle connections in the pool's
+    queue immediately and lets any in-flight one finish and be closed on
+    return.
+
+    A default instance (`default_pool_manager`, below) is what `PostgresCell`
+    uses when no `pool_manager` is supplied, so this behaves as a drop-in
+    fix with no caller changes required. Tests (and any caller that wants
+    isolated pool-cache behaviour, e.g. a short idle interval to make
+    eviction observable) construct their own `SharedPoolManager` and pass it
+    to `PostgresCell(..., pool_manager=...)` explicitly.
+    """
+
+    def __init__(self, *, idle_seconds: int | None = None, cache_max: int | None = None, pool_size: int | None = None, pool_max_overflow: int | None = None) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[tuple[str, str], _PoolManagerEntry] = {}
+        self._idle_seconds = idle_seconds if idle_seconds is not None else _env_int("R2DB_POOL_IDLE_SECONDS", 300)
+        self._cache_max = max(1, cache_max if cache_max is not None else _env_int("R2DB_POOL_CACHE_MAX", 32))
+        base = pool_size if pool_size is not None else _env_int("R2DB_POOL_SIZE", 2)
+        overflow = pool_max_overflow if pool_max_overflow is not None else _env_int("R2DB_POOL_MAX_OVERFLOW", 2)
+        self._default_maxconn = max(1, base + overflow)
+
+    def _evict_locked(self, now: float) -> None:
+        """Called at the top of every `get_pool()`, under `self._lock`
+        (mirrors `AppPoolManager._evict_idle_locked`): first retire every
+        pool idle longer than `self._idle_seconds`, then -- independently --
+        retire the least-recently-used pool(s) until at most `self._cache_
+        max` remain. The two sweeps are separate passes for the same reason
+        the reference implementation keeps them separate: an application
+        that is still within its idle window but pushed out by the cap is a
+        different, and more important, condition than one that simply went
+        quiet -- the cap is what actually bounds total connections
+        regardless of how many applications exist, per this class's
+        docstring.
+        """
+        stale = [key for key, entry in self._entries.items() if now - entry.last_used > self._idle_seconds]
+        for key in stale:
+            entry = self._entries.pop(key)
+            entry.pool.retire()
+
+        while len(self._entries) > self._cache_max:
+            oldest_key = min(self._entries.items(), key=lambda item: item[1].last_used)[0]
+            entry = self._entries.pop(oldest_key)
+            entry.pool.retire()
+
+    def get_pool(self, key: tuple[str, str], dsn: str, *, schema: str, maxconn: int | None = None) -> "_RolePool":
+        """Return the live pool for `key`, creating one (lazily, as before)
+        if none is cached, and refresh its recency so it survives the next
+        idle sweep. `dsn`/`schema`/`maxconn` are only consulted the moment a
+        pool is (re)created for this key -- once cached, a lookup for the
+        same key returns the existing pool as-is, exactly like the
+        reference implementation, which also only reads its connection
+        settings at first creation for a given key.
+        """
+        now = time.monotonic()
+        with self._lock:
+            self._evict_locked(now)
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry.last_used = now
+                return entry.pool
+            pool = _RolePool(dsn, schema=schema, maxconn=maxconn if maxconn is not None else self._default_maxconn)
+            self._entries[key] = _PoolManagerEntry(pool=pool, last_used=now)
+            return pool
+
+    def release(self, key: tuple[str, str]) -> None:
+        """Explicitly retire and drop the cached pool for `key`, if any --
+        called by `PostgresCell.close()` (via `_PoolHandle.close()`). This is
+        distinct from idle/LRU eviction (which only ever runs as a side
+        effect of some *other* key's `get_pool()` call): closing a cell is an
+        immediate, caller-driven release of exactly its own two pools,
+        independent of this manager's lazy sweep and of whatever else is
+        cached for other applications.
+        """
+        with self._lock:
+            entry = self._entries.pop(key, None)
+        if entry is not None:
+            entry.pool.retire()
+
+    def dispose_all(self) -> None:
+        """Retire every cached pool right now, regardless of key. Intended
+        for process shutdown / test-suite teardown, not for routine use --
+        routine release of one application's pools is `release()`, above."""
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            entry.pool.retire()
+
+
+class _PoolHandle:
+    """`PostgresCell`'s own `self._runtime`/`self._developer` attribute: a
+    thin, stateless-between-calls handle that resolves the live `_RolePool`
+    from `SharedPoolManager` on every `.connection()` call rather than
+    holding a direct reference to one pool for the cell's whole lifetime.
+    That indirection is what makes eviction and recreation transparent to
+    `PostgresCell` and its callers: if the pool behind this key was retired
+    (idle timeout or LRU cap) since the last call, the next `.connection()`
+    simply gets a freshly created one back from the manager -- same `dsn`/
+    `schema`, so it authenticates as exactly the same single fixed role as
+    before (D-3/§10.1: still no `SET ROLE`, still one role per pool) -- with
+    no special handling required here or in `PostgresCell`.
+    """
+
+    def __init__(self, manager: SharedPoolManager, key: tuple[str, str], dsn: str, schema: str, maxconn: int | None) -> None:
+        self._manager = manager
+        self._key = key
+        self._dsn = dsn
+        self._schema = schema
+        self._maxconn = maxconn
+
+    @contextmanager
+    def connection(self) -> Iterator["psycopg.Connection[Any]"]:
+        pool = self._manager.get_pool(self._key, self._dsn, schema=self._schema, maxconn=self._maxconn)
+        with pool.connection() as conn:
+            yield conn
+
+    def close(self) -> None:
+        self._manager.release(self._key)
+
+
+# The process-wide default `PostgresCell` uses when no `pool_manager` is
+# supplied explicitly -- constructed once at import time, reading
+# `R2DB_POOL_*` from the environment then (§ SharedPoolManager docstring).
+# Sized (and shaped) so the total ceiling stops scaling with the number of
+# applications; see `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §4 for
+# the resulting bounded arithmetic and how to size it for a given cluster.
+default_pool_manager = SharedPoolManager()
+
 
 class PostgresCell:
-    """A `StorageBackend` over one application's PostgreSQL schema.
+    """A `StorageBackend` over one application's own PostgreSQL database
+    (architecture §8, "D-3 改訂": database-per-application, not
+    schema-per-application -- each application's entities live in that
+    database's `public` schema; `schema` below is `"public"` for every
+    application, and the isolation boundary is which *database* a
+    connection's DSN names, not a schema name inside a shared one).
 
     `application_id` and `schema` are supplied by the caller (the control
-    plane), never derived from client request content (D-3: "physical
-    schema name is assigned by the control plane, not derived from client
-    input"). `runtime_dsn`/`developer_dsn` are two separate, already
+    plane), never derived from client request content (D-3: "the physical
+    namespace is assigned by the control plane, not derived from client
+    input" -- true of both the database name and the schema name within
+    it). `runtime_dsn`/`developer_dsn` are two separate, already
     fully-formed connection strings authenticating as this application's
-    `runtime` and `developer` PostgreSQL roles respectively (provisioned by
+    `runtime` and `developer` PostgreSQL roles respectively, each already
+    naming this application's own database (provisioned by
     `r2db-api/migrations/`, see `r2db-api/docs/`); this class never embeds a
     control-plane credential and never widens a connection's role at
     runtime, so schema-changing operations physically execute under the
-    `developer` role (DDL-capable on this schema only) while queries and
-    data mutations physically execute under the `runtime` role (DML only) --
-    a second, DB-enforced layer under the `developer: bool` check already
-    performed by `bind_schema_operation` (SI-03 defence in depth).
+    `developer` role (DDL-capable on this database's `public` schema only)
+    while queries and data mutations physically execute under the `runtime`
+    role (DML only) -- a second, DB-enforced layer under the `developer:
+    bool` check already performed by `bind_schema_operation` (SI-03
+    defence in depth).
+
+    Connection pooling (D-3/§10.1, and the fix this class's `_runtime`/
+    `_developer` attributes are part of): each is a `_PoolHandle` onto a
+    pool owned by `pool_manager` -- `default_pool_manager` (module-level, a
+    single process-wide `SharedPoolManager`) unless a caller supplies its
+    own, e.g. a test that wants an isolated cache with a short idle
+    interval. No pool is created here at construction time; `PostgresCell`
+    itself now holds nothing heavier than DSNs and a pool-cache key
+    (`application_id`, role) until something actually calls `.connection()`.
+    Because the cache is shared across every `PostgresCell` instance rather
+    than private to each one, the number of live pools is bounded by
+    `pool_manager`'s own cap regardless of how many applications exist --
+    see `SharedPoolManager`'s docstring and `r2db-api/docs/
+    POSTGRES_PROVISIONING_RUNBOOK.md` §4 for the resulting arithmetic.
+    `pool_size`, same as before, is this cell's own requested per-pool
+    connection cap (`None` defers to `pool_manager`'s configured default,
+    itself `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW` unless overridden) --
+    it is only consulted the moment a pool is actually (re)created for this
+    cell's key, exactly like every other pool setting here.
     """
 
-    def __init__(self, application_id: str, schema: str, *, runtime_dsn: str, developer_dsn: str, runtime_role: str, developer_role: str, pool_size: int = 4) -> None:
+    def __init__(self, application_id: str, schema: str, *, runtime_dsn: str, developer_dsn: str, runtime_role: str, developer_role: str, pool_size: int | None = None, pool_manager: SharedPoolManager | None = None) -> None:
         validate_identifier(schema)
         self.application_id = application_id
         self.schema = schema
@@ -235,12 +506,24 @@ class PostgresCell:
         validate_identifier(developer_role)
         self._runtime_role = runtime_role
         self._developer_role = developer_role
-        self._runtime = _RolePool(runtime_dsn, schema=schema, maxconn=pool_size)
-        self._developer = _RolePool(developer_dsn, schema=schema, maxconn=pool_size)
+        manager = pool_manager if pool_manager is not None else default_pool_manager
+        self._pool_manager = manager
+        self._runtime = _PoolHandle(manager, (application_id, "runtime"), runtime_dsn, schema, pool_size)
+        self._developer = _PoolHandle(manager, (application_id, "developer"), developer_dsn, schema, pool_size)
 
     def close(self) -> None:
-        self._runtime.close_all()
-        self._developer.close_all()
+        """Release this cell's own two pools back to the shared manager
+        (`SharedPoolManager.release`, via `_PoolHandle.close`) -- retiring
+        them immediately rather than waiting for idle/LRU eviction. This
+        matters beyond tidiness: `application_id` is a cache key this
+        manager is shared on, and a caller that deprovisions this
+        application (dropping its database/roles) and later reprovisions
+        the *same* `application_id` must not have a new `PostgresCell` for
+        it silently hand back a stale pool of connections authenticated
+        against credentials that no longer exist.
+        """
+        self._runtime.close()
+        self._developer.close()
 
     # ---- catalog -----------------------------------------------------
 
@@ -504,16 +787,40 @@ class PostgresCell:
         with conn.cursor() as cur:
             _run(cur, statement)
             self._apply_row_level_security(cur, entity)
+            # §8.5 condition 3(b): do not depend on remembering that the
+            # line above ran correctly. Re-derive, from live catalog state
+            # in the same transaction, whether *every* table in this
+            # application's database (not just the one just created) has
+            # RLS enabled and forced -- and refuse to let this CREATE TABLE
+            # commit if not. This is what makes RLS coverage a checked
+            # invariant rather than a convention: a future bug in
+            # `_apply_row_level_security`, or a table created by some other
+            # code path entirely, is caught here, before commit, not
+            # discovered later by an operator. See
+            # `verify_row_level_security` below for the same check exposed
+            # standalone (used by `r2db-api/tests/test_postgres.py` and
+            # available for an operator/health-check to call at any time,
+            # independent of a schema change happening at all).
+            offenders = self._rls_offenders(cur)
+            if offenders:
+                fail(
+                    "SERVICE_UNAVAILABLE",
+                    "Row level security is not enabled and forced on every table in this application's database.",
+                    status=503,
+                    details={"tables": offenders},
+                )
 
     def _apply_row_level_security(self, cur: "psycopg.Cursor[Any]", entity: str) -> None:
-        """D-3's third layer: RLS as defence-in-depth underneath schema
-        separation and the two distinct DB roles. Schema+role separation
-        already makes cross-application access structurally unreachable (a
-        role never receives any grant on another application's schema at
-        all), so this policy's job is to survive a *future* misconfiguration
-        -- e.g. an accidental broader grant, or a schema-per-application
-        assumption someday collapsing to a shared schema -- rather than to
-        be the primary control. It restricts every row in every table this
+        """D-3's third layer: RLS as defence-in-depth underneath the
+        database boundary and the two distinct DB roles (architecture §8,
+        "D-3 改訂": each application now owns its own PostgreSQL database,
+        not merely its own schema inside one shared database -- the
+        database boundary is the primary wall, since PostgreSQL admits no
+        cross-database query path at all without FDW/dblink, which this
+        deployment never grants). This policy's job is to survive a
+        *future* misconfiguration of that primary wall -- e.g. an
+        accidental broader `CONNECT` grant -- rather than to be the
+        primary control itself. It restricts every row in every table this
         cell creates to being visible/writable only by this application's
         own two roles, checked by PostgreSQL itself via `current_user`, not
         by anything this Python process asserts about itself.
@@ -531,6 +838,56 @@ class PostgresCell:
                 developer=sql.Literal(self._developer_role),
             ),
         )
+
+    def _rls_offenders(self, cur: "psycopg.Cursor[Any]") -> list[str]:
+        """The live list of base tables in this application's database
+        (current schema, i.e. `public`) that do NOT have both `ENABLE ROW
+        LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` set right now,
+        according to PostgreSQL's own catalog -- never this Python
+        process's memory of what it thinks it did. `_r2db_schema_revision`
+        (provisioned by `migrations/0003_provision_application.sql`,
+        already RLS-protected there) is excluded the same way
+        `_load_catalog` excludes it from the application-visible catalog.
+        Ordered so callers get a deterministic offender list.
+        """
+        statement = sql.SQL(
+            "SELECT c.relname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.relname <> {revision_table} "
+            "AND (c.relrowsecurity = false OR c.relforcerowsecurity = false) "
+            "ORDER BY c.relname"
+        ).format(revision_table=sql.Placeholder())
+        _run(cur, statement, [_REVISION_TABLE])
+        return [row[0] for row in cur.fetchall()]
+
+    def verify_row_level_security(self) -> None:
+        """Standalone form of the same check `_create_entity` runs inline
+        after every `CREATE TABLE` (§8.5 condition 3(b)): confirms every
+        base table in this application's database has RLS both enabled and
+        forced, independent of any schema change happening right now.
+        Callable at any time -- by a test, or by an operator/health-check
+        script -- as a live verification against real catalog state, not a
+        cached or point-in-time claim. Raises `FoundationError` naming the
+        offending tables if any are found; does nothing (no return value)
+        if the database is clean.
+
+        `migrations/0003_provision_application.sql` additionally installs
+        an always-available SQL-level equivalent of this same query,
+        `public._r2db_missing_rls`, directly inside every application's own
+        database, so this property can also be checked with `psql` (or any
+        other client) without going through `PostgresCell`/Python at all.
+        """
+        with self._developer.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    offenders = self._rls_offenders(cur)
+        if offenders:
+            fail(
+                "SERVICE_UNAVAILABLE",
+                "Row level security is not enabled and forced on every table in this application's database.",
+                status=503,
+                details={"tables": offenders},
+            )
 
     def _drop_entity(self, conn: "psycopg.Connection[Any]", entity: str) -> None:
         statement = sql.SQL("DROP TABLE {table}").format(table=sql.Identifier(entity))
@@ -591,4 +948,4 @@ def _json_text(value: Any) -> str:
 # equivalent assertion covering `ApplicationCell`.
 assert issubclass(PostgresCell, _StorageBackend), "PostgresCell must conform to StorageBackend (design D-1)"
 
-__all__ = ["PostgresCell"]
+__all__ = ["PostgresCell", "SharedPoolManager", "default_pool_manager"]

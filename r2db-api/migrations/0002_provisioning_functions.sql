@@ -1,61 +1,70 @@
--- r2db-api PostgreSQL provisioning -- 0002: application provisioning API
+-- r2db-api PostgreSQL provisioning -- 0002: control-plane registry + role
+-- provisioning helpers
 --
 -- WHO RUNS THIS: the operator, connected to the `r2dbsvc_platform` database
 -- (created by 0001) AS the `r2dbsvc_control` role -- never as the cluster
 -- superuser, and never as the r2db-api application process. Run once, after
--- 0001, to install the provisioning/deprovisioning functions; those
--- functions are then what actually onboards/removes an application, and
--- are themselves idempotent-safe to call as new applications are added
--- (this file's own DDL is `CREATE SCHEMA IF NOT EXISTS` / `CREATE OR
--- REPLACE FUNCTION`, so re-running this file is also a no-op beyond
--- refreshing the function bodies).
+-- 0001, to install the registry table and the functions below; those
+-- functions are then called by 0003/0004 (once per application onboarded/
+-- removed). This file's own DDL is `CREATE SCHEMA IF NOT EXISTS` / `CREATE
+-- OR REPLACE FUNCTION`, so re-running it is a no-op beyond refreshing the
+-- function bodies.
 --
 --   psql "$R2DBSVC_CONTROL_DSN" -f 0002_provisioning_functions.sql
 --
 -- `R2DBSVC_CONTROL_DSN` is an environment-variable name (the DSN for the
 -- `r2dbsvc_control` role against `r2dbsvc_platform`); see r2db-api/docs/.
 --
--- WHAT "PROVISIONING ONE APPLICATION" MEANS (design D-3's three layers):
---   1. namespace  -- one PostgreSQL schema, `r2dbsvc_app_<slug>`, owned by
---                    that application's own developer role. The schema name
---                    is assigned here, by the control plane, from an
---                    operator-supplied slug -- never derived from anything
---                    an application client sends at request time.
---   2. privilege   -- two login roles: `..._runtime` (DML only: SELECT /
---                    INSERT / UPDATE / DELETE on the schema's tables, no
---                    CREATE) and `..._developer` (owns the schema, so it
---                    can DDL within it; still NOSUPERUSER / NOCREATEDB /
---                    NOCREATEROLE). Neither role can see or touch any other
---                    application's schema: no grant ever mentions a schema
---                    that isn't its own.
---   3. RLS         -- `PostgresCell._create_entity` (application code, not
---                    this file) additionally enables and FORCEs row-level
---                    security on every table it creates, with a policy
---                    naming exactly these two roles. This file creates the
---                    one RLS-protected table it owns directly
---                    (`_r2db_schema_revision`) the same way, so the pattern
---                    is consistent between provisioning-time and
---                    request-time table creation.
+-- WHY THIS FILE NO LONGER CONTAINS THE FULL PROVISIONING FLOW (architecture
+-- §8 "D-3 改訂" -- database-per-application): the previous revision of this
+-- file provisioned an application entirely inside one plpgsql function
+-- (`provision_application`), because schema/role/RLS objects can all be
+-- created transactionally. Database-per-application breaks that: `CREATE
+-- DATABASE` (and `DROP DATABASE`, for deprovisioning) MUST run as its own
+-- top-level statement -- PostgreSQL explicitly refuses to run either
+-- "inside a transaction block", which every statement inside a plpgsql
+-- function body implicitly is. There is no workaround that keeps
+-- provisioning a single atomic function call once a database, not just a
+-- schema, is being created. 0001 already had to work around this exact
+-- constraint for `r2dbsvc_platform` itself, via psql's `\gexec`, rather
+-- than a function -- this file now applies that same idiom, at
+-- application-onboarding scale, in 0003/0004.
 --
--- Connection pooling note (ties to `r2db_api.postgres._RolePool`): each
--- application's `runtime`/`developer` roles get their own dedicated login
--- credentials here specifically so the Python layer can hold one
--- connection pool per role, authenticated directly as that role, and never
--- issue `SET ROLE`. See `r2db_api/postgres.py`'s `_RolePool` docstring for
--- why that avoids the pool release-time reset hazard D-3 calls out, rather
--- than relying on remembering to reset a shared connection.
+-- What stays here, as functions, is exactly the part that *is* safely
+-- transactional: creating the two login roles (a plain `CREATE ROLE`, no
+-- transaction-block restriction) and registry bookkeeping. 0003/0004 call
+-- these functions for that part, and handle `CREATE DATABASE`/`DROP
+-- DATABASE` and the objects that must be created *inside* the new database
+-- (which requires a `\c` reconnect -- another thing no single function
+-- call can do, since one PostgreSQL connection cannot switch which
+-- database it is connected to) as plain top-level SQL in a psql script.
+--
+-- Provisioning is therefore now a "begin" function (validate + create
+-- roles + compute names, but do NOT yet register the application) followed
+-- by 0003's script-level database/schema setup, followed by a "finish"
+-- function (register in the registry) -- so a crash partway through 0003
+-- never leaves the registry claiming an application is fully provisioned
+-- when its database/schema setup did not complete. Deprovisioning mirrors
+-- this: "begin" looks up the names (and fails loudly if the slug is not
+-- registered -- a deliberate behavioural change from the previous
+-- single-function `deprovision_application`, which silently no-op'd on an
+-- unknown slug; see the runbook), 0004 drops the database/roles, and
+-- "finish" removes the registry row only once that has succeeded.
 
 \set ON_ERROR_STOP on
 
 CREATE SCHEMA IF NOT EXISTS r2dbsvc_registry AUTHORIZATION r2dbsvc_control;
 
 -- Bookkeeping only: which application slugs have been provisioned, and the
--- schema/role names that resulted. Never reachable from any application
+-- database/role names that resulted. Never reachable from any application
 -- request path (SI-02: this schema has no application-facing role granted
--- anything on it at all).
+-- anything on it at all). `database_name` replaces the previous
+-- `schema_name` column: every application now gets one dedicated database
+-- (its entities live in that database's `public` schema, not in a
+-- control-plane-assigned schema name inside a shared database).
 CREATE TABLE IF NOT EXISTS r2dbsvc_registry.applications (
     application_slug text PRIMARY KEY,
-    schema_name       text NOT NULL UNIQUE,
+    database_name     text NOT NULL UNIQUE,
     runtime_role      text NOT NULL UNIQUE,
     developer_role    text NOT NULL UNIQUE,
     provisioned_at    timestamptz NOT NULL DEFAULT now()
@@ -64,15 +73,21 @@ CREATE TABLE IF NOT EXISTS r2dbsvc_registry.applications (
 REVOKE ALL ON SCHEMA r2dbsvc_registry FROM PUBLIC;
 REVOKE ALL ON r2dbsvc_registry.applications FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION r2dbsvc_registry.provision_application(
+-- Step 1 of provisioning (called by 0003, before `CREATE DATABASE`):
+-- validates the slug and passwords, creates the two login roles, and
+-- returns the computed database/role names -- but does NOT yet write a
+-- registry row, since the database those names refer to does not exist
+-- yet. `0003_provision_application.sql` captures this function's output
+-- via psql's `\gset` and uses it for every subsequent step.
+CREATE OR REPLACE FUNCTION r2dbsvc_registry.begin_provision_application(
     p_app_slug text,
     p_runtime_password text,
     p_developer_password text
-) RETURNS void
+) RETURNS TABLE(database_name text, runtime_role text, developer_role text)
 LANGUAGE plpgsql
 AS $fn$
 DECLARE
-    v_schema text := 'r2dbsvc_app_' || p_app_slug;
+    v_database_name text := 'r2dbsvc_app_' || p_app_slug;
     v_runtime_role text := 'r2dbsvc_app_' || p_app_slug || '_runtime';
     v_developer_role text := 'r2dbsvc_app_' || p_app_slug || '_developer';
 BEGIN
@@ -81,7 +96,7 @@ BEGIN
     -- in SQL because this function is the actual point where the slug
     -- becomes catalog objects): lower-case only, so it can never collide
     -- case-insensitively with an unquoted identifier, and bounded so the
-    -- resulting role/schema names stay under PostgreSQL's 63-byte
+    -- resulting database/role names stay under PostgreSQL's 63-byte
     -- identifier limit once the `r2dbsvc_app_..._developer` decoration is
     -- added.
     IF p_app_slug !~ '^[a-z][a-z0-9_]{0,32}$' THEN
@@ -103,128 +118,61 @@ BEGIN
         v_developer_role, p_developer_password
     );
 
-    -- 0001 revoked PUBLIC's default CONNECT on `r2dbsvc_platform`, so every
-    -- application role needs it granted explicitly -- otherwise neither
-    -- role can open a connection at all, regardless of what it is later
-    -- granted inside its own schema.
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), v_runtime_role);
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), v_developer_role);
-
-    -- PostgreSQL 16 auto-grants the role creator ADMIN OPTION on a role it
-    -- creates, but deliberately not SET/INHERIT (this was a PG16 change
-    -- specifically to avoid silently widening a CREATEROLE role's standing
-    -- authority). `CREATE SCHEMA ... AUTHORIZATION` and `SET ROLE` both
-    -- need SET, so it is granted explicitly here, used for exactly the
-    -- statements below that must run *as* the developer role to be owned
-    -- by it, and revoked again before this function returns -- so
-    -- `r2dbsvc_control` never holds standing membership in any
-    -- application's developer role between provisioning calls.
-    EXECUTE format('GRANT %I TO %I WITH SET TRUE', v_developer_role, current_user);
-
-    -- The developer role owns its own schema outright: that ownership *is*
-    -- its DDL authority, scoped to exactly this one schema (SI-03: schema-
-    -- changing capability requires elevated authority, and that authority
-    -- cannot reach any other application's schema because ownership of one
-    -- schema grants nothing on another). A freshly created schema has no
-    -- PUBLIC privileges by default (unlike a freshly created database,
-    -- which is why 0001 revokes those explicitly) so there is nothing to
-    -- revoke here.
-    EXECUTE format('CREATE SCHEMA %I AUTHORIZATION %I', v_schema, v_developer_role);
-
-    -- Everything from here through `RESET ROLE` below creates objects
-    -- *inside* that schema, which requires schema-owner-level privilege --
-    -- so it runs as the developer role itself (`SET LOCAL ROLE`, scoped to
-    -- this function's own transaction; there is no `RESET ROLE` needed for
-    -- a *pooled connection*'s sake the way `r2db_api.postgres._RolePool`
-    -- cares about, because this is a one-shot provisioning call, never a
-    -- connection any application request reuses).
-    EXECUTE format('SET LOCAL ROLE %I', v_developer_role);
-
-    -- Runtime gets USAGE (can resolve names inside the schema) but is never
-    -- granted CREATE on it, so it structurally cannot issue DDL there --
-    -- independent of, and in addition to, the application-layer
-    -- `developer: bool` check in `bind_schema_operation`.
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', v_schema, v_runtime_role);
-
-    -- Schema-revision bookkeeping table, created directly here (not left to
-    -- application code) so every provisioned application starts at
-    -- revision 0 with its RLS policy already in place, matching the
-    -- pattern `PostgresCell._create_entity` uses for entity tables it
-    -- creates later.
-    EXECUTE format(
-        'CREATE TABLE %I._r2db_schema_revision (id boolean PRIMARY KEY DEFAULT TRUE, revision bigint NOT NULL DEFAULT 0, CONSTRAINT _r2db_schema_revision_singleton CHECK (id))',
-        v_schema
-    );
-    EXECUTE format('INSERT INTO %I._r2db_schema_revision (id, revision) VALUES (TRUE, 0)', v_schema);
-    EXECUTE format('ALTER TABLE %I._r2db_schema_revision ENABLE ROW LEVEL SECURITY', v_schema);
-    EXECUTE format('ALTER TABLE %I._r2db_schema_revision FORCE ROW LEVEL SECURITY', v_schema);
-    EXECUTE format(
-        'CREATE POLICY schema_revision_application_isolation ON %I._r2db_schema_revision USING (current_user IN (%L, %L)) WITH CHECK (current_user IN (%L, %L))',
-        v_schema, v_runtime_role, v_developer_role, v_runtime_role, v_developer_role
-    );
-    EXECUTE format('GRANT SELECT, UPDATE ON %I._r2db_schema_revision TO %I', v_schema, v_runtime_role);
-
-    -- From here on, any table the developer role creates in this schema
-    -- (i.e. every entity table `PostgresCell.apply_schema`'s `create_entity`
-    -- path creates at request time) automatically grants the runtime role
-    -- DML -- and only DML, never DDL -- the moment it exists, with no
-    -- per-table grant statement required from the application process.
-    EXECUTE format(
-        'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
-        v_developer_role, v_schema, v_runtime_role
-    );
-
-    RESET ROLE;
-    EXECUTE format('REVOKE %I FROM %I', v_developer_role, current_user);
-
-    INSERT INTO r2dbsvc_registry.applications (application_slug, schema_name, runtime_role, developer_role)
-    VALUES (p_app_slug, v_schema, v_runtime_role, v_developer_role);
+    RETURN QUERY SELECT v_database_name, v_runtime_role, v_developer_role;
 END;
 $fn$;
 
-REVOKE ALL ON FUNCTION r2dbsvc_registry.provision_application(text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION r2dbsvc_registry.begin_provision_application(text, text, text) FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION r2dbsvc_registry.deprovision_application(p_app_slug text) RETURNS void
+-- Step 2 of provisioning (called by 0003, once the database and its
+-- `public` schema/role setup have fully succeeded): records the
+-- now-complete application in the registry.
+CREATE OR REPLACE FUNCTION r2dbsvc_registry.finish_provision_application(
+    p_app_slug text,
+    p_database_name text,
+    p_runtime_role text,
+    p_developer_role text
+) RETURNS void
 LANGUAGE plpgsql
 AS $fn$
-DECLARE
-    v_schema text;
-    v_runtime_role text;
-    v_developer_role text;
 BEGIN
-    SELECT schema_name, runtime_role, developer_role
-    INTO v_schema, v_runtime_role, v_developer_role
-    FROM r2dbsvc_registry.applications
-    WHERE application_slug = p_app_slug;
+    INSERT INTO r2dbsvc_registry.applications (application_slug, database_name, runtime_role, developer_role)
+    VALUES (p_app_slug, p_database_name, p_runtime_role, p_developer_role);
+END;
+$fn$;
 
+REVOKE ALL ON FUNCTION r2dbsvc_registry.finish_provision_application(text, text, text, text) FROM PUBLIC;
+
+-- Step 1 of deprovisioning (called by 0004, before `DROP DATABASE`): looks
+-- up the registered names for a slug. Unlike the previous single-function
+-- `deprovision_application`, this raises loudly (`ON_ERROR_STOP` then
+-- aborts 0004) rather than silently no-op'ing when the slug is not
+-- registered -- see this file's header note.
+CREATE OR REPLACE FUNCTION r2dbsvc_registry.begin_deprovision_application(p_app_slug text)
+RETURNS TABLE(database_name text, runtime_role text, developer_role text)
+LANGUAGE plpgsql
+AS $fn$
+BEGIN
+    RETURN QUERY
+        SELECT a.database_name, a.runtime_role, a.developer_role
+        FROM r2dbsvc_registry.applications a
+        WHERE a.application_slug = p_app_slug;
     IF NOT FOUND THEN
-        RETURN;
+        RAISE EXCEPTION 'application not provisioned: %', p_app_slug;
     END IF;
+END;
+$fn$;
 
-    -- Dropping the schema is an ownership-level operation, same reasoning
-    -- as `provision_application` above: briefly assume the developer role
-    -- (which owns it) rather than rely on `r2dbsvc_control` holding any
-    -- standing broader privilege.
-    EXECUTE format('GRANT %I TO %I WITH SET TRUE', v_developer_role, current_user);
-    EXECUTE format('SET LOCAL ROLE %I', v_developer_role);
-    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', v_schema);
-    RESET ROLE;
+REVOKE ALL ON FUNCTION r2dbsvc_registry.begin_deprovision_application(text) FROM PUBLIC;
 
-    -- Dropping the roles outright removes every *membership* grant
-    -- involving them (including the temporary one just above) automatically
-    -- -- but not privileges granted *to* them on objects outside the schema
-    -- just dropped, notably `GRANT CONNECT ON DATABASE` from provisioning.
-    -- Postgres only lets the grantor (or someone with grant option) revoke
-    -- that, not the grantee itself even if impersonated, so it is revoked
-    -- here explicitly, as `r2dbsvc_control` (the original grantor), before
-    -- `DROP ROLE` -- otherwise `DROP ROLE` fails with "cannot be dropped
-    -- because some objects depend on it".
-    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), v_runtime_role);
-    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), v_developer_role);
-    EXECUTE format('DROP ROLE IF EXISTS %I', v_runtime_role);
-    EXECUTE format('DROP ROLE IF EXISTS %I', v_developer_role);
+-- Step 2 of deprovisioning (called by 0004, once the database has been
+-- dropped and both roles removed): removes the registry row.
+CREATE OR REPLACE FUNCTION r2dbsvc_registry.finish_deprovision_application(p_app_slug text) RETURNS void
+LANGUAGE plpgsql
+AS $fn$
+BEGIN
     DELETE FROM r2dbsvc_registry.applications WHERE application_slug = p_app_slug;
 END;
 $fn$;
 
-REVOKE ALL ON FUNCTION r2dbsvc_registry.deprovision_application(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION r2dbsvc_registry.finish_deprovision_application(text) FROM PUBLIC;

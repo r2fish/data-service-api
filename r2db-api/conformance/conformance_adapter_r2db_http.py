@@ -48,8 +48,10 @@ import asyncio
 import atexit
 import os
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -182,12 +184,14 @@ class _Platform:
     admin_dsn: str
     control_dsn: str
     platform_db: str
-    registry_schema: str
+    provision_script: Path
+    deprovision_script: Path
 
 
 @dataclass(frozen=True)
 class _PgAppInfo:
     slug: str
+    database: str
     schema: str
     runtime_role: str
     developer_role: str
@@ -195,77 +199,101 @@ class _PgAppInfo:
     developer_dsn: str
 
 
-def _bootstrap_platform(prefix: str, admin_dsn: str) -> _Platform:
+def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
     """Run the real `0001_bootstrap_control_plane.sql` /
     `0002_provisioning_functions.sql` migrations (with `r2dbsvc` textually
     replaced by this run's unique prefix) through the real `psql` binary --
     the actual runbook an operator would use, not a Python reimplementation
     of it (§5.3 C-5), exactly as `test_postgres.py`'s `platform` fixture
-    does.
+    does. Also rewrites `0003_provision_application.sql`/`0004_deprovision_
+    application.sql` the same way and keeps them (in `script_dir`, which the
+    caller keeps alive for this adapter's whole lifetime -- unlike
+    `test_postgres.py`'s `tmp_path_factory`-backed fixture, this adapter has
+    no per-test temporary directory to borrow) for `_provision_pg_app`/
+    `close()` to run once per application, since database-per-application
+    (architecture §8) means provisioning one application is itself now a
+    multi-statement script, not a single function call -- see 0002/0003's
+    own header comments for why.
     """
-    import tempfile
-
     control_role = f"{prefix}_control"
     platform_db = f"{prefix}_platform"
-    registry_schema = f"{prefix}_registry"
     control_password = secrets.token_urlsafe(24)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        rewritten: dict[str, Path] = {}
-        for name in ("0001_bootstrap_control_plane.sql", "0002_provisioning_functions.sql"):
-            text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
-            out = Path(tmp) / name
-            out.write_text(text)
-            rewritten[name] = out
-        _run_psql(admin_dsn, rewritten["0001_bootstrap_control_plane.sql"], {"control_password": control_password})
-        control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
-        _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
+    rewritten: dict[str, Path] = {}
+    for name in (
+        "0001_bootstrap_control_plane.sql",
+        "0002_provisioning_functions.sql",
+        "0003_provision_application.sql",
+        "0004_deprovision_application.sql",
+    ):
+        text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
+        out = script_dir / name
+        out.write_text(text)
+        rewritten[name] = out
+    _run_psql(admin_dsn, rewritten["0001_bootstrap_control_plane.sql"], {"control_password": control_password})
+    control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
+    _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
 
     return _Platform(
         prefix=prefix,
         admin_dsn=admin_dsn,
         control_dsn=control_dsn,
         platform_db=platform_db,
-        registry_schema=registry_schema,
+        provision_script=rewritten["0003_provision_application.sql"],
+        deprovision_script=rewritten["0004_deprovision_application.sql"],
     )
 
 
 def _provision_pg_app(platform: _Platform, slug: str) -> _PgAppInfo:
     runtime_password = secrets.token_urlsafe(24)
     developer_password = secrets.token_urlsafe(24)
-    conn = psycopg.connect(platform.control_dsn, autocommit=True)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("SELECT {}.provision_application(%s, %s, %s)").format(sql.Identifier(platform.registry_schema)),
-                [slug, runtime_password, developer_password],
-            )
-    finally:
-        conn.close()
-    schema = f"{platform.prefix}_app_{slug}"
-    runtime_role = f"{schema}_runtime"
-    developer_role = f"{schema}_developer"
+    _run_psql(
+        platform.control_dsn,
+        platform.provision_script,
+        {"app_slug": slug, "runtime_password": runtime_password, "developer_password": developer_password},
+    )
+    database = f"{platform.prefix}_app_{slug}"
+    runtime_role = f"{database}_runtime"
+    developer_role = f"{database}_developer"
     return _PgAppInfo(
         slug=slug,
-        schema=schema,
+        database=database,
+        # Every application's entities live in that application's own
+        # database's `public` schema now (architecture §8), not in a
+        # control-plane-assigned schema name inside a shared database.
+        schema="public",
         runtime_role=runtime_role,
         developer_role=developer_role,
-        runtime_dsn=_dsn_with(platform.admin_dsn, user=runtime_role, password=runtime_password, dbname=platform.platform_db),
-        developer_dsn=_dsn_with(platform.admin_dsn, user=developer_role, password=developer_password, dbname=platform.platform_db),
+        runtime_dsn=_dsn_with(platform.admin_dsn, user=runtime_role, password=runtime_password, dbname=database),
+        developer_dsn=_dsn_with(platform.admin_dsn, user=developer_role, password=developer_password, dbname=database),
     )
 
 
-def _sweep_prefix(admin_dsn: str, platform_db: str, prefix: str) -> None:
-    """Drop everything this run created -- the platform database (which
-    takes every per-application schema/table/grant inside it with it), then
-    every cluster-global role whose name starts with this run's unique
-    prefix. Never touches any object outside this run's prefix. Identical
-    in spirit to `test_postgres.py::_sweep_prefix`, duplicated here rather
-    than imported so this module has no import-time dependency on that test
-    file.
+# `platform.deprovision_script` (0004) is kept on `_Platform` for
+# completeness/documentation of the provisioning pair this adapter's
+# rewritten scripts represent, but is deliberately never invoked here:
+# like the previous (schema-per-application) revision of this file, this
+# adapter never deprovisions individual applications mid-run -- it relies
+# entirely on `_sweep_prefix` at `close()`/`atexit` to drop everything this
+# run created (now every per-application *database* under this run's
+# prefix, not just the platform database's schemas -- see `_sweep_prefix`).
 
-    `DROP DATABASE` is retried a few times with a short backoff: a
-    connection this adapter itself just closed (e.g. one of
+
+def _sweep_prefix(admin_dsn: str, platform_db: str, prefix: str) -> None:
+    """Drop everything this run created -- every database whose name starts
+    with this run's unique prefix (the platform database *and* every
+    per-application database this run provisioned, database-per-application
+    per architecture §8 -- each one takes every schema/table/grant inside
+    it with it), then every cluster-global role whose name starts with the
+    same prefix. Never touches any object outside this run's prefix.
+    Identical in spirit to `test_postgres.py::_sweep_prefix`, duplicated
+    here rather than imported so this module has no import-time dependency
+    on that test file. `platform_db` is still accepted as a parameter (kept
+    for backward-compatible callers within this file) but is now just one
+    of the databases this function discovers by prefix, not the only one.
+
+    `DROP DATABASE` is retried a few times with a short backoff, per
+    database: a connection this adapter itself just closed (e.g. one of
     `PostgresCell`'s pooled connections, or an application-plane HTTP
     request's underlying connection) can take a brief moment to fully
     disappear from `pg_stat_activity` from the server's point of view even
@@ -278,39 +306,64 @@ def _sweep_prefix(admin_dsn: str, platform_db: str, prefix: str) -> None:
 
     Databases are dropped before roles (roles are cluster-global and
     outlive any one database, so they must be handled second). Role cleanup
-    is attempted even if the database drop ultimately fails -- residue in
-    two categories is worse than residue in one -- but the database's
+    is attempted even if a database drop ultimately fails -- residue in two
+    categories is worse than residue in one -- but the first database
     failure is still re-raised at the end so it is never silently lost
     (design requirement: cleanup failures must be visible). A leftover role
-    that still holds a `GRANT CONNECT ON DATABASE` on a platform database
-    that, for whatever reason, was not dropped here (the drop failed above,
-    or this role has no corresponding database at all -- see
-    `_sweep_stale_artifacts`) cannot be dropped directly: PostgreSQL only
+    that still holds a `GRANT CONNECT ON DATABASE` on some database under
+    this prefix that, for whatever reason, was not dropped above (a drop
+    that failed, most likely) cannot be dropped directly: PostgreSQL only
     lets the original grantor revoke that privilege, not `DROP ROLE`
-    itself, exactly the failure mode `migrations/0002_provisioning_
-    functions.sql`'s `deprovision_application` already had to handle. On
-    that specific failure this issues the matching `REVOKE CONNECT` and
-    retries once, rather than giving up.
+    itself, exactly the failure mode `migrations/0004_deprovision_
+    application.sql` avoids in the normal case by dropping the database
+    first. On that specific failure this issues the matching `REVOKE
+    CONNECT` against every surviving prefixed database and retries once,
+    rather than giving up.
     """
     import time
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
+            cur.execute("SELECT datname FROM pg_database WHERE datname LIKE %s", [f"{prefix}%"])
+            candidate_databases = {row[0] for row in cur.fetchall()}
+            candidate_databases.add(platform_db)
+
             db_error: Exception | None = None
-            for attempt in range(5):
-                cur.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
-                    [platform_db],
-                )
-                try:
-                    cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(platform_db)))
-                    db_error = None
-                    break
-                except psycopg.errors.ObjectInUse as exc:
-                    db_error = exc
-                    admin.rollback()
-                    time.sleep(0.2 * (attempt + 1))
+            surviving_databases: set[str] = set()
+            for database in sorted(candidate_databases):
+                dropped = False
+                for attempt in range(8):
+                    # `backend_type = 'client backend'` deliberately excludes
+                    # background workers (autovacuum in particular): this
+                    # admin connection authenticates as the cluster
+                    # superuser locally, so it *could* terminate one, but a
+                    # freshly churned throwaway database routinely has an
+                    # autovacuum worker visiting its system catalogs, and
+                    # terminating it is unnecessary -- it finishes on its
+                    # own well within this retry loop's backoff, which is
+                    # what actually clears the subsequent `ObjectInUse` in
+                    # that case. See `migrations/0004_deprovision_
+                    # application.sql`'s identical comment for the same
+                    # reasoning, and where this was first observed
+                    # empirically (as `permission denied to terminate
+                    # process` when this filter was missing).
+                    cur.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid() AND backend_type = 'client backend'",
+                        [database],
+                    )
+                    try:
+                        cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database)))
+                        dropped = True
+                        break
+                    except psycopg.errors.ObjectInUse as exc:
+                        if db_error is None:
+                            db_error = exc
+                        admin.rollback()
+                        time.sleep(0.2 * (attempt + 1))
+                if not dropped:
+                    surviving_databases.add(database)
 
             cur.execute("SELECT rolname FROM pg_roles WHERE rolname LIKE %s", [f"{prefix}%"])
             leftover_roles = [row[0] for row in cur.fetchall()]
@@ -319,11 +372,15 @@ def _sweep_prefix(admin_dsn: str, platform_db: str, prefix: str) -> None:
                     cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
                 except psycopg.errors.DependentObjectsStillExist:
                     admin.rollback()
-                    cur.execute(
-                        sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(
-                            sql.Identifier(platform_db), sql.Identifier(role)
-                        )
-                    )
+                    for database in surviving_databases:
+                        try:
+                            cur.execute(
+                                sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(
+                                    sql.Identifier(database), sql.Identifier(role)
+                                )
+                            )
+                        except psycopg.Error:
+                            admin.rollback()
                     cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
             if db_error is not None:
@@ -335,20 +392,23 @@ def _sweep_prefix(admin_dsn: str, platform_db: str, prefix: str) -> None:
 # The exact shape this module's own generated prefixes take: the literal
 # 8-character string "r2dbhttp" followed by 8 lowercase hex digits
 # (`secrets.token_hex(4)`, see `__init__` below) -- 16 characters total,
-# e.g. "r2dbhttp8130a23c". Matched two ways below: a platform database name
-# is exactly `<prefix>_platform`; a role name merely starts with
-# `<prefix>_` (control role, or `<prefix>_app_<slug>_runtime`/`_developer`).
-# Anchored at the start on the literal "r2dbhttp" and constrained to
-# exactly 8 trailing hex digits, so this can never match any of this local
-# cluster's many pre-existing, unrelated objects -- `r2db_control`,
-# `r2db_admin`, `auth_api`, or any of this repository's other `app_*`
-# databases from unrelated work all fail at the 5th character (`_`, `_`,
-# `u`, `p` respectively, none of them `h`), and `r2dbtest*`/`r2dbsvc*`
-# (this repository's *other* two throwaway-prefix conventions, from
-# `tests/test_postgres.py` and the raw migration files before textual
-# substitution) fail at the same position for the same reason ("test"/"svc"
-# where this pattern requires "http").
+# e.g. "r2dbhttp8130a23c". Matched three ways below: a platform database
+# name is exactly `<prefix>_platform`; a per-application database name
+# (architecture §8: database-per-application, one per application this
+# adapter provisions) starts with `<prefix>_app_`; a role name merely
+# starts with `<prefix>_` (control role, or `<prefix>_app_<slug>_runtime`/
+# `_developer`). Anchored at the start on the literal "r2dbhttp" and
+# constrained to exactly 8 trailing hex digits, so this can never match any
+# of this local cluster's many pre-existing, unrelated objects --
+# `r2db_control`, `r2db_admin`, `auth_api`, or any of this repository's
+# other `app_*` databases from unrelated work all fail at the 5th character
+# (`_`, `_`, `u`, `p` respectively, none of them `h`), and
+# `r2dbtest*`/`r2dbsvc*`/`r2dbmig*` (this repository's *other* throwaway-
+# prefix conventions, from `tests/test_postgres.py` and the raw migration
+# files before textual substitution) fail at the same position for the
+# same reason ("test"/"svc"/"mig" where this pattern requires "http").
 _STALE_PLATFORM_DB_PATTERN = r"^r2dbhttp[0-9a-f]{8}_platform$"
+_STALE_APP_DB_PATTERN = r"^r2dbhttp[0-9a-f]{8}_app_"
 _STALE_ROLE_PATTERN = r"^r2dbhttp[0-9a-f]{8}_"
 _PREFIX_LENGTH = len("r2dbhttp") + 8  # "r2dbhttp" + 8 hex digits
 
@@ -376,6 +436,8 @@ def _sweep_stale_artifacts(admin_dsn: str) -> None:
         with admin.cursor() as cur:
             cur.execute("SELECT datname FROM pg_database WHERE datname ~ %s", [_STALE_PLATFORM_DB_PATTERN])
             stale_prefixes = {row[0][: -len("_platform")] for row in cur.fetchall()}
+            cur.execute("SELECT datname FROM pg_database WHERE datname ~ %s", [_STALE_APP_DB_PATTERN])
+            stale_prefixes |= {row[0][:_PREFIX_LENGTH] for row in cur.fetchall()}
             cur.execute("SELECT rolname FROM pg_roles WHERE rolname ~ %s", [_STALE_ROLE_PATTERN])
             stale_prefixes |= {row[0][:_PREFIX_LENGTH] for row in cur.fetchall()}
     finally:
@@ -472,13 +534,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         _sweep_stale_artifacts(admin_dsn)
 
         prefix = f"r2dbhttp{secrets.token_hex(4)}"
+        # Unlike `test_postgres.py`'s `platform` fixture (which can borrow
+        # pytest's own `tmp_path_factory`, scoped to that one test module's
+        # run), this adapter's rewritten `0003_provision_application.sql`/
+        # `0004_deprovision_application.sql` must stay on disk for this
+        # adapter instance's entire lifetime -- `build_fixture` calls
+        # `provision_application` (and therefore `_provision_pg_app`,
+        # therefore `platform.provision_script`) repeatedly, long after
+        # `__init__` returns. `mkdtemp` (not the `TemporaryDirectory`
+        # context manager) is used deliberately so this directory outlives
+        # this function; `close()`/`_cleanup` below remove it explicitly.
+        self._script_dir = tempfile.mkdtemp(prefix="r2db_http_migrations_")
         try:
-            self._platform = _bootstrap_platform(prefix, admin_dsn)
+            self._platform = _bootstrap_platform(prefix, admin_dsn, Path(self._script_dir))
         except Exception:
             # Bootstrap can partially succeed (e.g. 0001 ran, 0002 failed);
             # sweep unconditionally so a failed build never leaves residue
             # in the local cluster.
             _sweep_prefix(admin_dsn, f"{prefix}_platform", prefix)
+            shutil.rmtree(self._script_dir, ignore_errors=True)
             raise
 
         # From this point on, this instance owns real, cluster-global
@@ -534,7 +608,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         if self._cleaned_up:
             return
         self._cleaned_up = True
-        _sweep_prefix(self._platform.admin_dsn, self._platform.platform_db, self._platform.prefix)
+        try:
+            _sweep_prefix(self._platform.admin_dsn, self._platform.platform_db, self._platform.prefix)
+        finally:
+            shutil.rmtree(self._script_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # backend wiring (design R2DB_SERVICE_LAYER_ARCHITECTURE Task 1)
@@ -563,8 +640,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     def _fresh_slug(self, letter: str) -> str:
         # PostgreSQL provisioning's own slug policy (0002's
-        # `provision_application`): `^[a-z][a-z0-9_]{0,32}$`. Kept well
-        # under that bound so the decorated schema/role names
+        # `begin_provision_application`): `^[a-z][a-z0-9_]{0,32}$`. Kept
+        # well under that bound so the decorated database/role names
         # (`<prefix>_app_<slug>_developer` etc.) stay under PostgreSQL's
         # 63-byte identifier limit alongside the random per-run prefix.
         self._counter += 1
@@ -1116,11 +1193,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 cell.close()
             self._loop.close()
             try:
-                # Drops the platform database (every schema/table/grant
-                # created this session with it) and sweeps every role under
-                # this run's unique prefix. Runs even if something above
-                # raised, so a failed/partial run never leaves residue in
-                # the local cluster. `_cleanup` is idempotent, so if
+                # Drops the platform database and every per-application
+                # database this run provisioned (each takes every
+                # schema/table/grant created inside it with it), and sweeps
+                # every role under this run's unique prefix. Runs even if
+                # something above raised, so a failed/partial run never
+                # leaves residue in the local cluster. `_cleanup` is
+                # idempotent, so if
                 # `atexit` already ran this (e.g. a previous, unrelated
                 # abnormal exit somehow left this same instance alive -- it
                 # never does in practice, but the guard costs nothing) this

@@ -2,7 +2,7 @@
 
 ## 文書情報
 
-- 版数: 1.2 (§3 の手順1〜5を実装済みとして記録し、§7 に残作業を新設)
+- 版数: 1.4 (§8.7 に接続プール管理の決定を追加) (§3 の手順1〜5を実装済みとして記録し、§7 に残作業を新設)
 - 発行日: 2026-08-27
 - 設計担当: Opus
 - 前提: `docs/design/CONFORMANCE_ADAPTER_V1.md` の完了。共通suiteが実体を検証できる状態を先に作る。
@@ -136,3 +136,91 @@ Cloud SQL や managed identity は前提にできない。ローカルPostgreSQL
 - **production証拠が無い。** `security/CONTROL_MAPPING.md` の該当行はすべて「ローカル/testクラスタ evidence」であることを明記しており、production identity/network/database-grant evidenceには昇格していない。
 - **audit sinkの耐久実装が無い。** D-6/§5.1で確定したfail-closed / bounded-buffer+alertの方針は契約に記述されたが、`AuditSink` (`r2db-api/src/r2db_api/audit.py`) は引き続き単一プロセス内のin-memory append-onlyリストのままであり、外部sinkへの転送・失敗検知・alertingのいずれも未実装。
 - **`psycopg_pool` への置き換えが未実施。** `postgres.py` の `_RolePool` は手作りのqueueベースpoolであり、`psycopg_pool` (公式pool実装) への置き換えは行っていない。D-3が指摘するrole/schema漏れのhazardは `_RolePool` の設計 (role毎に別pool、`SET ROLE`を使わない) で構造的に回避しているが、再接続・health check等のpool運用機能は自前実装の範囲にとどまる。
+
+## 8. D-3 改訂 — database-per-application (v1.3)
+
+### 8.1 決定
+
+`r2db-api` の application 分離を **schema-per-application から database-per-application へ変更する。**
+
+各 Application は専用の PostgreSQL データベースを持ち、その中の `public` schema に entity を置く。runtime / developer の2 role は従来どおり Application ごとに分ける。
+
+### 8.2 変更する理由
+
+**スキーマは名前空間であり、データベースは壁である。** PostgreSQL では FDW/dblink 無しにデータベースを跨げない。一方 schema 境界は `search_path` の設定ミス、grant の漏れ、RLS ポリシーの当て忘れのいずれか一つで越えられる。SI-00 が要求するのは「単一の実装欠陥が他 Application へ波及しないこと」であり、越境が原理的に不可能な境界のほうが、規律で維持する境界より強い。
+
+さらに現行実装には**構造的な弱点**がある。`PostgresCell._create_entity` は実行時に作成する全テーブルへ RLS を有効化しているが、将来テーブルを作る経路が増えたときに RLS 付与を書き忘れれば、壁は黙って消える。これは §10.1 で `SET ROLE` のリセット漏れについて「規律ではなく構造で消すべき」と判断したのと同じ性質の問題であり、同じ基準を topology 選択にも適用する。
+
+### 8.3 当初 schema を選んだ理由と、その再評価
+
+理由は接続数だった。データベースごとにプールが要るため、消費接続は `application数 × role数 × pool_size` で増え、PostgreSQL の `max_connections` (既定100前後) が天井になる。
+
+しかし本配備では当該制約が効かない。単一 VPS、Application 数は十数個規模である。**起きていない将来のスケール問題のために、いま効いている封じ込めの強度を下げる判断は筋が悪い。** 接続数は運用パラメータとして上限を明示し、天井が見えた時点で再検討する (pgbouncer 等の接続集約、あるいは topology 再評価)。
+
+副次的効果として、既存 VPS 実装が database-per-application であるため **topology が一致し、移行が大幅に容易になる。** 運用知識も流用できる。
+
+### 8.4 共通契約への影響
+
+**無い。** SI-00 の Implementation freedom が明示している。
+
+> Implementations may use separate databases, roles, schemas, tenants, IAM boundaries, network boundaries, policy engines, or equivalent layered controls. The invariant requires containment, not one particular topology.
+
+共通契約は topology を規定しない。本変更は `r2db-api` ローカルの実装判断であり、CCR は不要、`MitateDB-api` への影響も無い (CLAUDE.md: プラットフォーム固有の PostgreSQL provisioning は各実装の内側)。
+
+### 8.5 必須の実装条件
+
+1. **データベース単位の接続許可を閉じる。** 新規データベースは既定で `PUBLIC` に `CONNECT` が付く。provisioning は必ず `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` を行い、当該 Application の runtime/developer 2 role にのみ `CONNECT` を付与する。これが主たる壁であり、**テストで直接検証する** — Application A の role が Application B のデータベースへ接続できないことを、`PostgresCell` 経由ではなく生の接続で確認する。
+2. **`public` schema の既定権限を閉じる。** `REVOKE ALL ON SCHEMA public FROM PUBLIC`。developer が所有し、runtime は DML のみ。
+3. **RLS は補助の壁として維持するが、実行時コードの記憶に依存させない。** データベース境界が主たる壁になったため RLS の必然性は下がるが、多層防御として残す価値はある。ただし「テーブル作成時に有効化し忘れたら消える」構造は避ける。実現手段の優先順位は次のとおり。
+   - (a) bootstrap (クラスタ管理者が実行) でテンプレートデータベースに event trigger を作り、Application データベースを `CREATE DATABASE ... TEMPLATE` で作る。`CREATE EVENT TRIGGER` は superuser 権限を要するため、制御 role では実行できない点に注意。
+   - (b) (a) が不可なら、実行時の有効化は残したうえで、**当該データベース内に RLS 未適用のテーブルが1つでも存在すれば fail する検証**を provisioning とテストの双方に置く。希望ではなく検査にする。
+4. **接続数の上限を明示する。** `application数 × 2 role × pool_size` の実効値を runbook に記載し、`max_connections` に対する余裕を運用者が計算できるようにする。
+5. **既存 VPS 実装との共存 (§5.3 C-1) は維持する。** データベース名・role 名は `r2dbsvc_` 系の名前空間を保ち、既存の `app_<slug>_<hex>` 系と衝突しない。
+
+### 8.6 変更規模
+
+`PostgresCell` は既に Application ごとに独立した DSN を2本受け取る設計であり (`runtime_dsn` / `developer_dsn`)、`_RolePool` も「1つの固定 role として認証済みの DSN」単位でプールを持つ。したがって**接続先をデータベース単位に変えるのに構造変更は要らない。** SQL 合成部 (identifier 検証、catalog 照合、bind parameter、単一 choke point) は一切変更しない。
+
+### 8.7 接続プール管理 — 上限をアプリ数から切り離す
+
+#### 判断の誤りとその訂正
+
+§8.3 で「接続数の制約は本配備では効かない」と記した。**この判断は誤りだった。**
+
+アプリ数を十数個と見積もった点は正しかったが、`pool_size` との積を計算していなかった。既定 `pool_size=4` では `アプリ数 × 2 role × 4` となり、13アプリで104接続、`max_connections=100` を超える。既存本番には既に11個の application database がある。移行した時点で天井だった。
+
+より重要な誤りは、**稼働中の既存実装が同じ問題を既に解いていたのに、それを参照しなかったこと**である。`project/r2-vps/apps/r2db-api/src/r2db_api/pools.py` の `AppPoolManager` は次を備えている。
+
+- `pool_idle_seconds` (既定300) — 未使用エンジンの破棄
+- `pool_cache_max` (既定32) — 保持エンジン数の LRU 上限
+- `pool_pre_ping` / `pool_recycle`
+
+移行元の実装が本番で解決済みの問題を、新実装で解き直していなかった。
+
+#### 決定
+
+同等の設計を採用する。実装は SQLAlchemy ではなく psycopg 手製プールのため、コードではなく設計を移植する。
+
+- `SharedPoolManager` をプロセス全体で共有し、`(application_id, role)` をキーにプールを保持する。
+- **上限はグローバルに置く。** `PostgresCell` ごとに上限を置いても何も縛れない (セルはアプリごとに存在するため)。セルはプール実体を持たず、マネージャから毎回解決する。
+- アイドル退避と LRU 上限の双方を持つ。**本質は上限をアプリ数から切り離すことであり、`pool_size` を下げるだけの対症療法では構造が残る。**
+- checkout 時に `SELECT 1` で死活を確認する。`conn.closed` はサーバ側で切断された接続を検出できない。
+- 設定値は既存実装に揃える (`R2DB_POOL_IDLE_SECONDS=300`、`R2DB_POOL_CACHE_MAX=32`、`R2DB_POOL_SIZE=2`、`R2DB_POOL_MAX_OVERFLOW=2`)。運用者が既存の経験値を流用できる。
+- `SET ROLE` は導入しない。プールは固定 role の DSN 専用という §10.1 の性質を保ったまま上限を追加する。
+
+#### 退避が貸出中接続を閉じないことの担保
+
+プール退避は `_retired` を立て、キュー内のアイドル接続のみを閉じる。貸出中の接続はキューに存在しないため、**退避処理からは到達できない**。返却時に `_retired` を見て再投入せず閉じる。
+
+これはテストによる担保ではなく構造による担保である。実行中のトランザクション途中で接続が切れる障害は、負荷時にのみ散発的に現れ本番で最も追いにくい部類であり、規律ではなく構造で消すべき対象にあたる (§10.1 と同じ基準)。
+
+#### 上限の算術
+
+`cache_max` が数えるのは `(application_id, role)` のペア、すなわちプールそのものである。role 係数は既に `cache_max` に含まれるため掛け直してはならない。
+
+```
+live_pools        = min(applications × 2, cache_max)
+ceiling           = cache_max × (pool_size + pool_max_overflow) = 32 × 4 = 128
+```
+
+既存本番実装の上限と一致する。128 は `max_connections=100` を超えるが、これは満杯時の理論値であり、アイドル退避により実効値は大きく下回る。既存実装も同条件で稼働している。運用時は `max_connections` の引き上げか `R2DB_POOL_CACHE_MAX` の低減で調整する。
