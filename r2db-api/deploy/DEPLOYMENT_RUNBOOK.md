@@ -259,10 +259,13 @@ configuration's own layout rather than assuming.)
 
 Both postures make `PostgresCell`/`PostgresCredentialStore` behave
 identically; the DSN's *shape* is a configuration property, not a code
-property (P2-D5). This runbook presents both; **adopting one is the
-operator's decision** (`docs/design/
-R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md` §3), not something
-this runbook or the example files decide on your behalf.
+property (P2-D5). **Ruling (2026-08-28): posture B is adopted** — the
+requester delegated the choice to the design recommendation (no standing
+password material on disk; OS identity is the credential). Posture A
+remains documented below as the fallback: switching is a
+configuration-only change (rewrite the DSNs, drop the pg_ident map), with
+no code involved, and is the recorded remedy if posture B's server-side
+configuration proves troublesome in practice.
 
 ### Posture A -- password DSN
 

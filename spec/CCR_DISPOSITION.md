@@ -90,11 +90,13 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 2. **CCR-13: `MutationResult` の v1 拡張を行う** (2026-08-28)
 3. **CCR-13: アドレス再利用は案iii (再利用の有無を catalog で宣言)** (2026-08-28)。理由: 宣言による見える化が本契約の設計思想 (区分宣言・一意性宣言・`capability_status`) に最も馴染み、想定利用形態では利用設計者が AI エージェントであるため「宣言を読まないクライアント」という案iii の弱点が実質消える。案i (再利用禁止。将来のサロゲート鋳造不能な可変データ — 外部表透過 — を塞ぐ) / 案ii (precondition の領分。晒され方を知る手段が無い) は不採用。案iii強 (再利用宣言 entity への precondition 必須化) は将来の additive 強化として残す
 
-### 採用に伴い残る従属判断 (依頼者)
+### 従属判断 — すべて裁定済み (2026-08-28)
 
-1. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。CCR 文書が「採否と同時に判断する」と定めており、endpoint 形状と conformance 条件がこれで確定する
-2. ~~CCR-14: base path `/control/v1` の確認~~ — **裁定済み (2026-08-28、依頼者): 稼働中の旧実装とパスが重複しないことを条件に `/control/v1` とする。条件は同日、旧実装の実ソースから全 router を列挙して検証済み** — 旧実装の最上位パス名前空間 (`/`、`/health`、`/ready`、`/v1/tables`、`/v1/schema`、`/v1/meta`、`/admin`、`/admin/api`、`/console`、`/embed`) に `/control` で始まるものは無い。よって `/control/v1` で確定。なおこの実測で、引き継ぎ文書の旧パス一覧に無かった `/v1/schema` prefix の共有が判明した (完全一致は無し。段階2の path 振り分けで `/v1/schema/operations` に exact-match が要る — `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §4 に記録)
-3. CCR-15: `batch_entities` の境界値 (配備 profile の値) と enforcement layer の申告方法
+1. **CCR-14: in-band 発行は案B** (依頼者が起票側推奨に委任)。control credential の発行は bootstrap / reset の帯域外儀式に限り、公開 HTTP 面での `role=control` 発行要求は `CAPABILITY_UNSUPPORTED`。根拠: 失効を生き延びる永続性の排除が安全第一の軸で優先し、案Aの利便 (運用者追加にサーバ権限不要) は単一運用者の現配備では実質発生しない。**明確化 (裁定時)**: 帯域外に限るのは control credential のみ — application credential (runtime/developer) の発行は in-band に残る。オンボーディングをサーバログインなしに完結することが本 CCR の目的の一部であり、永続性の論証は自己複製する control credential に固有のため。**再検討条件**: 運用者追加が頻繁になり帯域外儀式が実運用の障害と実証された場合、案Aへの移行を additive な契約変更として審査 (endpoint の追加は削除より容易 — 案Bから始めることは後戻りのない選択ではない)
+2. **CCR-14: base path は `/control/v1` で確定** (依頼者、旧実装との非重複を条件とし、条件は同日、旧実装の実ソースから全 router を列挙して検証済み) — 旧実装の最上位パス名前空間 (`/`、`/health`、`/ready`、`/v1/tables`、`/v1/schema`、`/v1/meta`、`/admin`、`/admin/api`、`/console`、`/embed`) に `/control` で始まるものは無い。なおこの実測で、引き継ぎ文書の旧パス一覧に無かった `/v1/schema` prefix の共有が判明した (完全一致は無し。段階2の path 振り分けで `/v1/schema/operations` に exact-match が要る — `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §4 に記録)
+3. **CCR-15: `batch_entities` の参照 profile 値は 4** (依頼者が起票側推奨に委任)。保守的に始めて実証で緩める (SI-08 のガードレールの流儀)。申告は既存の `limits` / `limit_enforcement` に載せる。**再検討条件**: 実クライアントで不足が実証されれば profile 値の引き上げは additive
+
+配備の DB 認証 posture も同日、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。
 

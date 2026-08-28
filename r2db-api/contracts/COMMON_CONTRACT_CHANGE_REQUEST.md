@@ -175,13 +175,15 @@ POST   /control/v1/credentials/{id}/disable     無効化
 POST   /control/v1/credentials/{id}/enable      有効化
 ```
 
-**案Aを採る場合のみ**、これに発行が加わる。
+発行 endpoint も両案に共通して存在する — **ただし発行できる role が案により異なる**。
 
 ```
-POST   /control/v1/credentials                  発行 (秘密は一度だけ返す)
+POST   /control/v1/credentials                  Application credential の発行 (role=runtime/developer。秘密は一度だけ返す)
 ```
 
-`lifecycle.credential` が挙げる四つの動詞のうち、案Aでは issue / rotate / revoke / disable のすべてが HTTP に表現され、案Bでは issue を除く三動詞 (と enable) が表現され、issue は bootstrap / reset の帯域外儀式に限られる。なお `enable` (disabled → enabled の復帰) は現行の `lifecycle.credential` に**無い**動詞であり、本要求は disable を可逆な運用状態とするための動詞追加を含む (変更表参照)。
+Application credential の発行が in-band であることは両案で変わらない。オンボーディング (Application 登録 + credential 発行) を運用者のサーバログインなしに完結できることは本 CCR の目的の一部であり、また永続性の論証 (盗まれた1本から新しい credential を作り失効を生き延びる) は**自己複製する control credential に固有**である — 盗まれた control credential が発行する application credential は一覧に現れ、個別に失効でき、control 面への足場にならない。
+
+案A/案B が分けるのは **role=control の credential をこの endpoint で発行できるか**である。案Aでは可能、案Bでは `CAPABILITY_UNSUPPORTED` で拒否され、control credential の発行は bootstrap / reset の帯域外儀式に限られる。`lifecycle.credential` の四動詞は、application credential については両案とも全て HTTP に表現され、control credential については案Bで issue のみ帯域外になる。なお `enable` (disabled → enabled の復帰) は現行の `lifecycle.credential` に**無い**動詞であり、本要求は disable を可逆な運用状態とするための動詞追加を含む (変更表参照)。
 
 **状態の意味論を固定する: `revoke` は終端であり取り消せない。`disable` / `enable` は可逆な運用状態である。** 現行契約はこの区別を一度も述べておらず、revoke を取り消せる実装は SI-13 (Revocation Effectiveness) の意味を空洞化する — 「失効した」という監査事実が後から偽になるためである。失効済み credential を再び有効にする唯一の道は新しい credential の発行である。
 
@@ -252,14 +254,14 @@ SI-02 が制約するのは *Application-facing Runtime and Developer APIs* が�
 - 復旧経路は bootstrap の reset である。reset の意味論を契約に置く: 運用者 / OS 権限のもとでのみ実行可能であり、対象は control credential のみで **Application データと監査証跡を破壊しない**こと、正準の監査イベントを発行すること
 - **reset は既存の control credential をすべて失効させる。** これを欠くと、reset が「失効を生き延びる第二の発行経路」になり、案A/案B の論点だった永続性の危険が OS 権限側に残る。reset が発行する credential は bootstrap の初回 credential と同じ非恒久化規則 (下記) に従う
 
-### control credential の in-band 発行 — 未決として両論を残す
+### control credential の in-band 発行 — 裁定: 案B
 
-rotate / revoke / disable を HTTP に置く論拠は成立する (「個別に失効できる」は操作手段を要する)。しかし**新しい control credential の発行**まで in-band である必然は、この論拠からは従わない。両案を依頼者判断として残す。
+rotate / revoke / disable を HTTP に置く論拠は成立する (「個別に失効できる」は操作手段を要する)。しかし**新しい control credential の発行**まで in-band である必然は、この論拠からは従わない。
 
 - **案A — 発行も in-band**: 運用が一貫し、複数運用者の追加にサーバ権限が要らない。ただし盗まれた1本から新しい credential を発行でき、**失効を生き延びる永続性**を攻撃者に与える。既存 invariant は control credential の侵害を扱っていない (SI-00 は Application credential の条項である)
 - **案B — 発行は帯域外の儀式に留める** (Vault root の慣行): 永続性の危険を断つ。ただし運用者追加のたびにサーバ権限が要り、CCR-14 が解こうとした運用形態が control credential についてだけ残る
 
-いずれを採るかで endpoint 形状 (上記) と conformance 条件が変わるため、採否と同時に判断する。
+**裁定 (2026-08-28、依頼者が起票側推奨に委任): 案B を採る。** 根拠: 堅牢と安全が第一の軸では、失効を生き延びる永続性の排除が優先する。案Aの利便 (運用者追加にサーバ権限不要) は、現在の配備が単一運用者である間は実質発生しない。**再検討条件**: 運用者の追加が頻繁になり、帯域外儀式が実運用の障害であると実証された場合、案Aへの移行を additive な契約変更として審査する (endpoint の追加は削除より互換性が容易である — 案Bから始めることは後戻りのない選択ではない)。
 
 ### 現行 VPS 実装からの教訓 — 三つある
 
@@ -281,8 +283,7 @@ rotate / revoke / disable を HTTP に置く論拠は成立する (「個別に�
 - 失効済み credential が `enable` で復活しないこと (revoke の終端性)
 - 制御面の資源境界が `limits` として公開され enforce されること
 - 「分離して配備可能」は振る舞いテストではなく設計証拠 (review evidence) として審査すること
-
-in-band 発行の採否 (案A/案B) により conformance 条件は追加される。
+- **案B (裁定済み) に伴う条件**: `role=control` の credential 発行要求が、公開 HTTP 面のどこからも `CAPABILITY_UNSUPPORTED` で拒否されること (control credential を作る経路は bootstrap / reset のみ)
 
 ### bootstrap — endpoint ではなくライフサイクル条項として
 
@@ -409,10 +410,10 @@ SI-11 (Atomic Integrity) の適用範囲が広がるのみで、新たな invari
 - **CCR-13: `MutationResult` の v1 拡張を行う**
 - **CCR-13: アドレス再利用は案iii (catalog で宣言)** — 理由と経緯は本文「残余危険」欄
 
-## 採用に伴い残る従属判断 (依頼者)
+## 従属判断 — すべて裁定済み (2026-08-28)
 
-- CCR-14: control credential の in-band 発行 — 案A (発行も in-band) / 案B (発行は帯域外の儀式)。本文が「採否と同時に判断する」と定める項であり、endpoint 形状と conformance 条件がこれで確定する
-- ~~CCR-14: base path を `/control/v1` として `/v1` から分けることの確認~~ — **裁定済み (2026-08-28): 旧実装とのパス非重複を条件に `/control/v1`。条件は旧実装の実ソースの全 router 列挙で検証済み (`/control` で始まる旧パスは無い)。確定**
-- CCR-15: `batch_entities` の境界値 (配備 profile の値) と、その enforcement layer の申告方法
+- **CCR-14 in-band 発行: 案B** (依頼者が起票側推奨に委任)。詳細と再検討条件は本文「in-band 発行」欄。あわせて明確化: 帯域外に限るのは control credential の発行のみで、application credential (runtime/developer) の発行は両案とも in-band (本文形状欄)
+- **CCR-14 base path: `/control/v1` で確定** (旧実装とのパス非重複を実ソースの全 router 列挙で検証済み)
+- **CCR-15 `batch_entities`: 参照 profile 値 4** (依頼者が起票側推奨に委任)。保守的に始めて実証で緩める。申告は既存の `limits` / `limit_enforcement` の仕組みに載せる。**再検討条件**: 実クライアントで不足が実証された場合、profile 値の引き上げは additive
 
 **採用時に効く既知の依存** (判断項目ではないが、一覧に無いと見落とされるため記す): CCR-14 の「最後の control credential の失効には明示的な確認を要する」条項は、destructive 確認の有効性定義 (C-06 共通化の前提。MitateDB の確認トークン不検証が既知欠落) という**別の未解決の契約判断**に依存する。この定義が決まるまで当該条項は実効化しない。
