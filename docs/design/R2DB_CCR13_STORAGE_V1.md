@@ -26,7 +26,7 @@
 - `idempotency_key` (capability `idempotency`)。現行どおり `CAPABILITY_UNSUPPORTED` で拒否を維持
 - `alter_field`。`CAPABILITY_UNSUPPORTED` を維持 (capability_status 規則上、optional target operation の unavailable は適法)
 - catalog への field 型の公開。`EntityDescriptor` に型情報の語彙が無い (将来の additive 契約変更候補として申し送り)
-- **`contains` のリテラル部分一致化 (LIKE メタ文字エスケープ)**。初版 (R-8) はフェーズ1に含めていたが、`contains` の意味は契約に無く、r2db だけが意味を変えるのは peer 間の意味論分岐を実装が単独で作る形 (WP-0 レビュー M-10)。契約への1文追加 (依頼者裁定) とセットで別途行う。現行挙動 (`%`/`_` 素通し。バインド境界は無事) を維持する
+- (初版で非スコープとした `contains` の扱いは Q-2 裁定で**スコープ入り**した: `contains` のリテラル化 + `matches` 追加。契約反映済み。実装は WP-3 で r2db 両 cell、MitateDB のエスケープ修正 + `matches` 正直拒否も同時。C-03 probe は WP-5。契約反映から WP-3 までの間、r2db は `matches` を `VALIDATION_FAILED` で拒否する窓が生じる — 未配備ブランチ内のため許容し、WP-3 で実装へ)
 - MitateDB-api の新機能実装。同 peer は 1.1.0 を申告しつつ新 capability を unavailable と申告済み。フェーズ1で必要なのは「unavailable 側の正直な拒否」の証拠が C-17/C-18 に載ることのみ (§4 の structurally_absent)
 - cross-entity endpoint (`POST /v1/data/mutations`) — CCR-15 はフェーズ外。ただし `MutationResult` の共通形状 (assigned_addresses の `entity` 項目) は将来を塞がない形にする
 

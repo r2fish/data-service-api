@@ -140,7 +140,12 @@
     "bounds": "The control surface publishes its own limits and limit_enforcement via control discovery. Application count, credentials per application, and control operation rate are finite (limits classes: applications, credentials_per_application, control_requests_per_minute)."
   },
   "structured_operations": {
-    "allowed_query_operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"],
+    "allowed_query_operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"],
+    "query_operators": {
+      "contains": "Literal substring containment, case-sensitive: every character of the value is matched verbatim, and no character of the value is interpreted as a wildcard or pattern token.",
+      "matches": "Wildcard pattern match, case-sensitive: % matches any sequence including the empty one, _ matches exactly one character, and a backslash escapes the next character. An implementation not providing matches refuses it with CAPABILITY_UNSUPPORTED; it is never silently interpreted as a different operator.",
+      "case_folding": "Neither operator folds case; a case-insensitive comparison would be a separate additive operator."
+    },
     "allowed_mutations": ["insert", "update", "upsert", "delete"],
     "allowed_schema_operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"],
     "identifier": "ASCII letters, digits, and underscore; first character must be a letter or underscore; implementation may apply a stricter known-catalog policy.",
@@ -236,7 +241,7 @@
     "CredentialStateResult": {"type": "object", "required": ["credential_id", "enabled", "revoked"], "properties": {"credential_id": {"type": "string"}, "enabled": {"type": "boolean"}, "revoked": {"type": "boolean"}}}
   },
   "definitions": {
-    "Predicate": {"type": "object", "additionalProperties": false, "required": ["field", "operator"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "operator": {"enum": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"]}, "value": {}}},
+    "Predicate": {"type": "object", "additionalProperties": false, "required": ["field", "operator"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "operator": {"enum": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]}, "value": {}}},
     "Order": {"type": "object", "additionalProperties": false, "required": ["field", "direction"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "direction": {"enum": ["asc", "desc"]}}},
     "Page": {"type": "object", "additionalProperties": false, "properties": {"size": {"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": {"type": "string", "maxLength": 512}}},
     "Mutation": {"type": "object", "additionalProperties": false, "required": ["operation"], "properties": {"operation": {"enum": ["insert", "update", "upsert", "delete"]}, "values": {"type": "object", "maxProperties": 100}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "expected_revision": {"type": "string", "maxLength": 128}, "unique_key": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}}},
