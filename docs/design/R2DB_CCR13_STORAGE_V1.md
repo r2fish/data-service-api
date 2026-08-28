@@ -34,10 +34,10 @@
 
 | # | 論点 | 暫定 (本フェーズの実装) | 裁定後の変化 |
 |---|---|---|---|
-| Q-1 | **unique key が2つ以上の entity への upsert** (WP-0 レビュー B-3)。契約 `structured_operations.upsert` は拒否条件を「key 未宣言」「mutable 区分でない」の2つしか列挙せず、多キー時の存在判定は未定義。実装が独自に決めるのは CCR-13 が是正した欠陥の形の再発 | `CAPABILITY_UNSUPPORTED` (安全診断: ambiguous domain uniqueness)。拒否側に倒す — 後から支持に転じるのは additive、逆は破壊 | 案A: 契約に「複数 key の entity への upsert は `CAPABILITY_UNSUPPORTED`」を additive 追加 (暫定の追認)。案B: `Mutation` に key 選択フィールドを追加 (語彙が増える)。いずれも `spec/CCR_DISPOSITION.md` に従属判断として記録 |
-| Q-2 | **`contains` の意味定義** (WP-0 レビュー M-10)。契約は operator 名を列挙するのみで意味が無く、ワイルドカード解釈が実装ごとに分岐しうる | 現行挙動を変えない (エスケープ修正を見送り) | 「リテラル部分一致 (ワイルドカード解釈なし)」を契約に additive 追加後、r2db のエスケープ修正 + C-03 value corpus への `%`/`_`/`\` probe 追加を1コミットで行う |
+| Q-1 | **unique key が2つ以上の entity への upsert** (WP-0 レビュー B-3)。契約 `structured_operations.upsert` は拒否条件を「key 未宣言」「mutable 区分でない」の2つしか列挙せず、多キー時の存在判定は未定義。実装が独自に決めるのは CCR-13 が是正した欠陥の形の再発 | **裁定済み (2026-08-28): 案B。** `Mutation` / `ScopedMutation` に任意フィールド `unique_key` (catalog の `unique_keys[].name` を参照) を追加し、判定キーを名指しする。キー1つなら省略可 (既定)、複数キーで省略は `VALIDATION_FAILED`、未宣言キー名は `NOT_FOUND`、upsert 以外への付与は `VALIDATION_FAILED`。契約 1.1.0 (main 未マージ) への公開前追補として織り込み済み。記録: `spec/CCR_DISPOSITION.md` 従属判断 4 | — |
+| Q-2 | **`contains` の意味定義** (WP-0 レビュー M-10)。契約は operator 名を列挙するのみで意味が無く、ワイルドカード解釈が実装ごとに分岐しうる | **裁定済み (2026-08-28): 案i + 補足案。** `contains` は「リテラル部分一致 (ワイルドカード解釈なし)」と契約に明記し、同時にパターン一致演算子 `matches` (`%` = 任意列、`_` = 任意1文字、`\` エスケープ) を additive 追加する — 一般的に期待される能力は最初から普通に提供する (依頼者言明)。**両演算子とも大文字小文字を区別** (peer 間分岐の封鎖。区別しない検索は将来の additive 演算子)。提供しない実装の `matches` は `CAPABILITY_UNSUPPORTED` の正直拒否。反映は WP-2 是正コミット後の専用コミット (契約 + 裁定記録 + r2db 両 cell + MitateDB エスケープ修正 + C-03 probe) | — |
 
-C-17 は多キー upsert の挙動を検査しない (Q-1 裁定まで条件を置かない)。
+(旧注記「C-17 は多キー upsert の挙動を検査しない」は Q-1 裁定により失効 — C-17 は案B の選択規則を検査する。)
 
 ## 1. 設計判断 (実装ポリシー。契約変更ではない)
 
@@ -94,9 +94,11 @@ C-17 は多キー upsert の挙動を検査しない (Q-1 裁定まで条件を�
 - `create_index`: `index` (名前) + `fields` (1〜16) + `unique` (bool、省略時 false)。物理 index 名は `{entity}__{index}` (二重下線区切り)。**クライアント index 名に `__` を含むものは `VALIDATION_FAILED`** (物理名の逆写像を一意に保つ — 訂正記録 m-2)。合成名が 63 バイトを超える場合は `VALIDATION_FAILED`。同名 index の存在は `CONFLICT`、対象 entity / フィールド不存在は `NOT_FOUND`。`unique: true` は `CREATE UNIQUE INDEX`。既存データが一意性に違反していれば `CONFLICT`
 - **エラー写像の非開示 (訂正記録 M-5)**: PostgreSQL の UniqueViolation 等を `CONFLICT` に写像する際、DETAIL・制約名・行値は一切伝播させない。`message` は固定文言、`details` は高々 `{"field": <クライアント名>}` / `{"index": <クライアント名>}`
 - `drop_index`: **SI-09 の destructive 確認を必須とする** (`destructive: true` + 有効な confirmation。`drop_entity` と同じ扱い)。初版は「データを破壊しないので不要」としたが、unique index の削除は (a) 性質3 の `CONFLICT` ガードレールを外し、(b) upsert を無言で `CAPABILITY_UNSUPPORTED` に変え、(c) 重複データ流入後は再作成不能 (事実上不可逆)。SI-09 の適用範囲 (schema/object deletion) に該当する (訂正記録 M-6)。`security/CONTROL_MAPPING.md` の SI-09 行に反映
+- `create_index` は `schema_objects` 上限に**算入する** (SI-08。index は実資源であり、書き込み経路の検査コストも index 数に比例する)。`drop_index` で減算。index 名にも `_r2db` prefix 予約を適用 (`IDENTIFIER_INVALID`)
+- `create_index` の `fields` に **アドレスフィールド (`id`) を含むものは `VALIDATION_FAILED`** — アドレスは domain 一意性宣言ではない (§2)。これを許すと「catalog に載るが upsert では原理的に使えない unique key」(values.id 禁止と矛盾) を peer が publish でき、C-17 の positive control が成立しなくなる (WP-2 レビュー M-5)
 - catalog の `unique_keys`: `pg_index` から entity ごとの unique index を導出し、`{name: <クライアント名 (prefix を剥がす)>, fields: [...]}` で公開。`id` の PRIMARY KEY はアドレスであって domain 一意性宣言ではないため **unique_keys には含めない**
-- **upsert は「entity の宣言済み unique key がちょうど1つ」のときだけ支持する。** 0 個は契約どおり `CAPABILITY_UNSUPPORTED`。2 個以上は §0.5 Q-1 の暫定として `CAPABILITY_UNSUPPORTED`
-- upsert の values はその unique key の全フィールドを非 null で含むこと (`VALIDATION_FAILED`)。**upsert に `where` が付いていれば `VALIDATION_FAILED`** (存在判定は宣言済み key であり、述語を黙殺しない — 訂正記録 M-3。現行 bind_mutation の「upsert は where 必須」は逆転する)
+- **upsert の判定キーは Q-1 裁定 (案B) に従う**: unique key 0 個の entity は契約どおり `CAPABILITY_UNSUPPORTED`。1 個なら `unique_key` 省略可 (そのキーに既定。明示指定も可)。2 個以上は operation の `unique_key` フィールドでキー名を名指しし、省略は `VALIDATION_FAILED`。catalog に無いキー名は `NOT_FOUND`。`unique_key` を upsert 以外の operation に付ければ `VALIDATION_FAILED`
+- upsert の values は**選択されたキー**の全フィールドを非 null で含むこと (`VALIDATION_FAILED`)。**upsert に `where` が付いていれば `VALIDATION_FAILED`** (存在判定は宣言済み key であり、述語を黙殺しない — 訂正記録 M-3。現行 bind_mutation の「upsert は where 必須」は逆転する)
 - 実行は2文構成 (訂正記録 M-4 — `xmax` 系の未文書挙動に依存しない):
   1. `INSERT ... ON CONFLICT (<key fields>) DO NOTHING RETURNING id` → 行が返れば insert に解決 (assigned_addresses へ)
   2. 0 行なら `UPDATE ... SET <非 key の提供フィールド>, _r2db_revision = gen_random_uuid() WHERE <key eq> RETURNING id` → 0 行なら並行変更として `CONFLICT` (atomic batch ごと rollback)
@@ -108,6 +110,9 @@ C-17 は多キー upsert の挙動を検査しない (Q-1 裁定まで条件を�
 - pagination は offset cursor: `page.cursor` は base64url(JSON `{"o": <offset>, "q": <query 形状ハッシュ>}`) の不透明文字列。`q` は (entity, select, where, order_by, size) の正規化ハッシュで、**ページ間で query 形状が変わった cursor は `VALIDATION_FAILED`** (静かなずれを許さない — 訂正記録 m-3)。復号不能・型不正・負値・上限 (10^9) 超の offset も `VALIDATION_FAILED` (PostgreSQL エラーまで到達させない)
 - `LIMIT size+1` で続きの有無を判定し、続きがあれば `next_page` に offset+size の cursor、なければ null
 - cursor は権限を運ばない (自 Application のデータ内の位置情報のみ)。改竄は自分の結果ページがずれるか `VALIDATION_FAILED` になるだけで越境しない (C-01 の範囲に変化なし)
+- 順序の意味論 (WP-2 レビュー M-6/M-B で確定。両 cell が同一であること): NULL の位置は PostgreSQL 既定に合わせる (asc は末尾、desc は先頭)。untyped (JSONB) 列の**非 null 値**の型跨ぎ順序は PostgreSQL jsonb の順序 (`Object > Array > Boolean > Number > String`) に合わせる。JSON null は R-7 の規則により SQL NULL として保存されるため「jsonb null の順位」は発生しない。型付き列は R-7 により単型なので null 位置のみが効く
+- `order_by` に同一フィールドが重複していれば `VALIDATION_FAILED`。`order_by` 句数は `query_complexity` に算入する
+- cursor の形状ハッシュは application scope と entity を含める。なおハッシュは「同一 query の続きである」ことの確認であり、完全性や権限の検査ではない (cursor は offset 位置情報のみを運ぶ)
 - `page.size` の上限は既存 `result_items` 上限と同一。`order_by` 句数の上限は契約どおり 10
 
 ### R-7: 型付き列の値検証とバインド
@@ -115,7 +120,8 @@ C-17 は多キー upsert の挙動を検査しない (Q-1 裁定まで条件を�
 - 書き込み・述語の値は列型に対して検証してからバインドする: `bigint` ← JSON 整数 (bool は拒否)、`double precision` ← JSON 数値、`boolean` ← JSON 真偽、`text` ← JSON 文字列、`jsonb` ← 任意 JSON。型不一致は `VALIDATION_FAILED` (安全診断: field 名と期待型のみ。値は echo しない)
 - `in` の値リストは**要素ごと**に同じ型検証・native バインドを行う (訂正記録 m-7)
 - null は全列で許容 (NOT NULL は非スコープ)
-- バインドは型付き列では native パラメータ、JSONB 列では従来どおり `Jsonb(...)`。**値が生 SQL に入る経路を新設しない** (既存の `_run` チョークポイントと `sql.*` 合成のみを使う)。ORDER BY / OFFSET / LIMIT の数値はサーバ側計算値のみを `sql.Literal` 化 (既存 LIMIT と同型)
+- **untyped (JSONB) 列への JSON null は SQL NULL としてバインドする** (`jsonb 'null'` を作らない — WP-2 確認レビュー M-B。これを守らないと `is_null` 述語と order_by の null 位置が両 cell で割れる。実 PostgreSQL で実測確認済み)。それ以外のバインドは型付き列では native パラメータ、JSONB 列では従来どおり `Jsonb(...)`。**値が生 SQL に入る経路を新設しない** (既存の `_run` チョークポイントと `sql.*` 合成のみを使う)。ORDER BY / OFFSET / LIMIT の数値はサーバ側計算値のみを `sql.Literal` 化 (既存 LIMIT と同型)
+- **値の型検証は precondition 解決・対象行の探索より前に行う** (failure-before-execution。型不一致 = クライアントのバグを `PRECONDITION_FAILED` = 再試行指示として返すと、AI エージェントクライアントは成功しない再試行ループに入る — WP-2 レビュー M-9)
 - `register_application(entities=...)` の seed 行も通常の insert 経路を通し、id / revision の採番を受ける (訂正記録 m-9)
 
 ## 2. catalog 導出 (R-1 の帰結)
@@ -139,6 +145,7 @@ in-memory `ApplicationCell` (参照実装・in-process conformance plug の実�
 - `StorageBackend` Protocol: `query` の戻りを `(items, revisions, has_more)` 相当へ、`transact` の戻りを `(affected, assigned_addresses)` 相当へ拡張 (具体形は実装で決めてよいが、両 cell と service/http が同じ形を使うこと)
 - `http.post_query`: `order_by` / `page.cursor` の拒否を撤去し委譲。応答は `{items, next_page, revisions}`
 - `http.post_mutate`: `expected_revision` の拒否を撤去 (`bind_mutation` で受理・検証)。応答は `{committed, affected, assigned_addresses}` (per-entity endpoint では各要素は `{address: {...}}`、`entity` 項目なし、insert (と insert に解決した upsert) の操作順)。`idempotency_key` の拒否は維持
+- **WP-2〜WP-5 の乖離封鎖 (暫定ゲート)**: 共有 bind 境界の語彙受理は、放置すると申告 (`unavailable` / `unsupported`) のまま実挙動だけが公開面に開く (WP-2 レビュー B-1 — C-12 は「申告 enabled ⇒ 実行可能」の向きしか検査せず、逆向きの乖離はどの条件も捕まえない)。よって `DataService` (全 facade の共通点) に暫定ゲートを置き、`expected_revision` / `upsert` / `create_index` / `drop_index` / `field_type` を `CAPABILITY_UNSUPPORTED` で、catalog の宣言フィールド (`mutation_class` / `address_fields` / `address_reuse` / `unique_keys`) を旧形状への絞り込みで、**申告が更新される WP-5 の同一コミットまで**封鎖する。storage 固有の事実 (catalog `fields` への `id` の出現、予約名) は capability 非依存であり WP-2 から見えてよい
 - `capabilities()` の申告更新 (**WP-5 で C-17/C-18 が green になるのと同一コミットで行う** — C-12 が申告と実挙動の一致を強制するため、実装が先・申告が後):
   - `structured_query: enabled` (order_by / pagination が実行可能になったため)
   - `atomic_mutation`: `upsert` を operations に戻す (`unsupported` から除去)。upsert の可否が entity の宣言状態 (unique_keys) に依存する旨は catalog が伝える (C-12 の positive control は §4 の改訂で「key を宣言した entity」上で行う)
@@ -167,7 +174,7 @@ in-memory `ApplicationCell` (参照実装・in-process conformance plug の実�
 ### C-17 宣言と実挙動の一致 (区分・addressability・一意性)
 
 - `row_addressability` enabled peer: 全 entity が区分宣言を持つ (declaration_required の全数検査)。mutable entity は address_fields / address_reuse を持つ。アドレス列は select 可能で query 結果に現れる (性質2)。全アドレス eq は高々1行に一致する (性質3)。アドレス列を変更する update は `VALIDATION_FAILED` (性質4)。unique key 重複を作る書き込みは `CONFLICT`
-- upsert: unique key 宣言が無い entity では `CAPABILITY_UNSUPPORTED`。ちょうど1つ宣言した entity では実行され、既存 key 一致で update、無ければ insert になり、insert 解決分だけが assigned_addresses に現れる
+- upsert: unique key 宣言が無い entity では `CAPABILITY_UNSUPPORTED`。宣言済み entity では実行され (キー選択は Q-1 裁定の規則: 1個なら省略可、複数なら `unique_key` 必須で省略は `VALIDATION_FAILED`、未宣言キー名は `NOT_FOUND`)、既存 key 一致で update、無ければ insert になり、insert 解決分だけが assigned_addresses に現れる
 - 性質5 + `address_reuse: never`: 削除→再 insert でアドレスが再利用されないことの自動テスト (誘発可能な撹乱) + review evidence (R-1 の根拠、entity 生存期間スコープ、採番の非推論性を含む) の併用。契約の文言どおり
 - unavailable peer (MitateDB): 区分宣言は要求されない。宣言に依存する操作の不在は structural evidence (§4 上記4)
 
@@ -182,7 +189,7 @@ in-memory `ApplicationCell` (参照実装・in-process conformance plug の実�
 |---|---|---|
 | WP-0 | 本設計文書の独立レビュー (Opus) と反映 | 済 (§8) |
 | WP-1 | `conformance-tests/` + 3 plug: fixture `id` 退避、C-12 upsert 対照改訂、port v1.2 (`CONFORMANCE_ADAPTER_V1.md` §11 手順)、C-17/C-18 の CONDITIONS.md 登録 (not yet executable。test ファイルは WP-5 まで書かない — 訂正記録 m-8) | 全既存 suite green (`test_conditions_register.py` 含む) |
-| WP-2 | `structured.py` / `ApplicationCell` / `backend.py`: 語彙受理 (create_index/drop_index/field_type)、予約名、型検証、unique key、upsert 再有効化 (2文構成の in-memory 等価)、expected_revision (M-1/M-2/M-3 の分岐込み)、revisions、order_by、pagination、MutationOutcome | `test_foundation.py` 拡張 green |
+| WP-2 | `structured.py` / `ApplicationCell` / `backend.py`: 語彙受理 (create_index/drop_index/field_type)、予約名、型検証、unique key、upsert 再有効化 (2文構成の in-memory 等価)、expected_revision (M-1/M-2/M-3 の分岐込み)、revisions、order_by、pagination、outcome 型 (frozen dataclass。revisions は items と同数、未維持は None — WP-2 レビュー M-10)。**WP-2 単独での実機配備は禁止** (PostgresCell は id 採番を持たず R-3 の予約だけが効くため、アドレス能力が片肺になる。実配備は WP-3 以降) | `test_foundation.py` 拡張 green |
 | WP-3 | `postgres.py`: DDL (id identity・_r2db_revision・型 map)、完全性ガード、`ON CONFLICT DO NOTHING` + follow-up UPDATE、`RETURNING`、order_by/offset SQL、catalog 導出 (unique_keys)、エラー写像の非開示 | `test_postgres.py` 拡張 green (実 PostgreSQL) |
 | WP-4 | `service.py` / `http.py`: 応答形状 (revisions / next_page / assigned_addresses)、拒否撤去 (order_by / cursor / expected_revision)。**申告更新はまだ行わない** | `test_http.py` 拡張 green |
 | WP-5 | C-17/C-18 test 実装 + 3 adapter 実行可能化 + r2db plug の型配線 + `capabilities()` 申告更新 (同一コミット)、CONDITIONS.md status 更新、変異注入で検出力確認 (最低: 性質4検証を外す変異、precondition 黙殺変異 (空 values 分岐含む)、revisions 恒等文字列変異、各1つがテストを赤にすること) | 全 suite green + 変異が検出される |
@@ -231,3 +238,12 @@ blocker 3件・major 10件・minor 10件。全件を採り、以下のとおり�
 - **m-8**: WP-1 骨格テストが skip/fail どちらかになる → WP-1 は CONDITIONS.md 行 + port 改訂のみ、test は WP-5 (§5)
 - **m-9**: seed 行の採番 → 通常 insert 経路を通す (R-7)
 - **m-10**: 採番の非推論条項の根拠未記録 → R-1 に記録、review evidence へ
+
+## 9. 訂正記録 (WP-2 実装レビュー、Opus、2026-08-28)
+
+blocker 2件・major 13件・minor 8件。主な処置:
+
+- **B-1**: 共有 bind 境界の語彙受理により、申告 unavailable のまま `expected_revision` / `create_index` / `upsert` / `field_type` / catalog 宣言フィールドが HTTP 面で実挙動化していた (C-12 は逆向きの乖離を捕まえない)。→ §3 の暫定ゲート (DataService 層) を新設し WP-5 まで封鎖。依頼者裁定は不要 (設計 §3 の「外部挙動不変」を実装が破った形であり、設計どおりに戻す是正)
+- **B-2**: `unique_keys[].name` が optional のままでは、name 無しキーを宣言した entity への upsert が原理的に到達不能 (選択規則が満たせない)。→ 契約で `name` を required 化 (1.1.0 公開前追補)、C-17 の declaration_required に同旨を追加
+- **M-1〜M-13 / minor**: R-5 (index の schema_objects 算入・id への unique index 禁止・`_r2db` prefix)、R-6 (NULL 位置・jsonb 型跨ぎ順序・重複 order_by・cursor scope)、R-7 (型検証の precondition 先行)、§5 (WP-2 単独配備禁止)、outcome 型の dataclass 化、insert + where の拒否、`index`/`unique`/`revision` キーの黙殺封鎖、CONFLICT の HTTP 409 統一、`spec/CCR_DISPOSITION.md` の旧記述訂正、テスト増補 (PostgresCell guard・null 一意性・他キー CONFLICT・cursor 負値/上限/非 dict・複合キー) に反映
+- 契約追補の追加修正: 「キー0個 + `unique_key` 指定」は capability 検査がキー名解決に先行し `CAPABILITY_UNSUPPORTED`

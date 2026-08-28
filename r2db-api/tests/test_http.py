@@ -36,8 +36,11 @@ def _build_service(**limit_overrides):
     limits = ResourceLimits(**limit_overrides) if limit_overrides else ResourceLimits()
     service = DataService(credentials, limits=limits)
     control = ControlAuthority(service)
-    control.register_application("app-a", entities={"notes": [{"id": 1, "body": "a"}]})
-    control.register_application("app-b", entities={"notes": [{"id": 2, "body": "b"}]})
+    # Contract 1.1.0 (CCR-13): `id` is server-assigned, so seed fixtures no
+    # longer supply it -- app-a's and app-b's `notes` are separate cells
+    # with independent counters, so both seeded rows get `id == 1`.
+    control.register_application("app-a", entities={"notes": [{"body": "a"}]})
+    control.register_application("app-b", entities={"notes": [{"body": "b"}]})
     return service, control
 
 
@@ -178,7 +181,11 @@ async def test_cross_application_isolation_over_http(client):
     resp_a = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
     resp_b = await client.post("/v1/data/notes/query", headers=_auth("secret-b"), json={"select": ["id"]})
     assert resp_a.json()["items"] == [{"id": 1}]
-    assert resp_b.json()["items"] == [{"id": 2}]
+    # app-b's `notes` is a separate cell with its own independent id
+    # counter (CCR-13, R-1), so its one seeded row is also id 1 -- this
+    # still proves isolation (each credential only ever sees its own
+    # application's row), just not via distinct id values anymore.
+    assert resp_b.json()["items"] == [{"id": 1}]
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +389,7 @@ async def test_mutate_happy_path_commits(client):
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
-        json={"operations": [{"operation": "insert", "values": {"id": 8}}]},
+        json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
     )
     assert response.status_code == 200
     assert response.json() == {"committed": True, "affected": 1}
@@ -411,6 +418,58 @@ async def test_mutate_invalid_transaction_value_is_validation_failed(client):
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
         json={"operations": [{"operation": "insert", "values": {"id": 7}}], "transaction": "nonsense"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+# --------------------------------------------------------------------------
+# WP-2 confirmation-review minor fix: HTTP-level gate regression tests.
+# WP-2 review blocker B-1 was itself "the HTTP-observable surface silently
+# opened up" -- so the provisional `DataService` gate (design
+# R2DB_CCR13_STORAGE_V1.md §3) needs to be pinned at the HTTP boundary
+# directly, not only through `DataService` in `test_foundation.py`. Neither
+# `http.py`'s own shape checks nor the packaged contract schema reject
+# these fields (both already carry the CCR-13 vocabulary) -- this is
+# `DataService`'s gate, exercised end-to-end over real HTTP requests.
+# --------------------------------------------------------------------------
+
+
+async def test_http_gate_mutate_expected_revision_is_capability_unsupported(client):
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": "anything"}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+async def test_http_gate_mutate_upsert_is_capability_unsupported(client):
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "upsert", "values": {"body": "z"}}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+async def test_http_gate_schema_create_index_is_capability_unsupported(client):
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+async def test_http_gate_schema_field_type_is_validation_failed(client):
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "add_field", "entity": "notes", "field": "typed_field", "field_type": "integer"},
     )
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_FAILED"
@@ -465,7 +524,18 @@ async def test_catalog_matches_contract_shape_and_application_scope(client):
     response = await client.get("/v1/catalog", headers=_auth("secret-a"))
     assert response.status_code == 200
     body = response.json()
-    assert body == {"application_scope": "app-a", "entities": [{"entity": "notes", "fields": ["body", "id"]}]}
+    # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md §2/R-1):
+    # `ApplicationCell.catalog()` internally derives the full
+    # `EntityDescriptor` shape (mutation_class/address_fields/address_reuse/
+    # unique_keys) now, but `DataService`'s WP-2-through-WP-5 provisional
+    # gate (§3) narrows the *published* shape back to `{entity, fields}`
+    # until `row_addressability` is actually declared enabled (same commit
+    # as WP-5) -- `id`'s appearance in `fields` is a storage fact, not a
+    # capability declaration, so it stays.
+    assert body == {
+        "application_scope": "app-a",
+        "entities": [{"entity": "notes", "fields": ["body", "id"]}],
+    }
     assert response.headers["x-request-id"]
 
     unauth = await client.get("/v1/catalog")

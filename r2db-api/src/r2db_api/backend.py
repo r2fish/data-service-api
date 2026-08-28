@@ -23,7 +23,16 @@ from __future__ import annotations
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from .limits import ResourceLimits
-from .structured import ApplicationCell, Predicate
+from .structured import ApplicationCell, MutationOutcome, Predicate, QueryOutcome
+
+# `QueryOutcome`/`MutationOutcome` (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md
+# §3) are defined in `structured.py` -- the module that already owns the
+# shared validation/planning boundary and is where `ApplicationCell` actually
+# constructs them -- and re-exported here so this module remains the single
+# place that names the full `StorageBackend` call surface, inputs and
+# outputs alike. (Defining them here and importing them into `structured.py`
+# instead would create a import cycle: this module already imports
+# `ApplicationCell` from `structured.py` at module load time.)
 
 
 @runtime_checkable
@@ -48,10 +57,16 @@ class StorageBackend(Protocol):
         where: list[Predicate],
         page_size: int,
         limits: ResourceLimits,
+        order_by: list[dict[str, Any]] | None = None,
+        cursor: str | None = None,
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return at most `page_size` rows, projected to `select`."""
+    ) -> QueryOutcome:
+        """Return at most `page_size` rows, projected to `select`, plus
+        (CCR-13) their revisions and pagination continuation. `order_by`/
+        `cursor` are optional (a backend that does not implement them yet
+        may reject a non-None value with `CAPABILITY_UNSUPPORTED`).
+        """
         ...
 
     def transact(
@@ -62,10 +77,11 @@ class StorageBackend(Protocol):
         *,
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
-    ) -> int:
+    ) -> MutationOutcome:
         """Apply a batch of mutation operations as one atomic unit (D-5:
         one request maps to one transaction) and return the affected row
-        count. Any operation failing rolls back the whole batch.
+        count, plus (CCR-13) any addresses resolved for insert. Any
+        operation failing rolls back the whole batch.
         """
         ...
 
@@ -98,4 +114,4 @@ class StorageBackend(Protocol):
 # of silently going stale as a comment would.
 assert issubclass(ApplicationCell, StorageBackend), "ApplicationCell must conform to StorageBackend (design D-1)"
 
-__all__ = ["StorageBackend"]
+__all__ = ["StorageBackend", "QueryOutcome", "MutationOutcome"]

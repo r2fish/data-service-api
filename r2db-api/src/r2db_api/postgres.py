@@ -67,7 +67,9 @@ from .backend import StorageBackend as _StorageBackend
 from .errors import fail
 from .limits import ResourceLimits
 from .structured import (
+    MutationOutcome,
     Predicate,
+    QueryOutcome,
     bind_mutation,
     bind_schema_operation,
     require_destructive_confirmation,
@@ -624,12 +626,29 @@ class PostgresCell:
 
     # ---- query ---------------------------------------------------------
 
-    def query(self, entity: str, *, select: list[str], where: list[Predicate], page_size: int, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None) -> list[dict[str, Any]]:
+    def query(
+        self,
+        entity: str,
+        *,
+        select: list[str],
+        where: list[Predicate],
+        page_size: int,
+        limits: ResourceLimits,
+        order_by: list[dict[str, Any]] | None = None,
+        cursor: str | None = None,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> QueryOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
         if page_size <= 0:
             fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
+        if order_by is not None or cursor is not None:
+            # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md WP-2 scope note):
+            # this backend does not implement order_by/pagination yet
+            # (WP-3) -- refuse rather than silently ignore either one.
+            fail("CAPABILITY_UNSUPPORTED", "Result ordering and cursor pagination are not implemented by this backend yet.")
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
@@ -656,7 +675,14 @@ class PostgresCell:
         limits.check("result_items", min(len(rows), page_size))
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        return [dict(zip(select, row)) for row in rows]
+        # CCR-13 shim (WP-2 scope note): full revisions/has_more/next_cursor
+        # is WP-3 (needs the `_r2db_revision` column this backend does not
+        # provision yet); wrap today's unchanged result in the new outcome
+        # shape. `revisions=None` (not `[]`) -- WP-2 review M-10's
+        # `QueryOutcome.__post_init__` invariant is "None (unmaintained) or
+        # index-aligned with items", and an empty list would be wrong-length
+        # the moment `rows` is non-empty.
+        return QueryOutcome(items=[dict(zip(select, row)) for row in rows], revisions=None, has_more=False)
 
     def _select_statement(self, entity: str, select: list[str], where_sql: sql.Composed | None, page_size: int) -> sql.Composed:
         columns = sql.SQL(", ").join(sql.Identifier(f) for f in select)
@@ -667,7 +693,7 @@ class PostgresCell:
 
     # ---- mutations -------------------------------------------------------
 
-    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None) -> int:
+    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None) -> MutationOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
@@ -699,25 +725,47 @@ class PostgresCell:
         # exception (including a `FoundationError` raised by a later
         # operation), giving the whole batch one real database transaction
         # (D-5) in place of `ApplicationCell`'s in-memory deepcopy/restore.
-        return affected
+        # CCR-13 shim (WP-2 scope note): resolved-insert addresses are WP-3
+        # (needs the `id` identity column this backend does not provision
+        # yet); wrap today's unchanged affected-count in the new outcome
+        # shape. `assigned_addresses=None` (not `[]`) -- confirmation-review
+        # fix (minor): `None` means "not maintained", symmetric with
+        # `QueryOutcome.revisions`; `[]` would incorrectly claim this
+        # backend tracks addresses and simply resolved none this batch.
+        return MutationOutcome(affected=affected, assigned_addresses=None)
 
     def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], known_fields: set[str]) -> int:
         bound = bind_mutation(operation, known_fields)
+        # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md WP-2 scope note):
+        # `bind_mutation` (the shared boundary) no longer rejects every
+        # `upsert`/`expected_revision` outright -- whether either is
+        # actually executable now depends on catalog knowledge
+        # (declared uniqueness keys, a revision column) that only
+        # `ApplicationCell` has as of this work package. This backend has
+        # neither yet (both are WP-3), so it must reject them itself here,
+        # explicitly, rather than falling through to the pre-CCR-13
+        # "match on `where`, insert if none found" code below -- which
+        # would otherwise become reachable again and silently reinstate
+        # exactly the enabled-but-undefined-semantics gap CCR-13 closed.
+        if bound.operation == "delete":
+            # WP-2 review minor (f): destructive confirmation is checked
+            # before the expected_revision gate below, for `delete`
+            # specifically -- unifying error precedence with
+            # `ApplicationCell` (R-4, corrigendum m-5: confirmation before
+            # any precondition-related outcome, and here "not implemented"
+            # is the precondition-adjacent outcome being checked against).
+            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
+        if bound.expected_revision is not None:
+            fail("CAPABILITY_UNSUPPORTED", "Revision preconditions are not implemented by this backend yet.")
+        if bound.operation == "upsert":
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key, which this backend does not implement yet.")
         table = sql.Identifier(entity)
         if bound.operation == "insert":
             return self._insert(conn, table, bound.values)
         where_sql, where_params = self._where_clause(bound.where)
         if bound.operation == "delete":
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
             return self._delete(conn, table, where_sql, where_params)
-        updated = self._update(conn, table, bound.values, where_sql, where_params)
-        if bound.operation == "upsert" and updated == 0:
-            # Unreachable since `bind_mutation` (structured.py) now rejects
-            # every `upsert` with `CAPABILITY_UNSUPPORTED` before returning
-            # a `BoundMutation` (contract 1.1.0, CCR-13) -- kept in place,
-            # not deleted, for the reason given at that rejection site.
-            return self._insert(conn, table, bound.values)
-        return updated
+        return self._update(conn, table, bound.values, where_sql, where_params)
 
     def _insert(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, values: dict[str, Any]) -> int:
         if not values:
@@ -727,6 +775,13 @@ class PostgresCell:
             columns = sql.SQL(", ").join(sql.Identifier(key) for key in values)
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
             statement = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(table=table, columns=columns, placeholders=placeholders)
+            # TODO(WP-3, R-7 addendum): a Python `None` here must bind as
+            # SQL NULL, never as the JSON literal `jsonb 'null'` -- `Jsonb(
+            # None)` currently produces the latter for an untyped column.
+            # This has no observable effect while every column here is
+            # JSONB (untyped, WP-2's only shape), but becomes load-bearing
+            # once WP-3 adds typed columns/predicate type-checking, where
+            # "no value" and "the JSON null value" must stay distinguishable.
             params = [Jsonb(v) for v in values.values()]
         with conn.cursor() as cur:
             _run(cur, statement, params)
@@ -737,6 +792,8 @@ class PostgresCell:
             return self._count(conn, table, where_sql, where_params)
         assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(key), ph=sql.Placeholder()) for key in values)
         statement = sql.SQL("UPDATE {table} SET {assignments}").format(table=table, assignments=assignments)
+        # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note as
+        # `_insert` above.
         params = [Jsonb(v) for v in values.values()]
         if where_sql is not None:
             statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
@@ -787,6 +844,8 @@ class PostgresCell:
             if not isinstance(predicate.value, list) or not predicate.value:
                 fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in predicate.value)
+            # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note
+            # as `_insert` above, applied per element (m-7).
             return sql.SQL("{col} IN ({items})").format(col=column, items=placeholders), [Jsonb(v) for v in predicate.value]
         if predicate.operator == "contains":
             needle = predicate.value if isinstance(predicate.value, str) else _json_text(predicate.value)
@@ -800,6 +859,8 @@ class PostgresCell:
             # that invariant silently (D-4: "operators map to fixed
             # literals").
             fail("VALIDATION_FAILED", "Unsupported filter operator.", details={"field": predicate.field})
+        # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note as
+        # `_insert` above.
         return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [Jsonb(predicate.value)]
 
     # ---- schema ----------------------------------------------------------
@@ -817,8 +878,10 @@ class PostgresCell:
                         projected = current_objects + 1 + len(bound.fields)
                     elif bound.operation == "add_field":
                         projected = current_objects + 1
-                    else:  # drop_entity
+                    elif bound.operation == "drop_entity":
                         projected = current_objects - (len(catalog.get(bound.entity, set())) + 1)
+                    else:  # create_index / drop_index: no table/column object accounted
+                        projected = current_objects
                     limits.check("schema_objects", projected)
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
@@ -831,12 +894,26 @@ class PostgresCell:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
                         require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_ENTITY", "Drop requires explicit destructive confirmation.")
                         self._drop_entity(conn, bound.entity)
-                    else:  # add_field
+                    elif bound.operation == "add_field":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
                         if bound.field in catalog.get(bound.entity, set()):
                             fail("CONFLICT", "Field already exists.", status=409)
+                        if bound.field_type is not None:
+                            # CCR-13 (WP-2 scope note): typed columns are
+                            # WP-3 (needs the type-map DDL this backend
+                            # does not implement yet) -- refuse rather than
+                            # silently create an untyped column and drop
+                            # the caller's declared type on the floor.
+                            fail("CAPABILITY_UNSUPPORTED", "Typed columns are not implemented by this backend yet.")
                         self._add_field(conn, bound.entity, bound.field)
+                    else:  # create_index / drop_index
+                        # CCR-13 (WP-2 scope note): index declarations are
+                        # WP-3. Without this explicit branch, `create_index`/
+                        # `drop_index` -- now structurally accepted by the
+                        # shared `bind_schema_operation` boundary -- would
+                        # fall through and be misdispatched as `add_field`.
+                        fail("CAPABILITY_UNSUPPORTED", "Index declarations are not implemented by this backend yet.")
                     revision = self._bump_revision(conn)
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})

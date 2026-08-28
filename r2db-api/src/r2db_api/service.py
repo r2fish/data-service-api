@@ -136,9 +136,18 @@ class DataService:
                 self.limits.check_depth(request)
                 predicates = [parse_predicate(item) for item in (where or [])]
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                result = self._cells[canonical.application_id].query(entity, select=select, where=predicates, page_size=page_size, limits=self.limits, deadline=deadline, clock=self._clock)
+                outcome = self._cells[canonical.application_id].query(entity, select=select, where=predicates, page_size=page_size, limits=self.limits, deadline=deadline, clock=self._clock)
                 self._event(canonical, "data_operation", "query", "allow", "entity", request_id=request_id)
-                return result
+                # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md): `query()`
+                # now returns a `QueryOutcome` dataclass (items + revisions +
+                # pagination continuation) rather than a bare list. This work
+                # package does not change this facade's own external contract
+                # yet (order_by/cursor rejection stays in `http.py`, and
+                # neither revisions nor next_page reach a caller here) --
+                # only the storage-layer return shape changed, so only the
+                # plain item list is unwrapped and returned, unchanged from
+                # before.
+                return list(outcome.items)
         except FoundationError as exc:
             self._event(context, "authorization_denial", "query", "deny", "entity", exc.code, request_id=request_id)
             raise
@@ -150,13 +159,38 @@ class DataService:
                     fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.")
                 if not isinstance(operations, list):
                     fail("VALIDATION_FAILED", "Mutations must be a list.")
+                # --- WP-2-through-WP-5 provisional gate (design R2DB_CCR13_
+                # STORAGE_V1.md §3, "WP-2〜WP-5 の乖離封鎖", WP-2 review
+                # blocker B-1) -----------------------------------------------
+                # The shared bind boundary (`structured.bind_mutation`) now
+                # structurally accepts `expected_revision` and `upsert`
+                # regardless of what `capabilities()` currently declares --
+                # deciding whether either is actually executable needs live
+                # catalog knowledge only a backend has (declared unique keys,
+                # a revision column), which C-12's own declared-implies-
+                # executable check cannot see the *reverse* of (declared
+                # unavailable/unsupported, yet observably executes). Refuse
+                # both here, unconditionally, until `capabilities()` is
+                # updated in the same commit as WP-5. REMOVE THIS BLOCK in
+                # that commit -- `structured.py`'s own semantics (entity-
+                # scoped upsert eligibility, real precondition resolution)
+                # take over once the declaration catches up.
+                for item in operations:
+                    if isinstance(item, dict) and (item.get("operation") == "upsert" or "expected_revision" in item):
+                        fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose upsert or revision preconditions.")
                 request = {"entity": entity, "operations": operations}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                affected = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock)
+                outcome = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock)
                 self._event(canonical, "data_operation", "mutate", "allow", "entity", request_id=request_id)
-                return affected
+                # CCR-13: `transact()` now returns a `MutationOutcome`
+                # dataclass (affected count + resolved insert addresses)
+                # rather than a bare int -- see the identical note in
+                # `query()` above. `assigned_addresses` does not reach a
+                # caller here yet (WP-4); only the affected count is
+                # unwrapped and returned.
+                return outcome.affected
         except FoundationError as exc:
             self._event(context, "operation_denial", "mutate", "deny", "entity", exc.code, request_id=request_id)
             raise
@@ -166,6 +200,32 @@ class DataService:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
                     fail("VALIDATION_FAILED", "Schema operation must be an object.")
+                # WP-2 confirmation-review fix M-A: authority is checked
+                # here, before the provisional gate below, so a non-
+                # developer credential still gets pre-WP-2's FORBIDDEN/403
+                # for *any* schema operation -- including `create_index`/
+                # `drop_index`/`field_type`, which the gate below would
+                # otherwise answer with CAPABILITY_UNSUPPORTED/400 first
+                # (the gate has no idea who is asking; `bind_schema_
+                # operation`'s own `if not developer: fail FORBIDDEN` is
+                # what used to run first for every schema operation before
+                # this gate existed, and this restores that precedence).
+                if canonical.role != "developer":
+                    fail("FORBIDDEN", "Developer authority is required for schema operations.", status=403)
+                # --- WP-2-through-WP-5 provisional gate (see the identical
+                # note in `mutate()` above) --------------------------------
+                # `create_index`/`drop_index` are now structurally accepted
+                # by `structured.bind_schema_operation`, and `field_type` is
+                # now accepted on `add_field` -- none of that is declared
+                # (`schema_operations.unsupported` still lists `create_index`/
+                # `drop_index`; `field_type` has no declared capability of
+                # its own but was rejected pre-WP-2 as an unrecognized key).
+                # Refuse both here until `capabilities()` catches up in the
+                # same commit as WP-5. REMOVE THIS BLOCK in that commit.
+                if operation.get("operation") in {"create_index", "drop_index"}:
+                    fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose index declarations.")
+                if "field_type" in operation:
+                    fail("VALIDATION_FAILED", "field_type is not a recognized field.")
                 self.limits.check_request(operation)
                 self.limits.check_depth(operation)
                 deadline = self._clock() + self.limits.execution_ms / 1000
@@ -180,6 +240,20 @@ class DataService:
         try:
             with self._slot(context) as canonical:
                 entities = self._cells[canonical.application_id].catalog()
+                # --- WP-2-through-WP-5 provisional gate (see the identical
+                # note in `mutate()` above) --------------------------------
+                # `ApplicationCell.catalog()` now always publishes the full
+                # CCR-13 `EntityDescriptor` (mutation_class/address_fields/
+                # address_reuse/unique_keys), but `row_addressability` is
+                # still declared `unavailable`. Narrow the published shape
+                # back to the pre-WP-2 `{entity, fields}` until
+                # `capabilities()` catches up in the same commit as WP-5.
+                # REMOVE THIS narrowing in that commit. `id`'s appearance in
+                # `fields` is left untouched -- it is a storage fact (a
+                # reserved, always-present field name), not a capability
+                # declaration, and is independent of whether addressability
+                # itself is announced.
+                entities = [{"entity": item["entity"], "fields": item["fields"]} for item in entities]
                 self._event(canonical, "data_operation", "catalog", "allow", "entity", request_id=request_id)
                 return {"application_scope": canonical.application_id, "entities": entities}
         except FoundationError as exc:

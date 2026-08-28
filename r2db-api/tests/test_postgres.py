@@ -804,7 +804,7 @@ def test_injection_payloads_in_value_positions_round_trip_byte_equal(app_a: type
         cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
         cell.transact("items", [{"operation": "insert", "values": {"label": payload}}], LIMITS)
         rows = cell.query("items", select=["label"], where=[P("label", "eq", payload)], page_size=10, limits=LIMITS)
-        assert rows == [{"label": payload}]
+        assert rows.items == [{"label": payload}]
         # And the table is provably intact -- a real injection would have
         # dropped it.
         assert any(item["entity"] == "items" for item in cell.catalog())
@@ -829,7 +829,7 @@ def test_transaction_rollback_leaves_no_partial_effect(app_a: types.SimpleNamesp
                 LIMITS,
             )
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows == []
+        assert rows.items == []
 
         # A destructive operation without confirmation also rolls back
         # anything earlier in the same batch (SI-09 + SI-11 together).
@@ -844,7 +844,7 @@ def test_transaction_rollback_leaves_no_partial_effect(app_a: types.SimpleNamesp
             )
         assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows == []
+        assert rows.items == []
     finally:
         cell.close()
 
@@ -977,16 +977,16 @@ def test_mutation_operations_insert_update_delete_succeed_and_upsert_is_capabili
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label", "qty"]}, developer=True, limits=LIMITS)
-        affected = cell.transact("items", [{"operation": "insert", "values": {"label": "a", "qty": 1}}], LIMITS)
-        assert affected == 1
-        affected = cell.transact(
+        outcome = cell.transact("items", [{"operation": "insert", "values": {"label": "a", "qty": 1}}], LIMITS)
+        assert outcome.affected == 1
+        outcome = cell.transact(
             "items",
             [{"operation": "update", "where": [{"field": "label", "operator": "eq", "value": "a"}], "values": {"qty": 2}}],
             LIMITS,
         )
-        assert affected == 1
+        assert outcome.affected == 1
         rows = cell.query("items", select=["qty"], where=[P("label", "eq", "a")], page_size=10, limits=LIMITS)
-        assert rows == [{"qty": 2}]
+        assert rows.items == [{"qty": 2}]
 
         # upsert is rejected outright -- and, since it is not the first
         # item, this also confirms it rejects the *whole batch* it appears
@@ -1005,16 +1005,16 @@ def test_mutation_operations_insert_update_delete_succeed_and_upsert_is_capabili
             )
         assert exc.value.code == "CAPABILITY_UNSUPPORTED"
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows == [{"label": "a"}]
+        assert rows.items == [{"label": "a"}]
 
-        affected = cell.transact(
+        outcome = cell.transact(
             "items",
             [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "destructive": True, "confirmation": "DELETE"}],
             LIMITS,
         )
-        assert affected == 1
+        assert outcome.affected == 1
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows == []
+        assert rows.items == []
     finally:
         cell.close()
 
@@ -1033,13 +1033,110 @@ def test_query_operators_in_and_contains_and_is_null(app_a: types.SimpleNamespac
             LIMITS,
         )
         rows = cell.query("items", select=["label"], where=[P("label", "in", ["alpha", "beta"])], page_size=10, limits=LIMITS)
-        assert {r["label"] for r in rows} == {"alpha", "beta"}
+        assert {r["label"] for r in rows.items} == {"alpha", "beta"}
 
         rows = cell.query("items", select=["label"], where=[P("label", "contains", "et")], page_size=10, limits=LIMITS)
-        assert {r["label"] for r in rows} == {"beta"}
+        assert {r["label"] for r in rows.items} == {"beta"}
 
         rows = cell.query("items", select=["label"], where=[P("tag", "is_null")], page_size=10, limits=LIMITS)
-        assert {r["label"] for r in rows} == {"gamma"}
+        assert {r["label"] for r in rows.items} == {"gamma"}
+    finally:
+        cell.close()
+
+
+# --- CCR-13 WP-2 shim guards (docs/design/R2DB_CCR13_STORAGE_V1.md, WP-2
+# review M-13) ---------------------------------------------------------
+#
+# `structured.bind_mutation`/`bind_schema_operation` (the shared boundary
+# both cells call) now structurally accept `expected_revision`, `upsert`,
+# `create_index`/`drop_index`, and `field_type` -- whether either backend
+# can actually execute them is each backend's own concern. `PostgresCell`
+# implements none of them yet (WP-3): every one of the four must still be
+# refused with `CAPABILITY_UNSUPPORTED`, proving `PostgresCell`'s own
+# explicit guards (not the shared boundary, which no longer rejects these
+# outright) are what is doing the refusing.
+
+
+def test_postgres_cell_rejects_expected_revision(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "items",
+                [{"operation": "update", "where": [{"field": "label", "operator": "eq", "value": "a"}], "values": {"label": "b"}, "expected_revision": "anything"}],
+                LIMITS,
+            )
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        # No side effect: the row is untouched.
+        rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "a"}]
+    finally:
+        cell.close()
+
+
+def test_postgres_cell_delete_checks_destructive_confirmation_before_the_expected_revision_gate(app_a: types.SimpleNamespace) -> None:
+    """WP-2 review minor (f): unify error precedence with `ApplicationCell`
+    (R-4, corrigendum m-5) -- an unconfirmed destructive delete is refused
+    before the (still not-implemented) expected_revision gate is reached,
+    on both cells."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "items",
+                [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "expected_revision": "anything"}],
+                LIMITS,
+            )
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "a"}]
+    finally:
+        cell.close()
+
+
+def test_postgres_cell_rejects_create_index_and_drop_index(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "create_index", "entity": "items", "index": "by_label", "fields": ["label"]}, developer=True, limits=LIMITS)
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "drop_index", "entity": "items", "index": "by_label"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    finally:
+        cell.close()
+
+
+def test_postgres_cell_rejects_field_type_on_add_field(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": []}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "add_field", "entity": "items", "field": "qty", "field_type": "integer"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        # No side effect: the column was never added.
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["qty"], where=[], page_size=10, limits=LIMITS)
+        assert exc.value.code == "NOT_FOUND"
+    finally:
+        cell.close()
+
+
+def test_postgres_cell_rejects_order_by_and_cursor(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "label", "direction": "asc"}])
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS, cursor="opaque-cursor")
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
     finally:
         cell.close()
 
@@ -1227,7 +1324,7 @@ def test_isolation_holds_after_pool_eviction_and_recreation(platform: types.Simp
                     conn.rollback()
 
                 rows = cell_a.query("secrets", select=["value"], where=[], page_size=10, limits=LIMITS)
-                assert rows == [{"value": "app-a-only"}]
+                assert rows.items == [{"value": "app-a-only"}]
 
                 # B's cell, sharing the same manager, still cannot see A's
                 # data.
