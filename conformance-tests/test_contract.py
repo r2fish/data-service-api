@@ -1,5 +1,6 @@
 """Implementation-independent smoke checks for the common machine contract."""
 import json
+import re
 from pathlib import Path
 
 
@@ -56,7 +57,16 @@ def test_contract_states_audit_sink_failure_policy():
 
 
 def test_all_ccrs_have_disposition_records():
+    # CCR ids are discovered from the change-request documents themselves, not
+    # hardcoded: a newly raised CCR must not be able to slip past this check
+    # merely because nobody remembered to widen a range here.
+    requests = sorted((ROOT).glob("*/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md"))
+    assert requests, "no common contract change-request document was found"
+    raised = set()
+    for document in requests:
+        raised.update(re.findall(r"CCR-\d{2}", document.read_text()))
+    assert len(raised) >= 12
     text = (ROOT / "spec" / "CCR_DISPOSITION.md").read_text()
-    for number in range(1, 13):
-        assert f"CCR-{number:02d}" in text
+    missing = sorted(identifier for identifier in raised if identifier not in text)
+    assert not missing, f"raised CCRs without a disposition record: {missing}"
     assert "却下・保留となるCCRはない" in text

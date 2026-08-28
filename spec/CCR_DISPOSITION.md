@@ -17,7 +17,7 @@
 | CCR-11 | 採用 | Application-bound user/session、role/scope/policyを共通意味論とし、business PersonやUI authorityは除外 | user/identity capability実装時にpeer同等の policy/revoke 証拠を確認 |
 | CCR-12 | 採用 | audit emission/query分離とcontrol/audit-only queryは SI-02/10/14 に整合 | business auditを上位層から取り込む場合、security evidenceとの混同がない契約を別途審査 |
 
-却下・保留となるCCRはない。Google Cloud、SQLite、PostgreSQL、Cloud Run、secret manager等の実装制御は共通契約へ昇格せず、各peerの証拠として扱う。
+CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、SQLite、PostgreSQL、Cloud Run、secret manager等の実装制御は共通契約へ昇格せず、各peerの証拠として扱う。
 
 ## 追加契約変更 (2026-08-27, 依頼者承認済み)
 
@@ -29,3 +29,22 @@
 | `CapabilityDocument.authorization_propagation_bound_ms` の追加 (`required`化含む) | CCR-10 | `lifecycle.propagation_bound` が要求する「有限boundをprofileで公開する」を検証可能にする機械可読フィールドを追加 | 将来sessionキャッシュ等でbound値が0固定でなくなる場合、より詳細な粒度 (credential種別別など) が必要か再評価 |
 
 いずれも新しい共通Capabilityや安全outcomeを追加するものではなく、既存の CCR-06 (canonical audit) / CCR-10 (revoke/disable伝播bound) が既に要求していた意味論を、`spec/data-service-api.v1.json` 上で検証・実装可能な形にしたものである。
+
+## CCR-13〜14 採否記録 (r2db-api 起票)
+
+入力は `r2db-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md`。CCR-01〜12 と異なり、**起票時点では採否未決である。** 双方とも共通契約の骨格に関わるため、実装着手前に判断する。
+
+| CCR | 判定 | 論点 | 判断に必要なもの |
+|---|---|---|---|
+| CCR-13 行の同一性 | **審議中** | 契約は既に `Mutation.expected_revision` と `MutationRequest.idempotency_key` を定義しており、行の同一性なしにこれらは実装不能。欠落は明らかで採用方向は動かないと考える。残る論点は必須化の範囲 | 全entityに同一性を強制するか、entity単位の任意宣言とし未宣言時は revision/idempotency を `CAPABILITY_UNSUPPORTED` とするか |
+| CCR-14 制御プレーン endpoint | **審議中** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は既に契約にあり、endpoint だけが無い。制御手段が契約にないと各実装が独自の帯域外手段を発明し、現に両実装が別物になっている | control credential 自体の bootstrap 経路 (最初の1本は帯域外にならざるを得ない)、`/v1` 配下に置くか別 base path か |
+
+### 判断の前提
+
+- SI-02 が要求するのは Control Plane 認可の**分離**であって、HTTP 面の不在ではない。別種の credential で認証し、application API から到達経路を持たない制御面は SI-02 と両立する。
+- CCR-14 は「独立した汎用データサービス」という本 repository の目的に直結する。オンボーディングに運用者のサーバログインを要する状態は、特定用途の専用データベースの運用形態であり、目的と合致しない。
+- 現行 VPS 実装の `/admin/api/*` は、HTTP に出したこと自体は正しく、**単一のグローバルパスワードで全 Application を支配する点**が誤りである。control credential も個別発行・失効・期限を持つ資格情報とする。
+
+### 未採用のまま実装してはならない
+
+いずれも共通契約の変更であり、`r2db-api` 側の実装判断として先行させない (CLAUDE.md: peer を共通契約の暗黙的所有者にしない)。採用が決まるまでの暫定手段は帯域外 (CLI) とし、暫定であることを明記する。
