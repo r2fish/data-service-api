@@ -176,6 +176,31 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             return {item["entity"] for item in document["entities"]}
         return self._call(op)
 
+    def catalog_document(self, session) -> Mapping[str, Any]:
+        # The peer's own real `CatalogDocument` (DataService.catalog),
+        # returned exactly as `entities()` above already consumes it --
+        # this is a real, present discovery surface for this peer (contract
+        # capability `application_catalog: enabled`), never a fabricated
+        # document.
+        return self._call(lambda: self._service.catalog(session))
+
+    def attempt_mutation(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+    ) -> int:
+        item: dict[str, Any] = {"operation": operation}
+        if values is not None:
+            item["values"] = dict(values)
+        if where_field is not None:
+            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        return self._call(lambda: self._service.mutate(session, entity, [item]))
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------
@@ -250,6 +275,40 @@ class R2DBConformanceAdapter(ConformanceAdapter):
                 name="r2db_runtime_a_reaches_b_only_entity",
                 disposition="must_deny",
                 attempt=cross_application_handle_attempt,
+            ),
+        ]
+
+    def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
+        # `ControlAuthority.set_credential_state` is the only control-plane
+        # surface on this peer that could conceivably reactivate a revoked
+        # credential; it takes `enabled`/`revoked` as two independent
+        # booleans (auth.py's `CredentialStore.set_state`), so both are
+        # exercised as real attempts rather than declared structurally
+        # absent (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md
+        # section 2's stated minimum for this peer).
+        def revoked_false_attempt() -> None:
+            self._call(lambda: self._control.set_credential_state(handle.credential_ref, revoked=False))
+
+        def enabled_true_attempt() -> None:
+            # `enabled=True` alone (no `revoked=False`) is a distinct,
+            # non-terminal flag (auth.py: `revoked` is checked before
+            # `enabled` in both `authenticate`/`assert_active`) -- this
+            # call is expected to succeed without raising, but must not
+            # actually let the credential authenticate again.
+            self._call(lambda: self._control.set_credential_state(handle.credential_ref, enabled=True))
+
+        return [
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_set_credential_state_revoked_false",
+                disposition="must_deny",
+                attempt=revoked_false_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_set_credential_state_enabled_true_after_revoke",
+                disposition="must_ignore",
+                attempt=enabled_true_attempt,
             ),
         ]
 

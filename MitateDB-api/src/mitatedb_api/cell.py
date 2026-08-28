@@ -13,9 +13,19 @@ from threading import RLock
 from .audit import AuditSink
 from .auth import Principal, Role
 from .config import FoundationConfig
-from .errors import (AuthorizationError, ConflictError, NotFoundError,
-                     ResourceLimitError, ValidationError)
+from .errors import (AuthorizationError, CapabilityError, ConflictError,
+                     NotFoundError, ResourceLimitError, ValidationError)
 from .identifiers import quote_identifier, validate_identifier
+
+# The common contract's own mutation vocabulary
+# (`structured_operations.allowed_mutations`). `transact()` below only
+# executes "insert" itself; the other three names are real operations this
+# peer provides elsewhere (`update`/`delete` as their own dedicated
+# methods) or nowhere at all (`upsert`) -- either way, presenting one of
+# them to `transact()` specifically is a capability gap in this entry
+# point, not a malformed/unrecognized request, so it is distinguished from
+# a name outside this vocabulary entirely (still `ValidationError`).
+_CONTRACT_MUTATION_VOCABULARY = {"insert", "update", "upsert", "delete"}
 
 _TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL",
           "boolean": "INTEGER", "json": "TEXT"}
@@ -175,12 +185,27 @@ class ApplicationCell:
                 self._db.execute("BEGIN")
                 results = []
                 for operation in operations:
-                    if not isinstance(operation, dict) or operation.get("type") != "insert":
+                    if not isinstance(operation, dict):
                         raise ValidationError("unsupported transaction operation")
-                    results.append(self._insert_in_transaction(operation["collection"], operation["values"]))
+                    op_type = operation.get("type")
+                    if op_type == "insert":
+                        results.append(self._insert_in_transaction(operation["collection"], operation["values"]))
+                        continue
+                    if op_type in _CONTRACT_MUTATION_VOCABULARY:
+                        # Contract vocabulary (insert/update/upsert/delete),
+                        # but this entry point does not execute it: no
+                        # `upsert` exists anywhere on this peer, and
+                        # `update`/`delete` are only ever provided through
+                        # their own dedicated methods below, never through
+                        # `transact`. Per `capability_status.rules`
+                        # ("optional target operations ... must fail with
+                        # CAPABILITY_UNSUPPORTED"), this is a capability
+                        # gap, not a malformed request.
+                        raise CapabilityError(f"transact does not support operation type {op_type!r}")
+                    raise ValidationError("unsupported transaction operation")
                 self._db.commit()
                 return results
-            except (ValidationError, ResourceLimitError):
+            except (ValidationError, ResourceLimitError, CapabilityError):
                 self._db.rollback()
                 raise
             except sqlite3.IntegrityError:

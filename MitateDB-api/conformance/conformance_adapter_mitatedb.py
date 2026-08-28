@@ -43,6 +43,7 @@ if "adapter" not in sys.modules:
         sys.path.insert(0, _conformance_tests)
 
 from adapter import (  # noqa: E402
+    CATALOG_SURFACE_ABSENT,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
     ConformanceAdapter,
@@ -60,6 +61,7 @@ from mitatedb_api.errors import (  # noqa: E402
     AuthenticationError,
     AuthorizationError,
     AuthorizationStateUnavailable,
+    CapabilityError,
     ConflictError,
     FoundationError,
     NotFoundError,
@@ -72,6 +74,7 @@ _CLASSIFY_ORDER = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
     (AuthenticationError, "AUTH_INVALID"),
     (AuthorizationError, "FORBIDDEN"),
+    (CapabilityError, "CAPABILITY_UNSUPPORTED"),
     (ValidationError, "VALIDATION_FAILED"),
     (ResourceLimitError, "LIMIT_EXCEEDED"),
     (ConflictError, "CONFLICT"),
@@ -221,6 +224,81 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return {row["name"] for row in rows}
         return self._call(op)
 
+    def catalog_document(self, session) -> str:
+        # There is no public "list collections"/catalog operation anywhere
+        # on this peer's surface (cell.py exposes create_collection/insert/
+        # read/update/delete/transact only -- confirmed by source
+        # inspection, and `capabilities()` itself declares
+        # `application_catalog: unavailable`, cell.py's own comment: "No
+        # public 'list collections' operation exists on this peer"). This
+        # is a structural absence, not a denial this adapter observed from
+        # a real call, so per the port's contract this returns the
+        # sentinel rather than assembling a `CatalogDocument`-shaped dict
+        # out of `entities()`'s own internal sqlite_master reach-around
+        # (which exists only to serve this adapter's own `entities()`
+        # port method, not as a peer-provided discovery surface an
+        # application caller could reach).
+        return CATALOG_SURFACE_ABSENT
+
+    def attempt_mutation(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+    ) -> int:
+        filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
+
+        if operation == "insert":
+            def insert_op() -> int:
+                session.insert(entity, dict(values or {}))
+                return 1
+            return self._call(insert_op)
+
+        if operation == "update":
+            def update_op() -> int:
+                if filters is None:
+                    raise ValidationError("update requires a non-empty filter")
+                result = session.update(entity, dict(values or {}), filters)
+                return result["updated"]
+            return self._call(update_op)
+
+        if operation == "delete":
+            def delete_op() -> int:
+                if filters is None:
+                    raise ValidationError("delete requires a non-empty filter")
+                result = session.delete(entity, filters, confirm=True)
+                return result["deleted"]
+            return self._call(delete_op)
+
+        if operation == "upsert":
+            # There is no dedicated `upsert` method anywhere on this peer,
+            # but `ApplicationRuntime.transact`/`ApplicationCell.transact`
+            # *is* a real, present operation dispatcher that accepts an
+            # arbitrary `"type"` string -- so this presents `"upsert"` to
+            # it exactly as a real client attempting the contract's
+            # `upsert` vocabulary would (review finding: an adapter that
+            # denies this without ever presenting it to the peer hides
+            # whatever the peer's own dispatcher actually does with it,
+            # which is precisely what C-12 exists to observe. See `cell.
+            # py::transact` / `errors.CapabilityError` for this peer's own
+            # real answer).
+            def upsert_op() -> int:
+                results = session.transact([
+                    {"type": "upsert", "collection": entity, "values": dict(values or {})}
+                ])
+                return len(results)
+            return self._call(upsert_op)
+
+        # Any other operation name is outside the common contract's
+        # mutation vocabulary entirely (insert/update/upsert/delete);
+        # there is no peer call this adapter could present it to that
+        # would mean anything.
+        raise ConformanceDenial(code="CAPABILITY_UNSUPPORTED", adapter=self.name, native_type="")
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------
@@ -308,6 +386,56 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 name="mitatedb_runtime_a_reaches_b_only_collection",
                 disposition="must_deny",
                 attempt=cross_application_handle_attempt,
+            ),
+        ]
+
+    def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
+        # `auth.py`'s `CredentialStore` has no un-revoke/enable-credential
+        # call at all (`revoke()` is one-way; the only other state-mutating
+        # methods that touch a credential's own row are `issue()`, which
+        # always mints a brand-new `credential_id` with no parameter to
+        # force reuse of an existing one). The one real control-plane call
+        # that *could* plausibly be mistaken for a reactivation path is
+        # `enable_application`, since applications and credentials are
+        # separate flags on this peer (`_Credential.enabled` vs.
+        # `_applications[...]`) -- exercised here as a real attempt rather
+        # than assumed safe.
+        def enable_application_after_revoke_attempt() -> None:
+            # `enable_application` only ever flips the *application*-level
+            # flag (`_applications[...]`); it never touches a credential's
+            # own `enabled` state (`_Credential.enabled`, set False by
+            # `revoke()`) at all, so this call itself never raises -- it is
+            # a real, no-op-for-this-purpose control-plane call, not a
+            # denied one. `must_ignore` is the correct disposition:
+            # C-13's own must_ignore handling re-authenticates afterward
+            # and asserts the credential is still refused, which is the
+            # actual proof this attempt did not reactivate anything; that
+            # post-condition check does not belong inside attempt() itself
+            # (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md section 2:
+            # must_ignore's attempt() "may succeed").
+            self._control.credentials.enable_application(handle.application_id)
+
+        return [
+            TamperVector(
+                kind="credential_reactivation",
+                name="mitatedb_enable_application_does_not_reactivate_revoked_credential",
+                disposition="must_ignore",
+                attempt=enable_application_after_revoke_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="mitatedb_credential_store_has_no_reactivation_call",
+                disposition="structurally_absent",
+                surface=[
+                    self._control.credentials.issue,
+                    self._control.credentials.revoke,
+                    self._control.credentials.disable_application,
+                    self._control.credentials.enable_application,
+                    self._control.credentials.provision_application,
+                    self._control.credentials.authenticate,
+                    self._control.credentials.assert_active,
+                ],
+                forbidden_parameters=["enabled", "revoked", "reactivate", "unrevoke", "un_revoke"],
             ),
         ]
 

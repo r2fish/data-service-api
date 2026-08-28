@@ -96,16 +96,56 @@ def test_revoke_disable_and_unavailable_state_fail_closed(service):
     with pytest.raises(FoundationError) as exc:
         service.query(runtime, "notes", select=["id"])
     assert exc.value.code == "AUTH_REVOKED"
-    control.set_credential_state("cred-a", revoked=False)
+    # Revocation is terminal (contract 1.1.0 lifecycle.credential): cred-a
+    # cannot come back, so the rest of this test continues on a freshly
+    # issued credential rather than un-revoking cred-a for fixture
+    # convenience (docs/design/CONFORMANCE_CONDITIONS_V1_1.md section 5).
+    control.issue_credential("cred-a2", "app-a", "runtime", "secret-a2")
+    runtime2 = service.authenticate("secret-a2")
     control.set_application_enabled("app-a", enabled=False)
     with pytest.raises(FoundationError) as exc:
-        service.query(runtime, "notes", select=["id"])
+        service.query(runtime2, "notes", select=["id"])
     assert exc.value.code == "APPLICATION_DISABLED"
     control.set_application_enabled("app-a", enabled=True)
     control.set_authorization_state_available(False)
     with pytest.raises(FoundationError) as exc:
-        service.query(runtime, "notes", select=["id"])
+        service.query(runtime2, "notes", select=["id"])
     assert exc.value.code == "AUTH_STATE_UNAVAILABLE"
+
+
+def test_revoked_credential_cannot_be_un_revoked(service):
+    """Contract 1.1.0 lifecycle.credential: revocation is terminal. No
+    control-plane call -- including a later `revoked=False` -- may clear it.
+    """
+    runtime = service.authenticate("secret-a")
+    control = ControlAuthority(service)
+    control.set_credential_state("cred-a", revoked=True)
+    with pytest.raises(FoundationError) as exc:
+        control.set_credential_state("cred-a", revoked=False)
+    assert exc.value.code == "VALIDATION_FAILED"
+    # Still revoked: the rejected un-revoke attempt did not weaken anything.
+    with pytest.raises(FoundationError) as exc:
+        service.query(runtime, "notes", select=["id"])
+    assert exc.value.code == "AUTH_REVOKED"
+    # enabled=True alone (no revoked=False) is accepted -- it is a distinct,
+    # non-terminal flag -- but does not undo the terminal revocation.
+    control.set_credential_state("cred-a", enabled=True)
+    with pytest.raises(FoundationError) as exc:
+        service.query(runtime, "notes", select=["id"])
+    assert exc.value.code == "AUTH_REVOKED"
+
+
+def test_unrevoked_credential_enabled_false_true_round_trip_still_allowed(service):
+    """The terminal-revoke rule is scoped to `revoked`; disable/re-enable of
+    a never-revoked credential is unaffected."""
+    control = ControlAuthority(service)
+    control.set_credential_state("cred-a", enabled=False)
+    with pytest.raises(FoundationError) as exc:
+        service.authenticate("secret-a")
+    assert exc.value.code == "AUTH_INVALID"
+    control.set_credential_state("cred-a", revoked=False)  # no-op: never revoked
+    control.set_credential_state("cred-a", enabled=True)
+    assert service.authenticate("secret-a").application_id == "app-a"
 
 
 def test_authenticate_fails_closed_for_disabled_application(service):

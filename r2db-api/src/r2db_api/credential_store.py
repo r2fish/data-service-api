@@ -297,16 +297,34 @@ class PostgresCredentialStore:
             fail("VALIDATION_FAILED", "Credential enabled state must be boolean.")
         if revoked is not None and not isinstance(revoked, bool):
             fail("VALIDATION_FAILED", "Credential revoked state must be boolean.")
-        statement = sql.SQL(
+        # Revocation is terminal (contract 1.1.0 lifecycle.credential; same
+        # rule as `auth.CredentialStore.set_state`). The current `revoked`
+        # value is read in the same transaction as the update below (and
+        # locked with `FOR UPDATE` so a concurrent revoke cannot race this
+        # check), so a `revoked=False` request against an already-revoked
+        # row is refused rather than silently applied.
+        select_statement = sql.SQL("SELECT revoked FROM {table} WHERE credential_id = {id_ph} FOR UPDATE").format(
+            table=self._credentials_table, id_ph=sql.Placeholder()
+        )
+        update_statement = sql.SQL(
             "UPDATE {table} SET enabled = COALESCE({enabled_ph}, enabled), revoked = COALESCE({revoked_ph}, revoked), updated_at = now() WHERE credential_id = {id_ph} RETURNING credential_id"
         ).format(table=self._credentials_table, enabled_ph=sql.Placeholder(), revoked_ph=sql.Placeholder(), id_ph=sql.Placeholder())
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    _execute(cur, statement, [enabled, revoked, credential_id])
+                    _execute(cur, select_statement, [credential_id])
+                    current = cur.fetchone()
+                    if current is None:
+                        conn.rollback()
+                        fail("NOT_FOUND", "Credential was not found.", status=404)
+                    if revoked is False and current[0]:
+                        conn.rollback()
+                        fail("VALIDATION_FAILED", "Revocation is terminal; a revoked credential cannot be un-revoked.")
+                    _execute(cur, update_statement, [enabled, revoked, credential_id])
                     row = cur.fetchone()
-                if row is None:
-                    fail("NOT_FOUND", "Credential was not found.", status=404)
+                    if row is None:
+                        conn.rollback()
+                        fail("NOT_FOUND", "Credential was not found.", status=404)
                 conn.commit()
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)

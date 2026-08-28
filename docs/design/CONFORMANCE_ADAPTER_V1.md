@@ -427,3 +427,101 @@ M8の詳細な原因分析と修正内容は §10.8 を参照。
 C-03のvalue position corpusに含まれる NUL byte payload (`nul_byte`: `"value\x00tail"`) は、`ApplicationCell` (in-memory) では値としてそのままbyte-equalに往復する。`PostgresCell` では同じpayloadが分類済み `ConformanceDenial` として拒否される: JSONBはNUL byte (` `) を含むテキストを表現できないため (PostgreSQLの制約であり、`PostgresCell`固有の検証ではない)、値をJSONBへ書き込む時点でPostgreSQL自身がエラーを返し、これを安全に分類して拒否する。
 
 C-03の value position 要件 (design §5.2 項目4) は、「byte-equalに往復する」か「分類済み denial として拒否される」のいずれかであることを要求しており、両方とも許容される。したがってこれはC-03を通過する。これは実装欠陥ではなく、Security Invariantsが明示的に許容する、backend間の正当な物理データモデル差 (`postgres.py` モジュールdocstring既述の JSONB 順序意味論差と同種) として記録する。
+
+## 11. v1.1 port revision (coordinated with docs/design/CONFORMANCE_CONDITIONS_V1_1.md)
+
+`docs/design/CONFORMANCE_CONDITIONS_V1_1.md` raises C-11 (discovery/catalog
+document conformance), C-12 (capability declaration agreement), and C-13
+(credential revocation terminality) on this same port/plug design, and
+strengthens C-01 with one additional tamper vector. Making those three
+conditions executable required three coordinated additions to the
+NORMATIVE surface this document's §4 defines. Per this document's own
+design principle 1 (port owned by the common repository, plug owned by
+each peer) and principle 4 (uncertainty must not silently become
+permission), these are ABC-level additions to `conformance-tests/
+adapter.py`, implemented identically in shape -- though not identically in
+behavior, since peers differ -- across all three registered plugs
+(`conformance_adapter_r2db.py`, `conformance_adapter_r2db_http.py`,
+`conformance_adapter_mitatedb.py`) in the same change. No plug was left
+with a stub or a `NotImplementedError`: every plug either performs the
+real operation against its peer, or -- where a peer structurally has no
+surface for it -- says so through the sentinel/`structurally_absent`
+mechanisms below, never by fabricating a value on the peer's behalf.
+
+### 11.1 `catalog_document(self, session)`
+
+Returns the peer's own real `CatalogDocument`, the way an authenticated
+application caller would observe it -- not a document the adapter
+assembles from other calls. Two peers (`r2db-api`, both plugs) have a real,
+present catalog surface (`DataService.catalog()` in-process, `GET /v1/
+catalog` over HTTP) and return it unmodified. `MitateDB-api` has no catalog
+operation anywhere on its public surface at all (confirmed by source
+inspection of `cell.py`/`service.py`; its own `capabilities()` already
+declares `application_catalog: unavailable`), so its plug returns a new
+sentinel, `CATALOG_SURFACE_ABSENT`, rather than assembling a
+`CatalogDocument`-shaped dict out of the private `sqlite_master` reach-
+around its `entities()` port method already uses for its own, narrower
+purpose. This is why the sentinel exists as a third outcome alongside "a
+real document" and "a `ConformanceDenial`": a peer's discovery surface can
+genuinely not exist, as opposed to existing and refusing one particular
+request.
+
+### 11.2 `attempt_mutation(self, session, entity, operation, *, values, where_field, where_value)`
+
+Presents one operation from the mutation vocabulary (`insert`/`update`/
+`upsert`/`delete`) to the peer exactly as a real client would, returning
+rows affected. `r2db-api` (both plugs) has a single, real dispatcher that
+already accepts an `operation` string this way (`DataService.mutate` /
+`POST /v1/data/{entity}/mutations`), so both plugs pass the request
+straight through. `MitateDB-api` has no such generic dispatcher --
+`insert`/`update`/`delete` are three separate typed methods, and there is
+no `upsert` method or `"upsert"`-accepting branch anywhere on the peer at
+all (confirmed by source inspection; its `ApplicationCell.transact`'s own
+operation-type dispatch accepts only `"insert"`). Its plug therefore
+dispatches `insert`/`update`/`delete` to the corresponding real method, and
+for `upsert` denies directly with `ConformanceDenial(code=
+"CAPABILITY_UNSUPPORTED", ...)` rather than inventing a call: there is
+truly no path on this peer's real, observable surface to even attempt that
+operation, which is the honest meaning of `CAPABILITY_UNSUPPORTED` in the
+first place, not a workaround for an adapter gap.
+
+### 11.3 `credential_reactivation_vectors(self, handle)`
+
+Declares every control-plane surface of the peer that could conceivably
+re-activate an already-revoked credential, using the same `TamperVector`
+dataclass as `tamper_vectors` with a new, C-13-specific fixed `kind`,
+`"credential_reactivation"` (deliberately outside `TAMPER_KINDS` /
+`MUST_COVER_TAMPER_KINDS`, since it is not part of C-01's taxonomy). Both
+`r2db-api` plugs declare the same two vectors, matching the one real
+control surface this peer has (`ControlAuthority.set_credential_state` /
+`PostgresCredentialStore.set_state`, both taking independent `enabled`/
+`revoked` booleans): a direct `revoked=False` attempt (`must_deny`, backed
+by the terminal-revoke enforcement added in `docs/design/
+CONFORMANCE_CONDITIONS_V1_1.md` §5), and an `enabled=True` attempt after
+revoke (`must_ignore` -- this succeeds, since `enabled` is a distinct,
+non-terminal flag, but must not actually let the credential authenticate
+again). `MitateDB-api`'s `CredentialStore` (`auth.py`) has no un-revoke/
+enable-credential call of any kind -- `revoke()` is one-way, and the only
+other credential-touching call, `issue()`, always mints a brand-new
+`credential_id` with no parameter to force reuse of an existing one -- so
+its plug declares one `must_deny` vector against the one real, adjacent
+surface worth checking behaviorally (`enable_application` after revoke
+must not resurrect the credential, since applications and credentials are
+independent flags on this peer) plus one `structurally_absent` vector
+proving, by signature inspection of the entire `CredentialStore` surface,
+that no method accepts an `enabled`/`revoked`/`reactivate`-shaped
+parameter at all.
+
+### 11.4 C-01 strengthening: `http_smuggled_entity_field_in_mutation_operation_body`
+
+One new `tamper_vectors()` vector was added to `conformance_adapter_r2db_http.py`
+only (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md §4, a pull-forward
+of one C-16 vector): a per-entity mutation request whose body smuggles an
+`entity` field inside one *operation* dict of `operations`, distinct from
+the pre-existing top-level `application_id`-smuggling vector. This is
+`must_deny`, kind `request_field_scope`, and is HTTP-only: it is a real
+JSON-body-shape probe with no in-process equivalent (the in-process plug
+has no HTTP body to smuggle a field into at all; its existing
+`request_field_scope` vector already covers the kind through a different,
+in-process-appropriate probe), so `conformance_adapter_r2db.py` and
+`conformance_adapter_mitatedb.py` are unchanged by this specific addition.

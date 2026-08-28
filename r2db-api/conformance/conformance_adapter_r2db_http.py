@@ -88,6 +88,7 @@ from adapter import (  # noqa: E402
 
 from r2db_api import ControlAuthority, DataService  # noqa: E402
 from r2db_api.credential_store import PostgresCredentialStore  # noqa: E402
+from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
@@ -739,6 +740,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             return {}
         return response.json()
 
+    def _control_call(self, fn: Callable[[], Any]) -> Any:
+        """Wraps a *direct*, non-HTTP call into `PostgresCredentialStore`'s
+        write path (used by `credential_reactivation_vectors`, below),
+        converting a `FoundationError` into a `ConformanceDenial`.
+
+        This deliberately does not go through `classify()`/`_HttpFailure`:
+        those exist to interpret a real HTTP `application/problem+json`
+        response, and this call never goes over HTTP at all (mirroring why
+        `revoke_credential`/`issue_credential` above call
+        `self._write_credentials` directly rather than through the ASGI
+        app). The resulting code is already a genuine contract code
+        straight from `r2db_api.errors.FoundationError.code`, not
+        something this adapter infers.
+        """
+        try:
+            return fn()
+        except FoundationError as exc:
+            raise ConformanceDenial(code=exc.code, adapter=self.name, native_type=type(exc).__name__) from exc
+
     def _data_path(self, entity: str, suffix: str) -> str:
         return f"/v1/data/{quote(entity, safe='')}/{suffix}"
 
@@ -970,6 +990,33 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         document = self._send("GET", "/v1/catalog", session)
         return {item["entity"] for item in document["entities"]}
 
+    def catalog_document(self, session: object) -> Mapping[str, Any]:
+        assert isinstance(session, _Session)
+        # `GET /v1/catalog`'s own real response, unmodified -- the exact
+        # request `entities()` above already issues, this just returns the
+        # whole document instead of projecting it down to an entity-name
+        # set.
+        return self._send("GET", "/v1/catalog", session)
+
+    def attempt_mutation(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+    ) -> int:
+        assert isinstance(session, _Session)
+        item: dict[str, Any] = {"operation": operation}
+        if values is not None:
+            item["values"] = dict(values)
+        if where_field is not None:
+            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        result = self._mutate_request(session, entity, [item])
+        return result["affected"]
+
     # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------
@@ -1083,6 +1130,26 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # URL path segment naming it.
             self._send("POST", self._data_path(fixture.b_only_entity, "query"), runtime_a, json_body={"select": ["id"]})
 
+        def body_entity_field_in_mutation_operation_attempt() -> None:
+            # C-01 strengthening (design docs/design/
+            # CONFORMANCE_CONDITIONS_V1_1.md section 4 / C-16 pull-forward):
+            # a smuggled `entity` field inside one *operation* dict of a
+            # per-entity mutation request body -- distinct from the
+            # existing top-level `application_id`-smuggling vector above.
+            # `Mutation`'s own schema (`definitions.Mutation`) is
+            # `additionalProperties: false` and has no `entity` property;
+            # `structured.py`'s `bind_mutation` enforces the equivalent
+            # key-allowlist independently (`_MUTATION_KEYS`, which also
+            # excludes "entity") since `http.py` never re-validates each
+            # operation dict's shape against that schema itself. Either
+            # enforcement point rejects this with VALIDATION_FAILED before
+            # any write happens -- this is a real HTTP-wire-level probe an
+            # in-process adapter has no body to represent at all.
+            self._mutate_request(
+                runtime_a, fixture.shared_entity,
+                [{"operation": "insert", "values": {"id": 999}, "entity": fixture.b_only_entity}],
+            )
+
         return [
             TamperVector(
                 kind="forged_scope_object",
@@ -1119,6 +1186,40 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 name="http_runtime_a_path_segment_reaches_b_only_entity",
                 disposition="must_deny",
                 attempt=cross_application_path_attempt,
+            ),
+            TamperVector(
+                kind="request_field_scope",
+                name="http_smuggled_entity_field_in_mutation_operation_body",
+                disposition="must_deny",
+                attempt=body_entity_field_in_mutation_operation_attempt,
+            ),
+        ]
+
+    def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
+        # Same minimum as `conformance_adapter_r2db.py` (design docs/design/
+        # CONFORMANCE_CONDITIONS_V1_1.md section 2): `PostgresCredentialStore.
+        # set_state` is the one control-plane surface that could reactivate
+        # a revoked credential, via `self._write_credentials` (the
+        # full-DML-role store -- see `__init__`'s comment on why this,
+        # never `self._control`, is used for control-plane writes here).
+        def revoked_false_attempt() -> None:
+            self._control_call(lambda: self._write_credentials.set_state(handle.credential_ref, revoked=False))
+
+        def enabled_true_attempt() -> None:
+            self._control_call(lambda: self._write_credentials.set_state(handle.credential_ref, enabled=True))
+
+        return [
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_http_set_state_revoked_false",
+                disposition="must_deny",
+                attempt=revoked_false_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_http_set_state_enabled_true_after_revoke",
+                disposition="must_ignore",
+                attempt=enabled_true_attempt,
             ),
         ]
 

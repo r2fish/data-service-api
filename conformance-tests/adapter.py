@@ -149,6 +149,19 @@ VALID_CONFIRMATION = "<adapter-supplies-peer-required-confirmation>"
 # pass the very test meant to catch that.
 UNCLASSIFIED = "UNCLASSIFIED_NATIVE_FAILURE"
 
+# Sentinel for `ConformanceAdapter.catalog_document()` (docs/design/
+# CONFORMANCE_CONDITIONS_V1_1.md section 2). A peer either has a discovery
+# surface that answers (returns a real document) or denies (raises
+# `ConformanceDenial`), or it has no catalog operation on its public surface
+# at all -- structurally, not merely "not implemented today" in a way that
+# could still raise a classifiable denial. This sentinel is reserved for
+# that third case. It is deliberately NOT a dict an adapter could confuse
+# with a real (possibly empty) `CatalogDocument`, and deliberately NOT
+# something an adapter fabricates on the peer's behalf (design principle:
+# "adapter は peer の不足を埋めない") -- it is only ever returned when the
+# peer genuinely has no callable to invoke for this.
+CATALOG_SURFACE_ABSENT = "<peer-has-no-catalog-surface>"
+
 
 def native_cause_of(denial: BaseException) -> BaseException | None:
     """Return the native exception chained onto a ``ConformanceDenial`` via
@@ -396,6 +409,74 @@ class ConformanceAdapter(ABC):
     @abstractmethod
     def entities(self, session) -> set[str]: ...
 
+    @abstractmethod
+    def catalog_document(self, session) -> Mapping[str, Any] | str:
+        """Return the peer's own `CatalogDocument` (design docs/design/
+        CONFORMANCE_CONDITIONS_V1_1.md section 2), unmodified.
+
+        This is the peer's real discovery/catalog document for `session`'s
+        scope, not a value the adapter assembles from other calls. If the
+        peer denies the underlying operation (e.g. the caller's
+        credential/session is no longer valid, or the peer has a catalog
+        endpoint that answers "unsupported"), this raises
+        `ConformanceDenial` exactly like every other application-plane
+        method on this ABC. If the peer has no catalog operation on its
+        public surface at all -- not "denies it", structurally absent, no
+        callable to invoke -- this returns `CATALOG_SURFACE_ABSENT` rather
+        than fabricating a document. Adapters must not synthesize a
+        `CatalogDocument`-shaped dict out of other operations' side
+        channels; that would make the suite validate the adapter's
+        assembly, not the peer's own declared discovery surface.
+        """
+
+    @abstractmethod
+    def attempt_mutation(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+    ) -> int:
+        """Present one mutation-vocabulary operation (`insert` / `update` /
+        `upsert` / `delete`) to the peer exactly as a real client would, and
+        return the number of rows affected.
+
+        `values`/`where_field`/`where_value` follow the same "at most one
+        equality filter" shape every other probe on this ABC already uses
+        (mirrors `select_eq`/`delete`): `where_field is None` means no
+        filter is supplied at all; otherwise the filter is
+        `{field: where_field, operator: "eq", value: where_value}`.
+        `values` is omitted (not merely empty) when `None`.
+
+        This method is used by C-12 (capability declaration agreement) to
+        exercise `insert`/`update`/`upsert` against the peer's own
+        declared `atomic_mutation` capability; it deliberately never
+        exercises `delete` in that non-destructive context (C-12 leaves
+        destructive-operation conformance to C-06's own future suite), but
+        `delete` is still part of this method's contract for adapters that
+        can express it faithfully.
+
+        Every operation in this vocabulary MUST be presented to some real,
+        present call on the peer -- never fabricated as a denial by the
+        adapter itself. If a peer has more than one entry point that could
+        plausibly receive an operation name (for example, a generic
+        transaction dispatcher that accepts an arbitrary operation-type
+        string alongside separate, dedicated per-operation methods), the
+        adapter presents it to the entry point a real client attempting
+        that named operation would actually use, and returns whatever that
+        peer call itself produces -- success or `ConformanceDenial` alike.
+        An adapter denying an operation without presenting it to the peer
+        at all is exactly what design principle 4 (`docs/design/
+        CONFORMANCE_ADAPTER_V1.md` section 2) forbids: it would hide a real
+        peer non-conformance (a capability the peer's own document
+        declares unsupported, but which its real call surface does not
+        actually refuse, or refuses with the wrong code) behind a
+        passing test.
+        """
+
     # --- attack surface declarations ---
     @abstractmethod
     def native_command_surface(self) -> None: ...  # must always return None
@@ -405,6 +486,42 @@ class ConformanceAdapter(ABC):
 
     @abstractmethod
     def tamper_vectors(self, fixture: Fixture) -> Sequence[TamperVector]: ...
+
+    @abstractmethod
+    def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
+        """Declare every control-plane surface of this peer that could
+        conceivably re-activate an already-*revoked* credential, as
+        `TamperVector`s (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md
+        section 2). `handle` refers to a credential the C-13 condition test
+        has already revoked by the time this is called.
+
+        `kind` is always the fixed string `"credential_reactivation"` --
+        this is deliberately not added to `TAMPER_KINDS` / not covered by
+        `MUST_COVER_TAMPER_KINDS`, since it is a C-13-specific taxonomy, not
+        part of C-01's scope-tampering taxonomy. `disposition` reuses the
+        same three-value vocabulary as `tamper_vectors` (`TAMPER_DISPOSITIONS`),
+        with the identical general meaning but interpreted against C-13's
+        revoked-credential context specifically:
+
+        - `must_deny` -- `attempt()` must raise `ConformanceDenial`: this
+          control-plane call itself refuses to act on an already-revoked
+          credential.
+        - `must_ignore` -- `attempt()` may succeed (it legitimately changes
+          some *other* piece of state, e.g. a `enabled` flag distinct from
+          `revoked`), but authenticating with this credential afterward
+          must still be denied -- the attempt had no reactivating effect,
+          even though it did not itself raise.
+        - `structurally_absent` -- there is no control-plane call on this
+          peer's public surface that could reactivate a revoked credential
+          at all; proven the same structural way as `tamper_vectors`'
+          `structurally_absent` vectors (`surface` + `forbidden_parameters`
+          inspected via `signature_forbids_parameters`), never accepted as
+          a bare claim.
+
+        At least one vector must be returned; an empty declaration is a
+        suite failure (design principle 4: uncertainty must not silently
+        become permission), not "not applicable".
+        """
 
     @abstractmethod
     def identifier_positions(self, fixture: Fixture) -> Mapping[str, Callable[[Any], Any]]: ...

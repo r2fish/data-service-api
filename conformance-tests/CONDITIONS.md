@@ -16,6 +16,12 @@ equivalent operation; endpoint names and storage topology are not tested here.
 | C-08 | Revoked/disabled credentials, applications, and sessions stop authorizing within the published finite bound; unavailable state fails closed. | SI-13, SI-15 | revoke/retry test | executable (three adapters) -- `conformance-tests/test_c08_revocation_boundary.py`, `@pytest.mark.condition("C-08")`; runs against `r2db-api` (in-process), `r2db-api-http` (real HTTP boundary + PostgreSQL), and `MitateDB-api` |
 | C-09 | Security events are attributable and immutable to application callers; secrets, SQL, and row values are absent. Audit query requires control/audit authority. | SI-10, SI-14 | audit event test and platform sink evidence | not yet executable (common suite) -- peer-local evidence only, both peers (preliminary for `MitateDB-api`); no external append-only audit sink is implemented or evidenced for either peer per `security/CONTROL_MAPPING.md` |
 | C-10 | Application clients cannot obtain DB credentials, private management authority, or bypass-enabling configuration. | SI-12 | response/configuration review | not yet executable (common suite) -- document-level evidence only (response/configuration review); `r2db-api` additionally has partial peer-local evidence (structured-package/topology review, contract smoke test), `MitateDB-api` evidence is TBD per `security/CONTROL_MAPPING.md` |
+| C-11 | A peer's published discovery/catalog documents conform to the contract's schema (`CapabilityDocument` / `CatalogDocument` + `EntityDescriptor`), and every declared capability name is a member of `capability_status.defined`. | SI-08, SI-15 | document schema/vocabulary conformance test | executable (three adapters) -- `conformance-tests/test_c11_document_conformance.py`, `@pytest.mark.condition("C-11")`; runs against `r2db-api` (in-process), `r2db-api-http` (real HTTP boundary + PostgreSQL), and `MitateDB-api`. Validated with a self-contained schema-subset checker, `conformance-tests/schema_check.py` (unit-tested in `conformance-tests/test_schema_check.py`) |
+| C-12 | Capability declarations agree with observed behavior: a declared operation executes (positive control); an undeclared operation is refused with `CAPABILITY_UNSUPPORTED` before execution and leaves state unchanged. | SI-15, SI-05 | capability/behavior agreement test | executable (three adapters) -- `conformance-tests/test_c12_capability_agreement.py`, `@pytest.mark.condition("C-12")`; runs against `r2db-api`, `r2db-api-http`, and `MitateDB-api`; exercises `insert`/`update`/`upsert` (`delete` is left to C-06's future destructive-operation suite) and the `application_catalog` declaration against `catalog_document()` |
+| C-13 | Credential revocation is terminal: after revoke, no control-plane surface on the peer can re-activate that credential, and `authenticate` remains refused. | SI-13 | revocation-terminality test | executable (three adapters) -- `conformance-tests/test_c13_revocation_terminality.py`, `@pytest.mark.condition("C-13")`; runs against `r2db-api`, `r2db-api-http`, and `MitateDB-api`, exercising every vector `credential_reactivation_vectors()` declares |
+| C-14 | Control-plane authority boundary: an application credential is fail-closed against every control endpoint; a control credential is refused on data/schema endpoints; an in-band `role=control` issuance request is refused with `CAPABILITY_UNSUPPORTED` (plan B). | SI-00, SI-02, SI-03 | privilege-boundary test | not yet executable (common suite) -- neither peer implements a control-plane surface yet (`r2db-api`'s `python -m r2db_api.ops` remains an out-of-band CLI, not an in-band endpoint; `MitateDB-api` has no control-plane HTTP surface at all). To be made executable once a `/control/v1`-equivalent surface exists on a peer |
+| C-15 | Bootstrap/reset lifecycle: bootstrap cannot re-run while a control credential already exists; reset revokes every existing control credential; the first-issued credential is non-permanent. | SI-13, SI-14 | lifecycle test | not yet executable (common suite) -- same gap as C-14: no peer implements the control-plane lifecycle surface these clauses govern yet |
+| C-16 | Cross-entity atomicity: one atomic mutation unit is scoped to a single request, every named entity's validation precedes any entity's execution, and `batch_entities` has a finite, discoverable bound. | SI-08, SI-11 | cross-entity atomicity test | not yet executable (common suite) -- `cross_entity_mutation` is `unavailable` on both peers (no executable `POST /v1/data/mutations` path exists yet). One vector of this condition is already effectively enforced on `r2db-api`'s HTTP surface today: a per-entity mutation request's body cannot smuggle its own `entity` field past the entity the URL path already names -- this is exercised as a C-01 `tamper_vectors()` vector on the `r2db-api-http` plug only (`http_smuggled_entity_field_in_mutation_operation_body`, kind `request_field_scope`, disposition `must_deny`), not yet as its own C-16 test, and not (yet) evidenced for `MitateDB-api` |
 
 "executable (three adapters)" means: the ID is asserted via
 `@pytest.mark.condition(...)` on tests in `conformance-tests/`, those tests
@@ -40,11 +46,13 @@ what "executable" certifies here.
 
 ## Taxonomies used by the executable conditions
 
-The three conditions marked `executable (three adapters)` above are built on
-two shared taxonomies defined normatively in `conformance-tests/adapter.py`
-(design `docs/design/CONFORMANCE_ADAPTER_V1.md` sections 4.3 and 4.4). This
-is what "executable" actually covers for C-01 and C-03: coverage of these
-taxonomies, not just "some test ran and passed."
+The six conditions marked `executable (three adapters)` above are built on
+shared taxonomies defined normatively in `conformance-tests/adapter.py`
+(design `docs/design/CONFORMANCE_ADAPTER_V1.md` sections 4.3 and 4.4, and
+`docs/design/CONFORMANCE_CONDITIONS_V1_1.md` section 2 for the C-13
+addition below). This is what "executable" actually covers for C-01, C-03,
+and C-13: coverage of these taxonomies, not just "some test ran and
+passed."
 
 ### Tamper-vector taxonomy (design section 4.3)
 
@@ -85,3 +93,21 @@ callable that places one payload at one syntactic position of a request:
   failure; so is an unclassified native crash (`adapter.UNCLASSIFIED`,
   design section 10.2), which the suite's contract-code membership check
   surfaces rather than silently treating as a pass.
+
+### Credential-reactivation taxonomy (design CONFORMANCE_CONDITIONS_V1_1
+section 2)
+
+C-13 requires adapters to declare every control-plane surface of the peer
+that could conceivably re-activate an already-revoked credential, as
+`TamperVector`s with the fixed `kind` `"credential_reactivation"` --
+deliberately not a member of `TAMPER_KINDS` and not covered by
+`MUST_COVER_TAMPER_KINDS` (this is a C-13-specific taxonomy, not part of
+C-01's scope-tampering one). The three-value `disposition` vocabulary is
+the same as `tamper_vectors`, reinterpreted for C-13's revoked-credential
+context: `must_deny` (the reactivation call itself is refused),
+`must_ignore` (the call may succeed, but authenticating with the
+credential afterward is still refused), and `structurally_absent` (no such
+call exists at all, proven the same structural, signature-inspection way
+as C-01's `structurally_absent` vectors, never accepted as a bare claim).
+An adapter must declare at least one vector; an empty declaration is a
+suite failure.

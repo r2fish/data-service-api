@@ -186,6 +186,27 @@ class DataService:
             self._event(context, "authorization_denial", "catalog", "deny", "entity", exc.code, request_id=request_id)
             raise
 
+    def deny_unsupported(self, context: AuthContext, operation: str, message: str, *, request_id: str | None = None) -> None:
+        """Refuse a capability this foundation does not implement, while
+        still passing through `_slot`'s rate/concurrency accounting and
+        emitting a denial audit event -- exactly like every other
+        application-plane method below, instead of being a bare pre-`_slot`
+        `fail()` call that an unauthenticated-looking credential could
+        spend for free (review R12).
+
+        `http.py`'s `post_audit_query`/`post_cross_entity_mutate` stub
+        handlers use this for the two contract endpoints this foundation
+        declares `unavailable`/has no execution path for at all
+        (`audit_query`, `cross_entity_mutation`); this always raises
+        `CAPABILITY_UNSUPPORTED`, it never returns.
+        """
+        try:
+            with self._slot(context):
+                fail("CAPABILITY_UNSUPPORTED", message)
+        except FoundationError as exc:
+            self._event(context, "operation_denial", operation, "deny", "entity", exc.code, request_id=request_id)
+            raise
+
     @contextmanager
     def _slot(self, context: AuthContext) -> Iterator[AuthContext]:
         canonical = self._check(context)

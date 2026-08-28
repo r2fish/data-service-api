@@ -111,6 +111,20 @@ _ADAPTER_NAMES: list[str] = [name for name, _ in _BUILT_ADAPTERS]
 _ADAPTER_BY_NAME: dict[str, ConformanceAdapter] = dict(_BUILT_ADAPTERS)
 
 
+def registered_adapters() -> dict[str, ConformanceAdapter]:
+    """Public accessor for the live registry built at collection time.
+
+    A test module that needs a registry-wide check not expressed as the
+    per-adapter-parametrized `adapter`/`fx` fixtures (for example, a
+    vacuity guard that must hold across *all* registered adapters at once,
+    rather than being asserted once per adapter) calls this instead of
+    reaching into the private `_ADAPTER_BY_NAME` from outside this module.
+    Returns a fresh `dict` copy each call; mutating it does not affect the
+    registry.
+    """
+    return dict(_ADAPTER_BY_NAME)
+
+
 @pytest.fixture(scope="session", params=_ADAPTER_NAMES, ids=_ADAPTER_NAMES)
 def adapter(request: pytest.FixtureRequest) -> ConformanceAdapter:
     """The registered `ConformanceAdapter` instances, one per registry

@@ -54,6 +54,14 @@ class CredentialStore:
         record = self._records.get(credential_id)
         if record is None:
             fail("NOT_FOUND", "Credential was not found.", status=404)
+        # Revocation is terminal (contract 1.1.0 lifecycle.credential): once
+        # a credential is revoked, no control-plane call -- including this
+        # one -- may clear that flag again. `enabled` remains freely
+        # settable (disable/re-enable is a distinct, non-terminal state),
+        # but `revoked=False` against an already-revoked record is refused
+        # rather than silently applied.
+        if revoked is False and record.revoked:
+            fail("VALIDATION_FAILED", "Revocation is terminal; a revoked credential cannot be un-revoked.")
         self._records[credential_id] = CredentialRecord(record.credential_id, record.application_id, record.role, record.verifier, record.enabled if enabled is None else enabled, record.revoked if revoked is None else revoked)
 
     def authenticate(self, secret: str | None) -> AuthContext:
@@ -74,10 +82,18 @@ class CredentialStore:
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
         record = self._records.get(context.credential_id)
-        if record is None or not record.enabled:
+        if record is None:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
+        # revoked before enabled, matching authenticate()'s own order above
+        # and PostgresCredentialStore.assert_active's identical order
+        # (credential_store.py): a credential that is both revoked and
+        # disabled must report AUTH_REVOKED here, not AUTH_INVALID, so the
+        # two stores never disagree on which code an identical state
+        # combination produces.
         if record.revoked:
             fail("AUTH_REVOKED", "Credential is not active.", status=401)
+        if not record.enabled:
+            fail("AUTH_INVALID", "Credential is not active.", status=401)
         if record.application_id != context.application_id or record.role != context.role:
             fail("SCOPE_MISMATCH", "Credential scope is not valid for this request.", status=403)
         return AuthContext(record.credential_id, record.application_id, record.role)

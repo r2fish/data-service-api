@@ -522,6 +522,39 @@ async def test_cross_entity_mutate_is_capability_unsupported_for_any_application
     assert unauth.json()["code"] == "AUTH_REQUIRED"
 
 
+async def test_stub_endpoints_count_against_the_request_rate_limit():
+    # docs/design/CONFORMANCE_CONDITIONS_V1_1.md section 5 item 2 (review
+    # R12): `deny_unsupported` routes the stub through `DataService._slot`,
+    # so a caller cannot spend requests against `post_audit_query`/
+    # `post_cross_entity_mutate` for free just because neither ever
+    # executes anything. With `requests_per_minute=1`, the first stub call
+    # for a credential must still succeed (as CAPABILITY_UNSUPPORTED, not
+    # as a rate-limit response), and the *second* call for that same
+    # credential -- even though it is the exact same never-executing stub
+    # -- must be refused as LIMIT_EXCEEDED, proving the first call was
+    # actually counted.
+    service, _control = _build_service(requests_per_minute=1)
+    async with _client(service) as client:
+        first = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+        assert first.status_code == 400
+        assert first.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+        second = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+        assert second.status_code == 429
+        assert second.json()["code"] == "LIMIT_EXCEEDED"
+        assert second.json()["details"]["resource"] == "requests_per_minute"
+
+        # A different credential has its own independent rate window
+        # (DataService._acquire_rate keys on credential_id), so this is not
+        # a cross-credential accounting bug -- audit_query is bound too.
+        other = await client.post("/v1/audit/query", headers=_auth("dev-secret-a"), json={})
+        assert other.status_code == 400
+        assert other.json()["code"] == "CAPABILITY_UNSUPPORTED"
+        other_again = await client.post("/v1/audit/query", headers=_auth("dev-secret-a"), json={})
+        assert other_again.status_code == 429
+        assert other_again.json()["code"] == "LIMIT_EXCEEDED"
+
+
 async def test_cross_entity_mutate_route_does_not_collide_with_per_entity_mutate_route_for_an_entity_named_mutations(client):
     # `POST /v1/data/mutations` (3 path segments) is the new cross-entity
     # stub -- always CAPABILITY_UNSUPPORTED, per the test above.

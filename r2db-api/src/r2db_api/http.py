@@ -370,11 +370,17 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     # unsupported" from "you are not authenticated" for a caller who is
     # not authenticated at all. The request body is deliberately never
     # read -- there is nothing to validate for an operation this
-    # foundation never executes.
-    _authenticate(request, service)
-    fail(
-        "CAPABILITY_UNSUPPORTED",
+    # foundation never executes. `deny_unsupported` (not a bare `fail()`)
+    # so this stub still passes through `_slot`'s rate/concurrency
+    # accounting and emits a denial audit event, exactly like every
+    # executing endpoint (review R12) -- a caller cannot spend requests
+    # against this stub for free just because it never executes anything.
+    context = _authenticate(request, service)
+    service.deny_unsupported(
+        context,
+        "cross_entity_mutate",
         "Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
+        request_id=_request_id(request),
     )
     raise AssertionError("unreachable")
 
@@ -390,11 +396,17 @@ async def post_audit_query(request: Request) -> Response:
     # facade (only ControlAuthority.audit_events() does, which is not wired
     # into this ASGI app). No application credential -- runtime or
     # developer -- can reach audit evidence through this endpoint.
-    _authenticate(request, service)
-    fail(
-        "CAPABILITY_UNSUPPORTED",
+    # `deny_unsupported`, not a bare `fail()`, for the same reason as
+    # `post_cross_entity_mutate` above (review R12): this stub still counts
+    # against the caller's rate/concurrency budget and emits a denial audit
+    # event.
+    context = _authenticate(request, service)
+    service.deny_unsupported(
+        context,
+        "audit_query",
         "Audit evidence query requires separately authenticated control/audit authority "
         "that this foundation does not expose over the application-facing HTTP surface.",
+        request_id=_request_id(request),
     )
     raise AssertionError("unreachable")
 
