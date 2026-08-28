@@ -50,16 +50,27 @@ class FoundationTests(unittest.TestCase):
 
     def test_contains_filter_is_honestly_rejected_never_executed_as_a_like_wildcard(self):
         # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains` is a
-        # contract-listed filter operator this peer does not implement
-        # (`_OPS` in cell.py has no entry for it) -- it must never be
-        # silently executed with SQL LIKE wildcard pass-through semantics
-        # (which would also violate Q-2's "no wildcard interpretation"
-        # rule for `contains` even if it were implemented). A row whose
-        # title would match a naive `%<value>%` LIKE search must not
-        # silently come back; the operator is refused outright instead.
+        # contract-listed filter operator this peer declares `unsupported`
+        # in its own `structured_query` capability entry (`_OPS` in cell.py
+        # has no entry for it) -- it must never be silently executed with
+        # SQL LIKE wildcard pass-through semantics (which would also
+        # violate Q-2's "no wildcard interpretation" rule for `contains`
+        # even if it were implemented). A row whose title would match a
+        # naive `%<value>%` LIKE search must not silently come back; the
+        # operator is refused outright instead.
+        #
+        # Conformance-review finding (WP-5a, C-12 reverse condition): this
+        # used to assert `ValidationError` here, but `contains` is real
+        # contract vocabulary this peer's own capability document declares
+        # `unsupported` -- `capability_status.rules` requires
+        # `CAPABILITY_UNSUPPORTED` for exactly that combination
+        # ("recognized but not provided"), the same distinction `matches`
+        # below already drew correctly. `cell.py::_where` previously
+        # special-cased only `matches`; it now treats `contains`/`matches`/
+        # `is_null` uniformly.
         self.dev.create_collection("notes", {"title": "text"})
         self.runtime.insert("notes", {"title": "50% off everything"})
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(CapabilityError):
             self.runtime.read("notes", filters=[Filter("title", "contains", "50%")])
         # No partial/silent execution: the row is untouched and still
         # readable via a supported operator.
@@ -67,18 +78,31 @@ class FoundationTests(unittest.TestCase):
 
     def test_matches_filter_is_capability_unsupported_not_validation_failed(self):
         # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `matches` is
-        # additive vocabulary this peer does not implement. Unlike
-        # `contains`/`is_null` (never executable, and refused the same way
-        # a genuinely unrecognized operator string would be -- there is no
-        # dedicated acceptance surface for either), `matches` is checked
-        # explicitly, ahead of the generic allowlist, so its refusal is
+        # additive vocabulary this peer does not implement, refused with
         # `CapabilityError` (-> `CAPABILITY_UNSUPPORTED`) rather than
         # `ValidationError` (-> `VALIDATION_FAILED`): a positive, honest
-        # "recognized but not provided" answer, not "malformed request".
+        # "recognized but not provided" answer, not "malformed request" --
+        # the same answer `contains`/`is_null` now give (see the two
+        # neighboring tests).
         self.dev.create_collection("notes", {"title": "text"})
         self.runtime.insert("notes", {"title": "hello"})
         with self.assertRaises(CapabilityError):
             self.runtime.read("notes", filters=[Filter("title", "matches", "hel%")])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "hello")
+
+    def test_is_null_filter_is_capability_unsupported_not_validation_failed(self):
+        # Conformance-review finding (WP-5a, C-12 reverse condition): like
+        # `contains` above, `is_null` is real contract vocabulary
+        # (`allowed_query_operators`) this peer declares `unsupported` in
+        # its own `structured_query` capability entry, but the pre-fix code
+        # fell through to the generic "operator this peer does not
+        # implement at all" branch and raised `ValidationError` instead of
+        # `CapabilityError` -- disagreeing with its own declaration. Fixed
+        # alongside `contains` in `cell.py::_where`.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "hello"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.read("notes", filters=[Filter("title", "is_null", None)])
         self.assertEqual(self.runtime.read("notes")[0]["title"], "hello")
 
     def test_transaction_rolls_back(self):

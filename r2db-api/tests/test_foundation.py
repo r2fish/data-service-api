@@ -194,18 +194,20 @@ def test_authenticate_fails_closed_for_disabled_application(service):
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
-    """WP-2 review blocker B-1: `DataService.catalog()`'s provisional gate
-    (§3) narrows the published shape back to `{entity, fields}` until
-    `row_addressability` is declared enabled (WP-5) -- the full
-    `EntityDescriptor` shape `ApplicationCell.catalog()` itself already
-    computes is covered directly, ungated, by
-    `test_application_cell_catalog_returns_the_full_entity_descriptor_shape`
-    below."""
+    """CCR-13 WP-5b: `row_addressability` is declared `enabled`, so
+    `DataService.catalog()` publishes the full `EntityDescriptor` shape
+    `ApplicationCell.catalog()` itself computes -- no narrowing."""
     runtime = service.authenticate("secret-a")
     document = service.catalog(runtime)
-    assert document == {"application_scope": "app-a", "entities": [{"entity": "notes", "fields": ["body", "id"]}]}
+    assert document == {
+        "application_scope": "app-a",
+        "entities": [{"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+    }
     other = service.authenticate("secret-b")
-    assert service.catalog(other) == {"application_scope": "app-b", "entities": [{"entity": "notes", "fields": ["body", "id"]}]}
+    assert service.catalog(other) == {
+        "application_scope": "app-b",
+        "entities": [{"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+    }
 
 
 def test_catalog_denied_for_revoked_credential_exactly_as_query(service):
@@ -324,6 +326,56 @@ def test_r2_capability_artifact_matches_discovery_status_vocabulary():
     assert artifact["implementation"] == "r2db_foundation"
     assert set(artifact["enabled"]).isdisjoint(artifact["unavailable"])
     assert set(artifact["limit_enforcement"].values()) <= {"enforced", "reference_wall_clock", "deployment_required", "unavailable"}
+
+
+def test_r2_capability_artifact_matches_real_capabilities_response(service):
+    """WP-5 final review finding: the artifact test above only ever checked
+    `config/capabilities.json` for *internal* self-consistency (enabled/
+    unavailable disjoint, valid enforcement vocabulary) -- it never compared
+    the artifact against what `DataService.capabilities()` itself actually
+    declares. That let the artifact go stale: `revision_preconditions`/
+    `ordering`/`cursor_pagination`/`schema.create_index`/`schema.drop_index`
+    all stayed listed `unavailable` well after CCR-13 made every one of them
+    real, executable capabilities. This test compares every name the
+    artifact mentions against a real, authenticated `capabilities()`
+    response, so a future drift between this file and the actual
+    declaration fails loudly instead of silently.
+    """
+    artifact = json.loads((Path(__file__).parents[1] / "config" / "capabilities.json").read_text())
+    developer = service.authenticate("dev-secret-a")
+    response = service.capabilities(developer)
+    capabilities = response["capabilities"]
+
+    schema_ops = capabilities["schema_operations"]
+    enabled_schema_ops = set(schema_ops.get("operations", []))
+    unsupported_schema_ops = set(schema_ops.get("unsupported", []))
+
+    def is_enabled(name: str) -> bool:
+        if name in ("ordering", "cursor_pagination"):
+            # Neither `order_by` nor cursor pagination is a capability name
+            # of its own in the common contract -- both are query-shape
+            # features gated by `structured_query` alone (service.py's own
+            # capabilities() comment: "structured_query: enabled (order_by
+            # / pagination が実行可能になったため)").
+            return capabilities["structured_query"]["status"] == "enabled"
+        if name.startswith("schema."):
+            operation = name.split(".", 1)[1]
+            if operation in enabled_schema_ops:
+                return True
+            if operation in unsupported_schema_ops:
+                return False
+            raise AssertionError(
+                f"schema operation {operation!r} (from capabilities.json's {name!r}) is named in neither "
+                "schema_operations.operations nor .unsupported"
+            )
+        entry = capabilities.get(name)
+        assert entry is not None, f"capabilities.json names {name!r}, which is not a key in the real capabilities() response"
+        return entry["status"] == "enabled"
+
+    for name in artifact["enabled"]:
+        assert is_enabled(name), f"config/capabilities.json declares {name!r} enabled, but capabilities() disagrees"
+    for name in artifact["unavailable"]:
+        assert not is_enabled(name), f"config/capabilities.json declares {name!r} unavailable, but capabilities() reports it enabled"
 
 
 def test_capability_response_matches_common_capability_document_schema(service):
@@ -1418,6 +1470,22 @@ def test_cursor_rejects_negative_offset_overflow_and_non_dict_payload():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+def test_page_size_over_the_contract_maximum_is_validation_failed():
+    """WP-4 review minor-1: `Page.size`'s contract maximum (1000,
+    `spec/data-service-api.v1.json`) is enforced in the shared boundary,
+    independent of whatever `ResourceLimits.result_items` a deployment
+    happens to configure (this fixture's default is also 1000, so a
+    request for 1001 is unambiguously over the *contract's* own ceiling,
+    not merely this deployment's)."""
+    cell = _numbered_cell(1)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["n"], where=[], page_size=1001, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    # The boundary value itself is accepted (rejected only for exceeding
+    # it, not merely being large).
+    cell.query("items", select=["n"], where=[], page_size=1000, limits=LIMITS)
+
+
 def test_cursor_shape_hash_is_bound_to_application_and_entity():
     """WP-2 review minor (a): a cursor minted under one Application/entity
     must not validate against another's query of the same select/where/
@@ -1553,168 +1621,107 @@ def test_transact_checks_deadline_before_each_operation_not_only_the_whole_batch
 
 
 # ==========================================================================
-# WP-2 review blocker B-1: the provisional `DataService` gate (design
-# R2DB_CCR13_STORAGE_V1.md §3, "WP-2〜WP-5 の乖離封鎖"). These tests go
-# through `service` (not a raw `ApplicationCell`) specifically to prove the
-# HTTP/service-observable surface still matches the still-current
-# capability declaration (`expected_revision`/`upsert`/`create_index`/
-# `drop_index`/`field_type` all still declared unavailable/unsupported),
-# even though the shared bind layer and `ApplicationCell` underneath now
-# structurally accept and correctly execute all of them (proven by the
-# direct-cell tests above). REMOVE/rewrite these once WP-5 updates
-# `capabilities()` in the same commit as flipping these gates off.
+# CCR-13 WP-5b (docs/design/R2DB_CCR13_STORAGE_V1.md §3): the WP-2-through-
+# WP-5 provisional `DataService` gate is removed, and `capabilities()`
+# catches up in the same commit. These tests go through `service` (not a
+# raw `ApplicationCell`) to prove the vocabulary the gate used to refuse is
+# now genuinely reachable at the facade -- `matches`/`expected_revision`/
+# `upsert`/`create_index`/`drop_index`/`field_type`/the full catalog
+# declaration all execute through `service` exactly as the direct-cell
+# tests above already proved `ApplicationCell` itself could.
 # ==========================================================================
 
 
-def test_gate_query_matches_is_capability_unsupported(service):
-    """WP-3 review blocker-1: `matches` was added to the shared operator
-    allowlist (`structured.OPERATORS`) by Q-2's adjudication after this
-    gate list was first written, so it slipped through `DataService.query`
-    unrefused -- the same B-1-shaped gap recurring for a query operator.
-    `capabilities().structured_query.operators` is untouched by this fix
-    (still not listing `matches`); only this refusal is temporary, removed
-    in the same commit as WP-5."""
+def test_service_query_matches_filter_executes(service):
     runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    # No side effect on unrelated, well-formed operators.
-    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
+    assert service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}]) == [{"body": "a"}]
+    assert service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "z%"}]) == []
 
 
-def test_gate_mutate_update_where_matches_is_capability_unsupported(service):
-    """WP-3 confirmation review blocker: the `matches` gate above only
-    ever inspected `query()`'s own predicates -- `update`/`delete`'s
-    `operation.where` carries predicates too, and this was observed
-    executing all the way through (unrefused) before this fix. This scan
-    runs ahead of `bind_mutation`, so it must gate on the raw, not-yet-
-    validated `where` shape."""
+def test_service_mutate_update_and_delete_where_matches_executes(service):
+    """`update`/`delete`'s own `operation.where` accepts `matches` too, not
+    only `query()`'s predicates."""
     runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "z"}}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    # No side effect: the gate fires before the mutation is even attempted.
-    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
-
-
-def test_gate_mutate_delete_where_matches_is_capability_unsupported(service):
-    """The same gate, on `delete` specifically -- previously observed
-    executing the delete all the way through (the row was actually gone),
-    which is the concrete failure this fix closes."""
-    runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.mutate(
-            runtime,
-            "notes",
-            [{"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "destructive": True, "confirmation": "DELETE"}],
-        )
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    # No side effect: the row this delete would otherwise have matched
-    # (and previously did, before this fix) is still there.
-    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
-
-
-def test_gate_mutate_expected_revision_is_capability_unsupported(service):
-    runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": "anything"}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    # No side effect: the gate fires before the mutation is even attempted.
-    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
-
-
-def test_gate_mutate_upsert_is_capability_unsupported_even_with_a_declared_unique_key(service):
-    """The gate refuses upsert unconditionally, even on an entity that
-    *does* declare exactly one uniqueness key -- the underlying engine
-    would happily execute it (see the direct-cell upsert tests above); the
-    gate's job is to keep that invisible at the `DataService`/HTTP surface
-    until WP-5.
-
-    Confirmation-review fix M-C: the unique index is declared directly on
-    the underlying cell (`service._cells[...].apply_schema(...)`), not via
-    `service.schema()` -- `create_index` is itself gated (CAPABILITY_
-    UNSUPPORTED), so going through `service.schema()` here would leave
-    `notes` with *no* declared key at all, and the assertion below would
-    then be trivially true for the wrong reason (0-key upsert is refused by
-    the engine itself, not by this gate). Declaring the key directly makes
-    the precondition genuinely satisfied, so this test only passes because
-    of the gate: deleting the gate's `fail(...)` line in `mutate()` turns
-    this from CAPABILITY_UNSUPPORTED into a real, successful upsert.
-    """
-    developer = service.authenticate("dev-secret-a")
-    service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
-    service._cells["app-a"].apply_schema(
-        {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True},
-        developer=True,
-        limits=service.limits,
+    affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "renamed"}}])
+    assert affected == 1
+    assert service.query(runtime, "notes", select=["body"]) == [{"body": "renamed"}]
+    affected = service.mutate(
+        runtime,
+        "notes",
+        [{"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "rename%"}], "destructive": True, "confirmation": "DELETE"}],
     )
+    assert affected == 1
+    assert service.query(runtime, "notes", select=["body"]) == []
+
+
+def test_service_mutate_expected_revision_executes(service):
     runtime = service.authenticate("secret-a")
+    revision = service.query_page(runtime, "notes", select=["id"], where=[{"field": "id", "operator": "eq", "value": 1}]).revisions[0]
+    affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": revision}])
+    assert affected == 1
     with pytest.raises(FoundationError) as exc:
-        service.mutate(runtime, "notes", [{"operation": "upsert", "values": {"tag": "z"}}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "y"}, "expected_revision": revision}])
+    assert exc.value.code == "PRECONDITION_FAILED"
 
 
-def test_gate_schema_create_index_and_drop_index_are_capability_unsupported(service):
+def test_service_mutate_upsert_executes_with_a_declared_unique_key(service):
     developer = service.authenticate("dev-secret-a")
     service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
+    service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True})
+    runtime = service.authenticate("secret-a")
+    result = service.mutate_result(runtime, "notes", [{"operation": "upsert", "values": {"tag": "z"}}])
+    assert result.affected == 1
+    assert result.assigned_addresses == [{"address": {"id": 2}}]  # id 1 is the seeded row (tag is null, does not match "z")
+    result2 = service.mutate_result(runtime, "notes", [{"operation": "upsert", "values": {"tag": "z", "body": "updated"}}])
+    assert result2.affected == 1
+    assert result2.assigned_addresses == []  # resolved to update, not insert
+
+
+def test_service_mutate_upsert_without_a_declared_key_is_still_capability_unsupported(service):
+    """Upsert's per-entity precondition (a declared uniqueness key) is a
+    real, entity-scoped condition, unaffected by the gate's removal --
+    `notes` here declares no unique key at all."""
+    runtime = service.authenticate("secret-a")
     with pytest.raises(FoundationError) as exc:
-        service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"]})
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    with pytest.raises(FoundationError) as exc:
-        service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag"})
+        service.mutate(runtime, "notes", [{"operation": "upsert", "values": {"body": "x"}}])
     assert exc.value.code == "CAPABILITY_UNSUPPORTED"
 
 
-def test_gate_non_developer_create_index_is_forbidden_not_capability_unsupported(service):
-    """Confirmation-review fix M-A: authority is checked before the gate,
-    so a non-developer (`runtime`) credential still gets pre-WP-2's
-    FORBIDDEN/403 for `create_index` -- not CAPABILITY_UNSUPPORTED/400,
-    which the gate alone (with no idea who is asking) would otherwise
-    answer first."""
+def test_service_schema_create_index_and_drop_index_execute(service):
+    developer = service.authenticate("dev-secret-a")
+    service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
+    revision = service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True})
+    assert isinstance(revision, int)
+    runtime = service.authenticate("secret-a")
+    assert service.catalog(runtime)["entities"][0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
+    service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"})
+    assert service.catalog(runtime)["entities"][0]["unique_keys"] == []
+
+
+def test_service_non_developer_create_index_is_forbidden(service):
+    """Developer authority is still required for schema operations,
+    unaffected by the gate's removal (`bind_schema_operation`'s own
+    authority check, not the removed gate, is what enforces this)."""
     runtime = service.authenticate("secret-a")
     with pytest.raises(FoundationError) as exc:
         service.schema(runtime, {"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"]})
     assert exc.value.code == "FORBIDDEN"
 
 
-def test_gate_schema_field_type_is_validation_failed(service):
+def test_service_schema_field_type_executes(service):
     developer = service.authenticate("dev-secret-a")
+    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"}) == 1
+    runtime = service.authenticate("secret-a")
+    service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": 5}}])
+    assert service.query(runtime, "notes", select=["n"]) == [{"n": 5}]
     with pytest.raises(FoundationError) as exc:
-        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "typed_field", "field_type": "integer"})
+        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": "not-an-int"}}])
     assert exc.value.code == "VALIDATION_FAILED"
-    # No side effect: the field was never added.
-    runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.query(runtime, "notes", select=["typed_field"])
-    assert exc.value.code == "NOT_FOUND"
-
-
-def test_gate_catalog_publishes_only_entity_and_fields(service):
-    runtime = service.authenticate("secret-a")
-    document = service.catalog(runtime)
-    entity = document["entities"][0]
-    assert set(entity) == {"entity", "fields"}
-    assert entity["fields"] == ["body", "id"]  # `id`'s appearance is a storage fact, not a capability
-
-
-def test_gate_does_not_affect_ungated_mutation_operations(service):
-    """The gate is scoped exactly to `upsert`/`expected_revision` (mutate)
-    and `create_index`/`drop_index`/`field_type` (schema) -- plain insert/
-    update/delete and add_field/create_entity/drop_entity are unaffected."""
-    runtime = service.authenticate("secret-a")
-    affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}}])
-    assert affected == 1
-    developer = service.authenticate("dev-secret-a")
-    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"}) == 1
 
 
 # ==========================================================================
-# CCR-13 WP-4 (docs/design/R2DB_CCR13_STORAGE_V1.md §3): `order_by`/cursor
-# pagination delegated through `DataService.query`/`query_page`, no
-# longer rejected outright. Deliberately small scope: `revisions` and
-# `assigned_addresses` still do not reach a caller (WP-5); the gated
-# vocabulary (`matches`/`expected_revision`/`upsert`/`create_index`/
-# `drop_index`/`field_type`) must remain refused exactly as before.
+# CCR-13 WP-4/WP-5b: `order_by`/cursor pagination delegated through
+# `DataService.query`/`query_page`.
 # ==========================================================================
 
 
@@ -1748,22 +1755,12 @@ def test_service_query_cursor_from_a_different_entity_is_rejected(service):
     assert exc.value.code == "VALIDATION_FAILED"
 
 
-def test_gate_still_refuses_matches_and_mutate_gate_vocabulary_alongside_order_by_and_cursor(service):
-    """WP-4 opens `order_by`/`cursor` up at the facade -- this is the
-    regression check that doing so did not loosen the *other* gated
-    vocabulary (`matches`/`expected_revision`/`upsert`) riding along in
-    the very same call. Each case below supplies a well-formed `order_by`/
-    `cursor`-shaped request alongside the still-gated feature, to prove
-    the gate fires regardless."""
+def test_service_query_matches_filter_combines_with_order_by(service):
+    """WP-5b: `matches` and `order_by`/cursor are all reachable through the
+    same facade call now -- previously (WP-4) this combination would have
+    hit the (now-removed) `matches` gate even though `order_by` itself was
+    already open."""
     runtime = service.authenticate("secret-a")
-    with pytest.raises(FoundationError) as exc:
-        service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    with pytest.raises(FoundationError) as exc:
-        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": "anything"}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    with pytest.raises(FoundationError) as exc:
-        service.mutate(runtime, "notes", [{"operation": "upsert", "values": {"body": "x"}}])
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    # And ordinary order_by/cursor-free operators are still unaffected.
-    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
+    service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "another"}}])
+    items = service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
+    assert items == [{"body": "a"}, {"body": "another"}]

@@ -300,13 +300,10 @@ async def post_query(request: Request) -> Response:
     entity = request.path_params["entity"]
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
-    # CCR-13 WP-4 (docs/design/R2DB_CCR13_STORAGE_V1.md §3): `order_by`/
-    # `page.cursor` are no longer rejected outright here -- both are
-    # delegated to `DataService.query_page`, which passes them to the
-    # underlying cell (`structured.py`'s shared `_resolve_order_by`/
-    # `_decode_cursor` validate the shapes; `matches`/`expected_revision`/
-    # `upsert`/`create_index`/`drop_index`/`field_type` remain gated at
-    # the `DataService` layer, untouched by this change).
+    # CCR-13 WP-4/WP-5: `order_by`/`page.cursor` are delegated to
+    # `DataService.query_page`, which passes them to the underlying cell
+    # (`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`
+    # validate the shapes).
     kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
     page = body.get("page")
     if page is not None:
@@ -316,7 +313,9 @@ async def post_query(request: Request) -> Response:
         if "cursor" in page:
             kwargs["cursor"] = page["cursor"]
     result = service.query_page(context, entity, request_id=_request_id(request), **kwargs)
-    return JSONResponse({"items": result.items, "next_page": result.next_page}, status_code=200)
+    # CCR-13 WP-5: `revisions` (index-aligned with `items`) now reaches the
+    # response -- `revision_preconditions` is declared `enabled`.
+    return JSONResponse({"items": result.items, "next_page": result.next_page, "revisions": result.revisions}, status_code=200)
 
 
 @_endpoint
@@ -331,8 +330,12 @@ async def post_mutate(request: Request) -> Response:
     transaction = body.get("transaction", "atomic")
     if transaction not in {"atomic", "best_effort"}:
         fail("VALIDATION_FAILED", "Transaction mode is not supported.")
-    affected = service.mutate(context, entity, body.get("operations"), transaction=transaction, request_id=_request_id(request))
-    return JSONResponse({"committed": True, "affected": affected}, status_code=200)
+    result = service.mutate_result(context, entity, body.get("operations"), transaction=transaction, request_id=_request_id(request))
+    # CCR-13 WP-5: `assigned_addresses` now reaches the response, in
+    # operation order (insert, and insert-resolved upsert, only) -- the
+    # per-entity endpoint's own elements never carry an `entity` key
+    # (contract: only the cross-entity endpoint's elements do).
+    return JSONResponse({"committed": True, "affected": result.affected, "assigned_addresses": result.assigned_addresses}, status_code=200)
 
 
 @_endpoint

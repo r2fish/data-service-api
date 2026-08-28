@@ -42,6 +42,7 @@ if "adapter" not in sys.modules:
 from adapter import (  # noqa: E402
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
     CredentialHandle,
@@ -53,6 +54,19 @@ from adapter import (  # noqa: E402
 
 from r2db_api import ControlAuthority, CredentialStore, DataService  # noqa: E402
 from r2db_api.errors import FoundationError  # noqa: E402
+
+
+# port v1.3 (WP-5a, design docs/design/R2DB_CCR13_STORAGE_V1.md M-8
+# activation): the port's own two-member field-type vocabulary
+# (`adapter.COMMON_FIELD_TYPES`, `"text"`/`"integer"`) is deliberately not
+# spelled the same as the common contract's own `field_type` enum
+# (`spec/data-service-api.v1.json`: `string`/`integer`/`number`/`boolean`/
+# `object`/`array`) -- the port's vocabulary exists to name the two types
+# every registered peer can plausibly support at all, independent of how
+# each peer's own real schema surface spells them. This is the explicit
+# mapping from the port's vocabulary to this peer's real `add_field`
+# `field_type` parameter.
+_PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
 
 
 class R2DBConformanceAdapter(ConformanceAdapter):
@@ -128,9 +142,24 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         return ScopeView(application_id=session.application_id, role=session.role)
 
     def create_entity(self, session, entity: str, fields: Mapping[str, str]) -> None:
-        self._call(lambda: self._service.schema(
-            session, {"operation": "create_entity", "entity": entity, "fields": list(fields.keys())}
-        ))
+        # port v1.3 (WP-5a activation of M-8): `create_entity` no longer
+        # takes its fields inline (which would leave every column
+        # untyped/JSONB, discarding `fields`'s own type values entirely).
+        # This peer's own real create_entity + add_field(field_type=...)
+        # sequence -- the same two-call shape
+        # `conformance_adapter_r2db_http.py`'s HTTP twin already used, now
+        # with the type actually wired through both plugs -- is what a real
+        # client building a typed entity issues (design docs/design/
+        # R2DB_CCR13_STORAGE_V1.md R-2: create_entity has no per-field type
+        # slot in the common contract).
+        self._call(lambda: self._service.schema(session, {"operation": "create_entity", "entity": entity}))
+        for field_name, port_type in fields.items():
+            operation: dict[str, Any] = {"operation": "add_field", "entity": entity, "field": field_name}
+            contract_type = _PORT_FIELD_TYPE_TO_R2DB.get(port_type)
+            if contract_type is None:
+                raise ValueError(f"unmapped port field type {port_type!r} for field {field_name!r}")
+            operation["field_type"] = contract_type
+            self._call(lambda op=operation: self._service.schema(session, op))
 
     def insert(self, session, entity: str, values: Mapping[str, Any]) -> None:
         self._call(lambda: self._service.mutate(
@@ -139,6 +168,18 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
     def select_eq(self, session, entity: str, select: Sequence[str], field: str | None, value: Any) -> list[dict]:
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        return self._call(lambda: self._service.query(session, entity, select=list(select), where=where))
+
+    def attempt_filter(
+        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+    ) -> list[dict]:
+        # The same real, single query entry point `select_eq` above already
+        # uses, generalized to an arbitrary operator -- an operator this
+        # peer does not declare (`structured_query.operators`) is presented
+        # here exactly as a real client attempting it would be, and
+        # whatever `DataService.query` itself produces (success or
+        # `ConformanceDenial`) is returned, never fabricated.
+        where = [{"field": field, "operator": operator, "value": value}]
         return self._call(lambda: self._service.query(session, entity, select=list(select), where=where))
 
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
@@ -184,6 +225,49 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # document.
         return self._call(lambda: self._service.catalog(session))
 
+    def _build_mutation_item(
+        self,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None,
+        unique_key: str | None,
+        destructive: bool = False,
+        confirmation: Any = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {"operation": operation}
+        if values is not None:
+            item["values"] = dict(values)
+        if where_field is not None:
+            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        if destructive:
+            # Same VALID_CONFIRMATION sentinel protocol as `delete()` below,
+            # extended to batch operations (port v1.4): `destructive` is
+            # only ever meaningful when true (bind_mutation's own default is
+            # false), so it is only set here rather than always present.
+            item["destructive"] = True
+            peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+            if peer_confirmation is not None:
+                item["confirmation"] = peer_confirmation
+        if expected_revision is not None:
+            # A real parameter position on this peer's single mutation
+            # dispatcher (`Mutation.expected_revision`, `structured.py`'s
+            # `_MUTATION_KEYS`) -- carried through exactly like `values`/
+            # `where` above, never interpreted here. As of work package
+            # WP-5b this peer declares `revision_preconditions: enabled`
+            # and genuinely evaluates it (R-4); before that it was a real,
+            # present `CAPABILITY_UNSUPPORTED` denial rather than a
+            # `SurfaceAbsent` one either way.
+            item["expected_revision"] = expected_revision
+        if unique_key is not None:
+            # port v1.3: `Mutation.unique_key` (CCR-13 §0.5 Q-1 plan B),
+            # same real parameter position, same "never interpreted here"
+            # treatment.
+            item["unique_key"] = unique_key
+        return item
+
     def attempt_mutation(
         self,
         session,
@@ -194,37 +278,68 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where_field: str | None,
         where_value: Any,
         expected_revision: str | None = None,
+        unique_key: str | None = None,
     ) -> int:
-        item: dict[str, Any] = {"operation": operation}
-        if values is not None:
-            item["values"] = dict(values)
-        if where_field is not None:
-            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
-        if expected_revision is not None:
-            # A real parameter position on this peer's single mutation
-            # dispatcher (`Mutation.expected_revision`, `structured.py`'s
-            # `_MUTATION_KEYS`) -- carried through exactly like `values`/
-            # `where` above, never interpreted here. The peer itself
-            # currently refuses it with `CAPABILITY_UNSUPPORTED`
-            # (`revision_preconditions: unavailable` as of docs/design/
-            # R2DB_CCR13_STORAGE_V1.md work package WP-1); this is a real,
-            # present denial, not `SurfaceAbsent`.
-            item["expected_revision"] = expected_revision
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
         return self._call(lambda: self._service.mutate(session, entity, [item]))
+
+    def attempt_mutation_with_addresses(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        # `DataService.mutate_result` is the real, present entry point that
+        # actually observes `assigned_addresses` (`MutationResult`,
+        # service.py) -- `mutate()` above deliberately stays byte-for-byte
+        # backward compatible with every pre-CCR13 caller and never exposes
+        # them at all, so this is a genuinely different call, not the same
+        # one re-read.
+        result = self._call(lambda: self._service.mutate_result(session, entity, [item]))
+        return result.affected, list(result.assigned_addresses)
+
+    def attempt_batch_with_addresses(
+        self, session, entity: str, operations: Sequence[BatchOperation]
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        items = [
+            self._build_mutation_item(
+                op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
+                expected_revision=op.expected_revision, unique_key=op.unique_key,
+                destructive=op.destructive, confirmation=op.confirmation,
+            )
+            for op in operations
+        ]
+        # The same real, single `mutate_result` entry point
+        # `attempt_mutation_with_addresses` above uses, given every
+        # operation in one call -- exactly what a real client sending a
+        # multi-operation atomic batch would do, never several separate
+        # single-operation calls this adapter stitches together itself.
+        result = self._call(lambda: self._service.mutate_result(session, entity, items))
+        return result.affected, list(result.assigned_addresses)
 
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         # Presented to the same real, single generic schema dispatcher every
         # other schema operation on this peer goes through (`DataService.
         # schema`) -- there is no separate "unique index" entry point,
         # exactly like `attempt_mutation`'s `upsert` branch above.
-        # `create_index`/`unique` are already part of the common contract's
-        # `SchemaOperationRequest` vocabulary (CCR-13, contract 1.1.0) and
-        # `create_index` already appears in this peer's own
-        # `schema_operations.unsupported` list (service.py); this
-        # foundation genuinely has an entry point for it, it just does not
-        # yet accept the shape (docs/design/R2DB_CCR13_STORAGE_V1.md defers
-        # the real implementation to work package WP-3) -- so whatever
-        # denial results is real, never fabricated by this adapter.
+        # `create_index` is real, executable vocabulary on this peer as of
+        # docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-3, so a
+        # well-formed request against a real entity/fields genuinely
+        # succeeds here; a malformed or conflicting one still gets a real
+        # `ConformanceDenial` from this same dispatcher, never fabricated.
         self._call(lambda: self._service.schema(session, {
             "operation": "create_index",
             "entity": entity,
@@ -236,20 +351,21 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     def query_with_revisions(
         self, session, entity: str, select: Sequence[str], field: str | None, value: Any
     ) -> tuple[list[dict], list[str] | None]:
-        # `DataService.query()`'s own return type is `list[dict[str, Any]]`
-        # (`structured.py`'s `ApplicationCell.query`) -- a bare list, not a
-        # wrapping object -- so `None` here is an observation of that real
-        # return shape having structurally no slot a `revisions` key could
-        # ever occupy (docs/design/R2DB_CCR13_STORAGE_V1.md work package
-        # WP-4 is what gives this response shape one), not an assumption
-        # about its content the way returning `None` unconditionally would
-        # be if a dict-shaped response existed to inspect and simply wasn't
-        # looked at (contrast `conformance_adapter_r2db_http.py`'s sibling
-        # method, which does inspect a real `result.get("revisions")` since
-        # its response *is* a JSON object -- conformance-review correction
-        # M-1).
-        items = self.select_eq(session, entity, select, field, value)
-        return items, None
+        # `DataService.query()` (what `select_eq` above uses) deliberately
+        # stays byte-for-byte backward compatible with every pre-CCR13
+        # caller and returns a bare `list[dict]` with structurally no place
+        # a `revisions` key could occupy -- so this method observes the
+        # *other* real, present entry point instead: `DataService.
+        # query_page()`, whose `QueryPage.revisions` is genuinely populated
+        # as of work package WP-5b (`revision_preconditions: enabled`).
+        # This is the same "observe the real response, don't hardcode a
+        # claim about it" principle conformance-review correction M-1
+        # already established for `conformance_adapter_r2db_http.py`'s
+        # sibling method, applied here now that a real revisions-bearing
+        # entry point exists on this plug too.
+        where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        page = self._call(lambda: self._service.query_page(session, entity, select=list(select), where=where))
+        return page.items, list(page.revisions)
 
     # ------------------------------------------------------------------
     # attack-surface declarations

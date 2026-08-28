@@ -76,6 +76,7 @@ if "adapter" not in sys.modules:
 from adapter import (  # noqa: E402
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
     CredentialHandle,
@@ -533,6 +534,16 @@ def _stringify_for_path(payload: Any) -> str:
     return payload if isinstance(payload, str) else str(payload)
 
 
+# port v1.3 (WP-5a, design docs/design/R2DB_CCR13_STORAGE_V1.md M-8
+# activation): identical table and rationale to
+# `conformance_adapter_r2db.py`'s own constant of the same name -- the
+# explicit mapping from the port's own two-member field-type vocabulary
+# (`adapter.COMMON_FIELD_TYPES`) to this peer's real `add_field`
+# `field_type` parameter (`spec/data-service-api.v1.json`'s `field_type`
+# enum).
+_PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
+
+
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to r2db-api's real HTTP +
     PostgreSQL stack: `r2db_api.http.create_app` in front of a
@@ -922,11 +933,22 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # creating a multi-field entity must therefore issue one
         # `create_entity` call followed by one `add_field` call per column;
         # this is that same two-step sequence, not a workaround.
+        #
+        # port v1.3 (WP-5a activation of M-8): each `add_field` now also
+        # carries `field_type`, mapped from the port's own two-member
+        # vocabulary (`text`/`integer`) to this peer's real `field_type`
+        # parameter via the same `_PORT_FIELD_TYPE_TO_R2DB` table
+        # `conformance_adapter_r2db.py` uses -- duplicated here rather than
+        # imported, matching this repository's existing convention of each
+        # plug owning its own logic with no cross-plug import dependency.
         self._send("POST", self._schema_path(), session, json_body={"operation": "create_entity", "entity": entity})
-        for field_name in fields:
+        for field_name, port_type in fields.items():
+            contract_type = _PORT_FIELD_TYPE_TO_R2DB.get(port_type)
+            if contract_type is None:
+                raise ValueError(f"unmapped port field type {port_type!r} for field {field_name!r}")
             self._send(
                 "POST", self._schema_path(), session,
-                json_body={"operation": "add_field", "entity": entity, "field": field_name},
+                json_body={"operation": "add_field", "entity": entity, "field": field_name, "field_type": contract_type},
             )
 
     def insert(self, session: object, entity: str, values: Mapping[str, Any]) -> None:
@@ -938,6 +960,18 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     ) -> list[dict]:
         assert isinstance(session, _Session)
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        result = self._query_request(session, entity, select=list(select), where=where)
+        return result["items"]
+
+    def attempt_filter(
+        self, session: object, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+    ) -> list[dict]:
+        assert isinstance(session, _Session)
+        # Same real query endpoint `select_eq` above already uses,
+        # generalized to an arbitrary operator -- see
+        # conformance_adapter_r2db.py's identical method for the full
+        # rationale.
+        where = [{"field": field, "operator": operator, "value": value}]
         result = self._query_request(session, entity, select=list(select), where=where)
         return result["items"]
 
@@ -998,6 +1032,40 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # set.
         return self._send("GET", "/v1/catalog", session)
 
+    def _build_mutation_item(
+        self,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None,
+        unique_key: str | None,
+        destructive: bool = False,
+        confirmation: Any = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {"operation": operation}
+        if values is not None:
+            item["values"] = dict(values)
+        if where_field is not None:
+            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        if destructive:
+            # Same VALID_CONFIRMATION sentinel protocol as `delete()` below,
+            # extended to batch operations (port v1.4).
+            item["destructive"] = True
+            peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+            if peer_confirmation is not None:
+                item["confirmation"] = peer_confirmation
+        if expected_revision is not None:
+            # Same real parameter position as conformance_adapter_r2db.py's
+            # identical comment: carried through over real HTTP exactly like
+            # `values`/`where` above, never interpreted here.
+            item["expected_revision"] = expected_revision
+        if unique_key is not None:
+            # port v1.3: `Mutation.unique_key` (CCR-13 §0.5 Q-1 plan B).
+            item["unique_key"] = unique_key
+        return item
+
     def attempt_mutation(
         self,
         session: object,
@@ -1008,27 +1076,68 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         where_field: str | None,
         where_value: Any,
         expected_revision: str | None = None,
+        unique_key: str | None = None,
     ) -> int:
         assert isinstance(session, _Session)
-        item: dict[str, Any] = {"operation": operation}
-        if values is not None:
-            item["values"] = dict(values)
-        if where_field is not None:
-            item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
-        if expected_revision is not None:
-            # Same real parameter position as conformance_adapter_r2db.py's
-            # identical comment: carried through over real HTTP exactly like
-            # `values`/`where` above, never interpreted here.
-            item["expected_revision"] = expected_revision
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
         result = self._mutate_request(session, entity, [item])
         return result["affected"]
+
+    def attempt_mutation_with_addresses(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        assert isinstance(session, _Session)
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        # The real HTTP mutation response is a JSON object that already
+        # carries `assigned_addresses` (`http.py::post_mutate`, work
+        # package WP-5b) -- observed directly, exactly like
+        # `query_with_revisions` below observes `revisions`.
+        result = self._mutate_request(session, entity, [item])
+        return result["affected"], result.get("assigned_addresses")
+
+    def attempt_batch_with_addresses(
+        self, session: object, entity: str, operations: Sequence[BatchOperation]
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        assert isinstance(session, _Session)
+        items = [
+            self._build_mutation_item(
+                op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
+                expected_revision=op.expected_revision, unique_key=op.unique_key,
+                destructive=op.destructive, confirmation=op.confirmation,
+            )
+            for op in operations
+        ]
+        # Same real HTTP mutation endpoint as `attempt_mutation_with_
+        # addresses` above, given every operation in one request body --
+        # exactly what a real client sending a multi-operation atomic batch
+        # over HTTP would do.
+        result = self._mutate_request(session, entity, items)
+        return result["affected"], result.get("assigned_addresses")
 
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
         assert isinstance(session, _Session)
         # Same real, single schema-operations endpoint every other schema
         # operation in this adapter already uses -- see
         # conformance_adapter_r2db.py's identical method for the full
-        # rationale (this is the HTTP-boundary twin of that call).
+        # rationale (this is the HTTP-boundary twin of that call). Real,
+        # executable vocabulary on this peer as of work package WP-3: a
+        # well-formed request against a real entity/fields genuinely
+        # succeeds over real HTTP too.
         self._send(
             "POST", self._schema_path(), session,
             json_body={
@@ -1050,10 +1159,11 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # plug's real `POST .../query` response *is* a JSON object -- so
         # this observes whatever key that real response actually carries
         # (`result.get("revisions")`) rather than asserting `None` without
-        # looking. As of work package WP-4 the response has no `revisions`
-        # key at all, so this still evaluates to `None` today, but it is an
-        # observation of the real response, not a hardcoded claim about it
-        # (conformance-review correction M-1).
+        # looking (conformance-review correction M-1). As of work package
+        # WP-5b the response genuinely carries `revisions`
+        # (`revision_preconditions: enabled`), so this now returns real
+        # data -- no edit was needed here to pick it up, which is the
+        # point of observing rather than asserting.
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         result = self._query_request(session, entity, select=list(select), where=where)
         return result["items"], result.get("revisions")

@@ -42,6 +42,22 @@ _TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL",
 _OPS = {"eq": "=", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">",
         "gte": ">=", "in": "IN"}
 
+# Conformance-review finding (WP-5a, C-12 reverse condition): every one of
+# these three is a real member of the common contract's own filter-operator
+# vocabulary (`structured_operations.allowed_query_operators`) that this
+# peer declares `unsupported` in its own `structured_query` capability
+# entry below -- `capability_status.rules`: "optional target operations
+# ... must fail with CAPABILITY_UNSUPPORTED". `matches` already raised
+# `CapabilityError` correctly; `contains`/`is_null` used to fall through to
+# the generic "not a filter operator this peer implements at all" branch
+# below and raise `ValidationError` (-> `VALIDATION_FAILED`) instead -- a
+# real, observable mismatch between this peer's own declaration and its
+# own behavior, discovered by the common conformance suite's C-12 reverse
+# direction (`conformance-tests/test_c12_capability_agreement.py`)
+# presenting a real, contract-shaped request rather than assuming this
+# peer's behavior. All three now share one code path in `_where` below.
+_UNSUPPORTED_CONTRACT_OPERATORS = {"contains", "matches", "is_null"}
+
 
 @dataclass(frozen=True)
 class Filter:
@@ -297,38 +313,42 @@ class ApplicationCell:
             if not isinstance(item, Filter):
                 raise ValidationError("filters must contain Filter values")
             field = validate_identifier(item.field, "filter field")
-            if item.operator == "matches":
+            if item.operator in _UNSUPPORTED_CONTRACT_OPERATORS:
                 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication,
-                # docs/design/R2DB_CCR13_STORAGE_V1.md): `matches` is part
-                # of the common contract's own filter-operator vocabulary
+                # docs/design/R2DB_CCR13_STORAGE_V1.md): `contains`/
+                # `matches`/`is_null` are real members of the common
+                # contract's own filter-operator vocabulary
                 # (`allowed_query_operators`), unlike a genuinely
                 # unrecognized operator string -- this peer simply does
-                # not execute it. That is exactly CapabilityError's own
-                # distinction from ValidationError (see that class's
-                # docstring): a request outside the contract's vocabulary
-                # entirely (ValidationError) versus a contract operation
-                # this peer's own entry point does not implement
-                # (CapabilityError, mapped to CAPABILITY_UNSUPPORTED at
-                # the API boundary) -- a positive, honest refusal, since
-                # this peer's filter grammar does have an acceptance
-                # surface for it (unlike a peer with no filter DSL at
-                # all). Checked ahead of the field-existence check below
-                # (WP-3 review minor, ordering unified with r2db-api: there,
-                # `DataService.query`'s own `matches` gate fires before the
-                # cell is ever called at all, so field existence is never
-                # even considered -- a refusal this unconditional must not
-                # depend on whether the named field happens to exist).
-                raise CapabilityError("matches is not supported by this foundation")
+                # not execute any of the three. That is exactly
+                # CapabilityError's own distinction from ValidationError
+                # (see that class's docstring): a request outside the
+                # contract's vocabulary entirely (ValidationError) versus a
+                # contract operation this peer's own entry point does not
+                # implement (CapabilityError, mapped to
+                # CAPABILITY_UNSUPPORTED at the API boundary) -- a positive,
+                # honest refusal, since this peer's filter grammar does have
+                # an acceptance surface for the vocabulary (unlike a peer
+                # with no filter DSL at all). Checked ahead of the
+                # field-existence check below (WP-3 review minor, ordering
+                # unified with r2db-api: there, `DataService.query`'s own
+                # `matches` gate fires before the cell is ever called at
+                # all, so field existence is never even considered -- a
+                # refusal this unconditional must not depend on whether the
+                # named field happens to exist). `contains`/`is_null` used
+                # to fall through to the generic "not a filter operator this
+                # peer implements" branch below and raise `ValidationError`
+                # instead, disagreeing with their own declared
+                # `unsupported` status -- fixed (conformance-review finding,
+                # WP-5a): all three now share this one path.
+                raise CapabilityError(f"{item.operator} is not supported by this foundation")
             if field not in available:
                 raise ValidationError("invalid filter")
             if item.operator not in _OPS:
-                # `contains`/`is_null` fall through to here too (`_OPS`
-                # has neither) -- already declared `unsupported` in
-                # `structured_query` above and, unlike `matches`, never
-                # implemented via a LIKE-wildcard pass-through this
-                # module would need to escape (Q-2 disposition, WP-3
-                # scope note): there is no code path here that could leak
-                # wildcard semantics for either.
+                # A genuinely unrecognized operator string, outside the
+                # common contract's vocabulary entirely (every contract
+                # member this peer does not implement is handled by the
+                # `_UNSUPPORTED_CONTRACT_OPERATORS` branch above instead).
                 raise ValidationError("invalid filter")
             if item.operator == "in":
                 if not isinstance(item.value, list) or not item.value:

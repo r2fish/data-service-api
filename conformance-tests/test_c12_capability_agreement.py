@@ -53,6 +53,13 @@ def _declared_mutation_operations(capability_document: dict, contract: dict) -> 
     return set()
 
 
+def _declared_query_operators(capability_document: dict) -> set[str]:
+    entry = capability_document.get("capabilities", {}).get("structured_query", {})
+    if entry.get("status") in ("enabled", "partial"):
+        return set(entry.get("operators", []))
+    return set()
+
+
 # --- 1. declared vs. undeclared mutation operations -------------------------
 
 
@@ -179,7 +186,81 @@ def test_application_catalog_declaration_matches_observed_behavior(adapter, fx: 
     )
 
 
-# --- 3. registry-wide positive-control vacuity guard (not per-adapter) -----
+# --- 3. reverse condition: undeclared query operators/mutations refuse ------
+#
+# design docs/design/R2DB_CCR13_STORAGE_V1.md section 4 "C-12 逆向き条件"
+# (WP-5a): tests 1/2 above only check the "declared enabled => executes"
+# direction. The opposite direction -- "an operation/operator this peer's
+# own capability document does NOT declare must be refused with
+# CAPABILITY_UNSUPPORTED before execution, state unchanged" -- went
+# unchecked, and that is exactly the shape two real defects took (WP-2
+# review B-1, WP-3 review blocker-1: `expected_revision`/`create_index`/
+# `upsert`/`field_type`/`matches` all became executable through a shared
+# validation boundary while their capability declarations still said
+# `unavailable`/`unsupported`). The mutation-operation half of this reverse
+# direction is already covered by test 1's own "else" branch above (an
+# undeclared `atomic_mutation` operation is exercised and must refuse); this
+# section covers the other half design section 4 names explicitly: query
+# *operators* (`structured_query.operators`), which tests 1/2 never touch at
+# all.
+
+
+def test_undeclared_query_operators_are_refused_before_execution(adapter, fx: Fixture):
+    contract = load_contract()
+    all_operators = set(contract["structured_operations"]["allowed_query_operators"])
+    capability_document = adapter.capability_document()
+    declared = _declared_query_operators(capability_document)
+    undeclared = all_operators - declared
+
+    entity = fresh_identifier("c12_operator")
+    field_name = "label"
+    adapter.create_entity(fx.developer_a, entity, {field_name: "text"})
+    adapter.insert(fx.runtime_a, entity, {field_name: "seed-value"})
+
+    for operator in sorted(undeclared):
+        # Presented to the same real query entry point `select_eq`/
+        # `attempt_filter` already uses -- this finding was discovered
+        # (WP-1 review, correction B-2/M-1) by presenting a real,
+        # contract-shaped request rather than assuming a peer's behavior,
+        # and this reverse condition exists specifically to keep catching
+        # that class of gap, not just this one instance of it.
+        count_before = adapter.count(fx.runtime_a, entity)
+        value = None if operator == "is_null" else "seed-value"
+        with pytest.raises(ConformanceDenial) as ei:
+            adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, operator, value)
+        _assert_is_contract_code(ei.value.code)
+        assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
+            f"{adapter.name}: {operator!r} is not declared in structured_query.operators, so attempt_filter() "
+            f"must deny with CAPABILITY_UNSUPPORTED before execution, got {ei.value.code!r}"
+            f"{_unclassified_hint(ei.value.code)}"
+        )
+        count_after = adapter.count(fx.runtime_a, entity)
+        assert count_after == count_before, (
+            f"{adapter.name}: undeclared operator {operator!r} attempt changed {entity}'s row count "
+            f"({count_before} -> {count_after})"
+        )
+
+
+def test_at_least_one_adapter_has_an_undeclared_query_operator_to_refuse():
+    # Vacuity guard symmetric to the one below: if every registered adapter
+    # declared the contract's entire operator vocabulary, the reverse-
+    # condition test above would never actually exercise its refusal branch
+    # anywhere in the registry.
+    contract = load_contract()
+    all_operators = set(contract["structured_operations"]["allowed_query_operators"])
+    saw_undeclared_operator = False
+    for name, adapter_obj in registered_adapters().items():
+        declared = _declared_query_operators(adapter_obj.capability_document())
+        if all_operators - declared:
+            saw_undeclared_operator = True
+            break
+    assert saw_undeclared_operator, (
+        "every registered adapter declares the entire allowed_query_operators vocabulary; "
+        "test_undeclared_query_operators_are_refused_before_execution is vacuous across the whole registry"
+    )
+
+
+# --- 4. registry-wide positive-control vacuity guard (not per-adapter) -----
 
 
 def test_at_least_one_adapter_exercises_a_positive_control_mutation():

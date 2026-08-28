@@ -367,6 +367,28 @@ class TamperVector:
     forbidden_parameters: Sequence[str] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class BatchOperation:
+    """One element of the list `ConformanceAdapter.attempt_batch_with_
+    addresses` presents as a single real atomic mutation unit (port v1.4,
+    docs/design/CONFORMANCE_ADAPTER_V1.md section 14). Field-for-field the
+    same shape `attempt_mutation`'s own keyword arguments already use, so a
+    caller building a batch from what would otherwise be several separate
+    `attempt_mutation` calls does not learn a second vocabulary.
+    `destructive`/`confirmation` follow the same `VALID_CONFIRMATION`
+    sentinel protocol as `ConformanceAdapter.delete`.
+    """
+
+    operation: str
+    values: Mapping[str, Any] | None = None
+    where_field: str | None = None
+    where_value: Any = None
+    expected_revision: str | None = None
+    unique_key: str | None = None
+    destructive: bool = False
+    confirmation: Any = None
+
+
 # ---------------------------------------------------------------------------
 # 4.4 Abstract adapter
 # ---------------------------------------------------------------------------
@@ -478,6 +500,29 @@ class ConformanceAdapter(ABC):
     ) -> list[dict]: ...
 
     @abstractmethod
+    def attempt_filter(
+        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+    ) -> list[dict]:
+        """`select_eq` generalized to an arbitrary predicate operator (port
+        v1.3, docs/design/CONFORMANCE_ADAPTER_V1.md section 13): presents a
+        single-predicate query (`{field, operator, value}`) to the peer
+        exactly as a real client attempting that operator would, returning
+        matching items. Unlike `select_eq`, `field`/`operator` are not
+        optional -- there is always exactly one predicate.
+
+        Used by C-12's reverse condition (an operator outside a peer's own
+        declared `structured_query.operators` set must be refused with
+        `CAPABILITY_UNSUPPORTED` before execution, state unchanged) and by
+        C-03's `contains`/`matches` value-corpus probes (literal-vs-wildcard
+        semantics, and `matches`'s pattern-grammar rejection). Every
+        operator in the common contract's `allowed_query_operators` MUST be
+        presented to the same real query entry point `select_eq` already
+        uses -- never fabricated as a denial by the adapter itself, per the
+        same principle `attempt_mutation`'s docstring states for the
+        mutation vocabulary.
+        """
+
+    @abstractmethod
     def delete(
         self,
         session,
@@ -535,6 +580,7 @@ class ConformanceAdapter(ABC):
         where_field: str | None,
         where_value: Any,
         expected_revision: str | None = None,
+        unique_key: str | None = None,
     ) -> int:
         """Present one mutation-vocabulary operation (`insert` / `update` /
         `upsert` / `delete`) to the peer exactly as a real client would, and
@@ -579,6 +625,17 @@ class ConformanceAdapter(ABC):
         as of docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-1) -- a
         real, present denial, not a structural absence.
 
+        `unique_key` (port v1.3, docs/design/CONFORMANCE_ADAPTER_V1.md
+        section 13) is the contract's `Mutation.unique_key` (CCR-13 §0.5
+        Q-1 adjudication, plan B): names, by the catalog's own key name,
+        which of an entity's declared uniqueness keys `upsert` should use
+        as its existence test when more than one is declared. Carried
+        through exactly like `expected_revision` -- never interpreted by
+        the adapter -- to whatever real entry point already receives the
+        rest of the operation (for `r2db-api`, the same `unique_key`
+        parameter position on the single mutation dispatcher every other
+        keyword here already uses).
+
         This method is used by C-12 (capability declaration agreement) to
         exercise `insert`/`update`/`upsert` against the peer's own
         declared `atomic_mutation` capability; it deliberately never
@@ -606,19 +663,87 @@ class ConformanceAdapter(ABC):
         """
 
     @abstractmethod
+    def attempt_mutation_with_addresses(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        """Same request/dispatch semantics as `attempt_mutation` in every
+        respect (port v1.3, docs/design/CONFORMANCE_ADAPTER_V1.md section
+        13), but observes the real mutation response's addresses too,
+        returning `(affected, assigned_addresses)` instead of a bare
+        `int`. A second method, rather than changing `attempt_mutation`'s
+        own return type, because C-12 already depends on `attempt_mutation`
+        returning a plain `int` it compares with `>= 1`; this method exists
+        for C-17, which needs to see the response's `assigned_addresses`
+        directly (in particular, that only the *insert-resolved* half of an
+        `upsert` batch ever appears there -- an update-resolved `upsert`
+        must report none) rather than infer address values indirectly.
+
+        `assigned_addresses` (index-aligned with insert/insert-resolved-
+        upsert operations in the contract's `MutationResult.
+        assigned_addresses`) is `None` when the peer's real mutation
+        response carries no addresses concept at all (the same convention
+        `query_with_revisions` uses for `revisions`) -- an *observed* fact
+        about that real response, never an assumption: a plug whose peer's
+        response is a dict inspects it for the real key (e.g.
+        `result.get("assigned_addresses")`); only a plug whose underlying
+        call's return type structurally has no such slot at all (a bare
+        list/int, not a wrapping object) may report `None` on that
+        structural basis alone (conformance-review correction M-1's same
+        principle, applied here to addresses instead of revisions).
+        """
+
+    @abstractmethod
+    def attempt_batch_with_addresses(
+        self, session, entity: str, operations: Sequence[BatchOperation]
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        """Present multiple mutation-vocabulary operations as ONE real
+        atomic batch to the peer -- the same real multi-operation
+        dispatcher `attempt_mutation`/`attempt_mutation_with_addresses`
+        already use with exactly one operation each -- and return the
+        whole batch's `(affected, assigned_addresses)` (port v1.4,
+        docs/design/CONFORMANCE_ADAPTER_V1.md section 14).
+
+        Exists for C-17: `attempt_mutation_with_addresses` alone only ever
+        proves the insert-only membership rule for `assigned_addresses` one
+        operation at a time, which cannot catch a defect that only appears
+        when operations of different kinds share one atomic unit (for
+        example, a batch-level accumulation bug that attaches an address
+        entry to a non-insert operation only when a real insert elsewhere
+        in the same batch happens to precede it). Every operation MUST be
+        presented to the same real batch entry point a real client
+        sending multiple operations at once would use -- never split into
+        several separate single-operation calls by the adapter itself,
+        which would prove nothing about batch-level behavior at all.
+        """
+
+    @abstractmethod
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         """Present a real `create_index` (`unique: true`) schema operation to
         the peer, exactly as a real client attempting the contract's
         `create_index` vocabulary (CCR-13, contract 1.1.0) would (port v1.2,
         docs/design/CONFORMANCE_ADAPTER_V1.md section 12). Returns normally
         on success; raises `ConformanceDenial` on the peer's own real
-        refusal (for example, `r2db-api` as of docs/design/
-        R2DB_CCR13_STORAGE_V1.md work package WP-1 still refuses this shape,
-        since `create_index` execution is deferred to that design's WP-3 --
-        but it refuses through the same real, single `schema()` dispatcher
-        every other schema operation goes through, exactly like
-        `attempt_mutation`'s `upsert` branch, so that refusal is a genuine
-        `ConformanceDenial`, not fabricated).
+        refusal.
+
+        `r2db-api` (docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-3)
+        now really implements `create_index`, so a well-formed request
+        against a real entity with real, existing fields succeeds for real
+        on this peer -- this is no longer a guaranteed-refusal probe there
+        (port v1.2's original docstring text described the WP-1-era state,
+        before WP-3 landed; port v1.3 corrects it). A malformed or
+        conflicting request still gets a genuine `ConformanceDenial` from
+        the same real, single `schema()` dispatcher every other schema
+        operation goes through, exactly like `attempt_mutation`'s `upsert`
+        branch -- never fabricated.
 
         Raises `SurfaceAbsent` instead when the peer's public surface has no
         schema-operation entry point that could plausibly receive an

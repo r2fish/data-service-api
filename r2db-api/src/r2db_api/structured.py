@@ -109,17 +109,16 @@ class Predicate:
 # (well-formed string, not paired with `insert`, not silently discarded on
 # an empty-values `update`) and then executed by each backend's own code.
 #
-# IMPORTANT (WP-2 review, blocker B-1): this shared boundary now
-# structurally *accepts* vocabulary (`expected_revision`, `upsert`,
-# `create_index`/`drop_index`, `field_type`) that `DataService.capabilities()`
-# may still be declaring `unavailable`/`unsupported`. `DataService` (service.
-# py) is where the WP-2-through-WP-5 provisional gate lives that keeps the
-# HTTP-observable surface matching the still-current declaration until the
-# declaration itself is updated (design R2DB_CCR13_STORAGE_V1.md §3, "WP-2
-# 〜WP-5 の乖離封鎖"); this module does not gate anything itself, since a
-# direct caller of `ApplicationCell`/`PostgresCell` (every test in this
-# work package, and the eventual WP-5 conformance suite) needs the full,
-# ungated behaviour to be reachable.
+# CCR-13 WP-5b: this shared boundary structurally *accepts* the full
+# vocabulary (`expected_revision`, `upsert`, `create_index`/`drop_index`,
+# `field_type`, `matches`) unconditionally -- it never gated any of it
+# itself. `DataService` (service.py) carried a provisional gate through
+# WP-2〜WP-5 that kept the HTTP-observable surface matching the then-
+# current `capabilities()` declaration while this boundary and both cells
+# were being built out; that gate is removed in the same commit that
+# updates the declaration (design R2DB_CCR13_STORAGE_V1.md §3), so
+# `DataService` now exposes exactly what this boundary and the cells
+# themselves decide.
 
 
 def validate_projection(select: Any, known_fields: set[str]) -> list[str]:
@@ -572,6 +571,25 @@ def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, s
             _check_type(predicate.value, declared_type, predicate.field)
 
 
+# --- page size (contract `Page.size`) ---------------------------------------
+
+# `spec/data-service-api.v1.json`'s `Page.size` schema: `{"minimum": 1,
+# "maximum": 1000}` -- a fixed contract ceiling, independent of
+# `ResourceLimits.result_items` (a deployment-tunable resource class that
+# could in principle be configured to any positive value). A client
+# request for a page larger than the contract itself allows is a request
+# outside the contract's own vocabulary (`VALIDATION_FAILED`), not a
+# resource a deployment could simply raise (WP-4 review minor-1).
+MAX_PAGE_SIZE = 1000
+
+
+def validate_page_size(page_size: int, limits: ResourceLimits) -> None:
+    if page_size <= 0:
+        fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
+    if page_size > MAX_PAGE_SIZE:
+        fail("VALIDATION_FAILED", "Page size exceeds the contract maximum.", details={"limit": MAX_PAGE_SIZE})
+
+
 # --- order_by / cursor pagination (R-6) ------------------------------------
 
 MAX_ORDER_BY_FIELDS = 10
@@ -761,8 +779,7 @@ class ApplicationCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
-        if page_size <= 0:
-            fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
+        validate_page_size(page_size, limits)
         if entity not in self.entities:
             fail("NOT_FOUND", "Entity was not found.", status=404)
         field_types = self.schema.get(entity, {})

@@ -46,6 +46,7 @@ from adapter import (  # noqa: E402
     CATALOG_SURFACE_ABSENT,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
     CredentialHandle,
@@ -175,6 +176,19 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         filters = [Filter(field, "eq", value)] if field is not None else None
         return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
 
+    def attempt_filter(
+        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+    ) -> list[dict]:
+        # Same real `session.read()` entry point `select_eq` above already
+        # uses, generalized to an arbitrary operator -- an operator this
+        # peer does not implement (`contains`/`matches`/`is_null`, all
+        # declared `unsupported` in its own `structured_query` capability
+        # entry) is presented here exactly as a real client attempting it
+        # would be, and whatever `cell.py::_where` itself produces is
+        # returned, never fabricated.
+        filters = [Filter(field, operator, value)]
+        return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
+
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
         # VALID_CONFIRMATION sentinel protocol (design section 10.1):
         # `confirmation=None` supplies no confirmation (this peer's
@@ -241,7 +255,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # application caller could reach).
         return CATALOG_SURFACE_ABSENT
 
-    def attempt_mutation(
+    def _attempt_mutation_outcome(
         self,
         session,
         entity: str,
@@ -250,42 +264,49 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         values: Mapping[str, Any] | None,
         where_field: str | None,
         where_value: Any,
-        expected_revision: str | None = None,
+        expected_revision: str | None,
+        unique_key: str | None,
     ) -> int:
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
 
-        if expected_revision is not None:
+        if expected_revision is not None or unique_key is not None:
             # Conformance-review finding (correction B-2): this is a real,
-            # present entry point for a revision precondition, not a
-            # structural absence. `ApplicationRuntime.transact`/
-            # `ApplicationCell.transact` already accepts an arbitrary
-            # operation-dict shape (exactly what the `upsert` branch below
-            # relies on) -- so `expected_revision` is presented as a real
-            # extra key on that dict, exactly as a real client attempting
-            # the contract's revision-precondition vocabulary would, and
+            # present entry point for a revision precondition (and, port
+            # v1.3, for `unique_key`), not a structural absence.
+            # `ApplicationRuntime.transact`/`ApplicationCell.transact`
+            # already accepts an arbitrary operation-dict shape (exactly
+            # what the `upsert` branch below relies on) -- so either extra
+            # key is presented as a real field on that dict, exactly as a
+            # real client attempting the contract's vocabulary would, and
             # this adapter returns whatever `transact()` itself produces.
             # An earlier revision of this method instead raised
-            # `SurfaceAbsent` here on the strength of `session.insert`/
-            # `.update`/`.delete` alone having no such parameter -- but
-            # `transact()` is a real, present dispatcher those three
-            # dedicated methods do not exhaust, and (before `cell.py` was
-            # fixed) it silently ignored this exact key on an "insert"
-            # operation, committing the row with the precondition never
-            # even inspected. That was the real non-conformance C-18 exists
-            # to catch; declaring it `SurfaceAbsent` would have hidden it
-            # behind a fabricated claim of absence, which design principle
-            # 4 forbids as surely as fabricating a denial does.
-            item: dict[str, Any] = {
-                "type": operation, "collection": entity,
-                "values": dict(values or {}), "expected_revision": expected_revision,
-            }
+            # `SurfaceAbsent` for `expected_revision` on the strength of
+            # `session.insert`/`.update`/`.delete` alone having no such
+            # parameter -- but `transact()` is a real, present dispatcher
+            # those three dedicated methods do not exhaust, and (before
+            # `cell.py` was fixed) it silently ignored this exact key on an
+            # "insert" operation, committing the row with the precondition
+            # never even inspected. That was the real non-conformance C-18
+            # exists to catch; declaring it `SurfaceAbsent` would have
+            # hidden it behind a fabricated claim of absence, which design
+            # principle 4 forbids as surely as fabricating a denial does.
+            # This peer has no uniqueness-key concept at all, so a real
+            # `unique_key` value here is expected to be refused (there is
+            # no declared key it could ever name) -- but that refusal must
+            # still come from presenting it to this real dispatcher, not
+            # from this adapter deciding the answer itself.
+            item: dict[str, Any] = {"type": operation, "collection": entity, "values": dict(values or {})}
+            if expected_revision is not None:
+                item["expected_revision"] = expected_revision
+            if unique_key is not None:
+                item["unique_key"] = unique_key
             if filters is not None:
                 item["filters"] = filters
 
-            def revisioned_op() -> int:
+            def dispatched_op() -> int:
                 results = session.transact([item])
                 return len(results)
-            return self._call(revisioned_op)
+            return self._call(dispatched_op)
 
         if operation == "insert":
             def insert_op() -> int:
@@ -333,6 +354,91 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # there is no peer call this adapter could present it to that
         # would mean anything.
         raise ConformanceDenial(code="CAPABILITY_UNSUPPORTED", adapter=self.name, native_type="")
+
+    def attempt_mutation(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+    ) -> int:
+        return self._attempt_mutation_outcome(
+            session, entity, operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+
+    def attempt_mutation_with_addresses(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        affected = self._attempt_mutation_outcome(
+            session, entity, operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        # None, always: none of `session.insert`/`.update`/`.delete`/
+        # `.transact`'s real return shapes (`{"rowid": ...}`, `{"updated":
+        # ...}`, `{"deleted": ...}`, a results list) carry anything shaped
+        # like the contract's `assigned_addresses` -- consistent with this
+        # peer declaring `row_addressability: unavailable`. `insert()`'s
+        # own `rowid` is a SQLite-internal artifact, not a published
+        # address; synthesizing `[{"address": {"rowid": ...}}]` from it
+        # would be this adapter fabricating an addressability concept the
+        # peer itself does not declare or publish to a real caller.
+        return affected, None
+
+    def attempt_batch_with_addresses(
+        self, session, entity: str, operations: Sequence[BatchOperation]
+    ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        # `ApplicationRuntime.transact`/`ApplicationCell.transact` is the
+        # *only* real multi-operation atomic dispatcher this peer has --
+        # there is no other call that could receive more than one operation
+        # at once -- so every operation in the batch is presented to it
+        # together, in one real call, exactly as `_attempt_mutation_
+        # outcome`'s own `expected_revision`/`unique_key` branch already
+        # does for a single operation. This peer's `transact()` only ever
+        # truly executes a `"insert"` item; every other type in the same
+        # vocabulary (`update`/`delete`/`upsert`) is refused with
+        # `CapabilityError` regardless of what else is in the batch
+        # (`cell.py`'s own op-type dispatch) -- so a real mixed batch
+        # (insert alongside update/delete) is genuinely refused here, never
+        # silently split into several single-operation calls this adapter
+        # stitches together itself, which would prove nothing real about
+        # this peer's own (lack of) batch-mixing support.
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"type": op.operation, "collection": entity, "values": dict(op.values or {})}
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            if op.where_field is not None:
+                item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
+            if op.destructive:
+                item["destructive"] = True
+                if op.confirmation is VALID_CONFIRMATION:
+                    item["confirm"] = True
+                elif op.confirmation is not None:
+                    item["confirm"] = op.confirmation
+            items.append(item)
+
+        def op() -> int:
+            results = session.transact(items)
+            return len(results)
+        affected = self._call(op)
+        return affected, None
 
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         # `session` is unavailable-regardless of *any* session (the answer

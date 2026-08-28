@@ -262,3 +262,121 @@ def test_structural_integrity_across_corpus(adapter, fx: Fixture):
 
     ents_after = adapter.entities(fx.runtime_a)
     assert ents_after == ents_before, "entity set changed after running the value corpus"
+
+
+# --- 6. contains/matches value corpus (Q-2 literal/wildcard semantics) ------
+#
+# design docs/design/R2DB_CCR13_STORAGE_V1.md §0.5 Q-2 adjudication
+# (contract 1.1.0 `structured_operations.query_operators`): `contains` is
+# literal substring containment -- no character of its value is ever
+# interpreted as a wildcard/pattern token -- while `matches` is a real
+# wildcard grammar (`%`/`_` as meta-characters, `\` as an escape). Neither
+# `test_value_positions_round_trip_or_deny` above nor
+# `test_c12_capability_agreement.py`'s reverse condition exercise this: both
+# only ever use `eq`. These probes place values containing the wildcard
+# meta-characters themselves at the `contains`/`matches` *value* position
+# specifically, so a peer that silently gave `contains` wildcard semantics
+# (a live regression risk this same design's own §0.5 Q-2 exists to
+# foreclose) would be caught by a pattern falsely matching a row it should
+# not.
+
+CONTAINS_MATCHES_VALUE_PAYLOADS: list[str] = ["50%off", "a_b_c", "back\\slash", "%_\\mixed"]
+
+
+def _declared_query_operators_c03(capability_document: dict) -> set[str]:
+    entry = capability_document.get("capabilities", {}).get("structured_query", {})
+    if entry.get("status") in ("enabled", "partial"):
+        return set(entry.get("operators", []))
+    return set()
+
+
+def test_contains_value_position_is_literal_never_wildcard_interpreted(adapter, fx: Fixture):
+    declared = _declared_query_operators_c03(adapter.capability_document())
+    entity = fresh_identifier("c03_containslit")
+    field_name = "label"
+    adapter.create_entity(fx.developer_a, entity, {field_name: "text"})
+
+    if "contains" not in declared:
+        # Undeclared vocabulary member: C-12's reverse condition already
+        # covers the capability-agreement half of this; here it is enough
+        # to confirm the same real query entry point still denies it
+        # honestly rather than silently executing wildcard-interpreted.
+        with pytest.raises(ConformanceDenial) as ei:
+            adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "contains", "50%off")
+        _assert_is_contract_code(ei.value.code)
+        assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
+            f"{adapter.name}: contains is undeclared; attempt_filter() must deny with "
+            f"CAPABILITY_UNSUPPORTED, got {ei.value.code!r}{_unclassified_hint(ei.value.code)}"
+        )
+        return
+
+    for payload in CONTAINS_MATCHES_VALUE_PAYLOADS:
+        adapter.insert(fx.runtime_a, entity, {field_name: payload})
+        # positive: the payload, used verbatim as its own contains pattern,
+        # matches the row it came from -- a plain substring search always
+        # matches itself, wildcard-interpreted or not, so this alone does
+        # not yet distinguish the two; the negative check right below does.
+        rows = adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "contains", payload)
+        assert any(r.get(field_name) == payload for r in rows), (
+            f"{adapter.name}: contains({payload!r}) did not match the row holding that exact value"
+        )
+
+    # negative: a `%`-containing pattern must not ALSO match a row that
+    # merely fits the wildcard-interpreted shape (`50%off` interpreted as
+    # SQL LIKE would match `50XXXoff`, `50off`, etc.) -- if it did, this
+    # peer would be giving `contains` the exact wildcard semantics Q-2
+    # explicitly forecloses.
+    adapter.insert(fx.runtime_a, entity, {field_name: "50XXXoff"})
+    adapter.insert(fx.runtime_a, entity, {field_name: "50off"})
+    rows = adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "contains", "50%off")
+    matched_values = {r.get(field_name) for r in rows}
+    assert matched_values == {"50%off"}, (
+        f"{adapter.name}: contains('50%off') matched {matched_values!r} -- expected only the row containing "
+        "the literal substring '50%off', not rows a wildcard-interpreted % would additionally match"
+    )
+
+
+def test_matches_value_position_applies_real_wildcard_grammar_and_rejects_bad_patterns(adapter, fx: Fixture):
+    declared = _declared_query_operators_c03(adapter.capability_document())
+    entity = fresh_identifier("c03_matcheswild")
+    field_name = "label"
+    adapter.create_entity(fx.developer_a, entity, {field_name: "text"})
+
+    if "matches" not in declared:
+        with pytest.raises(ConformanceDenial) as ei:
+            adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "matches", "50\\%off%")
+        _assert_is_contract_code(ei.value.code)
+        assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
+            f"{adapter.name}: matches is undeclared; attempt_filter() must deny with "
+            f"CAPABILITY_UNSUPPORTED, got {ei.value.code!r}{_unclassified_hint(ei.value.code)}"
+        )
+        return
+
+    adapter.insert(fx.runtime_a, entity, {field_name: "50%off everything"})
+    adapter.insert(fx.runtime_a, entity, {field_name: "hello"})
+    # `%` as a real wildcard (any sequence, including empty) and `\%` as an
+    # escaped literal percent, in the same pattern.
+    rows = adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "matches", "50\\%off%")
+    matched_values = {r.get(field_name) for r in rows}
+    assert matched_values == {"50%off everything"}, (
+        f"{adapter.name}: matches('50\\\\%off%') matched {matched_values!r}, expected only '50%off everything'"
+    )
+    # `_` as a real wildcard (exactly one character).
+    rows_underscore = adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "matches", "hel_o")
+    assert {r.get(field_name) for r in rows_underscore} == {"hello"}, (
+        f"{adapter.name}: matches('hel_o') did not match 'hello' via the `_` wildcard"
+    )
+    # A pattern ending in an unescaped backslash has no next character to
+    # escape and is malformed grammar (contract `query_operators.matches`),
+    # refused deterministically rather than depending on stored data.
+    count_before = adapter.count(fx.runtime_a, entity)
+    with pytest.raises(ConformanceDenial) as ei:
+        adapter.attempt_filter(fx.runtime_a, entity, [field_name], field_name, "matches", "trailing\\")
+    _assert_is_contract_code(ei.value.code)
+    assert ei.value.code == "VALIDATION_FAILED", (
+        f"{adapter.name}: matches pattern with a trailing unescaped backslash: {ei.value.code!r}, "
+        "expected VALIDATION_FAILED"
+    )
+    assert adapter.count(fx.runtime_a, entity) == count_before, (
+        f"{adapter.name}: state changed despite a rejected malformed matches pattern"
+    )

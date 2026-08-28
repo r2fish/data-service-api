@@ -126,6 +126,7 @@ from .structured import (
     bind_schema_operation,
     require_destructive_confirmation,
     validate_identifier,
+    validate_page_size,
     validate_predicates,
     validate_projection,
 )
@@ -893,8 +894,7 @@ class PostgresCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
-        if page_size <= 0:
-            fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
+        validate_page_size(page_size, limits)
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:

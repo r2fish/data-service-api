@@ -2,9 +2,9 @@
 
 ## 文書情報
 
-- 版数: 1.3 (§12 を新設。port v1.2: `docs/design/R2DB_CCR13_STORAGE_V1.md` work package WP-1 由来の coordinated revision -- 共通 fixture/probe から `id` を退避、C-12 upsert positive control の unique-key 前提化、`attempt_mutation` への `expected_revision`、`create_unique_index`、`query_with_revisions`、`create_entity` の型配線義務の明記。独立レビュー (Opus) の blocker 3件・major 6件・minor 7件を反映済み)
+- 版数: 1.4 (§13 を新設。port v1.3: `docs/design/R2DB_CCR13_STORAGE_V1.md` work package WP-5a 由来の coordinated revision -- C-17/C-18 の test file 実装・実行可能化、C-12 逆向き条件 (query 演算子)、`attempt_mutation` への `unique_key`、`attempt_mutation_with_addresses`、`attempt_filter`、r2db plug の型配線有効化、C-03 の contains/matches value corpus 拡張。逆向き条件の実提示で発見した `MitateDB-api` の `contains`/`is_null` 非適合 (`CAPABILITY_UNSUPPORTED` ではなく `VALIDATION_FAILED`) を是正)
 - 発行日: 2026-08-28
-- 設計担当: Opus (§1〜§11)。§12 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)
+- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
 ## 1. 解決する問題
@@ -829,3 +829,203 @@ this document to whenever the NORMATIVE surface grows -- consistent with,
 not a departure from, how §11 introduced `catalog_document`,
 `attempt_mutation` itself, and `credential_reactivation_vectors` in the
 prior coordinated revision.
+
+## 13. v1.3 port revision (coordinated with docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-5a)
+
+By the time work package WP-5a began, `r2db-api` had already landed WP-2
+through WP-4 (in-memory + PostgreSQL CCR-13 storage, committed) and WP-5b
+(the `capabilities()` declaration update -- `row_addressability`/
+`revision_preconditions: enabled`, `upsert`/`create_index`/`drop_index`
+real operations, the provisional gate from R2DB_CCR13_STORAGE_V1.md §3
+removed)
+was staged in the same working tree. §12's port additions were therefore
+plumbing with no adapter divergence to observe when they were written; this
+section is where they -- and several more the C-17/C-18 test files
+themselves needed -- become genuinely exercised, per this document's own
+design principle 1 (port owned by the common repository, plug owned by
+each peer) and principle 4, exactly as §11/§12 did for their own additions.
+Every plug implements every addition below in the same change; none is
+left with a stub.
+
+### 13.1 `attempt_mutation`/`attempt_mutation_with_addresses`: `unique_key`
+
+`unique_key` (contract 1.1.0, CCR-13 §0.5 Q-1 adjudication plan B:
+`Mutation.unique_key`) is a new keyword-only parameter on
+`attempt_mutation`, carried through exactly like `expected_revision` -- never
+interpreted by the adapter. It names, by the catalog's own key name, which
+of an entity's declared uniqueness keys `upsert` should use as its
+existence test when more than one is declared. `r2db-api` (both plugs) has
+a real parameter position for it already (the same mutation-operation
+dispatcher every other keyword here uses); `MitateDB-api` has no
+uniqueness-key concept at all, so a real value is expected to be refused,
+but that refusal is required to come from presenting it to the real
+`transact()` dispatcher (the same one `expected_revision` already uses,
+per §12.3's correction B-2), never from the adapter deciding the answer
+itself.
+
+A second new method, `attempt_mutation_with_addresses`, has the identical
+parameter set but returns `(affected, assigned_addresses)` instead of a
+bare `int`. It exists because C-12 already depends on `attempt_mutation`
+returning a plain `int` compared with `>= 1`, and C-17 needs to observe the
+real mutation response's `assigned_addresses` directly -- in particular,
+that only the insert-resolved half of an `upsert` batch ever appears there,
+never the update-resolved half. `assigned_addresses` is `None` only when
+the peer's real response structurally has no such slot at all (the same
+convention `query_with_revisions` uses for `revisions`); `r2db-api` (both
+plugs) always returns a real list (`MutationResult.assigned_addresses`
+never being `None` in `service.py`'s own shape); `MitateDB-api` always
+returns `None`, since none of its real return shapes (`{"rowid": ...}`,
+`{"updated": ...}`, `{"deleted": ...}`, a `transact()` results list) carry
+anything resembling a published address -- consistent with this peer
+declaring `row_addressability: unavailable`. Synthesizing an address out of
+`insert()`'s own `rowid` would be this adapter fabricating an
+addressability concept the peer itself does not publish to a real caller.
+
+### 13.2 `attempt_filter`
+
+`select_eq` generalized to an arbitrary predicate operator:
+`attempt_filter(session, entity, select, field, operator, value)`, presenting a
+single-predicate query to the same real query entry point `select_eq`
+already uses. Needed by two consumers that both already existed but had no
+way to exercise a *non-`eq`* operator at all: C-12's reverse condition
+(§13.3 below) and C-03's new `contains`/`matches` value-corpus tests
+(§13.5).
+
+### 13.3 C-12 reverse condition: undeclared query operators
+
+C-12 previously only ever checked "declared enabled ⇒ executes" for
+mutation operations; the opposite direction -- "an operation/operator this
+peer's own capability document does NOT declare must be refused with
+`CAPABILITY_UNSUPPORTED` before execution" -- went completely unchecked
+for query *operators* specifically (`structured_query.operators`), even
+though the mutation-operation half of this reverse direction was already
+implicit in C-12's own "undeclared operation" branch. `docs/design/
+R2DB_CCR13_STORAGE_V1.md` §4 names this explicitly: two real defects (WP-2
+review B-1, WP-3 review blocker-1) took exactly this shape -- a
+capability-document `unavailable`/`unsupported` entry with a shared
+validation boundary that executed it anyway.
+`test_c12_capability_agreement.py`'s new
+`test_undeclared_query_operators_are_refused_before_execution` presents
+every operator in the contract's own `allowed_query_operators` that a
+peer's `structured_query.operators` does not list,
+via `attempt_filter`, and requires `CAPABILITY_UNSUPPORTED` with state
+unchanged.
+
+**Finding, fixed in this revision:** presenting this real request against
+`MitateDB-api` found that `contains` and `is_null` -- both declared
+`unsupported` in its own `structured_query` capability entry, same as
+`matches` -- were in fact refused with `VALIDATION_FAILED`, not
+`CAPABILITY_UNSUPPORTED`. `cell.py::_where` special-cased only `matches`
+with the correct `CapabilityError`; `contains`/`is_null` fell through to
+the generic "operator this peer does not implement at all" branch and
+raised `ValidationError` instead, disagreeing with their own declared
+status (`capability_status.rules`: "optional target operations ... must
+fail with CAPABILITY_UNSUPPORTED"). This is corrected in `cell.py` itself
+(a legitimate scope for this revision, the same precedent §12.3's
+correction B-2 already set for a `MitateDB-api` fix discovered by
+presenting a real request rather than assuming behavior): all three
+contract-vocabulary-but-unimplemented operators now share one code path.
+Peer-local coverage: `MitateDB-api/tests/test_foundation.py`'s
+`test_contains_filter_is_honestly_rejected_never_executed_as_a_like_wildcard`
+(updated) and new
+`test_is_null_filter_is_capability_unsupported_not_validation_failed`.
+
+### 13.4 r2db plug type-wiring activation (M-8, deferred in §12.6, now live)
+
+§12.6 recorded the obligation without discharging it, pending `r2db-api`'s
+own `add_field` `field_type` parameter (work package WP-5, since landed).
+Both `r2db-api` plugs' `create_entity` now issue `create_entity` (no
+inline fields) followed by one `add_field(field_type=...)` per field,
+mapping the port's own two-member vocabulary
+(`adapter.COMMON_FIELD_TYPES`: `text`/`integer`) to this peer's real `field_type` enum
+(`spec/data-service-api.v1.json`: `string`/`integer`/`number`/`boolean`/
+`object`/`array`) via an explicit `{"text": "string", "integer":
+"integer"}` table in each plug -- the mapping design section 4 item 3
+originally asked for. Verified empirically against the real HTTP+PostgreSQL
+plug: a field wired this way is a genuine typed column (an `integer`-typed
+field now refuses a non-integer value with `VALIDATION_FAILED`), and the
+common fixture's own existing string-only value corpus (`payloads.py`)
+continues to round-trip through the newly-typed `label`/`probe_key`/
+`probe_value` fields unaffected, since every value in that corpus was
+already a plain string.
+
+### 13.5 `query_with_revisions`/`attempt_mutation_with_addresses` now observe real data
+
+Both r2db plugs' `query_with_revisions` and the new
+`attempt_mutation_with_addresses` were written in §12 against a peer that did not yet
+populate `revisions`/`assigned_addresses` at all (WP-1's plumbing-only
+state). With WP-4/WP-5b now landed and staged, the in-process plug's
+`query_with_revisions` was found to still be calling `DataService.query()`
+-- the plain-list form that deliberately stays byte-for-byte pre-CCR13
+compatible and never exposes `revisions` -- rather than `DataService.
+query_page()`, the real, present entry point that does. This is corrected
+here: the in-process plug now calls `query_page()` and returns its real
+`.revisions`. `conformance_adapter_r2db_http.py`'s sibling method needed no
+code change at all -- it already inspected the real HTTP response
+(`result.get("revisions")`, §12.5's correction M-1) rather than asserting a
+hardcoded `None`, so it began returning real data the moment the server
+response gained the key, which is the entire point of observing instead of
+asserting.
+
+### 13.6 C-03 value corpus: `contains`/`matches`
+
+Two new test functions,
+`test_contains_value_position_is_literal_never_wildcard_interpreted` and
+`test_matches_value_position_applies_real_wildcard_grammar_and_rejects_bad_patterns`,
+using `attempt_filter` (§13.2)
+to place `%`/`_`/`\`-bearing values at the `contains`/`matches` *value*
+position specifically -- a position neither the existing
+`MUST_COVER_VALUE_POSITIONS` taxonomy (always `eq`) nor C-12's reverse condition (which
+only proves an undeclared operator is refused, never a declared one's
+semantics) ever reached. The core proof is negative, not just a round
+trip: a `%`-bearing `contains` pattern must not additionally match a row
+only a wildcard interpretation would reach, which is the live-regression
+shape Q-2's literal/wildcard split exists to foreclose (docs/design/
+R2DB_CCR13_STORAGE_V1.md §0.5 Q-2). `matches`'s trailing-unescaped-
+backslash grammar violation (the same contract text WP-3 review blocker-2
+already hardened `r2db-api` against) is checked as `VALIDATION_FAILED`
+here too, from the common suite's own side rather than only `r2db-api`'s
+peer-local tests. On a peer where an operator is undeclared, the test
+takes the same real-refusal branch C-12's reverse condition already
+established, rather than a second, redundant structural check.
+
+### 13.7 C-17/C-18: test files, CONDITIONS.md, mutation-detection results
+
+`test_c17_declaration_agreement.py` and
+`test_c18_revision_precondition_semantics.py` are new files, registered `@pytest.mark.condition("C-17")`/
+`"C-18"` respectively, parametrized over all three adapters exactly like
+every other executable condition. `CONDITIONS.md`'s C-17/C-18 rows move
+from `not yet executable` to `executable (three adapters)`; the C-12 row's
+condition/evidence text records the reverse direction (§13.3); the C-03
+row's evidence text records the `contains`/`matches` value-corpus addition
+(§13.6). Both new files follow the same "branch once at the top on the
+peer's own declared capability status" structure C-12 already established,
+so every test function makes a genuine, non-vacuous assertion against
+every registered adapter -- never a skip -- per this document's own design
+principle 4 and this repository's "skip is fail" rule: C-17's unavailable
+branch is `SurfaceAbsent`-based structural evidence (§4 item 4's
+mechanism, since `create_unique_index` truly has no receiving call on
+`MitateDB-api`); C-18's unavailable branch is a real, present
+`CAPABILITY_UNSUPPORTED` denial instead (§13.1's `unique_key` reasoning
+applies identically to `expected_revision`: `MitateDB-api`'s `transact()`
+is a real entry point that refuses it, not an absent one, since the §12.3
+correction B-2 fix).
+
+Detection-power verification (design §5 WP-5 completion condition: at
+least the property-4 removal, precondition-silencing, and revisions-
+identity-string mutations must each turn a test red) is recorded in this
+work's own completion report rather than duplicated here; see that report
+for the mutation table.
+
+### 13.8 Compatibility impact (mirrors §12.7)
+
+Two more additions to the NORMATIVE surface, applied identically in shape
+across all three plugs in the same change as §12.7 already established the
+precedent for: `attempt_mutation`'s new `unique_key` keyword-only
+parameter, and two new `@abstractmethod`s
+(`attempt_mutation_with_addresses`, `attempt_filter`). Identical breaking-change consequence for
+any plug outside this repository: `ConformanceAdapter` remains an `ABC`, so
+a third-party plug missing either new method fails to instantiate at all,
+and every plug's own `attempt_mutation` override must accept `unique_key`
+(a compatible default satisfies existing call sites, but the override
+itself must be edited to declare it).

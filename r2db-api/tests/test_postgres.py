@@ -1883,6 +1883,20 @@ def test_cursor_rejects_negative_offset_and_overflow(app_a: types.SimpleNamespac
         cell.close()
 
 
+def test_page_size_over_the_contract_maximum_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """WP-4 review minor-1: shared-boundary parity with `ApplicationCell`
+    -- `Page.size`'s contract maximum (1000) is enforced independent of
+    `ResourceLimits.result_items`."""
+    cell = _numbered_cell(app_a, 1)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=1001, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        cell.query("items", select=["n"], where=[], page_size=1000, limits=LIMITS)
+    finally:
+        cell.close()
+
+
 # --- catalog completeness guard (R-1) ---------------------------------------
 
 

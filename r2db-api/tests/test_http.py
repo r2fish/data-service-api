@@ -343,7 +343,13 @@ async def test_capabilities_document_matches_contract_shape(client):
 async def test_query_happy_path(client):
     response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
     assert response.status_code == 200
-    assert response.json() == {"items": [{"id": 1}], "next_page": None}
+    body = response.json()
+    assert body["items"] == [{"id": 1}]
+    assert body["next_page"] is None
+    # CCR-13 WP-5b: `revisions` is index-aligned with `items` -- a fixed
+    # UUID string cannot be asserted by value, so length/type stand in.
+    assert len(body["revisions"]) == 1
+    assert isinstance(body["revisions"][0], str) and body["revisions"][0]
 
 
 async def test_query_page_size_is_forwarded(client):
@@ -351,7 +357,20 @@ async def test_query_page_size_is_forwarded(client):
         "/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"], "page": {"size": 1}}
     )
     assert response.status_code == 200
-    assert response.json() == {"items": [{"id": 1}], "next_page": None}
+    body = response.json()
+    assert body["items"] == [{"id": 1}]
+    assert body["next_page"] is None
+
+
+async def test_query_page_size_over_the_contract_maximum_is_validation_failed(client):
+    """WP-4 review minor-1: `Page.size` is bounded at 1000 by the contract
+    itself (`spec/data-service-api.v1.json`), independent of whatever
+    `ResourceLimits.result_items` a deployment happens to configure."""
+    response = await client.post(
+        "/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"], "page": {"size": 1001}}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_FAILED"
 
 
 async def test_query_order_by_sorts_ascending_and_descending(client):
@@ -370,7 +389,10 @@ async def test_query_order_by_sorts_ascending_and_descending(client):
         json={"select": ["body"], "order_by": [{"field": "body", "direction": "asc"}]},
     )
     assert ascending.status_code == 200
-    assert ascending.json() == {"items": [{"body": "a"}, {"body": "m"}, {"body": "z"}], "next_page": None}
+    ascending_body = ascending.json()
+    assert ascending_body["items"] == [{"body": "a"}, {"body": "m"}, {"body": "z"}]
+    assert ascending_body["next_page"] is None
+    assert len(ascending_body["revisions"]) == 3
 
     descending = await client.post(
         "/v1/data/notes/query",
@@ -378,7 +400,9 @@ async def test_query_order_by_sorts_ascending_and_descending(client):
         json={"select": ["body"], "order_by": [{"field": "body", "direction": "desc"}]},
     )
     assert descending.status_code == 200
-    assert descending.json() == {"items": [{"body": "z"}, {"body": "m"}, {"body": "a"}], "next_page": None}
+    descending_body = descending.json()
+    assert descending_body["items"] == [{"body": "z"}, {"body": "m"}, {"body": "a"}]
+    assert descending_body["next_page"] is None
 
 
 async def test_query_order_by_multiple_clauses(client):
@@ -397,7 +421,9 @@ async def test_query_order_by_multiple_clauses(client):
         json={"select": ["id", "body"], "order_by": [{"field": "body", "direction": "asc"}, {"field": "id", "direction": "desc"}]},
     )
     assert response.status_code == 200
-    assert response.json() == {"items": [{"id": 1, "body": "a"}, {"id": 3, "body": "dup"}, {"id": 2, "body": "dup"}], "next_page": None}
+    body = response.json()
+    assert body["items"] == [{"id": 1, "body": "a"}, {"id": 3, "body": "dup"}, {"id": 2, "body": "dup"}]
+    assert body["next_page"] is None
 
 
 async def test_query_order_by_unknown_field_is_not_found(client):
@@ -499,19 +525,16 @@ async def test_query_cursor_minted_for_a_different_entity_is_rejected(client):
     assert response.json()["code"] == "VALIDATION_FAILED"
 
 
-async def test_query_matches_filter_is_capability_unsupported(client):
-    """WP-3 review blocker-1: the `DataService.query` gate covers the HTTP
-    path too -- `post_query` has no `where`-inspecting logic of its own, it
-    delegates entirely to `service.query`, so this is the same refusal as
-    `test_gate_query_matches_is_capability_unsupported` in
-    `test_foundation.py`, observed at the HTTP boundary."""
+async def test_query_matches_filter_executes(client):
+    """CCR-13 WP-5b: `matches` is declared `enabled` (`structured_query.
+    operators`) and reachable end-to-end over HTTP."""
     response = await client.post(
         "/v1/data/notes/query",
         headers=_auth("secret-a"),
         json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "a%"}]},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.status_code == 200
+    assert response.json()["items"] == [{"id": 1}]
 
 
 async def test_entity_identifier_validation_flows_through_http(client):
@@ -534,7 +557,29 @@ async def test_mutate_happy_path_commits(client):
         json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
     )
     assert response.status_code == 200
-    assert response.json() == {"committed": True, "affected": 1}
+    # CCR-13 WP-5b: `assigned_addresses` now reaches the response -- the
+    # seeded row is id=1, so this insert resolves to id=2.
+    assert response.json() == {"committed": True, "affected": 1, "assigned_addresses": [{"address": {"id": 2}}]}
+
+
+async def test_mutate_assigned_addresses_are_insert_only_in_operation_order(client):
+    """A batch mixing insert/update: only the inserts contribute an
+    element, in operation order -- an update contributes nothing."""
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={
+            "operations": [
+                {"operation": "insert", "values": {"body": "first"}},
+                {"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "renamed"}},
+                {"operation": "insert", "values": {"body": "second"}},
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["affected"] == 3
+    assert body["assigned_addresses"] == [{"address": {"id": 2}}, {"address": {"id": 3}}]
 
 
 async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported(client):
@@ -555,36 +600,31 @@ async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
-async def test_mutate_update_and_delete_where_matches_is_capability_unsupported(client):
-    """WP-3 confirmation review blocker: the `matches` gate must cover
-    `update`/`delete`'s own `operation.where`, not only `query()`'s
-    predicates -- confirmed previously executing all the way through
-    (including a `delete`) before this fix. `post_mutate` has no
-    `where`-inspecting logic of its own; this is `DataService.mutate`'s own
-    gate, observed at the HTTP boundary."""
+async def test_mutate_update_and_delete_where_matches_executes(client):
+    """CCR-13 WP-5b: `update`/`delete`'s own `operation.where` accepts
+    `matches` too, not only `query()`'s predicates -- executes end-to-end
+    over HTTP now that `matches` is declared `enabled`."""
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
-        json={"operations": [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "z"}}]},
+        json={"operations": [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "renamed"}}]},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.status_code == 200
+    assert response.json()["affected"] == 1
 
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
         json={
             "operations": [
-                {"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "destructive": True, "confirmation": "DELETE"}
+                {"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "rename%"}], "destructive": True, "confirmation": "DELETE"}
             ]
         },
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
-    # No side effect: the row this delete would otherwise have matched is
-    # still there.
+    assert response.status_code == 200
+    assert response.json()["affected"] == 1
     query_response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["body"]})
-    assert query_response.json()["items"] == [{"body": "a"}]
+    assert query_response.json()["items"] == []
 
 
 async def test_mutate_invalid_transaction_value_is_validation_failed(client):
@@ -598,28 +638,39 @@ async def test_mutate_invalid_transaction_value_is_validation_failed(client):
 
 
 # --------------------------------------------------------------------------
-# WP-2 confirmation-review minor fix: HTTP-level gate regression tests.
-# WP-2 review blocker B-1 was itself "the HTTP-observable surface silently
-# opened up" -- so the provisional `DataService` gate (design
-# R2DB_CCR13_STORAGE_V1.md §3) needs to be pinned at the HTTP boundary
-# directly, not only through `DataService` in `test_foundation.py`. Neither
-# `http.py`'s own shape checks nor the packaged contract schema reject
-# these fields (both already carry the CCR-13 vocabulary) -- this is
-# `DataService`'s gate, exercised end-to-end over real HTTP requests.
+# CCR-13 WP-5b: the provisional `DataService` gate (design
+# R2DB_CCR13_STORAGE_V1.md §3) is removed and `capabilities()` catches up
+# in the same commit -- these are the positive-side HTTP-level tests for
+# the vocabulary the gate used to refuse, replacing the old gate-regression
+# tests (which asserted the opposite outcome).
 # --------------------------------------------------------------------------
 
 
-async def test_http_gate_mutate_expected_revision_is_capability_unsupported(client):
+async def test_http_mutate_expected_revision_executes(client):
+    query_response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
+    revision = query_response.json()["revisions"][0]
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
-        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": "anything"}]},
+        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": revision}]},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.status_code == 200
+    assert response.json()["affected"] == 1
+    # A stale revision now fails as a real precondition mismatch, not a
+    # capability refusal.
+    stale = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "y"}, "expected_revision": revision}]},
+    )
+    assert stale.status_code == 412
+    assert stale.json()["code"] == "PRECONDITION_FAILED"
 
 
-async def test_http_gate_mutate_upsert_is_capability_unsupported(client):
+async def test_http_mutate_upsert_without_a_declared_unique_key_is_capability_unsupported(client):
+    """Upsert's per-entity precondition (a declared uniqueness key) is a
+    real, entity-scoped condition, unaffected by the gate's removal --
+    `notes` here declares no unique key at all."""
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
@@ -629,24 +680,88 @@ async def test_http_gate_mutate_upsert_is_capability_unsupported(client):
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
-async def test_http_gate_schema_create_index_is_capability_unsupported(client):
+async def test_http_mutate_upsert_with_a_declared_unique_key_executes(client):
+    developer_response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "add_field", "entity": "notes", "field": "tag"},
+    )
+    assert developer_response.status_code == 200
+    index_response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True},
+    )
+    assert index_response.status_code == 200
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "upsert", "values": {"tag": "z"}}]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["affected"] == 1
+    assert body["assigned_addresses"] == [{"address": {"id": 2}}]
+
+
+async def test_http_schema_create_index_and_drop_index_execute(client):
     response = await client.post(
         "/v1/schema/operations",
         headers=_auth("dev-secret-a"),
+        json={"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"], "unique": True},
+    )
+    assert response.status_code == 200
+    catalog_response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+    assert catalog_response.json()["entities"][0]["unique_keys"] == [{"name": "by_body", "fields": ["body"]}]
+
+    without_confirmation = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "drop_index", "entity": "notes", "index": "by_body"},
+    )
+    assert without_confirmation.status_code == 409
+    assert without_confirmation.json()["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "drop_index", "entity": "notes", "index": "by_body", "destructive": True, "confirmation": "DROP_INDEX"},
+    )
+    assert response.status_code == 200
+    catalog_response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+    assert catalog_response.json()["entities"][0]["unique_keys"] == []
+
+
+async def test_http_schema_create_index_still_requires_developer_authority(client):
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("secret-a"),
         json={"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"]},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.status_code == 403
+    assert response.json()["code"] == "FORBIDDEN"
 
 
-async def test_http_gate_schema_field_type_is_validation_failed(client):
+async def test_http_schema_field_type_executes(client):
     response = await client.post(
         "/v1/schema/operations",
         headers=_auth("dev-secret-a"),
-        json={"operation": "add_field", "entity": "notes", "field": "typed_field", "field_type": "integer"},
+        json={"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "VALIDATION_FAILED"
+    assert response.status_code == 200
+    mutate_response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": 5}}]},
+    )
+    assert mutate_response.status_code == 200
+    bad_type = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": "not-an-int"}}]},
+    )
+    assert bad_type.status_code == 400
+    assert bad_type.json()["code"] == "VALIDATION_FAILED"
 
 
 # --------------------------------------------------------------------------
@@ -699,16 +814,13 @@ async def test_catalog_matches_contract_shape_and_application_scope(client):
     assert response.status_code == 200
     body = response.json()
     # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md §2/R-1):
-    # `ApplicationCell.catalog()` internally derives the full
-    # `EntityDescriptor` shape (mutation_class/address_fields/address_reuse/
-    # unique_keys) now, but `DataService`'s WP-2-through-WP-5 provisional
-    # gate (§3) narrows the *published* shape back to `{entity, fields}`
-    # until `row_addressability` is actually declared enabled (same commit
-    # as WP-5) -- `id`'s appearance in `fields` is a storage fact, not a
-    # capability declaration, so it stays.
+    # `row_addressability` is declared `enabled` (WP-5b), so the full
+    # `EntityDescriptor` shape reaches the response with no narrowing.
     assert body == {
         "application_scope": "app-a",
-        "entities": [{"entity": "notes", "fields": ["body", "id"]}],
+        "entities": [
+            {"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}
+        ],
     }
     assert response.headers["x-request-id"]
 
