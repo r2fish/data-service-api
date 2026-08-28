@@ -38,7 +38,7 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 | CCR | 判定 | 論点 | 判断に必要なもの |
 |---|---|---|---|
-| CCR-13 行の指し示し可能性 | **審議中** | `allowed_mutations` に既にある `upsert` は一意性の概念なしには意味を定義できず、r2db-api は実装の選択した意味論で enabled 申告している (統治下の実証)。要求: entity は mutation 能力区分 (読み取り専用 / 追記専用 / 追記・削除 / 可変) を宣言し、update / upsert を支持する entity にのみ addressability を要求。結果は5性質 (宣言・可視・照準・不変・自発的再割当て禁止) に分解、revision の被参照先は6条項で固定 | `MutationResult` の拡張を v1 で行うか。アドレス再利用の扱い (案i 再利用禁止 / 案ii revision precondition の領分) |
+| CCR-13 行の指し示し可能性 | **審議中** | `allowed_mutations` に既にある `upsert` は一意性の概念なしには意味を定義できず、r2db-api は実装の選択した意味論で enabled 申告している (統治下の実証)。要求: entity は mutation 能力区分 (読み取り専用 / 追記専用 / 追記・削除 / 可変) を宣言し、update / upsert を支持する entity にのみ addressability を要求。結果は5性質 (宣言・可視・照準・不変・自発的再割当て禁止) に分解、revision の被参照先は6条項で固定 | `MutationResult` の拡張を v1 で行うか (アドレス再利用は案iii で裁定済み — 未決事項欄参照) |
 | CCR-14 制御プレーン | **審議中** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は採用済みで endpoint だけが無い。乖離は起きた問題ではなく見込みの問題 (統治下2 peer の公開面乖離はゼロ、旧 VPS 実装は統治外)。提供は必須とせず `capability_status` で申告。形状表は案A/案B で書き分け、reset は既存 credential 全失効、制御面にも SI-08 の資源境界 | 採用時期 (全体採用 / 安全条項のみ先行 / 全体延期)。in-band 発行 (案A / 案B)。base path `/control/v1` の確認 |
 | CCR-15 entity をまたぐ atomicity | **審議中** | mutation 経路が `/v1/data/{entity}/mutations` であり atomic batch が単一 entity に閉じる。形状は `POST /v1/data/mutations` + 新規定義 `ScopedMutationRequest` / `ScopedMutation` (既存 `Mutation` は無変更、per-entity endpoint は body の `entity` を拒否し続ける)。対話的トランザクションは明示的に排除 (再検討条件付き) | `batch_entities` の境界値と enforcement layer の申告方法 |
 
@@ -88,7 +88,7 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 1. **CCR-13/14/15 の採否そのもの**
 2. CCR-13: `MutationResult` の v1 拡張
-3. CCR-13: アドレス再利用の扱い — 案i (再利用禁止を性質に含める。ABA を構造的に断つ。実コストはアドレス機構が AUTOINCREMENT/非再利用連番/UUID に限られること — 自然キーは一意性宣言として引き続き使える。採択時は5性質が6性質になる) / 案ii (revision precondition の領分。機構の自由は最大だが、クライアントが自分の晒され方を知る契約上の手段が無い) / 案iii (再利用の有無を catalog で宣言。機構の自由を保ちつつ情報の非対称を消す。「再利用しない」宣言の適合証拠は自動テスト + review evidence の併用になる)。起票側の推奨は案iii だが決定ではない
+3. ~~CCR-13: アドレス再利用の扱い~~ — **裁定済み (2026-08-28、依頼者): 案iii (再利用の有無を catalog で宣言)**。理由: 宣言による見える化が本契約の設計思想 (区分宣言・一意性宣言・`capability_status`) に最も馴染み、想定利用形態では利用設計者が AI エージェントであるため「宣言を読まないクライアント」という案iii の弱点が実質消える。案i (再利用禁止。将来のサロゲート鋳造不能な可変データ — 外部表透過 — を塞ぐ) / 案ii (precondition の領分。晒され方を知る手段が無い) は不採用。案iii強 (再利用宣言 entity への precondition 必須化) は将来の additive 強化として残す
 4. CCR-14: 採用時期 — (a) 全体採用 (b) 安全条項のみ先行し endpoint 形状は peer 起動後に確定 (c) 全体延期。(b) は前レビュー担当の推奨だが決定ではない。三案の利害は CCR 文書に対称に記載
 5. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。既存 invariant は control credential の侵害を扱っていないため、採る案により endpoint 形状と conformance 条件が変わる
 6. CCR-14: base path `/control/v1`
