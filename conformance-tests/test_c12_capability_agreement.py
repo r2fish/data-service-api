@@ -75,7 +75,7 @@ def test_declared_mutation_operations_match_observed_behavior(adapter, fx: Fixtu
                     fx.runtime_a, entity, "insert",
                     values={field_name: marker}, where_field=None, where_value=None,
                 )
-            else:  # update / upsert: needs a target row and a filter
+            elif operation == "update":
                 adapter.attempt_mutation(
                     fx.runtime_a, entity, "insert",
                     values={field_name: marker}, where_field=None, where_value=None,
@@ -83,6 +83,36 @@ def test_declared_mutation_operations_match_observed_behavior(adapter, fx: Fixtu
                 affected = adapter.attempt_mutation(
                     fx.runtime_a, entity, operation,
                     values={field_name: marker + "-updated"}, where_field=field_name, where_value=marker,
+                )
+            else:  # upsert
+                # port v1.2 revision (docs/design/CONFORMANCE_ADAPTER_V1.md
+                # section 12 / docs/design/R2DB_CCR13_STORAGE_V1.md section
+                # 4 item 2, correction B-2): the contract's own precondition
+                # for `upsert` is the entity's *declared domain uniqueness*
+                # (`structured_operations.upsert`), so a positive control
+                # that declares the capability supported but exercises it on
+                # an entity with no declared unique key would not actually
+                # be exercising a request the contract permits. This
+                # positive control therefore runs on a dedicated entity that
+                # declares exactly one unique key, via `create_unique_index`
+                # -- never the bare `entity` above, which `insert`/`update`
+                # share. (Verifying that upsert is correctly *refused* on an
+                # entity with *no* declared unique key -- the negative side
+                # of this same precondition -- is C-17's job, not C-12's:
+                # C-12 only checks capability-declaration agreement at the
+                # whole-capability granularity, and no registered adapter
+                # declares `upsert` supported as of work package WP-1, so
+                # this branch is not yet exercised by any adapter -- see
+                # `test_at_least_one_adapter_exercises_a_positive_control_mutation`
+                # below, which only requires `insert`/`update` to be
+                # non-vacuous.)
+                upsert_entity = fresh_identifier("c12_upsert")
+                index_name = fresh_identifier("uniq")
+                adapter.create_entity(fx.developer_a, upsert_entity, {field_name: "text"})
+                adapter.create_unique_index(fx.developer_a, upsert_entity, index_name, [field_name])
+                affected = adapter.attempt_mutation(
+                    fx.runtime_a, upsert_entity, operation,
+                    values={field_name: marker}, where_field=None, where_value=None,
                 )
             assert affected and affected >= 1, (
                 f"{adapter.name}: {operation} is declared supported but attempt_mutation() reported "

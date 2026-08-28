@@ -123,6 +123,70 @@ class PayloadNotExpressible(Exception):
         super().__init__(f"payload not expressible at position {position!r}: {reason}")
 
 
+class SurfaceAbsent(Exception):
+    """Raised by a port operation whose natural return type cannot double as
+    a sentinel (unlike `catalog_document`, which returns
+    `CATALOG_SURFACE_ABSENT`) when the peer's public surface has no real
+    call that could plausibly receive the request at all.
+
+    This is deliberately distinct from `ConformanceDenial`: a
+    `ConformanceDenial` means the peer *received* the request through a
+    real, present entry point and refused it (design section 4.1's own
+    principle, restated in docs/design/CONFORMANCE_CONDITIONS_V1_1.md
+    section 11.2 -- "an adapter denying an operation without presenting it
+    to the peer at all is exactly what design principle 4 forbids"). This
+    exception is for the narrower, honest case where no such entry point
+    exists to present the request to in the first place -- confirmed by
+    source inspection of the peer's own public methods, never assumed.
+    Introduced for the port v1.2 additions
+    (docs/design/CONFORMANCE_ADAPTER_V1.md section 12,
+    docs/design/R2DB_CCR13_STORAGE_V1.md section 4 correction M-7):
+    `create_unique_index` and `attempt_mutation`'s `expected_revision`, both
+    of which return `None`/`int` and so cannot reuse `CATALOG_SURFACE_ABSENT`
+    's string-sentinel approach without colliding with a genuine result.
+
+    Unlike `PayloadNotExpressible` (a harness-level "could not observe this"
+    outcome the suite accepts as a bare exception), a claim of surface
+    absence is exactly the kind of claim design principle 4 ("uncertainty
+    must not silently become permission") says must not be taken on its
+    word: raising this exception is not itself proof of anything. Per
+    design section 4.3's `structurally_absent` mechanism, this exception
+    therefore MUST carry the same `surface`/`forbidden_parameters` pair a
+    `structurally_absent` `TamperVector` carries, so a consumer can run
+    `signature_forbids_parameters(surface, forbidden_parameters)` and
+    confirm the claim independently rather than trusting the plug. A
+    consumer (a future C-17/C-18 test) MUST NOT catch this exception and
+    convert it to a skip or a pass without performing that check --
+    swallowing it unchecked is exactly the "silent permission of the
+    unknown" design principle 4 forbids, applied to this exception instead
+    of to a bare `except: pass`.
+
+    Must never be raised to excuse a peer that genuinely received and
+    mishandled a request -- that is what `ConformanceDenial` and the
+    suite's own assertions are for.
+    """
+
+    def __init__(
+        self,
+        adapter: str,
+        operation: str,
+        reason: str,
+        *,
+        surface: Sequence[Callable],
+        forbidden_parameters: Sequence[str],
+    ) -> None:
+        if not surface:
+            raise ValueError("SurfaceAbsent requires a non-empty surface to inspect")
+        if not forbidden_parameters:
+            raise ValueError("SurfaceAbsent requires non-empty forbidden_parameters to check for")
+        self.adapter = adapter
+        self.operation = operation
+        self.reason = reason
+        self.surface = tuple(surface)
+        self.forbidden_parameters = tuple(forbidden_parameters)
+        super().__init__(f"{adapter}: {operation} has no surface on this peer: {reason}")
+
+
 # Sentinel for `ConformanceAdapter.delete(..., confirmation=...)`.
 #
 # Peers legitimately spell their destructive-confirmation token differently
@@ -253,6 +317,19 @@ def signature_forbids_parameters(
 
 @dataclass(frozen=True)
 class Fixture:
+    """`shared_entity`/`a_only_entity`/`b_only_entity`'s own field sets (as
+    each adapter's `build_fixture()` constructs them) never include `id`, and
+    common probes/tests must not introduce it as an ordinary field name
+    either: `id` (and any peer's implementation-reserved name prefix, e.g.
+    `r2db-api`'s `_r2db`) may be reserved by a registered peer for its own
+    purposes -- `r2db-api` reserves `id` as its server-assigned address
+    column (design docs/design/R2DB_CCR13_STORAGE_V1.md R-3) -- and a name
+    reservable by *any one* peer is not safe for the *common* fixture/probes
+    to use, even on peers that do not themselves reserve it (port v1.2
+    coordinated revision, docs/design/CONFORMANCE_ADAPTER_V1.md section 12).
+    The common suite's convention is `item_key` for this purpose.
+    """
+
     adapter: "ConformanceAdapter"
     app_a: str
     app_b: str
@@ -372,7 +449,25 @@ class ConformanceAdapter(ABC):
     def scope_of(self, session: object) -> ScopeView: ...
 
     @abstractmethod
-    def create_entity(self, session, entity: str, fields: Mapping[str, str]) -> None: ...
+    def create_entity(self, session, entity: str, fields: Mapping[str, str]) -> None:
+        """Create `entity` with the given fields (`{field_name: field_type}`,
+        `field_type` one of `COMMON_FIELD_TYPES`).
+
+        A plug has an obligation to wire `field_type` through to the peer's
+        own typed-column mechanism where one exists, rather than silently
+        discarding the type and always falling back to an untyped/JSONB
+        column (design docs/design/R2DB_CCR13_STORAGE_V1.md correction M-8:
+        "型付き列が共通 suite を一度も通らない"). For `r2db-api`, the wiring
+        target is `add_field` + `field_type` (`create_entity` itself has no
+        per-field type slot in the common contract, so a plug maps this call
+        to `create_entity` followed by one `add_field` per field -- already
+        true today for the field*names* alone -- carrying `field_type` on
+        each `add_field` once the peer accepts it). Activating that wiring
+        is deferred to `r2db-api`'s own implementation of `add_field` +
+        `field_type` (docs/design/R2DB_CCR13_STORAGE_V1.md work package
+        WP-5); until then, a plug may continue to pass only field names, as
+        it does today.
+        """
 
     @abstractmethod
     def insert(self, session, entity: str, values: Mapping[str, Any]) -> None: ...
@@ -439,6 +534,7 @@ class ConformanceAdapter(ABC):
         values: Mapping[str, Any] | None,
         where_field: str | None,
         where_value: Any,
+        expected_revision: str | None = None,
     ) -> int:
         """Present one mutation-vocabulary operation (`insert` / `update` /
         `upsert` / `delete`) to the peer exactly as a real client would, and
@@ -450,6 +546,38 @@ class ConformanceAdapter(ABC):
         filter is supplied at all; otherwise the filter is
         `{field: where_field, operator: "eq", value: where_value}`.
         `values` is omitted (not merely empty) when `None`.
+
+        `expected_revision` (port v1.2, docs/design/CONFORMANCE_ADAPTER_V1.md
+        section 12) is the contract's revision-precondition value
+        (`structured_operations.revision_preconditions`); when not `None`,
+        the plug carries it through to the peer's real mutation entry point
+        exactly as it does `values`/`where_field`/`where_value` -- never
+        interpreted or evaluated by the adapter itself. Before reaching for
+        `SurfaceAbsent`, check every entry point this peer actually has, not
+        only the operation-specific dedicated methods: a generic dispatcher
+        that accepts an arbitrary operation-dict shape (the same kind of
+        entry point the "if a peer has more than one entry point" paragraph
+        below already requires `attempt_mutation` itself to prefer for the
+        base operation) may carry an extra key like `expected_revision`
+        perfectly well even when no *typed* method parameter exists for it
+        anywhere (correction B-2: an earlier revision of `MitateDB-api`'s
+        plug declared this `SurfaceAbsent` on exactly that mistaken
+        assumption, when its `transact()` dispatcher was in fact a real,
+        present entry point for it -- one that, at the time, silently
+        dropped the precondition and committed anyway, which was the real
+        non-conformance C-18 exists to catch, not a structural absence to
+        report around it). Only when no call on the peer's entire public
+        surface could carry this key at all does the plug raise
+        `SurfaceAbsent` (with a `surface`/`forbidden_parameters` pair
+        covering every candidate entry point, per `SurfaceAbsent`'s own
+        docstring) rather than fabricating either a `ConformanceDenial` or a
+        silent, precondition-dropping success. `r2db-api` (both plugs)
+        already has a real parameter position for this
+        (`Mutation.expected_revision` in the mutation-operation shape both
+        plugs already construct), which the peer itself currently refuses
+        with `CAPABILITY_UNSUPPORTED` (`revision_preconditions: unavailable`
+        as of docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-1) -- a
+        real, present denial, not a structural absence.
 
         This method is used by C-12 (capability declaration agreement) to
         exercise `insert`/`update`/`upsert` against the peer's own
@@ -475,6 +603,56 @@ class ConformanceAdapter(ABC):
         declares unsupported, but which its real call surface does not
         actually refuse, or refuses with the wrong code) behind a
         passing test.
+        """
+
+    @abstractmethod
+    def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
+        """Present a real `create_index` (`unique: true`) schema operation to
+        the peer, exactly as a real client attempting the contract's
+        `create_index` vocabulary (CCR-13, contract 1.1.0) would (port v1.2,
+        docs/design/CONFORMANCE_ADAPTER_V1.md section 12). Returns normally
+        on success; raises `ConformanceDenial` on the peer's own real
+        refusal (for example, `r2db-api` as of docs/design/
+        R2DB_CCR13_STORAGE_V1.md work package WP-1 still refuses this shape,
+        since `create_index` execution is deferred to that design's WP-3 --
+        but it refuses through the same real, single `schema()` dispatcher
+        every other schema operation goes through, exactly like
+        `attempt_mutation`'s `upsert` branch, so that refusal is a genuine
+        `ConformanceDenial`, not fabricated).
+
+        Raises `SurfaceAbsent` instead when the peer's public surface has no
+        schema-operation entry point that could plausibly receive an
+        index-creation request at all -- confirmed by source inspection,
+        never assumed, and never used to excuse a peer that actually
+        received and mishandled the request. Per `SurfaceAbsent`'s own
+        docstring, that exception must carry `surface`/`forbidden_parameters`
+        naming the real callables inspected and the parameter names checked
+        for, so a consumer can verify the claim independently via
+        `signature_forbids_parameters` rather than trust it outright.
+        """
+
+    @abstractmethod
+    def query_with_revisions(
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any
+    ) -> tuple[list[dict], list[str] | None]:
+        """Same request shape as `select_eq`, returning `(items, revisions)`
+        (port v1.2, docs/design/CONFORMANCE_ADAPTER_V1.md section 12): the
+        contract's `QueryResult.revisions` (index-aligned with `items`,
+        docs/design/R2DB_CCR13_STORAGE_V1.md R-4), or `None` when the peer's
+        real query response carries no revisions concept at all (every
+        currently-registered peer, since `revision_preconditions` is
+        `unavailable` everywhere as of work package WP-1) -- never a value
+        this adapter invents on the peer's behalf.
+
+        `None` must be an *observation*, not an assumption: when the real
+        call this plug drives returns a dict-shaped response, the plug
+        inspects that response for a revisions-shaped key (e.g.
+        `result.get("revisions")`) rather than hardcoding `None` regardless
+        of what the peer actually sent back. Only when the call's own
+        return type structurally has no place a revisions value could ever
+        occupy at all (a bare `list[dict]`, not a wrapping object) does
+        `None` stand on that structural fact alone, with no dict left
+        unlooked-at (conformance-review correction M-1).
         """
 
     # --- attack surface declarations ---

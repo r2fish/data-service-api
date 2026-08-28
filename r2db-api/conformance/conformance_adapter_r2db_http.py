@@ -1007,6 +1007,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         values: Mapping[str, Any] | None,
         where_field: str | None,
         where_value: Any,
+        expected_revision: str | None = None,
     ) -> int:
         assert isinstance(session, _Session)
         item: dict[str, Any] = {"operation": operation}
@@ -1014,8 +1015,48 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             item["values"] = dict(values)
         if where_field is not None:
             item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        if expected_revision is not None:
+            # Same real parameter position as conformance_adapter_r2db.py's
+            # identical comment: carried through over real HTTP exactly like
+            # `values`/`where` above, never interpreted here.
+            item["expected_revision"] = expected_revision
         result = self._mutate_request(session, entity, [item])
         return result["affected"]
+
+    def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
+        assert isinstance(session, _Session)
+        # Same real, single schema-operations endpoint every other schema
+        # operation in this adapter already uses -- see
+        # conformance_adapter_r2db.py's identical method for the full
+        # rationale (this is the HTTP-boundary twin of that call).
+        self._send(
+            "POST", self._schema_path(), session,
+            json_body={
+                "operation": "create_index",
+                "entity": entity,
+                "index": index,
+                "fields": list(fields),
+                "unique": True,
+            },
+        )
+
+    def query_with_revisions(
+        self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any
+    ) -> tuple[list[dict], list[str] | None]:
+        assert isinstance(session, _Session)
+        # Unlike conformance_adapter_r2db.py's in-process twin (whose
+        # `DataService.query()` returns a bare `list[dict]` with
+        # structurally no place a `revisions` key could ever appear), this
+        # plug's real `POST .../query` response *is* a JSON object -- so
+        # this observes whatever key that real response actually carries
+        # (`result.get("revisions")`) rather than asserting `None` without
+        # looking. As of work package WP-4 the response has no `revisions`
+        # key at all, so this still evaluates to `None` today, but it is an
+        # observation of the real response, not a hardcoded claim about it
+        # (conformance-review correction M-1).
+        where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        result = self._query_request(session, entity, select=list(select), where=where)
+        return result["items"], result.get("revisions")
 
     # ------------------------------------------------------------------
     # attack-surface declarations
@@ -1062,7 +1103,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # rejected outright before any application logic ever sees it.
             self._send(
                 "POST", self._data_path(fixture.shared_entity, "query"), runtime_a,
-                json_body={"select": ["id"], "scope": {"application_id": fixture.app_b, "role": "developer"}},
+                json_body={"select": ["item_key"], "scope": {"application_id": fixture.app_b, "role": "developer"}},
             )
 
         def duplicate_authorization_header_attempt() -> None:
@@ -1077,7 +1118,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # header wins.
             self._send(
                 "POST", self._data_path(fixture.shared_entity, "query"), runtime_a,
-                json_body={"select": ["id"]},
+                json_body={"select": ["item_key"]},
                 extra_header_pairs=[("authorization", f"Bearer {runtime_b.secret}")],
             )
 
@@ -1105,7 +1146,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # like `r2db-api/tests/test_http.py`'s
             # `test_body_scope_fields_are_rejected_outright_and_have_no_effect`.
             self._mutate_request(
-                runtime_a, fixture.shared_entity, [{"operation": "insert", "values": {"id": 999}}],
+                runtime_a, fixture.shared_entity, [{"operation": "insert", "values": {"item_key": 999}}],
                 extra_body={"application_id": fixture.app_b},
             )
 
@@ -1118,7 +1159,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # scope.
             self._send(
                 "POST", self._data_path(fixture.shared_entity, "query"), runtime_a,
-                json_body={"select": ["id"]},
+                json_body={"select": ["item_key"]},
                 params={"application_id": fixture.app_b, "role": "developer"},
             )
 
@@ -1128,7 +1169,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # A legitimate, untampered credential for A, reaching straight
             # for an entity name that only exists in B's schema, via the
             # URL path segment naming it.
-            self._send("POST", self._data_path(fixture.b_only_entity, "query"), runtime_a, json_body={"select": ["id"]})
+            self._send("POST", self._data_path(fixture.b_only_entity, "query"), runtime_a, json_body={"select": ["item_key"]})
 
         def body_entity_field_in_mutation_operation_attempt() -> None:
             # C-01 strengthening (design docs/design/
@@ -1147,7 +1188,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # in-process adapter has no body to represent at all.
             self._mutate_request(
                 runtime_a, fixture.shared_entity,
-                [{"operation": "insert", "values": {"id": 999}, "entity": fixture.b_only_entity}],
+                [{"operation": "insert", "values": {"item_key": 999}, "entity": fixture.b_only_entity}],
             )
 
         return [
@@ -1234,14 +1275,18 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # `_stringify_for_path`), unlike every other identifier
             # position below, which are native JSON body fields.
             path = self._data_path(_stringify_for_path(payload), "query")
-            return self._send("POST", path, runtime_a, json_body={"select": ["id"]})
+            return self._send("POST", path, runtime_a, json_body={"select": ["item_key"]})
 
         def select_field_probe(payload: Any) -> Any:
             return self._query_request(runtime_a, fixture.shared_entity, select=[payload])
 
         def filter_field_probe(payload: Any) -> Any:
+            # `select` must name a real field of `shared_entity` (`id` is no
+            # longer one -- see `build_fixture`'s comment) so this probe's
+            # denial is genuinely attributable to the malicious `payload`
+            # filter field, not an incidental unknown-select-field NOT_FOUND.
             return self._query_request(
-                runtime_a, fixture.shared_entity, select=["id"],
+                runtime_a, fixture.shared_entity, select=["item_key"],
                 where=[{"field": payload, "operator": "eq", "value": 1}],
             )
 
@@ -1350,7 +1395,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         self.provision_application(app_a)
         self.provision_application(app_b)
 
-        fields = {"id": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
+        # `item_key`, not `id`: `id` is reserved on `r2db-api` (design
+        # docs/design/R2DB_CCR13_STORAGE_V1.md R-3 -- the server-assigned
+        # address column) and is not to be used as an ordinary field name by
+        # the common fixture/probes (port v1.2 coordinated revision,
+        # docs/design/CONFORMANCE_ADAPTER_V1.md section 12).
+        fields = {"item_key": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
         shared_entity = "shared_items"
         a_only_entity = "a_only_items"
         b_only_entity = "b_only_items"
@@ -1365,10 +1415,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         self.create_entity(developer_b, shared_entity, fields)
         self.create_entity(developer_b, b_only_entity, fields)
 
-        self.insert(developer_a, shared_entity, {"id": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
-        self.insert(developer_b, shared_entity, {"id": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
-        self.insert(developer_a, a_only_entity, {"id": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
-        self.insert(developer_b, b_only_entity, {"id": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
+        self.insert(developer_a, shared_entity, {"item_key": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
+        self.insert(developer_b, shared_entity, {"item_key": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
+        self.insert(developer_a, a_only_entity, {"item_key": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
+        self.insert(developer_b, b_only_entity, {"item_key": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
 
         runtime_a_handle = self.issue_credential(app_a, "runtime")
         runtime_b_handle = self.issue_credential(app_b, "runtime")

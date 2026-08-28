@@ -27,6 +27,16 @@ from .identifiers import quote_identifier, validate_identifier
 # a name outside this vocabulary entirely (still `ValidationError`).
 _CONTRACT_MUTATION_VOCABULARY = {"insert", "update", "upsert", "delete"}
 
+# The only operation-dict keys `transact()`'s "insert" branch below actually
+# reads. Any other key (`expected_revision`, `idempotency_key`, or any other
+# capability this entry point does not implement) must be rejected before
+# `_insert_in_transaction` ever touches the database -- silently ignoring an
+# unrecognized key would let a request carrying a real semantic (a revision
+# precondition, in particular) execute as if that semantic were honored,
+# when it was never even inspected. Contract `versioning.unknown_capability`:
+# "The service returns CAPABILITY_UNSUPPORTED without executing a fallback."
+_TRANSACT_INSERT_KEYS = {"type", "collection", "values"}
+
 _TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL",
           "boolean": "INTEGER", "json": "TEXT"}
 _OPS = {"eq": "=", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">",
@@ -189,6 +199,16 @@ class ApplicationCell:
                         raise ValidationError("unsupported transaction operation")
                     op_type = operation.get("type")
                     if op_type == "insert":
+                        if set(operation) - _TRANSACT_INSERT_KEYS:
+                            # A well-formed "insert" carrying an extra,
+                            # unrecognized key (e.g. `expected_revision`) is
+                            # a capability gap, not a malformed request --
+                            # same reasoning as the `update`/`upsert`/
+                            # `delete` branch below, which already refuses
+                            # this way for the operation *type* itself.
+                            raise CapabilityError(
+                                "transact does not support additional fields on operation type 'insert'"
+                            )
                         results.append(self._insert_in_transaction(operation["collection"], operation["values"]))
                         continue
                     if op_type in _CONTRACT_MUTATION_VOCABULARY:

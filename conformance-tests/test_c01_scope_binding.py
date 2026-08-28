@@ -39,7 +39,13 @@ MUST_DENY_CODES = {
 # schema is ever consulted for out-of-scope data, and (item 8) that the
 # denial is identical whether the entity exists in another application or
 # does not exist at all.
-_PLACEHOLDER_FIELD = "id"
+#
+# Deliberately not "id": `id` is reserved on `r2db-api` (design docs/design/
+# R2DB_CCR13_STORAGE_V1.md R-3) and the common fixture/probes must not use a
+# peer-reservable name as an ordinary field name (port v1.2 coordinated
+# revision, docs/design/CONFORMANCE_ADAPTER_V1.md section 12). `item_key` is
+# the name every adapter's `build_fixture()` now uses for this purpose.
+_PLACEHOLDER_FIELD = "item_key"
 
 
 def _unclassified_hint(code: str) -> str:

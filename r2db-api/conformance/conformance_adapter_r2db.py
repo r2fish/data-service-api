@@ -193,13 +193,63 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         values: Mapping[str, Any] | None,
         where_field: str | None,
         where_value: Any,
+        expected_revision: str | None = None,
     ) -> int:
         item: dict[str, Any] = {"operation": operation}
         if values is not None:
             item["values"] = dict(values)
         if where_field is not None:
             item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
+        if expected_revision is not None:
+            # A real parameter position on this peer's single mutation
+            # dispatcher (`Mutation.expected_revision`, `structured.py`'s
+            # `_MUTATION_KEYS`) -- carried through exactly like `values`/
+            # `where` above, never interpreted here. The peer itself
+            # currently refuses it with `CAPABILITY_UNSUPPORTED`
+            # (`revision_preconditions: unavailable` as of docs/design/
+            # R2DB_CCR13_STORAGE_V1.md work package WP-1); this is a real,
+            # present denial, not `SurfaceAbsent`.
+            item["expected_revision"] = expected_revision
         return self._call(lambda: self._service.mutate(session, entity, [item]))
+
+    def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
+        # Presented to the same real, single generic schema dispatcher every
+        # other schema operation on this peer goes through (`DataService.
+        # schema`) -- there is no separate "unique index" entry point,
+        # exactly like `attempt_mutation`'s `upsert` branch above.
+        # `create_index`/`unique` are already part of the common contract's
+        # `SchemaOperationRequest` vocabulary (CCR-13, contract 1.1.0) and
+        # `create_index` already appears in this peer's own
+        # `schema_operations.unsupported` list (service.py); this
+        # foundation genuinely has an entry point for it, it just does not
+        # yet accept the shape (docs/design/R2DB_CCR13_STORAGE_V1.md defers
+        # the real implementation to work package WP-3) -- so whatever
+        # denial results is real, never fabricated by this adapter.
+        self._call(lambda: self._service.schema(session, {
+            "operation": "create_index",
+            "entity": entity,
+            "index": index,
+            "fields": list(fields),
+            "unique": True,
+        }))
+
+    def query_with_revisions(
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any
+    ) -> tuple[list[dict], list[str] | None]:
+        # `DataService.query()`'s own return type is `list[dict[str, Any]]`
+        # (`structured.py`'s `ApplicationCell.query`) -- a bare list, not a
+        # wrapping object -- so `None` here is an observation of that real
+        # return shape having structurally no slot a `revisions` key could
+        # ever occupy (docs/design/R2DB_CCR13_STORAGE_V1.md work package
+        # WP-4 is what gives this response shape one), not an assumption
+        # about its content the way returning `None` unconditionally would
+        # be if a dict-shaped response existed to inspect and simply wasn't
+        # looked at (contrast `conformance_adapter_r2db_http.py`'s sibling
+        # method, which does inspect a real `result.get("revisions")` since
+        # its response *is* a JSON object -- conformance-review correction
+        # M-1).
+        items = self.select_eq(session, entity, select, field, value)
+        return items, None
 
     # ------------------------------------------------------------------
     # attack-surface declarations
@@ -229,27 +279,27 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             # brief and the scenario r2db-api/tests/test_foundation.py
             # already exercises for its own suite.
             forged = replace(session_a, application_id=fixture.app_b)
-            self._call(lambda: self._service.query(forged, fixture.shared_entity, select=["id"]))
+            self._call(lambda: self._service.query(forged, fixture.shared_entity, select=["item_key"]))
 
         def role_elevation_attempt() -> None:
             # Same credential id, role self-declared as "developer" while
             # the backing credential is actually "runtime".
             forged = replace(session_a, role="developer")
             self._call(lambda: self._service.schema(
-                forged, {"operation": "create_entity", "entity": "conf_role_elevation_probe", "fields": ["id"]}
+                forged, {"operation": "create_entity", "entity": "conf_role_elevation_probe", "fields": ["item_key"]}
             ))
 
         def request_field_scope_attempt() -> None:
             # A legitimate, untampered session, but the request body itself
             # carries a smuggled scope-looking field. The mutation shape
             # validator rejects any key outside its known operation shape.
-            operation = {"operation": "insert", "values": {"id": 999}, "application_id": fixture.app_b}
+            operation = {"operation": "insert", "values": {"item_key": 999}, "application_id": fixture.app_b}
             self._call(lambda: self._service.mutate(session_a, fixture.shared_entity, [operation]))
 
         def cross_application_handle_attempt() -> None:
             # A legitimate, untampered session for A reaching straight for
             # an entity that only exists in B's cell.
-            self._call(lambda: self._service.query(session_a, fixture.b_only_entity, select=["id"]))
+            self._call(lambda: self._service.query(session_a, fixture.b_only_entity, select=["item_key"]))
 
         return [
             TamperVector(
@@ -323,8 +373,13 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             return self._call(lambda: self._service.query(runtime_a, fixture.shared_entity, select=[payload]))
 
         def filter_field_probe(payload: Any) -> Any:
+            # `select` must name a real field of `shared_entity` (`id` is no
+            # longer one -- see `build_fixture`'s comment) so this probe's
+            # denial is genuinely attributable to the malicious `payload`
+            # filter field, not an incidental unknown-select-field NOT_FOUND
+            # that would mask whether `payload` itself was ever validated.
             return self._call(lambda: self._service.query(
-                runtime_a, fixture.shared_entity, select=["id"],
+                runtime_a, fixture.shared_entity, select=["item_key"],
                 where=[{"field": payload, "operator": "eq", "value": 1}],
             ))
 
@@ -346,7 +401,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
         def schema_entity_probe(payload: Any) -> Any:
             return self._call(lambda: self._service.schema(
-                developer_a, {"operation": "create_entity", "entity": payload, "fields": ["id"]}
+                developer_a, {"operation": "create_entity", "entity": payload, "fields": ["item_key"]}
             ))
 
         def schema_field_probe(payload: Any) -> Any:
@@ -437,7 +492,12 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         self.provision_application(app_a)
         self.provision_application(app_b)
 
-        fields = {"id": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
+        # `item_key`, not `id`: `id` is reserved on `r2db-api` (design
+        # docs/design/R2DB_CCR13_STORAGE_V1.md R-3 -- the server-assigned
+        # address column) and is not to be used as an ordinary field name by
+        # the common fixture/probes (port v1.2 coordinated revision,
+        # docs/design/CONFORMANCE_ADAPTER_V1.md section 12).
+        fields = {"item_key": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
         shared_entity = "shared_items"
         a_only_entity = "a_only_items"
         b_only_entity = "b_only_items"
@@ -452,10 +512,10 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         self.create_entity(developer_b, shared_entity, fields)
         self.create_entity(developer_b, b_only_entity, fields)
 
-        self.insert(developer_a, shared_entity, {"id": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
-        self.insert(developer_b, shared_entity, {"id": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
-        self.insert(developer_a, a_only_entity, {"id": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
-        self.insert(developer_b, b_only_entity, {"id": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
+        self.insert(developer_a, shared_entity, {"item_key": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
+        self.insert(developer_b, shared_entity, {"item_key": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
+        self.insert(developer_a, a_only_entity, {"item_key": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
+        self.insert(developer_b, b_only_entity, {"item_key": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
 
         runtime_a_handle = self.issue_credential(app_a, "runtime")
         runtime_b_handle = self.issue_credential(app_b, "runtime")

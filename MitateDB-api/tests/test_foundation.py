@@ -8,8 +8,8 @@ from mitatedb_api import (ControlPlane, Filter, FoundationConfig,
                           MitateDataService, Role)
 from mitatedb_api.errors import (AuthenticationError,
                                  AuthorizationStateUnavailable,
-                                 NotFoundError, ResourceLimitError,
-                                 ValidationError)
+                                 CapabilityError, NotFoundError,
+                                 ResourceLimitError, ValidationError)
 
 
 class FoundationTests(unittest.TestCase):
@@ -54,6 +54,25 @@ class FoundationTests(unittest.TestCase):
             self.runtime.transact([
                 {"type": "insert", "collection": "notes", "values": {"title": "first"}},
                 {"type": "unsupported", "collection": "notes", "values": {"title": "second"}},
+            ])
+        self.assertEqual(self.runtime.read("notes"), [])
+
+    def test_transact_insert_with_expected_revision_is_rejected_before_execution(self):
+        # Conformance-review finding (docs/design/CONFORMANCE_ADAPTER_V1.md
+        # section 12, correction B-2): `transact()`'s "insert" branch used to
+        # ignore any operation-dict key it did not itself read, so an
+        # `expected_revision` (a revision precondition this peer does not
+        # implement) rode along on an otherwise-valid insert and the row
+        # still committed -- silently dropping a real request semantic
+        # instead of refusing it (contract `versioning.unknown_capability`:
+        # "The service returns CAPABILITY_UNSUPPORTED without executing a
+        # fallback."). This must be refused before any row is written, and
+        # must not affect unrelated, well-formed inserts in the same batch.
+        self.dev.create_collection("notes", {"title": "text"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "notes", "values": {"title": "first"}},
+                {"type": "insert", "collection": "notes", "values": {"title": "second"}, "expected_revision": "deadbeef"},
             ])
         self.assertEqual(self.runtime.read("notes"), [])
 

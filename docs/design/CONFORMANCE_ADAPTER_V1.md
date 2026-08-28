@@ -2,9 +2,9 @@
 
 ## 文書情報
 
-- 版数: 1.2 (§10.7 に Phase B レビュー由来の mutation test M5〜M11 を追加、§10.8/§10.9 を新設)
-- 発行日: 2026-08-27
-- 設計担当: Opus
+- 版数: 1.3 (§12 を新設。port v1.2: `docs/design/R2DB_CCR13_STORAGE_V1.md` work package WP-1 由来の coordinated revision -- 共通 fixture/probe から `id` を退避、C-12 upsert positive control の unique-key 前提化、`attempt_mutation` への `expected_revision`、`create_unique_index`、`query_with_revisions`、`create_entity` の型配線義務の明記。独立レビュー (Opus) の blocker 3件・major 6件・minor 7件を反映済み)
+- 発行日: 2026-08-28
+- 設計担当: Opus (§1〜§11)。§12 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
 ## 1. 解決する問題
@@ -525,3 +525,307 @@ has no HTTP body to smuggle a field into at all; its existing
 `request_field_scope` vector already covers the kind through a different,
 in-process-appropriate probe), so `conformance_adapter_r2db.py` and
 `conformance_adapter_mitatedb.py` are unchanged by this specific addition.
+
+## 12. v1.2 port revision (coordinated with docs/design/R2DB_CCR13_STORAGE_V1.md work package WP-1)
+
+`docs/design/R2DB_CCR13_STORAGE_V1.md` §4 raises C-17 (declaration/
+addressability/uniqueness agreement) and C-18 (revision-precondition
+semantics) on this same port/plug design, both registered in
+`conformance-tests/CONDITIONS.md` as `not yet executable` -- their test
+files are deliberately deferred to that design's work package WP-5, since
+no registered peer implements the behavior they would exercise yet
+(`docs/design/R2DB_CCR13_STORAGE_V1.md`'s own correction m-8: a
+condition's port primitives may be readied ahead of the peer
+implementation they will one day exercise, but the *test* itself must wait
+until there is a real, non-vacuous case to run it against). What WP-1
+*does* do now, per this
+document's own design principle 1 (port owned by the common repository,
+plug owned by each peer) and principle 4 (uncertainty must not silently
+become permission), is a coordinated revision across the NORMATIVE surface
+this document's §4 defines and all three registered plugs
+(`conformance_adapter_r2db.py`, `conformance_adapter_r2db_http.py`,
+`conformance_adapter_mitatedb.py`), in the same change, exactly as §11 did
+for C-11/C-12/C-13.
+
+### 12.1 Reserved field names: common fixtures/probes must not use `id`
+
+`r2db-api` reserves the field name `id` (its server-assigned, immutable
+address column) and the entity/field-name prefix `_r2db` (docs/design/
+R2DB_CCR13_STORAGE_V1.md R-3). Before this revision, all three plugs'
+`build_fixture()` used `id` as an ordinary integer field on `shared_entity`/
+`a_only_entity`/`b_only_entity`, and `test_c01_scope_binding.py`'s
+`_PLACEHOLDER_FIELD` was `"id"` -- both would silently stop meaning what
+they appear to mean the moment `r2db-api` actually enforces this
+reservation (docs/design/R2DB_CCR13_STORAGE_V1.md's own correction B-1).
+
+The common fixture/probe convention is now `item_key` in place of `id`.
+This is not merely a `build_fixture()` edit: any probe in a plug that
+selects/filters a *fixture* entity's fields by the literal name `id` (as
+opposed to a brand-new, throwaway entity a probe creates for its own
+one-off purpose, which remains that peer's own business) had to move to
+`item_key` in the same change, on pain of a silent loss of test fidelity
+rather than an outright failure -- several of these probes reach an
+entity-existence or request-shape denial *before* the renamed field is ever
+looked up (`NOT_FOUND`/`VALIDATION_FAILED`, both already accepted denial
+codes), so the old field name would not have failed the suite; it would
+have quietly stopped exercising the position the probe exists to test (the
+`filter_field` identifier-position probes on both `r2db-api` plugs, and the
+`must_ignore` header/query-parameter vectors on `conformance_adapter_r2db_http.py`,
+are the cases where this actually mattered. Verified directly, not merely
+reasoned about: reverting those two vectors' `select` back to `id` and
+re-running the suite still leaves `test_c01_scope_binding.py` fully green,
+because both land on `ConformanceDenial(NOT_FOUND)`, which the consuming
+test (`test_must_ignore_vectors_leave_scope_and_other_app_unchanged`)
+already tolerates as an acceptable outcome for a `must_ignore` vector
+(`except ConformanceDenial: pass`) -- the silent-hollowing failure mode
+this paragraph describes, not a visible one.
+
+The general rule, stated once here rather than per-peer: **a name reservable
+by any one registered peer is not safe for the common fixture/probes to use,
+even on peers that do not themselves reserve it.** `MitateDB-api` does not
+reserve `id`; its own plug-local, non-fixture probe entities (the role-
+elevation and schema-field-identifier probes' throwaway `create_collection`
+calls) may keep using `id` freely, since they never touch the shared
+`Fixture` entities. `conformance-tests/adapter.py`'s `Fixture` docstring now
+states this rule normatively.
+
+### 12.2 C-12 upsert positive control: unique-key precondition (R2DB_CCR13_STORAGE_V1.md correction B-2, deferred)
+
+The contract's own precondition for `upsert`'s existence test
+(`structured_operations.upsert`) is the entity's *declared domain
+uniqueness*. `test_c12_capability_agreement.py`'s positive control
+previously exercised `upsert` (when declared supported) on the same bare
+entity `insert`/`update` share -- an entity with no declared unique key,
+which is not a request the contract actually permits `upsert` to succeed
+against. The positive control now creates a dedicated entity and calls the
+new `create_unique_index` (§12.4 below) to give it exactly one declared
+unique key before attempting `upsert` on it. The corresponding negative
+case -- verifying `upsert` is refused on an entity that declares *no*
+unique key, once a peer can declare `upsert` supported at the whole-
+capability level while still gating it per-entity -- is left to C-17's
+future test, not C-12's: C-12 only ever checked capability-declaration
+agreement at the whole-service granularity.
+
+This revision is not yet exercised by any positive-control path today: as
+of WP-1, both `r2db-api` (`service.py capabilities()`) and `MitateDB-api`
+(`cell.py capabilities()`) independently declare `atomic_mutation` with
+`upsert` in `unsupported`, so every registered adapter still takes C-12's
+existing negative branch for `upsert` (`CAPABILITY_UNSUPPORTED`, unaffected
+by this change), and `test_at_least_one_adapter_exercises_a_positive_control_mutation`'s
+vacuity guard is satisfied by `insert`/`update` alone.
+The revision is nonetheless made now, ahead of any adapter needing it, so a
+future adapter that does declare `upsert` supported (docs/design/
+R2DB_CCR13_STORAGE_V1.md work package WP-5) exercises a request the
+contract actually permits from the moment its capability document changes,
+without a second coordinated revision of this test.
+
+### 12.3 `attempt_mutation(..., expected_revision: str | None = None)`
+
+A new keyword-only parameter, carried through to the peer's real mutation
+entry point exactly like `values`/`where_field`/`where_value` -- never
+interpreted by the adapter itself. `r2db-api` (both plugs) has a real
+parameter position for it already (`Mutation.expected_revision`,
+`structured.py`'s `_MUTATION_KEYS`), so both plugs forward it unconditionally
+into the operation dict they already construct; the peer's own dispatcher
+currently refuses it with `CAPABILITY_UNSUPPORTED`
+(`revision_preconditions: unavailable`, a real and present denial, since
+`bind_mutation` explicitly checks for this key).
+
+**WP-1 implementation review, correction B-2 (Opus; distinct from
+R2DB_CCR13_STORAGE_V1.md's own "correction B-2" in section 12.2 above,
+which is a different document's different finding):** the first revision
+of this section declared `MitateDB-api` `SurfaceAbsent` for this parameter, on the
+reasoning that none of `session.insert`/`.update`/`.delete` has anything
+resembling it. That reasoning missed a real, present entry point:
+`ApplicationRuntime.transact`/`ApplicationCell.transact` already accepts an
+arbitrary operation-dict shape (the same dispatcher the `upsert` branch in
+§12.2 relies on) and, at the time, did not allowlist that dict's keys at
+all -- so `expected_revision` rode along on an otherwise well-formed
+`{"type": "insert", ...}` operation, and the row committed with the
+precondition never even inspected. Review confirmed this by direct
+measurement. Declaring this `SurfaceAbsent` would have been the adapter
+fabricating an absence claim to paper over a real, observed peer defect --
+precisely what design principle 4 forbids, mirrored onto `SurfaceAbsent`
+instead of `ConformanceDenial`. Two changes, in the same review pass, fix
+this properly:
+
+1. **The plug** (this section's own scope) presents `expected_revision` as
+   a real extra key on the `transact()` operation dict for every operation
+   type, exactly as a real client attempting the contract's
+   revision-precondition vocabulary would, and returns whatever `transact()`
+   itself produces -- never `SurfaceAbsent`.
+2. **`MitateDB-api` itself** (`cell.py`, a legitimate fix within this
+   revision's scope, not a design change: the common contract's
+   `versioning.unknown_capability` already requires "The service returns
+   CAPABILITY_UNSUPPORTED without executing a fallback"). `transact()`'s
+   `"insert"` branch now rejects any operation-dict key outside
+   `{"type", "collection", "values"}` with `CapabilityError`
+   (`CAPABILITY_UNSUPPORTED`) *before* touching the database, exactly the
+   same reasoning its neighboring branch already applies to an unsupported
+   operation *type*. A new peer-local test,
+   `MitateDB-api/tests/test_foundation.py::FoundationTests::test_transact_insert_with_expected_revision_is_rejected_before_execution`,
+   pins this: an `expected_revision`-carrying insert in a batch is refused
+   and the batch's well-formed sibling insert never commits either (the
+   whole `transact()` call is one atomic unit).
+
+With that fix, presenting `expected_revision` to `MitateDB-api`'s plug now
+observes a genuine `ConformanceDenial(CAPABILITY_UNSUPPORTED)` -- a real,
+present denial, not a structural absence, and not the silently-dropped
+precondition the unfixed peer used to produce.
+
+### 12.4 `create_unique_index(session, entity, index, fields)`
+
+Presents a real `create_index` (`unique: true`) schema operation to the
+peer, exactly as a real client attempting the contract's `create_index`
+vocabulary (CCR-13, contract 1.1.0; already present in `spec/
+data-service-api.v1.json`'s `SchemaOperationRequest` as `index`/`unique`)
+would. `r2db-api` (both plugs) presents this to the same real, single
+`schema()` dispatcher every other schema operation already goes through --
+there is no separate index-specific entry point, exactly like
+`attempt_mutation`'s `upsert` branch reuses the single mutation dispatcher. This is
+a real, present call, so whatever it returns is a genuine `ConformanceDenial`,
+never fabricated. `MitateDB-api`'s only schema-mutation call,
+`ApplicationDeveloper.create_collection(name, fields)`, has no parameter
+for indexes of any kind, and no other schema-operation call exists on this
+peer at all (confirmed by source inspection of `cell.py`); its plug raises
+`SurfaceAbsent` rather than presenting this to a call that could not
+possibly express it.
+
+**Finding (not fixed in this revision):** exercising `create_unique_index`
+against `r2db-api` today returns `VALIDATION_FAILED`, not
+`CAPABILITY_UNSUPPORTED`. The common contract's `capability_status.rules`
+states "optional target operations may be unavailable and must fail with
+`CAPABILITY_UNSUPPORTED`", and `create_index` is exactly such a declared-
+`unsupported` operation in this peer's own `schema_operations` capability
+entry (`service.py`) -- but `structured.py`'s `bind_schema_operation`
+rejects the request during its whole-shape key-allowlist check
+(`_SCHEMA_KEYS`, which does not yet include `index`/`unique`) before it
+ever reaches the operation-name branch that would produce
+`CAPABILITY_UNSUPPORTED`. This is a genuine, currently-existing
+`r2db-api` non-conformance with the letter of that contract rule,
+discovered by presenting a real, contract-shaped request rather than
+assuming the peer's behavior (this document's own design principle 4).
+It is recorded here rather than fixed: `create_index`'s real implementation
+(including the request-shape allowlist that must widen to accept it) is
+`docs/design/R2DB_CCR13_STORAGE_V1.md` work package WP-3's job, and fixing
+only the denial code ahead of that would still leave the operation
+unimplemented while inviting a second, redundant edit to the same
+validation path once WP-3 lands.
+
+**Finding, recorded for completeness (m-6):** `MitateDB-api`'s own
+`cell.py capabilities()` lists `create_index` in `schema_operations`'s
+`unsupported` array -- so the *vocabulary* is known to this peer's own
+discovery document -- while `ApplicationDeveloper` has no callable that
+could receive a request shaped like one at all (the structural absence
+this section's `SurfaceAbsent` raise documents). This sits in a mild
+tension with `capability_status.rules`'s "optional target operations may
+be unavailable and must fail with `CAPABILITY_UNSUPPORTED`": that rule
+presumes an operation named as `unsupported` still has some real refusal
+path to observe, whereas here there is no path to observe at all, only a
+name declared absent. This is not the same defect as the `r2db-api`
+finding above (which returns the *wrong code* through a *real* path); it
+is a peer naming an operation in its own vocabulary listing that its
+public surface cannot even receive. Recorded, not fixed, for the same
+reason: `create_index` does not exist on either peer's real, executable
+surface yet.
+
+### 12.5 `query_with_revisions(session, entity, select, field, value)` and `SurfaceAbsent`
+
+Same request shape as `select_eq`, returning `(items, revisions)`:
+`revisions` is the contract's `QueryResult.revisions` (index-aligned with
+`items`) when the peer's real query response carries one, or `None` when it
+does not. As of WP-1 every registered peer returns `None` here --
+`revision_preconditions` is `unavailable` on both `r2db-api` and
+`MitateDB-api`, and neither peer's query response shape has a revisions
+field yet (`r2db-api`'s gets one in docs/design/R2DB_CCR13_STORAGE_V1.md
+work package WP-4) -- so this is presently plumbing with no adapter
+divergence to observe, readied for WP-5's C-18 test.
+
+**WP-1 implementation review, correction M-1 (Opus):** `None` must be an
+*observation*, not an assumption. The in-process `r2db-api`/`MitateDB-api`
+plugs' underlying calls (`DataService.query()`, `ApplicationCell.read()`)
+each return a bare `list[dict]`, not a wrapping object, so `None` there is
+a structural fact about that return type -- there is no dict to have
+looked at and not looked at. `conformance_adapter_r2db_http.py`'s real
+`POST .../query` response, in contrast, *is* a JSON object; the first
+revision of this method discarded it entirely and hardcoded `None`
+regardless of what the peer actually sent back, which is an assertion
+wearing an observation's clothing. It now inspects the real response
+directly (`result.get("revisions")`) instead of going through `select_eq`,
+so it still evaluates to `None` today (the response genuinely has no such
+key yet) but will pick up a real value the moment work package WP-4 adds
+one, with no adapter edit required.
+
+`SurfaceAbsent` (`conformance-tests/adapter.py`) is a new exception,
+introduced because `create_unique_index` (`-> None`) and
+`attempt_mutation`'s `expected_revision` (`-> int`) cannot reuse
+`catalog_document`'s `CATALOG_SURFACE_ABSENT` string-sentinel approach
+without colliding with a genuine return value of their own type. It plays
+the identical structural role `CATALOG_SURFACE_ABSENT` plays for
+`catalog_document` and `structurally_absent` plays for
+`tamper_vectors`/`credential_reactivation_vectors`: the honest answer when
+a peer's public surface has no real call that could plausibly receive a
+request at all, confirmed by source inspection and never assumed, and
+never a substitute for a genuine `ConformanceDenial` when the peer did
+receive and refuse the request.
+
+**WP-1 implementation review, correction B-1 (Opus):** the first revision
+of this exception carried only `adapter`/`operation`/`reason` -- a bare claim, with
+nothing a consumer could check independently, unlike every other
+structural-absence mechanism on this port (`structurally_absent`'s own
+`surface`/`forbidden_parameters` pair, inspected via
+`signature_forbids_parameters`). `SurfaceAbsent` now *requires*
+(constructor-enforced, `ValueError` on an empty value) the same
+`surface: Sequence[Callable]` and `forbidden_parameters: Sequence[str]`
+pair, so a future C-17/C-18 test can run
+`signature_forbids_parameters(exc.surface, exc.forbidden_parameters)`
+itself rather than trust the claim on its word. `MitateDB-api`'s
+`create_unique_index` now raises it with
+`surface=self.public_operation_callables()` (this peer's entire
+application-facing surface) and `forbidden_parameters=["index", "unique"]`.
+The port docstring states the consuming norm explicitly: **a consumer must
+never catch this exception and convert it to a skip or a pass without
+performing that signature check** -- doing so would be exactly the "silent
+permission of the unknown" design principle 4 forbids, only relocated from
+a bare `except: pass` to an unchecked `except SurfaceAbsent: pass`.
+
+### 12.6 `create_entity`'s type-wiring obligation (correction M-8, not yet activated)
+
+`create_entity(session, entity, fields: Mapping[str, str])`'s `fields`
+values have always been type names (`COMMON_FIELD_TYPES`: `"text"`,
+`"integer"`), but every plug has only ever forwarded field *names* to its
+peer, discarding the type. `ConformanceAdapter.create_entity`'s docstring
+now records the obligation this leaves standing: a plug must wire
+`field_type` through to the peer's own typed-column mechanism where one
+exists, so a typed column is not left permanently unexercised by the common
+suite. For `r2db-api`, the wiring target is `add_field` + `field_type`
+(docs/design/R2DB_CCR13_STORAGE_V1.md R-2); activating it is deferred to
+that design's work package WP-5, once `r2db-api` itself implements
+`add_field`'s `field_type` parameter. Until then, both `r2db-api` plugs
+continue to pass only field names, as they did before this revision --
+this section records the obligation without discharging it, exactly as
+`docs/design/R2DB_CCR13_STORAGE_V1.md`'s own correction M-8 describes.
+
+### 12.7 Compatibility impact (WP-1 implementation review, correction M-5)
+
+This revision's two new `@abstractmethod`s (`create_unique_index`,
+`query_with_revisions`) and `attempt_mutation`'s new keyword-only
+`expected_revision` parameter are additions to the NORMATIVE surface this
+document's §4 defines (design principle 1: port owned by the common
+repository). Per §11's own precedent, they were applied identically in
+shape across all three plugs registered in `conformance-tests/registry.json`
+in the same change, so nothing in *this* repository is left with a stub or
+a `NotImplementedError`. This is stated here explicitly because it is
+**breaking for any plug outside this repository**: `ConformanceAdapter` is
+an `ABC`, so any third-party plug that does not implement the two new
+methods fails to instantiate at all (`TypeError: Can't instantiate
+abstract class ... with abstract methods create_unique_index,
+query_with_revisions`), and `attempt_mutation`'s new parameter, though
+it has a default and is therefore backward-compatible for *callers*, still
+requires every plug's own `attempt_mutation` override to accept it (a
+plug's override must repeat a compatible default, or every existing call
+site breaks). This is the same class of change principle 1 already commits
+this document to whenever the NORMATIVE surface grows -- consistent with,
+not a departure from, how §11 introduced `catalog_document`,
+`attempt_mutation` itself, and `credential_reactivation_vectors` in the
+prior coordinated revision.

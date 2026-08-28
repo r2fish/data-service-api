@@ -52,6 +52,7 @@ from adapter import (  # noqa: E402
     Fixture,
     PayloadNotExpressible,
     ScopeView,
+    SurfaceAbsent,
     TamperVector,
 )
 
@@ -249,8 +250,42 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         values: Mapping[str, Any] | None,
         where_field: str | None,
         where_value: Any,
+        expected_revision: str | None = None,
     ) -> int:
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
+
+        if expected_revision is not None:
+            # Conformance-review finding (correction B-2): this is a real,
+            # present entry point for a revision precondition, not a
+            # structural absence. `ApplicationRuntime.transact`/
+            # `ApplicationCell.transact` already accepts an arbitrary
+            # operation-dict shape (exactly what the `upsert` branch below
+            # relies on) -- so `expected_revision` is presented as a real
+            # extra key on that dict, exactly as a real client attempting
+            # the contract's revision-precondition vocabulary would, and
+            # this adapter returns whatever `transact()` itself produces.
+            # An earlier revision of this method instead raised
+            # `SurfaceAbsent` here on the strength of `session.insert`/
+            # `.update`/`.delete` alone having no such parameter -- but
+            # `transact()` is a real, present dispatcher those three
+            # dedicated methods do not exhaust, and (before `cell.py` was
+            # fixed) it silently ignored this exact key on an "insert"
+            # operation, committing the row with the precondition never
+            # even inspected. That was the real non-conformance C-18 exists
+            # to catch; declaring it `SurfaceAbsent` would have hidden it
+            # behind a fabricated claim of absence, which design principle
+            # 4 forbids as surely as fabricating a denial does.
+            item: dict[str, Any] = {
+                "type": operation, "collection": entity,
+                "values": dict(values or {}), "expected_revision": expected_revision,
+            }
+            if filters is not None:
+                item["filters"] = filters
+
+            def revisioned_op() -> int:
+                results = session.transact([item])
+                return len(results)
+            return self._call(revisioned_op)
 
         if operation == "insert":
             def insert_op() -> int:
@@ -298,6 +333,56 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # there is no peer call this adapter could present it to that
         # would mean anything.
         raise ConformanceDenial(code="CAPABILITY_UNSUPPORTED", adapter=self.name, native_type="")
+
+    def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
+        # `session` is unavailable-regardless of *any* session (the answer
+        # is peer-wide, not session-scoped), kept only to match this ABC
+        # method's signature -- the same convention `catalog_document`
+        # above already follows for its own unused `session` parameter.
+        # `entity`/`index`/`fields` are named in the raised exception's
+        # `reason` immediately below rather than left unused: a caller
+        # debugging why a *specific* index attempt reported "absent" can
+        # see what was actually asked for, not just that something was.
+        #
+        # `ApplicationDeveloper.create_collection(name, fields)` is this
+        # peer's only schema-mutation call, and it has no parameter for
+        # indexes of any kind -- unlike `r2db-api`'s single generic
+        # `schema()` dispatcher, there is no entry point on this peer's
+        # public surface (confirmed by source inspection of cell.py: no
+        # other developer-facing method exists) that could even receive an
+        # index-creation request. Structurally absent, not denied -- see
+        # `SurfaceAbsent`'s docstring for why this must not become a
+        # fabricated `ConformanceDenial` instead.
+        raise SurfaceAbsent(
+            self.name, "create_unique_index",
+            "ApplicationDeveloper.create_collection has no index/uniqueness parameter, and no other "
+            f"schema-operation call exists on this peer (requested: entity={entity!r}, index={index!r}, "
+            f"fields={list(fields)!r})",
+            # This peer's entire public application-facing surface (the
+            # same list `public_operation_callables()` below declares for
+            # C-03's native-command-surface check), so a consumer can
+            # independently verify -- via `signature_forbids_parameters` --
+            # that none of it accepts an index/uniqueness-shaped parameter,
+            # rather than take this claim on its word (design section 4.3 /
+            # `SurfaceAbsent`'s own docstring).
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["index", "unique"],
+        )
+
+    def query_with_revisions(
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any
+    ) -> tuple[list[dict], list[str] | None]:
+        # `ApplicationCell.read()`'s own return type is a bare
+        # `[dict(row) for row in rows]` list, not a wrapping object -- so
+        # `None` here observes that real return shape having structurally
+        # no slot a `revisions` key could ever occupy, the same reasoning
+        # as `conformance_adapter_r2db.py`'s identical comment (contrast
+        # `conformance_adapter_r2db_http.py`, whose response *is* a JSON
+        # object and which inspects a real `result.get("revisions")`
+        # instead of asserting `None` unlooked-at -- conformance-review
+        # correction M-1).
+        items = self.select_eq(session, entity, select, field, value)
+        return items, None
 
     # ------------------------------------------------------------------
     # attack-surface declarations
@@ -554,7 +639,15 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self.provision_application(app_a)
         self.provision_application(app_b)
 
-        fields = {"id": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
+        # `item_key`, not `id`: the common fixture must not use `id` as an
+        # ordinary field name (port v1.2 coordinated revision, docs/design/
+        # CONFORMANCE_ADAPTER_V1.md section 12 / docs/design/
+        # R2DB_CCR13_STORAGE_V1.md R-3) -- `r2db-api` reserves it as its
+        # server-assigned address column. `MitateDB-api` itself does not
+        # reserve `id` (this peer's own throwaway probe entities elsewhere
+        # in this file may still use it freely), but the *shared* fixture
+        # entities below must use a name safe on every registered peer.
+        fields = {"item_key": "integer", "label": "text", "probe_key": "text", "probe_value": "text"}
         shared_entity = "shared_items"
         a_only_entity = "a_only_items"
         b_only_entity = "b_only_items"
@@ -569,10 +662,10 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self.create_entity(developer_b, shared_entity, fields)
         self.create_entity(developer_b, b_only_entity, fields)
 
-        self.insert(developer_a, shared_entity, {"id": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
-        self.insert(developer_b, shared_entity, {"id": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
-        self.insert(developer_a, a_only_entity, {"id": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
-        self.insert(developer_b, b_only_entity, {"id": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
+        self.insert(developer_a, shared_entity, {"item_key": 1, "label": "seed-a", "probe_key": "seed", "probe_value": "seed-a"})
+        self.insert(developer_b, shared_entity, {"item_key": 1, "label": "seed-b", "probe_key": "seed", "probe_value": "seed-b"})
+        self.insert(developer_a, a_only_entity, {"item_key": 1, "label": "a-only", "probe_key": "seed", "probe_value": "a-only"})
+        self.insert(developer_b, b_only_entity, {"item_key": 1, "label": "b-only", "probe_key": "seed", "probe_value": "b-only"})
 
         runtime_a_handle = self.issue_credential(app_a, "runtime")
         runtime_b_handle = self.issue_credential(app_b, "runtime")
