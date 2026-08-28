@@ -1,0 +1,151 @@
+# r2db-api service layer (r2dbsvc) -- systemd unit, stage 1 (parallel 8443 deployment).
+#
+# Companion documents: docs/design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md
+# (P2-D5 composition root / environment contract, P3-D8 deployment artifacts) and
+# r2db-api/deploy/DEPLOYMENT_RUNBOOK.md (install steps, port collision check, both DB
+# auth postures).
+#
+# Every path, internal port, and account name below that the operator must supply
+# (WorkingDirectory, ExecStart's paths, REPLACE_ME_INTERNAL_PORT) is a placeholder
+# to substitute with the target's real values before installing -- this file itself
+# never names a real host, credential, or filesystem path. Note this is narrower
+# than "nothing here is real": this unit is a genuine, deliberately-chosen part of
+# the stage-1 design (a real dedicated systemd unit, a real hardening posture) --
+# only the *values* naming the specific target host's layout are placeholders, not
+# the unit's shape or the fact that it will run. The runbook tells the operator what
+# to verify and replace before this unit is installed on the actual target.
+#
+# PLACEHOLDERS TO REPLACE BEFORE INSTALLING (see DEPLOYMENT_RUNBOOK.md §2):
+#   - WorkingDirectory / ExecStart paths (/opt/r2dbsvc/r2db-api below is illustrative)
+#   - REPLACE_ME_INTERNAL_PORT (uvicorn's --port; run the collision check in the
+#     runbook first -- do not guess a port that "should" be free)
+#
+# This unit deliberately does not depend on any unit name from the existing VPS
+# deployment (its actual service/unit name is unconfirmed from this repository and
+# must not be asserted here); After=/Wants= below only reference generic targets.
+
+[Unit]
+Description=r2dbsvc-api -- r2db-api service layer (Data Service API contract), stage-1 parallel deployment on an internal loopback port behind nginx TLS termination
+Documentation=file:/opt/r2dbsvc/r2db-api/deploy/DEPLOYMENT_RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# This process talks to PostgreSQL (posture A: loopback TCP, posture B: UNIX socket --
+# see DEPLOYMENT_RUNBOOK.md §3). If the operator's PostgreSQL runs as a systemd unit
+# on the same host, add "postgresql.service" (or whatever the actual unit is named on
+# the target) to both After= and Wants= -- left out here because this repository does
+# not know that unit's real name on the deployment target.
+
+[Service]
+Type=simple
+
+# Dedicated, non-login, non-root service account. Create with:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin r2dbsvc
+# (see DEPLOYMENT_RUNBOOK.md §2 step 1). This account must not be shared with the
+# existing VPS r2db-api deployment's own service account, if any -- confirm before
+# reusing a name.
+User=r2dbsvc
+Group=r2dbsvc
+
+# All application configuration comes from this file, root-owned mode 0600, with no
+# variable inherited from the ambient shell/session environment (handover §2.5:
+# "重要なのは名前の分離ではなく、各 EnvironmentFile に全項目を明示し、環境からの継承に
+# 頼らないこと"). See deploy/env/api.env.example for the full variable contract.
+EnvironmentFile=/etc/r2dbsvc/api.env
+
+# Illustrative install layout: a dedicated venv under this application's own
+# directory, owned by r2dbsvc, not shared with any other deployment (including the
+# existing VPS r2db-api implementation, which must keep its own separate venv,
+# secrets, and PostgreSQL targets -- see DEPLOYMENT_RUNBOOK.md §6).
+WorkingDirectory=/opt/r2dbsvc/r2db-api
+ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.main:app --host 127.0.0.1 --port REPLACE_ME_INTERNAL_PORT --no-server-header
+
+# REPLACE_ME_INTERNAL_PORT is intentionally not a numeric placeholder: uvicorn will
+# fail to parse it and the unit will fail loudly at start if an operator forgets to
+# substitute a real, collision-checked port, rather than silently binding to whatever
+# a plausible-looking example number happened to be. This matches the composition
+# root's own "missing configuration fails loudly at startup" posture (P2-D5).
+
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=10
+
+# -- Hardening -----------------------------------------------------------------
+# This process is a stateless ASGI application: it holds no local persistent state
+# of its own (persistence lives in PostgreSQL, reached over the network/socket), so
+# every hardening directive below is safe to apply with no ReadWritePaths carve-out
+# -- WITH ONE EXCEPTION, PrivateTmp=true, noted where it appears below. If a future
+# revision adds local state (e.g. a spool file), add an explicit ReadWritePaths= for
+# exactly that path rather than relaxing ProtectSystem.
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+# CAVEAT (posture B only, DEPLOYMENT_RUNBOOK.md §3): PrivateTmp=true gives this
+# process its own private /tmp/ mount namespace, distinct from the host's real
+# /tmp/. If posture B's PostgreSQL UNIX socket lives under /tmp/ (this is the
+# upstream PostgreSQL / RHEL-family default `unix_socket_directories`, though many
+# distributions -- Debian/Ubuntu among them -- instead default to
+# /var/run/postgresql), every connection this process makes fails, because the
+# socket file the process can see inside its private /tmp/ is not the same
+# filesystem object the real postgres server is listening on. This is not a
+# harmless carve-out gap; it silently breaks all DB connectivity under that
+# specific combination, contradicting the "safe with no carve-out" claim above for
+# that one case.
+#
+# Before adopting posture B, confirm the target cluster's actual
+# `unix_socket_directories` (`SHOW unix_socket_directories;`). If it resolves to a
+# path under /tmp/, either (preferred) reconfigure PostgreSQL to listen under a
+# non-/tmp path such as /var/run/postgresql (a PostgreSQL server-config change,
+# outside this unit), or, if that cannot be changed, replace the line below with an
+# explicit bind carve-out naming the real socket file/directory, e.g.:
+#   BindPaths=/tmp/.s.PGSQL.5432
+# (adjust the path to the cluster's actual socket; BindPaths= -- read-write, since
+# a UNIX-domain stream connection needs both directions -- punches exactly that one
+# path through the private /tmp/ namespace without disabling PrivateTmp entirely).
+# Posture A (loopback TCP, no socket file) is entirely unaffected by PrivateTmp;
+# this caveat does not apply to posture A.
+PrivateTmp=true
+
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+UMask=0077
+
+# No capabilities at all: this process never binds a privileged port (it binds
+# 127.0.0.1:REPLACE_ME_INTERNAL_PORT, an unprivileged port by construction once a
+# real port >1024 is chosen -- see the runbook's port-selection note), never changes
+# file ownership, and never needs raw sockets.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# AF_UNIX: required both for PostgreSQL UNIX-socket connections (posture B) and for
+# ordinary local IPC used by the Python/asyncio runtime. AF_INET/AF_INET6: required
+# for the uvicorn loopback TCP listener itself and for PostgreSQL over loopback TCP
+# (posture A). No other address family is needed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Without this, the seccomp filter above is only installed for the process's
+# native ABI; a process (or an attacker-influenced code path within it) can still
+# issue syscalls through a secondary ABI the kernel also accepts on this
+# architecture (e.g. the i386/x32 compatibility ABIs on x86_64), bypassing
+# SystemCallFilter= entirely. Restricting to native closes that gap.
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
