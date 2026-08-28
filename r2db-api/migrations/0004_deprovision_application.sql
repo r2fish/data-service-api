@@ -36,10 +36,39 @@
 -- outright, ACL entries included, before `DROP ROLE` ever runs -- so there
 -- is nothing left for a role to still be "holding" by the time it is
 -- dropped.
+--
+-- CREDENTIAL-RESIDUE GUARD (review-reported gap, fixed here): a surviving
+-- `r2dbsvc_registry.credentials` row for this slug used to let this
+-- script's destructive steps below (`DROP DATABASE`/`DROP ROLE`) succeed,
+-- only for `finish_deprovision_application`'s registry `DELETE` at the very
+-- end to then fail on that row's foreign key -- leaving the database and
+-- roles gone, but the registry still claiming the application is
+-- provisioned and its credentials still valid (able to authenticate).
+-- `r2dbsvc_registry.assert_no_credentials_for_deprovision`
+-- (`0005_credential_store.sql`) closes that gap by checking this
+-- *immediately* after `begin_deprovision_application` below, before
+-- `pg_terminate_backend`/`DROP DATABASE`/`DROP ROLE` -- anything at all --
+-- ever runs, and raises loudly (aborting this whole script, `ON_ERROR_STOP`)
+-- if any credential still references this slug.
+--
+-- Called conditionally, via `to_regprocedure` + `\gexec` (the same
+-- conditional-DDL idiom `0001`/`0003` already use for their own
+-- catalog-checked steps): a platform database that has never had `0005`
+-- applied at all has no such function to call, and this deliberately skips
+-- the check rather than failing on a missing function -- `0003`/`0004`
+-- must keep working entirely on their own for a deployment (or test suite,
+-- e.g. `r2db-api/tests/test_postgres.py`) that provisions/deprovisions
+-- applications without ever adopting the credential store.
 
 \set ON_ERROR_STOP on
 
 SELECT * FROM r2dbsvc_registry.begin_deprovision_application(:'app_slug') \gset
+
+SELECT CASE WHEN to_regprocedure('r2dbsvc_registry.assert_no_credentials_for_deprovision(text)') IS NOT NULL
+            THEN format('SELECT r2dbsvc_registry.assert_no_credentials_for_deprovision(%L)', :'app_slug')
+            ELSE 'SELECT 1' -- 0005 was never applied on this platform database -- nothing to check
+       END
+\gexec
 
 -- Terminate any lingering ordinary client backends against this
 -- application's database before dropping it -- a pooled `PostgresCell`

@@ -86,7 +86,8 @@ from adapter import (  # noqa: E402
     load_contract_error_codes,
 )
 
-from r2db_api import ControlAuthority, CredentialStore, DataService  # noqa: E402
+from r2db_api import ControlAuthority, DataService  # noqa: E402
+from r2db_api.credential_store import PostgresCredentialStore  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
@@ -183,6 +184,7 @@ class _Platform:
     prefix: str
     admin_dsn: str
     control_dsn: str
+    api_dsn: str
     platform_db: str
     provision_script: Path
     deprovision_script: Path
@@ -201,11 +203,17 @@ class _PgAppInfo:
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
     """Run the real `0001_bootstrap_control_plane.sql` /
-    `0002_provisioning_functions.sql` migrations (with `r2dbsvc` textually
-    replaced by this run's unique prefix) through the real `psql` binary --
-    the actual runbook an operator would use, not a Python reimplementation
-    of it (§5.3 C-5), exactly as `test_postgres.py`'s `platform` fixture
-    does. Also rewrites `0003_provision_application.sql`/`0004_deprovision_
+    `0002_provisioning_functions.sql` / `0005_credential_store.sql`
+    migrations (with `r2dbsvc` textually replaced by this run's unique
+    prefix) through the real `psql` binary -- the actual runbook an
+    operator would use, not a Python reimplementation of it (§5.3 C-5),
+    exactly as `test_postgres.py`'s `platform` fixture does. `0005` is
+    control-plane bootstrap exactly like `0001`/`0002` (independent of any
+    one application), so it runs here, once, rather than per-application --
+    it is what makes `PostgresCredentialStore` usable at all below (P2-D7:
+    this adapter must exercise the real, DB-backed credential store, not
+    the in-memory `CredentialStore` the previous revision of this file
+    used). Also rewrites `0003_provision_application.sql`/`0004_deprovision_
     application.sql` the same way and keeps them (in `script_dir`, which the
     caller keeps alive for this adapter's whole lifetime -- unlike
     `test_postgres.py`'s `tmp_path_factory`-backed fixture, this adapter has
@@ -216,8 +224,16 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     own header comments for why.
     """
     control_role = f"{prefix}_control"
+    api_role = f"{prefix}_api"
     platform_db = f"{prefix}_platform"
     control_password = secrets.token_urlsafe(24)
+    # `0005_credential_store.sql` needs an `api_password` to create the
+    # read-only `<prefix>_api` role -- this adapter's own `DataService` now
+    # connects as exactly this role (review "逸脱(a)の改善": the request-
+    # time read path must run under the same least-privilege grants a real
+    # deployment's `r2dbsvc_api` role has, not the full-privilege control
+    # role), see `__init__` below.
+    api_password = secrets.token_urlsafe(24)
 
     rewritten: dict[str, Path] = {}
     for name in (
@@ -225,6 +241,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0002_provisioning_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        "0005_credential_store.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -233,11 +250,14 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(admin_dsn, rewritten["0001_bootstrap_control_plane.sql"], {"control_password": control_password})
     control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
     _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
+    _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
+    api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
 
     return _Platform(
         prefix=prefix,
         admin_dsn=admin_dsn,
         control_dsn=control_dsn,
+        api_dsn=api_dsn,
         platform_db=platform_db,
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
@@ -577,7 +597,47 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # Synthetic pepper for this conformance run only; never a real
             # deployment secret and never read from the environment (mirrors
             # conformance_adapter_r2db.py).
-            self._credentials = CredentialStore(pepper="synthetic-conformance-pepper-r2db-http-0000")
+            #
+            # Two separate `PostgresCredentialStore` instances, matching the
+            # real two-role production architecture (P2-D3) rather than
+            # collapsing it into one connection for convenience (review
+            # "逸脱(a)の改善"):
+            #
+            # - `self._credentials` (below): every real HTTP request this
+            #   adapter drives authenticates through `DataService`, which
+            #   holds exactly this store -- constructed against `<prefix>_
+            #   api`, the strictly read-only role `0005` provisions
+            #   (`SELECT` only on `applications`/`credentials`). If this
+            #   store's read path (`authenticate`/`assert_active`) ever
+            #   needed more than that role's grants, every single
+            #   application-plane request in this conformance run would
+            #   fail with `AUTH_STATE_UNAVAILABLE` -- a real, immediate
+            #   regression signal that this role's grants (and the code
+            #   that only ever reads through it) are actually sufficient,
+            #   not merely a naming convention.
+            # - `self._write_credentials`: constructed against `<prefix>_
+            #   control` (full DML), used directly -- by `issue_credential`/
+            #   `revoke_credential`/`disable_credential`-equivalent methods
+            #   below -- for provisioning writes. `ControlAuthority.issue_
+            #   credential`/`.set_credential_state` are *not* used for this:
+            #   both only ever reach `self._service._credentials` (the
+            #   read-only store above), which would refuse a write outright
+            #   at the database privilege level. This trades away
+            #   `ControlAuthority`'s own `credential_lifecycle` audit event
+            #   for these two operations (a separate, in-memory `AuditSink`
+            #   concern, orthogonal to what this adapter is actually
+            #   verifying) in exchange for the read path genuinely running
+            #   under least privilege -- the property this change is for.
+            self._credentials = PostgresCredentialStore(
+                self._platform.api_dsn,
+                pepper="synthetic-conformance-pepper-r2db-http-0000",
+                schema=f"{prefix}_registry",
+            )
+            self._write_credentials = PostgresCredentialStore(
+                self._platform.control_dsn,
+                pepper="synthetic-conformance-pepper-r2db-http-0000",
+                schema=f"{prefix}_registry",
+            )
             self._service = DataService(self._credentials, cell_factory=self._make_cell)
             self._control = ControlAuthority(self._service)
 
@@ -737,17 +797,58 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         self._counter += 1
         credential_id = f"httpconf-cred-{application_id}-{role}-{self._counter}"
         secret = f"httpconf-secret-{self._counter}-{uuid.uuid4().hex}"
-        self._control.issue_credential(credential_id, application_id, role, secret)
+        # `self._write_credentials`, not `self._control.issue_credential`:
+        # `ControlAuthority` can only reach `self._service._credentials`
+        # (`self._credentials`, the *read-only*-role store `DataService`
+        # holds), which would refuse this `INSERT` at the database
+        # privilege level -- see `__init__`'s comment on the two-store
+        # split.
+        self._write_credentials.add(credential_id, application_id, role, secret)
         return CredentialHandle(credential_ref=credential_id, application_id=application_id, role=role, secret=secret)
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
-        self._control.set_credential_state(handle.credential_ref, revoked=True)
+        self._write_credentials.set_state(handle.credential_ref, revoked=True)
 
     def disable_application(self, application_id: str) -> None:
-        self._control.set_application_enabled(application_id, enabled=False)
+        self._set_registry_application_enabled(application_id, False)
 
     def enable_application(self, application_id: str) -> None:
-        self._control.set_application_enabled(application_id, enabled=True)
+        self._set_registry_application_enabled(application_id, True)
+
+    def _set_registry_application_enabled(self, application_id: str, enabled: bool) -> None:
+        """The *only* mechanism this adapter uses to disable/enable an
+        application -- a direct write to the database `applications.
+        enabled` column, exactly what `python -m r2db_api.ops disable-app`/
+        `enable-app` (P2-D6) does in a real deployment. This adapter
+        reproduces the same SQL rather than shelling out to that CLI, for
+        the same reason `_sweep_prefix` above is duplicated rather than
+        imported (no import-time dependency on another module this adapter
+        must not assume stays stable).
+
+        Review-reported gap this fixes: an earlier revision of this method
+        *also* called `ControlAuthority.set_application_enabled` (which
+        only ever toggles `DataService`'s private in-memory `_disabled_
+        apps` set -- `DataService._check`/`.authenticate` still consult it
+        as a second, legacy layer). That in-memory toggle alone was enough
+        to make every C-08 disablement condition pass, which meant this
+        DB write could regress to a silent no-op without any conformance
+        test noticing -- confirmed by review: neutralizing this method's DB
+        write left the suite green while the in-memory call was still
+        present. `PostgresCredentialStore.authenticate`/`assert_active`
+        decide `APPLICATION_DISABLED` from the *database*
+        `applications.enabled` column alone (P2-D4); calling
+        `ControlAuthority.set_application_enabled` here would only ever
+        mask a bug in that DB-backed path, never actually exercise it, so
+        it is deliberately not called from this method at all.
+        """
+        statement = sql.SQL("UPDATE {table} SET enabled = {enabled_ph} WHERE application_slug = {slug_ph}").format(
+            table=sql.Identifier(f"{self._platform.prefix}_registry", "applications"),
+            enabled_ph=sql.Placeholder(),
+            slug_ph=sql.Placeholder(),
+        )
+        with psycopg.connect(self._platform.control_dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(statement, [enabled, application_id])
 
     def set_authorization_state_available(self, available: bool) -> None:
         self._control.set_authorization_state_available(available)
@@ -1191,6 +1292,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         finally:
             for cell in self._provisioned_cells:
                 cell.close()
+            self._credentials.close()
+            self._write_credentials.close()
             self._loop.close()
             try:
                 # Drops the platform database and every per-application

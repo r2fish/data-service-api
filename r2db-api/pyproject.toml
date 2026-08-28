@@ -9,6 +9,28 @@ description = "Reference foundation for the common structured Data Service API c
 requires-python = ">=3.11"
 dependencies = [
     "starlette>=1.0",
+    # `r2db_api.postgres`/`r2db_api.credential_store` import `psycopg`
+    # unconditionally (module-level `import psycopg`), and `r2db_api.main`
+    # (the `r2db_api.main:app` composition root, P2-D5) and `r2db_api.ops`
+    # (the provisional CLI, P2-D6) both depend on it transitively --
+    # review-reported gap: this was previously only satisfied by whatever
+    # happened to already be in the development virtualenv, so a fresh
+    # install following this package's own runbook (`r2db-api/docs/
+    # POSTGRES_PROVISIONING_RUNBOOK.md`) hit `ModuleNotFoundError` running
+    # `r2db_api.main`/`r2db_api.ops`. `[binary]` pulls in psycopg's
+    # pre-built C extension (`libpq` included) rather than requiring the
+    # target machine to have `libpq`'s headers/toolchain to build the pure
+    # `psycopg` package from source -- the simpler default for a deployed
+    # unit; an operator who specifically wants to link the system `libpq`
+    # instead can install plain `psycopg` + `psycopg-c` per psycopg's own
+    # documented alternative.
+    "psycopg[binary]>=3.1",
+    # `r2db_api.main:app` is meant to be run with `uvicorn r2db_api.main:app`
+    # (P2-D5, `deploy/systemd/r2dbsvc-api.service`'s `ExecStart=`) --
+    # declaring it here means `pip install` alone provides a working
+    # `uvicorn` binary in this package's own virtualenv, matching what the
+    # runbook's own commands assume.
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

@@ -78,6 +78,18 @@ from .structured import (
 
 _REVISION_TABLE = "_r2db_schema_revision"
 
+# `_RolePool`'s own bounded-wait defaults (review fix: neither of these
+# existed before -- a connect attempt against an unreachable target had no
+# timeout at all, and a caller waiting for a pooled connection to free up
+# waited on `queue.Queue.get()` with no timeout either). Both are
+# constructor parameters, not environment-tunable knobs like `R2DB_POOL_*`
+# below: they bound worst-case latency for a single acquisition, not
+# steady-state pool sizing, and a caller (a test, most concretely) that
+# needs a different value passes it directly to `_RolePool`/`PostgresCell`/
+# `PostgresCredentialStore`.
+_DEFAULT_CONNECT_TIMEOUT_S = 5
+_DEFAULT_ACQUIRE_TIMEOUT_S = 10.0
+
 _COMPARISON_OPERATORS: dict[str, sql.SQL] = {
     "eq": sql.SQL("="),
     "ne": sql.SQL("<>"),
@@ -122,13 +134,15 @@ class _RolePool:
     from either one reports its own fixed role/schema, never the other's.
     """
 
-    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4) -> None:
+    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4, connect_timeout: int = _DEFAULT_CONNECT_TIMEOUT_S, acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_S) -> None:
         self._dsn = dsn
         self._schema = schema
         self._maxconn = max(1, maxconn)
         self._queue: "queue.Queue[psycopg.Connection[Any]]" = queue.Queue(maxsize=self._maxconn)
         self._lock = threading.Lock()
         self._created = 0
+        self._connect_timeout = connect_timeout
+        self._acquire_timeout = acquire_timeout
         # Set by `retire()` (called only by `SharedPoolManager`, below, when
         # this pool is evicted -- idle timeout or LRU cap). A retired pool
         # keeps serving any connection a caller already checked out (see
@@ -138,7 +152,17 @@ class _RolePool:
         self._retired = False
 
     def _connect(self) -> "psycopg.Connection[Any]":
-        conn = psycopg.connect(self._dsn, autocommit=False)
+        # `connect_timeout` (a real libpq connection parameter, merged into
+        # `self._dsn`'s already-parsed conninfo by `psycopg.connect`'s own
+        # kwargs-override-conninfo behaviour) bounds how long a single
+        # connect attempt can take against an unreachable/blackholed target.
+        # Without this, a target that never responds at the TCP level (as
+        # opposed to an immediate `ECONNREFUSED`) can block for the
+        # platform's default TCP connect timeout -- minutes, not seconds --
+        # which is exactly the kind of unbounded wait `_acquire` below must
+        # not be exposed to while holding `self._lock` (see that method's
+        # own comment on why `_connect()` is never called under the lock).
+        conn = psycopg.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SET search_path TO {}").format(sql.Identifier(self._schema)))
         conn.commit()
@@ -149,11 +173,51 @@ class _RolePool:
             return self._queue.get_nowait()
         except queue.Empty:
             pass
+        # Reserve a slot (increment `_created`) and release the lock
+        # *before* calling `_connect()` -- a real, previously-shipped bug
+        # this class had: `_connect()` used to run while `self._lock` was
+        # held, so every thread contending for a new connection against an
+        # unreachable target serialized on this lock for the full connect
+        # attempt, and a failed `_connect()` never rolled its reservation
+        # back. `maxconn` consecutive failures against an unreachable
+        # target therefore permanently pinned `_created` at `maxconn`, so
+        # every later `_acquire()` call fell straight through to the
+        # untimed `self._queue.get()` below and blocked forever -- even
+        # once the target became reachable again, since nothing ever put a
+        # connection back on this empty queue. `r2db_api/tests/
+        # test_postgres.py::test_role_pool_recovers_after_connect_failures_
+        # are_exhausted_and_target_becomes_reachable` and
+        # `test_credential_persistence.py::
+        # test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_
+        # recovers_once_reachable` are the executable checks for this fix.
+        reserved = False
         with self._lock:
             if self._created < self._maxconn:
                 self._created += 1
+                reserved = True
+        if reserved:
+            try:
                 return self._connect()
-        return self._queue.get()
+            except Exception:
+                with self._lock:
+                    self._created = max(0, self._created - 1)
+                raise
+        # Every slot is claimed by a connection some other caller currently
+        # holds (or that is itself mid-`_connect()` on another thread) --
+        # wait for one to be returned, but never unboundedly: a
+        # `queue.Empty` here (nothing returned within `acquire_timeout`) is
+        # re-raised as a `psycopg.OperationalError`, the same exception
+        # type an actual failed connection attempt would raise, so every
+        # existing `except psycopg.Error` call site in this file and in
+        # `r2db_api.credential_store` already handles it correctly (fail-
+        # closed to `SERVICE_UNAVAILABLE`/`AUTH_STATE_UNAVAILABLE`, never a
+        # silent hang).
+        try:
+            return self._queue.get(timeout=self._acquire_timeout)
+        except queue.Empty:
+            raise psycopg.OperationalError(
+                f"timed out after {self._acquire_timeout}s waiting for an available pooled connection (pool exhausted at maxconn={self._maxconn})"
+            )
 
     def _liveness_check(self, conn: "psycopg.Connection[Any]") -> bool:
         """`pool_pre_ping` equivalent: a connection dequeued from `self._

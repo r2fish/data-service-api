@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import AbstractAsyncContextManager
 from importlib import resources
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -381,12 +382,25 @@ _ROUTES = [
 ]
 
 
-def create_app(service: DataService) -> ASGIApp:
+def create_app(service: DataService, *, lifespan: Callable[[Starlette], AbstractAsyncContextManager[None]] | None = None) -> ASGIApp:
     """Build the ASGI application exposing `service` over the contract's HTTP surface.
 
     The returned callable is `RequestByteBoundMiddleware` wrapping a
     Starlette application, so SI-08's request-byte bound is enforced before
     any Starlette routing or body parsing runs.
+
+    `lifespan` is optional and defaults to Starlette's own no-op lifespan,
+    same as before this parameter existed -- every existing caller
+    (`tests/test_http.py`, both conformance adapters) is unaffected. It
+    exists for `r2db_api.main`'s composition root (design docs/design/
+    R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md, P2-D5), which
+    needs an ASGI shutdown hook to release `PostgresCell`'s shared pool
+    manager and the platform credential store's own pool. An ASGI
+    `"lifespan"`-scope event bypasses `RequestByteBoundMiddleware` entirely
+    (it only intercepts `scope["type"] == "http"`, see that class'
+    `__call__` above), so wiring a lifespan into the wrapped Starlette
+    application here is sufficient for uvicorn's lifespan protocol to reach
+    it with no other change to this middleware.
     """
     app = Starlette(
         routes=_ROUTES,
@@ -394,6 +408,7 @@ def create_app(service: DataService) -> ASGIApp:
             StarletteHTTPException: _http_exception_handler,
             Exception: _unhandled_exception_handler,
         },
+        lifespan=lifespan,
     )
     app.state.service = service
     return RequestByteBoundMiddleware(app, service.limits)

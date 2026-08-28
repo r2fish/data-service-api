@@ -47,7 +47,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
-from r2db_api.postgres import PostgresCell, SharedPoolManager
+from r2db_api.postgres import PostgresCell, SharedPoolManager, _RolePool
 from r2db_api.structured import Predicate
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
@@ -1211,3 +1211,90 @@ def test_isolation_holds_after_pool_eviction_and_recreation(platform: types.Simp
                 cell_b.close()
         finally:
             cell_a.close()
+
+
+# --- `_RolePool` connect-failure accounting (fixed regression) ------------
+
+
+_UNREACHABLE_DSN = "host=127.0.0.1 port=1 dbname=nope user=nope password=nope"
+
+
+def test_role_pool_never_hangs_after_repeated_connect_failures_and_recovers() -> None:
+    """Regression test for a real, previously-shipped bug in `_RolePool.
+    _acquire`: `self._created` used to be incremented *before* calling
+    `self._connect()`, with no rollback on failure, and `self._connect()`
+    itself ran while `self._lock` was held. `maxconn` consecutive connect
+    failures against an unreachable target therefore permanently pinned
+    `_created` at `maxconn` -- every later `_acquire()` call fell straight
+    through to an untimed `self._queue.get()` and blocked forever, with no
+    way to recover even once the target became reachable again (nothing was
+    ever queued). Reported by review against real, measured behaviour:
+    unreachable DSN + `pool_size=2` blocked the 3rd `authenticate()` call
+    permanently.
+
+    Fixed by: (1) releasing the reserved slot on a failed `_connect()`
+    (`_created -= 1`), (2) calling `_connect()` outside `self._lock`, and
+    (3) giving both connection attempts (`connect_timeout`) and waiting for
+    a pooled connection to free up (`acquire_timeout`) real, bounded
+    timeouts -- a timed-out wait now raises `psycopg.OperationalError`
+    (the same type a genuine failed connection raises), rather than hanging
+    the calling thread indefinitely.
+
+    This test's own worker thread runs `daemon=True` and is bounded with a
+    `join(timeout=...)` specifically so that *this test itself* cannot hang
+    the suite even if this exact regression reappears -- a `TimeoutError`-
+    shaped assertion failure is the worst case, never an unbounded wait.
+    """
+    pool = _RolePool(_UNREACHABLE_DSN, schema="public", maxconn=2, connect_timeout=1, acquire_timeout=1)
+    try:
+        # The first `maxconn` acquisitions each take the "reserve a slot,
+        # try to connect" path. Port 1 on loopback refuses immediately
+        # (`ECONNREFUSED`) rather than timing out, so these return fast
+        # regardless of `connect_timeout` -- the bug this test is about is
+        # in what happens *after* these fail, not in how long they take.
+        for _ in range(2):
+            with pytest.raises(psycopg.OperationalError):
+                with pool.connection():
+                    pass
+
+        # Before the fix, `_created` was left pinned at `maxconn` by the
+        # two failures above, so this third acquisition fell through to an
+        # untimed `queue.Queue.get()` and never returned at all. Run it on
+        # a background thread with a bounded join so a reintroduced
+        # regression fails this assertion instead of hanging pytest.
+        outcome: list[BaseException | None] = []
+
+        def attempt() -> None:
+            try:
+                with pool.connection():
+                    pass
+            except BaseException as exc:  # noqa: BLE001 - captured for the main thread's assertions
+                outcome.append(exc)
+            else:
+                outcome.append(None)
+
+        worker = threading.Thread(target=attempt, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), (
+            "pool.connection() did not return within 5s after maxconn connect failures -- "
+            "this is the _created-leak hang regression this test guards against"
+        )
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], psycopg.OperationalError)
+
+        # Recovery: point this same pool instance at a real, reachable
+        # target -- an operator would observe this as "the network/platform
+        # DB outage cleared" -- and confirm a connection can still be
+        # created. This is only possible if `_created` was correctly rolled
+        # back on each failure above; if it had stayed pinned at `maxconn`
+        # (the bug), this would time out identically to the blocked
+        # attempt above, `acquire_timeout` notwithstanding, since nothing
+        # would ever have been queued.
+        pool._dsn = _admin_dsn()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                assert cur.fetchone() == (1,)
+    finally:
+        pool.close_all()
