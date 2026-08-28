@@ -30,21 +30,62 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 いずれも新しい共通Capabilityや安全outcomeを追加するものではなく、既存の CCR-06 (canonical audit) / CCR-10 (revoke/disable伝播bound) が既に要求していた意味論を、`spec/data-service-api.v1.json` 上で検証・実装可能な形にしたものである。
 
-## CCR-13〜14 採否記録 (r2db-api 起票)
+## CCR-13〜15 採否記録 (r2db-api 起票)
 
-入力は `r2db-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md`。CCR-01〜12 と異なり、**起票時点では採否未決である。** 双方とも共通契約の骨格に関わるため、実装着手前に判断する。
+入力は `r2db-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md` 第3版。CCR-01〜12 と異なり、**起票時点では採否未決である。** いずれも共通契約の骨格に関わるため、実装着手前に判断する。
+
+第1版・第2版はそれぞれ独立レビューを経て改稿した。訂正の記録は下記および CCR 文書内の訂正欄に保持する。
 
 | CCR | 判定 | 論点 | 判断に必要なもの |
 |---|---|---|---|
-| CCR-13 行の同一性 | **審議中** | 契約は既に `Mutation.expected_revision` と `MutationRequest.idempotency_key` を定義しており、行の同一性なしにこれらは実装不能。欠落は明らかで採用方向は動かないと考える。残る論点は必須化の範囲 | 全entityに同一性を強制するか、entity単位の任意宣言とし未宣言時は revision/idempotency を `CAPABILITY_UNSUPPORTED` とするか |
-| CCR-14 制御プレーン endpoint | **審議中** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は既に契約にあり、endpoint だけが無い。制御手段が契約にないと各実装が独自の帯域外手段を発明し、現に両実装が別物になっている | control credential 自体の bootstrap 経路 (最初の1本は帯域外にならざるを得ない)、`/v1` 配下に置くか別 base path か |
+| CCR-13 行の指し示し可能性 | **審議中** | `allowed_mutations` に既にある `upsert` は、一意性の概念なしには意味を定義できない。契約が意味を与えられない操作を許可している。要求は行を狙った mutation を支持する entity に限り、結果を4性質 (宣言・可視・照準・一意不変) に分解、revision の被参照先は5条項で固定 | `MutationResult` の拡張を v1 で行うか (サーバ側採番の識別子を返す唯一の応答形状変更) |
+| CCR-14 制御プレーン | **審議中** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は採用済みで endpoint だけが無い。乖離は起きた問題ではなく見込みの問題 (統治下2 peer の公開面乖離はゼロ、旧 VPS 実装は統治外)。提供は必須とせず `capability_status` で申告 | 採用時期 (全体採用 / 安全条項のみ先行 / 全体延期)。in-band 発行 (案A / 案B)。base path `/control/v1` の確認 |
+| CCR-15 entity をまたぐ atomicity | **審議中** | mutation 経路が `/v1/data/{entity}/mutations` であり atomic batch が単一 entity に閉じる。第3版で形状を定義 (`POST /v1/data/mutations`、各 `Mutation` に必須 `entity`)。対話的トランザクションは明示的に排除 | `batch_entities` の境界値と enforcement layer の申告方法 |
 
-### 判断の前提
+### 判断の軸
 
-- SI-02 が要求するのは Control Plane 認可の**分離**であって、HTTP 面の不在ではない。別種の credential で認証し、application API から到達経路を持たない制御面は SI-02 と両立する。
-- CCR-14 は「独立した汎用データサービス」という本 repository の目的に直結する。オンボーディングに運用者のサーバログインを要する状態は、特定用途の専用データベースの運用形態であり、目的と合致しない。
-- 現行 VPS 実装の `/admin/api/*` は、HTTP に出したこと自体は正しく、**単一のグローバルパスワードで全 Application を支配する点**が誤りである。control credential も個別発行・失効・期限を持つ資格情報とする。
+優先順位は **堅牢で安全であること、次に最大限の自由があること**。道路にゲートを設けるのではなく、ガードレールを設ける。
+
+- **機構ではなく結果を要求する。** SI-00 が containment を要求して topology を要求しないのと同じ形にする
+- **ガードレールは危険のある場所に置く。** 安全要求のスコープは危険の所在から導く。危険の無い区間への無条件の要求はそれ自体がゲートになる
+- **能力の提供を強制しない。** 契約は形状と意味論を定め、可用性は `capability_status` で申告させる
+- **結果は検証可能な性質に分解する。** 散文のままの結果は適合テストが書けず、「機構は自由」が「何も固定されていない」に転化する
+
+### 各版の誤りの記録
+
+**第1版 (第2版で訂正)**
+
+- `idempotency_key` は行の同一性を前提としない。`MutationRequest` に属するリクエスト単位の項目であり、これに基づく「未宣言 entity では利用不可」提案は追記専用データから冪等性を奪うものだった。撤回
+- `upsert` を引用していなかった。契約が意味を与えられない操作を既に許可しているという最強の根拠を落としていた
+- `expected_revision` の「実装不能」は言い過ぎ。正確には「相互運用可能な形で有効化できない」
+- saga の証拠を誤った要求に紐づけていた。示すのは entity をまたぐ atomicity の欠落であり、CCR-15 として分離した
+- 読み取り側 (catalog のキー宣言、query 結果の revision) を欠いていた
+- 現行 VPS 実装の教訓を一つしか記録していなかった (実際は三つ)
+
+**第2版 (第3版で訂正)**
+
+- 無条件の普遍的 addressability は、読み取り専用 entity を塞ぐ新しいゲートだった。可変 entity へスコープを絞った
+- revision の被参照先を、問題と指摘しながら固定していなかった。5条項で固定した
+- SQLite rowid の引用が自らの結果 (不変性) を満たしていなかった (`VACUUM` による振り直し、実測確認済み)
+- 「三実装が三様に乖離」は数え方が誤り。統治下の公開面乖離はゼロであり、見込みの問題として論じ直した
+- 採用延期の選択肢を断定 (「延期する理由にはならない」) で消していた。三案として依頼者に戻した
+- CCR-15 が形状を提案しておらず変更要求になっていなかった
+
+**レビュー側の誤り (同じく記録する)**
+
+- 第2版レビューは「契約側 r2db-api は schema-per-application」と結論したが、事実に反する (`r2db-api/migrations/0003_provision_application.sql` が `CREATE DATABASE` を発行し、`PostgresCell` の `schema` 引数は各 DB 内の `public` を指す)。ただし「CCR が peer の topology を断定すべきでない」という指摘自体は妥当であり、第3版は topology の断定を除いた
+
+### 未決事項 (依頼者判断)
+
+1. **CCR-13/14/15 の採否そのもの**
+2. CCR-13: `MutationResult` の v1 拡張
+3. CCR-14: 採用時期 — (a) 全体採用 (b) 安全条項のみ先行し endpoint 形状は peer 起動後に確定 (c) 全体延期。(b) は前レビュー担当の推奨だが決定ではない
+4. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。既存 invariant は control credential の侵害を扱っていないため、採る案により conformance 条件が変わる
+5. CCR-14: base path `/control/v1`
+6. CCR-15: `batch_entities` の境界値と enforcement layer
 
 ### 未採用のまま実装してはならない
 
 いずれも共通契約の変更であり、`r2db-api` 側の実装判断として先行させない (CLAUDE.md: peer を共通契約の暗黙的所有者にしない)。採用が決まるまでの暫定手段は帯域外 (CLI) とし、暫定であることを明記する。
+
+CCR-14 の実装には前提条件 (credential の永続化、composition root) がある。この前提作業自体は契約変更を伴わないため採否を待たずに進められるが、credential 記録の形・ライフサイクル状態・bootstrap の形を先取りで固定しないよう、採否判断を先に依頼者へ諮る。
