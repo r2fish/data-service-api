@@ -354,22 +354,149 @@ async def test_query_page_size_is_forwarded(client):
     assert response.json() == {"items": [{"id": 1}], "next_page": None}
 
 
-async def test_query_order_by_and_cursor_are_capability_unsupported(client):
+async def test_query_order_by_sorts_ascending_and_descending(client):
+    """CCR-13 WP-4: `order_by` is delegated, not rejected, and the HTTP
+    response reflects the real sort order."""
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "z"}}, {"operation": "insert", "values": {"body": "m"}}]},
+    )
+    assert response.status_code == 200
+
+    ascending = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["body"], "order_by": [{"field": "body", "direction": "asc"}]},
+    )
+    assert ascending.status_code == 200
+    assert ascending.json() == {"items": [{"body": "a"}, {"body": "m"}, {"body": "z"}], "next_page": None}
+
+    descending = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["body"], "order_by": [{"field": "body", "direction": "desc"}]},
+    )
+    assert descending.status_code == 200
+    assert descending.json() == {"items": [{"body": "z"}, {"body": "m"}, {"body": "a"}], "next_page": None}
+
+
+async def test_query_order_by_multiple_clauses(client):
+    """Multiple `order_by` clauses -- the second breaks ties left by the
+    first, exactly like a real multi-column ORDER BY."""
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "dup"}}, {"operation": "insert", "values": {"body": "dup"}}]},
+    )
+    assert response.status_code == 200
+    # Seeded row: id=1, body="a". Then id=2/3, body="dup"/"dup".
     response = await client.post(
         "/v1/data/notes/query",
         headers=_auth("secret-a"),
-        json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}]},
+        json={"select": ["id", "body"], "order_by": [{"field": "body", "direction": "asc"}, {"field": "id", "direction": "desc"}]},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"items": [{"id": 1, "body": "a"}, {"id": 3, "body": "dup"}, {"id": 2, "body": "dup"}], "next_page": None}
+
+
+async def test_query_order_by_unknown_field_is_not_found(client):
+    response = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["id"], "order_by": [{"field": "ghost", "direction": "asc"}]},
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "NOT_FOUND"
+
+
+async def test_query_cursor_pagination_pages_through_results_and_terminates(client):
+    """CCR-13 WP-4: `page.cursor` is delegated, not rejected -- pages
+    through a real multi-page result set and terminates with `next_page:
+    null` on the last page."""
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": f"p{n}"}} for n in range(2, 6)]},
+    )
+    assert response.status_code == 200
+    # 5 rows total (seeded "a" + 4 inserted), id 1..5.
+
+    seen_ids: list[int] = []
+    cursor = None
+    for _ in range(10):  # bounded loop -- a real termination bug must not hang the test
+        body: dict = {"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 2}}
+        if cursor is not None:
+            body["page"]["cursor"] = cursor
+        response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json=body)
+        assert response.status_code == 200
+        payload = response.json()
+        seen_ids.extend(item["id"] for item in payload["items"])
+        cursor = payload["next_page"]
+        if cursor is None:
+            break
+    else:
+        pytest.fail("pagination never terminated (next_page stayed non-null)")
+    assert seen_ids == [1, 2, 3, 4, 5]
+
+
+async def test_query_cursor_tampering_is_validation_failed(client):
+    seeded = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
+    )
+    assert seeded.status_code == 200
+    first = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1}},
+    )
+    cursor = first.json()["next_page"]
+    assert cursor  # the just-inserted second row makes a next page exist
+    tampered = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
+    response = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1, "cursor": tampered}},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+async def test_query_cursor_minted_for_a_different_entity_is_rejected(client):
+    """A cursor's opaque shape hash binds the entity it was minted against
+    (`r2db_api.structured._shape_hash`) -- reusing one against a different
+    entity must fail loudly, never silently page through the wrong
+    entity's rows."""
+    developer = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-secret-a"),
+        json={"operation": "create_entity", "entity": "widgets", "fields": ["name"]},
+    )
+    assert developer.status_code == 200
+    seeded = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
+    )
+    assert seeded.status_code == 200
+
+    minted = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1}},
+    )
+    cursor = minted.json()["next_page"]
+    assert cursor
 
     response = await client.post(
-        "/v1/data/notes/query",
+        "/v1/data/widgets/query",
         headers=_auth("secret-a"),
-        json={"select": ["id"], "page": {"cursor": "opaque-cursor"}},
+        json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1, "cursor": cursor}},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.json()["code"] == "VALIDATION_FAILED"
 
 
 async def test_query_matches_filter_is_capability_unsupported(client):

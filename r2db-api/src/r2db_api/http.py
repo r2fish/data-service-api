@@ -300,18 +300,23 @@ async def post_query(request: Request) -> Response:
     entity = request.path_params["entity"]
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
-    if "order_by" in body:
-        fail("CAPABILITY_UNSUPPORTED", "Result ordering is not supported by this foundation.")
-    kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where")}
+    # CCR-13 WP-4 (docs/design/R2DB_CCR13_STORAGE_V1.md §3): `order_by`/
+    # `page.cursor` are no longer rejected outright here -- both are
+    # delegated to `DataService.query_page`, which passes them to the
+    # underlying cell (`structured.py`'s shared `_resolve_order_by`/
+    # `_decode_cursor` validate the shapes; `matches`/`expected_revision`/
+    # `upsert`/`create_index`/`drop_index`/`field_type` remain gated at
+    # the `DataService` layer, untouched by this change).
+    kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
     page = body.get("page")
     if page is not None:
         _check_object_shape(page, _DEFINITIONS["Page"], label="page")
-        if "cursor" in page:
-            fail("CAPABILITY_UNSUPPORTED", "Cursor-based pagination is not supported by this foundation.")
         if "size" in page:
             kwargs["page_size"] = page["size"]
-    items = service.query(context, entity, request_id=_request_id(request), **kwargs)
-    return JSONResponse({"items": items, "next_page": None}, status_code=200)
+        if "cursor" in page:
+            kwargs["cursor"] = page["cursor"]
+    result = service.query_page(context, entity, request_id=_request_id(request), **kwargs)
+    return JSONResponse({"items": result.items, "next_page": result.next_page}, status_code=200)
 
 
 @_endpoint

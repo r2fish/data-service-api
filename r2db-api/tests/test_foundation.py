@@ -1706,3 +1706,64 @@ def test_gate_does_not_affect_ungated_mutation_operations(service):
     assert affected == 1
     developer = service.authenticate("dev-secret-a")
     assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"}) == 1
+
+
+# ==========================================================================
+# CCR-13 WP-4 (docs/design/R2DB_CCR13_STORAGE_V1.md §3): `order_by`/cursor
+# pagination delegated through `DataService.query`/`query_page`, no
+# longer rejected outright. Deliberately small scope: `revisions` and
+# `assigned_addresses` still do not reach a caller (WP-5); the gated
+# vocabulary (`matches`/`expected_revision`/`upsert`/`create_index`/
+# `drop_index`/`field_type`) must remain refused exactly as before.
+# ==========================================================================
+
+
+def test_service_query_order_by_sorts_and_query_page_reports_pagination(service):
+    runtime = service.authenticate("secret-a")
+    service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "z"}}, {"operation": "insert", "values": {"body": "m"}}])
+
+    ascending = service.query(runtime, "notes", select=["body"], order_by=[{"field": "body", "direction": "asc"}])
+    assert ascending == [{"body": "a"}, {"body": "m"}, {"body": "z"}]
+
+    # `query_page` (the shape `http.post_query` actually uses) reports a
+    # real `next_page` when more rows remain, and `None` on the last page.
+    first = service.query_page(runtime, "notes", select=["id"], order_by=[{"field": "id", "direction": "asc"}], page_size=2)
+    assert first.items == [{"id": 1}, {"id": 2}]
+    assert first.next_page is not None
+    second = service.query_page(runtime, "notes", select=["id"], order_by=[{"field": "id", "direction": "asc"}], page_size=2, cursor=first.next_page)
+    assert second.items == [{"id": 3}]
+    assert second.next_page is None
+
+
+def test_service_query_cursor_from_a_different_entity_is_rejected(service):
+    runtime = service.authenticate("secret-a")
+    developer = service.authenticate("dev-secret-a")
+    service.schema(developer, {"operation": "create_entity", "entity": "widgets", "fields": ["name"]})
+    service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "z"}}])
+
+    page = service.query_page(runtime, "notes", select=["id"], order_by=[{"field": "id", "direction": "asc"}], page_size=1)
+    assert page.next_page is not None
+    with pytest.raises(FoundationError) as exc:
+        service.query_page(runtime, "widgets", select=["name"], order_by=[{"field": "id", "direction": "asc"}], page_size=1, cursor=page.next_page)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_gate_still_refuses_matches_and_mutate_gate_vocabulary_alongside_order_by_and_cursor(service):
+    """WP-4 opens `order_by`/`cursor` up at the facade -- this is the
+    regression check that doing so did not loosen the *other* gated
+    vocabulary (`matches`/`expected_revision`/`upsert`) riding along in
+    the very same call. Each case below supplies a well-formed `order_by`/
+    `cursor`-shaped request alongside the still-gated feature, to prove
+    the gate fires regardless."""
+    runtime = service.authenticate("secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": "anything"}])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "upsert", "values": {"body": "x"}}])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    # And ordinary order_by/cursor-free operators are still unaffected.
+    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]

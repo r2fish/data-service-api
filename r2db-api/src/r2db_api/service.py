@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import threading
 import time
 from typing import Any, Callable, Iterator
@@ -28,6 +29,21 @@ CellFactory = Callable[[str, dict[str, list[dict[str, Any]]] | None], StorageBac
 
 def _default_cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> StorageBackend:
     return ApplicationCell(application_id, entities or {})
+
+
+@dataclass(frozen=True)
+class QueryPage:
+    """CCR-13 WP-4: `DataService.query_page`'s own return shape, matching
+    `spec/data-service-api.v1.json`'s `QueryResult` minus `revisions` (not
+    emitted yet -- `revision_preconditions` is still declared `unavailable`,
+    WP-5 starts emitting it in the same commit as that declaration update).
+    `next_page` is the opaque cursor for the next page (`QueryOutcome.
+    next_cursor`, `r2db_api.structured`), or `None` when this was the last
+    page.
+    """
+
+    items: list[dict[str, Any]]
+    next_page: str | None
 
 
 class DataService:
@@ -124,14 +140,43 @@ class DataService:
                 "role": canonical.role
             }
 
-    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, request_id: str | None = None) -> list[dict[str, Any]]:
+    def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
+        """Plain-item-list form, unchanged in shape since before CCR-13
+        (every existing caller -- `tests/test_foundation.py`, the in-process
+        conformance adapter -- keeps working against exactly this return
+        type). `order_by`/`cursor` (CCR-13 WP-4) are accepted here too (so
+        this method alone is enough to exercise/test them against the
+        facade), but the pagination continuation itself only reaches a
+        caller through `query_page` below, which `http.post_query` uses.
+        """
+        return list(self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id).items)
+
+    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> "QueryPage":
+        """CCR-13 WP-4: the HTTP-facing shape (`{items, next_page}`,
+        `spec/data-service-api.v1.json`'s `QueryResult`) -- used by `http.
+        post_query` instead of `query` above, since building a real
+        `next_page` needs `QueryOutcome.next_cursor`, which the plain-list
+        `query()` deliberately does not expose (kept byte-for-byte
+        backward compatible with every pre-CCR-13 caller). `revisions`
+        does not reach this shape yet: `revision_preconditions` is still
+        declared `unavailable` (WP-5 emits it in the same commit as that
+        declaration update, per design R2DB_CCR13_STORAGE_V1.md §3).
+        """
+        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id)
+        return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor)
+
+    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None):
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
                     fail("VALIDATION_FAILED", "Projection and page size have invalid types.")
                 if where is not None and not isinstance(where, list):
                     fail("VALIDATION_FAILED", "Filter must be a list.")
-                request = {"entity": entity, "select": select, "where": where or [], "page_size": page_size}
+                if order_by is not None and not isinstance(order_by, list):
+                    fail("VALIDATION_FAILED", "order_by must be a list.")
+                if cursor is not None and not isinstance(cursor, str):
+                    fail("VALIDATION_FAILED", "Cursor must be a string.")
+                request = {"entity": entity, "select": select, "where": where or [], "page_size": page_size, "order_by": order_by or [], "cursor": cursor}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
                 predicates = [parse_predicate(item) for item in (where or [])]
@@ -146,22 +191,19 @@ class DataService:
                 # operation/schema op). REMOVE THIS CHECK in the same
                 # commit as WP-5 (`capabilities()`'s `structured_query.
                 # operators` gaining "matches" is untouched by this WP;
-                # only this refusal is temporary). ------------------------
+                # only this refusal is temporary). `order_by`/`cursor`
+                # themselves are NOT gated (WP-4): `structured_query` is
+                # already declared `enabled`, so opening these two up only
+                # makes that declaration truer, unlike `matches` which is
+                # still declared `unsupported`. ---------------------------
                 if any(predicate.operator == "matches" for predicate in predicates):
                     fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose the matches filter operator.")
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                outcome = self._cells[canonical.application_id].query(entity, select=select, where=predicates, page_size=page_size, limits=self.limits, deadline=deadline, clock=self._clock)
+                outcome = self._cells[canonical.application_id].query(
+                    entity, select=select, where=predicates, page_size=page_size, order_by=order_by, cursor=cursor, limits=self.limits, deadline=deadline, clock=self._clock
+                )
                 self._event(canonical, "data_operation", "query", "allow", "entity", request_id=request_id)
-                # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md): `query()`
-                # now returns a `QueryOutcome` dataclass (items + revisions +
-                # pagination continuation) rather than a bare list. This work
-                # package does not change this facade's own external contract
-                # yet (order_by/cursor rejection stays in `http.py`, and
-                # neither revisions nor next_page reach a caller here) --
-                # only the storage-layer return shape changed, so only the
-                # plain item list is unwrapped and returned, unchanged from
-                # before.
-                return list(outcome.items)
+                return outcome
         except FoundationError as exc:
             self._event(context, "authorization_denial", "query", "deny", "entity", exc.code, request_id=request_id)
             raise
