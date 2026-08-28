@@ -342,7 +342,11 @@ class ApplicationRuntime:
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
         return {
-            "contract_version": "1.0.0",
+            # 1.1.0: every 1.1.0 addition is an optional capability this
+            # peer does not (yet) provide, so conforming to 1.1.0 needs no
+            # behavior change here -- only declaring the new capability
+            # names below as unavailable, mirroring r2db-api's declaration.
+            "contract_version": "1.1.0",
             "capabilities": {
                 # `_OPS` (this module) has no "contains" / "is_null" entry,
                 # so those two contract-listed operators are not executable
@@ -358,7 +362,10 @@ class ApplicationRuntime:
                 "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                 "best_effort_transactions": {"status": "unavailable"},
                 "idempotency": {"status": "unavailable"},
-                "revision_preconditions": {"status": "unavailable"}
+                "revision_preconditions": {"status": "unavailable"},
+                "row_addressability": {"status": "unavailable"},
+                "cross_entity_mutation": {"status": "unavailable"},
+                "control_plane": {"status": "unavailable"}
             },
             "limits": {
                 "batch_items": config.max_batch_items,

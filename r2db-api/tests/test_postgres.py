@@ -958,7 +958,22 @@ def test_drop_entity_requires_destructive_confirmation(app_a: types.SimpleNamesp
         cell.close()
 
 
-def test_mutation_operations_insert_update_upsert_delete(app_a: types.SimpleNamespace) -> None:
+def test_mutation_operations_insert_update_delete_succeed_and_upsert_is_capability_unsupported(app_a: types.SimpleNamespace) -> None:
+    """Contract 1.1.0 (CCR-13, `structured_operations.upsert`): "upsert's
+    existence test is the entity's declared domain uniqueness. upsert on an
+    entity without a declared uniqueness key ... fail[s] with
+    CAPABILITY_UNSUPPORTED." This foundation has no uniqueness-declaration
+    mechanism at all yet (`CatalogDocument.entities` is still an untyped
+    list), so upsert is unconditionally rejected here rather than executed
+    under this implementation's own previous, ad hoc "match on `where`,
+    insert if none found" semantics -- exactly the enabled-but-undefined-
+    semantics gap CCR-13 was raised against, with this implementation as
+    the governed evidence for it (`r2db-api/contracts/
+    COMMON_CONTRACT_CHANGE_REQUEST.md`). insert/update/delete are otherwise
+    unchanged from before this contract version; only the upsert exercise
+    changes shape, from "succeeds" to "is rejected, and rejects the whole
+    batch it appears in via failure-before-execution".
+    """
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label", "qty"]}, developer=True, limits=LIMITS)
@@ -973,23 +988,33 @@ def test_mutation_operations_insert_update_upsert_delete(app_a: types.SimpleName
         rows = cell.query("items", select=["qty"], where=[P("label", "eq", "a")], page_size=10, limits=LIMITS)
         assert rows == [{"qty": 2}]
 
-        affected = cell.transact(
-            "items",
-            [{"operation": "upsert", "where": [{"field": "label", "operator": "eq", "value": "b"}], "values": {"label": "b", "qty": 9}}],
-            LIMITS,
-        )
-        assert affected == 1
-        rows = cell.query("items", select=["label", "qty"], where=[P("label", "eq", "b")], page_size=10, limits=LIMITS)
-        assert rows == [{"label": "b", "qty": 9}]
+        # upsert is rejected outright -- and, since it is not the first
+        # item, this also confirms it rejects the *whole batch* it appears
+        # in (failure-before-execution: `PostgresCell.transact` validates/
+        # applies each operation inside one real database transaction, so
+        # an earlier operation in the same batch is rolled back along with
+        # the rejected one, never partially committed).
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "items",
+                [
+                    {"operation": "insert", "values": {"label": "c", "qty": 3}},
+                    {"operation": "upsert", "where": [{"field": "label", "operator": "eq", "value": "b"}], "values": {"label": "b", "qty": 9}},
+                ],
+                LIMITS,
+            )
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+        rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
+        assert rows == [{"label": "a"}]
 
         affected = cell.transact(
             "items",
-            [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "b"}], "destructive": True, "confirmation": "DELETE"}],
+            [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "destructive": True, "confirmation": "DELETE"}],
             LIMITS,
         )
         assert affected == 1
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows == [{"label": "a"}]
+        assert rows == []
     finally:
         cell.close()
 

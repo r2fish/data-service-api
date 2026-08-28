@@ -111,6 +111,31 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
     name = operation.get("operation")
     if name not in MUTATION_OPERATIONS:
         fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.")
+    if name == "upsert":
+        # Contract 1.1.0 (CCR-13, `structured_operations.upsert`): "upsert's
+        # existence test is the entity's declared domain uniqueness. upsert
+        # on an entity without a declared uniqueness key ... fail[s] with
+        # CAPABILITY_UNSUPPORTED." This foundation has no uniqueness
+        # declaration mechanism at all yet (`CatalogDocument.entities` is
+        # still an untyped list -- `EntityDescriptor.unique_keys` is not
+        # implemented), so *no* entity here can ever satisfy that
+        # precondition; upsert is therefore unconditionally unsupported,
+        # not conditionally per-entity. Before this contract version,
+        # `ApplicationCell`/`PostgresCell` executed upsert under an ad hoc
+        # "match on `where`, insert if none found" rule that was this
+        # implementation's own private choice of existence test -- exactly
+        # the enabled-but-undefined-semantics gap CCR-13 was raised
+        # against (this implementation was the governed evidence for it).
+        # Rejecting here, at the one shared validation boundary every
+        # backend's mutation path crosses (`ApplicationCell._apply` and
+        # `PostgresCell._apply` both call `bind_mutation`), means neither
+        # backend's own upsert-execution code below is reachable any
+        # longer; that code is deliberately left in place rather than
+        # deleted, since it is exactly what re-enabling upsert under a real
+        # uniqueness declaration will need once CCR-13's storage work
+        # lands (`spec/CCR_DISPOSITION.md`: "CCR-13 の storage 実装は
+        # field_type の型付き列化と同時に行うのが最も安い").
+        fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key, which this foundation does not implement.")
     raw_where = operation.get("where", [])
     if not isinstance(raw_where, list):
         fail("VALIDATION_FAILED", "Mutation filter must be a list.")
@@ -272,6 +297,10 @@ class ApplicationCell:
         for row in matches:
             row.update(bound.values)
         if bound.operation == "upsert" and not matches:
+            # Unreachable since `bind_mutation` above now rejects every
+            # `upsert` with `CAPABILITY_UNSUPPORTED` before returning a
+            # `BoundMutation` (contract 1.1.0, CCR-13) -- kept in place,
+            # not deleted, for the reason given at that rejection site.
             self.entities[entity].append(dict(bound.values))
             return 1
         return len(matches)

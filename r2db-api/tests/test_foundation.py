@@ -346,3 +346,24 @@ def test_every_advertised_resource_limit_has_a_deterministic_boundary():
     with pytest.raises(FoundationError) as error:
         service.query(context, "items", select=["id"])
     assert error.value.code == "LIMIT_EXCEEDED"
+
+
+def test_upsert_is_capability_unsupported_on_the_in_memory_backend_and_rejects_the_whole_batch(service):
+    # Contract 1.1.0 ties upsert's meaning to a declared domain uniqueness
+    # key, and no entity here declares one -- so upsert must be refused as
+    # CAPABILITY_UNSUPPORTED. The rejection lives in the shared validation
+    # boundary (`structured.bind_mutation`), and `test_postgres.py` holds
+    # the symmetric case for `PostgresCell`; this test pins the
+    # `ApplicationCell` path so neither backend's coverage depends on the
+    # other's. The upsert is deliberately the *second* operation: the
+    # preceding insert must roll back with it (failure-before-execution,
+    # no partial commit).
+    runtime = service.authenticate("secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [
+            {"operation": "insert", "values": {"id": 90, "body": "before-upsert"}},
+            {"operation": "upsert", "values": {"id": 91, "body": "x"}, "where": [{"field": "id", "operator": "eq", "value": 91}]},
+        ])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    remaining = service.query(runtime, "notes", select=["id"], where=[{"field": "id", "operator": "eq", "value": 90}])
+    assert remaining == [], "the batch's preceding insert must not survive the rejected upsert"

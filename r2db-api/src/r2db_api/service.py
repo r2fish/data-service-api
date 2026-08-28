@@ -63,16 +63,52 @@ class DataService:
         with self._slot(context) as canonical:
             schema_ops = ["create_entity", "add_field", "drop_entity"] if canonical.role == "developer" else []
             return {
-                "contract_version": "1.0.0",
+                "contract_version": "1.1.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"]},
-                    "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
+                    # Contract 1.1.0 (CCR-13, `structured_operations.
+                    # upsert`): upsert's existence test must be the
+                    # entity's declared domain uniqueness, which this
+                    # foundation does not implement (`CatalogDocument.
+                    # entities` has no uniqueness-declaration mechanism
+                    # yet -- see `EntityDescriptor.unique_keys`). Declaring
+                    # `atomic_mutation` as `enabled` with `upsert` in
+                    # `operations`, as before this contract version, would
+                    # itself violate `capability_status.rules`'s "must not
+                    # be advertised as enabled unless its operations are
+                    # executable" the moment `structured.py::bind_mutation`
+                    # rejects every upsert with `CAPABILITY_UNSUPPORTED`
+                    # (which it now does). `status: partial` plus the
+                    # explicit `unsupported` list is what
+                    # `schema_operations` right below already does for its
+                    # own gaps -- this mirrors that existing pattern rather
+                    # than inventing a new one.
+                    "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},
                     "application_catalog": {"status": "enabled"},
                     "schema_operations": {"status": "partial", "operations": schema_ops, "unsupported": ["alter_field", "create_index", "drop_index", "jobs"]},
                     "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                     "best_effort_transactions": {"status": "unavailable"},
                     "idempotency": {"status": "unavailable"},
-                    "revision_preconditions": {"status": "unavailable"}
+                    "revision_preconditions": {"status": "unavailable"},
+                    # Contract 1.1.0 additions (CCR-13/15/14 respectively).
+                    # None of the three are implemented by this foundation
+                    # yet -- `row_addressability` needs the same catalog
+                    # uniqueness/addressability declarations `upsert`
+                    # above is waiting on; `cross_entity_mutation` needs
+                    # the new `POST /v1/data/mutations` endpoint (stubbed
+                    # in `http.py` as CAPABILITY_UNSUPPORTED, not
+                    # executable); `control_plane` needs the `/control/v1`
+                    # surface (still the provisional out-of-band CLI, `ops.
+                    # py`, per docs/design/
+                    # R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md
+                    # §0's "no HTTP control plane" constraint, unresolved
+                    # until CCR-14's in-band-issuance dependent judgment is
+                    # implemented). `unavailable`, not `partial`: none of
+                    # the three has any executable operation yet, unlike
+                    # `atomic_mutation`/`schema_operations` above which do.
+                    "row_addressability": {"status": "unavailable"},
+                    "cross_entity_mutation": {"status": "unavailable"},
+                    "control_plane": {"status": "unavailable"}
                 },
                 "limits": self.limits.as_dict(),
                 "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},

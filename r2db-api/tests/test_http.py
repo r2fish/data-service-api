@@ -496,3 +496,46 @@ async def test_audit_query_unreachable_with_any_application_credential(client):
     unauth = await client.post("/v1/audit/query", json={})
     assert unauth.status_code == 401
     assert unauth.json()["code"] == "AUTH_REQUIRED"
+
+
+# --------------------------------------------------------------------------
+# cross_entity_mutate (contract 1.1.0, CCR-15): unimplemented capability
+# must say so honestly, and the new fixed 3-segment route
+# (`/v1/data/mutations`) must never collide with the existing 4-segment
+# per-entity route (`/v1/data/{entity}/mutations`) even for an entity
+# literally named "mutations".
+# --------------------------------------------------------------------------
+
+
+async def test_cross_entity_mutate_is_capability_unsupported_for_any_application_credential(client):
+    # The stub never reads the body at all (nothing to validate for an
+    # operation this foundation never executes -- see `http.py`'s own
+    # comment), so an empty object is enough here, matching `post_audit_
+    # query`'s identical precedent above.
+    for secret in ("secret-a", "dev-secret-a"):
+        response = await client.post("/v1/data/mutations", headers=_auth(secret), json={})
+        assert response.status_code == 400, secret
+        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", secret
+
+    unauth = await client.post("/v1/data/mutations", json={})
+    assert unauth.status_code == 401
+    assert unauth.json()["code"] == "AUTH_REQUIRED"
+
+
+async def test_cross_entity_mutate_route_does_not_collide_with_per_entity_mutate_route_for_an_entity_named_mutations(client):
+    # `POST /v1/data/mutations` (3 path segments) is the new cross-entity
+    # stub -- always CAPABILITY_UNSUPPORTED, per the test above.
+    cross_entity = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+    assert cross_entity.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+    # `POST /v1/data/mutations/mutations` (4 path segments: the per-entity
+    # route with `entity="mutations"`) must still resolve to the ordinary,
+    # executing `post_mutate` handler -- proven here by getting the
+    # per-entity handler's own outcome (NOT_FOUND, since no entity named
+    # "mutations" is registered for app-a) rather than the cross-entity
+    # stub's CAPABILITY_UNSUPPORTED. The two outcomes are only possible
+    # from two different handlers, so this is a direct routing check, not
+    # an inference from status code alone.
+    per_entity = await client.post("/v1/data/mutations/mutations", headers=_auth("secret-a"), json={"operations": [{"operation": "insert", "values": {}}]})
+    assert per_entity.status_code == 404
+    assert per_entity.json()["code"] == "NOT_FOUND"

@@ -102,4 +102,6 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 ### 実装順序 (採用後)
 
-CLAUDE.md の開発順序に従う: 共通契約 (`spec/data-service-api.v1.json`) の文言化 → conformance 条件 → 各 peer 実装。CCR-14 の endpoint 文言化は上記従属判断 1・2 の確定後に行う (それまで暫定 CLI は暫定のまま維持する)。CCR-13 の storage 実装は `field_type` の型付き列化と同時に行うのが最も安い (CCR 文書「両 peer 適用可能性」)。
+CLAUDE.md の開発順序に従う: 共通契約 (`spec/data-service-api.v1.json`) の文言化 → conformance 条件 → 各 peer 実装。CCR-13 の storage 実装は `field_type` の型付き列化と同時に行うのが最も安い (CCR 文書「両 peer 適用可能性」)。
+
+**文言化は完了した (2026-08-28、契約 1.1.0)。** 全従属判断の裁定を反映し、独立レビュー (Opus) を経て確定。1.1.0 の追加はすべて additive であり、両 peer は 1.1.0 を申告した上で新 capability (`row_addressability` / `cross_entity_mutation` / `control_plane`) を unavailable と申告する。あわせて r2db-api の `upsert` は、一意性宣言 (`unique_keys`) が実装されるまで `CAPABILITY_UNSUPPORTED` として拒否される — 契約が意味を与えられない操作を enabled と申告し続けることが 1.1.0 で規則違反になったため。次段は conformance 条件の登録 (`conformance-tests/CONDITIONS.md`): application credential の control endpoint への fail-closed、control credential の data/schema 拒否、`role=control` 発行の拒否 (案B)、revoke の終端性、per-entity endpoint の body `entity` 拒否、cross-entity の実行前検証、応答の契約 schema 検証。

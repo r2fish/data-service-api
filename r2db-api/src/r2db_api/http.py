@@ -349,6 +349,37 @@ async def post_schema(request: Request) -> Response:
 
 
 @_endpoint
+async def post_cross_entity_mutate(request: Request) -> Response:
+    service: DataService = request.app.state.service
+    # Contract 1.1.0 (CCR-15): `POST /v1/data/mutations` defines the shape
+    # of one atomic mutation unit across multiple entities
+    # (`ScopedMutationRequest`/`ScopedMutation`), availability declared via
+    # the `cross_entity_mutation` capability. This foundation declares that
+    # capability `unavailable` (service.py's `capabilities()`) and has no
+    # cross-entity execution path on `DataService` at all -- this handler
+    # exists only so the route itself resolves (distinctly from
+    # `POST /v1/data/{entity}/mutations`, see `tests/test_http.py`'s
+    # routing-collision test) and responds with the correct, contract-
+    # defined failure shape, never a 404/405 that would look like the
+    # endpoint does not exist per the contract at all.
+    #
+    # Same "authenticate first, then refuse" shape as `post_audit_query`
+    # below: an unauthenticated/invalid/revoked credential still gets
+    # AUTH_* first, exactly like every executing endpoint, rather than a
+    # capability answer that would distinguish "endpoint exists but
+    # unsupported" from "you are not authenticated" for a caller who is
+    # not authenticated at all. The request body is deliberately never
+    # read -- there is nothing to validate for an operation this
+    # foundation never executes.
+    _authenticate(request, service)
+    fail(
+        "CAPABILITY_UNSUPPORTED",
+        "Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
+    )
+    raise AssertionError("unreachable")
+
+
+@_endpoint
 async def post_audit_query(request: Request) -> Response:
     service: DataService = request.app.state.service
     # Authenticate with the same application-credential path as every other
@@ -376,6 +407,13 @@ _ROUTES = [
     Route("/v1/capabilities", get_capabilities, methods=["GET"]),
     Route("/v1/data/{entity}/query", post_query, methods=["POST"]),
     Route("/v1/data/{entity}/mutations", post_mutate, methods=["POST"]),
+    # Fixed 3-segment path, distinct from the 4-segment `/v1/data/{entity}/
+    # mutations` above at the routing level regardless of declaration order
+    # -- an entity literally named "mutations" resolves to
+    # `/v1/data/mutations/mutations` (4 segments, `post_mutate`, `entity=
+    # "mutations"`), never to this route. `tests/test_http.py` asserts both
+    # directions.
+    Route("/v1/data/mutations", post_cross_entity_mutate, methods=["POST"]),
     Route("/v1/catalog", get_catalog, methods=["GET"]),
     Route("/v1/schema/operations", post_schema, methods=["POST"]),
     Route("/v1/audit/query", post_audit_query, methods=["POST"]),

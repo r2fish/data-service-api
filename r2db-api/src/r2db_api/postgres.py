@@ -712,6 +712,10 @@ class PostgresCell:
             return self._delete(conn, table, where_sql, where_params)
         updated = self._update(conn, table, bound.values, where_sql, where_params)
         if bound.operation == "upsert" and updated == 0:
+            # Unreachable since `bind_mutation` (structured.py) now rejects
+            # every `upsert` with `CAPABILITY_UNSUPPORTED` before returning
+            # a `BoundMutation` (contract 1.1.0, CCR-13) -- kept in place,
+            # not deleted, for the reason given at that rejection site.
             return self._insert(conn, table, bound.values)
         return updated
 
