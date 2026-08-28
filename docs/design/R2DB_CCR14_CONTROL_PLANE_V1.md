@@ -3,6 +3,7 @@
 - 日付: 2026-08-29。設計: Fable (監督)。実装: Sonnet subagents、レビュー: Opus subagents
 - 改訂: v1.1 — WP-0 独立レビュー (Opus、blocker 3 / major 10 / minor 10 / nit 2、全指摘を実測で裏取り済み・誤指摘 0) を反映。§8 訂正記録
 - 改訂: v1.2 — 依頼者との Q-1 検討 (2026-08-29) を反映: 確認機構の守備範囲の明文化 (§0.5)、CLI break-glass への control credential enable/rotate 追加 (R-10)、誤配・侵害への装備 (R-11)、契約 additive 候補2件 (§6)。§9 改訂記録
+- 改訂: v1.3 — 抑止宣言の採用 (依頼者合意、2026-08-29): 制御面の拒否応答に「徒労」と「帰属」の真実の宣言を載せる (R-11、§2)。§9 改訂記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -135,10 +136,11 @@ CCR-14 の教訓3 (制御プレーンの保存物を application 面と同居さ
 - **sandbox 規則** (runbook 明文): control credential をアプリケーションに保持させない。テスト・練習は専用配備で行う (registry DB ひとつ + 儀式1回で立つ — 分離配備設計の帰結)
 - **契約 additive 候補2件** (§6 台帳): (i) `audit` role による制御面**読み取り** (一覧・capabilities) の許可 — 「配れる弱い credential」を用意し、root を配る動機を消す。(ii) per-application **発行凍結** (CLI 限定トグル) — 盗まれた control credential からデータ面への最短経路 (任意 app への credential 発行) を app 単位で閉じる
 - **推奨しない**: control credential の複数本運用 (悪意保持者は予備ごと revoke でき、常設の全能秘密が増えるだけ。うっかり締め出しは reset の RTO 数分で足りる)
+- **抑止宣言 (v1.3、依頼者合意)**: 制御面の拒否応答に**真実の宣言のみ**を載せる。(i) 徒労の宣言 — `role=control` 発行拒否の文言に「control credential を作る in-band 経路は存在せず、作成は運用者の儀式に限られ、例外はない」と明記。(ii) 帰属の宣言 — 制御面の拒否 problem+json に機械可読の `"audited": true` と「この要求は実行 credential に帰属して耐久記録され、control credential でも消せない」の一文 (R-6 で事実になっている)。狙いは利用者側エージェントの安全学習を発火させ**警告・注意喚起を出させる**ことまで — 悪意のない人間を慎重にさせ、悪意のある者には「この系は面倒だ」と映る (依頼者が期待効果として確定)。ハッタリ・honeypot・偽応答は「宣言 = 実挙動」の conformance 体系を壊すため禁止。決意した攻撃者の素のクライアントには効かないため、安全はこの層に依存しない (主役は本節冒頭の構造的性質)
 
 ## 2. HTTP 面の形状 (endpoint → 実装対応)
 
-処理順序は全 endpoint 共通: **rate limit (R-7 最前段) → byte bound / request_id → 認証 (拒否は耐久監査) → shape 検証 → capability 拒否 → 対象解決 → 状態検査 → limit 検査 → 実行 + 同一トランザクション監査**。応答は契約 schema (`_check_object_shape` と同じ import 時ロード機構を制御面 schema 群に適用)。エラーは `application/problem+json`、未捕捉例外は汎用 503 (SI-10)。
+処理順序は全 endpoint 共通: **rate limit (R-7 最前段) → byte bound / request_id → 認証 (拒否は耐久監査) → shape 検証 → capability 拒否 → 対象解決 → 状態検査 → limit 検査 → 実行 + 同一トランザクション監査**。応答は契約 schema (`_check_object_shape` と同じ import 時ロード機構を制御面 schema 群に適用)。エラーは `application/problem+json` で、認証認可・capability の拒否には R-11 の抑止宣言 (`audited: true` + 帰属の一文。`role=control` 発行拒否には徒労の明記) を含める。未捕捉例外は汎用 503 (SI-10 — 内部情報は出さない。抑止宣言は内部を漏らさない定型文のみ)。
 
 | endpoint | service 操作 | 主なエラー経路 |
 |---|---|---|
@@ -224,7 +226,7 @@ credential の id 系操作は application / control 両テーブルを対象に
 3. 発行対象 Application が disabled のときの credential 発行可否は契約が定めない。**発行は許す** (credential の実効性は `applications.enabled` が既に握っており、発行拒否は二重ゲート) — 文言確定レベルの細部として監督が決めた。覆す場合は WP-3 の一行変更
 4. `CredentialsResult` に `must_rotate` を露出するかは契約 additive 候補として台帳に積む (§8 m-9。運用者が儀式未完遂の credential を in-band で見分けたくなったら契約側で判断)
 5. **契約 additive 候補 (R-11、依頼者検討から)**: `audit` role による制御面読み取り / per-application 発行凍結。いずれも本フェーズには入れず台帳へ
-6. **監督決定の追加 (依頼者合意済み、2026-08-29)**: CLI break-glass への control credential enable/rotate 追加 (R-10)、playbook・sandbox 規則の WP-6 組み込み (R-11)
+6. **監督決定の追加 (依頼者合意済み、2026-08-29)**: CLI break-glass への control credential enable/rotate 追加 (R-10)、playbook・sandbox 規則の WP-6 組み込み (R-11)、抑止宣言の採用 — 期待効果は「利用者側エージェントの警告・注意喚起」まで (R-11、§2)
 7. フェーズ3 (耐久 audit sink) の設計は R-6 の `control_audit` を出発点にできるが、拘束しない
 
 ## 7. リスクとレビュー重点
@@ -258,7 +260,7 @@ blocker 3 / major 10 / minor 10 / nit 2。全指摘を監督が一次ソース�
 - **nit**: n-1 規範リストに SI-09 追加 (冒頭)、n-2 「544」実測値依存の記述を除去 (WP-5)
 - **レビュー確認済み (指摘なしの観点)**: 案Bの帯域外限定は HTTP (`CAPABILITY_UNSUPPORTED`)・DB GRANT (INSERT 欠如)・CLI (control role 発行コマンド不在 + CHECK 制約) の全経路で閉じている。rotate の in-band 提供は案Bと矛盾しない (同一 credential の秘密差替えであり、失効を生き延びる永続性を作らない)。§2 の schema 対応 (CredentialsResult への control credential 混載、CapabilityDocument の `role: control` を含む) は契約適合。HTTP status 対応に既存実装との衝突なし
 
-## 9. 改訂記録 (依頼者検討の反映、2026-08-29、v1.2)
+## 9. 改訂記録 (依頼者検討の反映、2026-08-29、v1.2 / v1.3)
 
 依頼者との Q-1 検討の往復で確定・追加した内容。契約変更は伴わない (契約 additive 候補は台帳止め)。
 
@@ -266,3 +268,4 @@ blocker 3 / major 10 / minor 10 / nit 2。全指摘を監督が一次ソース�
 - 確認機構の守備範囲を「曖昧さの排除まで」と明文化。正規手順を踏む意図しない/悪意の要求はプロトコルで区別できない — その防御は層を分ける (§0.5、R-11)
 - 依頼者指摘「人は control credential をテストアプリに渡す。悪意ある者に渡ることもある」を受けて R-11 を新設: 可逆性の全数・監査の不可消去・持続化不能の明文化、playbook / sandbox 規則 / `ops.py audit-report` の WP-6 組み込み、契約 additive 候補2件 (audit role 読み取り、発行凍結)、複数本運用の不採用
 - disable された唯一の control credential の復活手段として CLI break-glass に enable / rotate を追加 (R-10)。revoke の復活は意図的に作らない (reset が正準)
+- v1.3: 抑止宣言を採用 (R-11、§2)。API に意図の判定器は置けない (正規と悪意の要求は構文上同一) — 代わりに、拒否応答へ「徒労」(in-band の control credential 作成経路は存在しない) と「帰属」(耐久記録・不可消去) の**真実の宣言**を載せ、要求を組み立てる利用者側 AI エージェントの安全学習に読ませる。期待効果は依頼者が「エージェントが警告・注意を出せば十分 (慎重化 + 面倒くさそうの醸成)」と確定。虚偽の宣言は禁止、安全はこの層に依存しない
