@@ -51,7 +51,15 @@ re-verify them; it assumes they are already true.
    `docs/design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md`
    P2-D1/P2-D2). Every application slug this deployment will serve must
    already be provisioned (`0003`) and present in `r2dbsvc_registry.applications`
-   with `enabled = true`.
+   with `enabled = true`. **The target cluster must be PostgreSQL 13 or
+   later** (CCR-13, `docs/design/R2DB_CCR13_STORAGE_V1.md` §6 申し送り 4 --
+   every entity table's `_r2db_revision` column depends on the built-in
+   `gen_random_uuid()`, which only exists from version 13 onward); and if
+   any served application was provisioned before CCR-13's `0003` DOMAIN
+   addition, apply that addition's `CREATE DOMAIN` statements to its
+   database by hand first (`POSTGRES_PROVISIONING_RUNBOOK.md` §5's CCR-13
+   note -- not yet needed against this target, since no application has
+   been provisioned here at all).
 2. **The read-only `r2dbsvc_api` role exists** (P2-D3) with `CONNECT` on
    `r2dbsvc_platform`, `USAGE` on `r2dbsvc_registry`, and `SELECT` only on
    `applications` / `credentials`. This is the role `R2DB_PLATFORM_DSN`

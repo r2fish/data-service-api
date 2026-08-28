@@ -11,6 +11,16 @@ examples (`example.invalid`) only. It never contains a real host,
 credential, or DSN. Per CLAUDE.md's Public Repository Security Gate, treat
 every file in this repository as public from creation time.
 
+**Prerequisite: PostgreSQL 13 or later.** CCR-13
+(`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1/R-4/§6 申し送り 4) provisions
+every entity table with a server-assigned `id bigint GENERATED ALWAYS AS
+IDENTITY` address column and an invisible `_r2db_revision uuid NOT NULL
+DEFAULT gen_random_uuid()` column; `gen_random_uuid()` is a PostgreSQL
+built-in only from version 13 onward (earlier versions need the `pgcrypto`
+extension's `gen_random_uuid()` instead, which this migration set does not
+provision or depend on). Confirm the target cluster's version (`SELECT
+version();`) before running `0001` on it.
+
 ## 0. Topology: database-per-application
 
 Each application gets its own PostgreSQL **database** (not merely its own
@@ -300,6 +310,22 @@ Step 1 and step 2 are each safe to re-run: `0001` checks
 SCHEMA IF NOT EXISTS` / `CREATE OR REPLACE FUNCTION`. Step 3 is **not**
 idempotent by design -- it raises if the slug is already provisioned, so a
 re-run is a deliberate signal, not silently absorbed.
+
+**CCR-13 note (procedural only -- no application database has actually been
+provisioned against this cluster yet, so this has not been exercised):**
+`0003_provision_application.sql` now also creates two DOMAINs,
+`public._r2db_json_object`/`public._r2db_json_array`
+(`docs/design/R2DB_CCR13_STORAGE_V1.md` R-7 addendum, "object/array の
+DOMAIN 型統一"), inside the application database it provisions. Because
+step 3 is not re-runnable against an already-provisioned slug, an
+application database provisioned with a pre-CCR-13 `0003` before this
+DOMAIN addition landed will be missing both -- `field_type: "object"`/
+`"array"` on that application will fail until an operator applies just the
+two `CREATE DOMAIN` statements (see `0003`'s own body for the exact SQL) by
+hand against that one application's database, as the `developer` role, the
+same way `0003` itself does it. This is a one-time, per-already-provisioned-
+application catch-up step, not a routine part of onboarding a new
+application (which always gets both from a single, current `0003` run).
 
 **Why step 3 is a multi-statement script, not a single function call (a
 change from the previous, schema-per-application revision of this

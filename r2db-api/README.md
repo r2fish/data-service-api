@@ -67,10 +67,25 @@ versus what remains unevidenced.
   threaded through service calls, so a single request's audit events
   correlate.
 - **A third conformance adapter, `r2db-api-http`**
-  (`conformance/conformance_adapter_r2db_http.py`), running C-01/C-03/C-08
-  over this real HTTP+PostgreSQL stack rather than in-process. See
-  `docs/design/CONFORMANCE_ADAPTER_V1.md` and
+  (`conformance/conformance_adapter_r2db_http.py`), running
+  C-01/C-03/C-08/C-11/C-12/C-17/C-18 over this real HTTP+PostgreSQL stack
+  rather than in-process. See `docs/design/CONFORMANCE_ADAPTER_V1.md` and
   `conformance-tests/CONDITIONS.md`.
+- **CCR-13 storage layer** (`docs/design/R2DB_CCR13_STORAGE_V1.md`): typed
+  columns (`add_field`'s `field_type`, native `bigint`/`double precision`/
+  `boolean`/`text` columns plus DOMAIN-typed `object`/`array`), server-
+  assigned row addresses (`id`) with a never-reused-within-lifetime
+  guarantee, declared domain uniqueness (`create_index`/`drop_index`),
+  `upsert` resolving against a declared unique key, per-row optimistic-
+  concurrency `expected_revision` preconditions, `order_by`, and cursor
+  pagination -- all implemented on both `ApplicationCell` and
+  `PostgresCell` and declared through `capabilities()`
+  (`structured_query`/`atomic_mutation`/`schema_operations`/
+  `row_addressability`/`revision_preconditions` all `enabled` or
+  `partial` as appropriate, no longer `unavailable`). Conditions C-17
+  (declaration/addressability/uniqueness agreement) and C-18 (revision-
+  precondition semantics) are executable across all three conformance
+  adapters.
 
 All of the above has been exercised against a real local PostgreSQL 16
 server (`r2db-api/tests/test_postgres.py`, `test_http.py`, and the
@@ -103,8 +118,6 @@ production identity/network/database-grant evidence exists yet
   synchronous foundation. A future job capability must define finite
   execution/queue bounds, observable state transitions, cancellation,
   expiry, and rollback semantics before it is advertised.
-- Cursor-based pagination (`Page.cursor` in the contract) is accepted by the
-  schema but rejected by this implementation with `CAPABILITY_UNSUPPORTED`.
 - `/v1/audit/query` authenticates the caller but always fails with
   `CAPABILITY_UNSUPPORTED`: this foundation has no separately-authenticated
   control/audit credential type, and `DataService`'s public facade

@@ -268,3 +268,33 @@ blocker 2・major 4群・minor 数件。SQL 合成面 (識別子二段階防御�
 - **object/array**: 「正当な乖離」容認を却下し、DOMAIN 型 (`_r2db_json_object`/`_r2db_json_array`) + Python 側検証で厳格側に統一 (CHECK 制約案は名前長溢れと DETAIL 行開示の2つの罠があり不採用)。R-7 に記録
 - **テスト**: 素の insert の `assigned_addresses` が無検査 (変異生存)、エスケープ文法境界・両 cell parity テストの追加を WP-3 是正に含める
 - C-12 の逆向き条件を WP-5 で登録 (§4 に追記)
+
+## 11. 実装記録 (フェーズ1 完了、2026-08-28)
+
+全 WP 完了。コミット列: 設計 `831afff` → WP-1 `1979385` → WP-2 + Q-1 追補 `a13bf45` → Q-2 追補 `6b57a14` → WP-3 `fbb5529` → WP-4 `ccc30b3` → WP-5 `b3a6244` → WP-6 (文書)。最終状態:
+
+- 契約 1.1.0 (公開前追補込み): `unique_key` 選択規則、`unique_keys[].name` 必須、`query_operators` (contains リテラル / matches / 大文字小文字区別 / 末尾裸 `\` 拒否)
+- r2db-api: 両 cell が CCR-13 意味論を実装し、`row_addressability` / `revision_preconditions` enabled、`atomic_mutation` enabled (upsert 込み)、`structured_query` に matches、`schema_operations` に create_index/drop_index。応答は revisions / assigned_addresses / next_page を運ぶ
+- conformance: C-17 / C-18 が3 adapter で executable (MitateDB の不在面は構造的証拠)。C-12 に逆向き条件 (未申告の実行可能性を検出)。C-03 にワイルドカード/エスケープ probe。port v1.3
+- テスト: root suite 544 (実 HTTP + PostgreSQL adapter 込み)、`test_postgres.py` 単独 180
+- レビュー実績: 設計1回 + 実装レビュー往復8回 (Opus)。実在の peer 不適合を3件発見・是正 (MitateDB の precondition 黙殺 / contains・is_null の拒否コード / r2db の matches 未申告実行)。変異注入は延べ 40 本超、最終盤で必須3種 + X1/X2/V4 を含む全対象が検出される状態
+
+## 12. 将来課題台帳 (フェーズ1 レビューの minor 繰越)
+
+条件レジスタ整備 (フェーズ2以降) に送るもの:
+
+1. C-12 前向き検査の射程拡張: `idempotency` / `best_effort_transactions` / `audit_query` / `cross_entity_mutation` / `control_plane` / `schema_operations` の虚偽 enabled 申告を検出する条件 (現行 C-12 行は射程を正直に限定明記済み)
+2. C-17 Targetable の full address set 検査 (現在は `address_fields[0]` 単独。合成アドレス宣言 peer が現れた時に空虚化する) と「アドレス集合を重複させる書き込み → CONFLICT」の後半条項
+3. C-18 条項(9) の兄弟行 revision 不変の直接検査
+4. `SurfaceAbsent` の surface/forbidden_parameters を固定語彙と突き合わせる cross-validation (現在は plug の自己申告 + 署名検証)
+5. C-03 新規 contains/matches テストへの registry 空虚性ガード
+6. upsert の並行削除レース分岐 (M10) の検査手段
+7. `QueryPage` 構築時の `revisions or []` が None (未維持) を空配列に落とす — 現在到達不能だが index-aligned 不変条件の静かな破れ経路
+8. `number` 型の値域 (無限大が in-process 経由でのみ受理される) の扱い
+
+依頼者への申し送り (契約の将来 additive 候補、§6 と重複分を統合):
+
+- NOT NULL / DEFAULT の宣言語彙 (勤務表移行の残り前提)
+- catalog への field 型の公開 (AI エージェントが discovery で型を知る手段)
+- create_entity での区分選択・一括型指定 (必要が実証されたら)
+- 大文字小文字を区別しない比較演算子 (必要が実証されたら)

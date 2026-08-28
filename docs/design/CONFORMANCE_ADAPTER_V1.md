@@ -1029,3 +1029,79 @@ a third-party plug missing either new method fails to instantiate at all,
 and every plug's own `attempt_mutation` override must accept `unique_key`
 (a compatible default satisfies existing call sites, but the override
 itself must be edited to declare it).
+
+## 14. v1.4 port revision (WP-5 final review recommendation)
+
+C-17's own test file (§13.7) checks `assigned_addresses`' insert-only
+membership rule (contract 1.1.0, CCR-13 `MutationResult.assigned_
+addresses`) by calling `attempt_mutation_with_addresses` once per
+operation -- which cannot catch a defect that only appears when operations
+of different kinds share one real atomic batch (for example, an
+accumulation bug that attaches an address entry to a non-insert operation
+only because a real insert elsewhere in the same batch happens to precede
+it). The WP-5 final review recommended closing this gap with a genuine
+multi-operation batch test, which needs its own port addition: splitting
+the batch into several single-operation `attempt_mutation_with_addresses`
+calls would prove nothing about batch-level behavior, since each call
+would be its own atomic unit on the peer's side.
+
+### 14.1 `BatchOperation` and `attempt_batch_with_addresses`
+
+`BatchOperation` (`conformance-tests/adapter.py`) is a frozen dataclass
+naming one element of a batch -- field-for-field the same shape
+`attempt_mutation`'s own keyword arguments already use (`operation`,
+`values`, `where_field`, `where_value`, `expected_revision`, `unique_key`,
+`destructive`, `confirmation`), so a caller building a batch from what
+would otherwise be several separate `attempt_mutation` calls does not
+learn a second vocabulary.
+
+`attempt_batch_with_addresses(self, session, entity, operations: Sequence[
+BatchOperation]) -> tuple[int, list[Mapping[str, Any]] | None]` is a new
+`@abstractmethod` that presents every operation to the same real
+multi-operation dispatcher `attempt_mutation`/`attempt_mutation_with_
+addresses` already use with exactly one operation each, and returns the
+whole batch's `(affected, assigned_addresses)`. Every plug implements it
+by building its own real batch payload/item list from the `BatchOperation`
+sequence and handing the whole thing to that one real entry point in a
+single call -- never splitting it into several single-operation calls
+itself:
+
+- `r2db-api` (in-process): `DataService.mutate_result` given every
+  built mutation item at once (`r2db-api/conformance/
+  conformance_adapter_r2db.py`) -- the same facade method §13.1
+  introduced for `attempt_mutation_with_addresses`, here given more than
+  one item.
+- `r2db-api-http`: one `POST /v1/data/{entity}/mutations` request whose
+  body's `operations` array carries every item (`r2db-api/conformance/
+  conformance_adapter_r2db_http.py`) -- the real HTTP batch shape a real
+  multi-operation client request would use.
+- `MitateDB-api`: `ApplicationRuntime.transact`/`ApplicationCell.transact`
+  given every item (`MitateDB-api/conformance/
+  conformance_adapter_mitatedb.py`) -- this peer's *only* real
+  multi-operation atomic dispatcher. Consistent with `row_addressability:
+  unavailable`, this peer's `transact()` only ever truly executes an
+  `"insert"` item; every other type in the batch (`update`/`delete`/
+  `upsert`) is refused with `CapabilityError` regardless of what else
+  shares the batch (`cell.py`'s own op-type dispatch) -- so a real mixed
+  batch is genuinely refused here, not silently split apart by the
+  adapter to avoid that refusal.
+
+### 14.2 C-17 test: batch-level membership
+
+`test_assigned_addresses_membership_holds_when_mixed_in_one_batch`
+(`conformance-tests/test_c17_declaration_agreement.py`) presents one real
+batch mixing an insert, an update, an upsert that resolves to an update
+(matching a pre-seeded row's own declared unique key), and a properly
+confirmed delete, and requires `affected == 4` with exactly one
+`assigned_addresses` element -- the insert's -- no matter what else shares
+the batch. On a `row_addressability: unavailable` peer this takes the same
+structural-evidence branch every other declaration-dependent C-17 check
+does (§4's `signature_forbids_parameters`), rather than being skipped.
+
+### 14.3 Compatibility impact (mirrors §12.7/§13.8)
+
+One more addition to the NORMATIVE surface: the new `@abstractmethod`
+`attempt_batch_with_addresses`, plus the `BatchOperation` dataclass it
+takes a sequence of. Identical breaking-change consequence for any plug
+outside this repository: `ConformanceAdapter` remains an `ABC`, so a
+third-party plug missing the new method fails to instantiate at all.
