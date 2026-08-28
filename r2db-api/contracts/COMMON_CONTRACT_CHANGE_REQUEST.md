@@ -403,14 +403,16 @@ SI-11 (Atomic Integrity) の適用範囲が広がるのみで、新たな invari
 - **CCR-15: 要求本文が自己矛盾していた** (「`Mutation` に `entity` 必須」と「`Mutation` に `entity` を追加してはならない」の併記)。`ScopedMutation` / `ScopedMutationRequest` の新規定義として書き直し、レビュー出所表示を本文から訂正欄へ移した
 - **CCR-13/14/15: 変更表の欠落・不備** (CCR-14/15 に変更表が無い、`create_index` 拡張の過小見積り、capability 名の契約語彙化漏れ、サーバ採番識別子の越境推論条項の欠落、revision の他行非依存条項の欠落)。いずれも本版で補った
 
-## 未決事項 (依頼者判断)
+## 裁定 (依頼者、2026-08-28)
 
-- CCR-13/14/15 の採否そのもの
-- CCR-13: `MutationResult` の拡張を v1 で行うか。サーバ側採番の識別子を返す唯一の応答形状変更である
-- ~~CCR-13: アドレス再利用の扱い~~ — **裁定済み (2026-08-28): 案iii (catalog で宣言)**。理由と経緯は本文「残余危険」欄
-- CCR-14: 採用時期 — 全体採用 / 安全条項のみ先行 / 全体延期 の三案 (利害は本文に対称に記載)
-- CCR-14: control credential の in-band 発行 — 案A (発行も in-band) / 案B (発行は帯域外の儀式)
+- **CCR-13/14/15: 三件とも採用。** CCR-14 は全体採用 (採用時期の三案のうち案1)
+- **CCR-13: `MutationResult` の v1 拡張を行う**
+- **CCR-13: アドレス再利用は案iii (catalog で宣言)** — 理由と経緯は本文「残余危険」欄
+
+## 採用に伴い残る従属判断 (依頼者)
+
+- CCR-14: control credential の in-band 発行 — 案A (発行も in-band) / 案B (発行は帯域外の儀式)。本文が「採否と同時に判断する」と定める項であり、endpoint 形状と conformance 条件がこれで確定する
 - CCR-14: base path を `/control/v1` として `/v1` から分けることの確認
-- CCR-15: `batch_entities` の境界値と、その enforcement layer の申告方法
+- CCR-15: `batch_entities` の境界値 (配備 profile の値) と、その enforcement layer の申告方法
 
-**採用時に効く既知の依存** (判断項目ではないが、一覧に無いと見落とされるため記す): CCR-14 の「最後の control credential の失効には明示的な確認を要する」条項は、destructive 確認の有効性定義 (C-06 共通化の前提。MitateDB の確認トークン不検証が既知欠落) という**別の未解決の契約判断**に依存する。CCR-14 を採用しても、この定義が決まるまで当該条項は実効化しない。
+**採用時に効く既知の依存** (判断項目ではないが、一覧に無いと見落とされるため記す): CCR-14 の「最後の control credential の失効には明示的な確認を要する」条項は、destructive 確認の有効性定義 (C-06 共通化の前提。MitateDB の確認トークン不検証が既知欠落) という**別の未解決の契約判断**に依存する。この定義が決まるまで当該条項は実効化しない。

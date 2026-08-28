@@ -36,11 +36,11 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 第1版〜第3版はそれぞれ独立レビューを経て改稿した (第3版へのレビューは体制変更後の Opus による)。訂正の記録は下記および CCR 文書内の訂正欄に保持する。
 
-| CCR | 判定 | 論点 | 判断に必要なもの |
+| CCR | 判定 | 論点 | 残る従属判断 |
 |---|---|---|---|
-| CCR-13 行の指し示し可能性 | **審議中** | `allowed_mutations` に既にある `upsert` は一意性の概念なしには意味を定義できず、r2db-api は実装の選択した意味論で enabled 申告している (統治下の実証)。要求: entity は mutation 能力区分 (読み取り専用 / 追記専用 / 追記・削除 / 可変) を宣言し、update / upsert を支持する entity にのみ addressability を要求。結果は5性質 (宣言・可視・照準・不変・自発的再割当て禁止) に分解、revision の被参照先は6条項で固定 | `MutationResult` の拡張を v1 で行うか (アドレス再利用は案iii で裁定済み — 未決事項欄参照) |
-| CCR-14 制御プレーン | **審議中** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は採用済みで endpoint だけが無い。乖離は起きた問題ではなく見込みの問題 (統治下2 peer の公開面乖離はゼロ、旧 VPS 実装は統治外)。提供は必須とせず `capability_status` で申告。形状表は案A/案B で書き分け、reset は既存 credential 全失効、制御面にも SI-08 の資源境界 | 採用時期 (全体採用 / 安全条項のみ先行 / 全体延期)。in-band 発行 (案A / 案B)。base path `/control/v1` の確認 |
-| CCR-15 entity をまたぐ atomicity | **審議中** | mutation 経路が `/v1/data/{entity}/mutations` であり atomic batch が単一 entity に閉じる。形状は `POST /v1/data/mutations` + 新規定義 `ScopedMutationRequest` / `ScopedMutation` (既存 `Mutation` は無変更、per-entity endpoint は body の `entity` を拒否し続ける)。対話的トランザクションは明示的に排除 (再検討条件付き) | `batch_entities` の境界値と enforcement layer の申告方法 |
+| CCR-13 行の指し示し可能性 | **採用 (2026-08-28)** | `allowed_mutations` に既にある `upsert` は一意性の概念なしには意味を定義できず、r2db-api は実装の選択した意味論で enabled 申告している (統治下の実証)。entity は mutation 能力区分 (読み取り専用 / 追記専用 / 追記・削除 / 可変) を宣言し、update / upsert を支持する entity にのみ addressability を要求。結果は5性質に分解、revision の被参照先は6条項で固定。アドレス再利用は案iii (catalog 宣言) で裁定済み。**`MutationResult` の v1 拡張も行う (依頼者裁定 2026-08-28)** | なし |
+| CCR-14 制御プレーン | **採用 (2026-08-28、全体)** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は採用済みで endpoint だけが無かった。提供は必須とせず `capability_status` で申告。reset は既存 credential 全失効、revoke は終端、制御面にも SI-08 の資源境界 | in-band 発行 (案A / 案B — CCR 文書が「採否と同時に判断」と定める)。base path `/control/v1` の確認 |
+| CCR-15 entity をまたぐ atomicity | **採用 (2026-08-28)** | 形状は `POST /v1/data/mutations` + 新規定義 `ScopedMutationRequest` / `ScopedMutation` (既存 `Mutation` は無変更、per-entity endpoint は body の `entity` を拒否し続ける)。対話的トランザクションは明示的に排除 (再検討条件付き) | `batch_entities` の境界値 (配備 profile) と enforcement layer の申告方法 |
 
 ### 判断の軸
 
@@ -84,20 +84,20 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
 - 第2版レビューは「契約側 r2db-api は schema-per-application」と結論したが、事実に反する (`r2db-api/migrations/0003_provision_application.sql` が `CREATE DATABASE` を発行し、`PostgresCell` の `schema` 引数は各 DB 内の `public` を指す)。ただし「CCR が peer の topology を断定すべきでない」という指摘自体は妥当であり、第3版は topology の断定を除いた
 
-### 未決事項 (依頼者判断)
+### 裁定の記録 (依頼者)
 
-1. **CCR-13/14/15 の採否そのもの**
-2. CCR-13: `MutationResult` の v1 拡張
-3. ~~CCR-13: アドレス再利用の扱い~~ — **裁定済み (2026-08-28、依頼者): 案iii (再利用の有無を catalog で宣言)**。理由: 宣言による見える化が本契約の設計思想 (区分宣言・一意性宣言・`capability_status`) に最も馴染み、想定利用形態では利用設計者が AI エージェントであるため「宣言を読まないクライアント」という案iii の弱点が実質消える。案i (再利用禁止。将来のサロゲート鋳造不能な可変データ — 外部表透過 — を塞ぐ) / 案ii (precondition の領分。晒され方を知る手段が無い) は不採用。案iii強 (再利用宣言 entity への precondition 必須化) は将来の additive 強化として残す
-4. CCR-14: 採用時期 — (a) 全体採用 (b) 安全条項のみ先行し endpoint 形状は peer 起動後に確定 (c) 全体延期。(b) は前レビュー担当の推奨だが決定ではない。三案の利害は CCR 文書に対称に記載
-5. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。既存 invariant は control credential の侵害を扱っていないため、採る案により endpoint 形状と conformance 条件が変わる
-6. CCR-14: base path `/control/v1`
-7. CCR-15: `batch_entities` の境界値と enforcement layer
+1. **CCR-13/14/15: 三件とも採用** (2026-08-28)。CCR-14 は全体採用 (安全条項のみ先行 / 全体延期は不採用)
+2. **CCR-13: `MutationResult` の v1 拡張を行う** (2026-08-28)
+3. **CCR-13: アドレス再利用は案iii (再利用の有無を catalog で宣言)** (2026-08-28)。理由: 宣言による見える化が本契約の設計思想 (区分宣言・一意性宣言・`capability_status`) に最も馴染み、想定利用形態では利用設計者が AI エージェントであるため「宣言を読まないクライアント」という案iii の弱点が実質消える。案i (再利用禁止。将来のサロゲート鋳造不能な可変データ — 外部表透過 — を塞ぐ) / 案ii (precondition の領分。晒され方を知る手段が無い) は不採用。案iii強 (再利用宣言 entity への precondition 必須化) は将来の additive 強化として残す
 
-採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。採用してもこの定義が決まるまで当該条項は実効化しない。
+### 採用に伴い残る従属判断 (依頼者)
 
-### 未採用のまま実装してはならない
+1. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。CCR 文書が「採否と同時に判断する」と定めており、endpoint 形状と conformance 条件がこれで確定する
+2. CCR-14: base path `/control/v1` の確認
+3. CCR-15: `batch_entities` の境界値 (配備 profile の値) と enforcement layer の申告方法
 
-いずれも共通契約の変更であり、`r2db-api` 側の実装判断として先行させない (CLAUDE.md: peer を共通契約の暗黙的所有者にしない)。採用が決まるまでの暫定手段は帯域外 (CLI) とし、暫定であることを明記する。
+採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。
 
-CCR-14 の実装には前提条件 (credential の永続化、composition root) がある。この前提作業自体は契約変更を伴わないため採否を待たずに進められるが、credential 記録の形・ライフサイクル状態・bootstrap の形を先取りで固定しないよう、採否判断を先に依頼者へ諮る。
+### 実装順序 (採用後)
+
+CLAUDE.md の開発順序に従う: 共通契約 (`spec/data-service-api.v1.json`) の文言化 → conformance 条件 → 各 peer 実装。CCR-14 の endpoint 文言化は上記従属判断 1・2 の確定後に行う (それまで暫定 CLI は暫定のまま維持する)。CCR-13 の storage 実装は `field_type` の型付き列化と同時に行うのが最も安い (CCR 文書「両 peer 適用可能性」)。
