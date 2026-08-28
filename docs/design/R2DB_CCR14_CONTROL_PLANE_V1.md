@@ -2,6 +2,7 @@
 
 - 日付: 2026-08-29。設計: Fable (監督)。実装: Sonnet subagents、レビュー: Opus subagents
 - 改訂: v1.1 — WP-0 独立レビュー (Opus、blocker 3 / major 10 / minor 10 / nit 2、全指摘を実測で裏取り済み・誤指摘 0) を反映。§8 訂正記録
+- 改訂: v1.2 — 依頼者との Q-1 検討 (2026-08-29) を反映: 確認機構の守備範囲の明文化 (§0.5)、CLI break-glass への control credential enable/rotate 追加 (R-10)、誤配・侵害への装備 (R-11)、契約 additive 候補2件 (§6)。§9 改訂記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -17,7 +18,9 @@
 
 ## 0.5 依頼者裁定待ちの契約論点 (実装は条項休止のまま先行する)
 
-**Q-1: 破壊的確認の有効性定義 (C-06 共通化の前提)。** 契約 1.1.0 の `revoke_credential` 意味論は「最後の有効な control credential の失効は許可され、明示的確認を要する — ただし有効な確認の定義は未解決の契約判断であり、**解決まで本条項は実効化しない**」と自ら定める。よって本実装は revoke を確認検査なしで提供することが契約適合であり、独自の確認規則を発明して契約の空白を埋めることは (CCR-13 の Q-1 で是正した欠陥の形の再発になるため) しない。`CredentialRevokeRequest` の `destructive`/`confirmation` フィールドは schema どおり受理し、内容は検査しない。**この状態は MitateDB の既知欠落 (確認トークン不検証) と同型である**ことを明記して裁定を仰ぐ。裁定のたたき台: 「`destructive: true` を必須とし、`confirmation` は対象 credential_id の完全一致」等の定義を C-06 共通条項として起こし、確定後に additive に実効化 (拒否コードは `DESTRUCTIVE_CONFIRMATION_REQUIRED` が既に契約語彙にある)。**本設計はこの裁定を実装のブロッカーにしない** — 確定後の実効化は語彙追加なしの意味論追加で済む。
+**Q-1: 破壊的確認の有効性定義 (C-06 共通化の前提)。** 契約 1.1.0 の `revoke_credential` 意味論は「最後の有効な control credential の失効は許可され、明示的確認を要する — ただし有効な確認の定義は未解決の契約判断であり、**解決まで本条項は実効化しない**」と自ら定める。よって本実装は revoke を確認検査なしで提供することが契約適合であり、独自の確認規則を発明して契約の空白を埋めることは (CCR-13 の Q-1 で是正した欠陥の形の再発になるため) しない。`CredentialRevokeRequest` の `destructive`/`confirmation` フィールドは schema どおり受理し、内容は検査しない。**この状態は MitateDB の既知欠落 (確認トークン不検証) と同型である**ことを明記して裁定を仰ぐ。裁定のたたき台 (依頼者との往復で具体化、2026-08-29): **サーバが危険を宣言し、クライアントがそれを復唱したときのみ有効**とする状態レスな二段階方式。確認なしの破壊的要求は `DESTRUCTIVE_CONFIRMATION_REQUIRED` で拒否し、その problem+json に正準の確認句 (`required_confirmation` — 操作・対象・帰結クラスから決定論的に構成、再作成可能な対象は状態指紋を含める)、`consequence`、**可逆な代替 (`reversible_alternative`) と復旧経路 (`recovery`)** を機械可読で宣言する。有効な確認 = `destructive: true` + 確認句の全文一致。サーバは句を再計算できるため無状態 (トークン保存・失効・SI-08 の新資源を持ち込まない)。確定後に additive に実効化 (拒否コードは既に契約語彙にある)。**本設計はこの裁定を実装のブロッカーにしない** — 確定後の実効化は語彙追加なしの意味論追加で済む。
+
+**守備範囲の明文化 (依頼者と合意)**: 確認機構が守るのは「要求の曖昧さの排除」まで (C-06 の文言 "ambiguous requests do not execute" のとおり)。正しい credential と正しい手順を備えた「意図しない要求」「悪意の要求」はいかなる in-band 確認でも区別できない (人間向けダイアログでも同じ)。その防御は確認機構ではなく R-11 の層が担う。`reversible_alternative`/`recovery` の宣言は、手順に忠実なエージェント製クライアントを可逆側 (disable) へ誘導するための第3層である。
 
 ## 1. 設計判断 (実装ポリシー。契約変更ではない)
 
@@ -119,6 +122,19 @@ CCR-14 の教訓3 (制御プレーンの保存物を application 面と同居さ
 - 正準の in-band 管理面は `/control/v1` になる。`ops.py` の冒頭宣言「CCR-14 未裁定のため暫定」を「bootstrap/reset の帯域外儀式 (契約条項) + 運用者 break-glass」に書き換える
 - 既存サブコマンドは**残す** (運用者 OS 権限下の帯域外操作は契約が禁じるものではなく、制御面が落ちている時の復旧経路を消すのは安全側でない)。ただし `--help` と docstring に「通常運用は `/control/v1` を使う」を明記し、**全サブコマンドが `control_audit` に同一トランザクションで監査を書く** (R-6 / §8 M-10)
 - `delete-credential` (行の物理削除) は HTTP に存在しない帯域外専用操作として残る (契約の削除対象外方針と両立: 削除は provisioning 解除 runbook の一部でのみ使う)
+- **control credential の enable / rotate を break-glass サブコマンドに追加する** (依頼者合意、2026-08-29): 唯一の control credential が disable された状態は in-band の enable を呼べる者がいない詰みであり、CLI の enable は秘密の再配布なしに復旧できる (reset より軽い)。秘密の紛失は CLI の rotate (同一 credential_id のまま新秘密 — 監査の連続性を保つ)。**発行 (issue) だけは bootstrap/reset の儀式限定のまま**で、案Bは崩さない。revoke された control credential の復活手段は意図的に作らない — un-revoke は「失効した」という監査事実を偽にし (SI-13 の空洞化)、正準の復旧は reset である
+
+### R-11: 誤配・侵害への装備 — control credential が間違った手に渡る前提の層 (依頼者検討、2026-08-29)
+
+確認機構 (§0.5) では守れない「正規手順を踏む意図しない/悪意の要求」への装備。人は control credential をテストアプリに渡すし、悪意ある者に渡ることもある — その前提で、被害を可逆・可視・有界にする。設計上すでに成立している性質の明文化と、runbook 成果物の追加:
+
+- **可逆性の全数**: control credential でできる操作のうち不可逆は revoke のみで、revoke が壊すのは credential だけ (データは壊れない)。disable された app → enable で復旧、不正発行された credential → 一覧に必ず現れ個別 revoke、ゴミ登録 → disable、rotate による締め出し → reset
+- **証拠は消せない**: `control_audit` は制御面 role から INSERT のみ (R-3)。**control credential 保持者にも監査は消せない**。拒否イベントも耐久記録されるため (R-6)、締め出された正規運用者の失敗ログ自体が侵害の検知信号になる
+- **持続化できない**: 案B + reset。攻撃者は control credential を増産できず、reset 一発で失権する
+- **侵害/誤操作 playbook** (WP-6 成果物): reset → 監査を時刻で切って差分列挙 (`ops.py audit-report --since` 補助コマンド) → 侵害窓中に発行された credential の revoke → disable された app の enable。「control credential 侵害は有界・全復旧可能な事象 (残る実害は窓中の発行 credential 経由のデータ面到達と一時的な運用停止)」として CONTROL_MAPPING に記載
+- **sandbox 規則** (runbook 明文): control credential をアプリケーションに保持させない。テスト・練習は専用配備で行う (registry DB ひとつ + 儀式1回で立つ — 分離配備設計の帰結)
+- **契約 additive 候補2件** (§6 台帳): (i) `audit` role による制御面**読み取り** (一覧・capabilities) の許可 — 「配れる弱い credential」を用意し、root を配る動機を消す。(ii) per-application **発行凍結** (CLI 限定トグル) — 盗まれた control credential からデータ面への最短経路 (任意 app への credential 発行) を app 単位で閉じる
+- **推奨しない**: control credential の複数本運用 (悪意保持者は予備ごと revoke でき、常設の全能秘密が増えるだけ。うっかり締め出しは reset の RTO 数分で足りる)
 
 ## 2. HTTP 面の形状 (endpoint → 実装対応)
 
@@ -199,7 +215,7 @@ credential の id 系操作は application / control 両テーブルを対象に
 | WP-3 | `ControlPlaneService` (must_rotate ゲート・R-7 limits・R-6 同一トランザクション監査 + 拒否監査) | 単体 + parity + sink 故障注入 fail-closed |
 | WP-4 | `control_http.py` + `control_main.py` (factory のみ、module-level app なし) + AuthorityTopology 拡張 | HTTP 層テスト (httpx ASGITransport)。`test_topology.py` 既存アサーション維持。申告は据え置き |
 | WP-5 | 申告 flip (env 由来 `control_plane` status + capabilities.json + R-9 逆向き突合テスト) + `control_main` module-level app + 両 r2db adapter の provided 化 + C-13 再活性化ベクタ追加 + C-14/C-15 provided 分岐 green — **単一コミット** | 現行 suite 全 green + 追加分。逆向き C-14 ベクタ 4 が両方向で赤くなることを変異で確認 |
-| WP-6 | CONTROL_MAPPING (SI-00/02/06/08/13/14 行 + C-14 行の SI-08 登録) + DEPLOYMENT_RUNBOOK / POSTGRES_PROVISIONING_RUNBOOK (0006・儀式手順・ロックアウト復旧・`R2DB_CONTROL_PLANE_STATUS` の運用) + README + `ops.py` 再定義文言 + 実装記録・将来課題台帳を本書 §11/§12 に | ドキュメント整合。引き継ぎ更新 |
+| WP-6 | CONTROL_MAPPING (SI-00/02/06/08/13/14 行 + C-14 行の SI-08 登録) + DEPLOYMENT_RUNBOOK / POSTGRES_PROVISIONING_RUNBOOK (0006・儀式手順・ロックアウト復旧・`R2DB_CONTROL_PLANE_STATUS` の運用) + **侵害/誤操作 playbook・sandbox 規則・`ops.py audit-report` (R-11)** + README + `ops.py` 再定義文言 + 実装記録・将来課題台帳を本書 §11/§12 に | ドキュメント整合。引き継ぎ更新 |
 
 ## 6. 申し送り (依頼者への報告事項)
 
@@ -207,7 +223,9 @@ credential の id 系操作は application / control 両テーブルを対象に
 2. **監督決定 (覆せる形での報告)**: (a) 初回 credential 非恒久化は must-rotate 方式で、「1回の強制ローテートが契約 bootstrap[5] を満たす」と読む (R-5)、(b) control-plane 監査の先行耐久化 — 状態変更 + 拒否イベント (R-6)、(c) `register_application` は registry 二状態化の「登録済み」まで (R-4。0002 関数の改訂を含む)、(d) `ops.py` は儀式 + break-glass として存続し全サブコマンドを監査化 (R-10)、(e) 制御面 DB role の新設と権限形状 (R-3)、(f) revoked への rotate は `VALIDATION_FAILED`、disabled への rotate は許可 (§2)、(g) `control_plane` 申告は配備者の環境変数宣言 (R-9)。いずれも契約が機構を定めない領域の実装ポリシーであり、契約変更を伴わない
 3. 発行対象 Application が disabled のときの credential 発行可否は契約が定めない。**発行は許す** (credential の実効性は `applications.enabled` が既に握っており、発行拒否は二重ゲート) — 文言確定レベルの細部として監督が決めた。覆す場合は WP-3 の一行変更
 4. `CredentialsResult` に `must_rotate` を露出するかは契約 additive 候補として台帳に積む (§8 m-9。運用者が儀式未完遂の credential を in-band で見分けたくなったら契約側で判断)
-5. フェーズ3 (耐久 audit sink) の設計は R-6 の `control_audit` を出発点にできるが、拘束しない
+5. **契約 additive 候補 (R-11、依頼者検討から)**: `audit` role による制御面読み取り / per-application 発行凍結。いずれも本フェーズには入れず台帳へ
+6. **監督決定の追加 (依頼者合意済み、2026-08-29)**: CLI break-glass への control credential enable/rotate 追加 (R-10)、playbook・sandbox 規則の WP-6 組み込み (R-11)
+7. フェーズ3 (耐久 audit sink) の設計は R-6 の `control_audit` を出発点にできるが、拘束しない
 
 ## 7. リスクとレビュー重点
 
@@ -239,3 +257,12 @@ blocker 3 / major 10 / minor 10 / nit 2。全指摘を監督が一次ソース�
 - **minor**: m-1 rotate-once 読みの明文化 (R-5)、m-2 ロックアウト経路と reset 復旧の明記 (R-5)、m-3 `r2dbsvc_control` への control_audit INSERT 明示 GRANT (R-3)、m-4 append-only 主張の範囲限定 (R-3)、m-5 SEQUENCE/FUNCTION GRANT 不在の確認項目化 (R-3、§7)、m-6 role 名衝突なし・自動開放経路なしの確認記録 (R-2)、m-7 C-14 のコード非固定 + 401/403 の開示論拠 (R-8、§4)、m-8 `test_topology.py` 既存アサーション維持 (§3、WP-4)、m-9 `must_rotate` 非露出 + 契約 additive 候補化 (§2、§6)、m-10 module-level app を WP-5 へ (R-1、WP-4/5)
 - **nit**: n-1 規範リストに SI-09 追加 (冒頭)、n-2 「544」実測値依存の記述を除去 (WP-5)
 - **レビュー確認済み (指摘なしの観点)**: 案Bの帯域外限定は HTTP (`CAPABILITY_UNSUPPORTED`)・DB GRANT (INSERT 欠如)・CLI (control role 発行コマンド不在 + CHECK 制約) の全経路で閉じている。rotate の in-band 提供は案Bと矛盾しない (同一 credential の秘密差替えであり、失効を生き延びる永続性を作らない)。§2 の schema 対応 (CredentialsResult への control credential 混載、CapabilityDocument の `role: control` を含む) は契約適合。HTTP status 対応に既存実装との衝突なし
+
+## 9. 改訂記録 (依頼者検討の反映、2026-08-29、v1.2)
+
+依頼者との Q-1 検討の往復で確定・追加した内容。契約変更は伴わない (契約 additive 候補は台帳止め)。
+
+- Q-1 たたき台を具体化: 状態レスな二段階 (hazard 宣言 → 決定論的な確認句の復唱)。宣言に `reversible_alternative`/`recovery` を含める (§0.5)
+- 確認機構の守備範囲を「曖昧さの排除まで」と明文化。正規手順を踏む意図しない/悪意の要求はプロトコルで区別できない — その防御は層を分ける (§0.5、R-11)
+- 依頼者指摘「人は control credential をテストアプリに渡す。悪意ある者に渡ることもある」を受けて R-11 を新設: 可逆性の全数・監査の不可消去・持続化不能の明文化、playbook / sandbox 規則 / `ops.py audit-report` の WP-6 組み込み、契約 additive 候補2件 (audit role 読み取り、発行凍結)、複数本運用の不採用
+- disable された唯一の control credential の復活手段として CLI break-glass に enable / rotate を追加 (R-10)。revoke の復活は意図的に作らない (reset が正準)
