@@ -18,10 +18,12 @@ document names are deliberately *not* placeholders, and are not covered by
 that statement: the external port `8443` itself (§0 below -- a real,
 deliberately fixed part of the stage-1 design, not a value standing in for
 something else), and, in §4, the existing implementation's own endpoint path
-names (`/v1/tables`, `/v1/meta`, `/admin/api`, `/health`) -- non-secret
-routing facts already on record in `docs/work-orders/HANDOVER_20260828.md`
-§2.5, repeated here only to keep this document's own non-collision claim
-checkable in place, not new disclosure.
+names -- non-secret routing facts of the kind already on record in
+`docs/work-orders/HANDOVER_20260828.md` §2.5 (§4 carries the full,
+source-verified inventory, which is longer than the handover's list),
+stated only to keep this document's own non-collision claim checkable in
+place, not new disclosure. Path names carry no hostnames, credentials, or
+data.
 
 ## 0. Scope of this stage
 
@@ -370,16 +372,33 @@ to the existing, out-of-repository 443 server block and is deliberately not
 included as a `deploy/` artifact here, since this repository does not own
 that file).
 
-**Precondition already confirmed (handover §2.5), stated here for
-traceability:** this implementation's six endpoints
-(`/v1/capabilities`, `/v1/data/{entity}/query`,
-`/v1/data/{entity}/mutations`, `/v1/catalog`, `/v1/schema/operations`,
-`/v1/audit/query` -- `r2db-api/src/r2db_api/http.py`'s `_ROUTES`) do not
-overlap the existing implementation's own paths (`/v1/tables`, `/v1/meta`,
-`/admin/api`, `/health`). Before actually performing stage 2, re-verify this
-against the existing implementation's *current* routes at that time (routes
-can change between now and then) rather than relying solely on this
-runbook's record of a past check.
+**Precondition, re-verified against the existing implementation's actual
+source (2026-08-28; supersedes handover §2.5's shorter list):** the
+existing implementation's complete top-level path namespace, enumerated
+from its FastAPI routers and `main.py`, is `/`, `/health`, `/ready`,
+`/v1/tables/*`, `/v1/schema/*` (specifically `/v1/schema/tables`,
+`/v1/schema/tables/{table}`, `/v1/schema/tables/{table}/columns`),
+`/v1/meta/*`, `/admin`, `/admin/*` (UI assets), `/admin/api/*`,
+`/console/*`, `/embed/*`. No path begins with `/control` -- which is what
+clears `/control/v1` as the control-plane base path (CCR-14 ruling).
+
+This implementation's six endpoints (`/v1/capabilities`,
+`/v1/data/{entity}/query`, `/v1/data/{entity}/mutations`, `/v1/catalog`,
+`/v1/schema/operations`, `/v1/audit/query` --
+`r2db-api/src/r2db_api/http.py`'s `_ROUTES`) share **no exact path** with
+that namespace. One prefix, however, is shared: **both implementations
+have routes under `/v1/schema/`.** The handover's shorter list did not
+surface this. It does not affect stage 1 (separate ports), but stage 2's
+path routing cannot use a bare `location /v1/schema/` prefix block --
+route `/v1/schema/operations` to the new implementation with an
+exact-match block (`location = /v1/schema/operations`), which nginx
+always prefers over prefix matches, and leave the `/v1/schema/tables...`
+prefix with the existing implementation.
+
+Before actually performing stage 2, re-verify this inventory against the
+existing implementation's *current* routes at that time (routes can
+change between now and then) rather than relying solely on this runbook's
+record of a past check.
 
 ## 5. Rollback
 

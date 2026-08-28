@@ -93,7 +93,7 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 ### 採用に伴い残る従属判断 (依頼者)
 
 1. CCR-14: control credential の in-band 発行 — 案A (発行も in-band。運用一貫、ただし盗まれた1本が失効を生き延びる永続性を得る) / 案B (発行は帯域外の儀式。永続性の危険を断つが、運用者追加にサーバ権限が要る)。CCR 文書が「採否と同時に判断する」と定めており、endpoint 形状と conformance 条件がこれで確定する
-2. CCR-14: base path `/control/v1` の確認
+2. ~~CCR-14: base path `/control/v1` の確認~~ — **裁定済み (2026-08-28、依頼者): 稼働中の旧実装とパスが重複しないことを条件に `/control/v1` とする。条件は同日、旧実装の実ソースから全 router を列挙して検証済み** — 旧実装の最上位パス名前空間 (`/`、`/health`、`/ready`、`/v1/tables`、`/v1/schema`、`/v1/meta`、`/admin`、`/admin/api`、`/console`、`/embed`) に `/control` で始まるものは無い。よって `/control/v1` で確定。なおこの実測で、引き継ぎ文書の旧パス一覧に無かった `/v1/schema` prefix の共有が判明した (完全一致は無し。段階2の path 振り分けで `/v1/schema/operations` に exact-match が要る — `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §4 に記録)
 3. CCR-15: `batch_entities` の境界値 (配備 profile の値) と enforcement layer の申告方法
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。

@@ -412,7 +412,7 @@ SI-11 (Atomic Integrity) の適用範囲が広がるのみで、新たな invari
 ## 採用に伴い残る従属判断 (依頼者)
 
 - CCR-14: control credential の in-band 発行 — 案A (発行も in-band) / 案B (発行は帯域外の儀式)。本文が「採否と同時に判断する」と定める項であり、endpoint 形状と conformance 条件がこれで確定する
-- CCR-14: base path を `/control/v1` として `/v1` から分けることの確認
+- ~~CCR-14: base path を `/control/v1` として `/v1` から分けることの確認~~ — **裁定済み (2026-08-28): 旧実装とのパス非重複を条件に `/control/v1`。条件は旧実装の実ソースの全 router 列挙で検証済み (`/control` で始まる旧パスは無い)。確定**
 - CCR-15: `batch_entities` の境界値 (配備 profile の値) と、その enforcement layer の申告方法
 
 **採用時に効く既知の依存** (判断項目ではないが、一覧に無いと見落とされるため記す): CCR-14 の「最後の control credential の失効には明示的な確認を要する」条項は、destructive 確認の有効性定義 (C-06 共通化の前提。MitateDB の確認トークン不検証が既知欠落) という**別の未解決の契約判断**に依存する。この定義が決まるまで当該条項は実効化しない。
