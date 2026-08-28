@@ -48,6 +48,39 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.runtime.insert("notes", {"title); DROP TABLE notes;--": "x"})
 
+    def test_contains_filter_is_honestly_rejected_never_executed_as_a_like_wildcard(self):
+        # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains` is a
+        # contract-listed filter operator this peer does not implement
+        # (`_OPS` in cell.py has no entry for it) -- it must never be
+        # silently executed with SQL LIKE wildcard pass-through semantics
+        # (which would also violate Q-2's "no wildcard interpretation"
+        # rule for `contains` even if it were implemented). A row whose
+        # title would match a naive `%<value>%` LIKE search must not
+        # silently come back; the operator is refused outright instead.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "50% off everything"})
+        with self.assertRaises(ValidationError):
+            self.runtime.read("notes", filters=[Filter("title", "contains", "50%")])
+        # No partial/silent execution: the row is untouched and still
+        # readable via a supported operator.
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "50% off everything")
+
+    def test_matches_filter_is_capability_unsupported_not_validation_failed(self):
+        # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `matches` is
+        # additive vocabulary this peer does not implement. Unlike
+        # `contains`/`is_null` (never executable, and refused the same way
+        # a genuinely unrecognized operator string would be -- there is no
+        # dedicated acceptance surface for either), `matches` is checked
+        # explicitly, ahead of the generic allowlist, so its refusal is
+        # `CapabilityError` (-> `CAPABILITY_UNSUPPORTED`) rather than
+        # `ValidationError` (-> `VALIDATION_FAILED`): a positive, honest
+        # "recognized but not provided" answer, not "malformed request".
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "hello"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.read("notes", filters=[Filter("title", "matches", "hel%")])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "hello")
+
     def test_transaction_rolls_back(self):
         self.dev.create_collection("notes", {"title": "text"})
         with self.assertRaises(ValidationError):

@@ -30,6 +30,8 @@ which is exactly what §5.3 C-5 forbids.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import subprocess
@@ -48,7 +50,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
 from r2db_api.postgres import PostgresCell, SharedPoolManager, _RolePool
-from r2db_api.structured import Predicate
+from r2db_api.structured import ApplicationCell, Predicate
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
@@ -777,8 +779,10 @@ def test_injection_payload_as_add_field_name_is_rejected(app_a: types.SimpleName
         with pytest.raises(FoundationError) as exc:
             cell.apply_schema({"operation": "add_field", "entity": "items", "field": field_name}, developer=True, limits=LIMITS)
         assert exc.value.code == "IDENTIFIER_INVALID"
-        assert _real_column_names(app_a.developer_dsn, app_a.schema, "items") == {"label"}
-        assert cell.catalog() == [{"entity": "items", "fields": ["label"]}]
+        # R-1: every entity table also carries the server-provisioned `id`
+        # (selectable) and `_r2db_revision` (invisible) columns now.
+        assert _real_column_names(app_a.developer_dsn, app_a.schema, "items") == {"id", "_r2db_revision", "label"}
+        assert cell.catalog()[0]["fields"] == ["id", "label"]
     finally:
         cell.close()
 
@@ -917,16 +921,32 @@ def test_statement_timeout_is_wired_to_resource_limits(app_a: types.SimpleNamesp
 
 
 def test_catalog_reflects_entities_and_excludes_internal_bookkeeping_table(app_a: types.SimpleNamespace) -> None:
+    """CCR-13 §2/R-1: `catalog()` now publishes the full `EntityDescriptor`
+    shape -- the same one `ApplicationCell.catalog()` publishes -- not just
+    `{entity, fields}`. `id` appears in `fields` (visible, R-3 property 2);
+    `_r2db_revision` never does (R-3/R-4)."""
     cell = make_cell(app_a)
     try:
         assert cell.catalog() == []
         cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": ["name", "qty"]}, developer=True, limits=LIMITS)
         catalog = cell.catalog()
-        assert catalog == [{"entity": "widgets", "fields": ["name", "qty"]}]
+        assert catalog == [
+            {
+                "entity": "widgets",
+                "fields": ["id", "name", "qty"],
+                "mutation_class": "mutable",
+                "address_fields": ["id"],
+                "address_reuse": "never",
+                "unique_keys": [],
+            }
+        ]
 
         cell.apply_schema({"operation": "add_field", "entity": "widgets", "field": "color"}, developer=True, limits=LIMITS)
         catalog = cell.catalog()
-        assert catalog == [{"entity": "widgets", "fields": ["color", "name", "qty"]}]
+        assert catalog[0]["fields"] == ["color", "id", "name", "qty"]
+
+        cell.apply_schema({"operation": "create_index", "entity": "widgets", "index": "by_color", "fields": ["color"], "unique": True}, developer=True, limits=LIMITS)
+        assert cell.catalog()[0]["unique_keys"] == [{"name": "by_color", "fields": ["color"]}]
     finally:
         cell.close()
 
@@ -962,17 +982,17 @@ def test_mutation_operations_insert_update_delete_succeed_and_upsert_is_capabili
     """Contract 1.1.0 (CCR-13, `structured_operations.upsert`): "upsert's
     existence test is the entity's declared domain uniqueness. upsert on an
     entity without a declared uniqueness key ... fail[s] with
-    CAPABILITY_UNSUPPORTED." This foundation has no uniqueness-declaration
-    mechanism at all yet (`CatalogDocument.entities` is still an untyped
-    list), so upsert is unconditionally rejected here rather than executed
-    under this implementation's own previous, ad hoc "match on `where`,
-    insert if none found" semantics -- exactly the enabled-but-undefined-
-    semantics gap CCR-13 was raised against, with this implementation as
-    the governed evidence for it (`r2db-api/contracts/
-    COMMON_CONTRACT_CHANGE_REQUEST.md`). insert/update/delete are otherwise
-    unchanged from before this contract version; only the upsert exercise
-    changes shape, from "succeeds" to "is rejected, and rejects the whole
-    batch it appears in via failure-before-execution".
+    CAPABILITY_UNSUPPORTED." `items` here declares no unique key, so upsert
+    is rejected via the real (WP-3) catalog-driven check -- `_apply_upsert`
+    finds no declared uniqueness key and refuses before even looking at the
+    operation's own `where`/`values` -- exactly like `ApplicationCell`. See
+    `test_upsert_*` below for the full suite of executable-upsert branches
+    (a declared key resolving to insert/update, multi-key selection,
+    `expected_revision`, the other-key CONFLICT case, etc). insert/update/
+    delete are otherwise unchanged from before this contract version; only
+    the upsert exercise changes shape, from "succeeds" (pre-CCR-13) to "is
+    rejected, and rejects the whole batch it appears in via failure-before-
+    execution".
     """
     cell = make_cell(app_a)
     try:
@@ -1044,101 +1064,1442 @@ def test_query_operators_in_and_contains_and_is_null(app_a: types.SimpleNamespac
         cell.close()
 
 
-# --- CCR-13 WP-2 shim guards (docs/design/R2DB_CCR13_STORAGE_V1.md, WP-2
-# review M-13) ---------------------------------------------------------
-#
-# `structured.bind_mutation`/`bind_schema_operation` (the shared boundary
-# both cells call) now structurally accept `expected_revision`, `upsert`,
-# `create_index`/`drop_index`, and `field_type` -- whether either backend
-# can actually execute them is each backend's own concern. `PostgresCell`
-# implements none of them yet (WP-3): every one of the four must still be
-# refused with `CAPABILITY_UNSUPPORTED`, proving `PostgresCell`'s own
-# explicit guards (not the shared boundary, which no longer rejects these
-# outright) are what is doing the refusing.
+# --- CCR-13 §0.5 Q-2: `contains` literal semantics, `matches` wildcard,
+# and non-disclosure of PostgreSQL's LIKE-escaping mechanics ---------------
 
 
-def test_postgres_cell_rejects_expected_revision(app_a: types.SimpleNamespace) -> None:
+def test_contains_is_a_literal_substring_and_never_interprets_wildcards(app_a: types.SimpleNamespace) -> None:
+    """Q-2 (案i): `%`/`_`/`\\` in the *value* must never be interpreted as a
+    LIKE wildcard -- a row literally containing a percent sign must be
+    found by a `contains` search for that literal percent sign, and a row
+    that merely happens to match the *wildcard interpretation* of the
+    search text must NOT be found unless it also matches literally."""
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
-        cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
+        cell.transact(
+            "items",
+            [
+                {"operation": "insert", "values": {"label": "50% off"}},
+                {"operation": "insert", "values": {"label": "50X off"}},
+                {"operation": "insert", "values": {"label": "under_score"}},
+                {"operation": "insert", "values": {"label": "underxscore"}},
+            ],
+            LIMITS,
+        )
+        rows = cell.query("items", select=["label"], where=[P("label", "contains", "50%")], page_size=10, limits=LIMITS)
+        assert {r["label"] for r in rows.items} == {"50% off"}  # not "50X off", which a LIKE wildcard would also match
+
+        rows = cell.query("items", select=["label"], where=[P("label", "contains", "er_sc")], page_size=10, limits=LIMITS)
+        assert {r["label"] for r in rows.items} == {"under_score"}  # not "underxscore"
+    finally:
+        cell.close()
+
+
+def test_matches_wildcard_semantics_and_case_sensitivity(app_a: types.SimpleNamespace) -> None:
+    """Q-2 (補足案): `%` = any sequence (including empty), `_` = exactly one
+    character, `\\` escapes the following character; both operators are
+    case-sensitive."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.transact(
+            "items",
+            [
+                {"operation": "insert", "values": {"label": "hello"}},
+                {"operation": "insert", "values": {"label": "help"}},
+                {"operation": "insert", "values": {"label": "HELLO"}},
+                {"operation": "insert", "values": {"label": "hxllo"}},
+                {"operation": "insert", "values": {"label": "100% sure"}},
+            ],
+            LIMITS,
+        )
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "hel%")], page_size=10, limits=LIMITS)
+        assert {r["label"] for r in rows.items} == {"hello", "help"}  # not "HELLO" (case-sensitive)
+
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "h_llo")], page_size=10, limits=LIMITS)
+        assert {r["label"] for r in rows.items} == {"hello", "hxllo"}
+
+        # A literal `%` in the pattern, escaped, matches only that literal
+        # character -- not "any sequence".
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "100\\% sure")], page_size=10, limits=LIMITS)
+        assert {r["label"] for r in rows.items} == {"100% sure"}
+    finally:
+        cell.close()
+
+
+def test_contains_and_matches_reject_non_string_values(app_a: types.SimpleNamespace) -> None:
+    """Q-2: both operators' value is always a plain string, independent of
+    the target field's own declared type."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[P("label", "contains", 5)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[P("label", "matches", 5)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+# ==========================================================================
+# CCR-13 WP-3 (docs/design/R2DB_CCR13_STORAGE_V1.md): `PostgresCell`'s real
+# implementation of typed columns, indexes/uniqueness, upsert, revision
+# preconditions, order_by, and cursor pagination. Mirrors the granularity of
+# `test_foundation.py`'s own WP-2 test suite for `ApplicationCell` -- the
+# same semantics, error codes, and precedence, verified against a real
+# PostgreSQL server this time.
+# ==========================================================================
+
+
+def _row_revision(cell: PostgresCell, entity: str, row_id: int) -> str:
+    rows = cell.query(entity, select=["id"], where=[P("id", "eq", row_id)], page_size=10, limits=LIMITS)
+    return rows.revisions[0]
+
+
+# --- typed columns (R-2/R-7) ------------------------------------------------
+
+
+def test_field_type_maps_to_a_real_typed_column_and_round_trips_every_type(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "typed", "fields": []}, developer=True, limits=LIMITS)
+        for name, field_type in (("i", "integer"), ("n", "number"), ("b", "boolean"), ("s", "string"), ("o", "object"), ("a", "array")):
+            cell.apply_schema({"operation": "add_field", "entity": "typed", "field": name, "field_type": field_type}, developer=True, limits=LIMITS)
+        good = {"i": 1, "n": 1.5, "b": True, "s": "x", "o": {"k": 1}, "a": [1, 2]}
+        cell.transact("typed", [{"operation": "insert", "values": good}], LIMITS)
+        rows = cell.query("typed", select=["i", "n", "b", "s", "o", "a"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [good]
+
+        # `object`/`array` are deliberately excluded here (R-2): both map
+        # to the same physical PostgreSQL type (JSONB), so once a column
+        # is created, PostgreSQL's own catalog cannot tell this backend
+        # which of the two the client originally declared -- `_load_
+        # catalog` reports both as untyped, and an untyped column accepts
+        # any JSON-shaped value (same as this module's own documented
+        # `lt`/`lte`/`gt`/`gte` divergence for JSONB's total ordering).
+        # `ApplicationCell` tracks the declared type string itself, so it
+        # *can* still reject a list written to a field declared `object`;
+        # this is a legitimate, physical-data-model-driven difference the
+        # Security Invariants explicitly allow, not a validation gap both
+        # backends still reject bad identifiers/operators/shapes
+        # identically.
+        bad_cases = {"i": "not-an-int", "n": "not-a-number", "b": "not-a-bool", "s": 5}
+        for field_name, bad_value in bad_cases.items():
+            with pytest.raises(FoundationError) as exc:
+                cell.transact("typed", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
+            assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("typed", select=["i"], where=[P("i", "eq", "nope")], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+
+        # `isinstance(True, int)` is `True` in Python -- bool must be
+        # explicitly excluded from integer/number, not accepted as 0/1.
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("typed", [{"operation": "update", "where": [{"field": "i", "operator": "eq", "value": 1}], "values": {"i": True}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_field_type_null_is_allowed_for_any_declared_type(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "nullable", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "nullable", "field": "i", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact("nullable", [{"operation": "insert", "values": {"i": None}}], LIMITS)
+        rows = cell.query("nullable", select=["i"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"i": None}]
+        # And it is a real SQL NULL, not the JSONB-only literal (R-7) -- an
+        # is_null predicate on a *typed* column must find it too.
+        rows = cell.query("nullable", select=["i"], where=[P("i", "is_null")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"i": None}]
+    finally:
+        cell.close()
+
+
+def test_in_operator_type_checks_each_element_on_a_typed_column(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "ints", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "ints", "field": "i", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact("ints", [{"operation": "insert", "values": {"i": 1}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("ints", select=["i"], where=[P("i", "in", [1, "two"])], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        rows = cell.query("ints", select=["i"], where=[P("i", "in", [1, 2])], page_size=10, limits=LIMITS)
+        assert rows.items == [{"i": 1}]
+    finally:
+        cell.close()
+
+
+def test_eq_and_ne_reject_a_null_predicate_value(app_a: types.SimpleNamespace) -> None:
+    """WP-3 confirmation review N-3: shared-boundary parity with
+    `ApplicationCell` -- `= NULL`/`<> NULL` is refused rather than executed
+    as a query that silently always returns nothing."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["tag"]}, developer=True, limits=LIMITS)
+        cell.transact("items", [{"operation": "insert", "values": {"tag": None}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["tag"], where=[P("tag", "eq", None)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["tag"], where=[P("tag", "ne", None)], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        rows = cell.query("items", select=["tag"], where=[P("tag", "is_null")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"tag": None}]
+    finally:
+        cell.close()
+
+
+def test_json_null_binds_as_sql_null_on_untyped_column_not_jsonb_literal_null(app_a: types.SimpleNamespace) -> None:
+    """R-7 addendum (WP-2 review M-B): a JSON `null` written to an untyped
+    (JSONB) column must be stored as SQL `NULL`, not `'null'::jsonb` -- the
+    two are otherwise indistinguishable to `is_null`/`order_by` unless the
+    write path itself keeps them apart."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["value"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"value": None}}, {"operation": "insert", "values": {"value": 1}}], LIMITS)
+        rows = cell.query("docs", select=["value"], where=[P("value", "is_null")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"value": None}]
+        # A raw SQL-level check, independent of PostgresCell's own reading
+        # back: the stored value must be a genuine SQL NULL.
+        conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value IS NULL, jsonb_typeof(value) FROM docs WHERE value IS NULL")
+                is_null, typeof = cur.fetchone()
+                assert is_null is True
+                assert typeof is None  # jsonb_typeof(NULL) is NULL, not 'null'
+        finally:
+            conn.close()
+    finally:
+        cell.close()
+
+
+# --- create_index / drop_index (R-5) ---------------------------------------
+
+
+def test_create_index_and_unique_conflict_on_insert_and_update(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "accounts", "fields": ["email"]}, developer=True, limits=LIMITS)
+        revision = cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+        assert isinstance(revision, int)
+        assert cell.catalog()[0]["unique_keys"] == [{"name": "by_email", "fields": ["email"]}]
+
+        cell.transact("accounts", [{"operation": "insert", "values": {"email": "a@example.invalid"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("accounts", [{"operation": "insert", "values": {"email": "a@example.invalid"}}], LIMITS)
+        assert exc.value.code == "CONFLICT"
+        # R-5, corrigendum M-5: only the client-recognizable index name is
+        # disclosed -- never PostgreSQL's own DETAIL text, constraint
+        # internals, or the colliding row value.
+        assert exc.value.details == {"index": "by_email"}
+        rendered = repr(exc.value)
+        assert "a@example.invalid" not in rendered
+
+        cell.transact("accounts", [{"operation": "insert", "values": {"email": "b@example.invalid"}}], LIMITS)
         with pytest.raises(FoundationError) as exc:
             cell.transact(
-                "items",
-                [{"operation": "update", "where": [{"field": "label", "operator": "eq", "value": "a"}], "values": {"label": "b"}, "expected_revision": "anything"}],
+                "accounts",
+                [{"operation": "update", "where": [{"field": "email", "operator": "eq", "value": "b@example.invalid"}], "values": {"email": "a@example.invalid"}}],
                 LIMITS,
             )
-        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-        # No side effect: the row is untouched.
-        rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows.items == [{"label": "a"}]
-    finally:
-        cell.close()
+        assert exc.value.code == "CONFLICT"
+        assert exc.value.details == {"index": "by_email"}
 
-
-def test_postgres_cell_delete_checks_destructive_confirmation_before_the_expected_revision_gate(app_a: types.SimpleNamespace) -> None:
-    """WP-2 review minor (f): unify error precedence with `ApplicationCell`
-    (R-4, corrigendum m-5) -- an unconfirmed destructive delete is refused
-    before the (still not-implemented) expected_revision gate is reached,
-    on both cells."""
-    cell = make_cell(app_a)
-    try:
-        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
-        cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
         with pytest.raises(FoundationError) as exc:
-            cell.transact(
-                "items",
-                [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "expected_revision": "anything"}],
-                LIMITS,
-            )
-        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
-        rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
-        assert rows.items == [{"label": "a"}]
-    finally:
-        cell.close()
-
-
-def test_postgres_cell_rejects_create_index_and_drop_index(app_a: types.SimpleNamespace) -> None:
-    cell = make_cell(app_a)
-    try:
-        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"]}, developer=True, limits=LIMITS)
+        assert exc.value.code == "CONFLICT"
         with pytest.raises(FoundationError) as exc:
-            cell.apply_schema({"operation": "create_index", "entity": "items", "index": "by_label", "fields": ["label"]}, developer=True, limits=LIMITS)
-        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-        with pytest.raises(FoundationError) as exc:
-            cell.apply_schema({"operation": "drop_index", "entity": "items", "index": "by_label"}, developer=True, limits=LIMITS)
-        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    finally:
-        cell.close()
-
-
-def test_postgres_cell_rejects_field_type_on_add_field(app_a: types.SimpleNamespace) -> None:
-    cell = make_cell(app_a)
-    try:
-        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": []}, developer=True, limits=LIMITS)
-        with pytest.raises(FoundationError) as exc:
-            cell.apply_schema({"operation": "add_field", "entity": "items", "field": "qty", "field_type": "integer"}, developer=True, limits=LIMITS)
-        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-        # No side effect: the column was never added.
-        with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["qty"], where=[], page_size=10, limits=LIMITS)
+            cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_ghost", "fields": ["ghost"]}, developer=True, limits=LIMITS)
         assert exc.value.code == "NOT_FOUND"
     finally:
         cell.close()
 
 
-def test_postgres_cell_rejects_order_by_and_cursor(app_a: types.SimpleNamespace) -> None:
+def test_unique_index_with_null_key_field_never_conflicts(app_a: types.SimpleNamespace) -> None:
     cell = make_cell(app_a)
     try:
-        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_entity", "entity": "accounts", "fields": ["email"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+        cell.transact("accounts", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
+        rows = cell.query("accounts", select=["id", "email"], where=[], page_size=10, limits=LIMITS).items
+        assert [row["email"] for row in rows] == [None, None]
+    finally:
+        cell.close()
+
+
+def test_create_index_unique_rejects_when_existing_data_has_duplicates(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "dupes", "fields": ["tag"]}, developer=True, limits=LIMITS)
+        cell.transact("dupes", [{"operation": "insert", "values": {"tag": "x"}}, {"operation": "insert", "values": {"tag": "x"}}], LIMITS)
         with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "label", "direction": "asc"}])
-        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+            cell.apply_schema({"operation": "create_index", "entity": "dupes", "index": "by_tag", "fields": ["tag"], "unique": True}, developer=True, limits=LIMITS)
+        assert exc.value.code == "CONFLICT"
+        assert exc.value.status == 409
+        # No side effect: the rejected index never landed.
+        assert cell.catalog()[0]["unique_keys"] == []
+    finally:
+        cell.close()
+
+
+def test_create_index_rejects_address_field_and_drop_index_requires_destructive_confirmation(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "shapes", "fields": ["tag"]}, developer=True, limits=LIMITS)
         with pytest.raises(FoundationError) as exc:
-            cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS, cursor="opaque-cursor")
+            # R-5, WP-2 review M-5: `id` is the address, not a domain
+            # uniqueness declaration.
+            cell.apply_schema({"operation": "create_index", "entity": "shapes", "index": "by_id", "fields": ["id"]}, developer=True, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+
+        cell.apply_schema({"operation": "create_index", "entity": "shapes", "index": "by_tag", "fields": ["tag"], "unique": True}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        assert cell.catalog()[0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
+        cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+        assert cell.catalog()[0]["unique_keys"] == []
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "NOT_FOUND"
+        # Dropping the (now non-unique) index frees `upsert` back to
+        # CAPABILITY_UNSUPPORTED -- proving the index is actually gone, not
+        # just unlisted.
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("shapes", [{"operation": "upsert", "values": {"tag": "x"}}], LIMITS)
         assert exc.value.code == "CAPABILITY_UNSUPPORTED"
     finally:
         cell.close()
+
+
+def test_composite_unique_key_enforces_uniqueness_and_supports_upsert(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "memberships", "fields": ["org", "user", "role"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_index", "entity": "memberships", "index": "by_org_user", "fields": ["org", "user"], "unique": True}, developer=True, limits=LIMITS)
+        cell.transact("memberships", [{"operation": "insert", "values": {"org": "acme", "user": "ann", "role": "member"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("memberships", [{"operation": "insert", "values": {"org": "acme", "user": "ann", "role": "admin"}}], LIMITS)
+        assert exc.value.code == "CONFLICT"
+        cell.transact("memberships", [{"operation": "insert", "values": {"org": "acme", "user": "bob", "role": "member"}}], LIMITS)
+
+        outcome = cell.transact("memberships", [{"operation": "upsert", "values": {"org": "acme", "user": "ann", "role": "owner"}}], LIMITS)
+        assert outcome.affected == 1
+        assert outcome.assigned_addresses == []
+        rows = cell.query("memberships", select=["org", "user", "role"], where=[P("user", "eq", "ann")], page_size=10, limits=LIMITS).items
+        assert rows == [{"org": "acme", "user": "ann", "role": "owner"}]
+    finally:
+        cell.close()
+
+
+# --- upsert (R-5, §0.5 Q-1) --------------------------------------------------
+
+
+def test_upsert_with_one_declared_key_resolves_to_insert_then_update_with_assigned_addresses(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "people", "fields": ["email", "name"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_index", "entity": "people", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+
+        outcome = cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann"}}], LIMITS)
+        assert outcome.affected == 1
+        assert outcome.assigned_addresses == [{"address": {"id": 1}}]
+
+        outcome2 = cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann2"}}], LIMITS)
+        assert outcome2.affected == 1
+        assert outcome2.assigned_addresses == []  # resolved to update, not insert
+        rows = cell.query("people", select=["id", "name"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"id": 1, "name": "Ann2"}]
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "people",
+                [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann3"}, "where": [{"field": "name", "operator": "eq", "value": "Ann2"}]}],
+                LIMITS,
+            )
+        assert exc.value.code == "VALIDATION_FAILED"  # R-5, corrigendum M-3: upsert does not accept a filter
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("people", [{"operation": "upsert", "values": {"name": "NoEmail"}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"  # missing key field
+    finally:
+        cell.close()
+
+
+def _notes_cell_with_two_unique_keys(app_a: types.SimpleNamespace) -> "PostgresCell":
+    cell = make_cell(app_a)
+    cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body", "email"]}, developer=True, limits=LIMITS)
+    cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS)
+    cell.apply_schema({"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"], "unique": True}, developer=True, limits=LIMITS)
+    cell.apply_schema({"operation": "create_index", "entity": "notes", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+    return cell
+
+
+def test_upsert_on_multi_key_entity_requires_unique_key_and_validates_it(app_a: types.SimpleNamespace) -> None:
+    cell = _notes_cell_with_two_unique_keys(app_a)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "upsert", "values": {"body": "z", "email": "z@example.invalid"}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"  # unique_key required, 2 keys declared
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "upsert", "unique_key": "no_such_key", "values": {"body": "z", "email": "z@example.invalid"}}], LIMITS)
+        assert exc.value.code == "NOT_FOUND"
+    finally:
+        cell.close()
+
+
+def test_upsert_on_multi_key_entity_resolves_using_the_named_key_only(app_a: types.SimpleNamespace) -> None:
+    """A match on the *other* declared key must not resolve the upsert to
+    an update -- only the explicitly named key decides existence."""
+    cell = _notes_cell_with_two_unique_keys(app_a)
+    try:
+        cell.transact("notes", [{"operation": "upsert", "unique_key": "by_email", "values": {"body": "new-body", "email": "new@example.invalid"}}], LIMITS)
+        rows = cell.query("notes", select=["id", "body", "email"], where=[], page_size=10, limits=LIMITS).items
+        assert len(rows) == 2
+        bodies_by_email = {row["email"]: row["body"] for row in rows}
+        assert bodies_by_email == {None: "a", "new@example.invalid": "new-body"}
+
+        cell.transact("notes", [{"operation": "upsert", "unique_key": "by_email", "values": {"body": "changed", "email": "new@example.invalid"}}], LIMITS)
+        rows = cell.query("notes", select=["body", "email"], where=[], page_size=10, limits=LIMITS).items
+        bodies_by_email = {row["email"]: row["body"] for row in rows}
+        assert bodies_by_email == {None: "a", "new@example.invalid": "changed"}
+    finally:
+        cell.close()
+
+
+def test_upsert_conflicts_on_a_declared_key_other_than_the_selected_one(app_a: types.SimpleNamespace) -> None:
+    """WP-2 review M-13 parity: selecting a key with `unique_key` only
+    decides *existence* -- every declared unique key is still enforced on
+    write, including ones the selection did not name."""
+    cell = _notes_cell_with_two_unique_keys(app_a)
+    try:
+        cell.transact("notes", [{"operation": "upsert", "unique_key": "by_email", "values": {"body": "unique-1", "email": "one@example.invalid"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "upsert", "unique_key": "by_email", "values": {"body": "unique-1", "email": "two@example.invalid"}}], LIMITS)
+        assert exc.value.code == "CONFLICT"
+        assert exc.value.details == {"index": "by_body"}
+    finally:
+        cell.close()
+
+
+def test_upsert_on_single_key_entity_with_wrong_explicit_unique_key_name_is_not_found(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS)
+        cell.apply_schema({"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"], "unique": True}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "upsert", "unique_key": "not_by_body", "values": {"body": "a"}}], LIMITS)
+        assert exc.value.code == "NOT_FOUND"
+        outcome = cell.transact("notes", [{"operation": "upsert", "unique_key": "by_body", "values": {"body": "a"}}], LIMITS)
+        assert outcome.affected == 1
+        assert outcome.assigned_addresses == []
+    finally:
+        cell.close()
+
+
+def test_unique_key_is_rejected_on_insert_update_and_delete(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "notes", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("notes", [{"operation": "insert", "values": {"body": "a"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "insert", "values": {"body": "z"}, "unique_key": "by_body"}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "unique_key": "by_body"}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "unique_key": "by_body", "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_upsert_expected_revision_updates_in_place_and_never_resolves_to_insert(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "people", "fields": ["email", "name"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_index", "entity": "people", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+
+        # No existing row at all: never resolves to an insert.
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("people", [{"operation": "upsert", "values": {"email": "new@example.invalid"}, "expected_revision": "anything"}], LIMITS)
+        assert exc.value.code == "NOT_FOUND"
+        assert cell.query("people", select=["id"], where=[], page_size=10, limits=LIMITS).items == []
+
+        cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann"}}], LIMITS)
+        revision = _row_revision(cell, "people", 1)
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann2"}, "expected_revision": "wrong-revision"}], LIMITS)
+        assert exc.value.code == "PRECONDITION_FAILED"
+
+        outcome = cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann3"}, "expected_revision": revision}], LIMITS)
+        assert outcome.affected == 1
+        assert outcome.assigned_addresses == []
+        rows = cell.query("people", select=["name"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"name": "Ann3"}]
+        assert _row_revision(cell, "people", 1) != revision
+    finally:
+        cell.close()
+
+
+# --- expected_revision on update/delete: the contract's 6 clauses (R-4) ----
+
+
+def test_expected_revision_on_insert_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}, "expected_revision": "anything"}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_expected_revision_mismatch_is_precondition_failed(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "docs",
+                [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "v2"}, "expected_revision": "not-the-real-revision"}],
+                LIMITS,
+            )
+        assert exc.value.code == "PRECONDITION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_expected_revision_with_no_predicate_match_is_not_found(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+        revision = _row_revision(cell, "docs", 1)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "docs",
+                [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 999}], "values": {"body": "v2"}, "expected_revision": revision}],
+                LIMITS,
+            )
+        assert exc.value.code == "NOT_FOUND"
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "docs",
+                [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "expected_revision": revision, "destructive": True, "confirmation": "DELETE"}],
+                LIMITS,
+            )
+        assert exc.value.code == "NOT_FOUND"
+    finally:
+        cell.close()
+
+
+def test_expected_revision_success_rotates_revision_and_leaves_other_rows_unaffected(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}, {"operation": "insert", "values": {"body": "other"}}], LIMITS)
+        revision_1 = _row_revision(cell, "docs", 1)
+        revision_2_before = _row_revision(cell, "docs", 2)
+
+        outcome = cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "v2"}, "expected_revision": revision_1}], LIMITS)
+        assert outcome.affected == 1
+        assert _row_revision(cell, "docs", 1) != revision_1
+        assert _row_revision(cell, "docs", 2) == revision_2_before
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "v3"}, "expected_revision": revision_1}], LIMITS)
+        assert exc.value.code == "PRECONDITION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_expected_revision_without_precondition_zero_row_update_and_delete_still_succeed(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        outcome = cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 999}], "values": {"body": "v2"}}], LIMITS)
+        assert outcome.affected == 0
+        outcome = cell.transact("docs", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        assert outcome.affected == 0
+    finally:
+        cell.close()
+
+
+def test_expected_revision_on_empty_values_update_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """R-4, corrigendum M-1: an empty-`values` update never silently
+    discards a precondition riding along with it."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+        revision = _row_revision(cell, "docs", 1)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {}, "expected_revision": revision}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_expected_revision_predicate_matching_several_rows_affects_only_the_revision_row(app_a: types.SimpleNamespace) -> None:
+    """R-4, corrigendum M-2: the target of an `expected_revision` mutation
+    is "predicate match AND revision match" -- revision is unique per row,
+    so at most one row is ever changed even if the predicate matches many."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact(
+            "docs",
+            [
+                {"operation": "insert", "values": {"body": "shared"}},
+                {"operation": "insert", "values": {"body": "shared"}},
+                {"operation": "insert", "values": {"body": "shared"}},
+            ],
+            LIMITS,
+        )
+        revision_2 = _row_revision(cell, "docs", 2)
+        outcome = cell.transact("docs", [{"operation": "update", "where": [{"field": "body", "operator": "eq", "value": "shared"}], "values": {"body": "updated"}, "expected_revision": revision_2}], LIMITS)
+        assert outcome.affected == 1
+        rows = cell.query("docs", select=["id", "body"], where=[], page_size=10, limits=LIMITS).items
+        assert {row["id"]: row["body"] for row in rows} == {1: "shared", 2: "updated", 3: "shared"}
+    finally:
+        cell.close()
+
+
+def test_type_mismatch_is_validation_failed_even_with_a_matching_precondition(app_a: types.SimpleNamespace) -> None:
+    """R-7, corrigendum M-9: a type mismatch is refused before a
+    precondition is even evaluated -- never surfaced as PRECONDITION_FAILED/
+    NOT_FOUND, both of which read as "retry" to an AI agent client."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "docs", "field": "n", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1", "n": 1}}], LIMITS)
+        revision = _row_revision(cell, "docs", 1)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "docs",
+                [{"operation": "update", "where": [{"field": "n", "operator": "eq", "value": "not-an-int"}], "values": {"body": "v2"}, "expected_revision": revision}],
+                LIMITS,
+            )
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_destructive_confirmation_is_checked_before_precondition_evaluation(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("docs", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "expected_revision": "wrong-revision"}], LIMITS)
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        assert cell.query("docs", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
+    finally:
+        cell.close()
+
+
+def test_query_revisions_are_index_aligned_with_items(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["n"]}, developer=True, limits=LIMITS)
+        cell.transact("items", [{"operation": "insert", "values": {"n": n}} for n in range(3)], LIMITS)
+        outcome = cell.query("items", select=["id", "n"], where=[], page_size=10, limits=LIMITS)
+        assert len(outcome.revisions) == len(outcome.items)
+        assert len(set(outcome.revisions)) == len(outcome.items)
+        for revision in outcome.revisions:
+            assert isinstance(revision, str) and revision
+    finally:
+        cell.close()
+
+
+# --- order_by (R-6) ----------------------------------------------------------
+
+
+def _numbered_cell(app_a: types.SimpleNamespace, count: int) -> PostgresCell:
+    cell = make_cell(app_a)
+    cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["n"]}, developer=True, limits=LIMITS)
+    cell.transact("items", [{"operation": "insert", "values": {"n": n}} for n in range(count)], LIMITS)
+    return cell
+
+
+def test_order_by_sorts_and_appends_id_when_absent(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
+    try:
+        descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
+        assert descending.items == [{"n": 2}, {"n": 1}, {"n": 0}]
+        default_order = cell.query("items", select=["id"], where=[], page_size=10, limits=LIMITS)
+        assert default_order.items == [{"id": 1}, {"id": 2}, {"id": 3}]
+    finally:
+        cell.close()
+
+
+def test_order_by_unknown_field_is_not_found_and_rejects_a_repeated_field(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 1)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "ghost", "direction": "asc"}])
+        assert exc.value.code == "NOT_FOUND"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "asc"}, {"field": "n", "direction": "desc"}])
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_order_by_null_placement_matches_application_cell_defaults(app_a: types.SimpleNamespace) -> None:
+    """R-6, WP-2 review M-6: NULL sorts last for ascending, first for
+    descending -- PostgreSQL's own default with no explicit NULLS clause,
+    which is exactly the semantics `ApplicationCell._sort_key` was written
+    to match."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "tasks", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "tasks", "field": "priority", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact(
+            "tasks",
+            [
+                {"operation": "insert", "values": {"priority": 2}},
+                {"operation": "insert", "values": {"priority": None}},
+                {"operation": "insert", "values": {"priority": 1}},
+            ],
+            LIMITS,
+        )
+        ascending = cell.query("tasks", select=["priority"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "priority", "direction": "asc"}])
+        assert ascending.items == [{"priority": 1}, {"priority": 2}, {"priority": None}]
+        descending = cell.query("tasks", select=["priority"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "priority", "direction": "desc"}])
+        assert descending.items == [{"priority": None}, {"priority": 2}, {"priority": 1}]
+    finally:
+        cell.close()
+
+
+def test_order_by_untyped_column_uses_jsonb_cross_type_order(app_a: types.SimpleNamespace) -> None:
+    """WP-2 review M-6 parity: an untyped (JSONB-equivalent) column's
+    cross-type ascending order is String < Number < Boolean < Array <
+    Object -- PostgreSQL's own native jsonb comparison, matching
+    `ApplicationCell._sort_key`'s `_JSON_TYPE_RANK`."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "mixed", "fields": ["value"]}, developer=True, limits=LIMITS)
+        cell.transact(
+            "mixed",
+            [
+                {"operation": "insert", "values": {"value": {"k": 1}}},
+                {"operation": "insert", "values": {"value": [1]}},
+                {"operation": "insert", "values": {"value": True}},
+                {"operation": "insert", "values": {"value": 1}},
+                {"operation": "insert", "values": {"value": "x"}},
+            ],
+            LIMITS,
+        )
+        ascending = cell.query("mixed", select=["value"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "value", "direction": "asc"}])
+        assert ascending.items == [{"value": "x"}, {"value": 1}, {"value": True}, {"value": [1]}, {"value": {"k": 1}}]
+    finally:
+        cell.close()
+
+
+def test_order_by_clause_count_is_charged_to_query_complexity(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 1)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=10, limits=ResourceLimits(query_complexity=1), order_by=[{"field": "n", "direction": "asc"}])
+        assert exc.value.code == "LIMIT_EXCEEDED"
+    finally:
+        cell.close()
+
+
+# --- cursor pagination (R-6) -------------------------------------------------
+
+
+def test_cursor_pagination_pages_through_results_and_signals_has_more(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 5)
+    try:
+        first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
+        assert first.items == [{"n": 0}, {"n": 1}]
+        assert first.has_more is True
+        assert first.next_cursor is not None
+        second = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
+        assert second.items == [{"n": 2}, {"n": 3}]
+        assert second.has_more is True
+        third = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=second.next_cursor)
+        assert third.items == [{"n": 4}]
+        assert third.has_more is False
+        assert third.next_cursor is None
+    finally:
+        cell.close()
+
+
+def test_cursor_shape_mismatch_and_malformed_cursor_are_rejected(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 5)
+    try:
+        first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["id", "n"], where=[], page_size=2, limits=LIMITS, cursor=first.next_cursor)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor="not-a-valid-cursor")
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def _forge_cursor(payload) -> str:
+    blob = json.dumps(payload).encode("utf-8")
+    return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
+
+
+def _decode_cursor_shape(cursor: str) -> str:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))["q"]
+
+
+def test_cursor_rejects_negative_offset_and_overflow(app_a: types.SimpleNamespace) -> None:
+    cell = _numbered_cell(app_a, 3)
+    try:
+        first = cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS)
+        shape = _decode_cursor_shape(first.next_cursor)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": -1, "q": shape}))
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["n"], where=[], page_size=2, limits=LIMITS, cursor=_forge_cursor({"o": 10**9 + 1, "q": shape}))
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+# --- catalog completeness guard (R-1) ---------------------------------------
+
+
+def test_catalog_completeness_guard_fails_closed_when_id_or_revision_is_missing(app_a: types.SimpleNamespace) -> None:
+    """R-1's fail-closed declaration-completeness guard: if even one entity
+    table does not actually have both a `bigint identity` `id` and a `uuid`
+    `_r2db_revision` column, `_load_catalog` must fail the whole call
+    closed (`SERVICE_UNAVAILABLE`, naming only the offending entity), rather
+    than silently publish a false `mutable`/`address_fields` declaration for
+    it. A table like this can only arise from something bypassing
+    `PostgresCell.apply_schema` entirely (this deployment never provisions
+    one) -- simulated here with a raw DDL statement against a table
+    `PostgresCell` itself created normally.
+    """
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": ["name"]}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_entity", "entity": "sprockets", "fields": ["name"]}, developer=True, limits=LIMITS)
+        # Drift outside PostgresCell entirely: drop the revision column
+        # from one table, bypassing `apply_schema`.
+        dev_conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+        try:
+            with dev_conn.cursor() as cur:
+                cur.execute("ALTER TABLE public.sprockets DROP COLUMN _r2db_revision")
+        finally:
+            dev_conn.close()
+
+        with pytest.raises(FoundationError) as exc:
+            cell.catalog()
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        assert exc.value.details["entities"] == ["sprockets"]
+
+        # The same fail-closed guard blocks every other operation against
+        # this application too, including on the unaffected table --
+        # `_load_catalog` runs before any operation touches stored data.
+        with pytest.raises(FoundationError) as exc:
+            cell.query("widgets", select=["name"], where=[], page_size=10, limits=LIMITS)
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "create_entity", "entity": "another", "fields": []}, developer=True, limits=LIMITS)
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+    finally:
+        cell.close()
+
+
+# --- address non-reuse (R-1, property 5) -------------------------------------
+
+
+def test_id_is_never_reused_after_delete_or_a_failed_batch(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
+        cell.transact("widgets", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 2}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        ids = sorted(row["id"] for row in cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items)
+        assert ids == [1, 3]  # id 2 is gone forever
+
+        # A failed batch containing an insert still consumes the id --
+        # PostgreSQL's own `GENERATED ALWAYS AS IDENTITY` sequence is
+        # non-transactional and does not rewind on ROLLBACK.
+        with pytest.raises(FoundationError):
+            cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "unsupported"}], LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        ids_after = sorted(row["id"] for row in cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items)
+        assert ids_after == [1, 3, 5]  # id 4 was consumed and gapped
+
+        # drop_entity + recreate is a new entity: addressing restarts at 1.
+        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": "DROP_ENTITY"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
+    finally:
+        cell.close()
+
+
+def test_id_is_never_reused_after_vacuum(app_a: types.SimpleNamespace) -> None:
+    """R-1: `VACUUM` (and `pg_dump`/restore) preserve stored values and
+    identity sequence state -- a deleted id must stay gone even after the
+    dead row is physically reclaimed, not merely while its tuple is still
+    on disk."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
+        cell.transact("widgets", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 2}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+
+        conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("VACUUM public.widgets")
+        finally:
+            conn.close()
+
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        ids = sorted(row["id"] for row in cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items)
+        assert ids == [1, 3]
+    finally:
+        cell.close()
+
+
+# ==========================================================================
+# WP-3 independent review (Opus) corrigenda: blocker-1 (matches gate,
+# tested in test_foundation.py/test_http.py against DataService/HTTP --
+# this file tests PostgresCell directly, which is deliberately ungated),
+# blocker-2 (value-domain validation + 22xxx mapping), D-1~D-4 (predicate
+# semantics unified with SQL's own three-valued logic), and the object/
+# array DOMAIN unification.
+# ==========================================================================
+
+
+def test_integer_field_value_out_of_bigint_range_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """R-7 addendum (WP-3 review blocker-2): shared-boundary parity with
+    `ApplicationCell` -- a JSON integer outside signed 64-bit range must
+    never reach PostgreSQL's own bigint column at all."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "readings", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "readings", "field": "n", "field_type": "integer"}, developer=True, limits=LIMITS)
+        too_big = 2**63
+        too_small = -(2**63) - 1
+        for bad in (too_big, too_small):
+            with pytest.raises(FoundationError) as exc:
+                cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
+            assert exc.value.code == "VALIDATION_FAILED"
+            assert exc.value.details == {"field": "n"}
+        cell.transact("readings", [{"operation": "insert", "values": {"n": 2**63 - 1}}, {"operation": "insert", "values": {"n": -(2**63)}}], LIMITS)
+        rows = {row["n"] for row in cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items}
+        assert rows == {2**63 - 1, -(2**63)}
+    finally:
+        cell.close()
+
+
+def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: types.SimpleNamespace) -> None:
+    """R-7 addendum (WP-3 review blocker-2): shared-boundary parity with
+    `ApplicationCell` -- a U+0000 anywhere inside the value must never
+    reach PostgreSQL's `text`/`jsonb` storage."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["u"]}, developer=True, limits=LIMITS)
+        for name, field_type in (("s", "string"), ("o", "object"), ("a", "array")):
+            cell.apply_schema({"operation": "add_field", "entity": "docs", "field": name, "field_type": field_type}, developer=True, limits=LIMITS)
+        bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+        for field_name, bad_value in bad_values.items():
+            with pytest.raises(FoundationError) as exc:
+                cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
+            assert exc.value.code == "VALIDATION_FAILED"
+            assert exc.value.details == {"field": field_name}
+        assert cell.query("docs", select=["u"], where=[], page_size=10, limits=LIMITS).items == []
+    finally:
+        cell.close()
+
+
+def test_expected_revision_containing_nul_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
+        cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.transact(
+                "docs",
+                [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "v2"}, "expected_revision": "has\x00nul"}],
+                LIMITS,
+            )
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_matches_pattern_ending_in_an_unescaped_backslash_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """WP-3 review blocker-2 (Q-2 adjudication 5): rejected deterministically
+    in the shared boundary before this backend's own LIKE execution -- a
+    trailing bare backslash's behaviour there would otherwise depend on
+    stored data (non-deterministic from the client's point of view)."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[P("label", "matches", "a\\")], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        with pytest.raises(FoundationError) as exc:
+            cell.query("items", select=["label"], where=[P("label", "matches", "a\\\\\\")], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        # Even trailing backslash count (paired escapes) is well-formed.
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "a\\\\")], page_size=10, limits=LIMITS)
+        assert rows.items == []
+        # Escape grammar boundary: `\x` (escapes a plain, non-wildcard
+        # character -- matches that character literally, same as no
+        # escape) and `\\` (escapes a literal backslash).
+        cell.transact("items", [{"operation": "insert", "values": {"label": "a\\b"}}], LIMITS)
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "a\\\\b")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "a\\b"}]
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "\\a")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "a"}]
+    finally:
+        cell.close()
+
+
+def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_failed(app_a: types.SimpleNamespace) -> None:
+    """WP-3 review blocker-2, second layer of defence: `_check_type`'s
+    "number" branch only checks JSON type (int/float, not bool) -- unlike
+    "integer", it does not range-check against PostgreSQL's own `double
+    precision`. A value this large therefore reaches this backend's own SQL
+    execution, which is exactly the `psycopg.errors.DataError` ->
+    `VALIDATION_FAILED` mapping this test is for: it must never surface as
+    `SERVICE_UNAVAILABLE` (a false "retry" signal to an AI agent client),
+    and must never leak the value itself into the error.
+    """
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "readings", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "readings", "field": "n", "field_type": "number"}, developer=True, limits=LIMITS)
+        huge = 10**400
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("readings", [{"operation": "insert", "values": {"n": huge}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.status == 400
+        rendered = repr(exc.value)
+        assert str(huge)[:20] not in rendered
+        # No side effect.
+        assert cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items == []
+    finally:
+        cell.close()
+
+
+# --- object/array DOMAIN unification (R-7 addendum) -------------------------
+
+
+def test_object_and_array_field_types_use_domains_and_are_distinguishable(app_a: types.SimpleNamespace) -> None:
+    """WP-3 review, "object/array の DOMAIN 型統一": unlike a bare `jsonb`
+    column, `_load_catalog` can now recover which of the two a column was
+    declared as (via `information_schema.columns.domain_name`), and
+    `_check_type` enforces the declared shape on write -- the same mapping
+    `ApplicationCell` already provides, closing the previously-accepted
+    cross-backend divergence.
+    """
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "typed", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "o", "field_type": "object"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "a", "field_type": "array"}, developer=True, limits=LIMITS)
+
+        cell.transact("typed", [{"operation": "insert", "values": {"o": {"k": 1}, "a": [1, 2]}}], LIMITS)
+        rows = cell.query("typed", select=["o", "a"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [{"o": {"k": 1}, "a": [1, 2]}]
+
+        # Null is still allowed for either domain.
+        cell.transact("typed", [{"operation": "insert", "values": {}}], LIMITS)
+
+        # A list written to a field declared "object" (and vice versa) is
+        # now rejected -- the DOMAIN lets this backend tell them apart,
+        # closing the gap the pre-review docstring called a "legitimate
+        # divergence".
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("typed", [{"operation": "insert", "values": {"o": [1, 2]}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"field": "o"}
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("typed", [{"operation": "insert", "values": {"a": {"k": 1}}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"field": "a"}
+        # Same rejection on update.
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("typed", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"o": [1]}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_object_and_array_domain_name_is_read_back_from_the_live_catalog(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "typed", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "o", "field_type": "object"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "a", "field_type": "array"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "plain"}, developer=True, limits=LIMITS)
+        with cell._runtime.connection() as conn:
+            with conn.transaction():
+                info = cell._load_catalog(conn)
+        table_info = info["typed"]
+        assert table_info.columns["o"] == "object"
+        assert table_info.columns["a"] == "array"
+        assert table_info.columns["plain"] is None
+
+        # Raw SQL-level confirmation, independent of PostgresCell's own
+        # reading back: the domain really is what `information_schema`
+        # reports.
+        conn2 = psycopg.connect(app_a.developer_dsn, autocommit=True)
+        try:
+            with conn2.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name, domain_name FROM information_schema.columns WHERE table_name = 'typed' AND column_name IN ('o', 'a', 'plain')"
+                )
+                by_column = dict(cur.fetchall())
+                assert by_column["o"] == "_r2db_json_object"
+                assert by_column["a"] == "_r2db_json_array"
+                assert by_column["plain"] is None
+        finally:
+            conn2.close()
+    finally:
+        cell.close()
+
+
+# --- assigned_addresses ordering for plain inserts (mutation M11) ----------
+
+
+def test_plain_insert_assigned_addresses_returned_in_operation_order(app_a: types.SimpleNamespace) -> None:
+    """A single, ordinary insert (no upsert involved at all) must still
+    report its resolved address in `assigned_addresses` -- and a batch of
+    several must report them in operation order, index-aligned with the
+    inserts (not, say, sorted by id or reversed)."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+
+        outcome = cell.transact("items", [{"operation": "insert", "values": {"label": "solo"}}], LIMITS)
+        assert outcome.affected == 1
+        assert outcome.assigned_addresses == [{"address": {"id": 1}}]
+
+        outcome = cell.transact(
+            "items",
+            [
+                {"operation": "insert", "values": {"label": "a"}},
+                {"operation": "update", "where": [{"field": "label", "operator": "eq", "value": "solo"}], "values": {"label": "renamed"}},
+                {"operation": "insert", "values": {"label": "b"}},
+                {"operation": "insert", "values": {"label": "c"}},
+            ],
+            LIMITS,
+        )
+        assert outcome.affected == 4
+        # Insert-only, in operation order -- the update in between
+        # contributes nothing to `assigned_addresses`, and does not shift
+        # the ids reported for the inserts around it.
+        assert outcome.assigned_addresses == [{"address": {"id": 2}}, {"address": {"id": 3}}, {"address": {"id": 4}}]
+    finally:
+        cell.close()
+
+
+# --- WP-3 review D-1~D-4: predicate semantics unified with SQL's own
+# three-valued logic (PostgresCell side: confirms the shared-boundary
+# escaping/grammar and the *reference* implementation's parity fix, not
+# this backend's own semantics, which were already SQL-native) ------------
+
+
+def test_contains_and_matches_escape_grammar_boundary_with_null_rows_mixed_in(app_a: types.SimpleNamespace) -> None:
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label"]}, developer=True, limits=LIMITS)
+        cell.transact(
+            "items",
+            [
+                {"operation": "insert", "values": {"label": "back\\slash"}},
+                {"operation": "insert", "values": {"label": None}},
+                {"operation": "insert", "values": {"label": "plainx"}},
+            ],
+            LIMITS,
+        )
+        # `\\` (escaped literal backslash) via contains -- NULL row excluded,
+        # never an error.
+        rows = cell.query("items", select=["label"], where=[P("label", "contains", "back\\slash")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "back\\slash"}]
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "back\\\\slash")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "back\\slash"}]
+        # `\x` (escapes a non-wildcard character -- matches it literally,
+        # same as leaving it unescaped).
+        rows = cell.query("items", select=["label"], where=[P("label", "matches", "\\p\\l\\a\\i\\n\\x")], page_size=10, limits=LIMITS)
+        assert rows.items == [{"label": "plainx"}]
+    finally:
+        cell.close()
+
+
+# ==========================================================================
+# Direct ApplicationCell <-> PostgresCell parity: the same scenario, run
+# against both engines, asserting the observable results match (WP-3
+# review D-1~D-4's own point: the reference implementation must not behave
+# narrower than, or differently from, the deployed backend).
+# ==========================================================================
+
+
+def _memory_cell() -> ApplicationCell:
+    return ApplicationCell("parity-app", {})
+
+
+def test_parity_contains_matches_ne_in_with_null_rows(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["label", "n"]}, developer=True, limits=LIMITS)
+            cell.transact(
+                "items",
+                [
+                    {"operation": "insert", "values": {"label": "hello", "n": 5}},
+                    {"operation": "insert", "values": {"label": None, "n": None}},
+                    {"operation": "insert", "values": {"label": "help", "n": 7}},
+                ],
+                LIMITS,
+            )
+
+        cases = [
+            ("contains", "el"),
+            ("matches", "hel%"),
+            ("ne", "hello"),
+            ("in", ["hello", None]),
+            # WP-3 confirmation review N-5: substrings of Python's own
+            # `str(None)` ("None") -- makes the `if actual is None: return
+            # False` guard load-bearing. Neither "hello" nor "help"
+            # contains "on"/"No" (case-sensitive), so the only way either
+            # of these could spuriously match is a regression that fell
+            # back to formatting the NULL row's value with plain `str()`
+            # instead of excluding it outright.
+            ("contains", "on"),
+            ("contains", "No"),
+            ("matches", "%on%"),
+            # WP-3 confirmation review N-5 (round 2): "ul" is a substring
+            # of `_jsonb_scalar_text(None)`'s own literal output, `"null"`
+            # -- this codebase's *actual* fallback text for a NULL value,
+            # unlike the hypothetical `str(None)` ("None") the "on"/"No"
+            # needles above guard against. Without the `if actual is None:
+            # return False` short-circuit, `_predicate_text` would reach
+            # `_jsonb_scalar_text(None)` -> `"null"`, and `"ul" in "null"`
+            # is `True` -- so this needle is the one that actually kills a
+            # regression that removes the guard from *this* code path.
+            ("contains", "ul"),
+        ]
+        for operator, value in cases:
+            pg_items = pg.query("items", select=["label"], where=[P("label", operator, value)], page_size=10, limits=LIMITS).items
+            mem_items = mem.query("items", select=["label"], where=[Predicate("label", operator, value)], page_size=10, limits=LIMITS).items
+            assert sorted(pg_items, key=str) == sorted(mem_items, key=str), operator
+        # The N-5 needles specifically must match nothing at all on either
+        # cell -- not merely "agree with each other" (two cells that both
+        # spuriously matched the NULL row would also "agree").
+        for operator, value in cases[-4:]:
+            assert pg.query("items", select=["label"], where=[P("label", operator, value)], page_size=10, limits=LIMITS).items == [], (operator, value)
+    finally:
+        pg.close()
+
+
+def test_parity_contains_matches_with_integer_valued_float_on_a_typed_number_column(app_a: types.SimpleNamespace) -> None:
+    """WP-3 confirmation review N-1: `_predicate_text`'s float formatting
+    must match PostgreSQL's `float8out` (invoked by `PostgresCell._text_
+    expression`'s plain `::text` cast on a `double precision` column) --
+    an integer-valued float drops its trailing `.0`. This is a `field_type:
+    "number"` column specifically: an *untyped* JSONB column's own numeric
+    storage preserves the original literal text instead (confirmed
+    empirically against a real server -- `('100.0'::jsonb) #>> '{}'` stays
+    `"100.0"`, never dropping the `.0`), which is `PostgresCell`'s existing,
+    unrelated `#>> '{}'` behaviour for untyped columns, not something this
+    fix touches.
+    """
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "readings", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "readings", "field": "n", "field_type": "number"}, developer=True, limits=LIMITS)
+            cell.transact("readings", [{"operation": "insert", "values": {"n": 100.0}}, {"operation": "insert", "values": {"n": 1234567890123.0}}], LIMITS)
+
+        for needle, expect_match in (("100", True), (".0", False), ("1234567890123", True)):
+            pg_items = pg.query("readings", select=["n"], where=[P("n", "contains", needle)], page_size=10, limits=LIMITS).items
+            mem_items = mem.query("readings", select=["n"], where=[Predicate("n", "contains", needle)], page_size=10, limits=LIMITS).items
+            assert pg_items == mem_items, needle
+            assert bool(pg_items) is expect_match, needle
+    finally:
+        pg.close()
+
+
+def test_parity_contains_on_untyped_float_and_nested_float_use_jsonb_numeric_rules(app_a: types.SimpleNamespace) -> None:
+    """WP-3 confirmation review N-1 correction: the first pass applied
+    `float8out`-style formatting (drop trailing `.0`) to EVERY float
+    regardless of column type or nesting position -- correct only for a
+    TYPED `"number"` column's TOP-LEVEL scalar. An UNTYPED top-level float,
+    or a float at ANY nested position (inside a dict/list, even one
+    declared `field_type: "object"`/`"array"`), must instead use
+    PostgreSQL jsonb's own numeric storage/output rules: trailing zeros
+    are PRESERVED (never dropped), and scientific notation is EXPANDED to
+    full plain-decimal digits (confirmed empirically against a real
+    server: `('1e+20'::jsonb) #>> '{}'` -> `"100000000000000000000"`,
+    never `"1e+20"`) -- the opposite of `float8out` on both counts.
+    """
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["n", "payload"]}, developer=True, limits=LIMITS)
+            cell.transact(
+                "items",
+                [
+                    {"operation": "insert", "values": {"n": 100.0}},
+                    {"operation": "insert", "values": {"n": 1e20}},
+                    {"operation": "insert", "values": {"payload": {"yy": 1.0}}},
+                ],
+                LIMITS,
+            )
+
+        cases = [
+            # Untyped top-level float: trailing `.0` is preserved (unlike
+            # a typed "number" column, where `float8out` would drop it).
+            ("n", "100.0", True),
+            # Scientific notation is expanded to full decimal digits.
+            ("n", "100000000000000000000", True),
+            ("n", "1e+20", False),
+            # Nested float (inside an untyped dict): `.0` preserved.
+            ("payload", '"yy": 1.0', True),
+            ("payload", '"yy": 1}', False),
+        ]
+        for field, needle, expect_match in cases:
+            pg_items = pg.query("items", select=[field], where=[P(field, "contains", needle)], page_size=10, limits=LIMITS).items
+            mem_items = mem.query("items", select=[field], where=[Predicate(field, "contains", needle)], page_size=10, limits=LIMITS).items
+            assert pg_items == mem_items, (field, needle)
+            assert bool(pg_items) is expect_match, (field, needle)
+    finally:
+        pg.close()
+
+
+def test_parity_contains_with_mixed_key_length_dict(app_a: types.SimpleNamespace) -> None:
+    """WP-3 confirmation review N-2: an object's key order in its
+    `contains`/`matches` text form is PostgreSQL's own jsonb storage order
+    -- `(byte length, byte value)`, not Python's default alphabetical
+    string sort. `"aa"` sorts *before* `"b"` alphabetically but is
+    *longer*, so the two orderings disagree here: the literal substring
+    `{"b": 1, "aa": 2}` is only found if the byte-length rule is actually
+    applied (alphabetical order would produce `{"aa": 2, "b": 1}` instead,
+    in which that substring never appears at all).
+    """
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "items", "fields": ["payload"]}, developer=True, limits=LIMITS)
+            cell.transact("items", [{"operation": "insert", "values": {"payload": {"b": 1, "aa": 2}}}], LIMITS)
+
+        needle = '{"b": 1, "aa": 2}'
+        pg_items = pg.query("items", select=["payload"], where=[P("payload", "contains", needle)], page_size=10, limits=LIMITS).items
+        mem_items = mem.query("items", select=["payload"], where=[Predicate("payload", "contains", needle)], page_size=10, limits=LIMITS).items
+        assert pg_items == mem_items == [{"payload": {"b": 1, "aa": 2}}]
+
+        # The alphabetically-sorted form must NOT be found on either cell
+        # -- proving this isn't a coincidental match on an unordered
+        # substring check.
+        wrong_order = '{"aa": 2, "b": 1}'
+        assert pg.query("items", select=["payload"], where=[P("payload", "contains", wrong_order)], page_size=10, limits=LIMITS).items == []
+        assert mem.query("items", select=["payload"], where=[Predicate("payload", "contains", wrong_order)], page_size=10, limits=LIMITS).items == []
+    finally:
+        pg.close()
+
+
+def test_parity_contains_matches_on_typed_non_string_columns(app_a: types.SimpleNamespace) -> None:
+    """WP-3 confirmation review N-6: `contains`/`matches` against typed
+    non-string columns (integer, boolean), directly cross-checked between
+    both engines rather than only verified against `PostgresCell` alone."""
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "readings", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "readings", "field": "n", "field_type": "integer"}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "readings", "field": "flag", "field_type": "boolean"}, developer=True, limits=LIMITS)
+            cell.transact(
+                "readings",
+                [{"operation": "insert", "values": {"n": 12345, "flag": True}}, {"operation": "insert", "values": {"n": 999, "flag": False}}],
+                LIMITS,
+            )
+        for field, operator, value in (("n", "contains", "234"), ("flag", "matches", "tr%"), ("flag", "contains", "fals")):
+            pg_items = pg.query("readings", select=[field], where=[P(field, operator, value)], page_size=10, limits=LIMITS).items
+            mem_items = mem.query("readings", select=[field], where=[Predicate(field, operator, value)], page_size=10, limits=LIMITS).items
+            assert pg_items == mem_items, (field, operator, value)
+    finally:
+        pg.close()
+
+
+def test_parity_order_by_null_placement_and_cross_type(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "tasks", "fields": []}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "add_field", "entity": "tasks", "field": "priority", "field_type": "integer"}, developer=True, limits=LIMITS)
+            cell.transact(
+                "tasks",
+                [
+                    {"operation": "insert", "values": {"priority": 2}},
+                    {"operation": "insert", "values": {"priority": None}},
+                    {"operation": "insert", "values": {"priority": 1}},
+                ],
+                LIMITS,
+            )
+        for direction in ("asc", "desc"):
+            pg_items = pg.query("tasks", select=["priority"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "priority", "direction": direction}]).items
+            mem_items = mem.query("tasks", select=["priority"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "priority", "direction": direction}]).items
+            assert pg_items == mem_items, direction
+    finally:
+        pg.close()
+
+
+def test_parity_upsert_representative_branches(app_a: types.SimpleNamespace) -> None:
+    pg = make_cell(app_a)
+    mem = _memory_cell()
+    try:
+        for cell in (pg, mem):
+            cell.apply_schema({"operation": "create_entity", "entity": "people", "fields": ["email", "name"]}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "create_index", "entity": "people", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+
+        for cell in (pg, mem):
+            outcome = cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann"}}], LIMITS)
+            assert outcome.affected == 1
+            assert outcome.assigned_addresses == [{"address": {"id": 1}}]
+            outcome2 = cell.transact("people", [{"operation": "upsert", "values": {"email": "a@example.invalid", "name": "Ann2"}}], LIMITS)
+            assert outcome2.affected == 1
+            assert outcome2.assigned_addresses == []
+
+        pg_items = pg.query("people", select=["id", "name"], where=[], page_size=10, limits=LIMITS).items
+        mem_items = mem.query("people", select=["id", "name"], where=[], page_size=10, limits=LIMITS).items
+        assert pg_items == mem_items == [{"id": 1, "name": "Ann2"}]
+    finally:
+        pg.close()
 
 
 # --- SharedPoolManager: idle eviction + LRU cap (connection-pooling defect

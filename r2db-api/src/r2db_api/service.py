@@ -135,6 +135,20 @@ class DataService:
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
                 predicates = [parse_predicate(item) for item in (where or [])]
+                # --- WP-2-through-WP-5 provisional gate (see the identical
+                # note in `mutate()` below) -- WP-3 review blocker-1: this
+                # entry was missing when Q-2 added `matches` to the shared
+                # operator allowlist (`structured.OPERATORS`) after the
+                # gate list below was first written, letting `matches`
+                # execute through this facade while `capabilities()` still
+                # declares it `unsupported` (the exact B-1 pattern
+                # recurring for a query operator instead of a mutation
+                # operation/schema op). REMOVE THIS CHECK in the same
+                # commit as WP-5 (`capabilities()`'s `structured_query.
+                # operators` gaining "matches" is untouched by this WP;
+                # only this refusal is temporary). ------------------------
+                if any(predicate.operator == "matches" for predicate in predicates):
+                    fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose the matches filter operator.")
                 deadline = self._clock() + self.limits.execution_ms / 1000
                 outcome = self._cells[canonical.application_id].query(entity, select=select, where=predicates, page_size=page_size, limits=self.limits, deadline=deadline, clock=self._clock)
                 self._event(canonical, "data_operation", "query", "allow", "entity", request_id=request_id)
@@ -178,6 +192,26 @@ class DataService:
                 for item in operations:
                     if isinstance(item, dict) and (item.get("operation") == "upsert" or "expected_revision" in item):
                         fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose upsert or revision preconditions.")
+                    # WP-3 confirmation review blocker: the `matches` gate
+                    # added to `query()` above only ever inspected query
+                    # predicates -- `update`/`delete`'s own `operation.
+                    # where` carries predicates too, and a `matches` there
+                    # reached `bind_mutation`/`ApplicationCell`/
+                    # `PostgresCell` unrefused (observed executing all the
+                    # way through, including a `delete`). This scan runs
+                    # ahead of `bind_mutation`, so `where` is still a raw,
+                    # unvalidated value here -- defensively tolerant of any
+                    # shape (a malformed `where` is left for `bind_mutation`
+                    # itself to reject afterward; this loop only ever looks
+                    # for a `matches` operator string to gate, never raises
+                    # for anything else it does not recognize). REMOVE THIS
+                    # loop body in the same WP-5 commit that removes the
+                    # `query()` gate above -- both are the same provisional
+                    # closure over the same shared-boundary vocabulary leak.
+                    if isinstance(item, dict):
+                        where = item.get("where")
+                        if isinstance(where, list) and any(isinstance(predicate, dict) and predicate.get("operator") == "matches" for predicate in where):
+                            fail("CAPABILITY_UNSUPPORTED", "This foundation does not yet expose the matches filter operator.")
                 request = {"entity": entity, "operations": operations}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)

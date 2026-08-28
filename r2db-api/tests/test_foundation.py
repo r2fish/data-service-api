@@ -863,6 +863,289 @@ def test_upsert_with_one_declared_key_resolves_to_insert_then_update_with_assign
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+# --- CCR-13 §0.5 Q-2: `contains` literal semantics and `matches` wildcard --
+
+
+def test_contains_is_a_literal_substring_and_never_interprets_wildcards():
+    """Q-2 (案i): no character of the value is ever interpreted as a
+    wildcard -- Python's `in` on strings is already exactly this."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    cell.transact(
+        "items",
+        [
+            {"operation": "insert", "values": {"label": "50% off"}},
+            {"operation": "insert", "values": {"label": "50X off"}},
+            {"operation": "insert", "values": {"label": "under_score"}},
+            {"operation": "insert", "values": {"label": "underxscore"}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "contains", "50%")], page_size=10, limits=LIMITS)
+    assert {r["label"] for r in rows.items} == {"50% off"}
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "contains", "er_sc")], page_size=10, limits=LIMITS)
+    assert {r["label"] for r in rows.items} == {"under_score"}
+
+
+def test_matches_wildcard_semantics_and_case_sensitivity():
+    """Q-2 (補足案): `%` = any sequence (including empty), `_` = exactly
+    one character, `\\` escapes the following character; case-sensitive."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    cell.transact(
+        "items",
+        [
+            {"operation": "insert", "values": {"label": "hello"}},
+            {"operation": "insert", "values": {"label": "help"}},
+            {"operation": "insert", "values": {"label": "HELLO"}},
+            {"operation": "insert", "values": {"label": "hxllo"}},
+            {"operation": "insert", "values": {"label": "100% sure"}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "hel%")], page_size=10, limits=LIMITS)
+    assert {r["label"] for r in rows.items} == {"hello", "help"}  # not "HELLO"
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "h_llo")], page_size=10, limits=LIMITS)
+    assert {r["label"] for r in rows.items} == {"hello", "hxllo"}
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "100\\% sure")], page_size=10, limits=LIMITS)
+    assert {r["label"] for r in rows.items} == {"100% sure"}
+    # An unmatched trailing pattern (no wildcard at all) is a plain exact
+    # match, and a pattern that matches nothing raises nothing (empty
+    # result, not an error).
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "nope")], page_size=10, limits=LIMITS)
+    assert rows.items == []
+
+
+def test_contains_and_matches_reject_non_string_values():
+    """Q-2: both operators' value is always a plain string, independent of
+    the target field's own declared type."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "contains", 5)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "matches", 5)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_matches_pattern_ending_in_an_unescaped_backslash_is_validation_failed():
+    """WP-3 review blocker-2 (Q-2 adjudication 5): a pattern ending in a
+    lone, unescaped backslash is malformed grammar -- PostgreSQL's own LIKE
+    behaviour for this depends on the data it happens to be compared
+    against, which the contract resolves by rejecting it deterministically
+    here instead. An even number of trailing backslashes (all paired
+    escapes) is fine."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    cell.transact("items", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "matches", "a\\")], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "matches", "a\\\\\\")], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    # An even count of trailing backslashes is well-formed (each pair is a
+    # single escaped literal backslash) -- must not be rejected.
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "a\\\\")], page_size=10, limits=LIMITS)
+    assert rows.items == []
+
+
+def test_integer_field_value_out_of_bigint_range_is_validation_failed():
+    """R-7 addendum (WP-3 review blocker-2): a JSON integer with no
+    fixed width passes a bare `isinstance(int)` check but PostgreSQL's
+    `bigint` cannot store it -- the shared boundary must reject this
+    itself, deterministically, rather than let each backend discover it
+    independently (or not at all, for `ApplicationCell`)."""
+    cell = _cell()
+    _create_entity(cell, "readings")
+    _add_field(cell, "readings", "n", "integer")
+    too_big = 2**63
+    too_small = -(2**63) - 1
+    for bad in (too_big, too_small):
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"field": "n"}
+        rendered = repr(exc.value)
+        assert str(bad) not in rendered
+    # The boundary values themselves are valid.
+    cell.transact("readings", [{"operation": "insert", "values": {"n": 2**63 - 1}}, {"operation": "insert", "values": {"n": -(2**63)}}], LIMITS)
+    rows = {row["n"] for row in cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items}
+    assert rows == {2**63 - 1, -(2**63)}
+    # Also checked as a predicate value and as an `in`-list element
+    # (corrigendum m-7 parity).
+    with pytest.raises(FoundationError) as exc:
+        cell.query("readings", select=["n"], where=[Predicate("n", "eq", too_big)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    with pytest.raises(FoundationError) as exc:
+        cell.query("readings", select=["n"], where=[Predicate("n", "in", [1, too_big])], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
+    """R-7 addendum (WP-3 review blocker-2): a U+0000 anywhere inside a
+    string/object/array/untyped value is a value PostgreSQL's `text`/
+    `jsonb` storage cannot hold at all -- refused deterministically in the
+    shared boundary, never left for a backend to discover as its own
+    runtime error."""
+    cell = _cell()
+    _create_entity(cell, "docs")
+    for name, field_type in (("s", "string"), ("o", "object"), ("a", "array"), ("u", None)):
+        _add_field(cell, "docs", name, field_type)
+    bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+    for field_name, bad_value in bad_values.items():
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"field": field_name}
+        assert "\x00" not in repr(exc.value)
+    # Untyped field: NUL nested inside a dict/list value too.
+    with pytest.raises(FoundationError) as exc:
+        cell.transact("docs", [{"operation": "insert", "values": {"u": {"nested": ["has\x00nul"]}}}], LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_expected_revision_containing_nul_is_validation_failed():
+    cell = _cell()
+    _create_entity(cell, "docs")
+    _add_field(cell, "docs", "body")
+    cell.transact("docs", [{"operation": "insert", "values": {"body": "v1"}}], LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.transact(
+            "docs",
+            [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "v2"}, "expected_revision": "has\x00nul"}],
+            LIMITS,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_contains_and_matches_pattern_containing_nul_is_validation_failed():
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "contains", "has\x00nul")], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["label"], where=[Predicate("label", "matches", "has\x00nul")], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+# --- WP-3 review D-1~D-4: predicate semantics unified with SQL's own
+# three-valued logic ----------------------------------------------------
+
+
+def test_contains_and_matches_exclude_null_rows_instead_of_raising():
+    """WP-3 review D-1: a nullable column with at least one NULL row used
+    to make the *entire query* raise VALIDATION_FAILED for `contains`
+    (`expected in None` -- a TypeError) -- this was a reference-
+    implementation bug, narrower than the deployed PostgreSQL backend,
+    where a NULL row is simply excluded (SQL: `NULL LIKE pattern` is
+    UNKNOWN). `matches` gets the identical fix."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "label")
+    cell.transact(
+        "items",
+        [
+            {"operation": "insert", "values": {"label": "hello"}},
+            {"operation": "insert", "values": {"label": None}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "contains", "ell")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"label": "hello"}]
+    rows = cell.query("items", select=["label"], where=[Predicate("label", "matches", "hel%")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"label": "hello"}]
+
+
+def test_contains_and_matches_apply_to_typed_non_string_columns_via_text_form():
+    """WP-3 review D-1~D-4: "型付き非文字列列にも text 表現で適用可" --
+    matching `PostgresCell`'s own `::text`/`#>> '{}'` behaviour for the
+    unambiguous cases (booleans, plain integers)."""
+    cell = _cell()
+    _create_entity(cell, "readings")
+    _add_field(cell, "readings", "n", "integer")
+    _add_field(cell, "readings", "flag", "boolean")
+    cell.transact(
+        "readings",
+        [
+            {"operation": "insert", "values": {"n": 12345, "flag": True}},
+            {"operation": "insert", "values": {"n": 999, "flag": False}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("readings", select=["n"], where=[Predicate("n", "contains", "234")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"n": 12345}]
+    rows = cell.query("readings", select=["flag"], where=[Predicate("flag", "matches", "tr%")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"flag": True}]
+
+
+def test_ne_excludes_null_rows_per_sql_three_valued_logic():
+    """WP-3 review D-1~D-4: `NULL <> value` is UNKNOWN in SQL, not "not
+    equal because it's a different Python value" -- a NULL row must never
+    match `ne`."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "tag")
+    cell.transact(
+        "items",
+        [
+            {"operation": "insert", "values": {"tag": "a"}},
+            {"operation": "insert", "values": {"tag": "b"}},
+            {"operation": "insert", "values": {"tag": None}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("items", select=["tag"], where=[Predicate("tag", "ne", "a")], page_size=10, limits=LIMITS)
+    assert {r["tag"] for r in rows.items} == {"b"}  # not the NULL row
+
+
+def test_in_excludes_null_rows_even_when_the_list_itself_contains_null():
+    """WP-3 review D-1~D-4: `NULL IN (...)` is always UNKNOWN/excluded in
+    SQL, even if the list contains a literal null."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "tag")
+    cell.transact(
+        "items",
+        [
+            {"operation": "insert", "values": {"tag": "a"}},
+            {"operation": "insert", "values": {"tag": None}},
+        ],
+        LIMITS,
+    )
+    rows = cell.query("items", select=["tag"], where=[Predicate("tag", "in", ["a", None])], page_size=10, limits=LIMITS)
+    assert rows.items == [{"tag": "a"}]
+
+
+def test_eq_and_ne_reject_a_null_predicate_value():
+    """WP-3 confirmation review N-3: `= NULL`/`<> NULL` is always UNKNOWN
+    in SQL -- silently and permanently matching zero rows -- so this is
+    refused deterministically (`is_null` is the correct operator for a
+    null check) rather than left to quietly return an empty result
+    forever."""
+    cell = _cell()
+    _create_entity(cell, "items")
+    _add_field(cell, "items", "tag")
+    cell.transact("items", [{"operation": "insert", "values": {"tag": None}}], LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["tag"], where=[Predicate("tag", "eq", None)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"field": "tag"}
+    with pytest.raises(FoundationError) as exc:
+        cell.query("items", select=["tag"], where=[Predicate("tag", "ne", None)], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    # is_null is the correct, accepted way to ask this.
+    rows = cell.query("items", select=["tag"], where=[Predicate("tag", "is_null")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"tag": None}]
+
+
 def _docs_cell() -> ApplicationCell:
     cell = _cell()
     _create_entity(cell, "docs")
@@ -1281,6 +1564,54 @@ def test_transact_checks_deadline_before_each_operation_not_only_the_whole_batch
 # direct-cell tests above). REMOVE/rewrite these once WP-5 updates
 # `capabilities()` in the same commit as flipping these gates off.
 # ==========================================================================
+
+
+def test_gate_query_matches_is_capability_unsupported(service):
+    """WP-3 review blocker-1: `matches` was added to the shared operator
+    allowlist (`structured.OPERATORS`) by Q-2's adjudication after this
+    gate list was first written, so it slipped through `DataService.query`
+    unrefused -- the same B-1-shaped gap recurring for a query operator.
+    `capabilities().structured_query.operators` is untouched by this fix
+    (still not listing `matches`); only this refusal is temporary, removed
+    in the same commit as WP-5."""
+    runtime = service.authenticate("secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    # No side effect on unrelated, well-formed operators.
+    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
+
+
+def test_gate_mutate_update_where_matches_is_capability_unsupported(service):
+    """WP-3 confirmation review blocker: the `matches` gate above only
+    ever inspected `query()`'s own predicates -- `update`/`delete`'s
+    `operation.where` carries predicates too, and this was observed
+    executing all the way through (unrefused) before this fix. This scan
+    runs ahead of `bind_mutation`, so it must gate on the raw, not-yet-
+    validated `where` shape."""
+    runtime = service.authenticate("secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "z"}}])
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    # No side effect: the gate fires before the mutation is even attempted.
+    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
+
+
+def test_gate_mutate_delete_where_matches_is_capability_unsupported(service):
+    """The same gate, on `delete` specifically -- previously observed
+    executing the delete all the way through (the row was actually gone),
+    which is the concrete failure this fix closes."""
+    runtime = service.authenticate("secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(
+            runtime,
+            "notes",
+            [{"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "destructive": True, "confirmation": "DELETE"}],
+        )
+    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    # No side effect: the row this delete would otherwise have matched
+    # (and previously did, before this fix) is still there.
+    assert service.query(runtime, "notes", select=["body"]) == [{"body": "a"}]
 
 
 def test_gate_mutate_expected_revision_is_capability_unsupported(service):

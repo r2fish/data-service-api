@@ -143,7 +143,7 @@
     "allowed_query_operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"],
     "query_operators": {
       "contains": "Literal substring containment, case-sensitive: every character of the value is matched verbatim, and no character of the value is interpreted as a wildcard or pattern token.",
-      "matches": "Wildcard pattern match, case-sensitive: % matches any sequence including the empty one, _ matches exactly one character, and a backslash escapes the next character. An implementation not providing matches refuses it with CAPABILITY_UNSUPPORTED; it is never silently interpreted as a different operator.",
+      "matches": "Wildcard pattern match, case-sensitive: % matches any sequence including the empty one, _ matches exactly one character, and a backslash escapes the next character. A pattern ending in an unescaped backslash has no next character to escape and is refused with VALIDATION_FAILED. An implementation not providing matches refuses it with CAPABILITY_UNSUPPORTED; it is never silently interpreted as a different operator.",
       "case_folding": "Neither operator folds case; a case-insensitive comparison would be a separate additive operator."
     },
     "allowed_mutations": ["insert", "update", "upsert", "delete"],

@@ -119,6 +119,12 @@
 
 - 書き込み・述語の値は列型に対して検証してからバインドする: `bigint` ← JSON 整数 (bool は拒否)、`double precision` ← JSON 数値、`boolean` ← JSON 真偽、`text` ← JSON 文字列、`jsonb` ← 任意 JSON。型不一致は `VALIDATION_FAILED` (安全診断: field 名と期待型のみ。値は echo しない)
 - `in` の値リストは**要素ごと**に同じ型検証・native バインドを行う (訂正記録 m-7)
+- **値域検証も共有境界で行う** (WP-3 レビュー blocker-2): `integer` は bigint の値域 (±2^63)、文字列・jsonb・`expected_revision`・パターンは U+0000 を含まないこと。違反は `VALIDATION_FAILED`。これらは `_check_type` を通るのに PostgreSQL が実行時に拒む値であり、放置すると決定的なクライアントバグが `SERVICE_UNAVAILABLE` (= 再試行せよ) に化ける。防御第二層として postgres 側は 22xxx (DataError 系) を包括 `SERVICE_UNAVAILABLE` の手前で `VALIDATION_FAILED` (field 名のみ) に写像する
+- **`matches` パターンの文法検証も共有境界で行う**: 末尾の裸 `\` は `VALIDATION_FAILED` (契約に明文化済み — PostgreSQL LIKE では格納データ依存の実行時エラーになるため)
+- **`field_type: object` / `array` は PostgreSQL 側で DOMAIN 型 (`_r2db_json_object` / `_r2db_json_array`、`jsonb_typeof` CHECK 付き、application DB provision 時に作成) として列化する** (WP-3 レビューの対案採用)。`_load_catalog` は `information_schema.columns.domain_name` から宣言型を復元し、書き込み時の dict/list 検証は Python 側 (`_check_type`) が `VALIDATION_FAILED` (field 名のみ) で行う — ApplicationCell と同一写像。DOMAIN の CHECK は多層防御であり、発火は真のサーバ側不変条件破れとして 503 でよい。CHECK 制約名の合成 ({entity}__{field} 形式) は 63 バイト超過で逆写像が壊れ、CheckViolation の DETAIL に行全体が載るため不採用
+- **述語意味論は SQL (PostgreSQL) 側に統一する** (WP-3 レビュー D-1〜D-4): `contains`/`matches` は NULL 行を単に除外する (エラーにしない)。型付き非文字列列にも text 表現で適用可。`ne` / `in` は SQL 三値論理 (NULL 行は一致しない)。ApplicationCell を PG 意味論に合わせる — 参照実装が配備実体より狭い/違う挙動をしてはならない
+- **`eq` / `ne` の述語値に JSON null を渡すことは `VALIDATION_FAILED`** (null 判定は `is_null` を使う。SQL では `= NULL` / `<> NULL` は常に UNKNOWN で空集合になるが、黙って常に空を返すより明示拒否が AI エージェントに診断的 — WP-3 確認レビュー N-3)
+- **`contains`/`matches` の text 表現は PostgreSQL の出力規則に一致させる** (WP-3 確認レビュー N-1/N-2): float は整数値なら `.0` を落とす (PG `float8out` 準拠)、jsonb オブジェクトのキー順は (キー長, バイト順)。parity テストはこの表現差が最も壊れやすい値 (整数値 float・キー長混在 dict・"on"/"No" 等 `str(None)` に含まれる部分文字列) で固定する
 - null は全列で許容 (NOT NULL は非スコープ)
 - **untyped (JSONB) 列への JSON null は SQL NULL としてバインドする** (`jsonb 'null'` を作らない — WP-2 確認レビュー M-B。これを守らないと `is_null` 述語と order_by の null 位置が両 cell で割れる。実 PostgreSQL で実測確認済み)。それ以外のバインドは型付き列では native パラメータ、JSONB 列では従来どおり `Jsonb(...)`。**値が生 SQL に入る経路を新設しない** (既存の `_run` チョークポイントと `sql.*` 合成のみを使う)。ORDER BY / OFFSET / LIMIT の数値はサーバ側計算値のみを `sql.Literal` 化 (既存 LIMIT と同型)
 - **値の型検証は precondition 解決・対象行の探索より前に行う** (failure-before-execution。型不一致 = クライアントのバグを `PRECONDITION_FAILED` = 再試行指示として返すと、AI エージェントクライアントは成功しない再試行ループに入る — WP-2 レビュー M-9)
@@ -145,7 +151,7 @@ in-memory `ApplicationCell` (参照実装・in-process conformance plug の実�
 - `StorageBackend` Protocol: `query` の戻りを `(items, revisions, has_more)` 相当へ、`transact` の戻りを `(affected, assigned_addresses)` 相当へ拡張 (具体形は実装で決めてよいが、両 cell と service/http が同じ形を使うこと)
 - `http.post_query`: `order_by` / `page.cursor` の拒否を撤去し委譲。応答は `{items, next_page, revisions}`
 - `http.post_mutate`: `expected_revision` の拒否を撤去 (`bind_mutation` で受理・検証)。応答は `{committed, affected, assigned_addresses}` (per-entity endpoint では各要素は `{address: {...}}`、`entity` 項目なし、insert (と insert に解決した upsert) の操作順)。`idempotency_key` の拒否は維持
-- **WP-2〜WP-5 の乖離封鎖 (暫定ゲート)**: 共有 bind 境界の語彙受理は、放置すると申告 (`unavailable` / `unsupported`) のまま実挙動だけが公開面に開く (WP-2 レビュー B-1 — C-12 は「申告 enabled ⇒ 実行可能」の向きしか検査せず、逆向きの乖離はどの条件も捕まえない)。よって `DataService` (全 facade の共通点) に暫定ゲートを置き、`expected_revision` / `upsert` / `create_index` / `drop_index` / `field_type` を `CAPABILITY_UNSUPPORTED` で、catalog の宣言フィールド (`mutation_class` / `address_fields` / `address_reuse` / `unique_keys`) を旧形状への絞り込みで、**申告が更新される WP-5 の同一コミットまで**封鎖する。storage 固有の事実 (catalog `fields` への `id` の出現、予約名) は capability 非依存であり WP-2 から見えてよい
+- **WP-2〜WP-5 の乖離封鎖 (暫定ゲート)**: 共有 bind 境界の語彙受理は、放置すると申告 (`unavailable` / `unsupported`) のまま実挙動だけが公開面に開く (WP-2 レビュー B-1 — C-12 は「申告 enabled ⇒ 実行可能」の向きしか検査せず、逆向きの乖離はどの条件も捕まえない)。よって `DataService` (全 facade の共通点) に暫定ゲートを置き、`expected_revision` / `upsert` / `create_index` / `drop_index` / `field_type` / `matches` を `CAPABILITY_UNSUPPORTED` で、catalog の宣言フィールド (`mutation_class` / `address_fields` / `address_reuse` / `unique_keys`) を旧形状への絞り込みで、**申告が更新される WP-5 の同一コミットまで**封鎖する。storage 固有の事実 (catalog `fields` への `id` の出現、予約名) は capability 非依存であり WP-2 から見えてよい
 - `capabilities()` の申告更新 (**WP-5 で C-17/C-18 が green になるのと同一コミットで行う** — C-12 が申告と実挙動の一致を強制するため、実装が先・申告が後):
   - `structured_query: enabled` (order_by / pagination が実行可能になったため)
   - `atomic_mutation`: `upsert` を operations に戻す (`unsupported` から除去)。upsert の可否が entity の宣言状態 (unique_keys) に依存する旨は catalog が伝える (C-12 の positive control は §4 の改訂で「key を宣言した entity」上で行う)
@@ -177,6 +183,10 @@ in-memory `ApplicationCell` (参照実装・in-process conformance plug の実�
 - upsert: unique key 宣言が無い entity では `CAPABILITY_UNSUPPORTED`。宣言済み entity では実行され (キー選択は Q-1 裁定の規則: 1個なら省略可、複数なら `unique_key` 必須で省略は `VALIDATION_FAILED`、未宣言キー名は `NOT_FOUND`)、既存 key 一致で update、無ければ insert になり、insert 解決分だけが assigned_addresses に現れる
 - 性質5 + `address_reuse: never`: 削除→再 insert でアドレスが再利用されないことの自動テスト (誘発可能な撹乱) + review evidence (R-1 の根拠、entity 生存期間スコープ、採番の非推論性を含む) の併用。契約の文言どおり
 - unavailable peer (MitateDB): 区分宣言は要求されない。宣言に依存する操作の不在は structural evidence (§4 上記4)
+
+### C-12 逆向き条件 (WP-5 で追加登録)
+
+C-12 は「申告 enabled ⇒ 実行可能」の向きしか検査せず、「申告に無い操作・演算子が実行できてしまう」逆向きの乖離 (WP-2 B-1 / WP-3 blocker-1 が2度踏んだ形) を捕まえない。WP-5 で逆向き条件 (申告されない mutation 操作・query 演算子は `CAPABILITY_UNSUPPORTED` で拒否されること) を C-12 の拡張または独立条件として登録する。
 
 ### C-18 revision precondition 意味論
 
@@ -247,3 +257,14 @@ blocker 2件・major 13件・minor 8件。主な処置:
 - **B-2**: `unique_keys[].name` が optional のままでは、name 無しキーを宣言した entity への upsert が原理的に到達不能 (選択規則が満たせない)。→ 契約で `name` を required 化 (1.1.0 公開前追補)、C-17 の declaration_required に同旨を追加
 - **M-1〜M-13 / minor**: R-5 (index の schema_objects 算入・id への unique index 禁止・`_r2db` prefix)、R-6 (NULL 位置・jsonb 型跨ぎ順序・重複 order_by・cursor scope)、R-7 (型検証の precondition 先行)、§5 (WP-2 単独配備禁止)、outcome 型の dataclass 化、insert + where の拒否、`index`/`unique`/`revision` キーの黙殺封鎖、CONFLICT の HTTP 409 統一、`spec/CCR_DISPOSITION.md` の旧記述訂正、テスト増補 (PostgresCell guard・null 一意性・他キー CONFLICT・cursor 負値/上限/非 dict・複合キー) に反映
 - 契約追補の追加修正: 「キー0個 + `unique_key` 指定」は capability 検査がキー名解決に先行し `CAPABILITY_UNSUPPORTED`
+
+## 10. 訂正記録 (WP-3 実装レビュー、Opus、2026-08-28)
+
+blocker 2・major 4群・minor 数件。SQL 合成面 (識別子二段階防御・バインド境界・チョークポイント) は敵対プローブで健全を確認。変異注入 12 本中 10 検出。
+
+- **blocker-1**: `matches` が申告に無いまま DataService で実行可能 (B-1 と同型の再発。ゲート列挙が Q-2 裁定より古かった) → §3 のゲートに `matches` を追加
+- **blocker-2**: `_check_type` 通過後に PostgreSQL が拒む値 (bigint 溢れ・U+0000・末尾裸 `\` パターン — 最後は格納データ依存で非決定) が 503 に化け、AI エージェントを成功しない再試行ループに入れる → R-7 に値域・パターン文法検証 (共有境界) と 22xxx→`VALIDATION_FAILED` 写像を追加。末尾裸 `\` は契約に「`VALIDATION_FAILED`」を明文化 (裁定5の文言確定)
+- **D-1〜D-4**: ApplicationCell の `contains`/`matches`/`ne`/`in` の NULL・型意味論が PostgreSQL と乖離 (D-1 は nullable 列への contains が常に失敗する参照実装バグ) → R-7 に「述語意味論は SQL 側に統一」を明記し ApplicationCell を修正
+- **object/array**: 「正当な乖離」容認を却下し、DOMAIN 型 (`_r2db_json_object`/`_r2db_json_array`) + Python 側検証で厳格側に統一 (CHECK 制約案は名前長溢れと DETAIL 行開示の2つの罠があり不採用)。R-7 に記録
+- **テスト**: 素の insert の `assigned_addresses` が無検査 (変異生存)、エスケープ文法境界・両 cell parity テストの追加を WP-3 是正に含める
+- C-12 の逆向き条件を WP-5 で登録 (§4 に追記)

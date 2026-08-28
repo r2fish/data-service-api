@@ -297,7 +297,38 @@ class ApplicationCell:
             if not isinstance(item, Filter):
                 raise ValidationError("filters must contain Filter values")
             field = validate_identifier(item.field, "filter field")
-            if field not in available or item.operator not in _OPS:
+            if item.operator == "matches":
+                # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication,
+                # docs/design/R2DB_CCR13_STORAGE_V1.md): `matches` is part
+                # of the common contract's own filter-operator vocabulary
+                # (`allowed_query_operators`), unlike a genuinely
+                # unrecognized operator string -- this peer simply does
+                # not execute it. That is exactly CapabilityError's own
+                # distinction from ValidationError (see that class's
+                # docstring): a request outside the contract's vocabulary
+                # entirely (ValidationError) versus a contract operation
+                # this peer's own entry point does not implement
+                # (CapabilityError, mapped to CAPABILITY_UNSUPPORTED at
+                # the API boundary) -- a positive, honest refusal, since
+                # this peer's filter grammar does have an acceptance
+                # surface for it (unlike a peer with no filter DSL at
+                # all). Checked ahead of the field-existence check below
+                # (WP-3 review minor, ordering unified with r2db-api: there,
+                # `DataService.query`'s own `matches` gate fires before the
+                # cell is ever called at all, so field existence is never
+                # even considered -- a refusal this unconditional must not
+                # depend on whether the named field happens to exist).
+                raise CapabilityError("matches is not supported by this foundation")
+            if field not in available:
+                raise ValidationError("invalid filter")
+            if item.operator not in _OPS:
+                # `contains`/`is_null` fall through to here too (`_OPS`
+                # has neither) -- already declared `unsupported` in
+                # `structured_query` above and, unlike `matches`, never
+                # implemented via a LIKE-wildcard pass-through this
+                # module would need to escape (Q-2 disposition, WP-3
+                # scope note): there is no code path here that could leak
+                # wildcard semantics for either.
                 raise ValidationError("invalid filter")
             if item.operator == "in":
                 if not isinstance(item.value, list) or not item.value:
@@ -393,10 +424,14 @@ class ApplicationRuntime:
             # names below as unavailable, mirroring r2db-api's declaration.
             "contract_version": "1.1.0",
             "capabilities": {
-                # `_OPS` (this module) has no "contains" / "is_null" entry,
-                # so those two contract-listed operators are not executable
-                # here: "enabled" would misrepresent them as available.
-                "structured_query": {"status": "partial", "operators": list(_OPS), "unsupported": ["contains", "is_null"]},
+                # `_OPS` (this module) has no "contains" / "matches" /
+                # "is_null" entry, so those three contract-listed operators
+                # are not executable here: "enabled" would misrepresent
+                # them as available. `_where` (above) refuses each of the
+                # three honestly (CapabilityError for `matches`, which has
+                # its own acceptance surface in the filter grammar;
+                # ValidationError for `contains`/`is_null`, which do not).
+                "structured_query": {"status": "partial", "operators": list(_OPS), "unsupported": ["contains", "matches", "is_null"]},
                 # `ApplicationCell.transact` only accepts operation type
                 # "insert"; there is no "upsert" surface anywhere on this
                 # peer.

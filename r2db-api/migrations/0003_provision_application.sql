@@ -165,6 +165,40 @@ ALTER SCHEMA public OWNER TO :"developer_role";
 BEGIN;
 SET LOCAL ROLE :"developer_role";
 
+-- CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md R-7 addendum, WP-3 review
+-- "object/array の DOMAIN 型統一"): the two DOMAINs `PostgresCell._add_field`
+-- declares a column as when the client's `field_type` is `"object"`/
+-- `"array"`. Both are `jsonb` underneath -- PostgreSQL has no separate
+-- "object" or "array" storage type -- but a bare `jsonb` column's own
+-- catalog entry cannot report which of the two a client originally
+-- declared (`information_schema.columns.data_type` is `jsonb` either way).
+-- A DOMAIN's own name *is* reported (`information_schema.columns.
+-- domain_name`), which is what lets `PostgresCell._load_catalog` recover
+-- the declared type at all -- the entire reason these exist, not merely
+-- the `jsonb_typeof` CHECK. NULL is allowed for either domain (NOT NULL is
+-- out of this contract version's scope, R-7).
+--
+-- The CHECK is defence-in-depth underneath `r2db_api.structured._check_
+-- type`'s own Python-side dict/list validation (which is what answers a
+-- bad write with `VALIDATION_FAILED` naming only the field, before this
+-- CHECK is ever reached) -- a real server-side invariant that should never
+-- fire if `_check_type` is doing its job, so `PostgresCell` lets a CHECK
+-- violation here fall through to its ordinary `SERVICE_UNAVAILABLE`
+-- mapping rather than trying to decode and re-surface it. A named
+-- constraint (`CONSTRAINT ... CHECK`, composed as `{entity}__{field}` the
+-- way `create_index` names its own objects) was considered and rejected:
+-- the composed name can exceed PostgreSQL's 63-byte identifier limit
+-- (silently truncated, breaking the reverse lookup a disclosure-safe error
+-- mapping would need), and a `CheckViolation`'s own DETAIL text includes
+-- the entire failing row -- exactly what `errors.disclosure` forbids
+-- surfacing. Leaving the constraint unnamed (PostgreSQL synthesizes one
+-- privately) sidesteps both traps, since nothing in `PostgresCell` ever
+-- needs to parse a synthesized name back into a client-facing identifier.
+CREATE DOMAIN public._r2db_json_object AS jsonb
+    CHECK (VALUE IS NULL OR jsonb_typeof(VALUE) = 'object');
+CREATE DOMAIN public._r2db_json_array AS jsonb
+    CHECK (VALUE IS NULL OR jsonb_typeof(VALUE) = 'array');
+
 -- Schema-revision bookkeeping table, created directly here (not left to
 -- application code) so every provisioned application starts at revision 0
 -- with its RLS policy already in place, matching the pattern

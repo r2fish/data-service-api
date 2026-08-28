@@ -15,13 +15,20 @@ Design constraints this file is written to satisfy (design D-4):
 - Operators and sort directions map to a fixed table of `sql.SQL` literals
   (`_COMPARISON_OPERATORS`); no operator string from a request is ever
   written into SQL text.
-- No method on this class -- public or private -- accepts a `str` and
-  executes it. `_run`, the single choke point every statement passes
-  through, is typed to accept only `psycopg.sql.Composed`/`psycopg.sql.SQL`
-  and raises `TypeError` for anything else. This is a type-level property of
-  the file, not a convention: every SQL fragment built anywhere below is
-  constructed via `sql.SQL(...)`/`sql.Identifier`/`sql.Literal`/
-  `sql.Placeholder`, never an f-string or `%`-formatted plain string.
+- No method on this class -- public or private -- accepts request-derived
+  content and executes it as a `str`. `_run`, the single choke point every
+  *client-influenced* statement passes through, is typed to accept only
+  `psycopg.sql.Composed`/`psycopg.sql.SQL` and raises `TypeError` for
+  anything else. Every SQL fragment built anywhere below that carries a
+  client-supplied identifier/operator/value is constructed via
+  `sql.SQL(...)`/`sql.Identifier`/`sql.Literal`/`sql.Placeholder`, never an
+  f-string or `%`-formatted plain string, and never bypasses `_run`. The
+  one exception, by design, not oversight: `_RolePool._liveness_check`'s
+  pool-health probe (`cur.execute("SELECT 1")`) is a fixed, zero-argument
+  literal with no request content anywhere near it -- a connection-pool
+  implementation detail unrelated to any application-plane operation, and
+  the only `.execute(...)` call in this file that does not go through
+  `_run`.
 
 This module does not duplicate validation. Identifier syntax, the operator
 allowlist, mutation shape, and destructive-confirmation logic are imported
@@ -31,25 +38,63 @@ This file only adds what is inherently PostgreSQL-specific: catalog lookup
 against a live schema, SQL composition, session/transaction/timeout
 handling, and per-role connection pooling.
 
-Data model: every field declared via `create_entity`/`add_field` becomes a
-`JSONB` column. The common contract's structured operations do not carry
-per-field types (`SchemaOperationRequest.field_type` is accepted by the
-schema but not by this foundation's own operation-shape allowlist), and the
-in-memory reference cell stores arbitrary JSON-shaped Python values per
-field with no static typing -- JSONB is the direct PostgreSQL analogue that
-preserves that same dynamic-value semantics. One consequence worth noting
-for callers: JSONB has a total, defined ordering across all JSON types, so
-`lt`/`lte`/`gt`/`gte` comparisons that would raise `TypeError` against
-mismatched Python types in `ApplicationCell` typically do not raise here;
-they instead produce a deterministic (if occasionally surprising)
-`ORDER`-consistent boolean. This is a legitimate cross-backend semantic
-difference the Security Invariants explicitly allow (implementations are
-not required to share a physical data model), not a validation gap: both
-backends still reject bad identifiers/operators/shapes identically.
+Data model (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-2/R-4/R-7):
+`create_entity` always provisions a server-assigned `id bigint GENERATED
+ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and an invisible
+`_r2db_revision uuid NOT NULL DEFAULT gen_random_uuid()` (the per-row
+optimistic-concurrency token), ahead of the caller's own declared fields.
+Those own fields default to `JSONB` (`create_entity` never carries a
+`field_type` -- rejected at the shared `bind_schema_operation` boundary);
+`add_field`'s own optional `field_type` maps `string`/`integer`/`number`/
+`boolean` to `TEXT`/`BIGINT`/`DOUBLE PRECISION`/`BOOLEAN` respectively, and
+`object`/`array` to the two DOMAINs `migrations/0003_provision_application.
+sql` provisions per application database, `_r2db_json_object`/
+`_r2db_json_array` -- each a `jsonb` DOMAIN with a `jsonb_typeof(VALUE)`
+CHECK, so PostgreSQL's own catalog (`information_schema.columns.
+domain_name`) is what lets `_load_catalog` tell "declared as object" apart
+from "declared as array" apart from "untyped JSONB" (WP-3 review, "object/
+array の DOMAIN 型統一": a bare `jsonb` column cannot report this
+distinction at all). `id`/`_r2db_revision` require PostgreSQL 13+
+(`gen_random_uuid()` is a built-in as of that version).
+
+Two layers validate a value written to an `object`/`array` column: `_check_
+type` (shared with `ApplicationCell`, `r2db_api.structured`) refuses a
+non-dict/non-list value with `VALIDATION_FAILED` naming only the field --
+this is what a well-behaved client actually sees. The DOMAIN's own
+`jsonb_typeof` CHECK is a second, defence-in-depth layer underneath that:
+a real server-side invariant that should never fire if `_check_type` is
+doing its job, so a CHECK violation is left to fall through to this
+module's ordinary `SERVICE_UNAVAILABLE` mapping (a true "this should never
+happen" backstop, not a validation response) rather than being decoded and
+re-surfaced as a second `VALIDATION_FAILED` path.
+
+Two legitimate, accepted cross-backend semantic differences remain: an
+untyped (JSONB) column has no per-column type in the shared `r2db_api.
+structured` vocabulary (`None`), so `lt`/`lte`/`gt`/`gte` comparisons that
+would raise `TypeError` against mismatched Python types in `ApplicationCell`
+typically do not raise here -- PostgreSQL's own jsonb ordering is total
+across JSON types, producing a deterministic (if occasionally surprising)
+`ORDER`-consistent boolean instead. And a `jsonb` (or `_r2db_json_object`/
+`_r2db_json_array`-domain) column's own storage normalizes the value it is
+given -- an object's key order is not the order it was written in JSON
+source (PostgreSQL's own `(byte length, byte value)` order, `r2db_api.
+structured._jsonb_text` reproduces this for `contains`/`matches`'s own
+text-form comparison, WP-3 review N-1/N-2), and a duplicate key collapses
+to its last-written value, silently, the same way a plain Python `dict`
+literal with a repeated key would -- `ApplicationCell`, storing the Python
+value directly with no serialization round-trip, does not normalize either
+of these at write time, though a query response's item order/shape is
+otherwise identical between the two backends for every value this
+contract's type vocabulary can express. Both are what the Security
+Invariants allow (implementations are not required to share a physical
+data model), not validation gaps: both backends still reject bad
+identifiers/operators/shapes, and the exact same errors/precedence for
+every other checked property (addressability, uniqueness, revision
+preconditions, `contains`/`matches` literal/wildcard semantics against
+SQL's own three-valued logic, and object/array typing), identically.
 """
 from __future__ import annotations
 
-import json
 import os
 import queue
 import threading
@@ -67,9 +112,16 @@ from .backend import StorageBackend as _StorageBackend
 from .errors import fail
 from .limits import ResourceLimits
 from .structured import (
+    BoundMutation,
     MutationOutcome,
     Predicate,
     QueryOutcome,
+    _check_type,
+    _decode_cursor,
+    _encode_cursor,
+    _resolve_order_by,
+    _shape_hash,
+    _validate_predicate_types,
     bind_mutation,
     bind_schema_operation,
     require_destructive_confirmation,
@@ -79,6 +131,59 @@ from .structured import (
 )
 
 _REVISION_TABLE = "_r2db_schema_revision"
+# Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
+# every entity table this backend creates now carries a server-assigned
+# `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
+# an invisible `_r2db_revision uuid` column (the per-row optimistic-
+# concurrency token) alongside its declared JSONB/typed fields.
+_ID_COLUMN = "id"
+_REVISION_COLUMN = "_r2db_revision"
+_RESERVED_INTERNAL_PREFIX = "_r2db"
+
+# R-2/R-7: `add_field`'s `field_type` maps to a real PostgreSQL column
+# type; `create_entity`'s own fields (which never carry a `field_type` --
+# rejected at the shared `bind_schema_operation` boundary) and an
+# `add_field` with no `field_type` both keep the pre-CCR-13 default, JSONB.
+# `object`/`array` map to the two DOMAINs `migrations/0003_provision_
+# application.sql` provisions in every application database (WP-3 review,
+# "object/array の DOMAIN 型統一") -- not bare `JSONB`, which cannot report
+# which of the two a column was declared as. `sql.Identifier` (not
+# `sql.SQL`) is used for these two: they are catalog objects (domain
+# names), not built-in type keywords.
+_FIELD_TYPE_SQL: dict[str, "sql.SQL | sql.Identifier"] = {
+    "string": sql.SQL("TEXT"),
+    "integer": sql.SQL("BIGINT"),
+    "number": sql.SQL("DOUBLE PRECISION"),
+    "boolean": sql.SQL("BOOLEAN"),
+    "object": sql.Identifier("_r2db_json_object"),
+    "array": sql.Identifier("_r2db_json_array"),
+}
+_JSONB_SQL = sql.SQL("JSONB")
+
+# The two DOMAIN types' own bare names (as `information_schema.columns.
+# domain_name` reports them -- unqualified, WP-3 review confirmed
+# empirically), mapped back to the shared `r2db_api.structured` vocabulary
+# string `_load_catalog` reports for such a column's declared type.
+_DOMAIN_TO_DECLARED: dict[str, str] = {
+    "_r2db_json_object": "object",
+    "_r2db_json_array": "array",
+}
+
+# The inverse mapping, used by `_load_catalog` to recover each column's
+# declared type (in the shared `r2db_api.structured` vocabulary: "string"/
+# "integer"/"number"/"boolean", or `None` for untyped/JSONB-equivalent) from
+# PostgreSQL's own `information_schema.columns.data_type` reporting, for a
+# column that is *not* one of the two DOMAINs above (`_DOMAIN_TO_DECLARED`
+# is consulted first -- see `_load_catalog`). `id` also happens to be
+# `bigint` (looked up through this same table -- it is not a distinct
+# physical type from a user-declared `field_type: "integer"` column, only a
+# distinct *role*, which `_load_catalog` tracks separately).
+_SQL_TYPE_TO_DECLARED: dict[str, str] = {
+    "text": "string",
+    "bigint": "integer",
+    "double precision": "number",
+    "boolean": "boolean",
+}
 
 # `_RolePool`'s own bounded-wait defaults (review fix: neither of these
 # existed before -- a connect attempt against an unreachable target had no
@@ -100,6 +205,43 @@ _COMPARISON_OPERATORS: dict[str, sql.SQL] = {
     "gt": sql.SQL(">"),
     "gte": sql.SQL(">="),
 }
+
+
+def _escape_like_literal(value: str) -> str:
+    """Q-2 (案i): `contains` is literal substring containment -- no
+    character of the value is ever interpreted as a `LIKE` wildcard. `\\`
+    must be escaped first, before `%`/`_`, so a value already containing a
+    backslash does not have that backslash re-interpreted as escaping the
+    `%`/`_` markers this function itself inserts.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@dataclass
+class _TableInfo:
+    """One entity table's live shape, as re-derived from PostgreSQL's own
+    catalog by `PostgresCell._load_catalog` on every call (never cached
+    across calls, never trusted as a standing assumption -- D-4/R-1).
+
+    `columns`: declared field name -> declared type in the shared
+    `r2db_api.structured` vocabulary (`"string"`/`"integer"`/`"number"`/
+    `"boolean"`/`"object"`/`"array"`), or `None` for an untyped/JSONB-
+    equivalent column. `"object"`/`"array"` are recovered from PostgreSQL's
+    own `information_schema.columns.domain_name` (WP-3 review, "object/
+    array の DOMAIN 型統一") -- a plain `jsonb` column with no domain
+    reports `None`. Includes `"id"` (always `"integer"`); never includes
+    the invisible `"_r2db_revision"` column (R-3/R-4).
+
+    `indexes`: client index name -> `{"physical": <table>__<index> name,
+    "fields": (declared field name, ...), "unique": bool}`, covering every
+    index `PostgresCell.apply_schema`'s own `create_index` has created on
+    this table (both unique and non-unique -- SI-08/R-5: both count toward
+    `schema_objects`), excluding the primary key on `id` (R-1/§2: an
+    address, not a domain uniqueness declaration).
+    """
+
+    columns: dict[str, str | None]
+    indexes: dict[str, dict[str, Any]]
 
 
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
@@ -596,33 +738,142 @@ class PostgresCell:
     def catalog(self) -> list[dict[str, Any]]:
         with self._runtime.connection() as conn:
             with conn.transaction():
-                fields_by_entity = self._load_catalog(conn)
-        return [{"entity": name, "fields": sorted(fields_by_entity[name])} for name in sorted(fields_by_entity)]
+                info = self._load_catalog(conn)
+        result: list[dict[str, Any]] = []
+        for name in sorted(info):
+            table_info = info[name]
+            unique_keys = [
+                {"name": index_name, "fields": list(index_info["fields"])}
+                for index_name, index_info in sorted(table_info.indexes.items())
+                if index_info["unique"]
+            ]
+            result.append(
+                {
+                    "entity": name,
+                    "fields": sorted(table_info.columns),
+                    # R-1/R-2/§2: every entity this backend provisions is
+                    # server-addressed, mutable, and never reuses an
+                    # address within one entity's lifetime -- there is no
+                    # per-entity toggle for any of this (R-1: "クライアント
+                    # は区分を選べない").
+                    "mutation_class": "mutable",
+                    "address_fields": [_ID_COLUMN],
+                    "address_reuse": "never",
+                    "unique_keys": unique_keys,
+                }
+            )
+        return result
 
-    def _load_catalog(self, conn: "psycopg.Connection[Any]") -> dict[str, set[str]]:
+    def _load_catalog(self, conn: "psycopg.Connection[Any]") -> dict[str, "_TableInfo"]:
         """The catalog-verification step D-4 requires before any client
         identifier may be composed with `sql.Identifier`: this is the live
-        set of tables/columns that actually exist in this application's
-        schema right now, queried from `information_schema` (never from
-        request content), inside the same transaction as the operation
-        being validated.
+        set of tables/columns/unique-indexes that actually exist in this
+        application's schema right now, queried from `information_schema`/
+        `pg_catalog` (never from request content), inside the same
+        transaction as the operation being validated.
+
+        R-1's declaration-completeness guard also lives here: every entity
+        table this backend's own `_create_entity` provisions always carries
+        a `bigint GENERATED ALWAYS AS IDENTITY` `id` column and a `uuid`
+        `_r2db_revision` column -- if even one entity table does not
+        actually have both (this deployment has never provisioned one that
+        doesn't, but this is re-derived from live catalog state on every
+        call rather than trusted as a standing assumption), publishing this
+        application's catalog at all would be a false `mutable`/
+        `address_fields`/`revision_preconditions` declaration for that
+        entity (contract `declaration_required`: "must not be advertised as
+        enabled unless every entity can produce one"). This fails the whole
+        call closed (`SERVICE_UNAVAILABLE`) rather than silently omitting
+        the offending entity or downgrading its declaration, naming only
+        the offending entities (never a column value) in `details`.
         """
-        statement = sql.SQL(
-            "SELECT t.table_name, c.column_name "
+        columns_statement = sql.SQL(
+            "SELECT c.table_name, c.column_name, c.data_type, c.is_identity, c.domain_name "
             "FROM information_schema.tables t "
-            "LEFT JOIN information_schema.columns c "
+            "JOIN information_schema.columns c "
             "ON c.table_schema = t.table_schema AND c.table_name = t.table_name "
             "WHERE t.table_schema = {schema} AND t.table_type = 'BASE TABLE' AND t.table_name <> {revision_table}"
         ).format(schema=sql.Placeholder(), revision_table=sql.Placeholder())
+        # Every unique index (composite or single-column) on any of this
+        # application's tables, excluding the primary key (`id`'s own PK is
+        # the address, not a domain uniqueness declaration -- R-1/§2) and
+        # excluding partial/expression indexes (`create_index` never
+        # produces either, so any that exist were not created by this
+        # backend and are not a shape it understands). `NOT idx.indisunique`
+        # rows (plain, non-unique indexes `create_index(unique=False)`
+        # creates) are included too -- SI-08/R-5: an index is a real
+        # resource and counts toward `schema_objects` whether or not it is
+        # a uniqueness declaration.
+        indexes_statement = sql.SQL(
+            "SELECT c.relname AS table_name, i.relname AS index_name, idx.indisunique, "
+            "array_agg(a.attname ORDER BY k.ord) AS fields "
+            "FROM pg_index idx "
+            "JOIN pg_class c ON c.oid = idx.indrelid "
+            "JOIN pg_class i ON i.oid = idx.indexrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(idx.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON true "
+            "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum "
+            "WHERE n.nspname = {schema} AND NOT idx.indisprimary "
+            "AND idx.indexprs IS NULL AND idx.indpred IS NULL "
+            "GROUP BY c.relname, i.relname, idx.indisunique"
+        ).format(schema=sql.Placeholder())
+
+        tables: dict[str, dict[str, str | None]] = {}
+        identity_ok: dict[str, bool] = {}
+        revision_ok: dict[str, bool] = {}
         with conn.cursor() as cur:
-            _run(cur, statement, [self.schema, _REVISION_TABLE])
-            rows = cur.fetchall()
-        result: dict[str, set[str]] = {}
-        for table_name, column_name in rows:
-            fields = result.setdefault(table_name, set())
-            if column_name is not None:
-                fields.add(column_name)
-        return result
+            _run(cur, columns_statement, [self.schema, _REVISION_TABLE])
+            for table_name, column_name, data_type, is_identity, domain_name in cur.fetchall():
+                columns = tables.setdefault(table_name, {})
+                if column_name == _ID_COLUMN:
+                    identity_ok[table_name] = data_type == "bigint" and is_identity == "YES"
+                    columns[_ID_COLUMN] = "integer"
+                elif column_name == _REVISION_COLUMN:
+                    revision_ok[table_name] = data_type == "uuid"
+                    # Never a known/selectable field (R-3/R-4).
+                elif column_name.startswith(_RESERVED_INTERNAL_PREFIX):
+                    continue
+                else:
+                    # WP-3 review, object/array DOMAIN unification: a
+                    # column declared via one of this backend's own two
+                    # JSON-shape DOMAINs reports its domain name here --
+                    # checked first, since `data_type` alone (always
+                    # `jsonb` for either domain) cannot distinguish them.
+                    # A plain, non-domain column (including bare `jsonb`)
+                    # falls through to the ordinary data-type mapping.
+                    declared = _DOMAIN_TO_DECLARED.get(domain_name) if domain_name else None
+                    if declared is None:
+                        declared = _SQL_TYPE_TO_DECLARED.get(data_type)
+                    columns[column_name] = declared
+
+        offenders = sorted(
+            name for name in tables
+            if not identity_ok.get(name, False) or not revision_ok.get(name, False)
+        )
+        if offenders:
+            fail(
+                "SERVICE_UNAVAILABLE",
+                "An entity table does not satisfy the required id/revision declaration.",
+                status=503,
+                details={"entities": offenders},
+            )
+
+        indexes: dict[str, dict[str, dict[str, Any]]] = {name: {} for name in tables}
+        with conn.cursor() as cur:
+            _run(cur, indexes_statement, [self.schema])
+            for table_name, index_name, is_unique, fields in cur.fetchall():
+                if table_name not in tables:
+                    continue
+                prefix = f"{table_name}__"
+                if not index_name.startswith(prefix):
+                    # Not one of this backend's own indexes (R-5's physical
+                    # naming convention) -- ignore rather than misreport it
+                    # under a fabricated client name.
+                    continue
+                client_name = index_name[len(prefix):]
+                indexes[table_name][client_name] = {"physical": index_name, "fields": tuple(fields), "unique": bool(is_unique)}
+
+        return {name: _TableInfo(columns=columns, indexes=indexes.get(name, {})) for name, columns in tables.items()}
 
     # ---- query ---------------------------------------------------------
 
@@ -644,11 +895,6 @@ class PostgresCell:
         validate_identifier(entity)
         if page_size <= 0:
             fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
-        if order_by is not None or cursor is not None:
-            # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md WP-2 scope note):
-            # this backend does not implement order_by/pagination yet
-            # (WP-3) -- refuse rather than silently ignore either one.
-            fail("CAPABILITY_UNSUPPORTED", "Result ordering and cursor pagination are not implemented by this backend yet.")
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
@@ -657,12 +903,34 @@ class PostgresCell:
                     catalog = self._load_catalog(conn)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
-                    known_fields = catalog[entity]
+                    table_info = catalog[entity]
+                    known_fields = set(table_info.columns)
                     validate_projection(select, known_fields)
                     validate_predicates(where, known_fields)
-                    limits.check("query_complexity", len(where) + len(select))
-                    where_sql, where_params = self._where_clause(where)
-                    statement = self._select_statement(entity, select, where_sql, page_size)
+                    # R-6: identifier/catalog-checked order_by, with a
+                    # deterministic trailing `id ASC` tie-break appended
+                    # whenever the caller's own order_by does not already
+                    # mention `id` -- the exact same shared function
+                    # `ApplicationCell.query` uses, so both backends accept/
+                    # reject the same order_by shapes identically.
+                    order_spec = _resolve_order_by(order_by, known_fields)
+                    order_by_count = len(order_by) if order_by else 0
+                    limits.check("query_complexity", len(where) + len(select) + order_by_count)
+                    # R-7, corrigendum M-9: validate every predicate's value
+                    # type before touching stored rows at all -- the same
+                    # shared function and the same ordering `ApplicationCell.
+                    # query` uses.
+                    _validate_predicate_types(where, table_info.columns)
+                    # R-6: the cursor's opaque shape hash binds the
+                    # Application scope, entity, and the full query shape
+                    # (select/where/order_by/size) -- decoded (and
+                    # validated) here, before any SQL referencing it runs.
+                    shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
+                    offset = 0
+                    if cursor is not None:
+                        offset = _decode_cursor(cursor, shape)
+                    where_sql, where_params = self._where_clause(where, table_info.columns)
+                    statement = self._select_statement(entity, select, where_sql, order_spec, offset, page_size)
                     with conn.cursor() as cur:
                         _run(cur, statement, where_params)
                         rows = cur.fetchall()
@@ -672,24 +940,64 @@ class PostgresCell:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+        # R-6: `rows` was fetched with `LIMIT page_size + 1` (the look-ahead
+        # row, if present, is never returned to the caller -- it only
+        # signals `has_more`); `min(len(rows), page_size)` therefore equals
+        # `page_size` whenever at least `page_size` rows matched, or the
+        # true (smaller) match count otherwise -- exactly the quantity
+        # `ApplicationCell.query`'s own equivalent check computes from its
+        # full (unbounded) in-memory match list, before it slices to a
+        # window.
         limits.check("result_items", min(len(rows), page_size))
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        # CCR-13 shim (WP-2 scope note): full revisions/has_more/next_cursor
-        # is WP-3 (needs the `_r2db_revision` column this backend does not
-        # provision yet); wrap today's unchanged result in the new outcome
-        # shape. `revisions=None` (not `[]`) -- WP-2 review M-10's
-        # `QueryOutcome.__post_init__` invariant is "None (unmaintained) or
-        # index-aligned with items", and an empty list would be wrong-length
-        # the moment `rows` is non-empty.
-        return QueryOutcome(items=[dict(zip(select, row)) for row in rows], revisions=None, has_more=False)
+        has_more = len(rows) > page_size
+        page_rows = rows[:page_size]
+        # Every row was selected as `select ++ [_r2db_revision::text]`
+        # (`_select_statement`, below) -- the revision is always the last
+        # column, index-aligned with `page_rows` (R-4: capability
+        # `revision_preconditions: enabled` means every entity is mutable,
+        # so a query response always includes revisions).
+        items = [dict(zip(select, row[:-1])) for row in page_rows]
+        revisions = [row[-1] for row in page_rows]
+        next_cursor = _encode_cursor(offset + page_size, shape) if has_more else None
+        return QueryOutcome(items=items, revisions=revisions, has_more=has_more, next_cursor=next_cursor)
 
-    def _select_statement(self, entity: str, select: list[str], where_sql: sql.Composed | None, page_size: int) -> sql.Composed:
+    def _select_statement(
+        self,
+        entity: str,
+        select: list[str],
+        where_sql: sql.Composed | None,
+        order_spec: list[tuple[str, str]],
+        offset: int,
+        page_size: int,
+    ) -> sql.Composed:
         columns = sql.SQL(", ").join(sql.Identifier(f) for f in select)
-        statement = sql.SQL("SELECT {columns} FROM {table}").format(columns=columns, table=sql.Identifier(entity))
+        revision = sql.SQL("{col}::text").format(col=sql.Identifier(_REVISION_COLUMN))
+        statement = sql.SQL("SELECT {columns}, {revision} FROM {table}").format(columns=columns, revision=revision, table=sql.Identifier(entity))
         if where_sql is not None:
             statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
-        return sql.SQL("{base} LIMIT {limit}").format(base=statement, limit=sql.Literal(int(page_size)))
+        statement = sql.SQL("{base} ORDER BY {order}").format(base=statement, order=self._order_by_sql(order_spec))
+        # R-6: NULL placement (ASC -> NULLS LAST, DESC -> NULLS FIRST) is
+        # PostgreSQL's own default when no NULLS clause is given, which is
+        # exactly the semantics `ApplicationCell._sort_key` was written to
+        # match -- no explicit NULLS FIRST/LAST needed here. Likewise, a
+        # plain (untyped/JSONB) column's own cross-type ordering (ascending:
+        # String < Number < Boolean < Array < Object) falls directly out of
+        # PostgreSQL's native `jsonb` comparison operators.
+        #
+        # `offset`/`page_size` are always server-computed, already-validated
+        # non-negative integers (never client-supplied text) by this point
+        # -- `sql.Literal` here is composing a trusted value, the same
+        # pattern `_set_timeouts` already uses for its own computed values.
+        return sql.SQL("{base} OFFSET {offset} LIMIT {limit}").format(base=statement, offset=sql.Literal(int(offset)), limit=sql.Literal(int(page_size) + 1))
+
+    def _order_by_sql(self, order_spec: list[tuple[str, str]]) -> sql.Composed:
+        parts = [
+            sql.SQL("{col} {direction}").format(col=sql.Identifier(field_name), direction=sql.SQL("ASC" if direction == "asc" else "DESC"))
+            for field_name, direction in order_spec
+        ]
+        return sql.SQL(", ").join(parts)
 
     # ---- mutations -------------------------------------------------------
 
@@ -701,6 +1009,7 @@ class PostgresCell:
             fail("VALIDATION_FAILED", "At least one mutation is required.")
         limits.check("batch_items", len(operations))
         affected = 0
+        assigned_addresses: list[dict[str, Any]] = []
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
@@ -709,9 +1018,16 @@ class PostgresCell:
                     catalog = self._load_catalog(conn)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
-                    known_fields = catalog[entity]
+                    table_info = catalog[entity]
                     for operation in operations:
-                        affected += self._apply(conn, entity, operation, known_fields)
+                        if deadline is not None and clock is not None:
+                            # WP-2 review M-2 parity: per-operation deadline
+                            # check, not only before/after the whole batch.
+                            limits.check_deadline(deadline, clock)
+                        count, address = self._apply(conn, entity, operation, table_info)
+                        affected += count
+                        if address is not None:
+                            assigned_addresses.append(address)
                         limits.check("result_items", affected)
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
@@ -719,98 +1035,233 @@ class PostgresCell:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+            except psycopg.errors.UniqueViolation as exc:
+                self._fail_unique_conflict(entity, exc)
+            except psycopg.errors.DataError:
+                self._fail_client_value()
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         # `conn.transaction()` rolls back the *entire* batch on any
         # exception (including a `FoundationError` raised by a later
         # operation), giving the whole batch one real database transaction
         # (D-5) in place of `ApplicationCell`'s in-memory deepcopy/restore.
-        # CCR-13 shim (WP-2 scope note): resolved-insert addresses are WP-3
-        # (needs the `id` identity column this backend does not provision
-        # yet); wrap today's unchanged affected-count in the new outcome
-        # shape. `assigned_addresses=None` (not `[]`) -- confirmation-review
-        # fix (minor): `None` means "not maintained", symmetric with
-        # `QueryOutcome.revisions`; `[]` would incorrectly claim this
-        # backend tracks addresses and simply resolved none this batch.
-        return MutationOutcome(affected=affected, assigned_addresses=None)
+        # `assigned_addresses` (CCR-13, R-5) lists, in operation order, the
+        # address of every operation that resolved to an insert (a plain
+        # `insert`, or an `upsert` whose declared key found no existing
+        # row) -- an `upsert` that resolved to an update contributes
+        # nothing here, exactly like `ApplicationCell.transact`.
+        return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses)
 
-    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], known_fields: set[str]) -> int:
+    def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
+        """R-5, corrigendum M-5: map a real PostgreSQL `UniqueViolation`
+        (raised naturally by any INSERT/UPDATE that collides with a
+        `create_index(unique=True)`-declared index -- including one other
+        than the key an `upsert` used for its own existence test, R-5's
+        "既存重複は CONFLICT") to the contract's `CONFLICT`, disclosing at
+        most the client-recognizable index name and never PostgreSQL's own
+        DETAIL text, constraint/index internals, or any row value. `exc.
+        diag.constraint_name` is PostgreSQL's own (physical) index name; it
+        is only ever used here to look up the corresponding client name by
+        stripping this backend's own `{entity}__` naming convention -- never
+        surfaced to the caller directly.
+        """
+        physical = exc.diag.constraint_name or ""
+        prefix = f"{entity}__"
+        details: dict[str, Any] = {}
+        if physical.startswith(prefix):
+            details = {"index": physical[len(prefix):]}
+        fail("CONFLICT", "A declared uniqueness key would be violated.", status=409, details=details)
+
+    def _fail_client_value(self) -> None:
+        """R-7 addendum (WP-3 review blocker-2): a `psycopg.errors.
+        DataError` (SQLSTATE class 22 -- e.g. `NumericValueOutOfRange`, or
+        a NUL byte PostgreSQL's `text`/`jsonb` storage cannot hold at all)
+        is always a decisive, deterministic client-supplied-value bug, not
+        a transient server condition -- `VALIDATION_FAILED`, never
+        `SERVICE_UNAVAILABLE` (which reads as "retry", and an AI agent
+        client retrying an identical, never-succeeding request is exactly
+        the failure mode this refusal exists to prevent). This is a second,
+        defence-in-depth layer underneath the shared boundary's own value-
+        domain checks (`r2db_api.structured._check_type`'s integer-range/
+        NUL-byte validation, `_validate_wildcard_pattern`'s grammar check)
+        -- those already refuse every value this maps today before it ever
+        reaches SQL, so reaching this handler in practice means either
+        check has a gap, not that this handler is the primary defence.
+        Fixed message, no `details`: unlike `_fail_unique_conflict` above,
+        a single `DataError` from a whole batch/statement cannot be
+        reliably attributed to one specific field from this generic catch
+        site, so no field name is guessed at (`errors.disclosure`: never
+        wrong information is safer than no information).
+        """
+        fail("VALIDATION_FAILED", "A value in this request is not acceptable to the underlying storage.")
+
+    def _bind_value(self, value: Any, field_type: str | None) -> Any:
+        """R-7 addendum (WP-2 review M-B, confirmed empirically against a
+        real server): a JSON `null` must bind as SQL `NULL` for every
+        column shape, typed or untyped -- `Jsonb(None)` would instead
+        produce the JSONB literal `'null'::jsonb` for an untyped column,
+        which would make `is_null` predicates and `order_by` NULL placement
+        diverge from `ApplicationCell`'s own null semantics. A non-null
+        value binds as a native parameter for a scalar-typed column
+        (`string`/`integer`/`number`/`boolean`) or wrapped in `Jsonb(...)`
+        for an untyped column *or* an `object`/`array` one -- the latter
+        two are still physically `jsonb` underneath their DOMAIN (WP-3
+        review, object/array DOMAIN unification), so psycopg must still be
+        told to serialize the value as jsonb, exactly as for an untyped
+        column.
+        """
+        if value is None:
+            return None
+        if field_type is None or field_type in ("object", "array"):
+            return Jsonb(value)
+        return value
+
+    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None]:
+        field_types = table_info.columns
+        known_fields = set(field_types)
         bound = bind_mutation(operation, known_fields)
-        # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md WP-2 scope note):
-        # `bind_mutation` (the shared boundary) no longer rejects every
-        # `upsert`/`expected_revision` outright -- whether either is
-        # actually executable now depends on catalog knowledge
-        # (declared uniqueness keys, a revision column) that only
-        # `ApplicationCell` has as of this work package. This backend has
-        # neither yet (both are WP-3), so it must reject them itself here,
-        # explicitly, rather than falling through to the pre-CCR-13
-        # "match on `where`, insert if none found" code below -- which
-        # would otherwise become reachable again and silently reinstate
-        # exactly the enabled-but-undefined-semantics gap CCR-13 closed.
-        if bound.operation == "delete":
-            # WP-2 review minor (f): destructive confirmation is checked
-            # before the expected_revision gate below, for `delete`
-            # specifically -- unifying error precedence with
-            # `ApplicationCell` (R-4, corrigendum m-5: confirmation before
-            # any precondition-related outcome, and here "not implemented"
-            # is the precondition-adjacent outcome being checked against).
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
-        if bound.expected_revision is not None:
-            fail("CAPABILITY_UNSUPPORTED", "Revision preconditions are not implemented by this backend yet.")
-        if bound.operation == "upsert":
-            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key, which this backend does not implement yet.")
-        table = sql.Identifier(entity)
-        if bound.operation == "insert":
-            return self._insert(conn, table, bound.values)
-        where_sql, where_params = self._where_clause(bound.where)
-        if bound.operation == "delete":
-            return self._delete(conn, table, where_sql, where_params)
-        return self._update(conn, table, bound.values, where_sql, where_params)
 
-    def _insert(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, values: dict[str, Any]) -> int:
+        if bound.operation == "insert":
+            # R-7, corrigendum M-9: value types are validated before
+            # anything is sent to the database.
+            for key, value in bound.values.items():
+                _check_type(value, field_types.get(key), key)
+            row_id = self._insert(conn, entity, bound.values, field_types)
+            return 1, {"address": {"id": row_id}}
+
+        if bound.operation == "upsert":
+            return self._apply_upsert(conn, entity, bound, table_info)
+
+        # update / delete: R-7, corrigendum M-9 -- validate every value's
+        # type (predicate values, and for `update` the write values too)
+        # before executing anything, symmetric with the `insert` branch
+        # above and with `ApplicationCell._apply`.
+        _validate_predicate_types(bound.where, field_types)
+        if bound.operation == "update":
+            for key, value in bound.values.items():
+                _check_type(value, field_types.get(key), key)
+
+        where_sql, where_params = self._where_clause(bound.where, field_types)
+
+        if bound.operation == "delete":
+            # R-4, corrigendum m-5: destructive confirmation is checked
+            # before any precondition-related outcome (never resolves to a
+            # PRECONDITION_FAILED/NOT_FOUND).
+            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
+            affected = self._delete(conn, entity, where_sql, where_params, bound.expected_revision)
+            return affected, None
+
+        affected = self._update(conn, entity, bound.values, where_sql, where_params, field_types, bound.expected_revision)
+        return affected, None
+
+    def _append_revision_predicate(self, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> tuple[sql.Composed | None, list[Any]]:
+        """R-4: an `expected_revision` precondition is folded into the same
+        WHERE clause as the caller's own predicate (`<predicate> AND
+        _r2db_revision::text = $expected`), so the comparison and the write
+        are one atomic statement (the contract's revision-precondition
+        clause 5) rather than a separate read-then-write.
+
+        The comparison casts the `uuid` column to `text` rather than
+        binding `expected_revision` as a (contextually inferred) `uuid`
+        parameter: `expected_revision` is an arbitrary contract-opaque
+        client string (`bind_mutation` only bounds its length, since the
+        contract never requires it to look like a UUID), and PostgreSQL
+        raises a hard `invalid input syntax for type uuid` error -- not
+        just "does not match" -- for a non-UUID-shaped one. `ApplicationCell`
+        stores/compares revisions as plain Python strings, so a garbage
+        `expected_revision` there simply fails to match any row (resolving
+        to `PRECONDITION_FAILED`/`NOT_FOUND` the normal way); casting to
+        `text` here is what keeps that same "never matches, never raises"
+        behaviour on this backend too, instead of a `SERVICE_UNAVAILABLE`
+        this predicate's own value should never be able to trigger.
+        """
+        if expected_revision is None:
+            return where_sql, list(where_params)
+        revision_clause = sql.SQL("{col}::text = {ph}").format(col=sql.Identifier(_REVISION_COLUMN), ph=sql.Placeholder())
+        combined = sql.SQL("{w} AND {r}").format(w=where_sql, r=revision_clause) if where_sql is not None else revision_clause
+        return combined, list(where_params) + [expected_revision]
+
+    def _resolve_precondition_miss(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> None:
+        """R-4, corrigendum M-2: when a revision-qualified UPDATE/DELETE
+        affects zero rows, re-evaluate the caller's own predicate alone (no
+        revision clause), in the same transaction, to decide which of the
+        two failures applies -- `PRECONDITION_FAILED` (a row exists, but its
+        revision was not the one asserted) or `NOT_FOUND` (no row matches
+        the predicate at all, so there was no row to assert about).
+        """
+        if self._exists(conn, table, where_sql, where_params):
+            fail("PRECONDITION_FAILED", "The row's revision no longer matches the supplied precondition.", status=412)
+        fail("NOT_FOUND", "No row matches the supplied filter.", status=404)
+
+    def _exists(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> bool:
+        inner = sql.SQL("SELECT 1 FROM {table}").format(table=table)
+        if where_sql is not None:
+            inner = sql.SQL("{base} WHERE {where}").format(base=inner, where=where_sql)
+        statement = sql.SQL("SELECT EXISTS({inner})").format(inner=inner)
+        with conn.cursor() as cur:
+            _run(cur, statement, where_params if where_sql is not None else [])
+            row = cur.fetchone()
+            return bool(row[0]) if row else False
+
+    def _insert(self, conn: "psycopg.Connection[Any]", entity: str, values: dict[str, Any], field_types: dict[str, str | None]) -> int:
+        table = sql.Identifier(entity)
         if not values:
-            statement = sql.SQL("INSERT INTO {table} DEFAULT VALUES").format(table=table)
+            statement = sql.SQL("INSERT INTO {table} DEFAULT VALUES RETURNING {id}").format(table=table, id=sql.Identifier(_ID_COLUMN))
             params: list[Any] = []
         else:
             columns = sql.SQL(", ").join(sql.Identifier(key) for key in values)
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
-            statement = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(table=table, columns=columns, placeholders=placeholders)
-            # TODO(WP-3, R-7 addendum): a Python `None` here must bind as
-            # SQL NULL, never as the JSON literal `jsonb 'null'` -- `Jsonb(
-            # None)` currently produces the latter for an untyped column.
-            # This has no observable effect while every column here is
-            # JSONB (untyped, WP-2's only shape), but becomes load-bearing
-            # once WP-3 adds typed columns/predicate type-checking, where
-            # "no value" and "the JSON null value" must stay distinguishable.
-            params = [Jsonb(v) for v in values.values()]
+            statement = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING {id}").format(table=table, columns=columns, placeholders=placeholders, id=sql.Identifier(_ID_COLUMN))
+            params = [self._bind_value(v, field_types.get(k)) for k, v in values.items()]
         with conn.cursor() as cur:
             _run(cur, statement, params)
-        return 1
+            row = cur.fetchone()
+        return int(row[0])
 
-    def _update(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, values: dict[str, Any], where_sql: sql.Composed | None, where_params: list[Any]) -> int:
-        if not values:
+    def _update(
+        self,
+        conn: "psycopg.Connection[Any]",
+        entity: str,
+        values: dict[str, Any],
+        where_sql: sql.Composed | None,
+        where_params: list[Any],
+        field_types: dict[str, str | None],
+        expected_revision: str | None,
+    ) -> int:
+        table = sql.Identifier(entity)
+        if expected_revision is None and not values:
+            # R-4, corrigendum M-1: this branch is only reachable without a
+            # precondition -- `bind_mutation` already rejects an empty-
+            # `values` `update` carrying `expected_revision` outright, so a
+            # precondition is never silently discarded here.
             return self._count(conn, table, where_sql, where_params)
-        assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(key), ph=sql.Placeholder()) for key in values)
-        statement = sql.SQL("UPDATE {table} SET {assignments}").format(table=table, assignments=assignments)
-        # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note as
-        # `_insert` above.
-        params = [Jsonb(v) for v in values.values()]
-        if where_sql is not None:
-            statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
-            params = params + where_params
+        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision)
+        revision_bump = sql.SQL("{col} = gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
+        if values:
+            assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(key), ph=sql.Placeholder()) for key in values)
+            set_clause = sql.SQL("{assignments}, {revision}").format(assignments=assignments, revision=revision_bump)
+            value_params = [self._bind_value(v, field_types.get(k)) for k, v in values.items()]
+        else:
+            set_clause = revision_bump
+            value_params = []
+        statement = sql.SQL("UPDATE {table} SET {set} WHERE {where}").format(table=table, set=set_clause, where=full_where_sql)
         with conn.cursor() as cur:
-            _run(cur, statement, params)
-            return cur.rowcount
+            _run(cur, statement, value_params + full_params)
+            affected = cur.rowcount
+        if affected == 0 and expected_revision is not None:
+            self._resolve_precondition_miss(conn, table, where_sql, where_params)
+        return affected
 
-    def _delete(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> int:
-        statement = sql.SQL("DELETE FROM {table}").format(table=table)
-        params: list[Any] = []
-        if where_sql is not None:
-            statement = sql.SQL("{base} WHERE {where}").format(base=statement, where=where_sql)
-            params = where_params
+    def _delete(self, conn: "psycopg.Connection[Any]", entity: str, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> int:
+        table = sql.Identifier(entity)
+        full_where_sql, full_params = self._append_revision_predicate(where_sql, where_params, expected_revision)
+        statement = sql.SQL("DELETE FROM {table} WHERE {where}").format(table=table, where=full_where_sql)
         with conn.cursor() as cur:
-            _run(cur, statement, params)
-            return cur.rowcount
+            _run(cur, statement, full_params)
+            affected = cur.rowcount
+        if affected == 0 and expected_revision is not None:
+            self._resolve_precondition_miss(conn, table, where_sql, where_params)
+        return affected
 
     def _count(self, conn: "psycopg.Connection[Any]", table: sql.Identifier, where_sql: sql.Composed | None, where_params: list[Any]) -> int:
         statement = sql.SQL("SELECT COUNT(*) FROM {table}").format(table=table)
@@ -823,20 +1274,129 @@ class PostgresCell:
             row = cur.fetchone()
             return row[0] if row else 0
 
+    def _apply_upsert(self, conn: "psycopg.Connection[Any]", entity: str, bound: "BoundMutation", table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None]:
+        """R-5 / §0.5 Q-1 (adjudicated 案B). Mirrors `ApplicationCell.
+        _apply_upsert`'s exact key-selection and error-precedence rules;
+        the only difference is execution: two real SQL statements
+        (`INSERT ... ON CONFLICT (<key>) DO NOTHING RETURNING id`, then --
+        only if that inserted nothing -- `UPDATE ... WHERE <key eq>`)
+        instead of an in-memory existence check, per corrigendum M-4 (never
+        relying on `xmax`-based "was this an insert or update" tricks).
+        """
+        field_types = table_info.columns
+        declared = {name: info for name, info in table_info.indexes.items() if info["unique"]}
+        if not declared:
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.")
+        if bound.unique_key is not None:
+            if bound.unique_key not in declared:
+                fail("NOT_FOUND", "No declared uniqueness key matches unique_key.", status=404)
+            key_name = bound.unique_key
+        elif len(declared) == 1:
+            key_name = next(iter(declared))
+        else:
+            fail("VALIDATION_FAILED", "unique_key is required when an entity declares more than one uniqueness key.")
+        if bound.where:
+            fail("VALIDATION_FAILED", "Upsert does not accept a filter; its existence test is the entity's declared uniqueness key.")
+        key_fields: tuple[str, ...] = declared[key_name]["fields"]
+        for key_field in key_fields:
+            if bound.values.get(key_field) is None:
+                fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details={"field": key_field})
+        # R-7, corrigendum M-9: type-check before any SQL runs, symmetric
+        # with insert/update above.
+        for key, value in bound.values.items():
+            _check_type(value, field_types.get(key), key)
+
+        table = sql.Identifier(entity)
+        key_where_sql = sql.SQL(" AND ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(f), ph=sql.Placeholder()) for f in key_fields)
+        key_where_params = [self._bind_value(bound.values[f], field_types.get(f)) for f in key_fields]
+        update_values = {k: v for k, v in bound.values.items() if k not in key_fields}
+        revision_bump = sql.SQL("{col} = gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
+        if update_values:
+            assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(k), ph=sql.Placeholder()) for k in update_values)
+            set_clause = sql.SQL("{a}, {r}").format(a=assignments, r=revision_bump)
+            update_value_params = [self._bind_value(v, field_types.get(k)) for k, v in update_values.items()]
+        else:
+            set_clause = revision_bump
+            update_value_params = []
+
+        if bound.expected_revision is not None:
+            # R-5: a precondition never resolves an upsert to an insert --
+            # no key match is NOT_FOUND (via `_resolve_precondition_miss`),
+            # exactly like update/delete.
+            full_where_sql, full_params = self._append_revision_predicate(key_where_sql, key_where_params, bound.expected_revision)
+            statement = sql.SQL("UPDATE {table} SET {set} WHERE {where}").format(table=table, set=set_clause, where=full_where_sql)
+            with conn.cursor() as cur:
+                _run(cur, statement, update_value_params + full_params)
+                affected = cur.rowcount
+            if affected == 0:
+                self._resolve_precondition_miss(conn, table, key_where_sql, key_where_params)
+            return 1, None
+
+        columns = sql.SQL(", ").join(sql.Identifier(k) for k in bound.values)
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in bound.values)
+        conflict_columns = sql.SQL(", ").join(sql.Identifier(f) for f in key_fields)
+        insert_statement = sql.SQL("INSERT INTO {table} ({cols}) VALUES ({phs}) ON CONFLICT ({conflict}) DO NOTHING RETURNING {id}").format(
+            table=table, cols=columns, phs=placeholders, conflict=conflict_columns, id=sql.Identifier(_ID_COLUMN)
+        )
+        insert_params = [self._bind_value(v, field_types.get(k)) for k, v in bound.values.items()]
+        with conn.cursor() as cur:
+            _run(cur, insert_statement, insert_params)
+            row = cur.fetchone()
+        if row is not None:
+            return 1, {"address": {"id": int(row[0])}}
+
+        update_statement = sql.SQL("UPDATE {table} SET {set} WHERE {where} RETURNING {id}").format(table=table, set=set_clause, where=key_where_sql, id=sql.Identifier(_ID_COLUMN))
+        with conn.cursor() as cur:
+            _run(cur, update_statement, update_value_params + key_where_params)
+            row = cur.fetchone()
+        if row is None:
+            # M-4: the row this INSERT's ON CONFLICT saw was removed by a
+            # concurrent transaction before this UPDATE could find it --
+            # neither statement resolved, so the whole batch rolls back as
+            # a concurrent-modification conflict rather than silently
+            # inserting a second time.
+            fail("CONFLICT", "The row was concurrently modified.", status=409)
+        return 1, None
+
     # ---- predicate/WHERE composition ------------------------------------
 
-    def _where_clause(self, where: list[Predicate]) -> tuple[sql.Composed | None, list[Any]]:
+    def _where_clause(self, where: list[Predicate], field_types: dict[str, str | None]) -> tuple[sql.Composed | None, list[Any]]:
         if not where:
             return None, []
         fragments: list[sql.Composed] = []
         params: list[Any] = []
         for predicate in where:
-            fragment, values = self._predicate_sql(predicate)
+            fragment, values = self._predicate_sql(predicate, field_types.get(predicate.field))
             fragments.append(fragment)
             params.extend(values)
         return sql.SQL(" AND ").join(fragments), params
 
-    def _predicate_sql(self, predicate: Predicate) -> tuple[sql.Composed, list[Any]]:
+    def _text_expression(self, column: sql.Identifier, field_type: str | None) -> sql.Composed:
+        """The text form of `column` that `contains`/`matches` compare
+        against. R-7: "非 text 列は従来どおり ::text に対して適用" -- a
+        typed non-text column's plain `::text` cast is exactly this (a
+        numeric/boolean column's text representation carries no quoting
+        ambiguity). An *untyped* (JSONB-equivalent) column is different:
+        PostgreSQL's own `::text` cast on jsonb returns the JSON text
+        representation, which wraps a JSON **string** value in literal
+        double quotes (`"hello"`, not `hello`) -- silently breaking a full-
+        string-anchored `matches` pattern and shifting every `contains`
+        substring offset by one quote character, for exactly the columns
+        most likely to hold free-text data. `#>> '{}'` (the same "unwrap a
+        top-level jsonb scalar to text" idiom `->>`/`#>>` use for a keyed
+        value) recovers the bare string PostgreSQL's own client already
+        knows, and returns the same non-quoted text `::text` would for a
+        non-string JSON scalar (number/boolean/null) or an object/array --
+        it only differs from `::text` in the case that would otherwise be
+        wrong. This is what keeps the two backends' behaviour for a string-
+        typed field in parity, whether the client declared it via `add_field
+        field_type: "string"` or left it untyped.
+        """
+        if field_type is None:
+            return sql.SQL("(") + column + sql.SQL(" #>> '{}')")
+        return column + sql.SQL("::text")
+
+    def _predicate_sql(self, predicate: Predicate, field_type: str | None) -> tuple[sql.Composed, list[Any]]:
         column = sql.Identifier(predicate.field)
         if predicate.operator == "is_null":
             return sql.SQL("{col} IS NULL").format(col=column), []
@@ -844,12 +1404,28 @@ class PostgresCell:
             if not isinstance(predicate.value, list) or not predicate.value:
                 fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in predicate.value)
-            # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note
-            # as `_insert` above, applied per element (m-7).
-            return sql.SQL("{col} IN ({items})").format(col=column, items=placeholders), [Jsonb(v) for v in predicate.value]
-        if predicate.operator == "contains":
-            needle = predicate.value if isinstance(predicate.value, str) else _json_text(predicate.value)
-            return sql.SQL("{col}::text LIKE {ph}").format(col=column, ph=sql.Placeholder()), [f"%{needle}%"]
+            # R-7, corrigendum m-7: each element gets the same per-column
+            # type-aware bind (native for a typed column, `Jsonb(...)` for
+            # an untyped one, SQL NULL for a JSON null) as every other
+            # value position -- never a blanket `Jsonb(v)`.
+            return sql.SQL("{col} IN ({items})").format(col=column, items=placeholders), [self._bind_value(v, field_type) for v in predicate.value]
+        if predicate.operator in ("contains", "matches"):
+            text_column = self._text_expression(column, field_type)
+            if predicate.operator == "contains":
+                # Q-2 (案i): literal substring containment -- `%`/`_`/`\`
+                # in the value are escaped before being wrapped in
+                # `%...%`, so no character of the value is ever
+                # interpreted as a wildcard. `_validate_predicate_types`
+                # (called by every caller of this method) has already
+                # required `predicate.value` to be a string by this point.
+                escaped = _escape_like_literal(predicate.value)
+                pattern = f"%{escaped}%"
+            else:
+                # Q-2 (補足案): the client's pattern already uses exactly
+                # SQL LIKE's own wildcard grammar (`%`/`_`/`\`-escape) --
+                # bound as-is, no transformation.
+                pattern = predicate.value
+            return sql.SQL("{col} LIKE {ph} ESCAPE '\\'").format(col=text_column, ph=sql.Placeholder()), [pattern]
         operator = _COMPARISON_OPERATORS.get(predicate.operator)
         if operator is None:
             # Unreachable in practice: `predicate.validate()` (called by
@@ -859,9 +1435,7 @@ class PostgresCell:
             # that invariant silently (D-4: "operators map to fixed
             # literals").
             fail("VALIDATION_FAILED", "Unsupported filter operator.", details={"field": predicate.field})
-        # TODO(WP-3, R-7 addendum): same SQL-NULL-vs-`jsonb 'null'` note as
-        # `_insert` above.
-        return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [Jsonb(predicate.value)]
+        return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [self._bind_value(predicate.value, field_type)]
 
     # ---- schema ----------------------------------------------------------
 
@@ -873,15 +1447,27 @@ class PostgresCell:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
                     catalog = self._load_catalog(conn)
-                    current_objects = sum(len(fields) + 1 for fields in catalog.values())
+                    # Object accounting mirrors `ApplicationCell.apply_
+                    # schema` exactly (R-5: an index is a real resource and
+                    # counts toward `schema_objects` too, SI-08): one object
+                    # per entity table plus one per declared field
+                    # (`id` included, `_r2db_revision` never counted, same
+                    # as `ApplicationCell.schema`'s own dict), plus one per
+                    # index (unique or not).
+                    current_objects = sum(len(info.columns) + 1 for info in catalog.values()) + sum(len(info.indexes) for info in catalog.values())
                     if bound.operation == "create_entity":
-                        projected = current_objects + 1 + len(bound.fields)
+                        projected = current_objects + 1 + 1 + len(bound.fields)  # entity + id + declared fields
                     elif bound.operation == "add_field":
                         projected = current_objects + 1
                     elif bound.operation == "drop_entity":
-                        projected = current_objects - (len(catalog.get(bound.entity, set())) + 1)
-                    else:  # create_index / drop_index: no table/column object accounted
-                        projected = current_objects
+                        info = catalog.get(bound.entity)
+                        columns_len = len(info.columns) if info is not None else 0
+                        indexes_len = len(info.indexes) if info is not None else 0
+                        projected = current_objects - (columns_len + 1) - indexes_len
+                    elif bound.operation == "create_index":
+                        projected = current_objects + 1
+                    else:  # drop_index
+                        projected = current_objects - 1
                     limits.check("schema_objects", projected)
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
@@ -897,38 +1483,63 @@ class PostgresCell:
                     elif bound.operation == "add_field":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
-                        if bound.field in catalog.get(bound.entity, set()):
+                        if bound.field in catalog[bound.entity].columns:
                             fail("CONFLICT", "Field already exists.", status=409)
-                        if bound.field_type is not None:
-                            # CCR-13 (WP-2 scope note): typed columns are
-                            # WP-3 (needs the type-map DDL this backend
-                            # does not implement yet) -- refuse rather than
-                            # silently create an untyped column and drop
-                            # the caller's declared type on the floor.
-                            fail("CAPABILITY_UNSUPPORTED", "Typed columns are not implemented by this backend yet.")
-                        self._add_field(conn, bound.entity, bound.field)
-                    else:  # create_index / drop_index
-                        # CCR-13 (WP-2 scope note): index declarations are
-                        # WP-3. Without this explicit branch, `create_index`/
-                        # `drop_index` -- now structurally accepted by the
-                        # shared `bind_schema_operation` boundary -- would
-                        # fall through and be misdispatched as `add_field`.
-                        fail("CAPABILITY_UNSUPPORTED", "Index declarations are not implemented by this backend yet.")
+                        self._add_field(conn, bound.entity, bound.field, bound.field_type)
+                    elif bound.operation == "create_index":
+                        if bound.entity not in catalog:
+                            fail("NOT_FOUND", "Entity was not found.", status=404)
+                        table_info = catalog[bound.entity]
+                        for index_field in bound.index_fields:
+                            if index_field not in table_info.columns:
+                                fail("NOT_FOUND", "Field was not found.", status=404)
+                        if bound.index in table_info.indexes:
+                            fail("CONFLICT", "Index already exists.", status=409)
+                        self._create_index(conn, bound.entity, bound.index, bound.index_fields, bound.unique)
+                    else:  # drop_index
+                        if bound.entity not in catalog:
+                            fail("NOT_FOUND", "Entity was not found.", status=404)
+                        table_info = catalog[bound.entity]
+                        if bound.index not in table_info.indexes:
+                            fail("NOT_FOUND", "Index was not found.", status=404)
+                        # R-5, corrigendum M-6: dropping a unique index
+                        # removes a guardrail and can silently re-enable
+                        # upsert -- SI-09 destructive confirmation applies
+                        # exactly like drop_entity.
+                        require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_INDEX", "Dropping an index requires explicit destructive confirmation.")
+                        self._drop_index(conn, table_info.indexes[bound.index]["physical"])
                     revision = self._bump_revision(conn)
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+            except psycopg.errors.UniqueViolation as exc:
+                # R-5: `create_index(unique=True)` against data that
+                # already violates the requested uniqueness.
+                self._fail_unique_conflict(bound.entity, exc)
+            except psycopg.errors.DataError:
+                self._fail_client_value()
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         return revision
 
     def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...]) -> None:
-        if fields:
-            columns = sql.SQL(", ").join(sql.SQL("{col} JSONB").format(col=sql.Identifier(f)) for f in fields)
-            statement = sql.SQL("CREATE TABLE {table} ({columns})").format(table=sql.Identifier(entity), columns=columns)
-        else:
-            statement = sql.SQL("CREATE TABLE {table} ()").format(table=sql.Identifier(entity))
+        # R-1/R-4: every entity table gets a server-assigned `id` address
+        # (`GENERATED ALWAYS AS IDENTITY`, so the sequence is never
+        # rewound by any statement reachable through this public API -- see
+        # R-1's "採番識別子の非推論条項"/property-5 note) and an invisible,
+        # per-row `_r2db_revision` (PostgreSQL 13+'s built-in
+        # `gen_random_uuid()`), ahead of the caller's own declared fields
+        # (always JSONB -- `create_entity` never carries a `field_type`,
+        # R-2). `"id"`/`"_r2db_revision"` are hardcoded server literals
+        # here, never client input, so composing them as fixed SQL text
+        # (rather than through `sql.Identifier`) does not reopen the
+        # identifier-injection surface D-4 closes for client-supplied names.
+        id_column = sql.SQL("id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY")
+        revision_column = sql.SQL("{col} uuid NOT NULL DEFAULT gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
+        declared_columns = [sql.SQL("{col} JSONB").format(col=sql.Identifier(f)) for f in fields]
+        all_columns = sql.SQL(", ").join([id_column, revision_column] + declared_columns)
+        statement = sql.SQL("CREATE TABLE {table} ({columns})").format(table=sql.Identifier(entity), columns=all_columns)
         with conn.cursor() as cur:
             _run(cur, statement)
             self._apply_row_level_security(cur, entity)
@@ -1039,8 +1650,33 @@ class PostgresCell:
         with conn.cursor() as cur:
             _run(cur, statement)
 
-    def _add_field(self, conn: "psycopg.Connection[Any]", entity: str, field: str) -> None:
-        statement = sql.SQL("ALTER TABLE {table} ADD COLUMN {col} JSONB").format(table=sql.Identifier(entity), col=sql.Identifier(field))
+    def _add_field(self, conn: "psycopg.Connection[Any]", entity: str, field: str, field_type: str | None) -> None:
+        # R-2: `field_type` maps to a real typed column; omitted keeps the
+        # pre-CCR-13 default, JSONB.
+        column_type = _FIELD_TYPE_SQL.get(field_type, _JSONB_SQL) if field_type is not None else _JSONB_SQL
+        statement = sql.SQL("ALTER TABLE {table} ADD COLUMN {col} {type}").format(table=sql.Identifier(entity), col=sql.Identifier(field), type=column_type)
+        with conn.cursor() as cur:
+            _run(cur, statement)
+
+    def _create_index(self, conn: "psycopg.Connection[Any]", entity: str, index_name: str, fields: tuple[str, ...], unique: bool) -> None:
+        # R-5: the physical index name is `{entity}__{index}` -- `bind_
+        # schema_operation` has already rejected any client index name
+        # containing `__` or whose composed length would exceed the
+        # identifier limit, so this composition is unambiguous to invert
+        # (`_load_catalog` does exactly that). `entity`/`index_name` are
+        # plain Python strings built from already-validated identifiers;
+        # `sql.Identifier` below is what actually makes this safe to send
+        # to PostgreSQL (it quotes/escapes the resulting name regardless of
+        # content), not the string concatenation itself.
+        physical_name = f"{entity}__{index_name}"
+        columns = sql.SQL(", ").join(sql.Identifier(f) for f in fields)
+        unique_keyword = sql.SQL("UNIQUE ") if unique else sql.SQL("")
+        statement = sql.SQL("CREATE {unique}INDEX {name} ON {table} ({columns})").format(unique=unique_keyword, name=sql.Identifier(physical_name), table=sql.Identifier(entity), columns=columns)
+        with conn.cursor() as cur:
+            _run(cur, statement)
+
+    def _drop_index(self, conn: "psycopg.Connection[Any]", physical_name: str) -> None:
+        statement = sql.SQL("DROP INDEX {name}").format(name=sql.Identifier(physical_name))
         with conn.cursor() as cur:
             _run(cur, statement)
 
@@ -1082,10 +1718,6 @@ class PostgresCell:
         with conn.cursor() as cur:
             _run(cur, statement_timeout)
             _run(cur, lock_timeout)
-
-
-def _json_text(value: Any) -> str:
-    return json.dumps(value, sort_keys=True)
 
 
 # Checked, not just claimed: `PostgresCell` must present the exact same call

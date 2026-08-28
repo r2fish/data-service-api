@@ -7,6 +7,7 @@ import json
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
+from decimal import Decimal
 import re
 from typing import Any, Callable
 
@@ -21,7 +22,16 @@ IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # ResourceLimits; the contract permits a stricter per-implementation
 # identifier policy.
 MAX_IDENTIFIER_LENGTH = 63
-OPERATORS = {"eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null"}
+OPERATORS = {"eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"}
+# Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication, docs/design/
+# R2DB_CCR13_STORAGE_V1.md): `contains` is literal substring containment
+# (no wildcard interpretation) and `matches` is a case-sensitive wildcard
+# pattern (`%`/`_`/`\`). Both operators' *value* is always a plain string,
+# independent of the target field's own declared type (a typed non-string
+# column is matched against its text representation) -- checked once here,
+# ahead of the per-column `_check_type` declared-type check below, since
+# this constraint is about the operator, not the column.
+_TEXT_ONLY_OPERATORS = {"contains", "matches"}
 
 # Contract 1.1.0 (CCR-13, R2DB_CCR13_STORAGE_V1.md R-3): the server-assigned
 # row address `id` and any implementation-internal name starting with this
@@ -218,6 +228,11 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
         expected_revision = operation["expected_revision"]
         if not isinstance(expected_revision, str) or len(expected_revision) > MAX_EXPECTED_REVISION_LENGTH:
             fail("VALIDATION_FAILED", "expected_revision must be a string.", details={"field": "expected_revision"})
+        if "\x00" in expected_revision:
+            # R-7 addendum (WP-3 review blocker-2): a NUL byte here would
+            # otherwise reach PostgreSQL's `uuid`/`text` comparison and be
+            # rejected at execution time, not deterministically here.
+            fail("VALIDATION_FAILED", "expected_revision must not contain a NUL character.", details={"field": "expected_revision"})
         if name == "insert":
             # R-4, contract's revision-precondition clause 6: a precondition
             # asserts an existing row's identity; insert creates one, so the
@@ -435,6 +450,31 @@ class MutationOutcome:
 
 # --- value type validation (R-7) -------------------------------------------
 
+# R-7 addendum (WP-3 review blocker-2): PostgreSQL's `bigint` range. A JSON
+# integer outside this range passes every existing type check (Python `int`
+# has no fixed width) but PostgreSQL rejects it at execution time with a
+# non-deterministic-looking `numeric_value_out_of_range` -- a decisive
+# client bug that must not surface as a retryable-looking server failure.
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _contains_nul(value: Any) -> bool:
+    """`True` if `value` (or, recursively, any string nested inside a
+    dict/list) contains a U+0000 (NUL) character. PostgreSQL's `text`/
+    `jsonb` storage cannot hold a NUL byte at all (`invalid byte sequence
+    for encoding`/`unsupported Unicode escape sequence`) -- another
+    decisive client bug (R-7 addendum, WP-3 review blocker-2) that must be
+    refused deterministically here, not discovered as a database error.
+    """
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_contains_nul(item) for item in value)
+    return False
+
 
 def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
     """Validate `value` against a declared column type before it is bound.
@@ -445,11 +485,24 @@ def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
     of scope for this contract version). A mismatch fails `VALIDATION_
     FAILED` naming only the field -- never the value itself (`errors.
     disclosure`).
+
+    R-7 addendum (WP-3 review blocker-2): beyond the JSON-type check, a
+    value's own *domain* is validated too -- an `integer` outside signed
+    64-bit range, or a NUL byte anywhere inside a `string`/`object`/`array`/
+    untyped value -- both of which `_check_type` alone (a bare `isinstance`
+    check) would let through, but PostgreSQL's own storage cannot. Same
+    error code/disclosure shape as the type check itself.
     """
-    if field_type is None or value is None:
+    if value is None:
+        return
+    if field_type is None:
+        if _contains_nul(value):
+            fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
         return
     if field_type == "integer":
         ok = isinstance(value, int) and not isinstance(value, bool)
+        if ok and not (_INT64_MIN <= value <= _INT64_MAX):
+            fail("VALIDATION_FAILED", "Value is out of range for the field's declared type.", details={"field": field_name})
     elif field_type == "number":
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     elif field_type == "boolean":
@@ -464,6 +517,25 @@ def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
         ok = True
     if not ok:
         fail("VALIDATION_FAILED", "Value does not match the field's declared type.", details={"field": field_name})
+    if field_type in ("string", "object", "array") and _contains_nul(value):
+        fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+
+
+def _validate_wildcard_pattern(pattern: str, field_name: str) -> None:
+    """`matches`'s grammar check (contract 1.1.0, CCR-13 §0.5 Q-2
+    adjudication 5, WP-3 review blocker-2): a pattern ending in a lone,
+    unescaped backslash is malformed -- PostgreSQL's own `LIKE` grammar
+    does not reject this deterministically at parse time; whether it
+    errors depends on the *stored data* it is compared against at
+    execution time, which would make an identical request sometimes
+    succeed and sometimes fail with `SERVICE_UNAVAILABLE` depending on
+    which rows exist. The contract resolves this by requiring
+    `VALIDATION_FAILED` up front, in the shared boundary, before any
+    backend ever executes the pattern.
+    """
+    trailing_backslashes = len(pattern) - len(pattern.rstrip("\\"))
+    if trailing_backslashes % 2 == 1:
+        fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.", details={"field": field_name})
 
 
 def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, str | None]) -> None:
@@ -472,6 +544,25 @@ def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, s
     validation happens before target-row search/precondition resolution --
     see the call sites in `ApplicationCell.query`/`_apply`)."""
     for predicate in where:
+        if predicate.operator in _TEXT_ONLY_OPERATORS:
+            # Q-2: the operator's own value type is fixed (string), never
+            # the target column's declared type -- a typed non-string
+            # column is still matched via its text representation, so the
+            # column's own declared type is irrelevant to this check.
+            if not isinstance(predicate.value, str):
+                fail("VALIDATION_FAILED", "This operator's value must be a string.", details={"field": predicate.field})
+            if _contains_nul(predicate.value):
+                fail("VALIDATION_FAILED", "This operator's value must not contain a NUL character.", details={"field": predicate.field})
+            if predicate.operator == "matches":
+                _validate_wildcard_pattern(predicate.value, predicate.field)
+            continue
+        if predicate.operator in ("eq", "ne") and predicate.value is None:
+            # WP-3 confirmation review N-3: `= NULL`/`<> NULL` is always
+            # UNKNOWN in SQL -- silently, permanently matching zero rows,
+            # never what a caller means. `is_null` exists precisely for
+            # this comparison; refusing here is more diagnostic to an AI
+            # agent client than quietly returning an empty result forever.
+            fail("VALIDATION_FAILED", "eq/ne do not accept a null value; use is_null instead.", details={"field": predicate.field})
         declared_type = field_types.get(predicate.field)
         if predicate.operator == "in":
             if isinstance(predicate.value, list):
@@ -692,7 +783,7 @@ class ApplicationCell:
         # error first is misleading, not merely unnecessary work).
         _validate_predicate_types(where, field_types)
         try:
-            rows = [row for row in self.entities[entity] if all(_matches(row, p) for p in where)]
+            rows = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in where)]
         except (TypeError, ValueError):
             fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
         rows = _sort_rows(rows, order_spec)
@@ -791,7 +882,7 @@ class ApplicationCell:
                 _check_type(value, field_types.get(key), key)
 
         try:
-            matches = [row for row in self.entities[entity] if all(_matches(row, p) for p in bound.where)]
+            matches = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in bound.where)]
         except (TypeError, ValueError):
             fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
 
@@ -1013,14 +1104,198 @@ class ApplicationCell:
         return self.schema_revision
 
 
-def _matches(row: dict[str, Any], predicate: Predicate) -> bool:
+# Contract 1.1.0 (CCR-13, §0.5 Q-2): `matches`'s wildcard grammar is
+# `%` (any sequence, including empty), `_` (exactly one character), and
+# `\` (escapes the following character, including a literal `%`/`_`/`\`
+# itself). Compiled to a Python regex, anchored full-match, case-sensitive
+# (Q-2: "両演算子とも大文字小文字を区別") -- `re.escape` on every literal
+# character/escaped character means no client-supplied text can inject
+# regex metacharacters, so this never raises on arbitrary input.
+def _wildcard_pattern(pattern: str) -> "re.Pattern[str]":
+    out: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":
+            if i + 1 < n:
+                out.append(re.escape(pattern[i + 1]))
+                i += 2
+            else:
+                # WP-3 review blocker-2 (Q-2 adjudication 5): a trailing
+                # lone, unescaped backslash is malformed grammar, not a
+                # literal backslash to match -- `_validate_wildcard_pattern`
+                # (called by `_validate_predicate_types`, upstream of every
+                # caller of this function) already rejects it with
+                # `VALIDATION_FAILED` before this function ever runs, so
+                # this branch is unreachable in practice. No permissive
+                # "treat as literal" fallback remains here: the reference
+                # implementation must not silently accept something the
+                # deployed backend (PostgreSQL's own `LIKE` grammar) cannot
+                # reliably execute.
+                fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.")
+            continue
+        if ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return re.compile("(?s)\\A" + "".join(out) + "\\Z")
+
+
+def _float8out_text(value: float) -> str:
+    """PostgreSQL `double precision`'s own text-output function,
+    `float8out` (WP-3 confirmation review N-1) -- reproduced ONLY for a
+    TYPED `"number"` column's TOP-LEVEL scalar (`PostgresCell._text_
+    expression`'s plain `::text` cast on a real `double precision` column
+    invokes this natively; nothing else in this file does). An integer-
+    valued float drops its Python-repr trailing `.0` (`100.0` -> `"100"`).
+    A value already in scientific notation (`repr`'s own choice for
+    sufficiently large/small magnitudes, e.g. `1e+20`) never ends in `.0`
+    to begin with, and PostgreSQL's own `float8out` for such magnitudes
+    also uses scientific notation matching Python's -- so it passes
+    through unchanged.
+    """
+    text = repr(value)
+    return text[:-2] if text.endswith(".0") else text
+
+
+def _jsonb_numeric_text(value: float) -> str:
+    """PostgreSQL jsonb's own numeric storage/output (WP-3 confirmation
+    review N-1) -- used for every OTHER float position: an UNTYPED top-
+    level column, or ANY nested position inside a dict/list, regardless of
+    the enclosing field's own declared type (jsonb storage is jsonb either
+    way, whether the column is bare or one of this backend's `_r2db_json_
+    object`/`_r2db_json_array` DOMAINs over it). Confirmed empirically
+    against a real server: jsonb preserves a number's original literal
+    text almost verbatim, INCLUDING trailing zeros (`'100.0'::jsonb #>>
+    '{}'` stays `"100.0"`, never drops the `.0` the way `float8out` does),
+    but always EXPANDS scientific notation to full plain-decimal digits
+    (`'1e+20'::jsonb #>> '{}'` -> `"100000000000000000000"`, never
+    `"1e+20"`).
+
+    `json.dumps(value)` reproduces the exact text psycopg's `Jsonb` adapter
+    sends at INSERT time (this project's own round-trip) -- confirmed
+    empirically to match jsonb's stored/re-emitted text byte-for-byte for
+    every case that does not need exponent expansion. `Decimal` expands
+    the scientific-notation case the same way PostgreSQL's own numeric
+    parser does (exact decimal arithmetic, no float re-rounding): `Decimal
+    (json.dumps(value))` parses the very same text, and `format(...,
+    "f")` renders it in fixed (non-exponential) notation.
+    """
+    text = json.dumps(value)
+    if "e" in text or "E" in text:
+        return format(Decimal(text), "f")
+    return text
+
+
+def _jsonb_scalar_text(value: Any) -> str:
+    """A JSON scalar's PostgreSQL `jsonb` text-output form for a NESTED
+    position (inside a dict/list), or for an untyped, non-float, top-level
+    scalar: `boolean` is the lowercase `true`/`false` literal; `float` uses
+    `_jsonb_numeric_text` above (jsonb's own numeric rules, never
+    `float8out` -- a nested float is never affected by the enclosing
+    field's own declared type, since nesting only exists inside jsonb
+    storage to begin with).
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _jsonb_numeric_text(value)
+    if value is None:
+        return "null"
+    return str(value)  # pragma: no cover - value is always JSON-shaped
+
+
+def _jsonb_text(value: Any) -> str:
+    """PostgreSQL's own `jsonb` text-output rendering for a dict/list value
+    (WP-3 review N-1/N-2), used both directly (`_predicate_text`, below)
+    and recursively for a nested dict/list. Object key order is
+    PostgreSQL's own storage order -- *not* the order the keys were
+    written in JSON source, and not Python's default string sort either:
+    `(byte length, byte value)`, ascending (confirmed empirically against a
+    real server). Nested strings are quoted (`json.dumps`, `ensure_ascii=
+    False` to keep non-ASCII characters literal like PostgreSQL's own jsonb
+    text output does, rather than Python's default `\\uXXXX` escaping);
+    nested scalars reuse `_jsonb_scalar_text` above (never `_float8out_
+    text`: nesting only exists inside jsonb storage, so a nested float is
+    always jsonb's own numeric rules, independent of whatever the
+    enclosing top-level field's own declared type is).
+    """
+    if isinstance(value, dict):
+        keys = sorted(value.keys(), key=lambda k: (len(k.encode("utf-8")), k.encode("utf-8")))
+        parts = [f"{json.dumps(key, ensure_ascii=False)}: {_jsonb_text(value[key])}" for key in keys]
+        return "{" + ", ".join(parts) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_jsonb_text(item) for item in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return _jsonb_scalar_text(value)
+
+
+def _predicate_text(value: Any, field_type: str | None) -> str:
+    """The text representation `contains`/`matches` compare a non-string
+    row value against (WP-3 review D-1~D-4: "型付き非文字列列にも text
+    表現で適用可") -- matching `PostgresCell._text_expression`'s own text
+    form (a typed column's `::text` cast, or an untyped JSONB scalar's
+    `#>> '{}'` unwrap) as closely as Python's/PostgreSQL's differing native
+    formatting allows.
+
+    `field_type` (WP-3 confirmation review N-1 correction: this parameter
+    did not exist in the first pass, which applied `float8out`-style
+    formatting unconditionally -- correct for a typed `"number"` column,
+    but WRONG for an untyped one, where jsonb's own numeric storage rules
+    apply instead and disagree with `float8out` on both trailing zeros and
+    scientific-notation expansion) decides which rule a TOP-LEVEL float
+    uses: `float8out` only when this field is itself a typed `"number"`
+    column (matching `PostgresCell._text_expression`'s plain `::text`
+    cast); jsonb's own numeric rules for everything else, including an
+    untyped top-level column. A top-level dict/list (`_jsonb_text`) and any
+    NESTED position inside one always use jsonb's own rules regardless of
+    `field_type` -- nesting only exists inside jsonb storage, which has no
+    "typed number" concept at all beneath its own root.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return _jsonb_text(value)
+    if isinstance(value, float) and field_type == "number":
+        return _float8out_text(value)
+    return _jsonb_scalar_text(value)
+
+
+def _matches(row: dict[str, Any], predicate: Predicate, field_types: dict[str, str | None]) -> bool:
     """Pure comparison -- value type validation is done up front by
-    `_validate_predicate_types` (R-7, corrigendum M-9), not per-row here."""
+    `_validate_predicate_types` (R-7, corrigendum M-9), not per-row here.
+
+    WP-3 review D-1~D-4: predicate semantics are unified with PostgreSQL's
+    own SQL three-valued logic rather than Python's -- a NULL row is never
+    made to raise (`contains`/`matches`) or to look "not equal"/"in the
+    list" (`ne`/`in`) just because Python's own `is None` comparisons
+    happen to differ from SQL's "comparison against NULL is UNKNOWN,
+    excluded from the result" rule. `eq`/`lt`/`lte`/`gt`/`gte` are
+    deliberately left as-is: this reference implementation's own
+    documented, accepted cross-backend divergence (see `postgres.py`'s
+    module docstring) for ordering comparisons against mismatched/absent
+    values is unaffected by this fix.
+
+    `field_types` (WP-3 confirmation review N-1 correction): needed so
+    `contains`/`matches` can pass the predicate's OWN field's declared
+    type to `_predicate_text`, which is what decides whether a top-level
+    float uses `float8out` (typed `"number"` column) or jsonb's own
+    numeric rules (everything else) -- see `_predicate_text`'s docstring.
+    """
     actual = row.get(predicate.field)
     expected = predicate.value
     if predicate.operator == "eq":
         return actual == expected
     if predicate.operator == "ne":
+        if actual is None:
+            return False
         return actual != expected
     if predicate.operator == "lt":
         return actual < expected
@@ -1031,7 +1306,20 @@ def _matches(row: dict[str, Any], predicate: Predicate) -> bool:
     if predicate.operator == "gte":
         return actual >= expected
     if predicate.operator == "in":
+        if actual is None:
+            # SQL: `NULL IN (...)` is always UNKNOWN/excluded, even if the
+            # list itself contains a literal null.
+            return False
         return actual in expected
     if predicate.operator == "contains":
-        return expected in actual
+        # Q-2 (案i): literal substring containment, no wildcard
+        # interpretation -- Python's `in` on strings is already exactly
+        # this (no wildcard semantics exist for it).
+        if actual is None:
+            return False
+        return expected in _predicate_text(actual, field_types.get(predicate.field))
+    if predicate.operator == "matches":
+        if actual is None:
+            return False
+        return _wildcard_pattern(expected).match(_predicate_text(actual, field_types.get(predicate.field))) is not None
     return actual is None  # is_null

@@ -372,6 +372,21 @@ async def test_query_order_by_and_cursor_are_capability_unsupported(client):
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
+async def test_query_matches_filter_is_capability_unsupported(client):
+    """WP-3 review blocker-1: the `DataService.query` gate covers the HTTP
+    path too -- `post_query` has no `where`-inspecting logic of its own, it
+    delegates entirely to `service.query`, so this is the same refusal as
+    `test_gate_query_matches_is_capability_unsupported` in
+    `test_foundation.py`, observed at the HTTP boundary."""
+    response = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("secret-a"),
+        json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "a%"}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
 async def test_entity_identifier_validation_flows_through_http(client):
     response = await client.post(
         "/v1/data/bad-entity!/query", headers=_auth("secret-a"), json={"select": ["id"]}
@@ -411,6 +426,38 @@ async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported
     )
     assert response.status_code == 400
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+async def test_mutate_update_and_delete_where_matches_is_capability_unsupported(client):
+    """WP-3 confirmation review blocker: the `matches` gate must cover
+    `update`/`delete`'s own `operation.where`, not only `query()`'s
+    predicates -- confirmed previously executing all the way through
+    (including a `delete`) before this fix. `post_mutate` has no
+    `where`-inspecting logic of its own; this is `DataService.mutate`'s own
+    gate, observed at the HTTP boundary."""
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "z"}}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={
+            "operations": [
+                {"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "destructive": True, "confirmation": "DELETE"}
+            ]
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    # No side effect: the row this delete would otherwise have matched is
+    # still there.
+    query_response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["body"]})
+    assert query_response.json()["items"] == [{"body": "a"}]
 
 
 async def test_mutate_invalid_transaction_value_is_validation_failed(client):
