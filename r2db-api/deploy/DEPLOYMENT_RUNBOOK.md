@@ -43,36 +43,52 @@ document beyond stating its plan and preconditions.
 Confirm all of the following before starting §2. This runbook does not
 re-verify them; it assumes they are already true.
 
-1. **PostgreSQL migrations `0001` through `0005` have been applied** against
+1. **PostgreSQL migrations `0001` through `0006` have been applied** against
    the target cluster, per `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`
    §5 (`0001_bootstrap_control_plane.sql` through
-   `0004_deprovision_application.sql`) and migration `0005` (the
+   `0004_deprovision_application.sql`), migration `0005` (the
    `r2dbsvc_registry.credentials` table and `applications.enabled` column,
    `docs/design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md`
-   P2-D1/P2-D2). Every application slug this deployment will serve must
-   already be provisioned (`0003`) and present in `r2dbsvc_registry.applications`
-   with `enabled = true`. **The target cluster must be PostgreSQL 13 or
-   later** (CCR-13, `docs/design/R2DB_CCR13_STORAGE_V1.md` §6 申し送り 4 --
-   every entity table's `_r2db_revision` column depends on the built-in
-   `gen_random_uuid()`, which only exists from version 13 onward); and if
-   any served application was provisioned before CCR-13's `0003` DOMAIN
-   addition, apply that addition's `CREATE DOMAIN` statements to its
-   database by hand first (`POSTGRES_PROVISIONING_RUNBOOK.md` §5's CCR-13
-   note -- not yet needed against this target, since no application has
-   been provisioned here at all).
+   P2-D1/P2-D2), and migration `0006_control_plane_http.sql` (CCR-14,
+   `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-2/R-3/R-4/R-6 -- the
+   `applications` two-state registry, `control_credentials`, `control_audit`,
+   and the `r2dbsvc_controlplane` role; see `POSTGRES_PROVISIONING_RUNBOOK.md`
+   §11 -- **required even when this deployment does not run the
+   control-plane HTTP process at all**, since `0006` also revises
+   `begin_provision_application`/`finish_provision_application`, which
+   ordinary application onboarding (`0003`) depends on). Every application
+   slug this deployment will serve must already be provisioned (`0003`) and
+   present in `r2dbsvc_registry.applications` with `enabled = true`. **The
+   target cluster must be PostgreSQL 13 or later** (CCR-13, `docs/design/
+   R2DB_CCR13_STORAGE_V1.md` §6 申し送り 4 -- every entity table's
+   `_r2db_revision` column depends on the built-in `gen_random_uuid()`,
+   which only exists from version 13 onward); and if any served application
+   was provisioned before CCR-13's `0003` DOMAIN addition, apply that
+   addition's `CREATE DOMAIN` statements to its database by hand first
+   (`POSTGRES_PROVISIONING_RUNBOOK.md` §5's CCR-13 note -- not yet needed
+   against this target, since no application has been provisioned here at
+   all).
 2. **The read-only `r2dbsvc_api` role exists** (P2-D3) with `CONNECT` on
    `r2dbsvc_platform`, `USAGE` on `r2dbsvc_registry`, and `SELECT` only on
    `applications` / `credentials`. This is the role `R2DB_PLATFORM_DSN`
-   authenticates as -- never `r2dbsvc_control`.
+   authenticates as -- never `r2dbsvc_control`. It has no grant at all on
+   `control_credentials`/`control_audit` (R-2/R-3) -- a compromise of the
+   process using this role cannot read a control credential's verifier or a
+   single control-plane audit row.
 3. **At least one credential has been issued** for each served application
    via the out-of-band CLI, `python -m r2db_api.ops issue-credential <slug>
-   <runtime|developer>` (P2-D6). **This CLI is an explicitly provisional
-   control surface pending CCR-14's disposition** (`spec/CCR_DISPOSITION.md`);
-   it exists only because this implementation has no HTTP control plane at
-   all, by design (`docs/design/
-   R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md` §0). Do not expect
-   it to gain HTTP endpoints without a separate, explicit contract decision.
-   The CLI connects with `R2DB_CONTROL_DSN` (the `r2dbsvc_control` role) --
+   <runtime|developer>` (P2-D6). **CCR-14 is resolved**
+   (`spec/CCR_DISPOSITION.md`) and the canonical in-band management surface
+   is now `/control/v1` (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-10;
+   §7 below covers deploying it). `python -m r2db_api.ops` itself is no
+   longer a stand-in for that surface -- it now has two narrower, permanent
+   jobs: the bootstrap/reset control-credential **ritual** (the only
+   `role=control` issuance path there is, by design -- "案B",
+   `spec/CCR_DISPOSITION.md`) and operator **break-glass** recovery for when
+   `/control/v1` itself is unreachable (`ops.py`'s own module docstring).
+   Issuing an *application* credential via `issue-credential` remains valid
+   either way (break-glass, or before `/control/v1` is deployed at all) --
+   the CLI connects with `R2DB_CONTROL_DSN` (the `r2dbsvc_control` role) --
    an operator-held credential, never placed in the application's own
    `EnvironmentFile` (see §6 below).
 4. **Network isolation for PostgreSQL is already verified**, per
@@ -456,3 +472,92 @@ never overlap is the *value*: the same secret string or the same DSN target
 used by both processes would mean a compromise of one process's environment
 also compromises the other's, defeating the separation this parallel
 deployment is meant to demonstrate.
+
+## 7. Control-plane deployment (CCR-14)
+
+Companion to `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (R-1/R-3/R-9/R-10)
+and `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §§11-14 (storage,
+ritual, lockout recovery, begin-crash residue). This section is additive to
+§§1-6 above -- a deployment may run the application plane alone (§§1-6,
+`R2DB_CONTROL_PLANE_STATUS` left unset/`unavailable`) with no control-plane
+process at all, exactly as before this section existed.
+
+**Process.** The control-plane HTTP surface (`/control/v1`, 11 endpoints) is
+a separate ASGI app, `r2db_api.control_main:app`, assembled by
+`build_control_app()`. **Default deployment is a separate process, with its
+own systemd unit and its own listen address**, distinct from
+`r2dbsvc-api.service` (§2 above) -- R-1's own default. Co-locating both apps
+behind one server process is permitted (R-1's own SI-00 boundary evidence:
+distinct auth stores/DB roles/`AuthorityTopology` registration already make
+that safe), but this runbook's own steps assume the separate-process
+default; adapt step 3/4 below if co-locating.
+
+**Required environment (`control_main.build_control_app`'s own contract --
+see that module's docstring for the authoritative list):**
+
+| Variable | Meaning |
+|---|---|
+| `R2DB_CONTROLPLANE_DSN` | The `r2dbsvc_controlplane` role's DSN against `r2dbsvc_platform` (§11 of the provisioning runbook). Never `r2dbsvc_control` -- this process must not hold provisioning authority. |
+| `R2DB_CONTROL_CREDENTIAL_PEPPER` | Control-credential verifier HMAC pepper. **Must differ from `R2DB_CREDENTIAL_PEPPER`** (R-2) -- this process refuses to start if the two are equal. |
+| `R2DB_CREDENTIAL_PEPPER` | The same application-plane pepper `r2db_api.main` uses -- required here too (not merely "if configured"), because this process also issues/rotates *application* credentials in-band; see `control_main`'s own module docstring for why this departs from an earlier design-table reading. |
+| `R2DB_CONTROL_LIMIT_APPLICATIONS` / `R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION` / `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE` | Optional, SI-08 resource bounds (R-7); default to the contract's `example_profile` values if unset. |
+| `R2DB_PLATFORM_SCHEMA` / `R2DB_PLATFORM_POOL_SIZE` | Optional -- identical escape hatch/tuning knob to the application-plane process' own (§10 of the provisioning runbook); a real deployment leaves `R2DB_PLATFORM_SCHEMA` unset. |
+
+**Deployment steps (mirrors §2 above, for the second unit):**
+
+1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
+   root-owned, mode `0600`, containing the table above -- never the
+   application plane's own `api.env`.
+2. Install a second systemd unit pointing `ExecStart=` at
+   `uvicorn r2db_api.control_main:app` on its own internal port, following
+   the same account/port-collision checks as §2 steps 1 and 3 above.
+3. **Only after** the control-plane process is genuinely running and
+   reachable, set `R2DB_CONTROL_PLANE_STATUS=enabled` in the
+   **application-plane** process' own `api.env` and restart
+   `r2dbsvc-api.service`. This is a deployer *declaration*
+   (`r2db_api.main` cannot detect the control plane's actual reachability on
+   its own -- R-9); setting it before the control-plane process is actually
+   reachable creates a declaration/behavior mismatch (`/v1/capabilities`
+   claiming `control_plane: enabled` with nothing listening). The
+   authoritative check for "is a separated control plane actually
+   reachable" is always the control plane's own `GET /control/v1/capabilities`,
+   never the application plane's declaration.
+4. **Bootstrap the first control credential** (exactly once per platform
+   database, ever -- see `POSTGRES_PROVISIONING_RUNBOOK.md` §12 for the full
+   ritual and its lockout/recovery paths):
+   ```
+   R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... \
+     python -m r2db_api.ops bootstrap
+   ```
+   The issued credential is `must_rotate=true` -- authorized for nothing but
+   `GET /control/v1/capabilities` and rotating itself until an operator
+   completes one real rotation (`POST /control/v1/credentials/{id}/rotate`,
+   or the CLI break-glass `rotate-control-credential`). Do this immediately;
+   until it is done, the control plane has no usable administrative
+   credential for any other operation.
+5. Verify, **using the credential printed by step 4**:
+   ```
+   curl -sk -o /dev/null -w '%{http_code} %{content_type}\n' \
+     -H "Authorization: Bearer <secret from step 4>" \
+     https://control.example.invalid:<internal port>/control/v1/capabilities
+   ```
+   Expected: `200 application/json`, `capabilities.control_plane.status ==
+   "enabled"`, and the SI-08 `limits`/`limit_enforcement` (all three classes
+   `enforced`). **Unlike the application plane's own `/v1/capabilities`
+   check (§2 step 6), there is no no-credential variant of this check that
+   returns `200`** -- `GET /control/v1/capabilities` authenticates the
+   caller exactly like every other `/control/v1` endpoint (`Control
+   PlaneService.capabilities` calls `self._authenticate(secret, ...)`
+   unconditionally); an omitted/invalid `Authorization` header returns
+   `401 AUTH_REQUIRED`, durably recorded in `control_audit` the same as any
+   other authentication denial (R-6/R-11) -- it is not itself evidence that
+   this deployment step succeeded. What makes `capabilities` special (R-5)
+   is only that the step-4 credential, while still `must_rotate=true` at
+   this point, is already authorized to call it (`capabilities` and
+   self-`rotate` are the two operations a not-yet-rotated credential is
+   allowed) -- no other `/control/v1` endpoint would succeed with that same
+   credential yet.
+
+**Compromise/misuse:** see `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`
+(R-11) -- `ops.py reset` is the single recovery step from a lost, leaked, or
+misused control credential.
