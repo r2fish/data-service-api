@@ -5,6 +5,7 @@
 - 改訂: v1.2 — 依頼者との Q-1 検討 (2026-08-29) を反映: 確認機構の守備範囲の明文化 (§0.5)、CLI break-glass への control credential enable/rotate 追加 (R-10)、誤配・侵害への装備 (R-11)、契約 additive 候補2件 (§6)。§9 改訂記録
 - 改訂: v1.3 — 抑止宣言の採用 (依頼者合意、2026-08-29): 制御面の拒否応答に「徒労」と「帰属」の真実の宣言を載せる (R-11、§2)。§9 改訂記録
 - 改訂: v1.4 — WP-1 完了 (2026-08-29): port v1.5 / C-14・C-15 executable 化の実装レビュー (Opus、blocker 2 / major 7 / minor 7 / nit 2) の反映と、実装中の監督決定・変異注入結果。§10 記録
+- 改訂: v1.5 — WP-2 完了 (2026-08-29): 0006 migration / unit-of-work / ControlCredentialStore / 儀式 CLI の実装レビュー (Opus、blocker 2 / major 5 / minor 9 / nit 2) の反映と監督決定 — 特に R-4 の関数分割の訂正 (provisioning 列の確定は finish 側)。§11 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -304,3 +305,29 @@ WP-1 (port v1.5 + C-14/C-15 テスト実装 + 3 adapter surface-absent 分岐) �
 - provided 分岐 (C-14/C-15 の enabled 側) は静的レビューのみで未実行。WP-5 の完了条件に「provided 分岐 green + 変異による検出力確認」が含まれる (§5 のとおり)
 - ベクタ5の rate 回復チェックは最大 61 秒を要する (CI タイムアウトに注意)。applications 駆動の precondition (`既存数 < bound`) は fixture 消費と bound 設定の関係に依存 — conformance build の bound は suite 自身の登録消費より十分大きく取ること
 - `deprovision_application` の実実装 (r2db 2 adapter) は WP-5 で行う (現在は3 adapter とも SurfaceAbsent)
+
+## 11. WP-2 実装記録 (2026-08-29、v1.5)
+
+WP-2 (0006 migration + unit-of-work + ControlCredentialStore ペア + 儀式 CLI + `main.py` 突合強化) を実装した。実装: Sonnet、独立レビュー: Opus (blocker 2 / major 5 / minor 9 / nit 2)、全指摘反映済み。suite は 575 → 619 passed (新規 `r2db-api/tests/test_control_plane_store.py` 43 test 他)。C-13 は work 必須化後も明示再実行で green。詳細な実装・変異記録は実装報告 (セッション記録) と 0006 自身のコメント。
+
+### 11.1 レビューが捕捉した主要欠陥 (blocker は改訂 provisioning 関数に集中)
+
+- **BL-1**: `begin_provision_application` が CREATE DATABASE より前に provisioning 列を UPDATE で確定させ、途中クラッシュで「存在しない DB を provisioning 済みと主張し、0003 再実行も拒否される」回復不能状態を作った (実測)。設計 v1.1 R-4 の文言「begin が UPDATE」自体が 0002/0003 の元の crash-safety 構造 (registry への書込みは finish 側) を見誤っていた — **設計の誤りとして訂正** (11.2-a)
+- **BL-2**: `finish_provision_application` の `ON CONFLICT DO NOTHING` が真の競合 (begin と finish の間に登録が割り込む形) を無音で握り潰す (実測: 登録済み行に対し finish が黙って no-op)
+- **MA-3 (TOCTOU)**: bootstrap の存在検査が発行トランザクションの外にあり、並行 bootstrap 2本が両方成功し得た (実測)
+- **MA-5**: 実装者が採った「work 省略時は自動管理」の緩和は、既定 pool サイズでは無音でトランザクションが割れ、pool_size=1 では枯渇でハングする fail-open であることをレビューが実測 — §7 の「型で強制」の必要性が実証された
+
+### 11.2 監督決定 (いずれも覆せる。契約変更なし)
+
+- (a) **R-4 の関数分割の訂正** (設計自身の訂正): `begin_provision_application` は検証 + already-provisioned ガード (登録済みのみの行は通す) + CREATE ROLE のみで registry に**何も書かない**。provisioning 列の確定は `finish_provision_application` が 0003 の最後に行う (登録済み行への UPDATE → IF NOT FOUND なら INSERT の明示2分岐、ON CONFLICT 禁止 — provisioning 済み行はどちらの分岐にも合致せず PK 違反で音を立てる)。「registry が provisioning 済みを主張するのは実体が完成した後だけ」という 0002 本来の性質が両フロー (運用者先行 / 登録先行) で保存される。begin が作った role のクラッシュ残留は 0002 時代と同一の既存の運用上の疵であり、WP-6 の runbook 記載事項
+- (b) **work は厳密必須** (keyword-only、省略は TypeError)。既存呼び出し元は conformance adapter (特権呼び出し箇所) と test_http.py を含め全て追随 (B-2 の「既存呼び出し元を追随させる」の適用範囲を正しく広げた。WP-2 初回のスコープ制約が緩和逸脱を誘発した — 発注側の教訓)。C-13 の再活性化ベクタが FoundationError 形の拒否を保ったことを条件テストの明示再実行で確認
+- (c) **儀式の直列化**: bootstrap/reset は同一トランザクション内で `pg_advisory_xact_lock` (定数キー、ops.py に一元定義) を取得してから存在検査・発行を行う。lock 除去変異 (M9) は黒箱テストでは検出不能であることを実測し、受理境界として記録 (機構レベルの決定的2コネクション干渉テストで lock が防ぐ競合そのものは固定済み。本番コードへのテスト用計装は入れない — 監督支持)
+- (d) **CLI 監査は成功のみ** (`outcome="allow"`): 拒否イベントの耐久記録は WP-3 の HTTP 制御面の責務 (R-6/B-3)。CLI の失敗は stderr で運用者可視 — 意図的境界として ops.py に明記
+- (e) application credential の rotate は既存 Postgres 意味論 (revoked 不検査) を in-memory にもそのまま写し、control credential の rotate は revoked を `VALIDATION_FAILED` で拒否する別意味論 — 両者をテストで対で固定し、混同を防ぐ (§8 M-2 の読みどおり)
+- (f) GRANT 検証はカタログ実測 (`has_function_privilege` 等) まで行い、R-2 の中心主張 (`r2dbsvc_api` は control 保存物を読めない) と「controlplane は control_audit を書けるが読み返せない」をテストで固定
+
+### 11.3 WP-3 以降への申し送り
+
+- `ControlPlaneService` は store の work 必須 surface を前提に、状態変更 + 監査 INSERT を単一 `unit_of_work()` で構成する (拒否イベントの耐久記録もここで初めて実装される — 11.2-d)
+- `PostgresControlCredentialStore.has_any(include_revoked=False)` は現在未使用 (対称性のため存置)
+- advisory lock キーの一元管理場所は未整備 (現在 ops.py の1定数のみ)。制御面 HTTP プロセスが儀式と競合する書込みを持つ場合は同じ直列化の要否を WP-3 で判断

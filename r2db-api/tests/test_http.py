@@ -30,9 +30,12 @@ pytestmark = pytest.mark.anyio
 
 def _build_service(**limit_overrides):
     credentials = CredentialStore(pepper="http-test-pepper")
-    credentials.add("cred-a", "app-a", "runtime", "secret-a")
-    credentials.add("dev-a", "app-a", "developer", "dev-secret-a")
-    credentials.add("cred-b", "app-b", "runtime", "secret-b")
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-a", "app-a", "runtime", "secret-a", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("dev-a", "app-a", "developer", "dev-secret-a", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-b", "app-b", "runtime", "secret-b", work=work)
     limits = ResourceLimits(**limit_overrides) if limit_overrides else ResourceLimits()
     service = DataService(credentials, limits=limits)
     control = ControlAuthority(service)

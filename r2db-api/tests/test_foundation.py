@@ -15,9 +15,12 @@ from r2db_api.structured import ApplicationCell, Predicate, QueryOutcome
 @pytest.fixture
 def service():
     credentials = CredentialStore(pepper="test-pepper")
-    credentials.add("cred-a", "app-a", "runtime", "secret-a")
-    credentials.add("cred-b", "app-b", "runtime", "secret-b")
-    credentials.add("dev-a", "app-a", "developer", "dev-secret-a")
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-a", "app-a", "runtime", "secret-a", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-b", "app-b", "runtime", "secret-b", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("dev-a", "app-a", "developer", "dev-secret-a", work=work)
     service = DataService(credentials)
     control = ControlAuthority(service)
     # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-3):
@@ -282,7 +285,8 @@ def test_malformed_inputs_fail_with_safe_foundation_errors(service):
 
 def _limited(**kwargs):
     credentials = CredentialStore(pepper="limit-pepper")
-    credentials.add("limit-cred", "limit-app", "runtime", "limit-secret")
+    with credentials.unit_of_work() as work:
+        credentials.add("limit-cred", "limit-app", "runtime", "limit-secret", work=work)
     service = DataService(credentials, limits=ResourceLimits(**kwargs))
     # Two seed rows, unnamed (id is server-assigned): the first two inserted
     # get id 1 and id 2 respectively, exactly what every test below assumes.
