@@ -370,28 +370,52 @@ class ControlAuthority:
             self._control_event("control_failure", "enable_application" if enabled else "disable_application", "deny", application_id, exc.code)
             raise
 
-    def set_credential_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None) -> None:
+    def set_credential_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: Any = None) -> None:
+        """`work` is keyword-only and defaults to `None` (CCR-14 WP-3): when
+        omitted, this method self-manages exactly as before -- opens its own
+        `unit_of_work()`, commits/reverts exactly one call's worth of state,
+        and every pre-WP-3 caller (this repository's own tests, the
+        in-process conformance adapter) keeps working unchanged. When a
+        caller supplies its own already-open `work` handle (`ControlPlane
+        Service`'s in-memory backend, WP-3: it needs the credential-state
+        change and its own `control_audit` sink append to land in the *same*
+        transaction, R-6), this method uses that handle directly instead of
+        opening a second one -- never both. `work`'s type is deliberately
+        untyped (`Any`) rather than importing `auth._InMemoryWork`/
+        `credential_store._PostgresWork` here: this module stays agnostic to
+        which store implementation (in-memory or PostgreSQL) it is holding,
+        exactly as it already is everywhere else (`self._service._credentials`
+        is never type-narrowed in this class)."""
         try:
-            # R-6/§8 B-2: chase `CredentialStore`/`PostgresCredentialStore`'s
-            # new `unit_of_work()`-required call form -- semantics are
-            # unchanged (this still commits/reverts exactly one call's
-            # worth of state, same as before WP-2; `ControlAuthority`'s own
-            # audit trail stays on the existing in-memory `AuditSink` below,
-            # not on the new `control_audit` table, which only `ops.py`'s
-            # ritual/CLI-path writes to in this work package).
-            with self._service._credentials.unit_of_work() as work:
+            if work is not None:
                 self._service._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=work)
+            else:
+                # R-6/§8 B-2: chase `CredentialStore`/`PostgresCredentialStore`'s
+                # new `unit_of_work()`-required call form -- semantics are
+                # unchanged (this still commits/reverts exactly one call's
+                # worth of state, same as before WP-2; `ControlAuthority`'s own
+                # audit trail stays on the existing in-memory `AuditSink` below,
+                # not on the new `control_audit` table, which only `ops.py`'s
+                # ritual/CLI-path writes to in this work package).
+                with self._service._credentials.unit_of_work() as own_work:
+                    self._service._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=own_work)
             self._control_event("credential_lifecycle", "set_credential_state", "allow", credential_id)
         except FoundationError as exc:
             self._control_event("control_failure", "set_credential_state", "deny", credential_id, exc.code)
             raise
 
-    def issue_credential(self, credential_id: str, application_id: str, role: str, secret: str) -> None:
+    def issue_credential(self, credential_id: str, application_id: str, role: str, secret: str, *, work: Any = None) -> None:
+        """`work` is keyword-only, defaulting to `None` -- see `set_credential_
+        state`'s docstring immediately above for the full CCR-14 WP-3
+        rationale; identical reasoning applies here."""
         try:
             if application_id not in self._service._cells:
                 fail("NOT_FOUND", "Application was not found.", status=404)
-            with self._service._credentials.unit_of_work() as work:
+            if work is not None:
                 self._service._credentials.add(credential_id, application_id, role, secret, work=work)
+            else:
+                with self._service._credentials.unit_of_work() as own_work:
+                    self._service._credentials.add(credential_id, application_id, role, secret, work=own_work)
             self._control_event("credential_lifecycle", "issue_credential", "allow", application_id)
         except FoundationError as exc:
             self._control_event("control_failure", "issue_credential", "deny", application_id, exc.code)

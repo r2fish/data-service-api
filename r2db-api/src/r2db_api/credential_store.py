@@ -66,15 +66,17 @@ It is never derived from client/request input.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import os
 from typing import Any, Iterator, Sequence
+import uuid
 
 import psycopg
 from psycopg import sql
 
-from .auth import AuthContext, ControlAuthContext
+from .auth import AuthContext, ControlAuthContext, _fail_identified
 from .errors import FoundationError, fail
 from .postgres import _RolePool, _env_int
 from .structured import validate_identifier
@@ -305,6 +307,39 @@ class PostgresCredentialStore:
         except psycopg.Error:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
             raise  # unreachable; fail() always raises
+
+    # ---- CCR-14 WP-3 read additions (`ControlPlaneService`) ----------------
+
+    def get_state(self, credential_id: str) -> tuple[bool, bool] | None:
+        """`auth.CredentialStore.get_state`'s Postgres counterpart -- see
+        that docstring for the full rationale (dual-store resolution + the
+        control-plane HTTP `rotate` endpoint's own revoked-refusal check)."""
+        statement = sql.SQL("SELECT enabled, revoked FROM {table} WHERE credential_id = {ph}").format(table=self._credentials_table, ph=sql.Placeholder())
+        row = self._fetch_or_503(statement, [credential_id])
+        return (row[0], row[1]) if row is not None else None
+
+    def list_all(self) -> list[tuple[str, str, str, bool, bool]]:
+        """`auth.CredentialStore.list_all`'s Postgres counterpart -- returns
+        `(credential_id, application_id, role, enabled, revoked)` tuples,
+        never `verifier` (not selected at all, so there is no column to
+        forget to drop)."""
+        statement = sql.SQL("SELECT credential_id, application_slug, role, enabled, revoked FROM {table} ORDER BY credential_id").format(table=self._credentials_table)
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    return cur.fetchall()
+        except psycopg.Error:
+            fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
+            raise  # unreachable; fail() always raises
+
+    def count_active_for_application(self, application_id: str) -> int:
+        """`auth.CredentialStore.count_active_for_application`'s Postgres
+        counterpart (R-7 `credentials_per_application`: revoked rows are
+        never counted)."""
+        statement = sql.SQL("SELECT count(*) FROM {table} WHERE application_slug = {ph} AND NOT revoked").format(table=self._credentials_table, ph=sql.Placeholder())
+        row = self._fetch_or_503(statement, [application_id])
+        return int(row[0]) if row is not None else 0
 
     # ---- write path (P2-D6: reused directly by `python -m r2db_api.ops`) --
 
@@ -560,9 +595,9 @@ class PostgresControlCredentialStore:
         if not hmac.compare_digest(db_verifier, computed):
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
         if revoked:
-            fail("AUTH_REVOKED", "Credential is not active.", status=401)
+            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=credential_id)
         if not enabled:
-            fail("AUTH_INVALID", "Credential is not active.", status=401)
+            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=credential_id)
         return ControlAuthContext(credential_id, must_rotate)
 
     def assert_active(self, context: ControlAuthContext) -> ControlAuthContext:
@@ -724,5 +759,281 @@ class PostgresControlCredentialStore:
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
 
+    # ---- CCR-14 WP-3 read additions (`ControlPlaneService`) ----------------
 
-__all__ = ["PostgresCredentialStore", "PostgresControlCredentialStore", "validate_control_pepper_separation", "DEFAULT_SCHEMA"]
+    def get_state(self, credential_id: str) -> tuple[bool, bool] | None:
+        """`auth.ControlCredentialStore.get_state`'s Postgres counterpart."""
+        statement = sql.SQL("SELECT enabled, revoked FROM {table} WHERE credential_id = {ph}").format(table=self._table, ph=sql.Placeholder())
+        row = self._fetch_or_503(statement, [credential_id])
+        return (row[0], row[1]) if row is not None else None
+
+    def list_all(self) -> list[tuple[str, bool, bool]]:
+        """`auth.ControlCredentialStore.list_all`'s Postgres counterpart --
+        `(credential_id, enabled, revoked)` tuples; `must_rotate` is
+        deliberately not selected here at all (design §2/§8 m-9: it must
+        never reach a `list_credentials` response)."""
+        statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY credential_id").format(table=self._table)
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    return cur.fetchall()
+        except psycopg.Error:
+            fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
+            raise  # unreachable; fail() always raises
+
+
+class PostgresApplicationRegistry:
+    """CCR-14 WP-3: the Postgres-backed half of the "applications registry"
+    store pair design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §0/§3 calls
+    for -- registration-only writes (R-4: this never touches the four
+    provisioning columns; they stay NULL until the separate, out-of-band 0003
+    provisioning flow -- `finish_provision_application` -- fills them in)
+    plus the read/enable-flip surface `ControlPlaneService`'s `register_
+    application`/`list_applications`/`set_application_enabled` operations
+    need. There is no in-memory counterpart class: the in-memory backend
+    (`control_plane.InMemoryControlBackend`) represents this same state
+    directly via `DataService`'s own pre-existing `_cells`/`_disabled_apps`
+    (design §0: "in-memory側はControlAuthority/DataServiceの既存状態に整合す
+    る形--backend内で表現してよい") rather than duplicating a second registry.
+
+    Deliberately stays inside the `r2dbsvc_controlplane` GRANT boundary
+    (0006: SELECT/INSERT/UPDATE on `applications`, no DELETE) -- `register`
+    only ever `INSERT`s a slug-only row (every provisioning column omitted,
+    so they stay NULL, satisfying 0006's two-state CHECK), never anything
+    that could look like a provisioning write; `set_enabled` only ever
+    touches the `enabled` column. Mirrors `PostgresCredentialStore`/
+    `PostgresControlCredentialStore` in every structural respect (dedicated
+    `_RolePool`, D-4 SQL composition discipline, `_PostgresWork`-shaped
+    `unit_of_work()`).
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = DEFAULT_SCHEMA,
+        pool_size: int | None = None,
+        connect_timeout: int | None = None,
+        acquire_timeout: float | None = None,
+    ) -> None:
+        validate_identifier(schema)
+        maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
+        pool_kwargs: dict[str, Any] = {}
+        if connect_timeout is not None:
+            pool_kwargs["connect_timeout"] = connect_timeout
+        if acquire_timeout is not None:
+            pool_kwargs["acquire_timeout"] = acquire_timeout
+        self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
+        self._schema = schema
+        self._table = sql.Identifier(schema, "applications")
+
+    def close(self) -> None:
+        self._pool.close_all()
+
+    @contextmanager
+    def unit_of_work(self) -> Iterator[_PostgresWork]:
+        with self._pool.connection() as conn:
+            work = _PostgresWork(conn)
+            try:
+                yield work
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def register(self, application_id: str, *, work: _PostgresWork) -> None:
+        """Registration-only `INSERT` -- every provisioning column (`database_
+        name`/`runtime_role`/`developer_role`/`provisioned_at`) is omitted, so
+        each stays `NULL`, satisfying 0006's two-state CHECK as a "registered,
+        not yet provisioned" row (R-4)."""
+        statement = sql.SQL("INSERT INTO {table} (application_slug) VALUES ({ph})").format(table=self._table, ph=sql.Placeholder())
+        try:
+            with work.connection.cursor() as cur:
+                _execute(cur, statement, [application_id])
+        except psycopg.errors.UniqueViolation:
+            fail("CONFLICT", "Application already exists.", status=409)
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+
+    def set_enabled(self, application_id: str, enabled: bool, *, work: _PostgresWork) -> None:
+        statement = sql.SQL(
+            "UPDATE {table} SET enabled = {enabled_ph} WHERE application_slug = {id_ph} RETURNING application_slug"
+        ).format(table=self._table, enabled_ph=sql.Placeholder(), id_ph=sql.Placeholder())
+        try:
+            with work.connection.cursor() as cur:
+                _execute(cur, statement, [enabled, application_id])
+                row = cur.fetchone()
+                if row is None:
+                    fail("NOT_FOUND", "Application was not found.", status=404)
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+
+    def exists(self, application_id: str) -> bool:
+        statement = sql.SQL("SELECT EXISTS(SELECT 1 FROM {table} WHERE application_slug = {ph})").format(table=self._table, ph=sql.Placeholder())
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [application_id])
+                    row = cur.fetchone()
+                    return bool(row[0]) if row else False
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
+    def count(self) -> int:
+        statement = sql.SQL("SELECT count(*) FROM {table}").format(table=self._table)
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    row = cur.fetchone()
+                    return int(row[0]) if row else 0
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
+    def list_all(self) -> list[tuple[str, bool]]:
+        statement = sql.SQL("SELECT application_slug, enabled FROM {table} ORDER BY application_slug").format(table=self._table)
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    return cur.fetchall()
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
+
+_CONTROL_AUDIT_COLUMNS = (
+    "event_id", "event_class", "occurred_at", "request_id", "application_id",
+    "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code",
+)
+_CONTROL_AUDIT_INSERT = (
+    "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
+    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
+    "VALUES ({ph0}, {ph1}, {ph2}, {ph3}, {ph4}, {ph5}, {ph6}, {ph7}, {ph8}, {ph9}, {ph10}, {ph11})"
+)
+
+
+class PostgresControlAuditSink:
+    """CCR-14 WP-3, R-6: the durable control-plane audit trail's Postgres
+    half -- writes to `r2dbsvc_registry.control_audit` (0006). Lives here,
+    not in `audit.py`, so that `audit.py` (imported unconditionally by
+    `service.py`, and therefore the top-level `r2db_api` package) never
+    gains a `psycopg` import -- see `audit.ControlAuditSink`'s docstring for
+    the full rationale (mirrors the existing `CredentialStore`/
+    `PostgresCredentialStore` module split).
+
+    `append(..., work=None)`: when `work` is given (any of this file's
+    `_PostgresWork` handles -- `PostgresApplicationRegistry.unit_of_work()`/
+    `PostgresCredentialStore.unit_of_work()`/`PostgresControlCredentialStore.
+    unit_of_work()`, whichever the caller's state change just used), the
+    `INSERT` executes on `work.connection` -- the *same* connection/
+    transaction the caller's state change used (R-6: "状態変更とcontrol_
+    auditのINSERTを同一トランザクションでcommit"), so a failure here aborts
+    that caller's whole `with store.unit_of_work()` block through the normal
+    exception path, exactly like any other statement failing on that
+    connection -- no special-casing needed. When `work` is omitted (the
+    denial-event path, R-6: "拒否には状態変更が無いので独立トランザクション
+    のINSERTで足りる"), this opens and commits its own single-statement
+    transaction on its own pool.
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = DEFAULT_SCHEMA,
+        pool_size: int | None = None,
+        connect_timeout: int | None = None,
+        acquire_timeout: float | None = None,
+    ) -> None:
+        validate_identifier(schema)
+        maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
+        pool_kwargs: dict[str, Any] = {}
+        if connect_timeout is not None:
+            pool_kwargs["connect_timeout"] = connect_timeout
+        if acquire_timeout is not None:
+            pool_kwargs["acquire_timeout"] = acquire_timeout
+        self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
+        self._schema = schema
+        self._table = sql.Identifier(schema, "control_audit")
+
+    def close(self) -> None:
+        self._pool.close_all()
+
+    def append(
+        self,
+        *,
+        event_class: str,
+        request_id: str,
+        application_id: str | None,
+        actor_type: str,
+        actor_id: str | None,
+        role: str | None,
+        operation: str,
+        target_kind: str | None,
+        outcome: str,
+        reason_code: str | None = None,
+        work: _PostgresWork | None = None,
+    ) -> None:
+        event_id = str(uuid.uuid4())
+        occurred_at = datetime.now(timezone.utc)
+        placeholders = {f"ph{i}": sql.Placeholder() for i in range(12)}
+        statement = sql.SQL(_CONTROL_AUDIT_INSERT).format(table=self._table, **placeholders)
+        params = [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code]
+        if work is not None:
+            # Same connection/transaction as the caller's state change --
+            # deliberately no try/except here: a failure must propagate as
+            # the caller's own `unit_of_work()` exception (rolling back the
+            # state change too), never be swallowed or re-mapped at this
+            # layer (R-6/fail-closed-by-construction).
+            with work.connection.cursor() as cur:
+                _execute(cur, statement, params)
+            return
+        # Standalone (denial-event) path: this call owns its own connection
+        # and transaction. A `psycopg.Error` here propagates to the caller
+        # (`ControlPlaneService._deny`), which maps it to `SERVICE_UNAVAILABLE`
+        # (503) -- this method itself does not know about `FoundationError`.
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                _execute(cur, statement, params)
+            conn.commit()
+
+    def events(self) -> list[tuple[Any, ...]]:
+        """Read surface for tests/tooling connected with sufficient privilege
+        (`r2dbsvc_control`, never the control-plane process' own `r2dbsvc_
+        controlplane` role, which has no SELECT on this table at all -- R-3).
+        Design §0: "読み取りsurface(events())はin-memory/Postgres双方に用意
+        (WP-5のportcontrol_audit_events()とWP-6のaudit-reportが使う)".
+
+        Round-2 review MI-8: routed through `_execute` (D-4's single
+        execution choke point, like every other statement in this file) and
+        the module's own `psycopg.Error` -> `AUTH_STATE_UNAVAILABLE` (503)
+        discipline (`_fetch_or_503`'s pattern) -- this method previously
+        called `cur.execute` directly and let a connection failure propagate
+        as a raw `psycopg.Error`, the one read path in this file that had not
+        been brought under that discipline yet.
+        """
+        statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at").format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _CONTROL_AUDIT_COLUMNS), table=self._table
+        )
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    return cur.fetchall()
+        except psycopg.Error:
+            fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
+            raise  # unreachable; fail() always raises
+
+
+__all__ = [
+    "PostgresCredentialStore",
+    "PostgresControlCredentialStore",
+    "PostgresApplicationRegistry",
+    "PostgresControlAuditSink",
+    "validate_control_pepper_separation",
+    "DEFAULT_SCHEMA",
+]

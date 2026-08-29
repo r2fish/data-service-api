@@ -6,6 +6,7 @@
 - 改訂: v1.3 — 抑止宣言の採用 (依頼者合意、2026-08-29): 制御面の拒否応答に「徒労」と「帰属」の真実の宣言を載せる (R-11、§2)。§9 改訂記録
 - 改訂: v1.4 — WP-1 完了 (2026-08-29): port v1.5 / C-14・C-15 executable 化の実装レビュー (Opus、blocker 2 / major 7 / minor 7 / nit 2) の反映と、実装中の監督決定・変異注入結果。§10 記録
 - 改訂: v1.5 — WP-2 完了 (2026-08-29): 0006 migration / unit-of-work / ControlCredentialStore / 儀式 CLI の実装レビュー (Opus、blocker 2 / major 5 / minor 9 / nit 2) の反映と監督決定 — 特に R-4 の関数分割の訂正 (provisioning 列の確定は finish 側)。§11 記録
+- 改訂: v1.6 — WP-3 完了 (2026-08-29): `ControlPlaneService` の実装レビュー (Opus、major 3 / minor 11 / nit 3) の反映と監督決定 — 特に AUTH_REQUIRED の監査対象化と抑止宣言の2分割 (記録/帰属)。§12 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -331,3 +332,33 @@ WP-2 (0006 migration + unit-of-work + ControlCredentialStore ペア + 儀式 CLI
 - `ControlPlaneService` は store の work 必須 surface を前提に、状態変更 + 監査 INSERT を単一 `unit_of_work()` で構成する (拒否イベントの耐久記録もここで初めて実装される — 11.2-d)
 - `PostgresControlCredentialStore.has_any(include_revoked=False)` は現在未使用 (対称性のため存置)
 - advisory lock キーの一元管理場所は未整備 (現在 ops.py の1定数のみ)。制御面 HTTP プロセスが儀式と競合する書込みを持つ場合は同じ直列化の要否を WP-3 で判断
+
+## 12. WP-3 実装記録 (2026-08-29、v1.6)
+
+WP-3 (`ControlPlaneService` — §2 の操作カタログ + must_rotate ゲート + R-7 limits + R-6 同一トランザクション監査/拒否耐久記録 + R-11 抑止宣言) を実装した。実装: Sonnet、独立レビュー: Opus (major 3 / minor 11 / nit 3、blocker 0)、全指摘反映済み。suite は 619 → 672 passed (新規 `r2db-api/tests/test_control_plane_service.py` 53 test、in-memory/Postgres 両 backend パラメトライズ。Postgres 側は `r2dbsvc_controlplane` 相当 DSN で実配線し 0006 GRANT 境界内で全操作が動くことを検証)。変異注入 9 本 (再照準 M3、虚偽宣言 M9 含む) 全て赤→復元→green。conformance / `test_postgres.py` は不変。
+
+### 12.1 アーキテクチャの具体化 (§3 の監督裁定)
+
+実配備の制御面プロセスには DataService が存在しないため、§3 の「ControlAuthority 委譲」を **backend ペア**として具体化した: `ControlPlaneService` (共有意味論 — 処理順序・認証・ゲート・limits・監査・宣言) の下に `InMemoryControlBackend` (重複操作は必ず ControlAuthority 経由 = 意味論一本化、in-process adapter/既存テスト互換) と `PostgresControlBackend` (WP-2 ストア群 + 新設 `PostgresApplicationRegistry`、DataService 不使用)。拒否とゲートの所在は service 層のみ (B-1 再発形なし — レビュー確認済み)。
+
+### 12.2 レビューが捕捉した主要欠陥と監督決定 (いずれも覆せる)
+
+- **MA-1 (実装者判断の却下)**: AUTH_REQUIRED (資格情報の不提示) を監査対象外にした初回判断を却下し、監査対象に追加。契約 `audit.emission` は authentication denial を筆頭に挙げ、最も安価な probe (ヘッダ無し) が耐久痕跡ゼロになる非対称は R-11 の検知信号を無効化する。なお **AUTH_STATE_UNAVAILABLE は監査対象外を承認** (sink が同一 DB のため不達時は必ず二重 503 連鎖になる。応答自体は既に fail-closed) — **WP-6 で CONTROL_MAPPING SI-14 行に rate limit の線引きと並べて明記すること** (条件付き承認)
+- **MA-2 (抑止宣言の2分割)**: 認証拒否の監査行が無帰属 (actor 不明) なのに応答が「実行 credential に帰属」と宣言する虚偽をレビューが実測。宣言を `_RECORDED_DECLARATION` (帰属を主張しない耐久記録宣言) と `_ATTRIBUTED_DECLARATION` に分割し、帰属宣言は監査行に actor_id が実在するときのみ。AUTH_REVOKED / disabled 拒否では store が特定済みの credential_id を **problem+json に決して届かない内部経路** (FoundationError の非 details 属性) で監査行にのみ帰属させる — R-11 playbook (侵害窓の差分列挙) が認証拒否側でも機能する。details 経由の存在区別漏れ (R-8/§8 m-7) は構造的に不可能な形
+- **MA-3**: 同一トランザクション監査の故障注入が 3 つの uow 系 (applications/credentials/control_credentials) のうち 1 つしか固定していなかった → 全系パラメトライズ + 変異 M3 の再照準で赤を実測
+- **監査 `role` の統一 (MI-6)**: audit event の `role` は**実行者のロール** (制御面 service 操作は常に "control"、CLI は None)。対象 credential のロールを書いていた issue_credential の実バグを是正。**対象識別子 (target_id) は契約 `audit.fields` に存在しない語彙ギャップ** — R-11 playbook の「窓中に発行/失効された credential の列挙」は現行 12 項目では実行不能。契約 additive 候補として §6 台帳に積む (下記 12.4)
+- **rate window は sliding で存置 (MI-7)**: 設計 R-7 の「固定窓で足りる」より厳格側 (メモリ有界) のため実装を承認し、乖離をコードコメントに記録
+- **その他**: in-memory の ControlAuthority 副次監査も rollback に参加 (「起きなかった allow」を残さない)、`control_plane.py` の psycopg 非依存 import (TYPE_CHECKING 化 + subprocess 回帰テスト)、503 文言の原因中立化、`events()` の 503 規律統一、負経路/形状/許可リスト網羅テストの追補
+
+### 12.3 変異注入 (検出力の実測)
+
+9 本全て赤: 拒否リスト化 (列挙漏れ) / role=control 拒否の後置 / 監査 INSERT の uow 外出し (credentials 系に再照準) / 拒否監査失敗の握り潰し / rate 判定の後置 / 失効 credential のカウント混入 / rate 拒否への虚偽 audited 付与 / must_rotate の list 露出 / 無帰属拒否への帰属宣言付与 (虚偽)。生存変異なし。
+
+### 12.4 台帳追加 (契約 additive 候補、§6 に接続)
+
+- **audit.fields への対象識別子 (target_id) の追加** (12.2 MI-6/MI-11): credential lifecycle イベントが対象 credential を識別できず、R-11 playbook の窓中差分列挙が audit 行だけでは完結しない。`ops.py` の既存イベントも同一のギャップ (WP-3 の退行ではない)
+
+### 12.5 WP-4/WP-5 への申し送り (レビューの予見を含む)
+
+- WP-4 (HTTP 層): `ControlPlaneService` の9メソッドは secret/引数 → 契約 schema dict / FoundationError の形でそのまま呼べる。HTTP 層は `details` を problem+json へ転写するだけ (抑止宣言は service 層で確定済み — 意味論を bind 層に持ち込まない)。`R2DB_CONTROL_LIMIT_*` の env 読み出しは composition root の仕事
+- WP-5 (conformance provided 化): (i) 既定 limits profile (100/10/60) では C-14 ベクタ5 の headroom 前提 (`rate > apps駆動 + creds駆動 + 64`) を満たさない — conformance build は例えば (20, 5, 200) を注入する。(ii) rate window はグローバルなので session-scoped adapter では他テストと窓を共有する — profile の rate を十分大きく取るか service を再構築する。(iii) port `deprovision_application` は service に対応物を作らない (controlplane role に DELETE が無い) — adapter は運用者特権経路 (in-process: DataService 内部状態 / Postgres: control DSN + `finish_deprovision_application`) で実装。(iv) port `control_audit_events()` は**耐久 sink** を読む (in-memory ControlAuthority の副次トレイルを代用しない。Postgres は control_audit に SELECT を持つ `r2dbsvc_control` 相当 DSN の別インスタンスが要る)。(v) capability document のキー形状は C-14 ベクタ5 の読み方と一致済み (無改修で通る見込み)
