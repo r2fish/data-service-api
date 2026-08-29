@@ -382,6 +382,39 @@ def test_r2_capability_artifact_matches_real_capabilities_response(service):
         assert not is_enabled(name), f"config/capabilities.json declares {name!r} unavailable, but capabilities() reports it enabled"
 
 
+def test_r2_capability_artifact_names_every_real_capability(service):
+    """R-9 (CCR-14 WP-5, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
+    §1): closes the write-forgot-to-update-artifact detection gap the
+    forward test above cannot catch on its own -- that test only ever walks
+    names the artifact ALREADY mentions, so a capability added to the real
+    `capabilities()` response without a matching artifact update goes
+    unnoticed forever (the same "book-keeping never gets forced to stay
+    honest" shape design's own C-12 reverse check already closes for a
+    different pair of documents). This is the reverse direction: every
+    capability name the real response actually carries must be named in the
+    artifact somewhere (`enabled` or `unavailable`) -- membership only, not
+    which bucket, since `test_r2_capability_artifact_matches_real_
+    capabilities_response` above already pins the correct bucket for every
+    name that test walks.
+    """
+    artifact = json.loads((Path(__file__).parents[1] / "config" / "capabilities.json").read_text())
+    declared = set(artifact["enabled"]) | set(artifact["unavailable"])
+    developer = service.authenticate("dev-secret-a")
+    response = service.capabilities(developer)
+    capabilities = response["capabilities"]
+
+    schema_ops = capabilities["schema_operations"]
+    real_schema_names = {f"schema.{op}" for op in schema_ops.get("operations", [])} | {f"schema.{op}" for op in schema_ops.get("unsupported", [])}
+    real_names = {name for name in capabilities if name != "schema_operations"} | real_schema_names
+
+    for name in sorted(real_names):
+        assert name in declared, (
+            f"capabilities() response names {name!r}, which config/capabilities.json does not mention in "
+            "either 'enabled' or 'unavailable' -- the artifact was not updated alongside a new/changed "
+            "capability (R-9's own reverse-lookup detection gap)"
+        )
+
+
 def test_capability_response_matches_common_capability_document_schema(service):
     contract = json.loads((Path(__file__).parents[2] / "spec" / "data-service-api.v1.json").read_text())
     schema = contract["schemas"]["CapabilityDocument"]

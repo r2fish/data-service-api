@@ -57,17 +57,17 @@ genuinely verified here, never accepted on an adapter's bare word:
   check without a real form-(b) peer to validate it against risks solving
   the wrong problem.
 
-As of this port revision (WP-1 of the CCR-14 design), all three registered
-adapters (`r2db-api` in-process, `r2db-api-http`, `MitateDB-api`) declare
-`control_plane: unavailable` and have no in-band entry point at all, so
-every test below takes the surface-absent branch, form (a), for every
-adapter -- see each adapter's own `_control_surface_absent` for the
-per-adapter evidence. The "provided" branch each test function also
-contains is real, executable verification code, not a stub: it becomes
-non-vacuous, and green, once a registered adapter's peer implements
-`/control/v1` and flips its declaration to `enabled` (design section 5,
-work package WP-5). Per this repository's "skip is fail" rule and design
-principle 4, no branch here is ever skipped.
+As of this port revision (WP-5 of the CCR-14 design, the declaration
+flip), `r2db-api` (in-process) and `r2db-api-http` both declare
+`control_plane: enabled` and take the PROVIDED branch for real -- see
+each adapter's own `control_capabilities`/`register_application_inband`/
+etc. implementations (`conformance_adapter_r2db.py`/
+`conformance_adapter_r2db_http.py`) for how each presents requests to its
+real `/control/v1`-equivalent surface. `MitateDB-api` remains
+surface-absent, form (a), for every test below -- see that adapter's own
+`_control_surface_absent` for its evidence. Per this repository's "skip is
+fail" rule and design principle 4, no branch here is ever skipped, for
+any adapter.
 
 `deprovision_application` (port v1.5 fix-round addition, the 14th
 abstract method, design independent-review supervisor ruling on blockers
@@ -103,7 +103,15 @@ pytestmark = pytest.mark.condition("C-14")
 # implementation differences that all satisfy "fail-closed" are not
 # penalized. NOT_FOUND and CAPABILITY_UNSUPPORTED are never acceptable
 # here -- see `_inband_endpoint_thunks`'s own docstring for why.
-_FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "FORBIDDEN"})
+#
+# WP-5 (design §13.3, measured against the real provided-branch peers):
+# `AUTH_REQUIRED` (no secret presented at all -- the empty-secret probe) is
+# ALSO a genuine fail-closed outcome on both r2db-api adapters, distinct
+# from `AUTH_INVALID` (a *wrong* secret) only in which store-level check
+# fired first. §8 m-7's own "401 系 fail-closed, code非固定" reasoning
+# already covers this: the common suite was under-broadened here, not the
+# implementations under-conforming -- widened to match, same principle.
+_FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED", "FORBIDDEN"})
 
 # design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md section 4's own
 # conformance-buildability requirement (also stated on `adapter.py`'s new
@@ -129,9 +137,11 @@ def _assert_is_contract_code(code: str) -> None:
 def _control_plane_status(adapter) -> str:
     """The peer's own declared `control_plane` capability status, read from
     its real, application-plane `capability_document()` -- never a value
-    this suite infers or caches. `service.py:139` (`r2db-api`) and
-    `cell.py:468` (`MitateDB-api`) are where each peer currently publishes
-    this; both currently declare `"unavailable"`.
+    this suite infers or caches. `service.py`'s `DataService.capabilities()`
+    (`r2db-api`, both adapters -- constructor-injected via `control_plane_
+    status`, WP-5 R-9) and `cell.py:468` (`MitateDB-api`) are where each
+    peer publishes this; as of WP-5 the two r2db-api adapters declare
+    `"enabled"` and `MitateDB-api` still declares `"unavailable"`.
 
     Raises an explicit, actionable `AssertionError` naming whichever key is
     missing rather than letting a bare `KeyError` propagate (design

@@ -5,7 +5,17 @@ from pathlib import Path
 def test_topology_has_all_planes_and_denies_application_escape():
     topology = AuthorityTopology()
     topology.validate()
-    assert set(PLANES) == {"application_data", "application_development", "application_identity", "control", "provisioning", "audit"}
+    # CCR-14 WP-5 (§13.3/§5 WP-5 row): `control_plane_http` is folded into
+    # `PLANES` itself now (the WP-4 freeze that kept this a 6-name strict
+    # set, deferring the 7th name to the additive-only `ALL_PLANES`, ends
+    # with this WP -- see topology.py's own comment). `can_reach`'s results
+    # for every one of the original 6 planes are unchanged by this --
+    # `test_control_plane_http_reaches_only_control_and_audit` below pins
+    # the 7th plane's own pairwise results exactly as WP-4 established them.
+    assert set(PLANES) == {
+        "application_data", "application_development", "application_identity",
+        "control", "provisioning", "audit", "control_plane_http",
+    }
     assert not topology.can_reach("application_data", "application_development")
     assert not topology.can_reach("application_data", "control")
     assert not topology.can_reach("application_data", "provisioning")
@@ -29,13 +39,15 @@ def test_deployment_skeleton_declares_denied_privileged_egress():
 # ---------------------------------------------------------------------------
 
 
-def test_control_plane_http_node_is_additive_not_in_planes():
-    # `PLANES` itself must stay exactly the pre-existing 6-name set (the
-    # first assertion of the very first test above depends on this by
-    # strict equality) -- the new node lives only in `ALL_PLANES`.
-    assert CONTROL_HTTP_PLANE_NAME not in PLANES
+def test_control_plane_http_node_is_consolidated_into_planes():
+    # CCR-14 WP-5: `control_plane_http` is now a full `PLANES` member (the
+    # WP-4-era "additive, not in PLANES" split is over -- see topology.py's
+    # own comment and the first test above). `ALL_PLANES` is kept only as a
+    # plain alias for backward compatibility, so the two names are, and
+    # stay, identical rather than one being a subset of the other.
+    assert CONTROL_HTTP_PLANE_NAME in PLANES
     assert CONTROL_HTTP_PLANE_NAME in ALL_PLANES
-    assert set(ALL_PLANES) == set(PLANES) | {CONTROL_HTTP_PLANE_NAME}
+    assert ALL_PLANES == PLANES
 
 
 def test_control_plane_http_reaches_only_control_and_audit():

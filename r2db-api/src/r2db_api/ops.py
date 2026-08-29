@@ -58,8 +58,10 @@ from typing import Any, NoReturn, Sequence
 import psycopg
 from psycopg import sql
 
+from .control_plane import bootstrap_control_credential, reset_control_credentials
 from .credential_store import (
     DEFAULT_SCHEMA,
+    PostgresControlAuditSink,
     PostgresControlCredentialStore,
     PostgresCredentialStore,
     validate_control_pepper_separation,
@@ -67,7 +69,12 @@ from .credential_store import (
 from .errors import FoundationError, fail
 
 _CREDENTIAL_ID_PREFIX = "crd_"
-_CONTROL_CREDENTIAL_ID_PREFIX = "ctl_"
+# WP-5 round-2 review NIT-2: the control-credential id prefix ("ctl_") now
+# has a single home -- `control_plane._new_control_credential_id()`, used
+# by the shared ceremony functions this module calls (`bootstrap_control_
+# credential`/`reset_control_credentials`) -- this module no longer mints
+# a control credential id itself, so it no longer needs its own copy of
+# that prefix constant.
 _ACTOR_TYPE = "operator_cli"
 
 # MA-3 (round-2 review): arbitrary, fixed 64-bit `pg_advisory_xact_lock` key
@@ -143,12 +150,26 @@ def _control_store() -> PostgresControlCredentialStore:
     return PostgresControlCredentialStore(dsn, pepper=control_pepper, schema=_schema())
 
 
+def _control_audit_sink() -> PostgresControlAuditSink:
+    """CCR-14 WP-5 (ceremony core extraction, work order §2): the bootstrap/
+    reset ritual now writes its canonical audit event through the same
+    `PostgresControlAuditSink.append(..., work=...)` call surface
+    `ControlPlaneService`/the WP-5 in-process conformance adapter use,
+    instead of this module's own hand-rolled `_write_control_audit` SQL --
+    `bootstrap_control_credential`/`reset_control_credentials`
+    (`control_plane.py`) are the single, shared product-code implementation
+    of the ritual now; this module supplies the Postgres stores it needs.
+    `pool_size=1` -- this sink's own connection pool is never actually used
+    by the ritual's own `append(..., work=...)` call (it executes on the
+    caller's already-open `work.connection`, see that method's own
+    docstring), so a one-connection pool is enough to satisfy construction
+    without holding idle connections a one-shot CLI invocation has no use
+    for."""
+    return PostgresControlAuditSink(_control_dsn(), schema=_schema(), pool_size=1)
+
+
 def _new_credential_id() -> str:
     return _CREDENTIAL_ID_PREFIX + secrets.token_hex(8)
-
-
-def _new_control_credential_id() -> str:
-    return _CONTROL_CREDENTIAL_ID_PREFIX + secrets.token_hex(8)
 
 
 def _new_secret() -> str:
@@ -463,25 +484,26 @@ def cmd_bootstrap(_args: argparse.Namespace) -> int:
     standalone `has_any()` call, then a *separate* transaction for the
     `add`, with nothing serializing two concurrent `bootstrap` invocations
     against each other in between).
+
+    CCR-14 WP-5 (§2, ceremony core extraction): the existence check, the
+    issuance, and the canonical audit write are no longer hand-rolled here
+    -- `bootstrap_control_credential` (`control_plane.py`) is the same
+    reusable product-code ceremony the WP-5 in-process conformance adapter
+    calls against its own in-memory store. This CLI's job, unchanged, is
+    supplying the Postgres store/audit sink and the advisory lock
+    (Postgres-only serialization, never part of the shared ceremony
+    function itself); external behaviour, audit row shape, and exit codes
+    are unchanged (evidenced by this file's own pre-existing green tests).
     """
     store = _control_store()
+    audit = _control_audit_sink()
     try:
-        credential_id = _new_control_credential_id()
-        secret = _new_secret()
         with store.unit_of_work() as work:
             _lock_ritual(work.connection)
-            if store.has_any(include_revoked=True, work=work):
-                fail("CONFLICT", "a control credential already exists; bootstrap runs at most once -- use `reset` to recover", status=409)
-            store.add(credential_id, secret, work=work)
-            _write_control_audit(
-                work.connection,
-                event_class="control_credential_lifecycle",
-                operation="bootstrap_control_credential",
-                outcome="allow",
-                target_kind="control_credential",
-            )
+            credential_id, secret = bootstrap_control_credential(store, audit, work=work)
     finally:
         store.close()
+        audit.close()
     _print_issued(credential_id, secret)
     print("must_rotate: true -- this credential must be rotated before it can do anything besides GET /control/v1/capabilities and rotate itself")
     return 0
@@ -501,24 +523,21 @@ def cmd_reset(_args: argparse.Namespace) -> int:
     `bootstrap` (same key) -- serializing `reset` against a concurrent
     `bootstrap` (or another concurrent `reset`) on the same platform
     database, so the two rituals can never interleave.
+
+    CCR-14 WP-5 (§2, ceremony core extraction): see `cmd_bootstrap`'s
+    identical note -- `reset_control_credentials` (`control_plane.py`) is
+    the shared product-code ceremony; this CLI supplies the Postgres store/
+    audit sink and the advisory lock.
     """
     store = _control_store()
+    audit = _control_audit_sink()
     try:
-        credential_id = _new_control_credential_id()
-        secret = _new_secret()
         with store.unit_of_work() as work:
             _lock_ritual(work.connection)
-            store.revoke_all(work=work)
-            store.add(credential_id, secret, work=work)
-            _write_control_audit(
-                work.connection,
-                event_class="control_credential_lifecycle",
-                operation="reset_control_credentials",
-                outcome="allow",
-                target_kind="control_credential",
-            )
+            credential_id, secret = reset_control_credentials(store, audit, work=work)
     finally:
         store.close()
+        audit.close()
     _print_issued(credential_id, secret)
     print("must_rotate: true -- this credential must be rotated before it can do anything besides GET /control/v1/capabilities and rotate itself")
     return 0

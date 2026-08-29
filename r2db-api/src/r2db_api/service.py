@@ -70,7 +70,26 @@ class MutationResult:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable") -> None:
+        # R-9 (CCR-14 WP-5, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
+        # §1: "capability 申告は環境変数由来で composition root 注入"):
+        # whether this application-plane process' own `capabilities()`
+        # declares `control_plane: enabled` is a *deployer* fact this class
+        # cannot know on its own (a separated `/control/v1` deployment, the
+        # default, means the application-plane process has no idea whether a
+        # control-plane process is running anywhere at all) -- it is
+        # constructor-injected, defaulting to the safe, honest `unavailable`
+        # so nothing short of an explicit composition-root decision
+        # (`main.py`, reading `R2DB_CONTROL_PLANE_STATUS`) ever declares
+        # `enabled`. Validated here too (not only at `main.py`'s env-parsing
+        # boundary) so any other caller constructing a `DataService` directly
+        # (this repository's own tests, the WP-5 in-process conformance
+        # adapter) gets the same fail-loud guard against a typo'd status
+        # string, rather than silently publishing an invalid capability
+        # value.
+        if control_plane_status not in {"enabled", "unavailable"}:
+            raise ValueError("control_plane_status must be 'enabled' or 'unavailable'")
+        self._control_plane_status = control_plane_status
         self._credentials = credentials
         self.limits = limits or ResourceLimits()
         self.topology = topology or AuthorityTopology()
@@ -136,7 +155,10 @@ class DataService:
                     # judgment is implemented). Both remain `unavailable`:
                     # neither has any executable operation at all.
                     "cross_entity_mutation": {"status": "unavailable"},
-                    "control_plane": {"status": "unavailable"}
+                    # R-9: reflects this instance's own constructor-injected
+                    # deployer declaration -- never hardcoded (see __init__'s
+                    # comment on this field).
+                    "control_plane": {"status": self._control_plane_status}
                 },
                 "limits": self.limits.as_dict(),
                 "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},

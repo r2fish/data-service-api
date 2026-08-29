@@ -1503,3 +1503,29 @@ designed against no real example now.
 the strengthened M-7 helper) and exact pass counts are in this work's
 implementation report (`WP1_IMPLEMENTATION_REPORT.md`), fix-round
 section.
+
+### 15.10 WP-5: the flip -- `r2db-api` (both plugs) leave §15.4's uniform `SurfaceAbsent` branch
+
+`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` work package WP-5 (the
+single-commit declaration flip) lands the actual `/control/v1` product
+code (`control_plane.py`/`control_http.py`/`control_main.py`, WP-2
+through WP-4) and, in the same commit, both `r2db-api` plugs' own
+`control_plane` declaration flips to `enabled`. §15.4's "all three plugs:
+uniformly `SurfaceAbsent`" is therefore no longer the current state for
+two of the three registered adapters -- current adapter x phase state:
+
+| plug | branch as of WP-5 |
+|---|---|
+| `r2db-api` (in-process) | **provided** -- `ControlPlaneService` + `InMemoryControlBackend`, constructed directly on the plug's own `DataService`/`ControlAuthority`/`CredentialStore` (§15.2's own abstract-method group is now real service calls, not `_control_surface_absent`) |
+| `r2db-api-http` | **provided** -- a real `/control/v1` ASGI app driven by real HTTP (`httpx`/`ASGITransport`), `bootstrap`/`reset` run as the real `python -m r2db_api.ops` CLI subprocess. Assembled via the shared product assembler `r2db_api.control_main.assemble_control_stack` (round-2 review MINOR-3 -- the same assembly core `build_control_app` itself calls) rather than calling `build_control_app` itself, so this adapter can hold a closeable handle back to the 4 Postgres stores it needs to periodically rebuild `ControlPlaneService` and avoid exhausting `r2dbsvc_controlplane`'s real `CONNECTION LIMIT 10` (§13.3's own anticipated "session-scoped adapter shares one R-7 window with everything else" concern, measured this WP against real ordinary fixture-building traffic once C-08's own operations moved in-band too); this adapter's remaining departure from `build_control_app` is only that it does not drive ASGI lifespan (it closes the 4 stores directly instead) |
+| `MitateDB-api` | unchanged -- still `SurfaceAbsent` (§15.4 applies to this plug only, as of WP-5) |
+
+§15.4's own per-plug evidence description (the shared `_control_surface_
+absent` helper, `public_operation_callables()` as signature evidence, the
+HTTP plug's live-route-table assertion) is retired for the two flipped
+plugs along with the helper itself -- `MitateDB-api`'s own §15.4 entry is
+unaffected and remains the accurate description of that plug's real
+surface. Full implementation detail, the provided-branch defects WP-1's
+static-review-only gate could not catch until first execution, and the
+mutation-injection re-verification for this WP are in
+`WP5_IMPLEMENTATION_REPORT.md`.

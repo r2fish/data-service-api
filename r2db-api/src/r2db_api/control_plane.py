@@ -140,6 +140,10 @@ def _new_credential_id() -> str:
     return "crd_" + secrets.token_hex(8)
 
 
+def _new_control_credential_id() -> str:
+    return "ctl_" + secrets.token_hex(8)
+
+
 def _new_secret() -> str:
     return secrets.token_urlsafe(32)
 
@@ -917,9 +921,99 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+# ===========================================================================
+# Ceremony core (CCR-14 WP-5, design §5 WP-5 row / §2 item 2 of the work
+# order): the bootstrap/reset ritual's actual decision logic (existence
+# check, atomic revoke-all+add, same-transaction canonical audit), extracted
+# out of `ops.py` into real, reusable product code. Two callers share this
+# exact code, never two independent reimplementations of "what does
+# bootstrap/reset mean": `ops.py cmd_bootstrap`/`cmd_reset` (Postgres store,
+# wrapped in `_lock_ritual`'s advisory lock -- the Postgres-only
+# serialization guard the work order requires) and the WP-5 in-process
+# conformance adapter (in-memory store, no lock -- a single adapter instance
+# has no concurrent daemons to serialize against, design §5 item 2: "advisory
+# lock は Postgres 経路のみ").
+#
+# `control_credentials`/`audit` are duck-typed against the exact call
+# surfaces `ControlCredentialStore`/`PostgresControlCredentialStore`
+# (`has_any`/`add`/`revoke_all`) and `ControlAuditSink`/
+# `PostgresControlAuditSink` (`append(..., work=...)`) already share --
+# these two functions work unmodified against either backend pairing, same
+# as `ControlBackend`/`ControlPlaneService` above never branch on which
+# concrete store they were given.
+# ===========================================================================
+
+
+def bootstrap_control_credential(
+    control_credentials: Any,
+    audit: Any,
+    *,
+    work: Any,
+    credential_id: str | None = None,
+    secret: str | None = None,
+    request_id: str | None = None,
+    actor_type: str = "operator_cli",
+) -> tuple[str, str]:
+    """R-5 bootstrap ceremony core. Refuses (`CONFLICT`) when *any*
+    control-credential row exists, including a fully-revoked one (§8 M-6:
+    the contract's own text is "while a control credential exists", not
+    "while an unrevoked one exists"). Issues one credential and writes the
+    canonical `bootstrap_control_credential` audit event inside the same
+    `work` transaction the caller already opened -- a fault in `audit.
+    append` therefore aborts the issuance too (fail-closed by construction,
+    R-6's "同一トランザクション" guarantee), through the caller's own
+    enclosing `unit_of_work()` rollback, not through any handling here.
+
+    Returns `(credential_id, secret)`. `credential_id`/`secret` may be
+    supplied by the caller (parity/replay tests); by default both are
+    freshly generated.
+    """
+    credential_id = credential_id or _new_control_credential_id()
+    secret = secret or _new_secret()
+    if control_credentials.has_any(include_revoked=True, work=work):
+        fail("CONFLICT", "a control credential already exists; bootstrap runs at most once -- use `reset` to recover", status=409)
+    control_credentials.add(credential_id, secret, work=work)
+    audit.append(
+        event_class="control_credential_lifecycle", request_id=request_id or _uuid(), application_id=None,
+        actor_type=actor_type, actor_id=None, role=None, operation="bootstrap_control_credential",
+        target_kind="control_credential", outcome="allow", reason_code=None, work=work,
+    )
+    return credential_id, secret
+
+
+def reset_control_credentials(
+    control_credentials: Any,
+    audit: Any,
+    *,
+    work: Any,
+    credential_id: str | None = None,
+    secret: str | None = None,
+    request_id: str | None = None,
+    actor_type: str = "operator_cli",
+) -> tuple[str, str]:
+    """R-5 reset ceremony core -- see `bootstrap_control_credential`'s
+    docstring immediately above for the shared-code rationale. Revokes
+    every existing control credential and issues one new one, both inside
+    the same `work` transaction (R-5/§7 "reset の原子性": no fault-injected
+    or crashed moment can ever leave the old credentials revoked but no new
+    one minted, or vice versa)."""
+    credential_id = credential_id or _new_control_credential_id()
+    secret = secret or _new_secret()
+    control_credentials.revoke_all(work=work)
+    control_credentials.add(credential_id, secret, work=work)
+    audit.append(
+        event_class="control_credential_lifecycle", request_id=request_id or _uuid(), application_id=None,
+        actor_type=actor_type, actor_id=None, role=None, operation="reset_control_credentials",
+        target_kind="control_credential", outcome="allow", reason_code=None, work=work,
+    )
+    return credential_id, secret
+
+
 __all__ = [
     "ControlBackend",
     "ControlPlaneService",
     "InMemoryControlBackend",
     "PostgresControlBackend",
+    "bootstrap_control_credential",
+    "reset_control_credentials",
 ]

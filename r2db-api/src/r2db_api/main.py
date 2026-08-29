@@ -43,6 +43,30 @@ Environment variable contract (P2-D5):
                                           the literal name
                                           `0005_credential_store.sql`
                                           actually creates.
+    R2DB_CONTROL_PLANE_STATUS            optional, default `unavailable`
+                                          (CCR-14 WP-5, R-9) -- the deployer's
+                                          own declaration of whether a
+                                          `/control/v1` control-plane process
+                                          (`r2db_api.control_main`) is running
+                                          alongside this application-plane
+                                          process at all. Allowed values are
+                                          exactly `enabled`/`unavailable`; any
+                                          other value (including a silently
+                                          mistyped one) is a startup failure,
+                                          never a silent fallback to
+                                          `unavailable` -- see
+                                          `_control_plane_status` below. Set
+                                          this to `enabled` only when
+                                          `control_main` is genuinely
+                                          deployed reachably; this process
+                                          cannot verify that fact on its own
+                                          (R-9's own architecture note: a
+                                          separated deployment's own
+                                          `/control/v1` `GET .../capabilities`
+                                          is the actual authority for whether
+                                          a control plane is reachable, this
+                                          declaration is only ever the
+                                          deployer's stated intent).
 
 Startup failure policy (P2-D5): missing configuration, an application slug
 named in `R2DB_SERVE_APPS` that is not registered in the platform registry,
@@ -66,6 +90,28 @@ from .postgres import PostgresCell, default_pool_manager
 from .service import ControlAuthority, DataService
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
+
+# R-9 (CCR-14 WP-5): the only two values `DataService.__init__`'s own
+# `control_plane_status` parameter accepts -- kept in sync deliberately
+# (service.py's constructor validates independently too, so a caller other
+# than this composition root gets the identical guard).
+_VALID_CONTROL_PLANE_STATUSES = {"enabled", "unavailable"}
+
+
+def _control_plane_status(env: Mapping[str, str]) -> str:
+    """Reads `R2DB_CONTROL_PLANE_STATUS` (default `unavailable`) and fails
+    loudly (`RuntimeError`, P2-D5's "uzurusaku ochiru" startup-failure
+    policy) on anything other than the two allowed values -- deliberately
+    NOT a silent round-down to `unavailable` on an invalid value: a deployer
+    who mistyped this variable must find out at startup, not have their
+    typo quietly become the safe default while believing they configured
+    something else."""
+    value = env.get("R2DB_CONTROL_PLANE_STATUS") or "unavailable"
+    if value not in _VALID_CONTROL_PLANE_STATUSES:
+        raise RuntimeError(
+            f"R2DB_CONTROL_PLANE_STATUS must be one of {sorted(_VALID_CONTROL_PLANE_STATUSES)!r}, got {value!r}"
+        )
+    return value
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -155,6 +201,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     platform_dsn = _require(env, "R2DB_PLATFORM_DSN")
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     slugs = _parse_served_apps(_require(env, "R2DB_SERVE_APPS"))
+    control_plane_status = _control_plane_status(env)
 
     app_dsns: dict[str, tuple[str, str]] = {}
     for slug in slugs:
@@ -213,7 +260,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             developer_role=row["developer_role"],
         )
 
-    service = DataService(credentials, cell_factory=_cell_factory)
+    service = DataService(credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status)
     control = ControlAuthority(service)
     for slug in slugs:
         control.register_application(slug)

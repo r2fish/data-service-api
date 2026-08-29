@@ -1184,6 +1184,63 @@ def test_build_app_registered_only_slug_raises(platform: types.SimpleNamespace, 
         main_module.build_app(env=env)
 
 
+def test_build_app_invalid_control_plane_status_raises(platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType) -> None:
+    """CCR-14 WP-5, R-9: `R2DB_CONTROL_PLANE_STATUS` must fail startup
+    loudly on a value other than exactly `enabled`/`unavailable` -- never
+    silently degrade a typo into the safe default (M6's own mutation target:
+    a "silently round unknown values down to unavailable" mutation must
+    turn this test red)."""
+    env = _main_env(platform, provisioned_app)
+    env["R2DB_CONTROL_PLANE_STATUS"] = "ENABLED"
+    with pytest.raises(RuntimeError, match="R2DB_CONTROL_PLANE_STATUS"):
+        main_module.build_app(env=env)
+
+
+def test_build_app_default_control_plane_status_is_unavailable(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType
+) -> None:
+    """R-9: omitting `R2DB_CONTROL_PLANE_STATUS` entirely must default to
+    `unavailable`, not `enabled` -- the single-commit rule's safe default."""
+    writer = _write_store(platform)
+    try:
+        credential_id = "crd_" + secrets.token_hex(8)
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, provisioned_app.slug, "runtime", "s3cret-default-status", work=work)
+    finally:
+        writer.close()
+
+    env = _main_env(platform, provisioned_app)
+    assert "R2DB_CONTROL_PLANE_STATUS" not in env
+    asgi_app = main_module.build_app(env=env)
+    with TestClient(asgi_app) as client:
+        response = client.get("/v1/capabilities", headers={"authorization": "Bearer s3cret-default-status"})
+        assert response.status_code == 200
+        assert response.json()["capabilities"]["control_plane"] == {"status": "unavailable"}
+
+
+def test_build_app_control_plane_status_enabled_is_declared(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType
+) -> None:
+    """R-9: setting `R2DB_CONTROL_PLANE_STATUS=enabled` is reflected
+    verbatim in the real `capabilities()` response -- the deployer's own
+    declaration, not a value this composition root invents."""
+    writer = _write_store(platform)
+    try:
+        credential_id = "crd_" + secrets.token_hex(8)
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, provisioned_app.slug, "runtime", "s3cret-enabled-status", work=work)
+    finally:
+        writer.close()
+
+    env = _main_env(platform, provisioned_app)
+    env["R2DB_CONTROL_PLANE_STATUS"] = "enabled"
+    asgi_app = main_module.build_app(env=env)
+    with TestClient(asgi_app) as client:
+        response = client.get("/v1/capabilities", headers={"authorization": "Bearer s3cret-enabled-status"})
+        assert response.status_code == 200
+        assert response.json()["capabilities"]["control_plane"] == {"status": "enabled"}
+
+
 def test_import_r2db_api_main_module_succeeds_with_valid_environment(
     platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace
 ) -> None:
