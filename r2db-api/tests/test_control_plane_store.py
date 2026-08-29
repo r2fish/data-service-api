@@ -37,12 +37,15 @@ now opens `unit_of_work()` explicitly and passes the handle through. The
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
 import subprocess
 import sys
 import types
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -1473,3 +1476,256 @@ def test_cli_disable_app_writes_control_audit_row(platform: types.SimpleNamespac
 
     # Restore for hygiene (other tests may share this platform's registry).
     _run_cli(platform, "enable-app", slug)
+
+
+# ===========================================================================
+# Section G: `audit-report` (R-11 compromise/misuse playbook helper) --
+# work order §C ("audit-report の仕様確定" / "テスト + 変異注入").
+# ===========================================================================
+
+
+def _insert_control_audit_row(
+    platform: types.SimpleNamespace,
+    *,
+    occurred_at: datetime,
+    operation: str,
+    event_class: str = "control_credential_lifecycle",
+    outcome: str = "allow",
+    application_id: str | None = None,
+    actor_type: str = "operator_cli",
+    actor_id: str | None = None,
+    role: str | None = None,
+    target_kind: str | None = None,
+    reason_code: str | None = None,
+    event_id: str | None = None,
+) -> str:
+    """Inserts one `control_audit` row directly (as `r2dbsvc_control`, this
+    schema's owner -- full DML), with an explicit, caller-chosen
+    `occurred_at` -- unlike the real ritual/CLI/service code (which always
+    stamps `occurred_at = now()`), `audit-report`'s own boundary/ordering
+    behaviour needs precise, deterministic timestamps, not real wall-clock
+    delay. Returns the `event_id` (string) so callers can assert exactly
+    which rows a report line corresponds to. `event_id` may be supplied by
+    the caller (WP-6 review MI-3: the `event_id` ASC tiebreaker test needs
+    to control which of two identical-`occurred_at` rows sorts first,
+    independent of uuid4's own randomness) -- defaults to a fresh `uuid4()`
+    when omitted, as before."""
+    event_id = event_id or str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
+    statement = sql.SQL(
+        "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
+        "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    ).format(table=sql.Identifier(platform.schema, "control_audit"))
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                statement,
+                [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code],
+            )
+        conn.commit()
+    return event_id
+
+
+def _run_audit_report(platform: types.SimpleNamespace, since: str, until: str | None = None) -> subprocess.CompletedProcess:
+    args = ["audit-report", "--since", since]
+    if until is not None:
+        args += ["--until", until]
+    return _run_cli(platform, *args)
+
+
+def _parse_jsonl(stdout: str) -> list[dict]:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    return [json.loads(line) for line in lines]
+
+
+def _synthetic_window() -> datetime:
+    """A random base timestamp decades in the past, so each test's own
+    synthetic `control_audit` rows never collide -- inside the narrow
+    `--since`/`--until` bound that test asserts against -- with another
+    test's rows (this module's other sections write real `now()`-stamped
+    rows throughout a full test run; sibling tests in this section each
+    pick their own random base too)."""
+    base = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    return base + timedelta(seconds=secrets.randbelow(200_000_000))
+
+
+def test_audit_report_filters_since_and_until_inclusive_boundaries(platform: types.SimpleNamespace) -> None:
+    t0 = _synthetic_window()
+    before = t0 - timedelta(seconds=1)
+    at_since = t0
+    middle = t0 + timedelta(seconds=30)
+    at_until = t0 + timedelta(seconds=60)
+    after = t0 + timedelta(seconds=61)
+
+    marker = "arb" + secrets.token_hex(4)
+    id_before = _insert_control_audit_row(platform, occurred_at=before, operation=marker)
+    id_since = _insert_control_audit_row(platform, occurred_at=at_since, operation=marker)
+    id_middle = _insert_control_audit_row(platform, occurred_at=middle, operation=marker)
+    id_until = _insert_control_audit_row(platform, occurred_at=at_until, operation=marker)
+    id_after = _insert_control_audit_row(platform, occurred_at=after, operation=marker)
+
+    result = _run_audit_report(platform, at_since.isoformat(), at_until.isoformat())
+    assert result.returncode == 0, result.stderr
+    own = [r for r in _parse_jsonl(result.stdout) if r["operation"] == marker]
+    ids = [r["event_id"] for r in own]
+
+    # Inclusive on both ends ("in [--since, --until]"): `before`/`after` are
+    # excluded, `at_since`/`middle`/`at_until` are included.
+    assert id_before not in ids
+    assert id_after not in ids
+    assert ids == [id_since, id_middle, id_until]
+
+
+def test_audit_report_orders_ascending_by_occurred_at_regardless_of_insertion_order(platform: types.SimpleNamespace) -> None:
+    t0 = _synthetic_window()
+    marker = "aro" + secrets.token_hex(4)
+    # Insert deliberately out of chronological order.
+    id_late = _insert_control_audit_row(platform, occurred_at=t0 + timedelta(seconds=20), operation=marker)
+    id_early = _insert_control_audit_row(platform, occurred_at=t0, operation=marker)
+    id_mid = _insert_control_audit_row(platform, occurred_at=t0 + timedelta(seconds=10), operation=marker)
+
+    result = _run_audit_report(platform, t0.isoformat(), (t0 + timedelta(seconds=25)).isoformat())
+    assert result.returncode == 0, result.stderr
+    own = [r for r in _parse_jsonl(result.stdout) if r["operation"] == marker]
+    assert [r["event_id"] for r in own] == [id_early, id_mid, id_late]
+
+
+def test_audit_report_emits_one_json_object_per_line_with_contract_fields(platform: types.SimpleNamespace) -> None:
+    t0 = _synthetic_window()
+    marker = "arf" + secrets.token_hex(4)
+    slug = _fresh_slug("ar")
+    event_id = _insert_control_audit_row(
+        platform, occurred_at=t0, operation=marker, event_class="application_lifecycle",
+        application_id=slug, target_kind="application", outcome="allow",
+    )
+    result = _run_audit_report(platform, t0.isoformat(), t0.isoformat())
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    own_lines = [line for line in lines if marker in line]
+    # One JSON object per line (JSON Lines) -- never a single wrapping array.
+    assert len(own_lines) == 1
+    assert not own_lines[0].lstrip().startswith("[")
+    record = json.loads(own_lines[0])
+    assert record["event_id"] == event_id
+    assert record["event_class"] == "application_lifecycle"
+    assert record["application_id"] == slug
+    assert record["operation"] == marker
+    assert record["outcome"] == "allow"
+    assert record["target_kind"] == "application"
+    # Both timestamps present and ISO-8601-parseable -- `recorded_at` (the
+    # table's own DB-side insertion time) is distinct from `occurred_at` and
+    # both round-trip through this report.
+    datetime.fromisoformat(record["occurred_at"])
+    datetime.fromisoformat(record["recorded_at"])
+
+
+def test_audit_report_omitted_until_has_no_upper_bound(platform: types.SimpleNamespace) -> None:
+    t0 = _synthetic_window()
+    marker = "aru" + secrets.token_hex(4)
+    id_a = _insert_control_audit_row(platform, occurred_at=t0, operation=marker)
+    id_far = _insert_control_audit_row(platform, occurred_at=t0 + timedelta(days=3650), operation=marker)
+
+    result = _run_audit_report(platform, t0.isoformat())
+    assert result.returncode == 0, result.stderr
+    own = [r for r in _parse_jsonl(result.stdout) if r["operation"] == marker]
+    ids = {r["event_id"] for r in own}
+    assert {id_a, id_far} <= ids
+
+
+def test_audit_report_rejects_until_before_since(platform: types.SimpleNamespace) -> None:
+    t0 = _synthetic_window()
+    result = _run_audit_report(platform, t0.isoformat(), (t0 - timedelta(seconds=1)).isoformat())
+    assert result.returncode != 0
+    assert "--until" in (result.stderr or "")
+
+
+def test_audit_report_requires_since() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "r2db_api.ops", "audit-report"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(SRC_DIR)},
+    )
+    assert result.returncode != 0
+    assert "--since" in (result.stderr or "")
+
+
+def test_audit_report_rejects_non_iso8601_since() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "r2db_api.ops", "audit-report", "--since", "not-a-timestamp"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(SRC_DIR)},
+    )
+    assert result.returncode != 0
+    assert "--since" in (result.stderr or "")
+
+
+def test_audit_report_ties_break_by_event_id_ascending(platform: types.SimpleNamespace) -> None:
+    """WP-6 review MI-3(a): two rows sharing the exact same `occurred_at`
+    must sort by `event_id` ascending (matching `PostgresControlAuditSink.
+    events()`'s own tiebreaker), never by insertion order. Deliberately
+    inserts the lexicographically-larger id FIRST -- a "drop the tiebreaker,
+    keep only `ORDER BY occurred_at`" mutation degrades to a plan-dependent
+    order (typically insertion/physical order for a plain heap scan on a
+    small table), which disagrees with ascending `event_id` exactly because
+    of this insertion order."""
+    t0 = _synthetic_window()
+    marker = "att" + secrets.token_hex(4)
+    id_high = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+    id_low = "00000000-0000-4000-8000-000000000001"
+    inserted_high = _insert_control_audit_row(platform, occurred_at=t0, operation=marker, event_id=id_high)
+    inserted_low = _insert_control_audit_row(platform, occurred_at=t0, operation=marker, event_id=id_low)
+    assert (inserted_high, inserted_low) == (id_high, id_low)
+
+    result = _run_audit_report(platform, t0.isoformat(), t0.isoformat())
+    assert result.returncode == 0, result.stderr
+    own = [r for r in _parse_jsonl(result.stdout) if r["operation"] == marker]
+    assert [r["event_id"] for r in own] == [id_low, id_high]
+
+
+def test_audit_report_naive_since_is_interpreted_as_utc(platform: types.SimpleNamespace) -> None:
+    """WP-6 review MI-3(b): a `--since` with no timezone offset/`Z` suffix
+    must be treated as UTC, not left for PostgreSQL to interpret against the
+    session's own default `TimeZone` -- this local test cluster's default
+    session TimeZone is `Asia/Tokyo` (UTC+9, confirmed via `SHOW TimeZone`),
+    so a client-side bug that stopped forcing a naive value to UTC before
+    binding it would send an untyped/naive parameter that PostgreSQL then
+    casts to `timestamptz` using that +9 offset -- shifting the effective
+    boundary 9 hours away from the intended instant, decisively wrong for
+    this test's own once-per-second-scale rows near `t0`."""
+    t0 = _synthetic_window()
+    marker = "atz" + secrets.token_hex(4)
+    id_since = _insert_control_audit_row(platform, occurred_at=t0, operation=marker)
+    id_before = _insert_control_audit_row(platform, occurred_at=t0 - timedelta(seconds=1), operation=marker)
+
+    naive_since = t0.replace(tzinfo=None).isoformat()
+    assert "+" not in naive_since and "Z" not in naive_since and "-0" not in naive_since[-6:]
+
+    result = _run_audit_report(platform, naive_since)
+    assert result.returncode == 0, result.stderr
+    own = [r for r in _parse_jsonl(result.stdout) if r["operation"] == marker]
+    ids = {r["event_id"] for r in own}
+    assert id_since in ids
+    assert id_before not in ids
+
+
+def test_audit_report_does_not_modify_control_audit(platform: types.SimpleNamespace) -> None:
+    """WP-6 review MI-3(c): `audit-report` is read-only -- a row count taken
+    immediately before and after running it must be identical."""
+
+    def _count() -> int:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("SELECT count(*) FROM {table}").format(table=sql.Identifier(platform.schema, "control_audit")))
+                return cur.fetchone()[0]
+
+    t0 = _synthetic_window()
+    marker = "aro2" + secrets.token_hex(4)
+    _insert_control_audit_row(platform, occurred_at=t0, operation=marker)
+    before = _count()
+    result = _run_audit_report(platform, t0.isoformat())
+    assert result.returncode == 0, result.stderr
+    after = _count()
+    assert after == before, "audit-report must not write any control_audit row (read-only)"

@@ -957,7 +957,16 @@ def test_cli_missing_control_dsn_fails_loudly() -> None:
     assert "R2DB_CONTROL_DSN" in result.stderr
 
 
-def test_cli_help_mentions_ccr14_provisional_status() -> None:
+def test_cli_help_declares_ritual_and_break_glass() -> None:
+    """CCR-14 WP-6 (design R-10, D-4): the CLI's `--help` no longer describes
+    itself as a stand-in pending CCR-14's disposition -- CCR-14 is resolved
+    (spec/CCR_DISPOSITION.md) and the canonical in-band surface (`/control/v1`)
+    exists. This asserts the current re-definition text directly: the CLI
+    names itself as the bootstrap/reset *ritual* (the only control-credential
+    issuance path) plus operator *break-glass* recovery, still under the
+    "CCR-14" heading (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-10) --
+    not merely "some string called CCR-14 is present somewhere".
+    """
     result = subprocess.run(
         [sys.executable, "-m", "r2db_api.ops", "--help"],
         capture_output=True,
@@ -966,6 +975,8 @@ def test_cli_help_mentions_ccr14_provisional_status() -> None:
     )
     assert result.returncode == 0
     assert "CCR-14" in result.stdout
+    assert "ritual" in result.stdout
+    assert "break-glass" in result.stdout
 
 
 # ---------------------------------------------------------------------------

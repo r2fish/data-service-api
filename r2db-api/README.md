@@ -52,24 +52,58 @@ versus what remains unevidenced.
   loaded at import time as the single source of request shapes; a
   byte-identical packaged copy ships with the distribution so a checkout
   without the sibling `spec/` tree still imports.
-- **`migrations/`** (`0001_bootstrap_control_plane.sql`,
-  `0002_provisioning_functions.sql`): schema-per-application, two dedicated
-  PostgreSQL roles per application (`runtime`: DML only; `developer`: DDL
-  within its own schema only), and row-level security as a defence-in-depth
-  layer under both. A separately-bootstrapped control role
+- **`migrations/`** (`0001_bootstrap_control_plane.sql` through
+  `0006_control_plane_http.sql`): schema-per-application (database-per-
+  application, see the provisioning runbook §0), two dedicated PostgreSQL
+  roles per application (`runtime`: DML only; `developer`: DDL within its
+  own schema only), and row-level security as a defence-in-depth layer
+  under both. A separately-bootstrapped control role
   (`NOSUPERUSER`/`NOCREATEDB`) performs provisioning; the API process never
-  holds that credential. `docs/POSTGRES_PROVISIONING_RUNBOOK.md` is the
-  operator runbook. Provisioning is always run by an operator against a
-  real PostgreSQL server -- **never by the API process** -- and always
-  targets a footprint namespaced separately from the existing VPS
-  deployment.
+  holds that credential. `0006` additionally lays down the control-plane
+  HTTP surface's own storage -- `control_credentials`/`control_audit` and
+  the least-privilege `r2dbsvc_controlplane` role (see the control-plane
+  bullet below). `docs/POSTGRES_PROVISIONING_RUNBOOK.md` is the operator
+  runbook. Provisioning is always run by an operator against a real
+  PostgreSQL server -- **never by the API process** -- and always targets a
+  footprint namespaced separately from the existing VPS deployment.
+- **A control-plane HTTP surface, `/control/v1`** (CCR-14,
+  `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`): 11 endpoints
+  (`capabilities`, application register/list/enable/disable, credential
+  issue/list/rotate/revoke/disable/enable) served by a distinct ASGI app
+  (`src/r2db_api/control_http.py`, assembled by `src/r2db_api/control_main.py`)
+  with its own credential type (`role=control`, a dedicated verifier table
+  and HMAC pepper -- structurally unable to coexist with an application
+  credential in either direction), its own least-privilege DB role
+  (`r2dbsvc_controlplane`), and its own durable audit sink
+  (`control_audit`, contract `audit.fields`' full 12 columns, state changes
+  and denials alike written in the same transaction as the change they
+  describe). A `role=control` credential can only ever be created by an
+  out-of-band operator ritual (`python -m r2db_api.ops bootstrap`/`reset`)
+  -- there is no in-band issuance path anywhere, by design ("案B",
+  `spec/CCR_DISPOSITION.md`); the ritual's first-issued credential is
+  `must_rotate=true` until one real rotation completes. `python -m
+  r2db_api.ops` itself is no longer a stand-in control surface -- it is now
+  the bootstrap/reset ritual plus operator break-glass recovery for when
+  `/control/v1` is unreachable (see `r2db-api/docs/
+  CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` for the compromise/misuse recovery
+  procedure this CLI's `audit-report` subcommand supports). Whether a given
+  deployment's application-plane process declares `control_plane: enabled`
+  is a deployer decision (`R2DB_CONTROL_PLANE_STATUS`), not a detected
+  fact -- see `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7.
 - **`DataService.catalog()`** and an optional per-operation `request_id`
   threaded through service calls, so a single request's audit events
   correlate.
 - **A third conformance adapter, `r2db-api-http`**
   (`conformance/conformance_adapter_r2db_http.py`), running
-  C-01/C-03/C-08/C-11/C-12/C-17/C-18 over this real HTTP+PostgreSQL stack
-  rather than in-process. See `docs/design/CONFORMANCE_ADAPTER_V1.md` and
+  C-01/C-03/C-08/C-11/C-12/C-14/C-15/C-17/C-18 over this real
+  HTTP+PostgreSQL stack rather than in-process. C-14 (control-plane
+  authority boundary) and C-15 (bootstrap/reset lifecycle) run against a
+  real `/control/v1` for this adapter and against a real, in-process
+  `ControlPlaneService` for the plain `r2db-api` adapter -- both currently
+  take the PROVIDED branch (`control_plane: enabled`, exercised for real);
+  `MitateDB-api` still takes the surface-absent branch (no equivalent
+  surface exists yet -- next phase). See `docs/design/CONFORMANCE_ADAPTER_V1.md`,
+  `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`, and
   `conformance-tests/CONDITIONS.md`.
 - **CCR-13 storage layer** (`docs/design/R2DB_CCR13_STORAGE_V1.md`): typed
   columns (`add_field`'s `field_type`, native `bigint`/`double precision`/
@@ -118,11 +152,20 @@ production identity/network/database-grant evidence exists yet
   synchronous foundation. A future job capability must define finite
   execution/queue bounds, observable state transitions, cancellation,
   expiry, and rollback semantics before it is advertised.
-- `/v1/audit/query` authenticates the caller but always fails with
-  `CAPABILITY_UNSUPPORTED`: this foundation has no separately-authenticated
-  control/audit credential type, and `DataService`'s public facade
-  deliberately exposes no audit accessor for any application credential to
-  reach.
+- `/v1/audit/query` (the data-plane, application-facing endpoint) still
+  authenticates the caller but always fails with `CAPABILITY_UNSUPPORTED`:
+  `audit_query` itself remains unimplemented (out of CCR-14's own scope --
+  its endpoint/read-access shape is a separate, not-yet-designed decision),
+  and `DataService`'s public facade deliberately exposes no audit accessor
+  for any *application* credential to reach regardless. This is no longer
+  because no control/audit credential type exists at all -- CCR-14 added a
+  `role=control` credential type (above) -- but that type authenticates
+  only against `/control/v1`, a different plane entirely; it is fail-closed
+  against every `/v1` data/schema endpoint, `/v1/audit/query` included
+  (condition C-14), and `/control/v1` itself has no audit-reading endpoint
+  of its own yet either (an `audit` role able to read control-plane state
+  is tracked as a contract-additive candidate, not yet implemented -- see
+  `security/CONTROL_MAPPING.md`'s R-11 section).
 
 Application-facing code intentionally has no SQL/native-command execution
 surface and no access to Control or Provisioning authorities.

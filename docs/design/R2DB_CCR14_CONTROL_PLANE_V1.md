@@ -9,6 +9,7 @@
 - 改訂: v1.6 — WP-3 完了 (2026-08-29): `ControlPlaneService` の実装レビュー (Opus、major 3 / minor 11 / nit 3) の反映と監督決定 — 特に AUTH_REQUIRED の監査対象化と抑止宣言の2分割 (記録/帰属)。§12 記録
 - 改訂: v1.7 — WP-4 完了 (2026-08-29): `control_http.py`/`control_main.py` (factory のみ)/AuthorityTopology 拡張の実装レビュー (Opus、major 2 / minor 6 / nit 2) の反映と監督決定 — 特に rate 前課金 (`check_rate` + `rate_precharged`) と control_plane_http→audit 辺の訂正。§13 記録
 - 改訂: v1.8 — WP-5 完了 (2026-08-29): 申告 flip (単一コミット) の実装レビュー (Opus、major 1 / minor 7 / nit 6) の反映と監督決定 — provided 分岐の初実行、C-08 格上げ、儀式コアの製品コード化、逆向き両方向の変異確認。§14 記録
+- 改訂: v1.9 — WP-6 完了 (2026-08-29): ドキュメント WP (CONTROL_MAPPING/runbook 2冊/侵害playbook/README/ops.py 再定義/`audit-report`) の実装記録と監督決定 D-1 (`WWW-Authenticate` 両面不採用の恒久化) を反映。§14.4 の台帳整理と §15 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -87,6 +88,7 @@ CCR-14 の教訓3 (制御プレーンの保存物を application 面と同居さ
 - **非恒久化は must-rotate 方式を採る** (契約は「期限またはローテート強制。機構は自由」): bootstrap/reset が発行する credential は `must_rotate=true`。この状態の credential が認可されるのは `GET /control/v1/capabilities` と自分自身への `rotate` のみで、他の全操作は `FORBIDDEN`。rotate 成功で `must_rotate=false` になる。時計に依存せず (TTL のテストは時刻注入を要する)、運用者に儀式の完遂を強制し、C-15 の「first-issued credential is non-permanent」を決定的に検証できる
 - **契約条項の読みの明示 (§8 m-1、覆せる監督決定)**: 契約 bootstrap[5] "it expires or requires rotation" を「初回 credential は**1回の強制ローテートを受けるまで実用に供せない**」ことで満たすと読む。rotate は同一 credential の秘密差替えなので、rotate 後は期限のない通常の control credential になる — 「初回に配られた秘密が恒久化しない」ことが条項の保護対象であり、rotate 後の秘密は初回秘密ではない。恒常的な期限/再ローテート強制まで求める読みは契約が "implementation-free" とした機構の固定になるため採らない。この読みは依頼者が覆せる
 - **ロックアウト経路と復旧 (§8 m-2)**: (i) rotate 成功後にクライアントが新秘密を取りこぼす、(ii) must_rotate credential が disable される、(iii) rate limit 枯渇 — いずれの詰みも**唯一の復旧は CLI reset** である。runbook に明記する
+  - (補記、WP-6 レビュー: R-10 の break-glass 追加により (i) は `rotate-control-credential`、(ii) は `enable-control-credential` でより軽く復旧できることを実測確認。(iii) は sliding 60 秒窓のため待てば解ける。reset は常に有効な最終手段。runbook §13 参照)
 
 ### R-6: control-plane 監査は耐久テーブルへ — 状態変更は同一トランザクション、拒否イベントも耐久記録 (fail-closed by construction)
 
@@ -235,6 +237,7 @@ credential の id 系操作は application / control 両テーブルを対象に
 5. **契約 additive 候補 (R-11、依頼者検討から)**: `audit` role による制御面読み取り / per-application 発行凍結。いずれも本フェーズには入れず台帳へ
 6. **監督決定の追加 (依頼者合意済み、2026-08-29)**: CLI break-glass への control credential enable/rotate 追加 (R-10)、playbook・sandbox 規則の WP-6 組み込み (R-11)、抑止宣言の採用 — 期待効果は「利用者側エージェントの警告・注意喚起」まで (R-11、§2)
 7. フェーズ3 (耐久 audit sink) の設計は R-6 の `control_audit` を出発点にできるが、拘束しない
+8. **監督決定 D-1 (WP-6、依頼者合意、2026-08-29、覆せる形): `WWW-Authenticate` は data 面・control 面とも不採用を恒久判断として確定。** WP-4 の逸脱記録 (§13.1(c)) 「`WWW-Authenticate` 不採用 -- data 面 `http.py` 自身が出していない実態への一致。両面同時の decision として WP-6 へ」を受けて確定した。理由: (i) 契約 (`spec/data-service-api.v1.json`) はこのヘッダを要求しない、(ii) 本 API の想定利用者は problem+json の宣言 (エラー本文の `code`/`message`/R-11 の抑止宣言) を読む AI エージェントであり、`WWW-Authenticate` はブラウザ的な認証チャレンジ UI 慣習に由来する情報でエージェント向け宣言に何も追加しない、(iii) docs WP (本 WP) は公開 API の挙動・申告に一切触れない制約下にあり、ヘッダ追加は挙動変更になるため対象外。将来的にヘッダ採用を検討する場合は契約の additive 候補として扱う (ヘッダの有無は既存クライアントの解釈を壊さない追加のみが許容される)。data 面・control 面のどちらか一方だけ採用する非対称は「同一設計の認証拒否表現が面によって異なる」という新たな不整合を生むため意図的に排除する
 
 ## 7. リスクとレビュー重点
 
@@ -418,10 +421,139 @@ WP-5 (申告 flip — 単一コミット) を実装した。実装: Sonnet、独
 - 監査 events() に `event_id` の順序 tiebreaker (recorded_at はトランザクション時刻で全順序でない — C-15 の prefix 検証が load-bearing)
 - 実測値の訂正 (レビュア計装: 余裕 ~25 は誤り、正しくは 20/11)
 
-### 14.4 台帳 (将来課題)
+### 14.4 台帳 (将来課題) — WP-6 で整理 (v1.9)
 
-- **L1 (予定化)**: conformance fixture の Application deprovision フック — registry 消費を O(1) にし、上限 100 の残余裕枯渇 (テスト追加ごとに悪化) を根治
-- **L2 (次コミットで修正)**: `_sweep_stale_artifacts` に liveness ガードが無く、**別プロセスの pytest (--collect-only 含む) が実行中の run の role/DB を破壊する** — 実装者が「残留状態」と誤診断した一過性事象をレビュアが決定的に再現し、実在の並行性バグと確定。pg_stat_database の numbackends 検査等で防御する
-- L3: 特権 setup 専用の control stack 分離 (周期再構築の決定性改善 — WP-6 検討)
-- L4: `request_bytes` の control discovery 宣言 (継続)
+- **L1 (予定化のまま)**: conformance fixture の Application deprovision フック — registry 消費を O(1) にし、上限 100 の残余裕枯渇 (テスト追加ごとに悪化) を根治。WP-6 では未着手 (docs WP のスコープ外、コード変更を要する)
+- **L2— 修正済み (`ae815ee`、per-prefix advisory lock)**: `_sweep_stale_artifacts` の liveness ガード欠如 (別プロセスの pytest `--collect-only` を含む実行中 run の role/DB 破壊) は、本 WP-6 着手前に独立コミット `ae815ee` で修正済み。per-prefix の advisory lock により、他プロセスが同一 prefix を扱っている間のスイープを排他する形で対処した (§14.4 が「次コミットで修正」と記していた課題はクローズ)
+- **L3 — WP-6 で検討し、継続と判断**: 特権 setup 専用の control stack 分離 (周期再構築の決定性改善)。WP-5 で導入した「特権経路の service 周期再構築」(§14.2-4) は conformance adapter 内部の対症療法であり、専用スタックへの分離はテストの決定性を高める改善ではあるが、配備安全性には影響しない (本番の control-plane プロセスは conformance adapter のような周期再構築を必要としない — session-scoped adapter 固有の事情)。優先度は低いまま台帳に残す
+- **L4 — D-2 のとおり、WP-6 では実施しない**: `request_bytes` の control discovery 宣言 (§13.3 で識別されたギャップ — enforce はされているが `GET /control/v1/capabilities` が当該クラスを公開していない)。宣言面の変更は公開 API の申告に触れるため、conformance 証拠を伴うコード WP (Q-1 バッチ、契約 1.2.0 検討時) に載せる。docs WP である WP-6 の対象外 (監督決定 D-2、依頼者への申し送り)
 - 405 が code NOT_FOUND を運ぶ点の adapter classify 確認は未実施 (実経路に現れないため影響なし — レビュー NIT-6)
+
+**契約 additive 候補束 (Q-1 — 契約 1.2.0 検討時にまとめて判断)**: 個別に台帳へ散っていた4件を、Q-1 (破壊的確認の実効化) と同じ独立作業単位で一括検討する候補としてここに集約する。いずれも本フェーズのコード/契約には入れず、実装は現状のまま:
+
+1. **`audit.fields` への対象識別子 (`target_id`) の追加** (§12.4/§12.2 MI-6/MI-11): credential lifecycle イベントが対象 credential を識別できず、R-11 playbook (`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`) の「侵害窓中に発行/失効された credential の列挙」が監査行だけでは完結しない (`list-credentials` との突合で補っている、恒久策ではない)
+2. **`audit` role による制御面読み取り (一覧・capabilities) の許可** (§1 R-11): 「配れる弱い credential」を用意し、root (`role=control`) を配る動機を消す
+3. **per-application 発行凍結 (CLI 限定トグル)** (§1 R-11): 盗まれた control credential からデータ面への最短経路 (任意 app への credential 発行) を app 単位で閉じる
+4. **`CredentialsResult` への `must_rotate` 露出** (§2、§8 m-9): 運用者が儀式未完遂の credential を in-band で見分けたくなった場合の additive フィールド
+
+これら4件は互いに独立でよいが、Q-1 の契約 1.2.0 検討と同じタイミングでまとめて依頼者に諮ることで、契約バージョンの分散 (小さな additive 変更を都度別バージョンで出す) を避ける
+
+## 15. WP-6 実装記録 (2026-08-29、v1.9)
+
+WP-6 (ドキュメント WP + 帯域外 CLI `audit-report`) を実装した。**公開 API の挙動・申告には一切触れていない** — 変更はすべて (a) `ops.py` への `audit-report` サブコマンド追加とそのテスト、(b) ドキュメント (CONTROL_MAPPING/runbook 2冊/新規 playbook/README 2冊/本設計書) のみ。コミットはしていない (作業ツリーに変更を残したまま報告)。
+
+### 15.1 成果物一覧
+
+- `r2db-api/src/r2db_api/ops.py`: `audit-report --since <ISO8601> [--until <ISO8601>]` サブコマンドを追加 (`cmd_audit_report`/`_parse_report_timestamp`/`_CONTROL_AUDIT_REPORT_COLUMNS`)。`R2DB_CONTROL_DSN` (読み取り専用、`r2dbsvc_control` — owner 権限で SELECT 可) で `control_audit` を読み、`occurred_at` (application 側イベント時刻。`recorded_at` — DB 側挿入時刻 — ではない) が `[--since, --until]` (両端含む。`--until` 省略可) に入る行を `occurred_at ASC, event_id ASC` (`PostgresControlAuditSink.events()` と同じタイブレーカー) で 1 行 1 JSON (JSON Lines) として標準出力へ書く。監査は書かない (読み取り専用サブコマンドの既存慣例)。モジュール冒頭の docstring と `--help` の文言 (儀式 + break-glass の枠組みに「読み取り専用の第3の能力」として追記) も更新した
+- `r2db-api/tests/test_control_plane_store.py`: Section G として `audit-report` のテスト7本 (§15.2) を追加。先頭の import に `json`/`uuid`/`datetime`/`timedelta`/`timezone` を追加
+- `r2db-api/tests/test_credential_persistence.py`: D-4 のとおり `test_cli_help_mentions_ccr14_provisional_status` を `test_cli_help_declares_ritual_and_break_glass` にリネームし、アサーションを "CCR-14" 存在確認だけでなく "ritual"/"break-glass" の特徴句存在確認まで固定 (`--help` の実文言で実測確認済み — §15.4)
+- `security/CONTROL_MAPPING.md`: SI-00/SI-02/SI-03(4列目)/SI-06/SI-08/SI-13/SI-14 の各行に CCR-14 evidence を追記、C-14/C-15 の condition 参照を該当行の「Common conformance evidence」列に追加、新設 R-11 有界性言明の節 (playbook へのポインタを含む) を表の下に追加
+- `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md`: §1 の migration 適用範囲に `0006` を追加、Prerequisites 項目3 を「儀式 + break-glass」の現状へ書き換え、新設 §7「Control-plane deployment (CCR-14)」に `control_main` の配備手順・環境変数表・`R2DB_CONTROL_PLANE_STATUS` の運用注意・bootstrap 儀式・playbook へのポインタを追加
+- `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`: §9 の CCR-14 未裁定前提の記述を解決後の姿へ書き換え (durable audit sink の記述も含む)、§10 環境変数表に `R2DB_CONTROL_PLANE_STATUS` と control_main 環境変数群へのポインタを追加、新設 §11 (0006 storage の全容)・§12 (bootstrap/reset 儀式)・§13 (ロックアウト経路と復旧 — R-5 m-2 の原記述と R-10 の break-glass 追加との関係を明記して統合)・§14 (begin クラッシュ残骸の手動回収) を追加
+- `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (新規): D-3 のとおり実装ローカルの侵害/誤操作 playbook。有界性の根拠・復旧手順4段 (reset → audit-report → 突合revoke → enable) ・sandbox 規則・複数本運用の不採用理由・本 playbook が扱わない範囲 (`r2dbsvc_control` OS 権限侵害、Q-1 の確認機構) を明記
+- `r2db-api/README.md`: `/v1/audit/query` の古い記述 (「control/audit credential 型が存在しない」) を是正、conformance adapter の条件列挙に C-14/C-15 を追加、migrations 節に 0006 を追加、control plane の新規箇条書きを追加
+- ルート `README.md`: 確認のみ (truthful deterrence 節・conformance 言及とも矛盾なし、変更なし)
+- 本設計書 (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`): v1.8 → v1.9。§14.4 の L2 を修正済みへ更新、台帳整理 (L1/L3/L4)、契約 additive 候補4件の Q-1 束への集約、§6 に監督決定 D-1、本 §15 の追加
+
+### 15.2 `audit-report` の仕様確定内容
+
+- 呼び出し: `python -m r2db_api.ops audit-report --since <ISO 8601> [--until <ISO 8601>]` (`--since` 必須、argparse レベルで強制)
+- 接続: `R2DB_CONTROL_DSN` (読み取り専用。書き込みなし)
+- フィルタ: `occurred_at` (`control_audit` の application 側イベント時刻列) が `[--since, --until]` の閉区間に入る行のみ。`--until` 省略時は上限なし。`--until < --since` は起動時に拒否 (exit code 2、"--until must not be before --since")
+- 順序: `occurred_at` 昇順、同時刻は `event_id` 昇順でタイブレーク (`PostgresControlAuditSink.events()` と同じ規約)
+- 出力形: 標準出力へ JSON Lines (1 行 1 JSON object)。各行のキーは `control_audit` の全13列 (契約 `audit.fields` の12列 + `recorded_at`)。`event_id`/`occurred_at`/`recorded_at` は文字列化 (`str()`/`.isoformat()`)、他は生値
+- ISO 8601 でない `--since`/`--until` は起動時に拒否 (exit code 2)。タイムゾーン省略値は UTC とみなす (`occurred_at` が `timestamptz` であることと整合)
+- **WP-6 レビュー NI-2**: 入力側の規約 (naive な `--since`/`--until` は UTC とみなす、上記) と出力側の実際の表示は別物であることを明記する。出力の `occurred_at`/`recorded_at` は psycopg が返す tz-aware `datetime` をそのまま `.isoformat()` した文字列であり、そのタイムゾーンオフセットは**この CLI を実行した接続の PostgreSQL セッション既定 TimeZone** に従う (実測: ローカル検証クラスタでは `Asia/Tokyo`、`+09:00` — `SHOW TimeZone` で確認済み。UTC 設定のクラスタでは `+00:00`/`Z` 相当になる)。値そのもの (時刻の実体) はどちらの表示でも同一の瞬間を指すが、文字列としての比較・grep には注意が要る
+
+### 15.3 変異注入 (実測、`ops.py` を直接改変 → テスト実行 → scratchpad 経由コピーで復元。`git checkout` は使用していない)
+
+作業前に `ops.py` をセッションのスクラッチパッドディレクトリへバックアップし、各変異後は同じバックアップからの `cp` で復元した (バックアップパスはこの WP のスクラッチパッド配下)。
+
+| # | 変異内容 | 壊した性質 | 判定 |
+|---|---|---|---|
+| 1 | since フィルタの WHERE 条件を `TRUE` (無条件) に置換し、`since` パラメータを渡さないようにした | `--since`/`--until` 境界フィルタ | **赤** — `test_audit_report_filters_since_and_until_inclusive_boundaries` が `before`/`after` (境界外の行) を結果に含めてしまい失敗 (`3` 回中 `1` 回実行、決定的に赤) |
+| 2 | `ORDER BY occurred_at ASC, event_id ASC` を削除 (無順序 SELECT) | 時刻昇順の出力順序 | **赤** — `test_audit_report_orders_ascending_by_occurred_at_regardless_of_insertion_order` が3回連続 (3/3) で赤 (挿入順そのままの id 列が返り、期待する時刻順と一致しない) |
+| 3 | JSON Lines を単一の JSON 配列 (`json.dumps([...])`) に置換 | JSON Lines 形式 (1行1オブジェクト) | **赤** — 7本中4本 (`test_audit_report_filters_since_and_until_inclusive_boundaries`、`::_orders_ascending...`、`::_emits_one_json_object_per_line_with_contract_fields`、`::_omitted_until_has_no_upper_bound`) が失敗 (行ごとの `json.loads` が配列全体を1つの list として返し、`r["operation"]` が `TypeError` になる、または `own_lines` の 1 行 1 オブジェクト前提が崩れる) |
+
+3件とも守るべき性質を実際に壊し、対応するテストが実測で赤くなることを確認した。復元はいずれも `cp <スクラッチパッドのバックアップ> ops.py` で行い、復元後に7本全て green に戻ることを再実行で確認した。
+
+### 15.4 evidence として書いたテスト名の実在・green 確認方法
+
+- CONTROL_MAPPING.md / 両 runbook / playbook / README に書いた既存テスト名は、事前に `grep -n "^def test_"` で該当ファイル (`test_control_plane_store.py`/`test_control_plane_service.py`/`test_topology.py`/`test_credential_persistence.py`) の定義一覧を取得し、記載した各名前がその一覧に実在することを目視突合してから記載した (存在しない名前を書いていない)
+- そのうえで `test_control_plane_store.py`・`test_control_plane_service.py`・`test_topology.py`・`test_credential_persistence.py` を個別実行し、引用した全テストを含め green であることを実測確認した (§15.5 の実測値に含まれる)
+- `AUTH_STATE_UNAVAILABLE` の監査対象外については専用の負テストが無い (`_AUDITED_AUTH_FAILURE_CODES` という集合非包含であることがコード上の性質) ため、CONTROL_MAPPING.md にはその旨 ("dedicated negative test ではなく fixed-set membership property" である) を正直に明記した
+
+### 15.5 テスト実測
+
+- root suite (`./.venv/bin/python -m pytest`): 初回実測 **715 passed, 1 failed** (185.98秒)。失敗1件 (`r2db-api/tests/test_http.py::test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`) は本 WP 開始前から存在する無関係の既存不具合 — `spec/data-service-api.v1.json` (直近改訂コミット `3e0e678`) とパッケージ同梱コピー `r2db-api/src/r2db_api/contract/data-service-api.v1.json` (直近改訂コミット `fbb55295`) が非同期のまま (`3e0e678` の description 文言変更がパッケージコピーへ反映されていない)。`git status` で本 WP が `spec/`/`contract/` 配下を一切触っていないことを確認済み。ベースライン 709 passed (引き継ぎ記録) + 本 WP 追加の `audit-report` テスト7本 = 716 件収集、うち715 passed/1 failed で数が一致 (追加テストは全て green)。**この不一致は監督が同セッション中にコミット `b83fe9a` (パッケージコピーを spec 側に同期) で解消済み** — 以後の root suite 実測は 716 passed (MI-3 のテスト3本追加後は 719 passed、§15.7)。別セッションへ spawn した修正提案 (task_fe72a99f) は監督対応により不要となり dismiss 済み
+- `r2db-api/tests/test_postgres.py` 単独: **180 passed** (22.0秒) — ベースライン (180 passed) と完全一致、無変化
+- `audit-report` 関連7本単独: 7 passed (変異注入前後で確認、§15.3)
+
+### 15.6 設計・発注との食い違い / 疑義 (逸脱は改変せず報告)
+
+- **R-5 m-2「ロックアウト経路 (iii) rate limit 枯渇の唯一の復旧は reset」の記述**: `POSTGRES_PROVISIONING_RUNBOOK.md` §13 に書くにあたり、実装コード (`ControlPlaneService._check_rate`) を確認したところ、rate limit の判定は HTTP 経路 (`ControlPlaneService`) のみに存在し、`ops.py` CLI は DB に直接アクセスするため rate limit を一切経由しない。したがって reset に限らずどの CLI break-glass 操作も rate 枯渇の影響を受けない。この事実は R-5 m-2 の原文 (v1.5 時点の記述) より後に追加された R-10 (同一設計書内、`enable-control-credential`/`rotate-control-credential`) の存在ともかみ合う — m-2 は R-10 追加前の記述であり、現在は (i)(ii) には R-10 の軽い break-glass が、(iii) には「待つ」または「任意の CLI 操作」が使える、という、より具体的で軽い復旧が可能になっている。runbook §13 はこの現状を「R-5 m-2 を否定するものではなく、同一設計書内で R-10 が後から提供したより軽い選択肢を記録するもの」と明記して書いた。設計文書そのものは改変していない (m-2 の原文は §1 R-5 に残したまま)。疑義として報告する — 監督が「reset のみを唯一の復旧として運用者に周知したい」という意図であれば、runbook §13 の記述を差し戻す必要がある
+- **`request_bytes` の宣言 (L4/D-2)**: 発注の D-2 指示どおり、WP-6 では宣言を追加していない。ただし CONTROL_MAPPING.md の SI-08 行に「enforce されているが discovery 未宣言」という正直な注記を書いた (これは発注の指示範囲内 — 契約の申告・挙動そのものには触れていない、既存の欠落を文書で正直に記述しただけ)
+- 上記以外、設計文書・発注 (CONTROL_MAPPING/runbook/README/playbook/`ops.py`) の指示との食い違いは無い
+
+### 15.7 独立レビュー往復 (2026-08-29、Opus。blocker 0 / major 4 / minor 5 / nit 3、全件実測裏付き)。監督裁定 D-5 を含む
+
+WP-6 成果物の独立レビュー (Opus) を受け、指摘全件を作業ツリー上で修正した (コミットなし)。指摘一覧と処置は以下のとおり。
+
+**major (4件、全件修正)**
+
+| # | 指摘 | 処置 |
+|---|---|---|
+| MA-1 | `DEPLOYMENT_RUNBOOK.md` §7 step 5 の「no-credential smoke check で 200」が実挙動と逆 (`GET /control/v1/capabilities` も `ControlPlaneService.capabilities` が `self._authenticate` を無条件に呼ぶため認証必須。無資格情報は `401 AUTH_REQUIRED` で、しかも `control_audit` に耐久監査行を書く) | step 5 を「step 4 で得た秘密を `Authorization: Bearer` で使う `200` 検証」に書き換え、must_rotate でも capabilities は許可される旨を明記。§2 step 6 への誤った「同じ種類の」参照を撤去し、正確な対比 (§2 step 6 自身も無資格情報では 401 を返す) に置き換えた |
+| MA-2 | `CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` step 3/4 のコマンドが字義通りには実行不能 (`revoke-credential` は `R2DB_CONTROL_DSN` に加え *application-plane* の `R2DB_CREDENTIAL_PEPPER` を要求 — `PostgresCredentialStore` のコンストラクタが無条件に要求するため、`revoke` 自体は verifier を計算しないにもかかわらず必須) | 各コマンドに必要な環境変数を明示し、「control 面対応の運用者が application-plane pepper を手元に持っているとは限らないので事前に用意する」旨を前提として冒頭に追記。`list-credentials`/`enable-app` は `R2DB_CONTROL_DSN` のみで足りる旨も明記 |
+| MA-3 | `POSTGRES_PROVISIONING_RUNBOOK.md` §14 の crash 窓が `CREATE DATABASE` 後・`ALTER SCHEMA ... OWNER TO` 後を含み、その場合 `DROP ROLE` が依存オブジェクト (schema/table/domain の所有権) で失敗し、0003 再実行も `database already exists` で失敗する (レビュアが実測) | 検知に第3クエリ (`SELECT 1 FROM pg_database WHERE datname = '<db>'`) を追加し、(A) DB 未作成 (現行手順のまま) / (B) DB 作成済み (`DROP DATABASE` を先に行ってから `DROP ROLE`) の2分岐に書き換え。偽の根拠文2つ ("the crash happened before CREATE DATABASE"、"passwords ... never recorded anywhere") も是正 (前者は分岐の説明に格上げ、後者は「運用者が openssl rand で生成し secret manager へ記録する規約であり、実際に記録されたかは運用者の実践次第」と正直な言い回しへ) |
+| MA-4 | playbook / `CONTROL_MAPPING.md` の有界性言明「Every reachable operation is reversible」が無限定で誤り (盗まれた control credential は application credential を `revoke` で不可逆に破壊でき、これは可用性実害を生む)。残実害の言明も rotated credential を欠いていた | **監督裁定 D-5**: (1) 可逆性の主張を「control credential 自体と Application データは破壊されない」「不可逆なのは `revoke` のみで、その realm は application credential にも及び、復旧には再発行+秘密再配布という実費用がかかる」と精密化。(2) 残実害の3項目に「issued/rotated 両方の application credential」と「revoke による可用性実害」を明記。(3) 設計文書 R-11 本文は削除禁止のため**書き換えず**、本節 (§15.7) に訂正記録として追記するのみに留めた |
+
+**minor (5件、全件修正)**
+
+| # | 指摘 | 処置 |
+|---|---|---|
+| MI-1 | `POSTGRES_PROVISIONING_RUNBOOK.md` §9「Every subcommand … writes a canonical, durable event」が過大主張 (list-credentials/list-apps/audit-report は書かない) | `ops.py` docstring と同じ「Every **state-changing** subcommand」に訂正し、読み取り専用サブコマンドは監査を書かない旨を明記 |
+| MI-2 | playbook「Each step is idempotent to re-run」が step 1 (`reset`) で偽 (成功後の再実行は直前に保存した秘密を失効させる) | 「steps 2-4 のみ idempotent、step 1 は一度だけ・未完了時のみ再実行」に限定し、step 1 自身にも同旨の注記を追加 |
+| MI-3 | `audit-report` の宣言済み性質3つ (event_id タイブレーカー/naive `--since` の UTC 扱い/read-only) が専用テストで固定されていなかった | 3テストを追加 (`test_audit_report_ties_break_by_event_id_ascending`/`test_audit_report_naive_since_is_interpreted_as_utc`/`test_audit_report_does_not_modify_control_audit`)。追加後、変異 M-C/M-D/M-E を自ら再注入し赤を実測 (§15.7.1) |
+| MI-4 | 設計文書 §15.5 の root suite 実測記録が、監督が同セッションでコミット `b83fe9a` により packaged copy を解消したことを反映していなかった | §15.5 に「監督が `b83fe9a` で解消済み、以後 716 passed」を追記。spawn 済み task (`task_fe72a99f`) は不要となり dismiss 済み |
+| MI-5 | 設計文書 §1 R-5 m-2「唯一の復旧は CLI reset」が R-10 の break-glass 追加後も無条件のまま (ロックアウト経路 (i)(ii) にはより軽い復旧が今は存在する) | m-2 原文は削除・書き換えせず、直後に「(補記、WP-6 レビュー: ...)」を追記するのみ (§1 R-5 参照) |
+
+**nit (3件、全件修正)**
+
+| # | 指摘 | 処置 |
+|---|---|---|
+| NI-1 | playbook「v1 has no application-deletion path at all」が不正確 (0004/`finish_deprovision_application` は帯域外運用者経路として存在する) | 「no application-deletion path *a control credential can reach*」に訂正 |
+| NI-2 | `audit-report` の出力タイムスタンプ (PostgreSQL セッション TZ のオフセット付き isoformat) と入力 (`--since`/`--until` の naive=UTC 規約) が別物である旨の一文が欠けていた | §15.2 に一文追記 (実測: ローカル検証クラスタは `Asia/Tokyo` `+09:00`、`SHOW TimeZone` で確認済み。UTC 設定クラスタなら `+00:00` になる旨も明記) |
+| NI-3 | (指摘は上記2件のみ。3件目は無い) | — |
+
+#### 15.7.1 MI-3 追加テストの変異注入 (自己実施、scratchpad 経由コピーで復元。`git checkout` 不使用)
+
+`ops.py` をスクラッチパッドへバックアップ (`ops.py.orig2`) してから各変異を適用し、テスト実行後は同じバックアップから `cp` で復元した。
+
+| # | 変異内容 | 対象性質 | 判定 (3回実行) |
+|---|---|---|---|
+| M-C | `ORDER BY occurred_at ASC, event_id ASC` から `event_id ASC` を削除 | 同一 `occurred_at` の `event_id` 昇順タイブレーク | **赤 (3/3)** — 意図的に降順で挿入した2行が挿入順のまま返り、期待する昇順と不一致 |
+| M-D | `_parse_report_timestamp` の「naive なら UTC を付与する」分岐を削除 | naive `--since`/`--until` の UTC 強制 | **赤 (3/3)** — ローカル検証クラスタの PostgreSQL セッション既定 TimeZone が `Asia/Tokyo` (UTC+9、`SHOW TimeZone` で確認済み) であるため、naive 値がクライアント側で UTC 化されないと DB セッション側で +9h ずれて解釈され、境界の1秒前の行が誤って含まれる |
+| M-E | SELECT 直後に `INSERT ... VALUES (gen_random_uuid(), 'x', now(), 'x', 'operator_cli', 'x', 'allow')` と `commit()` を追加 | read-only (行数不変) | **赤 (3/3)** — 実行前後の `count(*)` が 1→2 に変化 |
+
+3件とも守るべき性質を実際に壊し、対応する新規テストが実測で赤くなることを確認した。復元後、`audit-report` 関連テスト (元7本+新規3本=10本) が再び green であることを再実行で確認した。
+
+#### 15.7.2 レビュアの変異5本 (Opus の独立レビュー自身が実施したもの。判定は監督経由の報告をそのまま転記 — 本セッションはこの5本を再現していない)
+
+| # | 判定 | 内容 (監督報告のとおり) |
+|---|---|---|
+| M-A | 赤 (4 failed) | 詳細はレビュー記録 (監督保有) を参照。本セッションには変異の中身自体は共有されていない |
+| M-B | 緑 (挙動不変で原理的に検知不能) | 受理境界として確認済み — injection 面の欠陥ではないとレビュー自身が判定した既知の限界 |
+| M-C | 当初緑 → MI-3 のテスト追加後に赤 | §15.7.1 で自己実施の再現込みで確認 (event_id タイブレーカー) |
+| M-D | 当初緑 → MI-3 のテスト追加後に赤 | §15.7.1 で自己実施の再現込みで確認 (naive→UTC 強制) |
+| M-E | 当初緑 → MI-3 のテスト追加後に赤 | §15.7.1 で自己実施の再現込みで確認 (read-only 違反) |
+
+#### 15.7.3 ロックアウト軽量復旧3経路の実測確認 (レビュー観点3)
+
+`POSTGRES_PROVISIONING_RUNBOOK.md` §13/設計 §1 R-5 m-2 補記が主張する「R-10 の break-glass による軽量復旧」を、既存テストの green 実行で確認した (新規テストは追加していない — 性質はいずれも WP-2/WP-3 の既存テストがすでに固定済みのため):
+
+1. **rotate 後の秘密取りこぼし** → `rotate-control-credential`: `r2db-api/tests/test_control_plane_store.py::test_break_glass_rotate_control_credential_keeps_same_id_and_clears_must_rotate` green (実行確認済み)
+2. **must_rotate credential の disable** → `enable-control-credential`: `r2db-api/tests/test_control_plane_store.py::test_break_glass_enable_control_credential` green (実行確認済み)
+3. **rate limit 枯渇** → 待てば解ける (sliding 60秒窓): `r2db-api/tests/test_control_plane_service.py::test_control_requests_per_minute_limit_and_window_recovery` green (実行確認済み、in-memory/Postgres 両 backend パラメトライズで2件 pass)。「CLI は `ControlPlaneService` を経由せずどの break-glass 操作も rate 枯渇の影響を受けない」自体は構造的事実 (`ops.py` が `ControlPlaneService` を一切 import/構築しないこと) であり、専用の負テストは存在しない (§15.6 の疑義記録のとおり)
+
+3経路とも機能することを確認した。

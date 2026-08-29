@@ -1,10 +1,14 @@
 """r2db-api out-of-band control-plane CLI: ``python -m r2db_api.ops``.
 
 R-10 (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md): the canonical in-band
-management surface is `/control/v1` (built in a later work package of this
-same phase; not yet wired to any composition root as of this WP). This CLI
-is **not** a stand-in for that surface any more -- CCR-14 itself is resolved
-(spec/CCR_DISPOSITION.md) -- it now has two distinct, narrower jobs:
+management surface is `/control/v1` (`control_http.create_control_app`,
+assembled by `r2db_api.control_main`, WP-4/WP-5 of this same phase -- built
+and, as of WP-5's single-commit declaration flip, reachable wherever a
+deployment runs `control_main` alongside this process and declares
+`R2DB_CONTROL_PLANE_STATUS=enabled`, deploy/DEPLOYMENT_RUNBOOK.md). This CLI
+is **not** a stand-in for that surface -- CCR-14 itself is resolved
+(spec/CCR_DISPOSITION.md) -- it now has two distinct, narrower jobs (plus one
+read-only diagnostic helper, R-11, documented separately below):
 
 1. **The bootstrap/reset ritual.** Issuing the very first control credential
    (`bootstrap`) and revoking-all-and-reissuing (`reset`) are, by design
@@ -24,6 +28,12 @@ is **not** a stand-in for that surface any more -- CCR-14 itself is resolved
    an *un-revoke* of a control credential, which this module deliberately
    never offers (revocation stays terminal; `reset` is the canonical
    recovery from "the only live control credential was revoked").
+
+Beyond those two jobs, `audit-report` (added this WP) is a third, read-only
+capability: a compromise/misuse investigation helper (R-11) that lists
+durable `control_audit` events in a time window as JSON Lines -- see
+`cmd_audit_report`'s own docstring and `r2db-api/docs/CONTROL_PLANE_
+COMPROMISE_PLAYBOOK.md` for the recovery sequence it supports.
 
 Every state-changing subcommand below -- both the pre-existing ones and the
 new control-credential ones -- now writes a canonical event to
@@ -48,6 +58,7 @@ store.validate_control_pepper_separation`).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import sys
@@ -92,6 +103,18 @@ _CONTROL_AUDIT_INSERT = (
     "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
     "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
+
+# R-11 (`audit-report`, added this WP): the exact column order the report's
+# SELECT reads and the JSON Lines output writes -- the contract `audit.
+# fields`' 12 named fields (`_CONTROL_AUDIT_INSERT`'s own column list,
+# above) plus `recorded_at` (0006's DB-side insertion timestamp, distinct
+# from the application-side `occurred_at` this report filters on -- see
+# `cmd_audit_report`'s own docstring).
+_CONTROL_AUDIT_REPORT_COLUMNS = (
+    "event_id", "event_class", "occurred_at", "request_id", "application_id",
+    "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code",
+    "recorded_at",
 )
 
 
@@ -463,6 +486,93 @@ def cmd_list_apps(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_report_timestamp(value: str, flag: str) -> datetime:
+    """Parses `--since`/`--until` as ISO 8601 (`datetime.fromisoformat`,
+    which in this project's Python floor (>=3.11) also accepts a trailing
+    `Z`). A naive (no offset/timezone) value is treated as UTC -- matching
+    `occurred_at`'s own storage as `timestamptz` and every other timestamp
+    this module already prints/compares in UTC (`_write_control_audit`'s
+    `datetime.now(timezone.utc)`) -- rather than silently adopting the
+    operator's local shell timezone, which `datetime.fromisoformat` alone
+    would do for a naive string once compared against an aware value.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        _die(f"{flag} must be an ISO 8601 timestamp, got {value!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def cmd_audit_report(args: argparse.Namespace) -> int:
+    """R-11 playbook helper (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md R-11
+    "侵害/誤操作 playbook" step 2; `r2db-api/docs/CONTROL_PLANE_COMPROMISE_
+    PLAYBOOK.md`): lists every durable `control_audit` row whose
+    application-side event timestamp (`occurred_at` -- never `recorded_at`,
+    the table's own DB-side insertion timestamp; see `0006_control_plane_
+    http.sql`'s `control_audit` table comment) falls inside `[--since,
+    --until]` (`--until` optional; omitting it means "no upper bound"),
+    oldest first, one JSON object per line (JSON Lines) on stdout.
+
+    Read-only: connects with `R2DB_CONTROL_DSN` (`r2dbsvc_control`, this
+    schema's owner -- the same read path `credential_store.
+    PostgresControlAuditSink.events()` already documents as sufficient,
+    since `r2dbsvc_controlplane`, the control-plane HTTP process' own role,
+    has no SELECT on this table at all -- R-3) and writes no audit event of
+    its own: a read has nothing to audit, the same "list 系（読み取り）は監査
+    不要" rule `cmd_list_credentials`/`cmd_list_apps` already follow.
+
+    Ordering is `occurred_at ASC, event_id ASC` -- the identical tiebreaker
+    `PostgresControlAuditSink.events()` uses (that method's own docstring,
+    round-2 review NIT-4): `occurred_at`/`recorded_at` alone are not a total
+    order (two rows can share a timestamp), so a second, deterministic key
+    is required for a stable, repeatable "oldest first" report -- exactly
+    what a playbook's "did I see every event in this window" investigation
+    needs.
+
+    R-11's own honest caveat (documented at length in `CONTROL_PLANE_
+    COMPROMISE_PLAYBOOK.md`, not repeated in full here): this report's rows
+    have no `target_id` field (contract `audit.fields` has no such column;
+    §6/§12.4 of the design track it as a contract-additive candidate) --
+    identifying exactly *which* credential a `credential_lifecycle` row
+    changed still requires cross-referencing `list-credentials`' current
+    state by timing/operation/`application_id`, not this report alone.
+    """
+    since = _parse_report_timestamp(args.since, "--since")
+    until = _parse_report_timestamp(args.until, "--until") if args.until else None
+    if until is not None and until < since:
+        _die("--until must not be before --since")
+
+    conditions = [sql.SQL("occurred_at >= {}").format(sql.Placeholder())]
+    params: list[Any] = [since]
+    if until is not None:
+        conditions.append(sql.SQL("occurred_at <= {}").format(sql.Placeholder()))
+        params.append(until)
+
+    statement = sql.SQL(
+        "SELECT {columns} FROM {table} WHERE {where} ORDER BY occurred_at ASC, event_id ASC"
+    ).format(
+        columns=sql.SQL(", ").join(sql.Identifier(name) for name in _CONTROL_AUDIT_REPORT_COLUMNS),
+        table=sql.Identifier(_schema(), "control_audit"),
+        where=sql.SQL(" AND ").join(conditions),
+    )
+
+    dsn = _control_dsn()
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(statement, params)
+            rows = cur.fetchall()
+
+    for row in rows:
+        record = dict(zip(_CONTROL_AUDIT_REPORT_COLUMNS, row))
+        record["event_id"] = str(record["event_id"])
+        record["occurred_at"] = record["occurred_at"].isoformat()
+        record["recorded_at"] = record["recorded_at"].isoformat()
+        print(json.dumps(record, sort_keys=False))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Control-credential ritual (bootstrap/reset -- R-5) and break-glass (R-10).
 # ---------------------------------------------------------------------------
@@ -654,6 +764,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list-apps", help="list registered applications")
     p.set_defaults(func=cmd_list_apps)
+
+    p = sub.add_parser(
+        "audit-report",
+        help=(
+            "R-11 compromise/misuse playbook helper (see r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md): "
+            "list durable control_audit events with occurred_at in [--since, --until] as JSON Lines, oldest first (read-only)"
+        ),
+    )
+    p.add_argument("--since", required=True, help="ISO 8601 timestamp (inclusive); filters on the event's occurred_at, not recorded_at")
+    p.add_argument("--until", required=False, default=None, help="ISO 8601 timestamp (inclusive), optional -- omit for no upper bound")
+    p.set_defaults(func=cmd_audit_report)
 
     p = sub.add_parser(
         "bootstrap",

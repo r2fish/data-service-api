@@ -41,6 +41,8 @@ StorageBackend (protocol)
 
 ### D-3 PostgreSQL isolation model
 
+> **改訂済み — 本節の決定は §8「D-3 改訂」(v1.3) で database-per-application に変更された。** 実装も §8 に従っている (`r2db-api/migrations/0003_provision_application.sql`・`0004_deprovision_application.sql`、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §0)。以下は当初決定の記録として保持する。
+
 **schema-per-application + application毎の2つのDB role + RLSを多層防御として併用する。**
 
 | 層 | 内容 |

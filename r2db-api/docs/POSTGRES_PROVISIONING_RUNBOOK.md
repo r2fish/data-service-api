@@ -500,25 +500,46 @@ naturally idempotent.
 | `r2dbsvc_api` (new login role) | `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10`. Granted `CONNECT` on `r2dbsvc_platform`, `USAGE` on `r2dbsvc_registry`, and `SELECT` (only) on `applications`/`credentials`. This is the role the *running API process* authenticates as (`R2DB_PLATFORM_DSN`, §6/§10) -- strictly read-only, and a completely different role from `r2dbsvc_control`, which keeps every write privilege and remains operator/CLI-only (§2, §5.3 C-2). A compromise of the running API process cannot alter a credential's `enabled`/`revoked` state or an application's `enabled` flag through this role's grants -- it can only read the state `python -m r2db_api.ops` (connected as `r2dbsvc_control`) already wrote. |
 | `r2dbsvc_registry.assert_no_credentials_for_deprovision` (new function) | Called by `0004_deprovision_application.sql`, immediately after `begin_deprovision_application` and before anything destructive runs: refuses to deprovision an application while any credential row still references it (see §5's deprovisioning note). Not called at all -- gracefully -- on a platform database that has never had `0005` applied. |
 
-**Managing rows in these tables is exclusively `python -m r2db_api.ops`'s
-job** (`r2db_api/ops.py`) -- there is no other supported way to issue,
-rotate, revoke, disable, enable, or (permanently) delete a credential, or
-disable/enable an application, until CCR-14 (control plane endpoints) is
-resolved (spec/CCR_DISPOSITION.md: undecided as of this writing). Run
-`python -m r2db_api.ops --help` for the full subcommand list; it requires
+**CCR-14 is resolved** (`spec/CCR_DISPOSITION.md`); the canonical, normal-
+operation, in-band way to issue/rotate/revoke/disable/enable an application
+credential, or disable/enable an application, is now the control-plane HTTP
+surface, `/control/v1` (`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`, §11
+below) -- deployed as its own process, `r2db_api.control_main:app` (see
+`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7). `python -m r2db_api.ops`
+remains available for the same operations as an operator **break-glass**
+path (R-10) -- always usable even when `/control/v1` itself is unreachable,
+and the *only* path for the operations `/control/v1` deliberately does not
+expose at all: the bootstrap/reset control-credential ritual (§12 below;
+there is no HTTP endpoint anywhere that can create a `role=control`
+credential -- "案B") and `delete-credential` (permanent row removal, kept
+CLI-only by design). Run `python -m r2db_api.ops --help` for the full
+subcommand list; application-credential subcommands require
 `R2DB_CONTROL_DSN` (the `r2dbsvc_control` DSN, never the read-only
 `r2dbsvc_api` one) and `R2DB_CREDENTIAL_PEPPER` (the same pepper value the
 running API process is configured with -- a credential issued with the
-wrong pepper never authenticates). `delete-credential` is the one
-genuinely destructive, irreversible subcommand here (every other one is a
-soft state change on a row that stays on record) -- it exists specifically
-to satisfy the deprovisioning guard above, which a revoke/disable alone
-cannot: the guard is a real foreign key, and only removing the row clears
-it. It is itself guarded: it refuses a credential that is not already
-revoked, so the lifecycle is always revoke first, then delete -- a live
-credential can never vanish without a revocation having been recorded. **This CLI has no durable audit sink behind it yet** (existing
-outstanding work) -- see its own module docstring for that gap before
-relying on it for production change control.
+wrong pepper never authenticates); control-credential subcommands
+(`bootstrap`/`reset`/`enable-control-credential`/`rotate-control-credential`)
+require `R2DB_CONTROL_CREDENTIAL_PEPPER` instead (§11/§12 below).
+`delete-credential` is the one genuinely destructive, irreversible
+subcommand here (every other one is a soft state change on a row that
+stays on record) -- it exists specifically to satisfy the deprovisioning
+guard above, which a revoke/disable alone cannot: the guard is a real
+foreign key, and only removing the row clears it. It is itself guarded: it
+refuses a credential that is not already revoked, so the lifecycle is
+always revoke first, then delete -- a live credential can never vanish
+without a revocation having been recorded.
+
+**Every *state-changing* subcommand of this CLI now writes a canonical,
+durable event to `r2dbsvc_registry.control_audit` in the same transaction
+as the state change itself** (CCR-14 R-6, §11 below) -- the durable-audit
+gap this section used to note here is closed; a `control_audit` write
+failure aborts the state change too (fail-closed by construction).
+Read-only subcommands (`list-credentials`, `list-apps`, `audit-report`, §12
+below) write nothing to `control_audit` -- a read has nothing to audit, the
+same rule the state-changing subcommands' own audit obligation does not
+apply to. `/control/v1`'s own denials (authentication failure, authorization
+refusal, capability rejection) are durably recorded the same way,
+independent of this CLI.
 
 ## 10. Environment variables the `r2db-api` process itself reads (as of `r2db_api.main`)
 
@@ -540,7 +561,306 @@ not a partial startup:
 | `R2DB_POOL_*` | no | Existing per-application pool tuning -- see `SharedPoolManager` and §4. |
 | `R2DB_PLATFORM_POOL_SIZE` | no, default `4` | The platform pool's own cap -- see §4's "+ platform pool" note. |
 | `R2DB_PLATFORM_SCHEMA` | no, default `r2dbsvc_registry` | **TEST-ONLY -- never set this in a real deployment.** Overrides the registry schema name `PostgresCredentialStore`/`r2db_api.main` look `applications`/`credentials` up under. Its only reason to exist is so this repository's own test suite and the conformance adapter -- which run the real migration files with `r2dbsvc` textually rewritten to a random throwaway prefix, to avoid colliding with anything else in a shared local cluster -- can point a built app at their own rewritten schema. A real deployment always uses the literal schema `0005_credential_store.sql` creates and must leave this unset. |
+| `R2DB_CONTROL_PLANE_STATUS` | no, default `unavailable` | CCR-14 (R-9, `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`). Allowed values are exactly `enabled`/`unavailable`; anything else is a startup failure, never a silent fallback. This is a **deployer declaration**, not a detected fact -- this process cannot verify on its own whether a `/control/v1` control-plane process (`r2db_api.control_main`) is actually reachable. Set it to `enabled` only once that process is genuinely deployed and reachable (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7); the authoritative check for "is a control plane actually reachable" in a separated deployment is always the control plane's own `GET /control/v1/capabilities`, never this declaration. |
 
 The corresponding synthetic entries already exist in `deploy/env/api.env.example`
 (P3-D8), following the existing repository-root `.env.example` pattern --
 name only, never a real value.
+
+**The control-plane HTTP process (`r2db_api.control_main:app`) is a
+separate process with its own, separate environment-variable contract** --
+`R2DB_CONTROLPLANE_DSN`, `R2DB_CONTROL_CREDENTIAL_PEPPER`,
+`R2DB_CREDENTIAL_PEPPER`, the optional `R2DB_CONTROL_LIMIT_*` resource-bound
+overrides, and the same `R2DB_PLATFORM_SCHEMA`/`R2DB_PLATFORM_POOL_SIZE`
+knobs as above. It is never read by `r2db_api.main` (the table above) and
+this process never reads `R2DB_PLATFORM_DSN`/`R2DB_SERVE_APPS` in turn --
+the two processes' environments do not overlap in meaning even where a
+variable name looks similar. See `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7
+for the authoritative table and deployment steps, and `control_main.py`'s
+own module docstring for the exact contract this reference is kept in sync
+with.
+
+## 11. Control-plane HTTP surface storage (`0006_control_plane_http.sql`)
+
+Companion to `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (R-2/R-3/R-4/R-6).
+**Run once, after `0002` and `0005`** (`0006` revises two of `0002`'s own
+functions, and does not depend on `0005` beyond running after it by
+convention), connected as `r2dbsvc_control`:
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v controlplane_password="$R2DBSVC_CONTROLPLANE_PASSWORD" \
+  -f r2db-api/migrations/0006_control_plane_http.sql
+```
+
+`R2DBSVC_CONTROLPLANE_PASSWORD` is a new environment-variable *name*,
+generated the same way `R2DBSVC_CONTROL_PASSWORD`/`R2DBSVC_API_PASSWORD` are
+(§5's note on `psql`'s password variables applies identically here). Like
+`0001`/`0002`/`0005`, this file is safe to re-run: every `ALTER TABLE ...
+DROP NOT NULL`/`DROP DEFAULT`, `CREATE TABLE IF NOT EXISTS`, and `CREATE OR
+REPLACE FUNCTION` in it is natively idempotent, and its one `ADD CONSTRAINT`
+is guarded by a `pg_constraint` catalog check (see the migration's own
+header for the full idempotency argument, including why `CREATE OR REPLACE
+FUNCTION` does not reset a function's existing ACL).
+
+**Not yet exercised against the real VPS (procedural note only, matching
+§5's CCR-13 note's own caveat)**: no application has actually been
+provisioned against that cluster yet, so the two-state registry change
+below has not been exercised there either -- this section describes what
+`0006` does and why, verified against a local PostgreSQL 16 cluster
+(`r2db-api/tests/test_control_plane_store.py`), not production evidence.
+
+**What it adds:**
+
+| Object | Purpose |
+|---|---|
+| `applications` two-state registry (no new column) | `database_name`/`runtime_role`/`developer_role`/`provisioned_at` all become nullable, guarded by a new CHECK: either all four are NULL ("registered, not yet provisioned") or all four are NOT NULL ("provisioned") -- a half-filled row can never exist. "Provisioned" is still judged solely by `database_name IS NOT NULL`. |
+| `begin_provision_application` (revised) | Writes **nothing** to `applications` any more (round-2 review ruling; see the migration's own header for the crash-safety argument) -- it only enforces the already-provisioned guard and runs the two `CREATE ROLE` statements. `finish_provision_application` is now the only place `applications` is ever written during provisioning. |
+| `finish_provision_application` (revised) | An explicit two-branch `UPDATE ... WHERE database_name IS NULL` then, if no row matched, `INSERT` -- handles both the operator-first flow (no pre-existing row) and the registered-row flow (a row already exists from `POST /control/v1/applications`) without an `ON CONFLICT` that could silently mask a real race (see the migration's own header, case (iii)). |
+| `begin_deprovision_application` (revised) | Adds `AND database_name IS NOT NULL` to its own lookup -- a registered-only row is never mistaken for a deprovisioning target. |
+| `r2dbsvc_registry.control_credentials` (new table) | `credential_id` (`ctl_` + 16 hex) / `verifier` (UNIQUE) / `enabled` / `revoked` / `must_rotate` (default `true`) / `created_at` / `updated_at`. No `application_slug` column and no `role` column at all -- structurally incapable of holding, or being confused with, an application credential (`credentials.role`'s own `CHECK (role IN ('runtime','developer'))` is untouched). |
+| `r2dbsvc_registry.control_audit` (new table) | Contract `audit.fields`' 12 named columns plus `recorded_at` (this table's own `DEFAULT now()` DB-side insertion timestamp, distinct from the application-supplied `occurred_at`). `event_id` is the primary key, generated application-side (never a server default), so a retried INSERT after a failed one can never split one intended event into two ids. |
+| `r2dbsvc_controlplane` (new login role) | `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10`. This is the role the control-plane HTTP process (`r2db_api.control_main`) authenticates as (`R2DB_CONTROLPLANE_DSN`) -- **never** `r2dbsvc_control`. Grants: `applications` SELECT/INSERT/UPDATE (no DELETE -- application deletion stays out of scope); `credentials` SELECT/INSERT/UPDATE (no DELETE -- `delete-credential` stays CLI-only); `control_credentials` SELECT/UPDATE **only, deliberately no INSERT** (the database-privilege half of "control-credential issuance is out-of-band only" -- "案B" -- independent of and in addition to the application-level enforcement); `control_audit` INSERT **only, no SELECT/UPDATE/DELETE** (append-only from this role -- R-3/R-6; this role can append an audit event but can never read one back, verified by `r2db-api/tests/test_control_plane_store.py::test_controlplane_role_grants_match_the_design`). No `GRANT EXECUTE` on any provisioning function, and no `GRANT` on any `SEQUENCE`/`FUNCTION` object at all, appears anywhere in this migration for this role -- both confirmed as review items, not merely asserted (see the migration's own §1.4 comments, each tied to the specific design requirement it satisfies). |
+| `r2dbsvc_control` gains an explicit `GRANT INSERT ON control_audit` too | Not merely relying on this role's pre-existing schema-owner privilege (`0002`'s `CREATE SCHEMA ... AUTHORIZATION r2dbsvc_control`) -- stated explicitly so a future change to schema ownership cannot silently revoke the CLI's own ability to write audit rows as a side effect nobody noticed. This is the one grant this role gains from `0006`; it already has full DML on every other table in this schema by ownership. |
+
+**Append-only, precisely scoped**: `control_audit`'s append-only guarantee
+holds *from the `r2dbsvc_controlplane` role* -- the schema owner
+(`r2dbsvc_control`, the operator/CLI role) retains ordinary PostgreSQL
+owner privilege over this table (can `SELECT`/`UPDATE`/`DELETE` it, same as
+every other table in this schema it owns). This is the same "externally
+governed where required" shape the common contract's own `audit.immutability`
+already anticipates (`security/CONTROL_MAPPING.md`'s SI-14 row states this
+precisely) -- append-only is a real, DB-enforced property against the
+control-plane HTTP process specifically, not a claim that no PostgreSQL
+role anywhere could ever alter this table.
+
+## 12. Bootstrap/reset ritual (`python -m r2db_api.ops bootstrap`/`reset`)
+
+The **only** way a `role=control` credential is ever created (design "案B" --
+no HTTP endpoint anywhere can do this). Both connect with `R2DB_CONTROL_DSN`
+(`r2dbsvc_control`) and `R2DB_CONTROL_CREDENTIAL_PEPPER` (a value that must
+differ from `R2DB_CREDENTIAL_PEPPER` -- both subcommands refuse to run at
+all if the two are equal, checked before touching the database).
+
+**`bootstrap`** -- run exactly once per platform database, ever:
+
+```
+R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... python -m r2db_api.ops bootstrap
+```
+
+Refuses (`CONFLICT`, exit code 1) if **any** `control_credentials` row
+already exists -- including one that has since been revoked (the contract's
+own text is "while a control credential exists", read as row-existence, not
+"while an unrevoked one exists"; reading it the other way would open a
+second issuance path once every row happened to be revoked). **Recovery
+from that state is always `reset`, never a second `bootstrap`.** On success,
+prints `credential_id`/`secret` once (never stored anywhere by this process
+beyond the verifier) and writes one canonical `control_credential_lifecycle`
+audit event in the same transaction as the issuance.
+
+**`reset`** -- the general-purpose recovery, at any time:
+
+```
+R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... python -m r2db_api.ops reset
+```
+
+Revokes **every** existing control credential and issues exactly one new
+one, atomically (both in the same transaction -- there is never a moment
+where the old credentials are revoked but no new one exists yet, or vice
+versa). Touches nothing in `applications`/`credentials`/`control_audit`
+beyond the one canonical event this itself writes.
+
+**Both rituals serialize against each other** via a fixed-key
+`pg_advisory_xact_lock` (`ops.py`'s own `_RITUAL_ADVISORY_LOCK_KEY`),
+acquired before the existence check runs, on the same connection/transaction
+the rest of the ritual uses -- closing the race where two concurrent
+`bootstrap` invocations (or a `bootstrap` and a `reset`) could otherwise
+both observe "no live row" before either commits.
+
+**Non-permanence (must-rotate)**: the credential either ritual issues has
+`must_rotate = true` -- authorized for nothing but `GET
+/control/v1/capabilities` and rotating itself (in-band, or the CLI
+break-glass `rotate-control-credential` below) until a real rotation
+completes. This is what satisfies the contract's "expires or requires
+rotation" for the first-issued credential without depending on wall-clock
+time.
+
+**Break-glass, control-credential-specific (R-10, always available even
+with `/control/v1` fully down):**
+
+```
+python -m r2db_api.ops enable-control-credential <credential_id>   # re-enable a disabled (not revoked) one
+python -m r2db_api.ops rotate-control-credential <credential_id>   # replace its secret in place, same credential_id
+```
+
+Neither offers an *un-revoke* -- revocation stays terminal by design (SI-13:
+un-revoking would make a durably-recorded revocation event false); the only
+recovery from a revoked control credential is `reset`.
+
+## 13. Control-plane lockout paths and recovery
+
+Three ways an operator can end up unable to use `/control/v1` at all, and
+the current, lightest recovery for each (design R-5 §7/§8 m-2 originally
+recorded all three as "recover via `reset` only" -- written before R-10, in
+the same design revision, added the two lighter break-glass subcommands
+below specifically to avoid needing `reset`'s heavier blast radius,
+revoke-everything-and-remint-one, for the two cases that do not actually
+involve a revoked credential; this section documents the current, more
+specific guidance those additions make possible, not a contradiction of R-5):
+
+1. **A rotation succeeded, but the new secret was never captured** (network
+   blip, terminal scrollback lost, etc.) -- the credential itself is fine
+   and not disabled/revoked, only its current secret is unknown. Recovery:
+   `rotate-control-credential <credential_id>` (same `credential_id`, a
+   fresh secret, printed once) -- lighter than `reset`, and preserves audit
+   continuity (every prior `control_audit` row naming this `credential_id`
+   still refers to the same, still-live credential).
+2. **The one live control credential was disabled** (not revoked) --
+   in-band or by mistake. Recovery: `enable-control-credential
+   <credential_id>` -- re-enables it in place; no new secret is issued or
+   needed.
+3. **`control_requests_per_minute` (R-7) is exhausted** -- the credential
+   itself is unaffected; the control-plane HTTP process is refusing *all*
+   `/control/v1` requests (429) until its single, global rate window
+   clears. `python -m r2db_api.ops` never goes through this window at all
+   (`ControlPlaneService`'s rate check is HTTP-request-path-specific; the
+   CLI talks to PostgreSQL directly) -- any CLI subcommand, not only
+   `reset`, is unaffected and usable immediately. Simply waiting also
+   resolves this with no CLI use at all: the window is a sliding 60-second
+   window (`ControlPlaneService._check_rate`, round-2 review MI-7 --
+   stricter than a fixed/bucketed window, deliberately), so it always
+   clears within 60 seconds of the last request that filled it, regardless
+   of `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`'s own configured
+   count.
+
+`reset` remains the universal fallback for all three (and the *only*
+recovery once a control credential has actually been revoked, or when the
+`credential_id` itself is not known/trusted) -- it is simply heavier than
+necessary for cases 1 and 2 above, now that lighter, targeted recovery
+exists for them.
+
+## 14. Manual recovery from a crash between `begin_provision_application` and `finish_provision_application`
+
+A known, pre-existing operational wart (unchanged by `0006` -- see that
+migration's own header comment on `begin_provision_application`, "KNOWN,
+UNCHANGED, PRE-EXISTING WART"): `begin_provision_application` (§2/§5 above)
+runs its two `CREATE ROLE` statements *before* `0003`'s `CREATE DATABASE`
+step, and (since `0006`) writes nothing to `applications` at all --
+`finish_provision_application`, at the very end of `0003`, is the only
+place a provisioning claim is ever recorded. A process crash, connection
+loss, or operator interrupt **anywhere between `begin`'s `CREATE ROLE`
+statements and `finish` running** -- which spans the whole of `0003`'s own
+body: `CREATE DATABASE`, the `CONNECT`/`USAGE` grants, `\c` into the new
+database, `ALTER SCHEMA public OWNER TO` the developer role, and the
+domain/table/RLS/view setup inside it -- therefore leaves:
+
+- the two per-application login roles (`r2dbsvc_app_<slug>_runtime`,
+  `r2dbsvc_app_<slug>_developer`) **created and present in `pg_roles`**, but
+- **no completed provisioning claim** in `r2dbsvc_registry.applications` --
+  either no row at all (operator-first flow), or a registered-only row
+  (`database_name IS NULL`, from a prior `POST /control/v1/applications`)
+  left exactly as it was.
+
+This is safe from a serving standpoint (`r2db_api.main`'s own startup
+check, §10 above, refuses to serve a registered-but-not-provisioned slug),
+but a *retry* of provisioning for the same slug now fails loudly until the
+residue is cleared by hand -- **exactly how depends on where inside `0003`
+the crash landed**, which is why detection below has three queries, not
+two: a crash before `CREATE DATABASE` leaves only role residue (`CREATE
+ROLE ... already exists` on retry), but a crash at or after `CREATE
+DATABASE` also leaves the database itself behind, and once `ALTER SCHEMA
+public OWNER TO` has run, that database's `public` schema (and everything
+`0003` created inside it before the crash) is *owned* by the residual
+developer role -- `DROP ROLE` refuses to drop a role that still owns
+objects, so the two-query, roles-only recovery this section originally
+described does not work past that point (confirmed by re-running this
+recovery against a deliberately crashed `0003` at several injection
+points).
+
+**Detection:**
+
+```sql
+-- 1. Do the per-application roles already exist?
+SELECT rolname FROM pg_roles
+  WHERE rolname IN ('r2dbsvc_app_<slug>_runtime', 'r2dbsvc_app_<slug>_developer');
+
+-- 2. Is there a completed provisioning claim for this slug?
+SELECT database_name FROM r2dbsvc_registry.applications
+  WHERE application_slug = '<slug>';
+
+-- 3. Did CREATE DATABASE itself already run?
+SELECT 1 FROM pg_database WHERE datname = 'r2dbsvc_app_<slug>';
+```
+
+If query 1 returns either role **and** query 2 returns no row, or a row
+with `database_name IS NULL`, provisioning never completed for this slug
+even though `begin`'s roles were created -- this is exactly the residue
+this section recovers from. Query 3 decides *which* of the two recovery
+branches below applies -- do not skip it and assume branch (A); guessing
+wrong surfaces as `DROP ROLE` failing with a "some objects depend on it"
+error partway through branch (A), not as a silent no-op.
+
+**Recovery -- branch (A): query 3 returned no row (`CREATE DATABASE` never ran)**
+
+1. Confirm nothing is actually connected as either residual role:
+   ```sql
+   SELECT pid, usename FROM pg_stat_activity
+     WHERE usename IN ('r2dbsvc_app_<slug>_runtime', 'r2dbsvc_app_<slug>_developer');
+   ```
+   This should return no rows -- these roles' passwords were freshly
+   generated for the interrupted run (per `0003`'s own header, by the
+   operator, via `openssl rand`, with an instruction to record them in a
+   secret manager immediately; whether that recording actually happened is
+   a matter of operator practice this recovery cannot verify) and, since
+   provisioning never completed, nothing in this flow has had reason to
+   authenticate as either role yet. If this query does return a row,
+   investigate before proceeding -- dropping a role with an active session
+   requires terminating that session first, and an active session here
+   would itself be unexpected and worth understanding.
+2. Drop the residual roles:
+   ```sql
+   DROP ROLE IF EXISTS r2dbsvc_app_<slug>_runtime;
+   DROP ROLE IF EXISTS r2dbsvc_app_<slug>_developer;
+   ```
+   Safe: no database was ever created for this slug (query 3 confirmed it),
+   so neither role owns anything anywhere in the cluster to worry about
+   orphaning -- at this point in `0003` they hold only `CONNECT`/membership
+   grants, never ownership, and a role that merely holds granted privileges
+   (as opposed to owning objects) drops cleanly.
+3. Re-run `0003_provision_application.sql` for the slug (§5 above) as
+   normal, with freshly generated passwords -- `begin_provision_application`
+   now finds no pre-existing roles and no completed provisioning claim, so
+   it proceeds exactly as a first attempt would.
+
+**Recovery -- branch (B): query 3 returned a row (`CREATE DATABASE` already ran)**
+
+The database must be removed *before* the roles -- in this branch, `public`
+(and whatever `0003` managed to create inside it before the crash: the two
+CCR-13 domains, `_r2db_schema_revision`, the `_r2db_missing_rls` view) may
+already be owned by the residual developer role (`ALTER SCHEMA public
+OWNER TO`, `0003`'s own line -- see this section's intro), which blocks a
+plain `DROP ROLE` outright. Dropping the database first removes every
+object inside it, ownership included, so neither role owns anything left
+anywhere in the cluster once it is gone:
+
+1. Terminate any sessions against the residual database (mirrors `0004`'s
+   own deprovisioning step -- a crash mid-`0003` is not expected to leave
+   live sessions, but confirm rather than assume):
+   ```sql
+   SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+     WHERE datname = 'r2dbsvc_app_<slug>' AND pid <> pg_backend_pid();
+   ```
+2. Drop the database, then the two roles:
+   ```sql
+   DROP DATABASE IF EXISTS r2dbsvc_app_<slug>;
+   DROP ROLE IF EXISTS r2dbsvc_app_<slug>_runtime;
+   DROP ROLE IF EXISTS r2dbsvc_app_<slug>_developer;
+   ```
+   The `DROP DATABASE` above must succeed before the `DROP ROLE` statements
+   are attempted -- if it fails (e.g. `database "..." is being accessed by
+   other users`, the same transient autovacuum-worker condition §5 above
+   already documents for `0004`), resolve that first; do not attempt to
+   drop the roles while the database that owns objects through them still
+   exists.
+3. Re-run `0003_provision_application.sql` for the slug (§5 above) as
+   normal, with freshly generated passwords -- identical to branch (A)'s
+   own step 3, now that both the roles and the database are gone.
