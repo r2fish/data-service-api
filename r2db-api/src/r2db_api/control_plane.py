@@ -68,6 +68,7 @@ from .auth import ControlAuthContext, ControlCredentialStore, CredentialStore, _
 from .errors import FoundationError, fail
 from .limits import ControlPlaneLimits
 from .service import ControlAuthority
+from .structured import revoke_last_control_credential_confirmation_phrase
 
 # Round-2 review MI-10: `credential_store.py` imports `psycopg` unconditionally
 # -- importing its Postgres classes at module level here would make this
@@ -117,6 +118,39 @@ _ATTRIBUTED_DECLARATION = (
 _FUTILITY_DECLARATION = (
     "No in-band path exists to create a control credential; issuance is limited to the "
     "operator bootstrap/reset ceremony, with no exceptions."
+)
+
+# Contract 1.2.0 `destructive_confirmation` (design docs/design/
+# DESTRUCTIVE_CONFIRMATION_V1.md R-3): the last-active-control-credential
+# revoke gate's own four declarations. Fixed, verbatim text -- like R-11's
+# declarations above, these are conformance-testable literals, never
+# regenerated per call. `reversible_alternative` is truthful about a real
+# limitation (WP-0 m-7, precision corrected by Opus review minor m-6):
+# `disable_credential` genuinely reverses this specific revoke (a disable,
+# not a revoke), but re-enabling the LAST disabled control credential is
+# itself gated behind its OWN separate out-of-band break-glass procedure
+# (`enable-control-credential`) -- distinct from `recovery`'s own `reset`
+# ceremony below, not "the same" one (an earlier revision of this text
+# conflated the two, which is not truthful: `reset` mints a fresh
+# credential and revokes every prior one, while `enable-control-credential`
+# re-enables the SAME still-existing, merely-disabled row -- two different
+# procedures, not one). Either way, the "alternative" does not actually
+# avoid needing an out-of-band step, it only defers which one. `recovery`
+# matches `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` §12/§13 (WP-0
+# m-2: that runbook, not DEPLOYMENT_RUNBOOK).
+_REVOKE_LAST_CONTROL_CREDENTIAL_CONSEQUENCE = (
+    "The last remaining active control credential is revoked; every in-band control-plane "
+    "credential is then unusable until the out-of-band break-glass reset ceremony runs."
+)
+_REVOKE_LAST_CONTROL_CREDENTIAL_REVERSIBLE_ALTERNATIVE = (
+    "disable_credential reverses (this specific revoke is terminal, a disable is not) -- but "
+    "re-enabling the last disabled control credential still requires its own separate out-of-band "
+    "break-glass procedure (enable-control-credential, distinct from this denial's own recovery, the "
+    "reset ceremony), so disabling instead only defers needing an out-of-band step, it does not avoid it."
+)
+_REVOKE_LAST_CONTROL_CREDENTIAL_RECOVERY = (
+    "The out-of-band operator reset ceremony (r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md "
+    "§12/§13) issues a fresh control credential."
 )
 
 # R-6 (design §4): exactly the denial codes design's own enumeration names
@@ -179,6 +213,7 @@ class ControlBackend(Protocol):
     def control_credentials_unit_of_work(self) -> ContextManager[Any]: ...
     def control_credential_state(self, credential_id: str) -> tuple[bool, bool] | None: ...
     def list_control_credentials(self) -> list[tuple[str, bool, bool]]: ...
+    def control_credentials_locked(self, work: Any) -> list[tuple[str, bool, bool]]: ...
     def rotate_control_credential(self, credential_id: str, secret: str, *, work: Any) -> None: ...
     def set_control_credential_state(self, credential_id: str, *, enabled: bool | None, revoked: bool | None, work: Any) -> None: ...
 
@@ -332,6 +367,16 @@ class InMemoryControlBackend:
     def list_control_credentials(self) -> list[tuple[str, bool, bool]]:
         return [(r.credential_id, r.enabled, r.revoked) for r in self._control_credentials.list_all()]
 
+    def control_credentials_locked(self, work: Any) -> list[tuple[str, bool, bool]]:
+        # design R-3/WP-0 MA-2: the in-memory store's own `unit_of_work()`
+        # (auth.ControlCredentialStore) already holds a `threading.Lock` for
+        # this whole `work`'s duration -- see that method's own docstring --
+        # so a plain read here is already serialized against a concurrent
+        # revoke/rotate/set_state racing the same decision; `work` itself
+        # carries no separate handle to lock on for this backend.
+        del work
+        return [(r.credential_id, r.enabled, r.revoked) for r in self._control_credentials.list_all()]
+
     def rotate_control_credential(self, credential_id: str, secret: str, *, work: Any) -> None:
         self._control_credentials.rotate(credential_id, secret, work=work)
 
@@ -413,6 +458,9 @@ class PostgresControlBackend:
     def list_control_credentials(self) -> list[tuple[str, bool, bool]]:
         return self._control_credentials.list_all()
 
+    def control_credentials_locked(self, work: Any) -> list[tuple[str, bool, bool]]:
+        return self._control_credentials.list_all_for_update(work)
+
     def rotate_control_credential(self, credential_id: str, secret: str, *, work: Any) -> None:
         self._control_credentials.rotate(credential_id, secret, work=work)
 
@@ -470,7 +518,7 @@ class ControlPlaneService:
         self._gate_must_rotate(context, "control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
         return {
-            "contract_version": "1.1.0",
+            "contract_version": "1.2.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": {"status": "unavailable"},
@@ -491,7 +539,7 @@ class ControlPlaneService:
         if self._backend.application_exists(application_id):
             fail("CONFLICT", "Application already exists.", status=409)
         if self._backend.applications_count() >= self._limits.applications:
-            fail("LIMIT_EXCEEDED", "Application registration limit exceeded.", status=413, details={"resource": "applications", "limit": self._limits.applications})
+            fail("LIMIT_EXCEEDED", "Application registration limit exceeded.", status=413, details={"resource": "applications", "limit_class": "applications", "limit": self._limits.applications})
 
         def _body(work: Any) -> dict[str, Any]:
             self._backend.register_application(application_id, work=work)
@@ -565,7 +613,7 @@ class ControlPlaneService:
         # (design §6 supervisor decision (3): issuance to a disabled
         # Application is permitted; enforcement already lives in `enabled`).
         if self._backend.credentials_active_count(application_id) >= self._limits.credentials_per_application:
-            fail("LIMIT_EXCEEDED", "Credentials-per-application limit exceeded.", status=413, details={"resource": "credentials_per_application", "limit": self._limits.credentials_per_application})
+            fail("LIMIT_EXCEEDED", "Credentials-per-application limit exceeded.", status=413, details={"resource": "credentials_per_application", "limit_class": "credentials_per_application", "limit": self._limits.credentials_per_application})
 
         credential_id = _new_credential_id()
         secret_value = _new_secret()
@@ -623,22 +671,85 @@ class ControlPlaneService:
         return self._run_state_change(self._backend.control_credentials_unit_of_work, _control_body)
 
     def revoke_credential(self, secret: str | None, credential_id: Any, *, destructive: Any = None, confirmation: Any = None, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
-        # Q-1 (design §0.5): the contract's own destructive-confirmation
-        # semantics are an undecided, not-yet-effective contract question --
-        # `destructive`/`confirmation` are accepted here exactly as the
-        # `CredentialRevokeRequest` schema allows, and deliberately NOT
-        # inspected. Inventing a bespoke confirmation rule to fill that gap
-        # would repeat the exact defect an earlier phase's own Q-1
-        # correction was about; the design record is explicit that this
-        # implementation must not do that. When the contract decision lands,
-        # enforcing it is an additive change to this one method.
-        del destructive, confirmation
+        """Contract 1.2.0 `destructive_confirmation` (design docs/design/
+        DESTRUCTIVE_CONFIRMATION_V1.md R-3): revoking an application
+        credential, or a control credential that is not the last remaining
+        active one, is never gated -- `destructive`/`confirmation` are not
+        even inspected on those paths (contract `non_destructive_requests`),
+        exactly as before this WP. Revoking the LAST remaining active
+        (enabled and not revoked) control credential requires a valid
+        confirmation; the judgment "is this the last active one" is made
+        inside the SAME `control_credentials_unit_of_work` transaction as
+        the state change itself, under a lock (`control_credentials_
+        locked`), so two concurrent revoke attempts against two different
+        credentials can never both observe "not last" and both proceed
+        unconfirmed (WP-0 MA-2's TOCTOU concern). Processing order:
+        authenticate -> must_rotate gate -> [confirmation gate, control
+        credentials only] -> execute (design R-3's own ordering).
+        """
         request_id = request_id or _uuid()
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "revoke_credential", request_id=request_id)
-        return self._set_credential_state(context, credential_id, revoked=True, operation="revoke_credential", request_id=request_id)
+        # Review blocker B-1: shape validation of the request's own
+        # `destructive`/`confirmation` fields (contract `CredentialRevoke
+        # Request.destructive: {"type": "boolean"}` / `.confirmation:
+        # {"type": "string", ...}`) -- applied unconditionally, regardless
+        # of whether this particular revoke ever meets the gate condition
+        # below. This is the same "request schema enforce" `bind_mutation`
+        # already applies to every data-plane mutation's own `destructive`
+        # field (structured.py); it is not part of the destructive-
+        # confirmation *semantics* the contract's own `non_destructive_
+        # requests` clause says a non-gated revoke never inspects -- a
+        # non-boolean truthy `destructive` (e.g. the string `"false"`,
+        # which a loose `bool(...)` cast would silently coerce to `True`)
+        # must be rejected as a shape defect before that semantic question
+        # is even reached, exactly per contract `evaluation_order` (shape
+        # validation precedes confirmation evaluation).
+        if destructive is not None and not isinstance(destructive, bool):
+            fail("VALIDATION_FAILED", "destructive must be boolean.")
+        if confirmation is not None and not isinstance(confirmation, str):
+            fail("VALIDATION_FAILED", "confirmation must be a string.")
+        kind, state = self._locate_credential(credential_id)
+        if kind is None:
+            fail("NOT_FOUND", "Credential was not found.", status=404)
+        if kind != "control":
+            # Q1-D1: an application credential's revocation is never gated.
+            del destructive, confirmation
+            return self._set_credential_state(context, credential_id, revoked=True, operation="revoke_credential", request_id=request_id)
+
+        def _body(work: Any) -> dict[str, Any]:
+            rows = self._backend.control_credentials_locked(work)
+            matching = next((row for row in rows if row[0] == credential_id), None)
+            if matching is None:
+                fail("NOT_FOUND", "Credential was not found.", status=404)
+            _credential_id, enabled_now, revoked_now = matching
+            # `active_ids` (enabled AND not revoked) naturally excludes
+            # `credential_id` itself when `revoked_now` is already true, so
+            # an idempotent re-revoke of an already-revoked row never hits
+            # this gate -- no separate branch is needed for that case.
+            active_ids = [row[0] for row in rows if row[1] and not row[2]]
+            if len(active_ids) == 1 and active_ids[0] == credential_id:
+                phrase = revoke_last_control_credential_confirmation_phrase(credential_id)
+                if destructive is not True or confirmation != phrase:
+                    self._deny(
+                        code="DESTRUCTIVE_CONFIRMATION_REQUIRED", status=409,
+                        message="Revoking the last remaining active control credential requires explicit destructive confirmation.",
+                        event_class="control_credential_lifecycle", operation="revoke_credential", target_kind="control_credential",
+                        request_id=request_id, actor_id=context.credential_id, actor_type="control_credential", role="control",
+                        extra_details={
+                            "required_confirmation": phrase,
+                            "consequence": _REVOKE_LAST_CONTROL_CREDENTIAL_CONSEQUENCE,
+                            "reversible_alternative": _REVOKE_LAST_CONTROL_CREDENTIAL_REVERSIBLE_ALTERNATIVE,
+                            "recovery": _REVOKE_LAST_CONTROL_CREDENTIAL_RECOVERY,
+                        },
+                    )
+            self._backend.set_control_credential_state(credential_id, enabled=None, revoked=True, work=work)
+            self._write_state_audit(work, event_class="control_credential_lifecycle", operation="revoke_credential", target_kind="control_credential", actor=context, request_id=request_id)
+            return {"credential_id": credential_id, "enabled": enabled_now, "revoked": True}
+
+        return self._run_state_change(self._backend.control_credentials_unit_of_work, _body)
 
     def set_credential_enabled(self, secret: str | None, credential_id: Any, enabled: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
@@ -817,14 +928,33 @@ class ControlPlaneService:
         extra_details: dict[str, Any] | None = None,
     ) -> None:
         """R-6/R-11: writes one durable denial event in its own, independent
-        transaction (no state change to share one with -- design §4), then
-        raises the original denial with an R-11 declaration attached. If the
-        durable write itself fails, the *whole response* becomes `SERVICE_
-        UNAVAILABLE` (503) instead -- the original denial code/message/
-        declaration are discarded, not merely supplemented, which is what
-        keeps "audited: true" truthful by construction (a response can never
-        claim durable attribution for an event that was not, in fact,
-        durably recorded).
+        transaction, then raises the original denial with an R-11
+        declaration attached. "No state change to share one with" (design
+        §4) describes the ordinary call sites (`_authenticate`/`_gate_must_
+        rotate`/`_deny_role_control`), which run before any state-changing
+        `unit_of_work` is even opened. The last-active-control-credential
+        revoke gate (design R-3, WP-3) calls `_deny` from a different
+        position -- from INSIDE an already-open `control_credentials_unit_
+        of_work` transaction (`revoke_credential`'s own `_body`) -- but the
+        "independent transaction" property still holds in practice: `self.
+        _audit` (`ControlAuditSink`/`PostgresControlAuditSink`) is backed by
+        its own, separate connection/pool from the one `control_credentials_
+        unit_of_work` holds open (see `PostgresControlAuditSink.__init__`'s
+        own dedicated `_RolePool`), so the audit row this call writes
+        commits independently of, and is never rolled back by, the
+        enclosing `_body`'s own transaction aborting after `_deny` raises
+        (which it always does -- `_deny` never returns normally). Durably
+        recorded audit evidence for a denial made from inside an open
+        transaction survives that transaction's own rollback for the same
+        reason two ordinary, unrelated database connections' commits are
+        independent of each other.
+
+        If the durable write itself fails, the *whole response* becomes
+        `SERVICE_UNAVAILABLE` (503) instead -- the original denial code/
+        message/declaration are discarded, not merely supplemented, which
+        is what keeps "audited: true" truthful by construction (a response
+        can never claim durable attribution for an event that was not, in
+        fact, durably recorded).
 
         Round-2 review MA-2: the declaration text itself must be truthful
         about *attribution*, not just about durability -- the attributed
@@ -913,7 +1043,7 @@ class ControlPlaneService:
         with self._rate_lock:
             self._rate_window[:] = [stamp for stamp in self._rate_window if now - stamp < 60]
             if len(self._rate_window) >= self._limits.control_requests_per_minute:
-                fail("LIMIT_EXCEEDED", "Control-plane request rate limit exceeded.", status=429, details={"resource": "control_requests_per_minute", "limit": self._limits.control_requests_per_minute})
+                fail("LIMIT_EXCEEDED", "Control-plane request rate limit exceeded.", status=429, details={"resource": "control_requests_per_minute", "limit_class": "control_requests_per_minute", "limit": self._limits.control_requests_per_minute})
             self._rate_window.append(now)
 
 

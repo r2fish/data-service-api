@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import os
+import threading
 from typing import Iterator, Mapping
 
 from .errors import FoundationError, fail
@@ -284,6 +285,21 @@ class ControlCredentialStore:
             raise ValueError("R2DB_CONTROL_CREDENTIAL_PEPPER is required")
         self._pepper = pepper.encode()
         self.available = True
+        # design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3/WP-0 MA-2:
+        # the last-active-control-credential revoke gate's count-then-write
+        # must be serialized against a concurrent revoke of a DIFFERENT
+        # credential racing the exact same decision (two concurrent revokes
+        # of the last two active rows could otherwise both observe "count =
+        # 2" and both proceed unconfirmed, leaving zero active control
+        # credentials). `PostgresControlCredentialStore`'s equivalent is a
+        # real `SELECT ... FOR UPDATE` inside the caller's own transaction
+        # (`list_all_for_update`); this in-memory store has no separate
+        # connection/transaction to lock rows on, so `unit_of_work` itself
+        # holds this lock for its entire duration instead -- every state-
+        # changing control-credential operation already goes through
+        # exactly one `unit_of_work()` call, so this serializes all of them
+        # against each other, not only the revoke gate.
+        self._lock = threading.Lock()
 
     def verifier(self, secret: str) -> str:
         if not isinstance(secret, str):
@@ -292,13 +308,14 @@ class ControlCredentialStore:
 
     @contextmanager
     def unit_of_work(self) -> Iterator[_InMemoryWork]:
-        snapshot = dict(self._records)
-        work = _InMemoryWork()
-        try:
-            yield work
-        except BaseException:
-            self._records = snapshot
-            raise
+        with self._lock:
+            snapshot = dict(self._records)
+            work = _InMemoryWork()
+            try:
+                yield work
+            except BaseException:
+                self._records = snapshot
+                raise
 
     def add(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> None:
         """Only the bootstrap/reset ritual (`ops.py`, connected with `R2DB_

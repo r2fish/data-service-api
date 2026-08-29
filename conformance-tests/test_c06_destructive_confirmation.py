@@ -27,21 +27,20 @@ named trap: a naive string compare ranks "1.10.0" below "1.2.0"):
   exercise indirectly through `delete(..., confirmation=VALID_
   CONFIRMATION)`; this module names it explicitly as C-06's own floor.
 
-**As of this work package (WP-2), every registered adapter (`r2db-api`,
-`r2db-api-http`, `MitateDB-api`) declares `contract_version: 1.1.0`** (the
-r2db/MitateDB flip to 1.2.0 is WP-3/WP-5's own single-commit work, per
-design's per-peer flip rule). Every test below therefore takes the baseline
-branch for real, for every currently-registered adapter -- the strict-branch
-code paths are written to this design's exact spec and exercised only by
-`test_contract_version_at_least_*`/`test_resolve_valid_confirmation_*`'s
-own direct unit tests of the *pure* dispatch/derivation functions
-(`adapter.parse_semver`/`contract_version_at_least`/`resolve_valid_
-confirmation`) at the bottom of this file -- proving the vector bodies'
-own skeletons import and branch correctly, not that a real >= 1.2.0 peer
-satisfies them end-to-end. **First real execution of the strict branch
-against a genuine 1.2.0 peer is explicitly WP-3's own completion condition
-(r2db-api) and WP-5's (MitateDB-api)**, not this WP's -- see this file's
-own `CONDITIONS.md` C-06 row for the same disclosure.
+**As of WP-3, both registered r2db adapters (`r2db-api`, `r2db-api-http`)
+declare `contract_version: 1.2.0` and take the STRICT branch for real, on
+every run** (the r2db flip to 1.2.0 landed in WP-3's own single commit, per
+design's per-peer flip rule); `MitateDB-api` still declares `1.1.0` and
+takes the baseline branch (its own flip is WP-5's completion condition, not
+yet landed). Vectors V1-V8 below are therefore real, first-execution-proven
+coverage against genuine 1.2.0 peers, not merely unit-tested dispatch
+skeletons -- `test_contract_version_at_least_*`/`test_resolve_valid_
+confirmation_*` at the bottom of this file remain in place as direct unit
+tests of the *pure* dispatch/derivation functions (`adapter.parse_semver`/
+`contract_version_at_least`/`resolve_valid_confirmation`) themselves, not
+as a substitute for end-to-end coverage -- see this file's own
+`CONDITIONS.md` C-06 row for the same disclosure, updated in the same
+commit as this flip.
 
 ## Vectors (design R-6, strict branch)
 
@@ -116,6 +115,7 @@ import pytest
 
 from absence import assert_control_operation_absent_or_uniformly_refused
 from adapter import (
+    BatchOperation,
     ConformanceDenial,
     Fixture,
     SurfaceAbsent,
@@ -156,22 +156,26 @@ _REQUIRED_DETAIL_KEYS = ("required_confirmation", "consequence", "reversible_alt
 # this whole module's run. Precisely which check may share the cached
 # Fixture's data safely differs by branch, corrected here per review m-5
 # (an earlier revision of this comment overclaimed this uniformly):
-# `_assert_baseline_delete_invariant` -- the ONLY code path that actually
-# runs against any currently-registered adapter (every one still declares
-# `contract_version: 1.1.0`) -- operates on a freshly `insert()`-ed,
-# uniquely-marked row of its own rather than the shared fixture's single
-# seeded row, specifically so its own repeated invocations (once per
-# vector test, 8 times, against the SAME cached Fixture) never step on
-# each other. The STRICT branch's own vectors (dead code today, exercised
-# only once each per adapter across this module's whole run when they do
-# run) are not bound by that same constraint and mutate the shared
-# Fixture's real state directly where the vector itself calls for it: V5
-# deletes the seeded row for real (a genuine, one-time echo-then-execute);
-# V6 no longer touches the shared fixture's own entities at all (review
-# m-5 also moved V6's drop target to a throwaway entity of its own,
-# created fresh inside that test, removing an implicit ordering dependency
-# on V3's own use of `fx.a_only_entity`); V7 mutates control-plane
-# credential state, entirely independent of this Fixture.
+# `_assert_baseline_delete_invariant` -- the ONLY code path `MitateDB-api`
+# (still declaring `contract_version: 1.1.0`) ever runs -- operates on a
+# freshly `insert()`-ed, uniquely-marked row of its own rather than the
+# shared fixture's single seeded row, specifically so its own repeated
+# invocations (once per vector test, 8 times, against the SAME cached
+# Fixture) never step on each other. As of WP-3 the STRICT branch's own
+# vectors are REAL, first-execution-proven coverage for both r2db adapters
+# (no longer dead code) -- each still runs only once per adapter across
+# this module's whole run, and each mutates the shared Fixture's real state
+# directly where the vector itself calls for it, which remains safe under
+# the SAME per-vector footprint reasoning as before the flip: V5 deletes
+# the seeded row for real (a genuine, one-time echo-then-execute); V6 no
+# longer touches the shared fixture's own entities at all (review m-5 moved
+# V6's drop target to a throwaway entity of its own, created fresh inside
+# that test, removing an implicit ordering dependency on V3's own use of
+# `fx.a_only_entity`); V7 mutates control-plane credential state, entirely
+# independent of this Fixture. Measured (full-suite runs, both r2db
+# adapters strict since WP-3): no fixture-sharing regression of the kind
+# this comment block's own history (the `applications` SI-08 near-miss,
+# `test_c15_bootstrap_reset_lifecycle.py`) already warns about.
 # ---------------------------------------------------------------------------
 
 _SHARED_FIXTURE_CACHE: dict[str, Fixture] = {}
@@ -478,6 +482,56 @@ def test_c06_v2_destructive_false_with_correct_phrase_denied(adapter, fx: Fixtur
     denial = _assert_delete_denied(adapter, session, entity, "item_key", 1, destructive=False, confirmation=phrase)
     assert denial.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
     assert adapter.count(session, entity) == before
+
+
+# ---------------------------------------------------------------------------
+# V2b-wire: literal wire-level `destructive` OMISSION (WP-2 review
+# recommendation, realized WP-3) -- distinct from V2/V2b above, which this
+# port's `delete()` cannot express as a genuine wire omission at all (see
+# that test's own docstring): `destructive`/`confirmation` are now set
+# independently of each other in both r2db plugs' own `_build_mutation_item`
+# (the coupling that made this unreachable), so `BatchOperation`/`attempt_
+# batch_with_addresses` (port v1.4) can construct the literal shape --
+# `destructive` key ABSENT, `confirmation` key present with a real,
+# currently-valid phrase for the identical request -- that a genuinely
+# omitted wire field would produce.
+# ---------------------------------------------------------------------------
+
+
+def test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied(adapter, fx: Fixture):
+    """Contract `valid_confirmation`: "a missing destructive field is
+    equivalent to false, never to true" -- so a request whose wire OMITS
+    `destructive` entirely, while still carrying a real, currently-valid
+    `confirmation` phrase for the identical request, must be denied exactly
+    like V2/V2b's explicit `destructive: false` case."""
+    if _branch_for(adapter) != "strict":
+        _assert_baseline_delete_invariant(adapter, fx)
+        return
+
+    session = fx.runtime_a
+    entity = fx.shared_entity
+    before = adapter.count(session, entity)
+
+    with pytest.raises(ConformanceDenial) as excinfo:
+        adapter.attempt_batch_with_addresses(
+            session,
+            entity,
+            [
+                BatchOperation(
+                    operation="delete", where_field="item_key", where_value=1,
+                    destructive=False, confirmation=VALID_CONFIRMATION,
+                )
+            ],
+        )
+    denial = excinfo.value
+    assert denial.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+        f"{adapter.name}: a request whose wire OMITS destructive entirely (not merely false), carrying a real "
+        f"valid confirmation phrase for the identical request, was not denied -- got {denial.code!r}"
+    )
+    _assert_four_declarations(denial.details, context="V2b-wire destructive omitted, real phrase supplied")
+    assert adapter.count(session, entity) == before, (
+        f"{adapter.name}: V2b-wire must never change state"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -840,22 +894,23 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # runs exactly once regardless of how many adapters are registered).
 # ---------------------------------------------------------------------------
 
-# Expected as of THIS work package (port v1.6): every registered adapter
-# still declares `contract_version: 1.1.0` (§ this file's own module
-# docstring) -- so strict is the EMPTY set and baseline is all three. This
-# is deliberately a literal, hardcoded expectation, not derived from
-# anything computed below: WP-3 flips both r2db plugs to 1.2.0 in one
-# commit, and WP-5 flips MitateDB-api -- each flip MUST update these two
-# sets in the same commit as the flip, or this test goes red (a peer that
-# is expected to have moved to the strict branch but is still being
-# classified baseline, or vice versa, is exactly the silent-drift design
-# principle 4 forbids). The registry keys used here are `registered_
-# adapters()`'s own dict keys (`registry.json`'s `name` field), matching
-# `test_c11`/`test_c12`'s own convention -- NOT each adapter object's own
-# `.name` property (`"r2db-api (http+postgres)"` for the HTTP plug, used
-# elsewhere in this file for diagnostic messages only).
-_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset()
-_EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http", "MitateDB-api"})
+# Expected as of WP-3 (§ this file's own module docstring): both r2db
+# plugs (`r2db-api`, `r2db-api-http`) flipped to `contract_version: 1.2.0`
+# in that WP's single commit and take the strict branch; `MitateDB-api`
+# still declares `1.1.0` and takes the baseline branch (its own flip is
+# WP-5's completion condition). This is deliberately a literal, hardcoded
+# expectation, not derived from anything computed below: WP-5 flipping
+# MitateDB-api MUST update these two sets (to `{"r2db-api", "r2db-api-http",
+# "MitateDB-api"}` / `frozenset()`) in the SAME commit as that flip, or
+# this test goes red (a peer that is expected to have moved to the strict
+# branch but is still being classified baseline, or vice versa, is exactly
+# the silent-drift design principle 4 forbids). The registry keys used here
+# are `registered_adapters()`'s own dict keys (`registry.json`'s `name`
+# field), matching `test_c11`/`test_c12`'s own convention -- NOT each
+# adapter object's own `.name` property (`"r2db-api (http+postgres)"` for
+# the HTTP plug, used elsewhere in this file for diagnostic messages only).
+_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http"})
+_EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset({"MitateDB-api"})
 
 
 def test_c06_branch_dispatch_vacuity_guard():
@@ -901,13 +956,16 @@ def test_c06_branch_dispatch_vacuity_guard():
 
 
 # ---------------------------------------------------------------------------
-# Pure-function unit tests (design instructions item C-4): the strict
-# branch is never exercised against a real peer in this WP (every
-# registered adapter still declares 1.1.0) -- these tests instead verify,
-# directly and without any adapter, that the dispatch/derivation
-# primitives the vectors above depend on are themselves correct and that
-# the vector bodies above import/collect without error (module-level
-# collection already proves that much; these add real behavioral coverage
+# Pure-function unit tests (design instructions item C-4): kept in place
+# after WP-3's flip as direct, adapter-independent coverage of the
+# dispatch/derivation primitives themselves (the strict branch IS now
+# exercised against real peers too, via the vector tests above -- these
+# unit tests are a complementary, narrower check, not a stand-in for that
+# end-to-end coverage). They verify, directly and without any adapter, that
+# the dispatch/derivation primitives the vectors above depend on are
+# themselves correct and that the vector bodies above import/collect
+# without error (module-level collection already proves that much; these
+# add real behavioral coverage
 # of the pure functions).
 # ---------------------------------------------------------------------------
 

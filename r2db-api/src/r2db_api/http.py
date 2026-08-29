@@ -156,7 +156,7 @@ class RequestByteBoundMiddleware:
                 "LIMIT_EXCEEDED",
                 "Request body exceeds the configured resource limit.",
                 status=413,
-                details={"resource": "request_bytes", "limit": bound},
+                details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound},
             )
             await _send_problem_directly(send, error, request_id)
             return

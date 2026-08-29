@@ -615,12 +615,22 @@ async def test_mutate_update_and_delete_where_matches_executes(client):
     assert response.status_code == 200
     assert response.json()["affected"] == 1
 
+    delete_where = [{"field": "body", "operator": "matches", "value": "rename%"}]
+    probe = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("secret-a"),
+        json={"operations": [{"operation": "delete", "where": delete_where, "destructive": True}]},
+    )
+    assert probe.status_code == 409
+    assert probe.json()["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    phrase = probe.json()["details"]["required_confirmation"]
+
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("secret-a"),
         json={
             "operations": [
-                {"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "rename%"}], "destructive": True, "confirmation": "DELETE"}
+                {"operation": "delete", "where": delete_where, "destructive": True, "confirmation": phrase}
             ]
         },
     )
@@ -724,11 +734,12 @@ async def test_http_schema_create_index_and_drop_index_execute(client):
     )
     assert without_confirmation.status_code == 409
     assert without_confirmation.json()["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    phrase = without_confirmation.json()["details"]["required_confirmation"]
 
     response = await client.post(
         "/v1/schema/operations",
         headers=_auth("dev-secret-a"),
-        json={"operation": "drop_index", "entity": "notes", "index": "by_body", "destructive": True, "confirmation": "DROP_INDEX"},
+        json={"operation": "drop_index", "entity": "notes", "index": "by_body", "destructive": True, "confirmation": phrase},
     )
     assert response.status_code == 200
     catalog_response = await client.get("/v1/catalog", headers=_auth("secret-a"))

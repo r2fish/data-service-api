@@ -209,7 +209,13 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
     if not isinstance(raw_values, dict):
         fail("VALIDATION_FAILED", "Mutation values must be an object.")
     if len(raw_values) > 100:
-        fail("LIMIT_EXCEEDED", "Mutation contains too many fields.", status=413)
+        # Contract 1.2.0 (subordinate ruling 7(B), Q1-D8): this mirrors the
+        # contract's own fixed `Mutation.values.maxProperties: 100` shape
+        # bound, not a deployment-tunable `limits.classes` resource -- so it
+        # is `VALIDATION_FAILED` (400), never `LIMIT_EXCEEDED` (which would
+        # be unable to name a `limit_class` member for this, since no such
+        # class exists).
+        fail("VALIDATION_FAILED", "Mutation contains too many fields.", details={"field": "values"})
     for key in raw_values:
         validate_identifier(key)
         if key not in known_fields:
@@ -254,7 +260,171 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
     return BoundMutation(name, where, dict(raw_values), bool(operation.get("destructive")), operation.get("confirmation"), expected_revision, unique_key)
 
 
-def require_destructive_confirmation(destructive: bool, confirmation: Any, expected: str, message: str) -> None:
+# --- destructive confirmation phrase construction (design docs/design/
+# DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1, contract 1.2.0
+# `destructive_confirmation.phrase_construction`) --------------------------
+#
+# One shared definition for every one of this codebase's three surfaces
+# (data/schema plane here, control plane in `control_plane.py`, and the
+# ceremony CLI's own `ops.py` in a later work package) -- none of them
+# re-derives its own spelling. Every phrase is: (a) deterministic given only
+# the operation/target/consequence class (never request_id, timestamps, or
+# the request's own destructive/confirmation fields), (b) scope-included
+# (`delete`'s own selection/where predicate is part of the derivation), (c)
+# state-fingerprinted for a re-creatable target (`drop_entity`/`drop_index`
+# carry the application's current `schema_revision`, so re-creating the same
+# name -- or any other schema change -- invalidates a stale phrase), (d)
+# built only from already identifier-validated target names (never an
+# unvalidated client-supplied string reflected back), and (e) bounded well
+# within `confirmation`'s contract maxLength (256).
+
+# r2db's own identifier limit (`MAX_IDENTIFIER_LENGTH` above), not a contract
+# figure -- used only to assert the worst-case phrase length stays bounded.
+_PHRASE_MAX_LENGTH = 256
+# int64 (`_INT64_MAX` below in this same module) has at most 19 decimal
+# digits; `schema_revision` is a monotonic counter starting at 0 and is
+# always representable in that range for the lifetime of any real
+# deployment, so 20 digits (one more than the true worst case) is a safe,
+# round upper bound for the length assertions below.
+_MAX_REVISION_DIGITS = 20
+
+
+def _canonical_where_json(where: "list[Predicate]") -> str:
+    """Key-order-fixed JSON serialization of a bound (identifier- and
+    operator-validated) predicate list, the input to `_where_digest16`
+    below. Defined for an empty list too (a `delete` with no `where` selects
+    every row -- design R-2 item 1's own "where 空にも digest は定まる").
+
+    Opus review minor m-7: deliberately NO `default=str` fallback. Every
+    `predicate.value` reaching this function today is JSON-native (str/
+    int/float/bool/None/list/dict, from `parse_predicate`'s own JSON-body
+    parsing) and serializes exactly here without one. A `default=str`
+    escape hatch would silently coerce any FUTURE non-JSON-native value
+    (e.g. a `Decimal`, `datetime`, or `bytes` a later `bind_mutation` change
+    might admit) into whatever `str(value)` happens to produce -- and two
+    genuinely different values whose `str()` forms coincide (a real
+    possibility across types, e.g. `Decimal("1")` and the string `"1"`)
+    would then silently collide onto the identical digest, silently merging
+    two different scopes' phrases into one. Without the fallback, such a
+    value raises `TypeError` here immediately and loudly instead -- a
+    finding for whoever introduces it to fix at the type's own admission
+    point, not a probability-dependent security gap in this hash.
+    """
+    payload = [{"field": p.field, "operator": p.operator, "value": p.value} for p in where]
+    return json.dumps(payload, sort_keys=True, ensure_ascii=True)
+
+
+def _where_digest16(where: "list[Predicate]") -> str:
+    """SHA-256, first 16 hex characters, of `_canonical_where_json`'s
+    output -- the delete phrase's own state-fingerprint-free scope digest
+    (design Q1-D9/WP-0 MA-4: a probed narrow selection must never validate a
+    broader one, since the digest changes whenever the selection does)."""
+    blob = _canonical_where_json(where).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def delete_confirmation_phrase(entity: str, where: "list[Predicate]", schema_revision: int) -> str:
+    """`DELETE <entity> @where=<digest16> @schema_revision=<n>` -- `entity`
+    must already be identifier-validated by the caller (every caller of
+    this function is downstream of `validate_identifier(entity)` in
+    `transact()`).
+
+    Monitor decision Q1-D10 (Opus review minor m-2, measured): the
+    `schema_revision` fingerprint was originally omitted here on the
+    reasoning that "a row is not a target identifiable by a re-creatable
+    name, so it needs no state fingerprint" -- but the where-digest alone
+    is a pure function of the (field, operator, value) tuples in the
+    caller's own selection, independent of whether `entity` currently
+    declares those fields at all. A probed phrase for `delete ... where
+    id=5` against `widgets`, followed by `drop_entity widgets` + `create_
+    entity widgets` (a genuinely different entity, same name, contract
+    `phrase_construction` rule (b): "対象の再作成...により旧句が無効になる
+    こと"), would otherwise still validate an echo of the OLD phrase
+    against the NEW entity's identical-looking delete request -- the old
+    phrase never actually became invalid, contradicting rule (b)'s literal
+    text even though delete's own target (a row set) is not itself a
+    re-created name. Including `schema_revision` closes this: any schema
+    change to the Application (including this exact drop-then-recreate)
+    invalidates every previously-issued delete phrase for every entity, not
+    only the recreated one -- broader invalidation than strictly necessary,
+    but safe (Q1-D3's own precedent: over-invalidating a stale phrase is
+    the safe direction, under-invalidating is not) and now uniform across
+    all three phrase-construction functions in this module.
+    """
+    # Worst-case length check, symmetric with `drop_index_confirmation_
+    # phrase`'s own: `"DELETE "` (7) + entity (<= MAX_IDENTIFIER_LENGTH) +
+    # `" @where="` (8) + 16-hex digest (16) + `" @schema_revision="` (18) +
+    # up to `_MAX_REVISION_DIGITS` digits = 7 + 63 + 8 + 16 + 18 + 20 = 132,
+    # comfortably within 256.
+    worst_case = 7 + MAX_IDENTIFIER_LENGTH + 8 + 16 + 18 + _MAX_REVISION_DIGITS
+    assert worst_case <= _PHRASE_MAX_LENGTH, "delete_confirmation_phrase's own worst-case bound no longer fits confirmation's maxLength"
+    phrase = f"DELETE {entity} @where={_where_digest16(where)} @schema_revision={schema_revision}"
+    assert len(phrase) <= _PHRASE_MAX_LENGTH, "delete_confirmation_phrase exceeded the contract's confirmation maxLength"
+    return phrase
+
+
+def drop_entity_confirmation_phrase(entity: str, schema_revision: int) -> str:
+    """`DROP_ENTITY <entity> @schema_revision=<n>` -- `n` is the
+    Application's current schema_revision (monotonic, bumped by every
+    schema operation on either backend), so re-creating an entity under the
+    same name -- which necessarily bumps the revision again -- invalidates
+    any phrase computed before the drop."""
+    phrase = f"DROP_ENTITY {entity} @schema_revision={schema_revision}"
+    assert len(phrase) <= _PHRASE_MAX_LENGTH, "drop_entity_confirmation_phrase exceeded the contract's confirmation maxLength"
+    return phrase
+
+
+def drop_index_confirmation_phrase(entity: str, index: str, schema_revision: int) -> str:
+    """`DROP_INDEX <entity>.<index> @schema_revision=<n>` -- the index name
+    is scoped by entity in the phrase (design R-2 item 1: index names live
+    in an entity-scoped namespace, `indexes[entity][index]`/the physical
+    `<table>__<index>` name), not because the phrase needs to be invertible,
+    only because two different entities' indexes of the same local name
+    must never collide onto the same phrase.
+
+    Worst-case length check (design R-2 item 1; nit n-1 corrected the
+    arithmetic below -- the trailing segment is 18 characters, not 19, so
+    the true worst case is 176, not 177; the assert itself was always
+    conservative/safe either way, this corrects what the number MEANS):
+    `"DROP_INDEX "` (11) + entity (<= MAX_IDENTIFIER_LENGTH) + `"."` (1) +
+    index (<= MAX_IDENTIFIER_LENGTH) + `" @schema_revision="` (18) + up to
+    `_MAX_REVISION_DIGITS` digits = 11 + 63 + 1 + 63 + 18 + 20 = 176,
+    comfortably within the contract's 256 maxLength -- asserted here as a
+    standing regression guard, not merely documented.
+    """
+    worst_case = 11 + MAX_IDENTIFIER_LENGTH + 1 + MAX_IDENTIFIER_LENGTH + 18 + _MAX_REVISION_DIGITS
+    assert worst_case <= _PHRASE_MAX_LENGTH, "drop_index_confirmation_phrase's own worst-case bound no longer fits confirmation's maxLength"
+    phrase = f"DROP_INDEX {entity}.{index} @schema_revision={schema_revision}"
+    assert len(phrase) <= _PHRASE_MAX_LENGTH, "drop_index_confirmation_phrase exceeded the contract's confirmation maxLength"
+    return phrase
+
+
+def revoke_last_control_credential_confirmation_phrase(credential_id: str) -> str:
+    """`REVOKE_LAST_CONTROL_CREDENTIAL <credential_id>` -- the control
+    plane's own destructive-confirmation phrase (design R-3), sharing this
+    module's phrase-construction definitions even though the gate itself
+    lives in `control_plane.py`, not here. No state fingerprint is needed:
+    `credential_id` is itself a random, never-reused value (`control_plane.
+    _new_control_credential_id`), so it already serves as its own fingerprint --
+    a revoked id can never legitimately reappear as a *different* live
+    credential the way an entity/index name can be re-created under the
+    same name.
+    """
+    phrase = f"REVOKE_LAST_CONTROL_CREDENTIAL {credential_id}"
+    assert len(phrase) <= _PHRASE_MAX_LENGTH, "revoke_last_control_credential_confirmation_phrase exceeded the contract's confirmation maxLength"
+    return phrase
+
+
+def require_destructive_confirmation(
+    destructive: bool,
+    confirmation: Any,
+    phrase: str,
+    message: str,
+    *,
+    consequence: str,
+    reversible_alternative: str | None,
+    recovery: str | None,
+) -> None:
     """Shared SI-09 gate for every destructive operation (`delete`,
     `drop_entity`, `drop_index`). Deliberately NOT called from inside
     `bind_mutation`/`bind_schema_operation`: each backend calls it at the
@@ -264,9 +434,30 @@ def require_destructive_confirmation(destructive: bool, confirmation: Any, expec
     strictly before any revision-precondition evaluation (R-4, corrigendum
     m-5: failure-before-execution means an unconfirmed destructive
     operation is refused before a precondition is even looked at).
+
+    Contract 1.2.0 (`destructive_confirmation.valid_confirmation`/`denial`):
+    `phrase` is this exact request's own, freshly (re)computed
+    `required_confirmation` (one of the `*_confirmation_phrase` functions
+    above) -- a valid confirmation is `destructive is True` AND
+    `confirmation` equal to `phrase` as an exact Unicode code point sequence
+    (no normalization). On denial, `details` carries all four contract-
+    required keys (`required_confirmation`/`consequence`/
+    `reversible_alternative`/`recovery`); `reversible_alternative`/`recovery`
+    are `None` exactly when the caller declares no such path genuinely
+    exists (never fabricated -- Q1-D6/design R-2 item 2).
     """
-    if not destructive or confirmation != expected:
-        fail("DESTRUCTIVE_CONFIRMATION_REQUIRED", message, status=409)
+    if not destructive or confirmation != phrase:
+        fail(
+            "DESTRUCTIVE_CONFIRMATION_REQUIRED",
+            message,
+            status=409,
+            details={
+                "required_confirmation": phrase,
+                "consequence": consequence,
+                "reversible_alternative": reversible_alternative,
+                "recovery": recovery,
+            },
+        )
 
 
 FIELD_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
@@ -322,6 +513,16 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             fail("VALIDATION_FAILED", "unique is only supported by create_index.")
         if "index" in operation and name != "drop_index":
             fail("VALIDATION_FAILED", "index is only supported by create_index/drop_index.")
+    if "destructive" in operation and not isinstance(operation["destructive"], bool):
+        # Review blocker B-1: symmetric with `bind_mutation`'s identical
+        # check above -- a non-boolean truthy `destructive` (a string, an
+        # int, an object) must never be silently coerced into `True` by a
+        # loose `bool(...)` cast downstream. This is a shape check (contract
+        # `SchemaOperationRequest.destructive: {"type": "boolean"}`), so it
+        # runs here, before the destructive-confirmation gate itself, per
+        # contract `evaluation_order` (shape validation precedes
+        # confirmation evaluation).
+        fail("VALIDATION_FAILED", "Destructive flag must be boolean.")
     fields: tuple[str, ...] = ()
     field_name: str | None = None
     field_type: str | None = None
@@ -585,7 +786,7 @@ MAX_PAGE_SIZE = 1000
 
 def validate_page_size(page_size: int, limits: ResourceLimits) -> None:
     if page_size <= 0:
-        fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit": limits.result_items})
+        fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit_class": "result_items", "limit": limits.result_items})
     if page_size > MAX_PAGE_SIZE:
         fail("VALIDATION_FAILED", "Page size exceeds the contract maximum.", details={"limit": MAX_PAGE_SIZE})
 
@@ -907,7 +1108,14 @@ class ApplicationCell:
             # m-5: destructive confirmation is checked before any
             # precondition evaluation -- an unconfirmed delete is refused
             # before a revision precondition is even looked at.
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
+            require_destructive_confirmation(
+                bound.destructive, bound.confirmation,
+                delete_confirmation_phrase(entity, bound.where, self.schema_revision),
+                "Delete requires explicit destructive confirmation.",
+                consequence="Rows matching the filter are permanently deleted; there is no in-band restore.",
+                reversible_alternative=None,
+                recovery=None,
+            )
             if bound.expected_revision is not None:
                 target = [row for row in matches if row["_r2db_revision"] == bound.expected_revision]
                 if not target:
@@ -1067,7 +1275,14 @@ class ApplicationCell:
         elif bound.operation == "drop_entity":
             if bound.entity not in self.entities:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_ENTITY", "Drop requires explicit destructive confirmation.")
+            require_destructive_confirmation(
+                bound.destructive, bound.confirmation,
+                drop_entity_confirmation_phrase(bound.entity, self.schema_revision),
+                "Drop requires explicit destructive confirmation.",
+                consequence="The entity and all of its rows and indexes are permanently destroyed; re-creating an entity of the same name creates a new entity, not a restore.",
+                reversible_alternative=None,
+                recovery=None,
+            )
             self.entities.pop(bound.entity, None)
             self.schema.pop(bound.entity, None)
             self.indexes.pop(bound.entity, None)
@@ -1105,7 +1320,14 @@ class ApplicationCell:
             # guardrail (uniqueness) and can silently re-enable upsert's
             # CAPABILITY_UNSUPPORTED gate to flip -- SI-09 destructive
             # confirmation applies exactly like drop_entity.
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_INDEX", "Dropping an index requires explicit destructive confirmation.")
+            require_destructive_confirmation(
+                bound.destructive, bound.confirmation,
+                drop_index_confirmation_phrase(bound.entity, bound.index, self.schema_revision),
+                "Dropping an index requires explicit destructive confirmation.",
+                consequence="The index is destroyed; query semantics are unaffected, only performance (and any uniqueness guarantee it enforced) are lost.",
+                reversible_alternative=None,
+                recovery="create_index with the same definition restores it -- an index carries no data of its own, so this fully restores a non-unique index; recreating a UNIQUE index re-validates existing rows against that uniqueness and can instead fail with CONFLICT if data written after the drop now violates it.",
+            )
             del self.indexes[bound.entity][bound.index]
         if deadline is not None and clock is not None:
             try:

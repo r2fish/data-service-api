@@ -1,6 +1,6 @@
 # Q-1 実効化設計 — 宣言と復唱 (destructive confirmation)、契約 1.2.0
 
-- 版数: v1.2 (2026-08-29。v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
+- 版数: v1.3 (2026-08-30。WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
 - 正典: `spec/CCR_DISPOSITION.md` 従属判断6 (裁定、2026-08-29) および従属判断7 (2026-08-29、依頼者裁定案を監督検証のうえ WP-1 で記録)。たたき台と守備範囲合意は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §0.5。本書は裁定を**実施する**設計であり、裁定内容を再交渉しない
 - 適用範囲: 共通契約 (spec) + conformance (C-06) + r2db-api (データ/schema 面・制御面・儀式 CLI) + MitateDB-api
 - 実施順序は裁定どおり: 契約 1.2.0 文言化 → C-06 共通 suite → CCR-14 休止条項の実効化 (r2db) → MitateDB の確認内容検証の適合修正
@@ -54,7 +54,7 @@
    - `delete`: `DELETE <entity> @where=<digest16>` — digest16 は**識別子検証・bind 済み**の where 述語列の正準直列化 (キー順固定 JSON) の SHA-256 先頭 16 hex。probe した狭い句が広い削除 (where 空 = 全行) に流用できる穴を塞ぐ (WP-0 MA-4)。where 空にも digest は定まる。行は名前で再作成される対象でないため schema 指紋は不要
    - `drop_entity`: `DROP_ENTITY <entity> @schema_revision=<n>`
    - `drop_index`: `DROP_INDEX <entity>.<index> @schema_revision=<n>` — 索引名は entity 単位の名前空間 (`structured.py` の indexes[entity][index] / PostgreSQL 物理名 `<table>__<index>`) のため entity を句に含める (WP-0 B-1)
-   - 長さ検算 (r2db 固有の識別子上限 63 — 契約由来でない旨を注記): 最長は drop_index の 12+63+1+63+18+20 = 177 ≤ **256** (R-1 の引き上げ後)。句構成関数はこの帰結を assert しテストで固定
+   - 長さ検算 (r2db 固有の識別子上限 63 — 契約由来でない旨を注記): 最長は drop_index の 11+63+1+63+18+20 = 176 ≤ **256** (R-1 の引き上げ後。WP-3 followup nit n-1: 実装時点の式は "@schema_revision=" 部分を 19 と誤カウントし 177 としていたが、正しくは 18 で 176 — assert 自体は保守側のため実害なし、値の意味のみ訂正)。句構成関数はこの帰結を assert しテストで固定。delete 句にも同じ指紋を含める設計変更 (監督決定 Q1-D10、WP-3 followup m-2) により、delete 句の最長も 7+63+8+16+18+20=132 として同様に assert される
    - n は当該アプリの現在 schema_revision。in-memory は `ApplicationCell.schema_revision`。**PostgreSQL は読み取り経路を新設**する: `_r2db_schema_revision` は `_bump_revision` (UPDATE…RETURNING) しか持たないため、同一トランザクション内 SELECT を追加 (行は 0003 が revision 0 で挿入済み・developer_role 所有。WP-0 m-1)。全 schema 操作で単調増加すること (両 backend 実測済み) により同名再作成を含む schema 変化で旧句が失効
 2. **拒否 details の合成**: `require_destructive_confirmation` を「句 + 4 宣言」を受けて `fail(..., details={...})` する形に拡張。呼び出し 6 箇所 (ApplicationCell / PostgresCell × delete / drop_entity / drop_index) の配置と順序は不変 (R-1-5 の優先順位 = 現行 m-5 順序)。宣言の真実値:
    - `delete`: consequence = filter に一致する行を恒久削除、in-band 復元なし / reversible_alternative = null / recovery = null
@@ -149,3 +149,96 @@
 
 - v1.1 (2026-08-29): WP-0 独立レビュー全反映 — B-1 (drop_index 句の entity 欠落と 128 超過 → entity 込み + maxLength 256)、B-2 (識別子長非有界 → digest 逃げ道の規範化)、B-3 (句合成の入力反射 → 識別子検証後置の規範化 + V8)、MA-1 (CLI gate から revoke-credential 除外)、MA-2 (gate 判定の uow 内直列化)、MA-3 (ConformanceDenial は details のみ + echo 検査)、MA-4 (where digest、Q1-D9)、MA-5 (複数操作時の宣言指示対象)、MA-6 (非空要求 + null 限界表明)、MA-7 (基線分岐の残置宣言)、m-1〜m-10・n-1〜n-3 全反映 (個別処置は本文へ織込み)。従属判断7 を §0.2/R-1/R-2-4/R-5/R-6/WP-1 に統合 (11 種への数値訂正・MINOR-3 転換の明示・封筒のみ閉鎖・futility 追加 codify・212 再分類 Q1-D8)
 - v1.2 (2026-08-29): WP-1 実装 (契約 1.2.0 文言化 + packaged copy 同期 + conformance 逆向き検証 + CCR_DISPOSITION 従属判断7 記録) への独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。**契約文言 (R-1-4 へ統合)**: B-1 (句の導出入力を操作・対象〈作用範囲込み〉・帰結クラスのみに限定する規則を明記 — 確認フィールド自身・request_id・時刻等は導出入力に含めない。「the same request」の曖昧さを排除)、M-1 (`denial.when` を「request 全体を拒否・一部実行なし」に — 部分適用後 409 の読みを封鎖)、M-2 (状態指紋の無効化契機を「対象の再作成」と「schema 変化」の両方に — 同一 schema での drop→create 再作成による旧句復活の読みを封鎖)、M-3 (作用範囲規則を追加 — Q1-D9 の契約側への正式な昇格)、M-4 (`version_binding` の 1.2.0 新設義務 4 系統を網羅列挙 + `capability_status.rules` 新語彙規則自体への版数拘束参照)、M-5 (`versioning.compatibility` にスキーマ閉鎖を minor として扱う調停条項を追加)、M-7 (**独立レビューが SECRET_LEAK 級の実証で指摘**: 封筒閉鎖だけではネスト行 schema 経由の余剰キー漏洩を塞げない — `ApplicationsResult.applications[]`/`CredentialsResult.credentials[]`/`MutationResult.assigned_addresses[]`/`EntityDescriptor.unique_keys[]` の4箇所を追加閉鎖し、逆向き検証に余剰キー拒否の positive control を追加。意図的に開放したまま残す4箇所には契約自身に注記)、m-1 (`applies_to` の連言記述を2要素に分割)、m-2 (`errors.details_vocabulary` と `destructive_confirmation.denial.details_keys` の相互参照)、n-3 (`http_status: 409` 以外のコードの status 無記載は「未定義」であり「任意」でない旨を明記)。**conformance テスト**: M-6 (`test_c11_response_schema_conformance.py` が独自の skip 規約に初めて違反していたことの是正 — MitateDB の `pytest.skip` を C-14 型の `SurfaceAbsent` 主張検証〈3 assertion〉に置換、raw-accessor 不在の `_skip_no_raw_accessor` 系を fail に転換し vacuity guard 相当のメッセージを付与)、n-1 (raw accessor への直接属性アクセスを fail-loud に統一)、n-2 (到達不能 `return` の除去)。**台帳**: M-8+m-4 (`spec/CCR_DISPOSITION.md` 従属判断7 の実施記録を実被覆〈3 adapter: CatalogDocument/EntityDescriptor、2 adapter: ApplicationStateResult 系3種、r2db http のみ: 6種、0: AuditResult/AuditQueryRequest〉どおりに訂正し、`conformance-tests/CONDITIONS.md` C-11 行の Description/Status も実態に合わせ更新)、m-3 (`conformance_adapter_r2db_http.py` のコメント誤ファイル名を訂正)。この往復は WP-1 が「実装コードに触れず契約文言化のみ」という当初の限定スコープの範囲内で完結している
+
+## 5. WP-3 実装記録 (r2db-api 実効化、v1.3 追記)
+
+### 5.1 実装内容
+
+- **句構成の共有モジュール**: `r2db_api/structured.py` に `delete_confirmation_phrase`/`drop_entity_confirmation_phrase`/`drop_index_confirmation_phrase`/`revoke_last_control_credential_confirmation_phrase` を一元定義。`control_plane.py` はこれらを import して参照 (CLI `ops.py` からの参照は WP-4)。`delete` の where 句は識別子・演算子検証済み `Predicate` 列のキー順固定 JSON (SHA-256 先頭16桁)。`drop_index` の最長句 (176 文字 — nit n-1: 実装当初は式の誤りで 177 と記録していたが訂正) は関数内 assert で固定。監督決定 Q1-D10 (followup m-2) により `delete` 句にも `@schema_revision=<n>` を追加し、その最長句 (132 文字) も同様に assert される。
+- **PostgresCell の revision 読み取り経路**: `_read_schema_revision` を新設 (同一トランザクション内 `SELECT revision FROM _r2db_schema_revision`)。`_bump_revision` (UPDATE) とは独立した読み取り専用経路。
+- **`require_destructive_confirmation` の拡張**: 句 + 4 宣言 (`consequence`/`reversible_alternative`/`recovery` をキーワード引数化) を受け、`details` を合成して `fail` する形に変更。呼び出し 6 箇所 (`ApplicationCell`/`PostgresCell` × delete/drop_entity/drop_index) の位置・順序は不変。データ面には `audited` を載せていない (Q1-D6 のまま)。
+- **旧固定句の受理終了**: 実装 6 箇所・adapter 4 箇所・r2db ローカルテスト 27+ 箇所を新句 (probe→echo または実測 phrase 関数) に更新。`grep -rn '"DELETE"\|"DROP_ENTITY"\|"DROP_INDEX"' r2db-api/` は `legacy_token="DELETE"`/`"DROP_ENTITY"` (port v1.6 の <1.2.0 フォールバック値、r2db は 1.2.0 宣言のため実行時に到達しない) とコメント中の言及のみが残存 — 実行時の旧句送信はゼロ。
+- **limit_class**: 全 `LIMIT_EXCEEDED` emission (19 箇所、`structured.py:212` の再分類後。WP-3 followup nit n-3: 実装時点は誤って 20 箇所と記録していたが実測 19 — `test_limit_class_vocabulary.py` の AST 静的スキャンで確定) に `limit_class` を追加。`structured.py:212` (Mutation values 100 フィールド超) は `VALIDATION_FAILED` (400) へ再分類。
+- **V2b wire 欠落ベクタ**: 両 r2db adapter の `_build_mutation_item` で confirmation 設定を `destructive` から分離。C-06 に `test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied` を追加 (`BatchOperation`/`attempt_batch_with_addresses` 経由で wire `destructive` 省略 + 正句を構成)。
+- **制御面ゲート**: `ControlPlaneService.revoke_credential` を再構成 — kind=control かつ「唯一の enabled・未 revoked 行」の判定を `control_credentials_unit_of_work` の中で `control_credentials_locked` (Postgres: `FOR UPDATE` 全行ロック、in-memory: `ControlCredentialStore.unit_of_work` 自体が `threading.Lock` を保持) を用いて行い、gate 発動時は `_deny` 経由で拒否 (`audited`/`attribution` 同乗)。非 gate 経路 (application credential・最後でない control credential) は不検査のまま。
+- **版数 flip**: `service.py`/`control_plane.py` の `contract_version` を `"1.2.0"` へ。`config/capabilities.json` は `contract_version` を含まないため変更不要 (確認済み)。C-06 の `_EXPECTED_STRICT_ADAPTER_NAMES = {"r2db-api", "r2db-api-http"}` / baseline = `{"MitateDB-api"}` に更新。
+
+### 5.2 初回実行デバッグでの発見 (全数)
+
+WP-2 レビューが予想した項目のうち実際に発生したもの、および未予想の発見:
+
+1. **conformance-tests の C-13/C-15 が想定外に赤化 (suite 側の想定漏れ、製品側は正常)**: `test_c13_revocation_terminality.py::test_revoked_credential_stays_revoked_across_every_reactivation_vector` と `test_c15_bootstrap_reset_lifecycle.py::test_c15_bootstrap_refused_while_any_control_credential_exists` は、いずれも「唯一の control credential を無確認で revoke する」という、この WP 以前は常に成功していた前提のコードを含んでいた (前者: `credential_reactivation_vectors` の `inband_rotate_revoked_control_credential_attempt` が revoke をセットアップ手順として使用。後者: bootstrap 再拒否確認のための一括 revoke ループ)。ゲートの実装は正しく機能しており (これらの呼び出しが本来拒否されるべきものを拒否した)、**suite 側の修正**として: (a) 両 r2db adapter (`conformance_adapter_r2db.py`/`conformance_adapter_r2db_http.py`) の `inband_rotate_revoked_control_credential_attempt` を probe→echo 化、(b) 共通 `test_c15_bootstrap_reset_lifecycle.py` の revoke ループを probe→echo 化 (Q-1 adjudication 未定という古いコメントも実効化済みに更新)。
+2. **V7 の rate 窓 429 (予想項目 (7)) は発現せず**: 実測では C-06 単独実行・全体実行のいずれでも 429 は観測されなかった (`control_requests_per_minute=60` に対し probe+echo+復旧の消費が十分小さい)。予想リスクは的中しなかったが、要注意項目として残す。
+3. **V6 の決定論 re-probe が句構成の非決定性を暴く懸念 (予想項目 (1))**: 発現せず。句は entity/where/schema_revision のみの純関数であり、re-probe は毎回同一句を返した (V4/V6 とも green)。
+4. **V2/V2b の評価順序 (予想項目 (2))・V3 の where/operation 別正句 (予想項目 (3)(4))・V4 の developer credential probe (予想項目 (5))**: いずれも初回実行で green。特別な追加修正は不要だった。
+5. **suite 自体のバグ (予想項目 (8))**: 上記 1. 以外には見つからなかった。
+
+### 5.3 変異注入結果 (6 本、全数赤を実測ののち scratchpad 経由で復元・diff 一致確認済み)
+
+| # | 変異内容 | 対象 | 赤の実測方法 | 結果 |
+|---|---|---|---|---|
+| (i) | 全文一致→存在チェック化 (`confirmation != phrase` → `not confirmation`) | `structured.require_destructive_confirmation` | `conformance-tests/test_c06_destructive_confirmation.py -k v3` | 赤 (V3 の接尾辞付き変異句が誤って通過) |
+| (ii) | schema_revision 指紋除去 (`drop_entity_confirmation_phrase` から revision を削除) | `structured.py` | `test_c06_destructive_confirmation.py -k v6` | 赤 (schema 変化後も旧句が通過) |
+| (iii) | where digest 除去 (`delete_confirmation_phrase` から digest を削除) | `structured.py` | `test_c06_destructive_confirmation.py -k v3` | 赤 (別 where の正句が同一句に収束) |
+| (iv) | details キー1個欠落 (`recovery` を details から除外) | `structured.require_destructive_confirmation` | `test_c06_destructive_confirmation.py -k v1` | 赤 (`_assert_four_declarations` が `recovery` 欠落を検出) |
+| (v) | gate の「唯一判定」除去 (`len(active_ids)==1 and ...` を `True` に固定) | `control_plane.py::revoke_credential._body` | 新設 r2db ローカルテスト `test_revoking_a_non_last_control_credential_accepts_q1_fields_without_inspecting_them` | 赤 (最後でない control credential の revoke も無確認で拒否されるようになった) |
+| (vi) | gate判定を uow 外へ (locked read を `control_credentials_unit_of_work` の外・閉じたトランザクションの `work` に対して実行) | `control_plane.py::revoke_credential` | 新設の決定的機構テスト `test_revoke_credential_gate_judgment_is_made_inside_the_open_transaction` (`_GateOrderProbeBackend` — `work.active` フラグで uow 内外を判定する test double。実 2 コネクション干渉の実測は `test_control_plane_store.py::test_control_credentials_locked_scan_serializes_against_a_concurrent_scan` が別途担う) | 赤 (assertion failure、`work` が非 active 状態で呼ばれたことを検出) |
+
+各変異は `structured.py`/`control_plane.py` を scratchpad のバックアップコピーで復元し、`diff` で完全一致を確認済み (`git checkout` は使用していない)。
+
+### 5.4 逸脱・疑義
+
+- design R-2 item 1 は「CLI (`ops.py`) も共有定義を参照できる形」を求めるが、CLI 自体の declare-and-echo 化は WP-4 の管轄であり、本 WP では `ops.py` に変更を加えていない (共有関数はすでに `structured.py` に公開済みで WP-4 から import 可能)。
+- C-15/C-13 の共通 suite 修正 (5.2-1) は「WP-3 は r2db-api 実効化」という本 WP のスコープ外の共通ファイルへの変更を含む。設計上は WP-2 の管轄領域だが、WP-3 の実効化がなければ検出できない不具合だったため、本 WP の完了条件 (「初回実行デバッグの発見一覧」) の一部として本 WP 内で修正した。
+- ~~`conformance-tests/CONDITIONS.md` の C-06 行はまだ「全 adapter が 1.1.0 のまま」という記述のままで、本 WP の版数 flip 後は事実と異なる。~~ Opus レビュー M-2 で指摘され、本 followup コミットで実態 (r2db 両 adapter は 1.2.0 で strict 実行済み、MitateDB のみ baseline) に更新済み。基線分岐の残置宣言そのもの (「未実行分岐である旨を明記」する項) は WP-6 のまま。
+
+### 5.5 WP-4/WP-5 への申し送り
+
+- WP-4 (儀式 CLI): `ops.py` の `reset`/`delete-credential` に `--confirm` を追加する際は `structured.py` の `revoke_last_control_credential_confirmation_phrase` と同型の新規関数 (`RESET_CONTROL_CREDENTIALS` 定数、`DELETE_CREDENTIAL <credential_id>`) を追加し、既存の句構成関数と同じモジュールに置くこと。
+- WP-5 (MitateDB): 本 WP は MitateDB-api に一切触れていない (`MitateDB-api/` 配下は無変更)。`_EXPECTED_STRICT_ADAPTER_NAMES`/`_EXPECTED_BASELINE_ADAPTER_NAMES` の更新は WP-5 で `{"r2db-api", "r2db-api-http", "MitateDB-api"}` / `frozenset()` に切り替えること。
+
+### 5.6 Opus レビュー往復 (v1.3 followup、blocker 1 / major 3 / minor 7 / nit 6、全件実測裏付き)
+
+WP-3 の独立レビュー (Opus) が発見した項目と、その全対応の記録。
+
+**blocker B-1 (非 boolean truthy `destructive` の受理)**: `bind_schema_operation` (structured.py) に `bind_mutation` と同一の `isinstance(bool)` 検査を追加 (非 bool → `VALIDATION_FAILED`、確認検査より前)。`ControlPlaneService.revoke_credential` にも同型の型検査を追加 (gate 有無に関わらず適用— データ面 `bind_mutation` と同じ「request schema の enforce」であり、契約 `non_destructive_requests` が言う「検査されない」は確認*意味論*の話であって shape 検査の話ではない、という整理)。ゲート判定自体も `destructive is not True` に精密化。**「wire 型ベクタは peer-local」の整理**: port は typed (`destructive: bool` という Python シグネチャ) のため、共通 conformance suite からは「wire 上で destructive が文字列」という敵対的形状を構成できない (adapter が Python レベルで型を強制する) — この種の検査は各実装がローカルに保持する責務であり、共通 suite の対象外である。データ面 (既存挙動の固定)・schema 面・制御面 (service 直呼び + 実 HTTP wire) の計 3+ テストを r2db ローカルに追加。**実 wire 実測** (`test_control_http.py` の新設 2 テスト + 手動実行ログ): `destructive: "false"` (文字列) を実 HTTP 経由で送信 → `400 VALIDATION_FAILED` (`message: "destructive must be boolean."`)、対象の唯一 control credential は非 revoke のまま (`/capabilities` が同一 secret で 200 のまま)。別途、実 `destructive: true` 無確認 revoke → `409 DESTRUCTIVE_CONFIRMATION_REQUIRED` + 4 宣言、を同一ハーネスで確認。
+
+**major M-1 (limit_class 無防備)**: (a) `r2db-api/tests/test_limit_class_vocabulary.py` を新設 — AST で `r2db_api` 全モジュールの `fail("LIMIT_EXCEEDED", ...)` 呼び出し (実測 19 箇所) を走査し、`details["limit_class"]` の存在と、値が契約 `limits.classes` メンバー (リテラル) または既知の動的 kind (`ResourceLimits.check`の `kind` 引数、call-site 側がすべてリテラルを渡すことが前提の名指し allowlist) であることを全数 assert。レビュア変異 B (全値 `"NOT_A_CLASS"` 化) を自分で再注入し 18 箇所の違反を実測 (赤)、scratchpad 復元で diff 完全一致確認。(b) `applications`/`credentials_per_application`/`control_requests_per_minute` (制御面) と `batch_items`/`result_items`/`query_complexity` (データ面、`ResourceLimits.check`の動的 kind 経路を含む) の計 6 経路に実応答 `limit_class` の behavioral assertion を追加。
+
+**major M-2 (陳腐化文言)**: `test_c06_destructive_confirmation.py` のモジュール docstring・`fx` override コメント・vacuity guard 前後のコメント計 4 箇所を、r2db 両 adapter が 1.2.0/strict である実態へ更新。`CONDITIONS.md` C-06 行の「全 adapter 1.1.0」太字も同コミットで実態に更新 (基線分岐の残置宣言自体は WP-6 のまま)。
+
+**major M-3 (audited の耐久裏付け)**: `_deny` の docstring を「`_body` から呼ばれる場合、`self._audit` は別プール/別接続で独立にコミットされ、`_body` 自身のトランザクションの rollback では消えない」という実態に更新。`test_revoking_the_last_live_control_credential_denial_carries_audited_and_attribution` に (a) 拒否直後の監査行数が +1 であること、(b) その行の `outcome`/`reason_code`/`actor_id` が実際の拒否と一致すること、(c) 拒否後も対象 credential が `capabilities()` で認証できる (revoke されていない) こと、の3 assertion を追加。
+
+**minor m-1 (対象同一性)**: `test_revoking_an_already_revoked_different_credential_is_never_gated_by_target_identity` を新設 — 有効 control credential がちょうど1本の状態で、別の既に失効済みの credential への revoke が gate されない (無確認で実行される) ことを assert。レビュア変異 C (`len(active_ids)==1 and active_ids[0]==credential_id` → `len(active_ids)==1`) を再注入し赤を実測、復元・diff 一致確認済み。
+
+**minor m-2 (Q1-D10)**: `delete_confirmation_phrase` に `@schema_revision=<n>` を追加 (`DELETE <entity> @where=<digest16> @schema_revision=<n>`)。監督決定 **Q1-D10**: 行は名前で再作成される対象ではないが、where-digest 単体は entity の現在の schema と無関係な純関数であるため、drop→同名 recreate を跨いで旧 delete 句が生存しうる (レビュア実測、契約 rule (b) の字義違反) -- 3句すべてに指紋規律を統一することでこの解釈の穴を閉じる (Q1-D3 の「広めの失効は安全側」の踏襲)。r2db ローカルテスト (`test_foundation.py`/`test_postgres.py` 双方に追加): レビュアの実シナリオ (revision N で probe → drop_entity → 同名 create → 旧句 echo) が実際に `DESTRUCTIVE_CONFIRMATION_REQUIRED` で拒否されることを確認 (in-memory・実 Postgres の両方で実測 green)。長さ assert も `delete` 用に新設 (worst case 132 ≤ 256)。
+
+**minor m-3**: レビュア指摘のとおり元の WP-3 実装時点にこの再分類の専用テストが実在しなかったことを確認 -- `test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded` を新設 (structured.py:212 相当。101 フィールドの `insert` → `VALIDATION_FAILED`、`details == {"field": "values"}`、`LIMIT_EXCEEDED` ではないこと、を assert)。
+
+**minor m-4**: C-13/C-15 と両 r2db adapter の3箇所の probe→echo ヘルパー (`inband_rotate_revoked_control_credential_attempt` × 2 adapter、C-15 の revoke ループ) の `except ConformanceDenial` を `code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"` 限定に変更 (他コードは re-raise)、echo 後の応答に `revoked: True` が含まれることを assert 追加。
+
+**minor m-5**: `PostgresControlCredentialStore.unit_of_work` に `SET LOCAL lock_timeout` を追加 (データ面 `postgres.py::_set_timeouts` と同型)。`ControlPlaneLimits` に execution_ms 相当の設定可能値が無いため、データ面のデフォルト値 (5000ms) を固定定数として再利用 (`_CONTROL_LOCK_TIMEOUT_MS`)。既存の TOCTOU 干渉テスト (`test_control_credentials_locked_scan_serializes_against_a_concurrent_scan`) は green のまま (別接続の明示的 `SET lock_timeout` で上書きされるため無干渉)。
+
+**minor m-6**: (a) `drop_index` の `recovery` 宣言を「非 unique index は完全復旧、unique index の再作成はデータが違反していれば `CONFLICT` になりうる」旨の条件付きに修正。(b) revoke の `reversible_alternative` 宣言から「同じ帯域外儀式」という誤った同一視を除去し、`enable-control-credential` (再有効化) と `recovery` の `reset` (新規発行) が **別々の** 帯域外手続きであることを正確に記述。
+
+**minor m-7**: `_canonical_where_json` の `json.dumps(..., default=str, ...)` から `default=str` を除去。理由: JSON ネイティブでない値 (将来 `bind_mutation` が Decimal/datetime 等を許容するようになった場合) を `str()` に暗黙変換すると、異なる値が同じ文字列表現に収束し同一 digest に潰れる可能性がある — 除去後はそのような値が来た時点で `TypeError` が即座に上がる (握りつぶされた収束ではなく、導入時点での気づきに変わる)。
+
+**nit n-1**: `drop_index_confirmation_phrase` の長さ検算式の誤り (`" @schema_revision="` を19文字と誤カウント、正しくは18文字) を訂正 — 最長は 177 ではなく **176**。`assert` 自体は保守側の値だったため実害なし (176 < 177 のどちらでも 256 以下)。docstring・本設計書 §1 R-2・§5.1 の該当箇所を訂正。
+
+**nit n-2**: `revoke_last_control_credential_confirmation_phrase` の docstring 内、関数名の誤記 `_new_control_control_credential_id` (control が重複) を `control_plane._new_control_credential_id` に訂正。
+
+**nit n-3**: 本設計書 §5.1 の「`LIMIT_EXCEEDED` 全 20 箇所」を実測 **19 箇所** に訂正 (`test_limit_class_vocabulary.py` の AST スキャンで確定)。
+
+**nit n-4/n-5/n-6 (コード変更なし、設計記録のみ)**:
+- n-4: 正規化 (大文字小文字畳み込み・Unicode 正規化) を禁止する契約 `valid_confirmation` の規範は、r2db の句が entity/index/credential_id (すべて ASCII 識別子または16進digest) のみで構成される純 ASCII 文字列であるため、r2db 自身の実装では「正規化により偽陽性一致が起きる」具体的なケースが観測不能 (規範自体は契約の一般原則として有効、r2db はたまたまこの穴の実例を提供しない、という限界の記録)。
+- n-5: `delete` の空 `where` に対する digest 定義 (「where 空にも digest は定まる」) は、`bind_mutation` (structured.py:253-254) が `delete`/`update` に対して非空 filter を既に必須としているため、r2db の実行時には**到達不能**な防御的仕様である。契約定義としては一般性のために維持するが (将来他実装や将来の r2db 自身の仕様変更で到達しうる)、現行 r2db では実測できない旨を記録する。
+- n-6: `delete` の digest は述語の **リスト** (`list[Predicate]`) の正準化であり、リストの**順序**もハッシュ入力に含まれる (`_canonical_where_json` は各要素内の dict キーのみ `sort_keys=True` でソートし、リスト自体の順序は保持する) -- 同じ述語集合でも順序が異なれば別の digest になる、という仕様上の挙動を意図的なものとして記録する (異なる順序の where を「同じ selection」とみなして digest を畳み込む正規化は行わない、という設計選択)。
+
+**完了条件チェック**: (1) 全件対応済み、(2) レビュア変異 B・C を自分で再注入し赤を実測、scratchpad 経由で復元し diff 一致確認済み、(3) 下記 §5.7 参照、(4) B-1 の実 wire 再現ログは本節の B-1 記載を参照、(5) 本節が該当。
+
+### 5.7 テスト実測 (followup、すべて同期・フォアグラウンド実行)
+
+- root suite (`pytest -q`、リポジトリルート、conformance-tests + r2db-api/tests + MitateDB-api/tests): **1 回目 787 passed / 0 failed / 0 skipped (192.43s)、2 回目 787 passed / 0 failed / 0 skipped (193.82s)**
+- conformance-tests 単独: **251 passed / 0 failed / 0 skipped (155.09s)**
+- `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (22.48s)**
+- 新設/更新テストファイル: `r2db-api/tests/test_limit_class_vocabulary.py` (新設)、`test_foundation.py`/`test_postgres.py`/`test_control_plane_service.py`/`test_control_plane_store.py`/`test_control_http.py` (追加テスト)、`conformance-tests/test_c06_destructive_confirmation.py`/`test_c15_bootstrap_reset_lifecycle.py`/`CONDITIONS.md` (陳腐化文言修正)。

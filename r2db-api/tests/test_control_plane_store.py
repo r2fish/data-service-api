@@ -1075,6 +1075,72 @@ def test_without_the_ritual_lock_two_concurrent_existence_checks_both_see_no_row
         store_b.close()
 
 
+def test_control_credentials_locked_scan_serializes_against_a_concurrent_scan(platform: types.SimpleNamespace) -> None:
+    """WP-3 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3, WP-0
+    MA-2): the same deterministic, manually-sequenced-real-connections
+    technique as this module's own `test_without_the_ritual_lock_two_
+    concurrent_existence_checks_both_see_no_row` immediately above -- no
+    thread timing involved -- proving the POSITIVE property that precedent
+    test proves the ABSENCE of: `PostgresControlCredentialStore.list_all_
+    for_update`, the read `ControlPlaneService.revoke_credential`'s
+    last-active-control-credential gate uses inside its own `control_
+    credentials_unit_of_work` (`_body`'s own real call sequence, `control_
+    plane.py`), genuinely locks every control-credential row (`FOR UPDATE`,
+    no `WHERE`) for the remainder of that transaction.
+
+    This is the exact property that closes the TOCTOU window WP-0 MA-2
+    describes: without it (an unlocked `list_all()` read, or this same read
+    taken BEFORE `control_credentials_unit_of_work` even opens -- design's
+    own mutation-injection completion condition (vi), "gate 判定を uow 外
+    へ"), two concurrent revokes of the last two active control credentials
+    could each independently observe "count = 2" and both proceed
+    unconfirmed, leaving zero active control credentials with neither
+    revoke ever having been asked to confirm anything.
+
+    Demonstrated with a short `lock_timeout` on the second connection
+    (turning contention into an immediate, deterministic `LockNotAvailable`
+    rather than a real hang, exactly like `test_control_plane_service.py`'s
+    own `_run_state_change` `psycopg.errors.LockNotAvailable` handling
+    already anticipates for this exact statement shape) -- first while the
+    first connection's transaction is still open (must raise), then again
+    after it commits (must succeed immediately, proving the block was the
+    lock and not some unrelated contention).
+    """
+    store_a = _control_store(platform)
+    table = sql.Identifier(platform.schema, "control_credentials")
+    lock_statement = sql.SQL("SELECT credential_id FROM {table} FOR UPDATE").format(table=table)
+    try:
+        credential_id = "ctl_" + secrets.token_hex(8)
+        with store_a.unit_of_work() as work_a:
+            store_a.add(credential_id, "secret-lockscan-" + secrets.token_hex(4), work=work_a)
+
+        with store_a.unit_of_work() as work_a:
+            # Mirrors `_body`'s own real call: locks every row for the
+            # remainder of THIS transaction.
+            store_a.list_all_for_update(work_a)
+
+            with psycopg.connect(platform.control_dsn) as conn_b:
+                conn_b.autocommit = False
+                with conn_b.cursor() as cur:
+                    cur.execute("SET lock_timeout = '250ms'")
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    with conn_b.cursor() as cur:
+                        cur.execute(lock_statement)
+                conn_b.rollback()
+            # work_a commits here (the `with store_a.unit_of_work()` block
+            # exits) -- the lock is released.
+
+        # Identical statement, fresh connection, no contention: succeeds
+        # immediately now that work_a's transaction has ended.
+        with psycopg.connect(platform.control_dsn) as conn_c:
+            with conn_c.cursor() as cur:
+                cur.execute("SET lock_timeout = '250ms'")
+                cur.execute(lock_statement)
+            conn_c.commit()
+    finally:
+        store_a.close()
+
+
 # ===========================================================================
 # Section D: 0002-revision provisioning round trip -- work order §6 item 3.
 # ===========================================================================

@@ -227,11 +227,18 @@ def test_c15_bootstrap_refused_while_any_control_credential_exists(adapter, fx: 
     # actor's OWN credential LAST (design independent review, minor: were
     # it revoked mid-loop, the actor could no longer be trusted to
     # authorize the remaining revokes on some peer's real implementation).
-    # No `destructive`/`confirmation` fields are passed: the contract's
-    # own Q-1 adjudication (design section 0.5) leaves `revoke_credential_
-    # inband`'s confirmation *check* suspended, so this call site
-    # correctly supplies neither field today -- once Q-1 is adjudicated,
-    # this call will need the canonical confirmation phrase added.
+    # Contract 1.2.0 (WP-3 first-real-execution finding, design docs/design/
+    # DESTRUCTIVE_CONFIRMATION_V1.md R-3): revoking the LAST remaining
+    # active control credential now requires a valid confirmation -- the
+    # loop's own final iteration (typically the only genuinely live row by
+    # this point, since `control_credential()` maintains at most one live
+    # control credential per session) hits that gate, so each attempt below
+    # probes -> echoes the real phrase on denial, exactly like a real
+    # client. An attempt against a row this gate does NOT apply to (not the
+    # last active one) simply succeeds outright with `destructive: True`
+    # and no `confirmation` needed (contract `non_destructive_requests`:
+    # accepted but never inspected there), so this same probe/echo pattern
+    # is safe to apply uniformly to every row in the loop.
     # Design section 8 M-6: "while a control credential exists" means "a
     # row exists", not "an unrevoked row exists" -- the only legitimate
     # second-mint path after every credential is revoked is reset, never
@@ -241,7 +248,17 @@ def test_c15_bootstrap_refused_while_any_control_credential_exists(adapter, fx: 
     own_ref = control_actor.credential_ref
     ordered_rows = sorted(control_rows, key=lambda row: row["credential_id"] == own_ref)
     for row in ordered_rows:
-        adapter.revoke_credential_inband(control_actor, row["credential_id"])
+        try:
+            adapter.revoke_credential_inband(control_actor, row["credential_id"], destructive=True)
+        except ConformanceDenial as denial:
+            # Opus review minor m-4: only the gate's own denial code is a
+            # probe to echo past -- any OTHER denial must propagate rather
+            # than being silently swallowed as if it were the gate.
+            if denial.code != "DESTRUCTIVE_CONFIRMATION_REQUIRED":
+                raise
+            phrase = denial.details["required_confirmation"]
+            revoked = adapter.revoke_credential_inband(control_actor, row["credential_id"], destructive=True, confirmation=phrase)
+            assert revoked.get("revoked") is True, f"echoing the real phrase did not actually revoke the credential: {revoked!r}"
     with pytest.raises(ConformanceDenial) as ei2:
         adapter.bootstrap()
     _assert_is_contract_code(ei2.value.code)

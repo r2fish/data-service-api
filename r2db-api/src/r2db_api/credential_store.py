@@ -83,6 +83,25 @@ from .structured import validate_identifier
 
 DEFAULT_SCHEMA = "r2dbsvc_registry"
 
+# Opus review minor m-5: the control plane's own last-active-control-
+# credential gate (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3)
+# takes a real `FOR UPDATE` lock across every control-credential row for
+# the duration of `control_credentials_unit_of_work` (`PostgresControl
+# CredentialStore.list_all_for_update`) -- the same kind of lock-holding
+# transaction `postgres.py`'s own `_set_timeouts` already bounds with a
+# `SET LOCAL lock_timeout` on the DATA plane, so the control plane needs
+# the identical discipline: a request that would otherwise wait forever
+# behind a stuck/slow concurrent transaction must instead fail
+# deterministically. Reuses `ResourceLimits`'s own default `execution_ms`
+# (5000ms) for consistency with the data plane's own default budget --
+# `ControlPlaneLimits` has no `execution_ms`-shaped field of its own to
+# derive this from (R-7's 3 control-plane resource classes are
+# applications/credentials_per_application/control_requests_per_minute,
+# none of which is a lock/statement-timeout bound), so this is a fixed
+# constant here rather than a configurable one, unlike the data plane's
+# per-request budget.
+_CONTROL_LOCK_TIMEOUT_MS = 5000
+
 
 class _PostgresWork:
     """The Postgres pair's (`PostgresCredentialStore`/`PostgresControl
@@ -566,6 +585,16 @@ class PostgresControlCredentialStore:
     @contextmanager
     def unit_of_work(self) -> Iterator[_PostgresWork]:
         with self._pool.connection() as conn:
+            # Opus review minor m-5: `SET LOCAL lock_timeout`, mirroring
+            # `postgres.py`'s own `_set_timeouts` (data plane) -- scoped to
+            # this transaction only (discarded on commit/rollback, never
+            # leaking onto the next transaction this pooled connection is
+            # reused for). Bounds the last-active-control-credential gate's
+            # own `FOR UPDATE` lock wait (`list_all_for_update`) so a
+            # concurrent lock holder that never releases cannot wedge this
+            # transaction open indefinitely.
+            with conn.cursor() as cur:
+                _execute(cur, sql.SQL("SET LOCAL lock_timeout = {t}").format(t=sql.Literal(f"{_CONTROL_LOCK_TIMEOUT_MS}ms")), [])
             work = _PostgresWork(conn)
             try:
                 yield work
@@ -780,6 +809,31 @@ class PostgresControlCredentialStore:
                     return cur.fetchall()
         except psycopg.Error:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
+            raise  # unreachable; fail() always raises
+
+    def list_all_for_update(self, work: _PostgresWork) -> list[tuple[str, bool, bool]]:
+        """Row-locking counterpart to `list_all` above, used exclusively by
+        `ControlPlaneService.revoke_credential`'s last-active-control-
+        credential destructive-confirmation gate (design docs/design/
+        DESTRUCTIVE_CONFIRMATION_V1.md R-3, WP-0 MA-2). `FOR UPDATE` with no
+        `WHERE` locks every row in this table for the remainder of `work`'s
+        transaction -- the gate's own count of active rows must not be able
+        to change between this read and the state-changing `UPDATE`
+        (`set_state`) that follows in the SAME transaction, closing the
+        TOCTOU window a standalone count-then-write would leave between two
+        concurrent revokes each independently observing "count = 2" and
+        both proceeding unconfirmed. A concurrent `rotate`/`set_state`
+        call's own single-row `SELECT ... FOR UPDATE` (see those methods
+        above) blocks against this same lock too, since it necessarily
+        locks a row this statement has already locked.
+        """
+        statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY credential_id FOR UPDATE").format(table=self._table)
+        try:
+            with work.connection.cursor() as cur:
+                _execute(cur, statement, [])
+                return cur.fetchall()
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
             raise  # unreachable; fail() always raises
 
 
