@@ -8,6 +8,12 @@ The target is that an AI agent can use either implementation from:
 2. a base URL, and
 3. an authorized API key.
 
+`data-service-api.v1.json` is intentionally **not** an OpenAPI document. It is a
+platform-independent semantic contract — the source of truth for both
+implementations. An OpenAPI description of the HTTP surface may be derived from
+it for tooling purposes, but any derived artifact is non-authoritative, and the
+absence of OpenAPI structure here is a design decision, not a defect.
+
 `data-service-api.v1.json` is the initial machine-readable contract. It covers endpoint semantics, request/response shapes, authentication roles, error codes, structured query/schema operations, finite resource limits, lifecycle, audit semantics, and versioning/compatibility rules. `CCR_DISPOSITION.md` records the formal disposition of CCR-01 through CCR-12.
 
 Do not treat deployment-specific paths, proxies, database connection mechanics,

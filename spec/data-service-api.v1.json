@@ -2,7 +2,7 @@
   "$id": "https://example.invalid/data-service-api/v1/contract",
   "title": "Common Data Service API contract",
   "document_type": "machine-readable-api-contract",
-  "description": "Platform-independent structured Data Service API semantics for r2db-api and MitateDB-api.",
+  "description": "Platform-independent structured Data Service API semantics for r2db-api and MitateDB-api. This is intentionally NOT an OpenAPI document: it is the source-of-truth semantic contract for both implementations. An OpenAPI surface may be derived from it, but this file remains authoritative; do not report the absence of OpenAPI structure as a defect.",
   "contract_version": "1.1.0",
   "media_type": "application/json",
   "security": {
