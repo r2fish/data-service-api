@@ -27,20 +27,21 @@ named trap: a naive string compare ranks "1.10.0" below "1.2.0"):
   exercise indirectly through `delete(..., confirmation=VALID_
   CONFIRMATION)`; this module names it explicitly as C-06's own floor.
 
-**As of WP-3, both registered r2db adapters (`r2db-api`, `r2db-api-http`)
-declare `contract_version: 1.2.0` and take the STRICT branch for real, on
-every run** (the r2db flip to 1.2.0 landed in WP-3's own single commit, per
-design's per-peer flip rule); `MitateDB-api` still declares `1.1.0` and
-takes the baseline branch (its own flip is WP-5's completion condition, not
-yet landed). Vectors V1-V8 below are therefore real, first-execution-proven
-coverage against genuine 1.2.0 peers, not merely unit-tested dispatch
-skeletons -- `test_contract_version_at_least_*`/`test_resolve_valid_
-confirmation_*` at the bottom of this file remain in place as direct unit
-tests of the *pure* dispatch/derivation functions (`adapter.parse_semver`/
-`contract_version_at_least`/`resolve_valid_confirmation`) themselves, not
-as a substitute for end-to-end coverage -- see this file's own
-`CONDITIONS.md` C-06 row for the same disclosure, updated in the same
-commit as this flip.
+**As of WP-5, all three registered adapters (`r2db-api`, `r2db-api-http`,
+`MitateDB-api`) declare `contract_version: 1.2.0` and take the STRICT
+branch for real, on every run** (r2db's flip landed in WP-3's own single
+commit; MitateDB-api's own flip lands in WP-5's own single commit, per
+design's per-peer flip rule -- the baseline branch below therefore has no
+adapter currently exercising it, and is retained only as the future
+registration seam WP-0 MA-7 describes). Vectors V1-V8 below are therefore
+real, first-execution-proven coverage against genuine 1.2.0 peers, not
+merely unit-tested dispatch skeletons -- `test_contract_version_at_least_*`
+/`test_resolve_valid_confirmation_*` at the bottom of this file remain in
+place as direct unit tests of the *pure* dispatch/derivation functions
+(`adapter.parse_semver`/`contract_version_at_least`/`resolve_valid_
+confirmation`) themselves, not as a substitute for end-to-end coverage --
+see this file's own `CONDITIONS.md` C-06 row for the same disclosure,
+updated in the same commit as this flip.
 
 ## Vectors (design R-6, strict branch)
 
@@ -156,26 +157,33 @@ _REQUIRED_DETAIL_KEYS = ("required_confirmation", "consequence", "reversible_alt
 # this whole module's run. Precisely which check may share the cached
 # Fixture's data safely differs by branch, corrected here per review m-5
 # (an earlier revision of this comment overclaimed this uniformly):
-# `_assert_baseline_delete_invariant` -- the ONLY code path `MitateDB-api`
-# (still declaring `contract_version: 1.1.0`) ever runs -- operates on a
-# freshly `insert()`-ed, uniquely-marked row of its own rather than the
-# shared fixture's single seeded row, specifically so its own repeated
-# invocations (once per vector test, 8 times, against the SAME cached
-# Fixture) never step on each other. As of WP-3 the STRICT branch's own
-# vectors are REAL, first-execution-proven coverage for both r2db adapters
-# (no longer dead code) -- each still runs only once per adapter across
-# this module's whole run, and each mutates the shared Fixture's real state
-# directly where the vector itself calls for it, which remains safe under
-# the SAME per-vector footprint reasoning as before the flip: V5 deletes
-# the seeded row for real (a genuine, one-time echo-then-execute); V6 no
-# longer touches the shared fixture's own entities at all (review m-5 moved
-# V6's drop target to a throwaway entity of its own, created fresh inside
-# that test, removing an implicit ordering dependency on V3's own use of
-# `fx.a_only_entity`); V7 mutates control-plane credential state, entirely
-# independent of this Fixture. Measured (full-suite runs, both r2db
-# adapters strict since WP-3): no fixture-sharing regression of the kind
-# this comment block's own history (the `applications` SI-08 near-miss,
-# `test_c15_bootstrap_reset_lifecycle.py`) already warns about.
+# `_assert_baseline_delete_invariant` -- the code path every adapter ran
+# through WP-4 (and the only one `MitateDB-api` ran, back when it still
+# declared `contract_version: 1.1.0`) -- operates on a freshly
+# `insert()`-ed, uniquely-marked row of its own rather than the shared
+# fixture's single seeded row, specifically so its own repeated invocations
+# (once per vector test, 8 times, against the SAME cached Fixture) never
+# step on each other; retained for the currently-unexercised baseline
+# branch (no adapter takes it as of WP-5, design WP-0 MA-7's future
+# registration seam). As of WP-3 (r2db) and WP-5 (MitateDB-api) the STRICT
+# branch's own vectors are REAL, first-execution-proven coverage for all
+# three registered adapters (no longer dead code) -- each still runs only
+# once per adapter across this module's whole run, and each mutates the
+# shared Fixture's real state directly where the vector itself calls for
+# it, which remains safe under the SAME per-vector footprint reasoning as
+# before the flip: V5 deletes the seeded row for real (a genuine, one-time
+# echo-then-execute); V6 no longer touches the shared fixture's own
+# entities at all (review m-5 moved V6's drop target to a throwaway entity
+# of its own, created fresh inside that test, removing an implicit
+# ordering dependency on V3's own use of `fx.a_only_entity`) -- and takes
+# the shared absence mechanism instead for `MitateDB-api`, which has no
+# `drop_entity` surface at all; V7 mutates control-plane credential state,
+# entirely independent of this Fixture, and likewise takes the shared
+# absence mechanism for `MitateDB-api` (no control-plane surface at all).
+# Measured (full-suite runs, all three adapters strict since WP-5): no
+# fixture-sharing regression of the kind this comment block's own history
+# (the `applications` SI-08 near-miss, `test_c15_bootstrap_reset_
+# lifecycle.py`) already warns about.
 # ---------------------------------------------------------------------------
 
 _SHARED_FIXTURE_CACHE: dict[str, Fixture] = {}
@@ -439,35 +447,25 @@ def test_c06_v2_destructive_false_with_correct_phrase_denied(adapter, fx: Fixtur
 
     Port-level scope note (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md
     R-1-3's own "フィールド欠落は false と同値" rule, corrected per review
-    nit): this port's `ConformanceAdapter.delete()` signature requires
-    `destructive: bool` as an explicit Python keyword argument on every
-    call -- but what each adapter does with it on the wire is NOT uniform
-    across all three registered peers (an earlier revision of this
-    docstring overstated this as "every registered adapter's delete()...
-    never omits the field", which is simply wrong for `MitateDB-api`: that
-    peer's real `session.delete()` has no `destructive` wire parameter
-    AT ALL -- deletion there is unconditionally destructive, gated by
-    `confirm` alone, so there is no separate field for its adapter to
-    either send or omit). What IS true for every peer is narrower: this
-    port's OWN `delete()` method always receives an explicit Python
-    `bool`, so a caller here cannot construct a request that omits the
-    argument entirely -- genuine wire-level field OMISSION (V2b's own
-    literal reading, meaningful only for a peer whose wire shape has a
-    real `destructive` key to omit, i.e. `r2db-api`) is therefore not
-    independently expressible at this port level without a second,
-    lower-level entry point this design did not authorize adding here --
-    V2 and V2b collapse onto the identical port-level assertion below.
-    Verifying that `r2db-api`'s own wire parser treats an *omitted*
-    `destructive` key identically to an explicit `false` is real, real
-    coverage, but it is peer-local test scope, not something this common
-    port can observe today: WP-3's own handoff (per this review) is to add
-    it there, by separating confirmation-setting from the `destructive`
-    check inside `_build_mutation_item` (both r2db plugs currently only
-    ever set `confirmation` INSIDE the `if destructive:` branch, so a
-    request with `destructive` omitted/false but `confirmation` present
-    cannot be constructed through this adapter today either -- that
-    coupling has to be undone first, on the r2db plugs specifically, before
-    a real wire-omission vector can be added anywhere).
+    nit and updated by WP-5): this port's `ConformanceAdapter.delete()`
+    signature requires `destructive: bool` as an explicit Python keyword
+    argument on every call, so a caller here cannot construct a request
+    that omits the argument entirely at the PORT level, regardless of peer
+    -- genuine wire-level field OMISSION (V2b's own literal reading) is
+    therefore not independently expressible through this specific method
+    for ANY peer; V2 and V2b collapse onto the identical port-level
+    assertion below for all three registered adapters.
+    `test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied`
+    below covers the literal wire-omission shape instead, via `BatchOperation`
+    /`attempt_batch_with_addresses` (port v1.4), which -- unlike this
+    method -- lets `destructive` be genuinely absent from what reaches each
+    peer's own real entry point. As of WP-5, MitateDB-api's `session.
+    delete()` also carries a real `destructive` keyword (before WP-5 it had
+    none at all -- deletion there was unconditionally destructive, gated by
+    `confirm` alone); this peer's own limitation for the WIRE-OMISSION-
+    VIA-BATCH vector specifically is different and structural, not a
+    missing parameter -- see `_batch_delete_capability_absent`'s own
+    docstring, next to that test, for why.
     """
     if _branch_for(adapter) != "strict":
         _assert_baseline_delete_invariant(adapter, fx)
@@ -498,6 +496,95 @@ def test_c06_v2_destructive_false_with_correct_phrase_denied(adapter, fx: Fixtur
 # ---------------------------------------------------------------------------
 
 
+def _batch_delete_capability_absent(adapter, session, entity: str) -> bool:
+    """True iff this peer's own multi-operation batch dispatcher
+    (`attempt_batch_with_addresses`) cannot execute a `delete`-type
+    operation THROUGH THAT ENTRY POINT at all, independent of any
+    confirmation -- established by presenting a real, harmless probe (no
+    `destructive` flag, no `confirmation`, a `where` that matches no row so
+    nothing is at risk even for a peer that WOULD execute it) and observing
+    a real `CAPABILITY_UNSUPPORTED` denial.
+
+    WP-5 first-execution finding (MitateDB-api): unlike both r2db-api
+    adapters (a single `mutate()` dispatcher executes every mutation type,
+    batched or not, uniformly), `MitateDB-api`'s ONLY multi-operation
+    dispatcher (`ApplicationCell.transact`) never executes anything but an
+    `"insert"` item -- `update`/`delete`/`upsert` are refused with
+    `CapabilityError` unconditionally, before any destructive-confirmation
+    semantics are even inspected (a real, honestly-declared limitation of
+    this peer's own batch capability, not a bug: its dedicated single-
+    operation `delete()` method is the only real path to `destructive_
+    confirmation` semantics on this peer). `test_c06_v2b_wire_*` below
+    presents the WIRE-OMISSION-VIA-BATCH shape specifically, which simply
+    has no real entry point to reach on such a peer -- this is confirmed by
+    an actual observed denial each time, never assumed from a capability
+    declaration alone (design principle 4).
+
+    A peer that DOES execute delete through this dispatcher (destructive
+    operations included) instead denies this exact probe with
+    `DESTRUCTIVE_CONFIRMATION_REQUIRED` (a `delete` is destructive
+    regardless of its own request's `destructive: false` default, or of
+    whether any row happens to match) -- so this function returns `False`
+    for every such peer.
+
+    mi-1(a) hardening (independent review): this claim is NOT tied to any
+    peer's own `capabilities().atomic_mutation` declaration -- design v1.5
+    §7's own MA-1 investigation found that capability's own `operations`
+    list is genuinely ambiguous between "which operation types this
+    peer's batch dispatcher executes" and "which of the general mutation
+    vocabulary this peer executes at all through SOME real entry point"
+    (MitateDB-api's own real declaration keeps `update`/`delete` listed
+    under the SECOND reading, since each has a real, working dedicated
+    method -- deliberately NOT resolved to the first reading here, since
+    doing so was measured to require an adapter change that would itself
+    misrepresent how a real client reaches this peer's own working
+    update/delete behavior; see that comment for the full investigation).
+    Tying THIS function's own absence claim to that contested declaration
+    would inherit its ambiguity. Instead, this corroborates the SAME claim
+    a second, independent way: `update` -- a different operation type,
+    unaffected by destructive-confirmation semantics at all -- must ALSO
+    be refused with `CAPABILITY_UNSUPPORTED` through this identical batch
+    entry point. Agreement across two unrelated operation types is
+    evidence the refusal is about the DISPATCHER (batch entry point
+    structurally rejecting non-insert types), not something specific to
+    `delete`/confirmation handling that could coincidentally also read as
+    `CAPABILITY_UNSUPPORTED`.
+
+    mi-2 acceptance-boundary note (independent review, design v1.5 §7):
+    this mechanism's real detection power is peer-dependent and bounded.
+    A peer that genuinely over-deletes in response to this probe (any row
+    beyond the zero this `where` should match) IS caught, indirectly, by
+    the calling test's own before/after row-count assertion -- but a peer
+    that accepts this probe, deletes exactly the zero rows it should, and
+    then reports success (rather than a denial) cannot be told apart, by
+    this mechanism alone, from one that silently discarded the request
+    without executing anything at all: both look identical (`False`
+    returned, no state change observed) from outside. This is an accepted
+    limitation of black-box conformance testing, not something this
+    probe's design can close, and is recorded rather than silently
+    presumed away.
+    """
+    try:
+        adapter.attempt_batch_with_addresses(
+            session, entity,
+            [BatchOperation(operation="delete", where_field="item_key", where_value=-1)],
+        )
+    except ConformanceDenial as denial:
+        delete_absent = denial.code == "CAPABILITY_UNSUPPORTED"
+    else:
+        return False
+    if not delete_absent:
+        return False
+    try:
+        adapter.attempt_batch_with_addresses(
+            session, entity,
+            [BatchOperation(operation="update", values={}, where_field="item_key", where_value=-1)],
+        )
+    except ConformanceDenial as denial:
+        return denial.code == "CAPABILITY_UNSUPPORTED"
+    return False
+
+
 def test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied(adapter, fx: Fixture):
     """Contract `valid_confirmation`: "a missing destructive field is
     equivalent to false, never to true" -- so a request whose wire OMITS
@@ -511,6 +598,18 @@ def test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied(adapter
     session = fx.runtime_a
     entity = fx.shared_entity
     before = adapter.count(session, entity)
+
+    if _batch_delete_capability_absent(adapter, session, entity):
+        # See `_batch_delete_capability_absent`'s own docstring: this
+        # vector's own precondition (a destructive delete reachable through
+        # the SAME batch entry point `attempt_batch_with_addresses` uses)
+        # does not hold for this peer. The single-operation `delete()` port
+        # method's own V2/V2b test above already covers the identical
+        # semantic for this peer through its real, present entry point;
+        # this specific wire-omission-VIA-BATCH shape is inapplicable to
+        # this peer, not untested.
+        assert adapter.count(session, entity) == before
+        return
 
     with pytest.raises(ConformanceDenial) as excinfo:
         adapter.attempt_batch_with_addresses(
@@ -531,6 +630,42 @@ def test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied(adapter
     _assert_four_declarations(denial.details, context="V2b-wire destructive omitted, real phrase supplied")
     assert adapter.count(session, entity) == before, (
         f"{adapter.name}: V2b-wire must never change state"
+    )
+
+
+def test_c06_v2b_wire_vacuity_guard():
+    """mi-1(b) (independent review): if every registered strict-branch
+    adapter's `_batch_delete_capability_absent` returned `True`, the vector
+    above would never actually exercise its own REAL assertions (the
+    `pytest.raises(ConformanceDenial)` block) anywhere in the whole
+    registry -- every per-adapter run would "pass" via the inapplicable-
+    vector shortcut alone, and this specific wire-omission-via-batch shape
+    would be silently unexercised registry-wide (design principle 4:
+    uncertainty must not silently become permission). Symmetric to C-12's
+    own `test_at_least_one_adapter_exercises_a_positive_control_mutation`.
+    This does not re-run the vector itself (the per-adapter test above
+    already does); it only proves the absence shortcut is not universal --
+    via a fresh, minimal, self-contained Application/entity per strict
+    adapter (deliberately NOT reusing this module's own cached `fx`, to
+    avoid depending on collection-order assumptions about which per-adapter
+    tests have already run by the time this registry-wide guard executes).
+    """
+    saw_real_vector = False
+    for name, adapter_obj in registered_adapters().items():
+        if _branch_for(adapter_obj) != "strict":
+            continue
+        app = fresh_identifier("c06v2bvacuity")
+        adapter_obj.provision_application(app)
+        entity = fresh_identifier("c06v2bvacuity_entity")
+        dev_session = adapter_obj.authenticate(adapter_obj.issue_credential(app, "developer"))
+        adapter_obj.create_entity(dev_session, entity, {"item_key": "integer"})
+        runtime_session = adapter_obj.authenticate(adapter_obj.issue_credential(app, "runtime"))
+        if not _batch_delete_capability_absent(adapter_obj, runtime_session, entity):
+            saw_real_vector = True
+            break
+    assert saw_real_vector, (
+        "no registered strict-branch adapter actually exercises the V2b-wire real assertions -- every one "
+        "took the _batch_delete_capability_absent shortcut, making this vector vacuous registry-wide"
     )
 
 
@@ -894,23 +1029,27 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # runs exactly once regardless of how many adapters are registered).
 # ---------------------------------------------------------------------------
 
-# Expected as of WP-3 (§ this file's own module docstring): both r2db
-# plugs (`r2db-api`, `r2db-api-http`) flipped to `contract_version: 1.2.0`
-# in that WP's single commit and take the strict branch; `MitateDB-api`
-# still declares `1.1.0` and takes the baseline branch (its own flip is
-# WP-5's completion condition). This is deliberately a literal, hardcoded
-# expectation, not derived from anything computed below: WP-5 flipping
-# MitateDB-api MUST update these two sets (to `{"r2db-api", "r2db-api-http",
-# "MitateDB-api"}` / `frozenset()`) in the SAME commit as that flip, or
-# this test goes red (a peer that is expected to have moved to the strict
-# branch but is still being classified baseline, or vice versa, is exactly
-# the silent-drift design principle 4 forbids). The registry keys used here
+# mi-4 correction (independent review): this comment used to say
+# "MitateDB-api still declares 1.1.0 and takes the baseline branch" as the
+# CURRENT expectation -- stale since WP-5 flipped it (the code below
+# already reflected the flip; only this prose lagged, exactly the kind of
+# drift this vacuity guard exists to catch in the DECLARATION, not to
+# accumulate in its own commentary). As of WP-5, all three registered
+# adapters (`r2db-api`, `r2db-api-http` since WP-3; `MitateDB-api` since
+# WP-5) declare `contract_version: 1.2.0` and take the strict branch; no
+# adapter currently takes the baseline branch. This is deliberately a
+# literal, hardcoded expectation, not derived from anything computed below:
+# a future <1.2.0 peer's registration, or any peer's own version flip, MUST
+# update these two sets in the SAME commit as that change, or this test
+# goes red (a peer that is expected to have moved to the strict branch but
+# is still being classified baseline, or vice versa, is exactly the
+# silent-drift design principle 4 forbids). The registry keys used here
 # are `registered_adapters()`'s own dict keys (`registry.json`'s `name`
 # field), matching `test_c11`/`test_c12`'s own convention -- NOT each
 # adapter object's own `.name` property (`"r2db-api (http+postgres)"` for
 # the HTTP plug, used elsewhere in this file for diagnostic messages only).
-_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http"})
-_EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset({"MitateDB-api"})
+_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http", "MitateDB-api"})
+_EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset()
 
 
 def test_c06_branch_dispatch_vacuity_guard():

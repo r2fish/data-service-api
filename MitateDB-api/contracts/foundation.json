@@ -26,12 +26,13 @@
     "values": "parameter-bound",
     "identifiers": "validated before quoted construction",
     "transaction": "all operations commit or rollback as one local transaction",
-    "destructive_data_operation": "explicit confirm required"
+    "destructive_data_operation": "declare-and-echo confirmation required (contract 1.2.0 destructive_confirmation): destructive=true and confirm must exactly equal the server's own currently-recomputed required_confirmation phrase for this exact request; a truthy-but-non-matching confirm is refused, never accepted"
   },
   "resource_bounds": {
     "configuration": "FoundationConfig / MITATEDB_* environment variables",
     "finite_by_default": true,
-    "classes": ["batch_items", "result_rows", "fields", "filter_terms", "request_bytes", "schema_objects"]
+    "classes": ["batch_items", "result_items", "query_complexity", "request_bytes", "schema_objects"],
+    "note": "matches spec/data-service-api.v1.json limits.classes membership exactly (Q1-D7(B)/Q1-D11, design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md v1.5 §7) -- max_fields-gated shape checks (schema-field count, read-projection width, write-payload width) are VALIDATION_FAILED, not a resource_bounds class, per Q1-D11"
   },
   "evidence": {
     "automated_suite": "../tests/test_foundation.py",

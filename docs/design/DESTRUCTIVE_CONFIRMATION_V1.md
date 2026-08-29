@@ -1,6 +1,6 @@
 # Q-1 実効化設計 — 宣言と復唱 (destructive confirmation)、契約 1.2.0
 
-- 版数: v1.4 (2026-08-30。WP-4 実装 (儀式 CLI `ops.py` の `reset`/`delete-credential` declare-and-echo 化 + runbook/playbook 更新) を §6.1-6.6 に記録し、その独立レビュー (Opus、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き) への全対応を §6.7-6.8 に追記 (WP-3 followup が §5.6 で v1.3 のまま追記記録したのと同じ前例に倣い、版数は据え置き)。v1.3 は WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録したもの。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
+- 版数: v1.5 (2026-08-30。WP-5 実装 (MitateDB-api の確認内容検証の適合修正 — R-5 全部 + 版数 flip + limits 語彙適合 + C-06 厳格分岐の初実行デバッグ) を §7 に記録)。v1.4 は WP-4 実装 (儀式 CLI `ops.py` の `reset`/`delete-credential` declare-and-echo 化 + runbook/playbook 更新) を §6.1-6.6 に記録し、その独立レビュー (Opus、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き) への全対応を §6.7-6.8 に追記したもの (WP-3 followup が §5.6 で v1.3 のまま追記記録したのと同じ前例に倣い、WP-4 時点では版数を据え置いた)。v1.3 は WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録したもの。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
 - 正典: `spec/CCR_DISPOSITION.md` 従属判断6 (裁定、2026-08-29) および従属判断7 (2026-08-29、依頼者裁定案を監督検証のうえ WP-1 で記録)。たたき台と守備範囲合意は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §0.5。本書は裁定を**実施する**設計であり、裁定内容を再交渉しない
 - 適用範囲: 共通契約 (spec) + conformance (C-06) + r2db-api (データ/schema 面・制御面・儀式 CLI) + MitateDB-api
 - 実施順序は裁定どおり: 契約 1.2.0 文言化 → C-06 共通 suite → CCR-14 休止条項の実効化 (r2db) → MitateDB の確認内容検証の適合修正
@@ -331,3 +331,157 @@ WP-4 の独立レビュー (Opus) が発見した項目と、その全対応の�
 - conformance-tests 単独: **251 passed / 0 failed / 0 skipped (156.44s)** -- 無変更 (adapter 内部実装のみの変更であり conformance テストファイル自体は touch していない)
 - `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (28.76s)** -- 無変更
 - 儀式経路 conformance (`test_c15_bootstrap_reset_lifecycle.py`/`test_c13_revocation_terminality.py`/`test_c06_destructive_confirmation.py`): 59 passed (N-2 のパース変更後も green)
+
+## 7. WP-5 実装記録 (MitateDB-api 適合修正、v1.5 追記)
+
+### 7.1 実装内容
+
+- **`ApplicationCell.delete`** (`MitateDB-api/src/mitatedb_api/cell.py`): シグネチャを `delete(self, principal, collection, filters, *, destructive=False, confirm=None)` へ変更 (旧 `confirm=False` の bool 単独引数を廃止)。評価順序を (a) 認可 (`_require_data`) → (b) `destructive`/`confirm` の型検査 (非 bool/非 str は `ValidationError`) → (c) `collection` 識別子検証 → (d) filters の非空検査 → (e) `_where(collection, filters)` (フィルタ識別子検証・演算子検証・**対象存在検査** — `_field_names` 経由。契約 evaluation_order の「target-existence checks」を兼ねる) → (f) 確認検査 (`destructive is not True or confirm != phrase`) → (g) 実行、へ並べ替えた。B-3 (識別子検証を確認検査より前に) と契約 evaluation_order (shape → 認証・認可 → 対象存在 → 確認 → precondition → 実行) を同時に満たす。`ApplicationRuntime.delete` も同型のキーワード引数へ追随。
+- **確認句**: `DELETE <collection> @where=<digest16>` (`_delete_confirmation_phrase`/`_canonical_where_json`、`cell.py` 冒頭に新設)。digest はフィルタ列の正準 JSON (各 `Filter` を `field`/`operator`/`value` の key-sorted dict 化、リスト自体の順序は保持 — r2db n-6 と同じ設計選択) の SHA-256 先頭 16 hex。`default=str` は使わない (r2db WP-3 followup m-7 と同じ理由 — `_where` の `_encode_value` が既に非 JSON-native 値を弾くため、収束による取り違えより即時 `TypeError` を選ぶ)。長さ assert (最長 94 文字 ≤ 256) を関数内に固定。
+- **状態指紋なし**: r2db の delete 句 (Q1-D10) と異なり、schema_revision 相当の指紋を含めない — §7.3 に裏取りを記録。
+- **新設 `DestructiveConfirmationRequired(FoundationError)`** (`errors.py`): 機械可読 `details` 属性 (4 キー: `required_confirmation`/`consequence`/`reversible_alternative`/`recovery`)。データ面には耐久監査が無いため `audited` は載せない (r2db Q1-D6 と同じ判断)。`consequence` = 実データ削除・復元不可の説明、`reversible_alternative`/`recovery` はともに `None` (真実として代替・復旧経路が無い)。
+- **`ResourceLimitError` の構造化 details**: `__init__(self, message, *, limit_class)` へ変更 (キーワード必須、デフォルト無し — 呼び出し漏れは `TypeError` で即座に検出される)。9 箇所全てに `limit_class` を付与 (§7.2 参照)。
+- **`transact` の except タプル**に `DestructiveConfirmationRequired` を追加 (現状到達しないが穴を残さない、r2db m-8 と同じ予防的対応)。
+- **conformance adapter** (`conformance_adapter_mitatedb.py`): `delete()` を faithful pass-through化 (`destructive` を常に配線、`confirmation` は `_resolve_confirmation` 経由で probe→echo。legacy_token=True は 1.2.0 flip 後は到達しない死コードとして維持 — r2db が旧句 "DELETE" を維持したのと同じ流儀)。`_attempt_mutation_outcome` の delete 分岐 (`confirm=True` 直書き) も probe→echo 化。`attempt_batch_with_addresses` の `destructive`/`confirm` 配線を分離 (r2db WP-3 の V2b-wire 修正と同型 — decoupling 自体は独立に正しい修正だが、後述 §7.4 のとおりこれだけでは MitateDB 自身の構造的制約を解決しない)。`_CLASSIFY_ORDER` に `DestructiveConfirmationRequired → DESTRUCTIVE_CONFIRMATION_REQUIRED` を追加。
+- **`capabilities()` の flip**: `contract_version` を `"1.2.0"` へ。
+- **conformance 側の追随**: `test_c06_destructive_confirmation.py` の `_EXPECTED_STRICT_ADAPTER_NAMES`/`_EXPECTED_BASELINE_ADAPTER_NAMES` を `{"r2db-api", "r2db-api-http", "MitateDB-api"}`/`frozenset()` に更新。陳腐化していたモジュール docstring・`fx` override コメント・V2 の docstring (MitateDB の `delete()` に `destructive` パラメータが無いという記述) を実態に更新。`CONDITIONS.md` C-06 行の「MitateDB は 1.1.0 のまま」という記述も実態 (全 3 adapter が 1.2.0/strict) に更新。
+- **MitateDB ローカルテスト**: `test_foundation.py:179` の交絡 (空 filters vs 確認欠落) を解消し、非空 filters + 確認欠落で gate を単独検証する新テスト (`test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters`) と型検査テスト (`test_delete_rejects_non_boolean_destructive_and_non_string_confirm`) を新設。r2db の `test_limit_class_vocabulary.py` を模した静的 AST スキャン (`test_limit_class_vocabulary.py`、MitateDB 版) を新設 — ただし `ResourceLimitError.__init__` が `limit_class` をキーワード必須にしたため「存在漏れ」の検出はコンストラクタ自身が構造的に保証しており、このスキャンは「値が 15 classes のメンバーか」のみを検証する (r2db 版との役割分担の違いとして明記)。
+
+### 7.2 limits 語彙の判断 (fields/filter_terms の対応先・台帳送りの根拠)
+
+調査対象: `config.max_fields` (3 箇所で使用 — `create_collection` のスキーマ定義フィールド数、`_fields`/`read` の射影フィールド数、`_prepare_values`/insert・update・transact-insert の values フィールド数) と `config.max_filter_terms` (`_where` のフィルタ数、1 箇所のみ)。
+
+- **`filter_terms` → `query_complexity` へ改称 (クリーンな 1:1 対応)**: `_where` の唯一の呼び出しで enforce される値がそのまま `query_complexity` の宣言値になる。r2db 自身の `query_complexity` が `len(where) + len(select) + order_by_count` を束ねる「クエリの構造的複雑度」という同じ概念であり、`_where` の filter 数だけを数える MitateDB の実現はその部分集合として真実に対応する。
+- **`fields` → 宣言から削除 (改称せず)**: `max_fields` は 3 箇所で異なる意味 (スキーマ定義幅・読み取り射影幅・書き込みペイロード幅) に使われており、そのどれも 15 classes の既存メンバーの宣言値と数値が一致しない (`schema_objects` は別のカウンタ [collection 総数] を持つ、`query_complexity` は `max_filter_terms` の値を持つ)。改称してどちらかの名前を再利用すると、宣言された数値 (`capabilities().limits[class]`) と実際に踏んだ境界値が食い違う、という別の不誠実を生む。よって `fields` キー自体は宣言から外した (r2db の L4 `request_bytes` 宣言ギャップと同型 — enforce されているが discovery 未宣言)。
+- **`ResourceLimitError.details.limit_class` (エラー詳細のクラス名) — WP-5 本体時点の暫定判断 (Q1-D11 により不採用、次項参照)**: `max_fields` を使う 3 箇所を最も近い kind-match として `query_complexity` に分類したが、`capabilities().limits.query_complexity` が公開する数値 (`max_filter_terms`) とこれら 3 箇所が実際に踏む数値 (`max_fields`) が食い違ったまま残るという不正確な宣言だった。
+
+#### Q1-D11 (監督裁定、2026-08-30。依頼者が覆せる): max_fields 系 3 箇所を `ValidationError` へ再分類
+
+WP-5 本体の上記判断 (「宣言数値と不一致のまま `query_complexity` にタグ付け」) は不正確な宣言であるとして監督裁定 Q1-D11 により不採用となり、各箇所の実性質を再調査したうえで次のとおり修正した:
+
+- **write-payload 幅 (`_prepare_values`)**: 契約 `Mutation.values.maxProperties: 100` に直接対応する shape 境界。r2db 自身の Q1-D8 (`structured.py` 旧212、"mirrors the contract's own fixed ... shape bound, not a deployment-tunable limits.classes resource") と同一の理路で `ValidationError` (`VALIDATION_FAILED`) へ再分類。
+- **schema-field count (`create_collection`)**: r2db の実装を確認したところ、`bind_schema_operation` の `create_entity` 分岐 (`structured.py`) が同じ実世界の操作 (新規 entity の列一覧を 1 回の呼び出しで定義する) を、資源集計に一切参加しない単独の `VALIDATION_FAILED` (`len(raw_fields) > 100`) として扱っている — r2db 自身がこの操作を「資源クラスでなく shape」と判定した実例であり、MitateDB も同型として `ValidationError` へ再分類。
+- **read-projection width (`_fields`)**: r2db の `validate_projection` (`structured.py`) を確認したところ、`len(select) > 100` は単独の `VALIDATION_FAILED` であり、`query_complexity` 集計 (`limits.check("query_complexity", len(where) + len(select) + order_by_count)`) とは**別建て**の、それ自体は資源集計に参加しないチェックだった (r2db は select 件数を「shape 境界」と「資源複雑度への寄与」の両方で扱うが、前者は独立した shape チェックとして存在する)。MitateDB の `_fields` は集計の仕組み自体を持たず単独カウントのみであり、r2db の shape 側チェックと同型 — `ValidationError` へ再分類。
+- **資源消費境界として残ったもの (再分類しなかった箇所)**: `_where` のフィルタ数チェック (`query_complexity` のまま) — こちらは Q1-D7 時点で `filter_terms`→`query_complexity` の 1:1 改称が既に宣言値と一致しており (`capabilities().limits.query_complexity == config.max_filter_terms`)、監督から明示的に「維持」と指示された。他 3 箇所 (`batch_items` ×2、`result_items`、`schema_objects`、`request_bytes`) はいずれも WP-5 本体時点から宣言値と実施値が一致しており、対象外。
+- **結果**: `ResourceLimitError` の emission は 9 → 6 箇所に減少し、残る全箇所で `capabilities().limits[limit_class]` の宣言数値と実際に踏む閾値が完全に一致する (`test_every_resource_limit_error_declared_and_enforced_values_agree` で実測確認)。「新契約クラス候補として台帳へ」という前回の代替案は不要になった — 3 箇所とも既存の shape 概念 (`ValidationError`) で真実に説明できたため、`limits.classes` へ新規クラスを追加する CCR は提起しない。
+- **conformance への波及確認**: `grep -rn "LIMIT_EXCEEDED" conformance-tests/*.py` は `test_c14_authority_boundary.py` (r2db 制御面のレート制限、MitateDB 無関係) のみがヒット。`test_c01_scope_binding.py`/`test_c03_structured_injection.py` はいずれも `ResourceLimitError`/`max_fields`/`LIMIT_EXCEEDED` を参照しておらず、この 3 箇所を叩く既存ベクタは無い。実測 (`pytest conformance-tests -k "mitatedb or MitateDB"` 66 passed、`test_c01_scope_binding.py`/`test_c03_structured_injection.py`/`test_c11_document_conformance.py` 計 52 passed) でも退行なしを確認済み。
+
+### 7.3 句に状態指紋が不要である理由 (実装調査による裏取り)
+
+契約 `phrase_construction` rule (b) は「名前で破壊・再作成できる対象」にのみ状態指紋を要求する。MitateDB の `collection` がこれに当たるかをソース調査した:
+
+1. **drop 経路の不在**: `cell.py` 全体を確認 — `ApplicationCell`/`ApplicationDeveloper`/`ControlPlane` のいずれにも `drop_collection`/`drop_entity` に相当するメソッドは存在しない。`capabilities().schema_operations.unsupported` も `drop_entity`/`drop_index` を明示。よって同名での drop→create は構造的に不可能。
+2. **既存 collection への schema 変更経路の不在**: `add_field`/`alter_field`/`create_index` もすべて `unsupported` であり、`schema_revision` 相当のカウンタも存在しない (grep 済み、ゼロ件)。よって「同名再作成」だけでなく「その他の schema 変化」の経路も存在しない。
+3. **結論**: collection は一度 create されると、そのプロセスの生存期間中は形状が不変であり、delete 句が無効化されるべき「状態変化」自体が発生し得ない。指紋を省略することは見落としではなく、r2db の Q1-D10 (同名 drop→create が可能なため指紋必須) とは異なる、MitateDB 自身の実際の機能に基づく別の真実の答えである。
+
+### 7.4 C-06 厳格分岐の MitateDB 初実行デバッグ (発見一覧)
+
+初回実行 (`pytest conformance-tests -k mitatedb`) で 1 件のみ失敗した (V1/V2/V3/V4/V5/V8 はすべて初回 green — 想定リスクは的中しなかった):
+
+1. **V2b-wire (`test_c06_v2b_wire_destructive_omitted_with_valid_confirmation_denied`) が想定外に赤化 (suite 側の想定漏れ、製品側は正常)**: この vector は `attempt_batch_with_addresses`/`BatchOperation` (port v1.4) 経由で `destructive` を wire レベルで真に省略する。MitateDB の唯一の複数操作ディスパッチャ `ApplicationCell.transact` は `"insert"` 以外の operation type (`update`/`delete`/`upsert`) を**確認検査より前に無条件で** `CapabilityError` (→ `CAPABILITY_UNSUPPORTED`) で拒否する (このコードパス自体は WP-5 以前からの、正直で正しい既存の宣告— capabilities().atomic_mutation が正しく反映)。よって probe (`destructive=True`, 確認なし) が `DESTRUCTIVE_CONFIRMATION_REQUIRED` ではなく `CAPABILITY_UNSUPPORTED` を返し、`resolve_valid_confirmation` が `AssertionError` を送出した。**根本原因**: この vector が「対象操作を確認ゲートまで到達させられる複数操作エントリポイントがどの strict peer にも存在する」という、r2db (単一の `mutate()` が全 mutation type を均一に扱う) では真だが MitateDB では偽の前提を置いていたこと。**対応 (suite 側)**: `test_c06_destructive_confirmation.py` に `_batch_delete_capability_absent` ヘルパーを新設 — 無害な probe (確認なし・存在しない行を狙う where) を実際に `attempt_batch_with_addresses` へ送り、`CAPABILITY_UNSUPPORTED` が返れば「この peer のバッチ経由 delete は構造的に到達不能」と判定 (r2db 系は同じ probe が `DESTRUCTIVE_CONFIRMATION_REQUIRED` を返すため false になり、既存の実アサーションへ進む — 退行なし)。この判定が真の場合、V2b-wire は単一操作 `delete()` 側の V2/V2b テストで既に同じ意味論を検証済みとして状態不変のみ確認し return する — `SurfaceAbsent` は使わない (`transact()` は実際にリクエストを受理して拒否しており、`SurfaceAbsent` の「受理する実エントリポイントが存在しない」という定義には当たらないため)。
+2. **adapter 自身の decoupling バグ (製品側でなく adapter 側)**: `attempt_batch_with_addresses` は `confirmation` の設定を `if op.destructive:` の内側に置いていた (r2db が WP-3 で既に修正した同型のバグ)。`destructive=False` + `confirmation=VALID_CONFIRMATION` という V2b-wire 自身の入力形は、この結合により `confirm` キー自体が never 設定されないという別の失敗モードを生んでいた。r2db の `_build_mutation_item` と同じ形に decouple した (上記 7.1)。この修正単独では 1. の構造的制約は解決しないが、正しい修正として独立に必要だった。
+3. **`_attempt_mutation_outcome` の delete 分岐**: `confirm=True` (旧 bool) を直書きしていた箇所。現行 test suite はここを実際には踏まない (C-12 は delete を意図的に除外、C-17/C-18 の delete 利用はいずれも `row_addressability`/`revision_preconditions` が `unavailable` のため absent 分岐に落ちる) が、シグネチャ変更後は `bool` が `confirm` に非 str として渡り即座に `ValidationError` で壊れる死んだコードだったため、probe→echo 化して修正 (未使用でも穴を残さない、という r2db m-8 と同じ流儀)。
+4. **V3/V4 の個別懸念 (発注書の名指し)**: 「別 where の正句」(V3) は where-digest 実装の存在が前提だったが、実装済みのため初回 green。「別 credential で同一句」(V4) も、句が `operation`/`collection`/`filters` のみに依存し requester の credential/role を一切参照しないため初回 green (懸念は的中せず)。
+5. **suite 自体のバグ**: 上記 1./2. 以外には見つからなかった。
+
+### 7.5 変異注入結果 (5 本、全数赤を実測ののち scratchpad 経由で復元・diff 一致確認済み)
+
+| # | 変異内容 | 対象 | 赤の実測方法 | 結果 |
+|---|---|---|---|---|
+| (i) | 全文一致→存在チェック化 (`confirm != phrase` → `not confirm`) | `ApplicationCell.delete` | `conformance-tests/test_c06_destructive_confirmation.py -k v3` | 赤 (`DID NOT RAISE ConformanceDenial` — 正句+接尾辞の変異句が誤って通過) |
+| (ii) | where digest 除去 (`_delete_confirmation_phrase` の digest を定数化) | `cell.py` | `test_c06_destructive_confirmation.py -k v3` | 赤 (別 where の正句が同一句に収束し `different_where_phrase != phrase` assertion が失敗) |
+| (iii) | details キー1個欠落 (`recovery` を details から除外) | `ApplicationCell.delete` | `test_c06_destructive_confirmation.py -k v1` | 赤 (`_assert_four_declarations` が `recovery` 欠落を検出) |
+| (iv) | `destructive` 型検査除去 (`isinstance(destructive, bool)` チェックを削除) | `ApplicationCell.delete` | MitateDB ローカル `test_delete_rejects_non_boolean_destructive_and_non_string_confirm` | 赤 (`destructive="true"` が `ValidationError` ではなく `DestructiveConfirmationRequired` を送出 — `destructive is not True` という等価性検査自体は truthy 文字列を弾き続けるため実行はされないが、`assertRaises(ValidationError)` が誤った例外型を検出) |
+| (v) | limit_class を非メンバー化 (`"batch_items"` → `"NOT_A_CLASS"`、`transact` のバッチ上限) | `ApplicationCell.transact` | MitateDB ローカル `test_limit_class_vocabulary.py` (静的 AST スキャン) と `test_foundation.py::test_bounded_inputs_and_explicit_destructive_confirmation` (実応答の behavioral assertion) の両方 | 赤 (両テストとも検出 — 静的スキャンと実応答検査の両輪性を実測で確認、r2db WP-3 followup M-2 と同じ知見) |
+
+各変異は `MitateDB-api/src/mitatedb_api/cell.py` を scratchpad のバックアップコピー (実装完了直後の状態) で復元し、`diff` で完全一致を確認済み (`git checkout` は使用していない)。
+
+### 7.6 テスト実測 (WP-5 本体時点、すべて同期・フォアグラウンド実行)
+
+- root suite (`pytest -q`、リポジトリルート): **3 回連続で 810 passed / 0 failed / 0 skipped** (204.67s、197.37s、205.70s)。806 baseline (WP-4 followup の 807 + WP-6 分の変動なし、との前提から逆算した参考値ではなく実測値) + 本 WP 新設 3 件 (`test_foundation.py` +2、`test_limit_class_vocabulary.py` (MitateDB 版) +1) = 810。**訂正記録**: 初回の完全実行 (フォアグラウンド開始 → 120秒でバックグラウンド遷移) は `809 passed` と報告されたが、その直後の独立な 3 回 (バックグラウンド起動から一貫、出力をファイルへ直接リダイレクト) はいずれも `810 passed` で一致し、`--collect-only` も両時点で 810 件収集を確認 — 遷移時の出力キャプチャの artifact と判断し、810 を正とする (テスト自体の非決定性ではない)。
+- conformance-tests 単独: **251 passed / 0 failed / 0 skipped (157.03s)** — 件数は WP-4 baseline と同一 (本 WP は既存テスト関数の書き換え・ヘルパー追加のみで新規テスト関数は追加していない)。
+- `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (27.07s)** — 無変更 (r2db-api には一切触れていない)。
+- `MitateDB-api/tests` 単独: **15 passed (0.02s)** (`test_foundation.py` 14 件 [12 baseline + 2 新設]、`test_limit_class_vocabulary.py` 1 件)。
+
+### 7.7 逸脱・疑義
+
+- ~~limits 語彙の不完全性 (§7.2)~~ Q1-D11 により解消済み (§7.2 参照) — `max_fields` 系 3 箇所を `ValidationError` へ再分類し、残る全 `ResourceLimitError` 箇所で宣言数値=実施数値の対応が真実になった。
+- **V2b-wire の suite 側修正 (§7.4-1)**: 設計上は WP-2 の管轄領域 (port/共通 suite) だが、WP-5 の実効化がなければ検出できない不具合だったため、WP-3 が C-13/C-15 を自 WP 内で修正した前例に倣い、本 WP の完了条件の一部として本 WP 内で修正した。
+- ~~CONTROL_MAPPING.md SI-09 行の MitateDB 列~~ MA-3 (§7.9) で更新済み。
+- **`create_collection` の未使用 `destructive` パラメータ**: `ApplicationCell.create_collection(self, principal, name, fields, destructive=False)` に既存の (WP-5 以前からの) `destructive` 引数があるが、どこからも渡されず、契約上も `create_entity` は destructive_confirmation の対象操作ではないため意味論的に無関係 — 本 WP はこれに触れていない (スコープ外の既存コードであり、削除・変更は本 WP の完了条件に含まれない)。
+
+### 7.8 WP-6 への申し送り
+
+- CONDITIONS.md C-06 行の「基線分岐は現在どの adapter も踏んでいない」という残置宣言そのもの (WP-0 MA-7) は本 WP で行った暫定更新 (§7.1) に加え、WP-6 の正式なチェックリスト項目として改めて確認すること。
+- ~~`security/CONTROL_MAPPING.md` SI-09 行の MitateDB 列を...更新すること~~ MA-3 (§7.9) で完了。
+- ~~§7.2/§7.7 に記録した limits 語彙の不完全性...を監督判断事項として提起すること~~ Q1-D11 (§7.2) で解決済み。新クラス追加の CCR は不要になった。
+- **新規 (§7.9 MA-1)**: `capabilities().atomic_mutation` の `operations` 語彙が「バッチ経由の可否」か「一般的な mutation 語彙の実行可否」かという契約 `capability_status.defined.atomic_mutation` (「Single-entity atomic mutation batches」) 自体の解釈論点は、本 WP の調査で「genuinely ambiguous」と判定し宣言・挙動とも変更しなかった (§7.9 MA-1 参照)。次回この capability に触れる WP、または契約改定の機会に、この論点自体を監督判断として提起すること (`capability_status.defined` への注記追加、または `structured_operations.allowed_mutations` 相当の別語彙の新設を検討)。
+
+### 7.9 独立レビュー往復 (Opus、blocker 0 / major 5 / minor 6 / nit 7、全件実測裏付き)
+
+WP-5 (§7.1-7.8) への独立レビューが発見した項目と、その全対応の記録。
+
+### major
+
+**MA-1 (`atomic_mutation` 申告の解釈論点)**: レビュアは `capabilities().atomic_mutation` が `operations: ["insert","update","delete"]` を申告する一方 `ApplicationCell.transact` が `update`/`delete` を無条件で `CAPABILITY_UNSUPPORTED` 拒否する点 (cell.py の旧コメント自身がこの落差を記していた) を「申告が偽」と指摘した。一次ソースを確認:
+- 契約 `capability_status.defined.atomic_mutation` = 「Single-entity atomic mutation batches」— 文言上は「バッチ (複数操作をまとめた atomic 実行)」自体の話に読める。
+- r2db-api 自身の宣言 (`"atomic_mutation": {"status": "enabled", "operations": [...4種全部...]}`) はこの論点を判別しない — r2db は単一の `mutate()` が単発でもバッチでも全 4 種を均一に実行するため、「バッチ経由」と「一般的な実行可否」が常に一致し、両解釈のどちらであっても同じ宣言になる。
+- `conformance-tests/test_c12_capability_agreement.py::_declared_mutation_operations` は `atomic_mutation.operations` を読み取り、`ConformanceAdapter.attempt_mutation` (港レベルの ABC docstring: 「present one mutation-vocabulary operation ... to the peer exactly as a real client would」、バッチという限定は一切ない) で実際に叩く。MitateDB の `attempt_mutation` は `insert`/`update`/`delete` それぞれを**専用の実メソッド**(`session.insert`/`update`/`delete`、いずれも transact を経由しない、実際に動く経路) で実行する — C-12 は実質「一般的な mutation 語彙の実行可否」を検証している。
+- **実験で確認**: (a) 宣言を `operations: ["insert"], unsupported: ["update","delete","upsert"]` (バッチ限定解釈) に変更したところ、`test_declared_mutation_operations_match_observed_behavior[MitateDB-api]` が赤化 (`update` の実行が実際には専用メソッド経由で成功するため、「unsupported」の申告と矛盾)。(b) さらに adapter 側で `update` を `transact()` 経由に付け替えて C-12 を green にすることは技術的に可能だと確認したが (66 passed 実測)、これは「real client がどうこの peer を使うか」を偽る変更である (実際のクライアントは単発 update に transact をラップしない) と判断し不採用。
+- **結論**: 現行宣言 (`operations: ["insert","update","delete"], unsupported: ["upsert"]`) は「一般的な mutation 語彙の実行可否」解釈のもとでは真実 (全て実メソッドで動く) であり、この解釈は契約自身の `attempt_mutation` 抽象 (バッチ限定と書いていない) および C-12 の実運用と整合する。「バッチ限定」解釈のもとでは偽 (transact は insert のみ) だが、この解釈を採用するには adapter 側の不誠実な付け替えが必要になり、それ自体が別の不正確な申告を生む。**依頼者裁定 (b) の「解釈が契約上曖昧なら独断せず両解釈と影響を報告」に該当すると判断し、宣言・挙動とも変更しなかった**。cell.py の該当コメントを、この調査の全内容 (両解釈・r2db 比較・C-12 実測・不採用の adapter 変更とその理由) を明記する形に全面書き換えた。契約 `capability_status.defined.atomic_mutation` の文言自体を明確化する CCR を将来提起することを推奨 (§7.8 に追記)。
+
+**MA-2 (declared==enforced が片側検証だった)**: `test_every_resource_limit_error_declared_and_enforced_values_agree` を拡張し、残る全 5 クラス (`batch_items`/`result_items`/`query_complexity`/`schema_objects`/`request_bytes`) それぞれに負の対照 (宣言値ちょうどの入力が成功する) を追加。レビュア変異 M-F (query_complexity: `len(filters) > max_filter_terms` → `len(filters) + 1 > max_filter_terms`、過大申告方向に 1 ずらす) と M-F3 (result_items/batch_items: 同じ方向に 5 ずらす) を再注入し、いずれも新設の負の対照が赤を検出することを実測 (§7.9 変異表参照)。scratchpad 経由で復元、diff 完全一致確認済み。
+
+**MA-3 (本コミットが壊した evidence 参照)**: `security/CONTROL_MAPPING.md` SI-09 行の MitateDB 列を、現行のテスト構成 (gate 専用テスト `test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters`・型テスト `test_delete_rejects_non_boolean_destructive_and_non_string_confirm`・句性質テスト・C-06 strict 実行) に合わせて全面更新。`test_bounded_inputs_and_explicit_destructive_confirmation` を `test_batch_and_request_size_limits_and_empty_filters_shape_check` へリネーム (post Q1-D11 の実態 — 破壊的確認は検証しておらず、shape 検査のみであることを名前が正しく示すように)。
+
+**MA-4 (`foundation.json` の限界クラス残置)**: `MitateDB-api/contracts/foundation.json` の `resource_bounds.classes` (`fields`/`filter_terms`/`result_rows` を含む旧語彙) を現行の真実な集合 (`batch_items`/`result_items`/`query_complexity`/`request_bytes`/`schema_objects` — 契約 `limits.classes` の部分集合と厳密一致) へ更新。`destructive_data_operation` の文言も「explicit confirm required」という bool 時代の記述から declare-and-echo の実態へ更新。
+
+**MA-5 (§7.6 実測数値の訂正)**: 下記 §7.10 テスト実測を参照 (root/MitateDB tests/新設件数を本 followup の実際の値に更新)。
+
+### minor
+
+**mi-1 (V2b absence gate の V6 水準化)**: (a) `_batch_delete_capability_absent` を、MA-1 で「atomic_mutation は本 WP では変更しない」と結論したため、その宣言に依存せず独立に補強 — `delete` に加えて `update` も同じバッチ経由で `CAPABILITY_UNSUPPORTED` になることを追加検証し、2つの無関係な operation type が一致して拒否されることでディスパッチャ自体の構造的拒否である (delete/confirmation 固有の偶然の一致ではない) ことを裏付ける。(b) 新設 `test_c06_v2b_wire_vacuity_guard` — registry 全体で「少なくとも1 adapter が V2b-wire の実アサーションを実行した」ことを検証 (C-12 の `test_at_least_one_adapter_exercises_a_positive_control_mutation` と対称)。キャッシュ済み fixture への依存を避けるため、自前で最小構成の Application/entity を都度用意する設計とした。
+
+**mi-2 (受理境界の正直化)**: `_batch_delete_capability_absent` の docstring 「this probe never mutates state anywhere」を「peer 依存の性質であり、過剰削除は呼び出し側の before/after 行数検査が間接的に捕捉するが、要求どおり 0 行を削除しつつ *拒否として振る舞う* (実際には受理して実行し、たまたま0行だった) ケースは、この機構だけでは構造的に検出不能」という正直な受理境界の記述に訂正。ブラックボックス conformance テストの一般的限界として記録 (下記「受理境界」参照)。
+
+**mi-3 (details 属性コメントの陳腐化)**: `conformance_adapter_mitatedb.py::_deny` 直上のコメント (「details 属性は存在しない」) を、WP-5 で `errors.py` に `details` を実装済みであり `getattr(exc, "details", None)` がその配線の**生命線**である (他に details を C06 の denial へ渡す経路が無い) という実態へ全面訂正。
+
+**mi-4 (陳腐化コメント「MitateDB still declares 1.1.0」)**: `test_c06_branch_dispatch_vacuity_guard` 前置コメントを flip 後の実態 (全 3 adapter が 1.2.0/strict、baseline 分岐は現在どの adapter も未踏) へ更新。`grep -rn "1\.1\.0" conformance-tests/` の残存を全数確認 — 歴史的引用 (CCR-13 の契約バージョン言及、`resolve_valid_confirmation`/`contract_version_at_least` 自体の単体テスト入力、`test_schema_check.py` のフィクスチャデータ) のみで、adapter の現在状態を誤って記述する箇所はゼロ。
+
+**mi-5 (`_canonical_where_json` の単体テスト)**: `test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies` を新設 — (1) 各 Filter の key-sorted 化、(2) 外側リストの順序保持 (ソートしない)、(3) `default=str` 不使用 (非 JSON-native 値で `TypeError`) の3性質を実測で固定。レビュア変異 M-B (`default=str` を再追加) を再注入し、性質(3)のアサーションが赤化することを実測、scratchpad 経由で復元・diff 完全一致確認済み。
+
+**mi-6 (型検査防護が peer-local 単独である構造的理由)**: 変異 (iv) (`destructive` 型検査除去) は共通 conformance suite からは検出できず、MitateDB ローカルテストのみが検出する。理由: port (`ConformanceAdapter.delete`) は `destructive: bool` という型付き Python シグネチャを持つため、共通 suite からは「wire 上で destructive が文字列である」という敵対的形状を構成できない (adapter が Python レベルで型を強制する)。この種の型検査は各実装がローカルに保持する責務であり、共通 suite の対象外である — r2db-api WP-3 followup B-1 の「wire 型ベクタは peer-local」という整理と同一の理由づけであり、本 WP でも同じ結論になることを明記する。
+
+### nit
+
+**n-1**: `_delete_confirmation_phrase` の長さ assert 直上コメントを、`assert` が `-O`/`PYTHONOPTIMIZE` 下で完全に除去される事実を踏まえ、「不変条件は識別子長 63 (`validate_identifier` の正規表現) から数学的に証明されており、assert はその証明を実行可能な形で固定する開発時の backstop に過ぎず、`-O` 下での唯一の防御ではない」という正確な記述へ訂正。
+
+**n-2**: `test_foundation.py` 内の存在しないテスト名参照 (`test_delete_gate_*`) を、MA-3 のリネーム作業と同時に実在するテスト名 (`test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters`) へ修正。
+
+**n-3/n-6**: 現状維持 (レビュアの指示どおり、変更なし)。
+
+**n-4/n-5/n-7 (コード変更なし、設計記録のみ)**:
+- n-4: bool/int の別句が衝突する懸念は、衝突方向が「安全側」(誤って別の正当な確認が通ってしまう方向ではなく、正しい確認が誤って拒否される、または的外れな拒否になる方向) であることを確認 — `destructive is not True` という同一性検査により、`1`/`1.0` 等の truthy な非-bool は既に `destructive` の型検査 (§7.1) で `ValidationError` として弾かれ、句の同一性判定にすら到達しない。
+- n-5: 句に `application_scope` (テナント境界識別子) が含まれない点は、契約 `destructive_confirmation.scope_limit` が明記する「意図しない/悪意ある正規要求への防御はこの機構の責務外」という免責範囲内 — 同一 credential が既に application 境界で認可されている前提のもとでの話であり、境界を跨いだ句の使い回しは SI-01/SI-06 (application scope 分離) が別途担う。
+- n-7: `ApplicationCell.create_collection` の未使用 `destructive=False` 引数 (WP-5 以前から存在) は既知の死引数として記録 (§7.7 参照) — 本 WP のスコープ外。
+
+### 変異注入表 (MA-2/mi-5 追加分、全数赤を実測ののち scratchpad 経由で復元・diff 一致確認済み)
+
+| # | 変異内容 | 対象 | 赤の実測方法 | 結果 |
+|---|---|---|---|---|
+| M-F | query_complexity 過大申告方向 +1 (`len(filters) > max_filter_terms` → `len(filters) + 1 > max_filter_terms`) | `ApplicationCell._where` | `test_every_resource_limit_error_declared_and_enforced_values_agree` (宣言値ちょうどの filters が失敗) | 赤 (負の対照が検出 -- 宣言値 2 の filters が誤って拒否) |
+| M-F3 | result_items/batch_items 過大申告方向 +5 (`limit > max_result_rows` → `limit + 5 > max_result_rows`、`len(operations) > max_batch_items` → `len(operations) + 5 > max_batch_items`) | `ApplicationCell.read`/`transact` | 同上 | 赤 (batch_items の負の対照が先に検出 -- 宣言値 2 の operations が誤って拒否) |
+| M-B | `_canonical_where_json` に `default=str` を再追加 | `cell.py` | `test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies` | 赤 (性質3のアサーション `assertRaises(TypeError)` が検出 -- 非 JSON-native 値が握りつぶされて文字列化された) |
+
+各変異は `MitateDB-api/src/mitatedb_api/cell.py` を scratchpad のバックアップコピー (本 followup 実装直後の状態) で復元し、`diff` で完全一致を確認済み。
+
+**完了条件チェック**: (1) 全件対応済み (上記)。(2) M-F/M-F3/M-B いずれも再注入し赤を実測、scratchpad 経由で復元・diff 一致確認済み。(3) 下記 §7.10 テスト実測を参照。(4) 本節が該当 (MA-1 の申告訂正の根拠は同項目内、mi-2 の受理境界は同項目内、変異表は上記)。
+
+### 7.10 テスト実測 (Opus レビュー followup、MA-5 訂正値、すべて同期・フォアグラウンド実行)
+
+WP-5 本体 (§7.6) から Q1-D11 (root 812) を経て、本 followup (MA-1〜n-7) 完了時点の最終実測値:
+
+- root suite (`pytest -q`、リポジトリルート): **2 回連続で 814 passed / 0 failed / 0 skipped** (197.91s、217.99s)。Q1-D11 後の 812 + 本 followup 新設 2 件 (`MitateDB-api/tests/test_foundation.py::test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies` +1、`conformance-tests/test_c06_destructive_confirmation.py::test_c06_v2b_wire_vacuity_guard` +1) = 814。
+- conformance-tests 単独: **252 passed / 0 failed / 0 skipped (156.02s)** — 251 (Q1-D11 後、無変更) + `test_c06_v2b_wire_vacuity_guard` 1 件 = 252。
+- `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (21.74s)** — 無変更 (r2db-api には一切触れていない)。
+- `MitateDB-api/tests` 単独: **18 passed (0.02s)** (`test_foundation.py` 17 件 [Q1-D11 後の 16 + 本 followup 新設 1 件]、`test_limit_class_vocabulary.py` 1 件)。

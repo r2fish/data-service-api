@@ -23,7 +23,40 @@ class ValidationError(FoundationError):
 
 
 class ResourceLimitError(FoundationError):
-    pass
+    """Raised when a finite, deployment-configurable resource bound
+    (``FoundationConfig``) is exceeded. ``details['limit_class']`` names the
+    common contract's own ``limits.classes`` member this exceeded bound
+    belongs to (contract ``errors.details_vocabulary.LIMIT_EXCEEDED.
+    limit_class``, WP-5 Q1-D7(B)) -- every call site is required to pass one
+    (no default: a missing classification here would silently reintroduce
+    the pre-WP-5 vocabulary gap this attribute exists to close).
+    """
+
+    def __init__(self, message, *, limit_class):
+        super().__init__(message)
+        self.details = {"limit_class": limit_class}
+
+
+class DestructiveConfirmationRequired(FoundationError):
+    """Raised when a destructive operation (contract ``destructive_
+    confirmation``: currently ``delete`` on this peer) is attempted without
+    a valid confirmation echo -- ``destructive`` was not exactly ``True``,
+    or ``confirm`` did not exactly match the server's own currently
+    recomputed ``required_confirmation`` phrase for this exact request
+    (contract ``valid_confirmation``: no truthy/partial/prefix acceptance).
+
+    ``details`` carries the contract's four required declaration keys
+    (``required_confirmation``/``consequence``/``reversible_alternative``/
+    ``recovery``, contract ``destructive_confirmation.denial.details_
+    keys``) so an HTTP adapter or conformance plug can surface them
+    verbatim on the denial -- exactly the same ``getattr(exc, "details",
+    None)`` convention ``conformance_adapter_mitatedb.py::_deny`` already
+    uses for every other ``FoundationError`` subclass.
+    """
+
+    def __init__(self, message, *, details):
+        super().__init__(message)
+        self.details = dict(details)
 
 
 class ConflictError(FoundationError):

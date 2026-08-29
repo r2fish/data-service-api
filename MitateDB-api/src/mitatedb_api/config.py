@@ -50,4 +50,7 @@ class FoundationConfig:
     def validate_request_size(self, size):
         """Reject a body before parsing or dispatching it."""
         if not isinstance(size, int) or size < 0 or size > self.max_request_bytes:
-            raise ResourceLimitError("request size limit exceeded")
+            # Clean 1:1 correspondence with contract `limits.classes`:
+            # this is the same finite byte bound `capabilities().limits`
+            # publishes as `request_bytes` (WP-5 Q1-D7(B)).
+            raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
