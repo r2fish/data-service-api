@@ -90,3 +90,36 @@ class ResourceLimits:
                 fail("LIMIT_EXCEEDED", "Operation nesting exceeds the configured limit.", status=413, details={"resource": "operation_depth", "limit": self.operation_depth})
             children = item.values() if isinstance(item, dict) else item
             stack.extend((child, next_depth) for child in children)
+
+
+@dataclass(frozen=True)
+class ControlPlaneLimits:
+    """CCR-14 WP-3, R-7: the 3 control-plane resource classes (contract
+    `limits.classes`' control-plane subset -- `applications`, `credentials_
+    per_application`, `control_requests_per_minute`). A separate, smaller
+    dataclass from `ResourceLimits` above rather than folding these 3 fields
+    into it: the two are enforced by two different services (`DataService`
+    vs. the new `ControlPlaneService`) against two different resource
+    universes, and design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §1 R-7
+    describes them as the control plane's "own" bounds, discovered through
+    the control plane's own `GET /control/v1/capabilities` -- not a subset a
+    caller could confuse with `ResourceLimits.as_dict()`'s application-plane
+    keys. Defaults are the contract's own `example_profile` values for
+    exactly these 3 keys (`spec/data-service-api.v1.json`). Deployment-
+    profile injection (environment-variable driven) is a composition-root
+    concern (WP-4/5, `R2DB_CONTROL_LIMIT_*` per the design) -- this WP only
+    injects the profile object itself, mirroring `ResourceLimits`'s own
+    established convention.
+    """
+
+    applications: int = 100
+    credentials_per_application: int = 10
+    control_requests_per_minute: int = 60
+
+    def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(f"control-plane limit {name} must be finite and positive")
+
+    def as_dict(self) -> dict[str, int]:
+        return asdict(self)

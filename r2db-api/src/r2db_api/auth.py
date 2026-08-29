@@ -8,7 +8,25 @@ import hmac
 import os
 from typing import Iterator, Mapping
 
-from .errors import fail
+from .errors import FoundationError, fail
+
+
+def _fail_identified(code: str, message: str, *, status: int, credential_id: str) -> None:
+    """Like `errors.fail`, but attaches the store's own identified
+    `credential_id` onto the raised `FoundationError` as a plain dynamic
+    attribute (`identified_credential_id`) -- never a dataclass field, so
+    `FoundationError.problem()` (which only ever serializes `type`/`code`/
+    `message`/`request_id`/`details`) cannot leak it into a response even by
+    accident (R-8/§8 m-7: no existence-distinction disclosure). Round-2
+    review (MA-2): `ControlPlaneService`'s durable denial audit needs a real
+    actor to attribute an `AUTH_REVOKED`/identified-`AUTH_INVALID` denial to
+    -- a truthful `attributed` R-11 declaration requires it. Used only for
+    the "a matching verifier was found, but the credential is revoked/
+    disabled" cases below; "no matching verifier at all" has no credential to
+    identify and keeps using plain `errors.fail`."""
+    exc = FoundationError(code, message, {}, status)
+    exc.identified_credential_id = credential_id
+    raise exc
 
 
 @dataclass(frozen=True)
@@ -211,6 +229,43 @@ class CredentialStore:
         record = self._records.get(credential_id)
         return record.application_id if record else None
 
+    def get_state(self, credential_id: str) -> tuple[bool, bool] | None:
+        """Read-only existence/state probe (CCR-14 WP-3, `ControlPlaneService`):
+        returns `(enabled, revoked)` for `credential_id`, or `None` if no such
+        row exists. Not part of this store's pre-WP-3 call surface -- added so
+        the control-plane service can (a) resolve a `credential_id` against
+        this store without mutating it, as half of the "query both stores,
+        never trust the `crd_`/`ctl_` prefix as semantics" dual-store
+        resolution design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md §2 calls
+        for, and (b) enforce its own revoked-refusal on `rotate` (this store's
+        own `rotate` deliberately does not check `revoked` -- see its
+        docstring -- so the control-plane HTTP `rotate` endpoint's *own*
+        VALIDATION_FAILED-on-revoked rule, §2 M-2, reads this first rather
+        than duplicating a check into this store that would change its
+        existing, deliberately-unchecked behaviour for `ops.py`'s callers).
+        """
+        record = self._records.get(credential_id)
+        if record is None:
+            return None
+        return (record.enabled, record.revoked)
+
+    def list_all(self) -> tuple[CredentialRecord, ...]:
+        """Read-only full enumeration (CCR-14 WP-3): `ControlPlaneService.
+        list_credentials`'s application-credential half. Returns the typed
+        `CredentialRecord` dataclass, never a raw dict -- callers read
+        `.credential_id`/`.application_id`/`.role`/`.enabled`/`.revoked`
+        only, so there is no way to accidentally forward `.verifier` into an
+        API response or audit event (it is a real field on the dataclass,
+        but nothing this WP touches ever reads it off a `list_all()` result)."""
+        return tuple(self._records.values())
+
+    def count_active_for_application(self, application_id: str) -> int:
+        """Count of *not-yet-revoked* credentials for one application (CCR-14
+        WP-3, R-7 `credentials_per_application`: "失効済みは数えない" -- a
+        revoked credential must never count against this limit, or revoking
+        credentials would perversely make onboarding harder)."""
+        return sum(1 for record in self._records.values() if record.application_id == application_id and not record.revoked)
+
 
 class ControlCredentialStore:
     """In-memory counterpart to `credential_store.
@@ -336,9 +391,9 @@ class ControlCredentialStore:
         for record in self._records.values():
             if hmac.compare_digest(record.verifier, self.verifier(secret)):
                 if record.revoked:
-                    fail("AUTH_REVOKED", "Credential is not active.", status=401)
+                    _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=record.credential_id)
                 if not record.enabled:
-                    fail("AUTH_INVALID", "Credential is not active.", status=401)
+                    _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=record.credential_id)
                 return ControlAuthContext(record.credential_id, record.must_rotate)
         fail("AUTH_INVALID", "Credential is not valid.", status=401)
 
@@ -353,3 +408,20 @@ class ControlCredentialStore:
         if not record.enabled:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
         return ControlAuthContext(record.credential_id, record.must_rotate)
+
+    def get_state(self, credential_id: str) -> tuple[bool, bool] | None:
+        """`CredentialStore.get_state`'s control-credential counterpart
+        (CCR-14 WP-3) -- see that docstring for why this exists."""
+        record = self._records.get(credential_id)
+        if record is None:
+            return None
+        return (record.enabled, record.revoked)
+
+    def list_all(self) -> tuple[ControlCredentialRecord, ...]:
+        """`CredentialStore.list_all`'s control-credential counterpart (CCR-14
+        WP-3): `ControlPlaneService.list_credentials`'s control-credential
+        half. `must_rotate` is a real field on the returned records, but
+        design §2/§8 m-9 forbids exposing it in the `list_credentials`
+        response -- `ControlPlaneService` itself is what omits it, not this
+        method (this is a plain, complete read)."""
+        return tuple(self._records.values())
