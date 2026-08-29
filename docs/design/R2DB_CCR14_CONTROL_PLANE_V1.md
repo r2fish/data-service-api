@@ -7,6 +7,7 @@
 - 改訂: v1.4 — WP-1 完了 (2026-08-29): port v1.5 / C-14・C-15 executable 化の実装レビュー (Opus、blocker 2 / major 7 / minor 7 / nit 2) の反映と、実装中の監督決定・変異注入結果。§10 記録
 - 改訂: v1.5 — WP-2 完了 (2026-08-29): 0006 migration / unit-of-work / ControlCredentialStore / 儀式 CLI の実装レビュー (Opus、blocker 2 / major 5 / minor 9 / nit 2) の反映と監督決定 — 特に R-4 の関数分割の訂正 (provisioning 列の確定は finish 側)。§11 記録
 - 改訂: v1.6 — WP-3 完了 (2026-08-29): `ControlPlaneService` の実装レビュー (Opus、major 3 / minor 11 / nit 3) の反映と監督決定 — 特に AUTH_REQUIRED の監査対象化と抑止宣言の2分割 (記録/帰属)。§12 記録
+- 改訂: v1.7 — WP-4 完了 (2026-08-29): `control_http.py`/`control_main.py` (factory のみ)/AuthorityTopology 拡張の実装レビュー (Opus、major 2 / minor 6 / nit 2) の反映と監督決定 — 特に rate 前課金 (`check_rate` + `rate_precharged`) と control_plane_http→audit 辺の訂正。§13 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -362,3 +363,28 @@ WP-3 (`ControlPlaneService` — §2 の操作カタログ + must_rotate ゲー�
 
 - WP-4 (HTTP 層): `ControlPlaneService` の9メソッドは secret/引数 → 契約 schema dict / FoundationError の形でそのまま呼べる。HTTP 層は `details` を problem+json へ転写するだけ (抑止宣言は service 層で確定済み — 意味論を bind 層に持ち込まない)。`R2DB_CONTROL_LIMIT_*` の env 読み出しは composition root の仕事
 - WP-5 (conformance provided 化): (i) 既定 limits profile (100/10/60) では C-14 ベクタ5 の headroom 前提 (`rate > apps駆動 + creds駆動 + 64`) を満たさない — conformance build は例えば (20, 5, 200) を注入する。(ii) rate window はグローバルなので session-scoped adapter では他テストと窓を共有する — profile の rate を十分大きく取るか service を再構築する。(iii) port `deprovision_application` は service に対応物を作らない (controlplane role に DELETE が無い) — adapter は運用者特権経路 (in-process: DataService 内部状態 / Postgres: control DSN + `finish_deprovision_application`) で実装。(iv) port `control_audit_events()` は**耐久 sink** を読む (in-memory ControlAuthority の副次トレイルを代用しない。Postgres は control_audit に SELECT を持つ `r2dbsvc_control` 相当 DSN の別インスタンスが要る)。(v) capability document のキー形状は C-14 ベクタ5 の読み方と一致済み (無改修で通る見込み)
+
+## 13. WP-4 実装記録 (2026-08-29、v1.7)
+
+WP-4 (`control_http.py` の `create_control_app` + `control_main.py` composition root (factory のみ、module-level app なし) + AuthorityTopology の制御面 HTTP ノード拡張) を実装した。実装: Sonnet、独立レビュー: Opus (major 2 / minor 6 / nit 2、blocker 0)、全指摘反映済み。suite は 672 → 704 passed。`test_topology.py` の既存アサーションは byte-identical のまま (§8 m-8 完了条件)、conformance / `test_postgres.py` 不変。11 endpoint の method/path/schema 対応は契約と行単位で突合済み (レビュー実測)。単一コミット規則は保存 (module-level app 不在をテストで機械検査、`control_plane` 申告は unavailable のまま)。
+
+### 13.1 レビューが捕捉した主要欠陥と監督決定 (いずれも覆せる)
+
+- **MAJOR-1 (rate 前課金)**: body を持つ 3 endpoint で shape 検証が rate 判定より先に走り、未認証の malformed-body フラッドが `limit_enforcement: "enforced"` 宣言下で無制限だった (レビュー実測)。→ `ControlPlaneService.check_rate()` (公開) + 全9メソッドに keyword-only `rate_precharged: bool = False` を追加し、HTTP handler は Bearer 抽出・body 読取より前に課金してから `rate_precharged=True` で呼ぶ。1リクエスト=1トークンを両経路 (HTTP / in-process 直呼び) で保証し、二重課金なしを bound 位置で検証。byte-bound 413 が窓より前に立つのは middleware 構造上の data 面 parity として受理 (コメント記録)。この修正の過程で、既存 stub テスト2本が `check_rate` 欠如の偶発 `AttributeError`→503 で「主張と別の理由で通っていた」実バグも是正された
+- **MAJOR-2 (topology の虚偽辺)**: `control_plane_http → audit` を不到達と宣言していたが、0006 の `GRANT INSERT ON control_audit TO r2dbsvc_controlplane` と R-6 の耐久書込み義務に矛盾 (CONTROL_MAPPING が SI-00/SI-02 evidence に引くテストが虚偽を主張する形)。→ 到達可 (append-only、INSERT のみ) に訂正し topology/yaml/テストを一致させた。宣言=実挙動 (R-11) は evidence artifact 自身にも適用される
+- **応答 shape 検証の緩和 (MINOR-3)**: 契約の response schema は `additionalProperties: false` を宣言しない (additive 変更許容) ため、未知キー拒否は宣言のある schema に限定し、それ以外は必須キー検査のみ。malformed 応答は 400 でなく 503 (原因中立文言 — WP-3 MI-9 と整合)
+- **逸脱3件は全て承認**: (a) `ALL_PLANES` 第2タプル (PLANES 厳密一致テストとの衝突回避 — WP-5 で PLANES へ統合する)、(b) `control_main` での `R2DB_CREDENTIAL_PEPPER` 必須化 (省略可にすると `validate_control_pepper_separation` が no-op になり R-2 の同値検査を運用者がスキップできてしまう — 必須化が分離を強める)、(c) `WWW-Authenticate` 不採用 (data 面 http.py 自身が出していない実態への一致。両面同時の decision として WP-6 へ)
+- `can_reach` の deny ブロック群は default-deny の allow-list に対する文書であり執行辺ではない (全削除しても挙動不変とレビューが実測) — その旨をコード注記
+
+### 13.2 変異注入
+
+9 本全て赤 (認証判定の HTTP 層持ち込み / 宣言転写落とし / 応答検証外し / 例外メッセージ漏洩 / topology 新規則反転 / module-level app 設置 / route 削除 / 前課金落とし / rate_precharged 既定反転)。M4/M5 は初回の変異部位が赤くならず、再配置の過程で「per-handler catch-all が実際の SI-10 境界」「deny ブロックは冗長」という構造事実を露出した (報告書に記録)。
+
+### 13.3 WP-5 への申し送り (§12.5 に追加。レビュー実測の予見を含む)
+
+- **C-15 の `_FAIL_CLOSED_CODES` に `AUTH_REQUIRED` が要る**: 空 secret の probe は両面・両 adapter とも `AUTH_REQUIRED` を返す (実測)。conformance 側の集合 {AUTH_INVALID, AUTH_REVOKED, FORBIDDEN} のままでは provided 分岐が赤になる — §8 m-7 (単一コードに固定しない) と整合的に広げる
+- adapter は `{"applications": [...]}` / `{"credentials": [...]}` の envelope を剥がす (port v1.5 の docstring どおり)。405 は data 面 parity で code NOT_FOUND を運ぶ — `classify()` の対応を確認
+- `test_control_main_module_has_no_module_level_app` は WP-5 の単一コミットで反転させる (flip チェックリストに載せる)
+- `control_plane_http` を `PLANES` に統合し厳密一致アサーションを更新 (m-8 の凍結は WP-4 で終了)
+- **`request_bytes` の宣言ギャップ**: 制御面は byte bound を enforce するが control discovery が当該クラスを公開しない — WP-5/WP-6 で declaration を判断 (契約 `limits.classes` に `request_bytes` は存在する)
+- conformance build の limits profile 例 (20, 5, 200) は headroom 算術を満たすことをレビューが確認済み。`R2DB_CONTROL_LIMIT_*` の3変数で注入可能 (コード変更不要)
