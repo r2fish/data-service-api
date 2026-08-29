@@ -51,6 +51,7 @@ from adapter import (  # noqa: E402
     PayloadNotExpressible,
     ScopeView,
     TamperVector,
+    resolve_valid_confirmation,
 )
 
 from r2db_api import ControlAuthority, CredentialStore, DataService  # noqa: E402
@@ -156,6 +157,14 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # obligation).
         self._control_credential_ref: str | None = None
         self._control_credential_secret: str | None = None
+        # port v1.6 declare-and-echo (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): this peer's own
+        # declared `contract_version` is static for the lifetime of this
+        # adapter instance (it never changes at runtime), so it is safe to
+        # cache after the first real `capability_document()` call rather
+        # than provisioning a fresh disposable Application on every single
+        # destructive-operation call site that needs it.
+        self._contract_version_cache: str | None = None
 
     # ------------------------------------------------------------------
     # control plane
@@ -438,14 +447,51 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where = [{"field": field, "operator": operator, "value": value}]
         return self._call(lambda: self._service.query(session, entity, select=list(select), where=where))
 
+    def _declared_contract_version(self) -> str:
+        # port v1.6 declare-and-echo (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): cached after the
+        # first real `capability_document()` call -- this peer's declared
+        # `contract_version` is static for this adapter instance's whole
+        # lifetime, so re-fetching it on every destructive-operation call
+        # site would only add cost, never change the answer.
+        if self._contract_version_cache is None:
+            self._contract_version_cache = str(self.capability_document()["contract_version"])
+        return self._contract_version_cache
+
+    def _resolve_confirmation(self, confirmation: Any, *, probe: Callable[[], Any], legacy_token: str) -> Any:
+        """`VALID_CONFIRMATION` sentinel resolution (design R-6 item 1,
+        `adapter.resolve_valid_confirmation`): a peer declaring
+        `contract_version >= 1.2.0` gets a real probe -> echo round trip;
+        a peer still on 1.1.0 gets its legacy fixed token, unchanged. Any
+        other `confirmation` value (`None`, or a caller-supplied string)
+        passes straight through -- this method only ever interprets the
+        `VALID_CONFIRMATION` sentinel itself.
+        """
+        if confirmation is not VALID_CONFIRMATION:
+            return confirmation
+        return resolve_valid_confirmation(
+            contract_version=self._declared_contract_version(), legacy_token=legacy_token, probe=probe
+        )
+
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
-        # VALID_CONFIRMATION sentinel protocol (design section 10.1):
-        # `destructive` always passes through faithfully; `confirmation`
-        # None means "supply nothing", VALID_CONFIRMATION means "supply
-        # this peer's own required token" ("DELETE" for r2db-api), and any
-        # other string passes through verbatim so a wrong token is still
-        # observable as a wrong token to this peer's own validation.
-        peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+        # VALID_CONFIRMATION sentinel protocol (design section 10.1,
+        # updated port v1.6 for declare-and-echo -- design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): `destructive` always
+        # passes through faithfully; `confirmation` None means "supply
+        # nothing", VALID_CONFIRMATION resolves to a real, currently-valid
+        # confirmation for this exact request via `_resolve_confirmation`
+        # (declare-and-echo for a >= 1.2.0 peer, this peer's legacy fixed
+        # token "DELETE" otherwise), and any other string passes through
+        # verbatim so a wrong token is still observable as a wrong token to
+        # this peer's own validation.
+        def probe() -> None:
+            self._call(lambda: self._service.mutate(session, entity, [{
+                "operation": "delete",
+                "where": [{"field": field, "operator": "eq", "value": value}],
+                "destructive": True,
+            }]))
+
+        peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DELETE")
         operation: dict[str, Any] = {
             "operation": "delete",
             "where": [{"field": field, "operator": "eq", "value": value}],
@@ -492,6 +538,8 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         unique_key: str | None,
         destructive: bool = False,
         confirmation: Any = None,
+        session: object = None,
+        entity: str | None = None,
     ) -> dict[str, Any]:
         item: dict[str, Any] = {"operation": operation}
         if values is not None:
@@ -499,12 +547,34 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         if where_field is not None:
             item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
         if destructive:
-            # Same VALID_CONFIRMATION sentinel protocol as `delete()` below,
-            # extended to batch operations (port v1.4): `destructive` is
-            # only ever meaningful when true (bind_mutation's own default is
-            # false), so it is only set here rather than always present.
+            # Same VALID_CONFIRMATION sentinel protocol as `delete()` above
+            # (port v1.6 declare-and-echo), extended to batch operations
+            # (port v1.4): `destructive` is only ever meaningful when true
+            # (bind_mutation's own default is false), so it is only set
+            # here rather than always present. `session`/`entity` are only
+            # required when `confirmation is VALID_CONFIRMATION` (the probe
+            # needs a real entry point to present itself to); every other
+            # caller of this batch operation on this peer passes a real
+            # confirmation string or `None` directly.
             item["destructive"] = True
-            peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+            if confirmation is VALID_CONFIRMATION:
+                assert session is not None and entity is not None, (
+                    "_build_mutation_item: VALID_CONFIRMATION requires session/entity to build its probe"
+                )
+                # Snapshot of `item` as it stands right now (operation/
+                # values/where/destructive, no confirmation yet) -- the
+                # probe presents this SAME shape, unconfirmed, to the SAME
+                # real entry point the caller is about to retry, so the
+                # phrase it reads back is valid for the actual call that
+                # follows.
+                probe_item = dict(item)
+
+                def probe(_session=session, _entity=entity, _probe_item=probe_item) -> None:
+                    self._call(lambda: self._service.mutate(_session, _entity, [dict(_probe_item)]))
+
+                peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DELETE")
+            else:
+                peer_confirmation = confirmation
             if peer_confirmation is not None:
                 item["confirmation"] = peer_confirmation
         if expected_revision is not None:
@@ -575,6 +645,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
                 op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
                 expected_revision=op.expected_revision, unique_key=op.unique_key,
                 destructive=op.destructive, confirmation=op.confirmation,
+                session=session, entity=entity,
             )
             for op in operations
         ]
@@ -603,6 +674,25 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             "fields": list(fields),
             "unique": True,
         }))
+
+    def drop_entity(self, session, entity: str, *, destructive: bool, confirmation: str | None) -> None:
+        # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+        # item 3): the destructive twin of `create_unique_index` above --
+        # same real, single `DataService.schema()` dispatcher, `drop_entity`
+        # being real, executable vocabulary on this peer already
+        # (`structured.py`'s `bind_schema_operation`/execution branches).
+        # `destructive`/`confirmation` follow the identical VALID_
+        # CONFIRMATION sentinel protocol as `delete()` above.
+        def probe() -> None:
+            self._call(lambda: self._service.schema(session, {
+                "operation": "drop_entity", "entity": entity, "destructive": True,
+            }))
+
+        peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DROP_ENTITY")
+        operation: dict[str, Any] = {"operation": "drop_entity", "entity": entity, "destructive": destructive}
+        if peer_confirmation is not None:
+            operation["confirmation"] = peer_confirmation
+        self._call(lambda: self._service.schema(session, operation))
 
     def query_with_revisions(
         self, session, entity: str, select: Sequence[str], field: str | None, value: Any
@@ -1014,7 +1104,16 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             raise self._deny(exc) from exc
 
     def _deny(self, exc: BaseException) -> ConformanceDenial:
-        return ConformanceDenial(code=self.classify(exc), adapter=self.name, native_type=type(exc).__name__)
+        # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+        # item 2): `FoundationError.details` is this peer's own real
+        # structured details mapping (`errors.py`'s `to_dict()` -- the
+        # same object a real problem+json response's `details` field
+        # carries); any other native exception (`TypeError`/`ValueError`)
+        # has none, so this maps to an empty mapping rather than `None`.
+        return ConformanceDenial(
+            code=self.classify(exc), adapter=self.name, native_type=type(exc).__name__,
+            details=getattr(exc, "details", None),
+        )
 
 
 def build_adapter() -> ConformanceAdapter:

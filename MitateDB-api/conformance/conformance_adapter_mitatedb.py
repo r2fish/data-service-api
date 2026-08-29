@@ -56,6 +56,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    resolve_valid_confirmation,
 )
 
 from mitatedb_api import ControlPlane, Filter, MitateDataService, Role  # noqa: E402
@@ -102,6 +103,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self._control = ControlPlane("synthetic-conformance-pepper-mitatedb-0000000")
         self._service = MitateDataService(self._control)
         self._counter = 0
+        # port v1.6 declare-and-echo (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): cached after the
+        # first real `capability_document()` call, mirroring both r2db-api
+        # plugs' identical cache -- this peer's declared `contract_version`
+        # is static for this adapter instance's whole lifetime.
+        self._contract_version_cache: str | None = None
 
     # ------------------------------------------------------------------
     # control plane
@@ -147,6 +154,28 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         handle = self.issue_credential(probe_app, "runtime")
         session = self.authenticate(handle)
         return self._call(lambda: session.capabilities())
+
+    def _declared_contract_version(self) -> str:
+        # port v1.6 declare-and-echo (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): cached after the
+        # first real `capability_document()` call, mirroring both r2db-api
+        # plugs' identical cache.
+        if self._contract_version_cache is None:
+            self._contract_version_cache = str(self.capability_document()["contract_version"])
+        return self._contract_version_cache
+
+    def _resolve_confirmation(self, confirmation: Any, *, probe: Callable[[], Any], legacy_token: Any) -> Any:
+        """`VALID_CONFIRMATION` sentinel resolution (design R-6 item 1,
+        `adapter.resolve_valid_confirmation`) -- identical contract to both
+        r2db-api plugs' own method of the same name. `legacy_token` is this
+        peer's own pre-1.2.0 boolean `confirm=True` (not a string -- this
+        peer's `confirm` parameter is boolean until the WP-5 declare-and-
+        echo flip, design R-5)."""
+        if confirmation is not VALID_CONFIRMATION:
+            return confirmation
+        return resolve_valid_confirmation(
+            contract_version=self._declared_contract_version(), legacy_token=legacy_token, probe=probe
+        )
 
     # ------------------------------------------------------------------
     # control plane HTTP surface (port v1.5) -- surface-absent branch
@@ -346,23 +375,31 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
 
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
-        # VALID_CONFIRMATION sentinel protocol (design section 10.1):
-        # `confirmation=None` supplies no confirmation (this peer's
-        # `confirm` stays falsy), VALID_CONFIRMATION supplies this peer's
-        # own required token (its boolean `confirm=True`), and any other
-        # string passes through verbatim so a wrong token is still
-        # observable to this peer's own validation rather than silently
-        # upgraded. This peer's `delete()` has no separate `destructive`
-        # parameter -- deletion is unconditionally destructive and gated
-        # by `confirm` alone -- so there is nothing further for the port's
-        # `destructive` flag to faithfully pass through to here.
-        if confirmation is VALID_CONFIRMATION:
-            peer_confirm: Any = True
-        elif confirmation is None:
-            peer_confirm = False
-        else:
-            peer_confirm = confirmation
+        # VALID_CONFIRMATION sentinel protocol (design section 10.1,
+        # updated port v1.6 for declare-and-echo -- design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): `confirmation=None`
+        # supplies no confirmation (this peer's `confirm` stays falsy),
+        # VALID_CONFIRMATION resolves to a real, currently-valid
+        # confirmation via `_resolve_confirmation` (this peer still
+        # declares `contract_version: 1.1.0`, so that always resolves to
+        # this peer's own legacy fixed token `confirm=True` today -- the
+        # WP-5 flip is what would activate the declare-and-echo branch),
+        # and any other value passes through verbatim so a wrong token is
+        # still observable to this peer's own validation rather than
+        # silently upgraded. This peer's `delete()` has no separate
+        # `destructive` parameter -- deletion is unconditionally
+        # destructive and gated by `confirm` alone -- so there is nothing
+        # further for the port's `destructive` flag to faithfully pass
+        # through to here.
         filters = [Filter(field, "eq", value)]
+
+        def probe() -> None:
+            self._call(lambda: session.delete(entity, filters, confirm=False))
+
+        if confirmation is None:
+            peer_confirm: Any = False
+        else:
+            peer_confirm = self._resolve_confirmation(confirmation, probe=probe, legacy_token=True)
 
         def op() -> int:
             result = session.delete(entity, filters, confirm=peer_confirm)
@@ -584,8 +621,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
             if op.destructive:
                 item["destructive"] = True
+                # Same VALID_CONFIRMATION sentinel protocol as `delete()`
+                # above (port v1.6 declare-and-echo), extended to batch
+                # operations (port v1.4).
                 if op.confirmation is VALID_CONFIRMATION:
-                    item["confirm"] = True
+                    probe_item = dict(item)
+                    probe_item["confirm"] = False
+
+                    def probe(_probe_item=probe_item) -> None:
+                        self._call(lambda: session.transact([dict(_probe_item)]))
+
+                    peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token=True)
+                    item["confirm"] = peer_confirm
                 elif op.confirmation is not None:
                     item["confirm"] = op.confirmation
             items.append(item)
@@ -629,6 +676,30 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # `SurfaceAbsent`'s own docstring).
             surface=self.public_operation_callables(),
             forbidden_parameters=["index", "unique"],
+        )
+
+    def drop_entity(self, session, entity: str, *, destructive: bool, confirmation: str | None) -> None:
+        # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+        # item 3): same structural-absence reasoning as `create_unique_
+        # index` immediately above -- `ApplicationDeveloper.create_
+        # collection(name, fields)` is this peer's only schema-mutation
+        # call, and it has no drop/destroy parameter of any kind. No other
+        # developer-facing method exists on this peer's public surface
+        # (confirmed by source inspection of cell.py) that could even
+        # receive a destructive drop request, so this is a structural
+        # absence, not a denial this adapter observed from a real call --
+        # exactly the honest form `SurfaceAbsent`'s own docstring requires,
+        # not a fabricated `ConformanceDenial`. `destructive`/`confirmation`
+        # are accepted only to match this ABC method's signature (the same
+        # convention `create_unique_index` above follows for its own unused
+        # `session` parameter) -- there is no real entry point to pass them
+        # through to.
+        raise SurfaceAbsent(
+            self.name, "drop_entity",
+            "ApplicationDeveloper.create_collection has no drop/destroy parameter, and no other "
+            f"schema-operation call exists on this peer (requested: entity={entity!r})",
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["drop", "destroy"],
         )
 
     def query_with_revisions(
@@ -971,7 +1042,20 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             raise self._deny(exc) from exc
 
     def _deny(self, exc: BaseException) -> ConformanceDenial:
-        return ConformanceDenial(code=self.classify(exc), adapter=self.name, native_type=type(exc).__name__)
+        # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+        # item 2): this peer's own `FoundationError` base class has no
+        # `details` attribute at all today (`mitatedb_api/errors.py` --
+        # never touched by this WP, per CLAUDE.md's "peer 実装には一切触れ
+        # ない"), so `getattr(..., "details", None)` always falls through
+        # to `None` here -> an empty mapping on `ConformanceDenial`. Written
+        # this way (not simply omitting `details=`) so this adapter picks
+        # up a real `details` attribute for free the moment a future WP
+        # adds one to this peer's own error hierarchy, without a second
+        # edit to this call site.
+        return ConformanceDenial(
+            code=self.classify(exc), adapter=self.name, native_type=type(exc).__name__,
+            details=getattr(exc, "details", None),
+        )
 
 
 def build_adapter() -> ConformanceAdapter:

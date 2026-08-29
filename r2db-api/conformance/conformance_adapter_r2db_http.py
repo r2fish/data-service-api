@@ -87,6 +87,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     TamperVector,
     load_contract_error_codes,
+    resolve_valid_confirmation,
 )
 
 # CCR-14 WP-5 round 2 (MINOR-3): `r2db_api.control_main` now ends with a
@@ -643,6 +644,19 @@ class _HttpFailure(Exception):
         return f"HTTP {self.status_code} (non-problem+json response)"
 
 
+def _failure_details(failure: "_HttpFailure") -> Mapping[str, Any]:
+    """port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+    item 2): the real problem+json response's own `details` object, exactly
+    as `errors.py`'s `FoundationError.to_dict()` publishes it over HTTP --
+    never assembled or interpreted by this adapter. Empty when the response
+    was not a well-formed problem+json body at all (`failure.body is None`)
+    or carried no `details` key."""
+    if failure.body is None:
+        return {}
+    details = failure.body.get("details")
+    return details if isinstance(details, dict) else {}
+
+
 def _stringify_for_path(payload: Any) -> str:
     """A URL path segment is always text on the wire: any real HTTP client
     placing a non-string value into a path must serialize it first. `str()`
@@ -751,6 +765,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             self._app_pg: dict[str, _PgAppInfo] = {}
             self._provisioned_cells: list[PostgresCell] = []
             self._counter = 0
+            # port v1.6 declare-and-echo (design docs/design/
+            # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): cached after the
+            # first real `capability_document()` call, mirroring
+            # conformance_adapter_r2db.py's identical cache -- this peer's
+            # declared `contract_version` is static for this adapter
+            # instance's whole lifetime.
+            self._contract_version_cache: str | None = None
 
             # Synthetic pepper for this conformance run only; never a real
             # deployment secret and never read from the environment (mirrors
@@ -991,7 +1012,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         if response.status_code >= 400:
             failure = _HttpFailure(response)
             raise ConformanceDenial(
-                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
             ) from failure
         if not response.content:
             return {}
@@ -1020,7 +1042,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         if response.status_code >= 400:
             failure = _HttpFailure(response)
             raise ConformanceDenial(
-                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
             ) from failure
         if not response.content:
             return {}
@@ -1043,7 +1066,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         try:
             return fn()
         except FoundationError as exc:
-            raise ConformanceDenial(code=exc.code, adapter=self.name, native_type=type(exc).__name__) from exc
+            raise ConformanceDenial(
+                code=exc.code, adapter=self.name, native_type=type(exc).__name__,
+                details=getattr(exc, "details", None),
+            ) from exc
 
     def _data_path(self, entity: str, suffix: str) -> str:
         return f"/v1/data/{quote(entity, safe='')}/{suffix}"
@@ -1336,6 +1362,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         handle = self.issue_credential(probe_app, "runtime")
         session = self.authenticate(handle)
         return self._send("GET", "/v1/capabilities", session)
+
+    def _declared_contract_version(self) -> str:
+        # port v1.6 declare-and-echo (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): cached after the
+        # first real `capability_document()` call over HTTP, mirroring
+        # conformance_adapter_r2db.py's identical cache.
+        if self._contract_version_cache is None:
+            self._contract_version_cache = str(self.capability_document()["contract_version"])
+        return self._contract_version_cache
+
+    def _resolve_confirmation(self, confirmation: Any, *, probe: Callable[[], Any], legacy_token: str) -> Any:
+        """`VALID_CONFIRMATION` sentinel resolution (design R-6 item 1,
+        `adapter.resolve_valid_confirmation`) -- identical contract to
+        `conformance_adapter_r2db.py`'s own method of the same name."""
+        if confirmation is not VALID_CONFIRMATION:
+            return confirmation
+        return resolve_valid_confirmation(
+            contract_version=self._declared_contract_version(), legacy_token=legacy_token, probe=probe
+        )
 
     # ------------------------------------------------------------------
     # control plane HTTP surface (port v1.5) -- provided branch (WP-5)
@@ -1639,12 +1684,20 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         confirmation: str | None,
     ) -> int:
         assert isinstance(session, _Session)
-        # VALID_CONFIRMATION sentinel protocol (design section 10.1),
-        # identical to conformance_adapter_r2db.py: `destructive` always
-        # passes through faithfully; this adapter never upgrades a
+        # VALID_CONFIRMATION sentinel protocol (design section 10.1,
+        # updated port v1.6 for declare-and-echo -- identical to
+        # conformance_adapter_r2db.py's own `delete()`): `destructive`
+        # always passes through faithfully; this adapter never upgrades a
         # non-destructive/unconfirmed request into a confirmed destructive
         # one.
-        peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+        def probe() -> None:
+            self._mutate_request(session, entity, [{
+                "operation": "delete",
+                "where": [{"field": field, "operator": "eq", "value": value}],
+                "destructive": True,
+            }])
+
+        peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DELETE")
         operation: dict[str, Any] = {
             "operation": "delete",
             "where": [{"field": field, "operator": "eq", "value": value}],
@@ -1696,6 +1749,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         unique_key: str | None,
         destructive: bool = False,
         confirmation: Any = None,
+        session: object = None,
+        entity: str | None = None,
     ) -> dict[str, Any]:
         item: dict[str, Any] = {"operation": operation}
         if values is not None:
@@ -1703,10 +1758,24 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         if where_field is not None:
             item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
         if destructive:
-            # Same VALID_CONFIRMATION sentinel protocol as `delete()` below,
-            # extended to batch operations (port v1.4).
+            # Same VALID_CONFIRMATION sentinel protocol as `delete()` above
+            # (port v1.6 declare-and-echo), extended to batch operations
+            # (port v1.4). `session`/`entity` are only required when
+            # `confirmation is VALID_CONFIRMATION` (mirrors
+            # conformance_adapter_r2db.py's identical parameter).
             item["destructive"] = True
-            peer_confirmation = "DELETE" if confirmation is VALID_CONFIRMATION else confirmation
+            if confirmation is VALID_CONFIRMATION:
+                assert session is not None and entity is not None, (
+                    "_build_mutation_item: VALID_CONFIRMATION requires session/entity to build its probe"
+                )
+                probe_item = dict(item)
+
+                def probe(_session=session, _entity=entity, _probe_item=probe_item) -> None:
+                    self._mutate_request(_session, _entity, [dict(_probe_item)])
+
+                peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DELETE")
+            else:
+                peer_confirmation = confirmation
             if peer_confirmation is not None:
                 item["confirmation"] = peer_confirmation
         if expected_revision is not None:
@@ -1772,6 +1841,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
                 expected_revision=op.expected_revision, unique_key=op.unique_key,
                 destructive=op.destructive, confirmation=op.confirmation,
+                session=session, entity=entity,
             )
             for op in operations
         ]
@@ -1801,6 +1871,24 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 "unique": True,
             },
         )
+
+    def drop_entity(self, session: object, entity: str, *, destructive: bool, confirmation: str | None) -> None:
+        assert isinstance(session, _Session)
+        # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
+        # item 3): the HTTP-boundary twin of conformance_adapter_r2db.py's
+        # `drop_entity` -- same real, single schema-operations endpoint,
+        # same VALID_CONFIRMATION sentinel protocol as `delete()` above.
+        def probe() -> None:
+            self._send(
+                "POST", self._schema_path(), session,
+                json_body={"operation": "drop_entity", "entity": entity, "destructive": True},
+            )
+
+        peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DROP_ENTITY")
+        body: dict[str, Any] = {"operation": "drop_entity", "entity": entity, "destructive": destructive}
+        if peer_confirmation is not None:
+            body["confirmation"] = peer_confirmation
+        self._send("POST", self._schema_path(), session, json_body=body)
 
     def query_with_revisions(
         self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any

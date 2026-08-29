@@ -2,9 +2,9 @@
 
 ## 文書情報
 
-- 版数: 1.5 (§15 を新設。port v1.5: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` work package WP-1 由来の coordinated revision -- control-plane HTTP 面を検証するための 13 新規 abstract method (`ControlCredentialHandle` 型を含む)、C-14 (authority boundary)/C-15 (bootstrap/reset lifecycle) の test file 実装・実行可能化 (structural-evidence 分岐)、3 adapter 全ての `SurfaceAbsent` 実装。§15.9: 独立レビュー (blocker 2 / major 7 / minor 7 / nit 2、判定 approve-with-fixes) の fix-round を反映 -- 14番目の abstract method `deprovision_application`、`SurfaceAbsent.exempt_parameters`、C-14 vector 5 の positional-arithmetic 書き直し (B-1/B-2)、`test_conditions_register.py` への第3検査追加 (item 10、監督許可のscope拡張))
-- 発行日: 2026-08-29
-- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
+- 版数: 1.6 (§16 を新設。port v1.6: `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` work package WP-2 由来の coordinated revision -- `ConformanceDenial.details` (additive)、`VALID_CONFIRMATION` の declare-and-echo 化 (`parse_semver`/`contract_version_at_least`/`resolve_valid_confirmation`)、15番目の abstract method `drop_entity`、C-14 由来の absence 機構の共有モジュール抽出 (`conformance-tests/absence.py`)、C-06 (destructive confirmation) の test file 実装・実行可能化 (baseline/strict 分岐)。全 registered adapter は本 WP 時点で `contract_version: 1.1.0` のままのため、strict 分岐は本 WP では実行されない (r2db は WP-3、MitateDB は WP-5 で初実行) -- CONDITIONS.md C-06 行にこの限界を明記)
+- 発行日: 2026-08-30
+- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
 ## 1. 解決する問題
@@ -1529,3 +1529,313 @@ surface. Full implementation detail, the provided-branch defects WP-1's
 static-review-only gate could not catch until first execution, and the
 mutation-injection re-verification for this WP are in
 `WP5_IMPLEMENTATION_REPORT.md`.
+
+## 16. v1.6 port revision (coordinated with docs/design/DESTRUCTIVE_CONFIRMATION_V1.md work package WP-2)
+
+`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` §R-6 (Q-1 effectivation:
+declare-and-echo destructive confirmation, contract 1.2.0) requires four
+port-level changes plus a new common condition suite. As with §12-§15, this
+is a coordinated revision across the NORMATIVE surface this document's §4
+defines and all three registered plugs, in one change.
+
+### 16.1 `ConformanceDenial.details` (additive)
+
+`ConformanceDenial.__init__` gains an additive, keyword-only `details:
+Mapping[str, Any] | None = None`, stored as `self.details: dict[str, Any]`
+(never `None` -- an empty mapping when nothing is available, so every
+caller can read `denial.details.get(...)` unconditionally). This does NOT
+weaken the exception's existing message-exclusion rationale (§4.1: never
+carrying the native exception's `str()`, to keep a payload-echo assertion
+made directly against `ConformanceDenial` itself meaningful) -- `details`
+is never free text, and each plug wires only the peer's own genuine
+structured details mapping, never a string built from interpolating
+request data:
+
+- `r2db-api` (in-process): `getattr(exc, "details", None)` off the caught
+  `FoundationError` -- that class already carries a real `details: dict`
+  attribute (`errors.py`), used unchanged for this new purpose.
+- `r2db-api-http`: the real problem+json response's own `details` object
+  (`_HttpFailure.body["details"]`, via a new `_failure_details()` helper),
+  exactly as `errors.py`'s `FoundationError.to_dict()` publishes it over
+  HTTP -- never assembled or interpreted by the plug.
+- `MitateDB-api`: `getattr(exc, "details", None)` off the caught
+  `FoundationError` -- that peer's own error base class has NO `details`
+  attribute at all today (untouched by this WP, per CLAUDE.md's "peer 実装
+  には一切触れない"), so this always falls through to an empty mapping;
+  written as a `getattr` (not simply omitting `details=`) so the plug picks
+  up a real attribute for free the moment a future WP adds one to that
+  peer's own error hierarchy, without a second edit to this call site.
+
+`adapter.assert_no_payload_echo_in_details(details, payload, *, context="")`
+is `assert_no_payload_echo`'s identical substring/length-floor check,
+applied to every string value of a `details` mapping instead of a native
+exception's `str()` -- used by C-06 vector V8 (below).
+
+### 16.2 `VALID_CONFIRMATION`: declare-and-echo
+
+Before this revision, every plug resolved the `VALID_CONFIRMATION`
+sentinel to a hardcoded, peer-specific fixed token (`r2db-api`: the
+literal string `"DELETE"`; `MitateDB-api`: the boolean `confirm=True`).
+Contract 1.2.0's own client obligation forbids exactly this for a peer
+declaring `contract_version >= 1.2.0` ("句の綴りは契約で固定せず...
+クライアントは常に復唱", Q1-D2) -- a real client obtains the phrase from
+the peer's own denial and echoes it back; hardcoding it defeats the
+protocol's own state-fingerprinting guarantee.
+
+Two new shared, normative-adjacent functions on the port (`adapter.py`)
+implement the dispatch and the resolution, so no plug hand-rolls either:
+
+- `parse_semver(version: str) -> tuple[int, int, int]` / `contract_
+  version_at_least(contract_version: str, minimum: str) -> bool`: a
+  MAJOR.MINOR.PATCH string parsed into a comparable int tuple, never
+  compared as a string (the design's own named trap: `"1.10.0" < "1.2.0"`
+  as strings, but `1.10.0 >= 1.2.0` as versions).
+- `resolve_valid_confirmation(*, contract_version: str, legacy_token: Any,
+  probe: Callable[[], Any]) -> Any`: below 1.2.0, returns `legacy_token`
+  unchanged (every plug's own pre-1.6 behavior, preserved byte-for-byte for
+  a 1.1.0 peer); at or above 1.2.0, calls `probe()` (expected to present
+  the SAME destructive request the caller is about to retry, with
+  `destructive=True` and no confirmation, through whatever real entry
+  point a genuine client would use), and returns the `required_
+  confirmation` phrase read directly off the peer's own
+  `DESTRUCTIVE_CONFIRMATION_REQUIRED` denial -- never guessed, hardcoded,
+  or assembled by this port itself. A probe that succeeds outright, denies
+  with the wrong code, or denies without a non-empty `required_
+  confirmation` in its `details` raises `AssertionError` (a suite finding,
+  not a harness bug): each is a real, observable non-conformance a
+  contract_version >= 1.2.0 peer must not exhibit.
+
+Every plug now exposes a small private pair, `_declared_contract_version()`
+(cached after the first real `capability_document()` call -- a peer's
+declaration is static for that adapter instance's whole lifetime, so
+re-fetching it on every destructive-operation call site would only add
+cost) and `_resolve_confirmation(confirmation, *, probe, legacy_token)` (the
+`VALID_CONFIRMATION`-sentinel dispatch itself, delegating to `adapter.
+resolve_valid_confirmation`), and applies this at every call site that
+previously hardcoded a fixed token: `delete()` (all three plugs) and the
+per-operation batch item builder behind `attempt_batch_with_addresses`
+(`_build_mutation_item`, both `r2db-api` plugs; `MitateDB-api`'s own
+per-op loop). Each such call site's probe presents the SAME operation/
+entity/where shape the real (non-probe) call is about to use, snapshotted
+before `confirmation` is attached, so the phrase read back is valid for the
+call that immediately follows it. As of this WP, every registered plug
+still declares `contract_version: 1.1.0` (r2db/MitateDB's own flips are
+WP-3/WP-5's single-commit work), so `resolve_valid_confirmation` always
+takes the `legacy_token` branch in practice today -- the declare-and-echo
+branch is written to spec but not yet exercised against a real peer (see
+§16.5's own disclosure, mirrored in `CONDITIONS.md`'s C-06 row).
+
+The `VALID_CONFIRMATION` sentinel's own doc-comment (`adapter.py`, the
+block immediately preceding its definition) is rewritten for this new
+two-mode resolution; the sentinel's *external* contract (`None`/
+`VALID_CONFIRMATION`/any other string, from a call site's point of view)
+is unchanged.
+
+### 16.3 New port op: `drop_entity`
+
+A 15th abstract method, `drop_entity(self, session, entity, *, destructive:
+bool, confirmation: str | None) -> None` -- `SchemaOperationRequest.
+operation == "drop_entity"`'s destructive twin to `create_unique_index`,
+following the identical pass-through convention `delete()`'s own docstring
+already establishes (`destructive` always faithful; `confirmation` follows
+the `VALID_CONFIRMATION` protocol). `drop_index` is deliberately left to a
+future port revision (Q1-D5; tracked as C-06 v2 in the design's own ledger,
+`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` §R-6 item 3).
+
+- `r2db-api` (both plugs): real, executable vocabulary already
+  (`structured.py`'s `bind_schema_operation`/execution branches accept
+  `drop_entity` unconditionally) -- presented to the same single
+  `DataService.schema()` (in-process) / `POST /v1/schema/operations`
+  (HTTP) dispatcher every other schema operation already uses, exactly
+  like `create_unique_index`.
+- `MitateDB-api`: `SurfaceAbsent`, mirroring `create_unique_index`'s own
+  reasoning verbatim -- `ApplicationDeveloper.create_collection(name,
+  fields)` is this peer's only schema-mutation call and has no drop/
+  destroy parameter of any kind; no other developer-facing method exists
+  on this peer's public surface (confirmed by source inspection) that
+  could even receive a destructive drop request. `forbidden_parameters=
+  ["drop", "destroy"]` against the same `public_operation_callables()`
+  evidence `create_unique_index` already uses.
+
+### 16.4 Shared absence mechanism: `conformance-tests/absence.py`
+
+`test_c14_authority_boundary.py`'s own `_assert_control_operation_absent_
+or_uniformly_refused`/`_assert_uniform_absence_form`/`_unclassified_hint`/
+`_assert_is_contract_code` (previously private, module-local helpers) move
+to a new shared module, `conformance-tests/absence.py`, as `assert_
+control_operation_absent_or_uniformly_refused`/`assert_uniform_absence_
+form`/`unclassified_hint`/`assert_is_contract_code`. This is a pure move,
+not a revision: pass/fail behavior for C-14 is equivalent, not byte-for-
+byte identical (review correction m-7) -- that file's own suite stays
+green against the shared module, but the move itself generalized
+assertion-message text (no longer says "control-plane" specifically) and
+turned the `{"credential", "control"}` forbidden-vocabulary check into the
+optional `required_forbidden_vocabulary` parameter, described below.
+`test_c14_authority_boundary.py` now imports the shared functions and
+wraps them in two thin, file-local functions of its own original names
+that additionally pass `required_forbidden_vocabulary=("credential",
+"control")` (C-14's own vocabulary-narrowness guard, §15.9's independent-
+review-driven addition, kept file-local rather than promoted to the shared
+module's default -- a capability's forbidden-parameter vocabulary is
+specific to what that capability's own absence claim is about, and does
+not generalize).
+
+The shared function gains one new, optional keyword-only parameter to
+carry this: `required_forbidden_vocabulary: Sequence[str] = ()` (both on
+`assert_control_operation_absent_or_uniformly_refused` and `assert_
+uniform_absence_form`, the latter passing it through unchanged to every
+call it makes). Empty by default, so a caller with no such vocabulary
+requirement (C-06's own use, below) need not supply one.
+
+C-06 vector V6 (`drop_entity` state-fingerprint invalidation) reuses this
+exact shared mechanism for `MitateDB-api`'s absent branch, and vector V7
+(control-credential revoke gate) reuses it for any peer without a real,
+`enabled` control-plane surface -- proving this extraction's own stated
+purpose (design R-6 item 4 / WP-0 m-4): a second condition suite needing
+the identical "structurally absent, independently re-verified, OR
+uniformly `CAPABILITY_UNSUPPORTED`" mechanism no longer duplicates or
+risks drifting from C-14's own.
+
+### 16.5 C-06 suite: `test_c06_destructive_confirmation.py`
+
+New file, `@pytest.mark.condition("C-06")`. Branches on the peer's own
+declared `contract_version` (`adapter.contract_version_at_least`, §16.2),
+mirroring C-14's `_control_plane_status` dispatch pattern:
+
+- **strict branch (>= 1.2.0)**: vectors V1-V8 (unconfirmed delete denied
+  with all four declaration keys present/non-empty/null-or-non-empty per
+  design R-1-2's `details_rules`; `destructive: false` with an otherwise-
+  correct phrase still denied -- see that test's own docstring for why
+  V2b's literal "field omitted on the wire" collapses onto the identical
+  port-level assertion as V2, this port's `delete()` signature always
+  requiring an explicit `destructive: bool`; full-match adversarial checks
+  -- suffix, a proper prefix DERIVED from the real phrase never
+  hardcoded, case-changed, another entity's/operation's/selection's
+  correct phrase -- all denied, state unchanged; phrase determinism
+  across repeated probes and across a second credential for the same
+  Application; probe-then-echo executes; `drop_entity`'s state-fingerprint
+  invalidation after an unrelated schema change -- `create_unique_index`
+  stands in for the design text's own "`add_field`" example, since this
+    port has no standalone `add_field` operation and `create_unique_index`
+  bumps the identical monotonic state fingerprint design R-2 item 1
+  requires of "every schema operation" -- with the shared absence
+  mechanism (§16.4) for a surface-absent peer, plus a V3-equivalent
+  adversarial subset against `drop_entity` itself; the in-band last-
+  control-credential revoke gate, control-plane-provided peers only, `
+  audited: true` included, with the shared absence mechanism for a
+  surface-absent peer otherwise; no payload-echo in any declaration
+  value, via §16.1's `assert_no_payload_echo_in_details`).
+- **baseline branch (< 1.2.0)**: every vector instead asserts the pre-1.2.0
+  floor -- an unconfirmed destructive delete never executes (whatever
+  code), and `VALID_CONFIRMATION` succeeds -- against a freshly `insert()`-
+  ed, uniquely-marked row of its own (never the shared fixture's single
+  seeded row), so this floor check is safe to call repeatedly.
+
+**As of this WP, all three registered adapters still declare
+`contract_version: 1.1.0`** (§16.2), so every one of the 8 vector tests
+takes the baseline branch for every currently-registered adapter today --
+the strict branch's own vector bodies are exercised, in this WP, only by
+this file's own direct unit tests of the pure dispatch/derivation
+functions they depend on (`parse_semver`/`contract_version_at_least`/
+`resolve_valid_confirmation`/`assert_no_payload_echo_in_details`/the
+adversarial-variant deriver), proving those skeletons import and compute
+correctly, not that a real >= 1.2.0 peer satisfies them end-to-end. First
+real execution of the strict branch is WP-3's own completion condition
+(`r2db-api`, both plugs) and WP-5's (`MitateDB-api`) -- disclosed here and
+in `CONDITIONS.md`'s C-06 row, per design R-6's own "将来 peer の受け入れ
+口として残置し、未実行分岐である旨を明記" (mirroring §16.4's C-14
+precedent for the exact same kind of disclosed, deliberate floor).
+
+**Applications-headroom regression (found, root-caused, and fixed this
+WP -- full record, since the first-pass diagnosis during implementation
+was itself wrong and had to be corrected under review):**
+
+A first version of this file made TWO independent out-of-band `provision_
+application` sources uncached, and their combination broke `test_c15_
+bootstrap_reset_lifecycle.py`'s own `register_application_inband` audit
+call with `LIMIT_EXCEEDED` (`details={"resource": "applications", "limit":
+100}`) at session end, on BOTH r2db plugs. The regression was verified
+genuine (not pre-existing) the correct way: the whole WP's diff was
+stashed, the full root suite was run against the byte-identical fe8d0b7
+tree (727 passed, 0 failed), then the diff was restored and the full suite
+re-run with this file present (2 failed) and absent (0 unexpected
+failures) -- an earlier attempt to establish "pre-existing" by running a
+file *subset* under `git stash` was correctly rejected on review: a
+subset's collection order and shared-adapter state are not the same
+condition as the full suite, so it cannot stand in for this comparison.
+
+The two sources, both now fixed:
+
+1. This file's own `fx` override (below) builds a full two-Application
+   `Fixture` via `adapter.build_fixture()`. Left at conftest.py's own
+   function scope, 8 vector tests x 3 adapters would call this 24 times
+   (16 `provision_application` calls per r2db adapter alone) -- so `fx` is
+   overridden here with a same-named, module-local fixture (pytest
+   resolves a fixture defined in the test module itself in preference to
+   conftest.py's for tests in that module) that memoizes ONE real,
+   unmodified `Fixture` per adapter for this whole module's run. This
+   suite never reads `Fixture`'s B-side fields (`app_b`/`runtime_b`/
+   `b_only_entity` -- every vector operates within a single Application),
+   so nothing is lost by sharing one. Every check that might actually
+   mutate state operates on a freshly `insert()`-ed, uniquely-marked row
+   of its own (`_assert_baseline_delete_invariant`), so repeated
+   invocations against the SAME cached `Fixture` never step on each other.
+2. **The dominant contributor, missed by the first pass:** `_branch_for`
+   (the strict/baseline dispatch every one of the 8 vector tests calls
+   first) calls `_contract_version`, which called the PUBLIC `adapter.
+   capability_document()` directly -- and every registered plug's
+   `capability_document()` provisions its OWN fresh, disposable probe
+   Application on every single call (it has no anonymous path; see each
+   plug's own docstring). Called uncached from 8 vector tests, this alone
+   cost 8 more `provision_application` calls per adapter -- more than
+   `fx`'s own 2. Fixed the same way: `_contract_version` now memoizes the
+   peer's declared `contract_version` (static for the whole run regardless)
+   in a second module-level cache, cutting this to 1 call per adapter.
+
+With both fixes, this file's total added footprint is 1 (`capability_
+document` probe) + 2 (`fx`'s own two Applications) = 3 out-of-band
+Applications per r2db adapter for the file's ENTIRE run -- smaller than a
+single ordinary condition-test file's own per-test-uncached footprint
+elsewhere in this suite. Verified: the full root suite passes GREEN twice
+consecutively (0 failed, 0 skipped both times) with this file present, and
+`conformance-tests/` alone and `r2db-api/tests/test_postgres.py` alone are
+both green. No SI-08 limit value, no `test_c15_*` assertion, and no
+conftest.py shared-fixture semantics were changed to reach this state --
+the fix is confined entirely to this file's own two caches.
+
+### 16.6 `CONDITIONS.md`
+
+C-06's row moves from "not yet executable" to "executable (three
+adapters)", with the strict/baseline branch split and the "all three
+adapters still declare 1.1.0 today" floor stated explicitly (mirroring how
+C-14's own row records its WP-5 flip state) -- this row's own text is the
+authoritative disclosure that the strict branch is unexecuted in this WP,
+not an incidental mention buried in this design document alone. C-12's
+existing "delete は C-06 へ" note (`test_c12_capability_agreement.py`'s own
+`attempt_mutation` docstring and CONDITIONS.md's C-12 row) is unchanged and
+remains accurate: C-12 still deliberately never exercises `delete` in its
+own capability-agreement context.
+
+### 16.7 Compatibility impact (mirrors §12.7/§13.8/§14.3/§15.8)
+
+- `ConformanceDenial.details` is additive (a new optional constructor
+  keyword, defaulting to an empty mapping); no existing call site that
+  constructs or catches a `ConformanceDenial` needs to change.
+- `VALID_CONFIRMATION`'s external contract (`None`/`VALID_CONFIRMATION`/
+  any other string) is unchanged; only its INTERNAL resolution gained a
+  version-gated second mode. Every existing test that already uses
+  `VALID_CONFIRMATION` (`test_c01_scope_binding.py`, `test_c03_structured_
+  injection.py`, `test_c17_declaration_agreement.py`, `test_c18_revision_
+  precondition_semantics.py`) is unaffected: all three registered plugs
+  still declare 1.1.0, so `resolve_valid_confirmation` still returns each
+  plug's own unchanged legacy token for every one of those call sites,
+  verified this WP by running the full existing suite unmodified against
+  all three plugs (see this work's own implementation report for the
+  pass count).
+- `drop_entity` is a new abstract method; a plug that does not implement
+  it fails to instantiate (Python's own `ABC` enforcement) -- all three
+  registered plugs implement it as of this revision (§16.3), so this is
+  not a live compatibility break for any currently-registered adapter.
+- `conformance-tests/absence.py`'s extraction preserves every existing
+  call site's observable behavior for C-14 (§16.4); no C-14 test assertion
+  changed.

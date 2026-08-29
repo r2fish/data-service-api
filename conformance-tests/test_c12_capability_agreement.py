@@ -24,7 +24,9 @@ from adapter import (
 pytestmark = pytest.mark.condition("C-12")
 
 # design section 2 / 3: C-12 exercises insert/update/upsert only. delete is
-# left to C-06's own future destructive-operation suite.
+# left to C-06 (`test_c06_destructive_confirmation.py`, executable as of
+# port v1.6), which owns destructive-operation conformance for this
+# vocabulary member.
 _EXERCISED_OPERATIONS = ("insert", "update", "upsert")
 
 

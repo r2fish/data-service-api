@@ -19,6 +19,7 @@ from adapter import (
     NATIVE_SURFACE_FORBIDDEN_NAME_FRAGMENTS,
     PayloadNotExpressible,
     assert_no_payload_echo,
+    assert_no_payload_echo_in_details,
     fresh_identifier,
     load_contract_error_codes,
     native_cause_of,
@@ -137,6 +138,9 @@ def test_identifier_positions_reject_every_payload(adapter, fx: Fixture):
                 assert_no_payload_echo(
                     native_cause_of(denial), payload, context=f"{position_name}:{payload!r}"
                 )
+                # port v1.6 review M-3: same second channel as the
+                # value-position check below.
+                assert_no_payload_echo_in_details(denial.details, payload, context=f"{position_name}:{payload!r}")
             else:
                 failures.append(f"{position_name}: payload {payload!r} was NOT denied")
 
@@ -182,6 +186,12 @@ def test_value_positions_round_trip_or_deny(adapter, fx: Fixture):
                 assert_no_payload_echo(
                     native_cause_of(denial), payload, context=f"{position_name}:{payload!r}"
                 )
+                # port v1.6 review M-3: `details` is a second, independent
+                # channel a denial can reflect a payload through (design
+                # docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 2 /
+                # C-06 vector V8's own check) -- checked alongside the
+                # native-message check above, not instead of it.
+                assert_no_payload_echo_in_details(denial.details, payload, context=f"{position_name}:{payload!r}")
                 continue
 
             if position_name == "insert_value":

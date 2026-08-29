@@ -84,15 +84,37 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
+from absence import (
+    assert_control_operation_absent_or_uniformly_refused as _shared_assert_control_operation_absent_or_uniformly_refused,
+)
+from absence import assert_is_contract_code as _assert_is_contract_code
+from absence import assert_uniform_absence_form as _shared_assert_uniform_absence_form
 from adapter import (
     ConformanceDenial,
     Fixture,
-    SurfaceAbsent,
-    UNCLASSIFIED,
     fresh_identifier,
-    load_contract_error_codes,
-    signature_forbids_parameters,
 )
+
+# port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 4 /
+# WP-0 m-4): this vocabulary and the absence-form mechanism itself now live
+# in the shared `absence` module (C-06's `drop_entity` absent branch reuses
+# the identical mechanism). `{"credential", "control"}` is this file's own
+# C-14-specific vocabulary requirement, preserved unchanged from before the
+# extraction.
+_CONTROL_PLANE_FORBIDDEN_VOCABULARY = ("credential", "control")
+
+
+def _assert_control_operation_absent_or_uniformly_refused(adapter, thunk: Callable[[], Any]) -> str:
+    return _shared_assert_control_operation_absent_or_uniformly_refused(
+        adapter, thunk, required_forbidden_vocabulary=_CONTROL_PLANE_FORBIDDEN_VOCABULARY
+    )
+
+
+def _assert_uniform_absence_form(adapter, thunks: Mapping[str, Callable[[], Any]]) -> None:
+    _shared_assert_uniform_absence_form(
+        adapter, thunks, required_forbidden_vocabulary=_CONTROL_PLANE_FORBIDDEN_VOCABULARY
+    )
+
 
 pytestmark = pytest.mark.condition("C-14")
 
@@ -118,20 +140,6 @@ _FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED",
 # port v1.5 abstract-method group): a conformance build's SI-08 resource
 # bounds must be small enough to actually drive over in one test run.
 _MAX_EXERCISABLE_LIMIT = 200
-
-
-def _unclassified_hint(code: str) -> str:
-    if code != UNCLASSIFIED:
-        return ""
-    return (
-        " -- code is adapter.UNCLASSIFIED: the peer raised a native exception the adapter could not map "
-        "to a contract code. This is a finding under SI-05/SI-10, not a denial."
-    )
-
-
-def _assert_is_contract_code(code: str) -> None:
-    contract_codes = load_contract_error_codes()
-    assert code in contract_codes, f"denial code {code!r} is not a contract error code{_unclassified_hint(code)}"
 
 
 def _control_plane_status(adapter) -> str:
@@ -176,124 +184,6 @@ def _application_actor(adapter, fx: Fixture):
     holder is the actual content of vector 1's absence side.
     """
     return adapter.issue_credential(fx.app_a, "runtime")
-
-
-def _assert_control_operation_absent_or_uniformly_refused(adapter, thunk: Callable[[], Any]) -> str:
-    """Runs `thunk`. Exactly one of two shapes is acceptable whenever
-    `control_plane` is declared anything other than `"enabled"` (design
-    section 4's two absence forms):
-
-    - (a) surface-absent: `thunk` raises `SurfaceAbsent`. Its claim is
-      independently re-verified, more strongly than the original C-17
-      precedent (design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md WP-1
-      independent review, major M-7):
-
-      - `signature_forbids_parameters(exc.surface, exc.forbidden_
-        parameters)`'s violations must EXACTLY equal `exc.exempt_
-        parameters` -- not merely a subset. An unexempted violation means
-        a real parameter could carry the absent capability (the claim is
-        false, C-14 mutation M1 exercises this). A violation set that is a
-        *proper subset* of the declared exemptions is just as suspect: a
-        stale or padded exemption naming a parameter that is not actually
-        a violation either no longer applies, or was never a real
-        exemption to begin with (C-14 mutation M7 exercises this).
-      - the declared `surface` must cover at least the peer's own real
-        `public_operation_callables()` (`set(exc.surface) >=
-        set(adapter.public_operation_callables())`) -- an adapter cannot
-        narrow its evidence surface below the peer's actual public surface
-        just to dodge a violation elsewhere on it (C-14 mutation M8
-        exercises this).
-      - the *declared* `forbidden_parameters` set is not a weakened,
-        narrow list chosen merely to make the signature check pass
-        vacuously (C-14 mutation M4): `{"credential", "control"}` must be
-        a subset of the declared set.
-    - (b) declared-unavailable: `thunk` raises `ConformanceDenial` with
-      `code == "CAPABILITY_UNSUPPORTED"` -- any other code is a finding:
-      an unavailable declaration must refuse uniformly, not with an
-      unrelated error (a `NOT_FOUND`, for instance, would mean the peer
-      resolved the target before ever checking capability availability).
-      See this module's own docstring for this form's known,
-      measured acceptance-boundary limitation (mutation M5/M9).
-
-    `thunk` succeeding without raising is always a failure regardless of
-    form: an "unavailable"/absent declaration under which a control
-    operation actually executes is the reverse half of design section 4
-    vector 4 (declared status disagreeing with real behavior) -- the same
-    property `test_c14_declared_status_agrees_with_actual_surface`'s
-    module-level name calls out explicitly, enforced here for every
-    thunk this helper is ever given, not only that one test's own thunks.
-
-    Returns `"surface_absent"` or `"declared_unavailable"` so the caller
-    can additionally assert every operation it exercises takes the *same*
-    form (`_assert_uniform_absence_form`, below) -- a peer answering some
-    operations one way and others the other way is an internally
-    inconsistent declaration in its own right, not two independently
-    acceptable outcomes.
-    """
-    try:
-        thunk()
-    except SurfaceAbsent as exc:
-        violations = set(signature_forbids_parameters(exc.surface, exc.forbidden_parameters))
-        exempt = set(exc.exempt_parameters)
-        assert violations == exempt, (
-            f"{adapter.name}: control-plane SurfaceAbsent's signature_forbids_parameters violations "
-            f"{sorted(violations)!r} do not exactly equal its declared exempt_parameters "
-            f"{sorted(exempt)!r} -- an unexempted violation means a real parameter could carry the absent "
-            "capability (claim false); a stale or padded exemption naming a parameter that is not actually "
-            "a violation is itself suspect (design section 4, independent review major M-7)"
-        )
-        declared = {f.lower() for f in exc.forbidden_parameters}
-        assert {"credential", "control"} <= declared, (
-            f"{adapter.name}: control-plane SurfaceAbsent's forbidden_parameters {exc.forbidden_parameters!r} "
-            "does not include both 'credential' and 'control' -- a narrower fragment set could pass "
-            "signature_forbids_parameters vacuously without actually covering the control-plane vocabulary "
-            "this claim is supposed to rule out (C-14 mutation M4 hardens exactly this)"
-        )
-        public_surface = set(adapter.public_operation_callables())
-        declared_surface = set(exc.surface)
-        assert declared_surface >= public_surface, (
-            f"{adapter.name}: control-plane SurfaceAbsent's declared surface omits "
-            f"{[c for c in public_surface if c not in declared_surface]!r} of the peer's own real "
-            "public_operation_callables() -- shrinking the evidence surface below the peer's real public "
-            "surface would let a genuine control-plane-shaped parameter elsewhere on the peer go unchecked "
-            "(independent review major M-7, C-14 mutation M8)"
-        )
-        return "surface_absent"
-    except ConformanceDenial as exc:
-        _assert_is_contract_code(exc.code)
-        assert exc.code == "CAPABILITY_UNSUPPORTED", (
-            f"{adapter.name}: control_plane is declared unavailable, but this operation was refused with "
-            f"{exc.code!r} instead of CAPABILITY_UNSUPPORTED -- an unavailable declaration must refuse "
-            "every real entry point uniformly (design section 4 form (b))"
-        )
-        return "declared_unavailable"
-    else:
-        raise AssertionError(
-            f"{adapter.name}: control_plane is not declared 'enabled', but this operation succeeded -- an "
-            "unavailable/absent declaration under which a control operation actually executes is a genuine "
-            "defect (design section 4 vector 4's reverse direction)"
-        )
-
-
-def _assert_uniform_absence_form(adapter, thunks: Mapping[str, Callable[[], Any]]) -> None:
-    """Runs every thunk in `thunks` through
-    `_assert_control_operation_absent_or_uniformly_refused` and requires
-    every one to report the *same* form. A `control_plane` declaration
-    means one consistent thing -- surface-absent XOR declared-unavailable
-    -- not a per-operation coin flip; a peer that answers some control
-    operations with `SurfaceAbsent` and others with a real
-    `CAPABILITY_UNSUPPORTED` denial is declaring something internally
-    inconsistent about its own topology, which this suite treats as a
-    finding rather than silently accepting whichever form each individual
-    operation happened to take.
-    """
-    forms = {name: _assert_control_operation_absent_or_uniformly_refused(adapter, thunk) for name, thunk in thunks.items()}
-    unique_forms = set(forms.values())
-    assert len(unique_forms) == 1, (
-        f"{adapter.name}: control-plane absence form is not uniform across operations: {forms!r}. A "
-        "control_plane declaration must mean one consistent thing, not a mix depending on which operation "
-        "is asked."
-    )
 
 
 def _inband_endpoint_thunks(adapter, actor) -> dict[str, Callable[[], Any]]:
