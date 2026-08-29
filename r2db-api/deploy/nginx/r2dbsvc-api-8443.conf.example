@@ -1,0 +1,132 @@
+# r2dbsvc-api -- nginx server block, stage 1 (parallel 8443 deployment).
+#
+# This is a SEPARATE server block on a separate port from the existing production
+# 443 server block. It does not edit, include, or reference the existing
+# configuration's `location /` at all (handover §2.5: "既存 nginx の `location /`
+# に触れないので、検証段階のミスが本番に出ない"). Installing this file only adds a
+# new listener; it cannot change how any existing request on 443 is routed.
+#
+# server_name, certificate paths, and the internal proxy_pass port below are
+# synthetic placeholders (example.invalid, illustrative paths/ports) -- replace
+# every one of them with the real value only in the installed copy on the target
+# host, never in this repository, per CLAUDE.md's Public Repository Security Gate.
+# `listen 8443` is different in kind: 8443 is a real, deliberately fixed port this
+# design's stage-1 plan actually opens (docs/work-orders/HANDOVER_20260828.md
+# §2.5), not a value the operator is expected to replace -- do not read "synthetic
+# placeholder" as covering it. See DEPLOYMENT_RUNBOOK.md §2 for the install and
+# verification steps, and its Prerequisites §1 item 4 for the TLS/network
+# preconditions this file assumes are already true (loopback-only PostgreSQL etc.
+# are out of scope for nginx itself).
+
+server {
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+
+    # Same server_name as the existing production 443 block (handover §2.5:
+    # deliberately not a new hostname -- stage 1 tests the new implementation
+    # under the real hostname's TLS identity before stage 2 touches routing on
+    # 443 itself). Replace with the actual hostname; example.invalid here only.
+    server_name data.example.invalid;
+
+    # SI-10-adjacent: do not advertise the nginx version in error pages or the
+    # Server response header -- a stage-1 diagnostic surface should not double
+    # as version fingerprinting for an attacker.
+    server_tokens off;
+
+    # Reuse the existing certificate/key the production 443 block already uses
+    # for this same server_name -- do not provision a second certificate for the
+    # same name. Paths below are illustrative (a typical certbot/Let's Encrypt
+    # layout); confirm the actual paths from the existing 443 server block on
+    # the target host rather than assuming this layout.
+    ssl_certificate     /etc/letsencrypt/live/data.example.invalid/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/data.example.invalid/privkey.pem;
+
+    # TLS policy: `ssl_protocols` below is an explicit, active floor -- leaving
+    # this directive entirely commented-out would silently fall back to
+    # whatever this nginx build's own compile-time default is, which on older
+    # nginx/OpenSSL builds still includes TLSv1/TLSv1.1. That would make this
+    # file's own stated goal ("not a weaker TLS surface than production")
+    # depend on the operator remembering to set it, rather than on anything
+    # this file actually enforces -- so it is set here, not left as a comment.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    #
+    # This floor may be narrowed further (never widened) to match the existing
+    # 443 server block's own policy for this server_name, if that policy is
+    # stricter. `ssl_ciphers`/`ssl_session_cache`/`ssl_dhparam` are left as
+    # directives to copy from the existing 443 block (or its included snippet,
+    # e.g. a certbot-managed options-ssl-nginx.conf) rather than restated here
+    # as guessed concrete values, since the actual current policy lives in
+    # config this repository does not own and duplicating a guess risks
+    # silently drifting from it:
+    # ssl_ciphers <copy from the existing 443 server block>;
+    # ssl_session_cache <copy from the existing 443 server block>;
+
+    # ------------------------------------------------------------------------
+    # Body size: the application's own deterministic bound is
+    # ResourceLimits.request_bytes (r2db-api/src/r2db_api/limits.py), default
+    # 1_048_576 bytes (1 MiB). client_max_body_size below is set slightly above
+    # that (1100k = 1,126,400 bytes, ~7% headroom) so that, for the overwhelming
+    # common case, it is the application's RequestByteBoundMiddleware --  not
+    # nginx's own 413 handler -- that decides an oversized request is rejected.
+    # This matters because the application's rejection is a structured
+    # `application/problem+json` body carrying resource/limit detail
+    # (spec-conformant), while nginx's own 413 is a bare HTML error page with no
+    # such shape. Setting client_max_body_size *equal* to request_bytes would
+    # leave the two enforcers racing on rounding/framing differences; setting it
+    # far larger would let nginx buffer/forward bodies many times the
+    # application's bound before the application ever gets to reject them. If
+    # ResourceLimits.request_bytes's hardcoded default in limits.py ever
+    # changes (it is not currently environment-configurable -- see
+    # docs/design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md §2,
+    # explicitly out of scope for this change set), this value must be
+    # recomputed to match.
+    # ------------------------------------------------------------------------
+    client_max_body_size 1100k;
+
+    # Only the contract's data-plane path is proxied. No control-plane location
+    # exists here by construction: this implementation has no HTTP control
+    # surface at all (CCR-14 is undecided -- docs/design/
+    # R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md §0), and the
+    # runtime's only HTTP endpoints are under /v1/ (r2db-api/src/r2db_api/
+    # http.py `_ROUTES`: /v1/capabilities, /v1/data/*, /v1/catalog,
+    # /v1/schema/operations, /v1/audit/query). This block does not add a
+    # location for anything else, and the explicit catch-all below returns 404
+    # for any other path rather than silently proxying it.
+    location /v1/ {
+        proxy_pass http://127.0.0.1:REPLACE_ME_INTERNAL_PORT;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # $remote_addr, not $proxy_add_x_forwarded_for: this is the first (and,
+        # in stage 1, only) hop nginx makes to the application, so there is no
+        # legitimate prior proxy chain to append to. Using
+        # $proxy_add_x_forwarded_for here would instead append $remote_addr to
+        # whatever X-Forwarded-For value the client itself sent inbound --
+        # letting any client assert an arbitrary prefix onto a header the
+        # application might treat as provenance. Setting it to $remote_addr
+        # directly always names nginx's own view of the connecting peer, not a
+        # client-supplied chain.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # The application mints and returns its own X-Request-Id
+        # (RequestByteBoundMiddleware, r2db-api/src/r2db_api/http.py); do not
+        # let nginx overwrite it if a client happens to send one inbound.
+        proxy_set_header X-Request-Id "";
+
+        # No local buffering/caching of request or response bodies beyond
+        # nginx's own defaults is required for this bound-size, non-streaming
+        # JSON API; left as nginx defaults deliberately rather than tuned here.
+    }
+
+    # REPLACE_ME_INTERNAL_PORT must be the same collision-checked loopback port
+    # configured in the systemd unit's ExecStart (deploy/systemd/
+    # r2dbsvc-api.service) and verified against the existing implementation's
+    # own listeners per DEPLOYMENT_RUNBOOK.md's port collision check -- do not
+    # pick this value independently of that unit file.
+
+    location / {
+        return 404;
+    }
+}

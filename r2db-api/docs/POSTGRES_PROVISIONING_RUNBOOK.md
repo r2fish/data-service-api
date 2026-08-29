@@ -1,0 +1,546 @@
+# r2db-api PostgreSQL provisioning runbook
+
+Status: operator runbook for `r2db-api/migrations/`. Companion to
+`docs/design/R2DB_SERVICE_LAYER_ARCHITECTURE.md` §5.3 (deployment target:
+the existing VPS) and §8 ("D-3 改訂" -- database-per-application, the
+topology this runbook now describes) and
+`security/SECURITY_INVARIANTS_V1.md` (SI-00, SI-01, SI-02, SI-03).
+
+This document names environment-variable *names* and uses synthetic
+examples (`example.invalid`) only. It never contains a real host,
+credential, or DSN. Per CLAUDE.md's Public Repository Security Gate, treat
+every file in this repository as public from creation time.
+
+**Prerequisite: PostgreSQL 13 or later.** CCR-13
+(`docs/design/R2DB_CCR13_STORAGE_V1.md` R-1/R-4/§6 申し送り 4) provisions
+every entity table with a server-assigned `id bigint GENERATED ALWAYS AS
+IDENTITY` address column and an invisible `_r2db_revision uuid NOT NULL
+DEFAULT gen_random_uuid()` column; `gen_random_uuid()` is a PostgreSQL
+built-in only from version 13 onward (earlier versions need the `pgcrypto`
+extension's `gen_random_uuid()` instead, which this migration set does not
+provision or depend on). Confirm the target cluster's version (`SELECT
+version();`) before running `0001` on it.
+
+## 0. Topology: database-per-application
+
+Each application gets its own PostgreSQL **database** (not merely its own
+schema inside one shared database, as an earlier revision of this runbook
+described). That application's entities live in that database's `public`
+schema. The two per-application roles (`runtime`, `developer`) are
+unchanged in spirit: `runtime` gets DML only, `developer` owns `public` and
+can DDL there. See §8 of the architecture document for the full rationale
+-- in short: a database boundary in PostgreSQL admits no cross-database
+query path at all without FDW/dblink (never granted here), whereas a
+schema boundary can be crossed by a single missed `REVOKE`/RLS policy. The
+database boundary is now the primary wall; RLS remains a secondary,
+verified one (§3 below).
+
+## 1. What this provisions, and what it deliberately does not
+
+`r2db-api/migrations/` provisions a **new, separately-namespaced**
+PostgreSQL footprint for the service-layer implementation described in
+`R2DB_SERVICE_LAYER_ARCHITECTURE.md`. It does **not** touch, migrate, or
+depend on the currently-running old `r2db-api` deployment
+(`project/r2-vps/apps/r2db-api`), and it never has that deployment's
+credentials in the first place -- that absence of connection information
+*is* the isolation evidence design §5.3 C-1 asks for, not merely a
+convention this runbook asks you to follow separately.
+
+**Namespace collision, re-examined for database-per-application.** The
+existing VPS deployment is *also* database-per-application (its own
+`app_<slug>_<hex>` naming convention). Before this revision, this
+implementation's own per-application objects were schemas living inside
+one shared `r2dbsvc_platform` database -- invisible to `pg_database`
+entirely, so a name collision against the existing deployment's databases
+was structurally impossible regardless of naming. That is no longer true:
+this implementation's per-application objects are now themselves real
+entries in the same cluster's `pg_database` catalog the existing
+deployment's databases live in, so the collision surface is real and must
+be checked deliberately, not assumed away by the old argument. It remains
+impossible here specifically because the two prefixes differ at the very
+first character -- `r2dbsvc_app_<slug>` vs. `app_<slug>_<hex>` -- for
+every possible `<slug>`/`<hex>`, not because of the different topology.
+Every object this migration set creates carries the `r2dbsvc_` prefix:
+
+| Object | Name |
+|---|---|
+| bootstrap/control-plane login role | `r2dbsvc_control` |
+| control-plane database (bookkeeping only, no application data) | `r2dbsvc_platform` |
+| control-plane bookkeeping schema | `r2dbsvc_registry` (inside `r2dbsvc_platform`) |
+| per-application database | `r2dbsvc_app_<slug>` |
+| per-application runtime role | `r2dbsvc_app_<slug>_runtime` |
+| per-application developer role | `r2dbsvc_app_<slug>_developer` |
+
+None of these names, ports, or database identifiers are shared with, or
+derived from, whatever the existing deployment uses. If the existing
+deployment happens to already use a name with the `r2dbsvc_` prefix
+(unexpected, but verify before running 0001), stop and pick a different
+prefix throughout `migrations/` and this runbook before proceeding, rather
+than assume.
+
+## 2. Roles and who runs what (design D-3, §5.3 C-2)
+
+There are three distinct credential tiers in this flow, and **the
+application process never holds the first two**:
+
+1. **Bootstrap/cluster administrator** -- an existing superuser, or a role
+   with `CREATEROLE` and `CREATEDB`, on the target PostgreSQL cluster. Used
+   exactly once, to run `0001_bootstrap_control_plane.sql`. Not stored
+   anywhere the application reads.
+2. **`r2dbsvc_control`** -- the provisioning/operator role `0001` creates.
+   Has `CREATEROLE` (to create per-application roles) **and now
+   `CREATEDB`** (to create each application's own database -- see §8.5
+   condition 1 of the architecture decision; database-per-application
+   means provisioning an application means creating a database, not just a
+   schema), but explicitly `NOSUPERUSER`. Used to run
+   `0002_provisioning_functions.sql` once, and thereafter to run
+   `0003_provision_application.sql` / `0004_deprovision_application.sql`
+   whenever an application is onboarded or removed. **This credential
+   lives only with whoever operates the platform** (a deploy script, a
+   human operator's own session) -- it is never given to the `r2db-api`
+   HTTP process, and it is not one of the environment variables the
+   application reads (see §4). This is the literal realization of §5.3
+   C-2: "the API process's role does not have
+   `CREATEDB`/`CREATEROLE`/superuser," because the API process never even
+   receives this credential to begin with.
+
+   `r2dbsvc_control`'s `CREATEDB` privilege is still far short of
+   superuser: it can create databases (and, per §8.5's own investigation,
+   still cannot create event triggers, which PostgreSQL reserves for true
+   superuser with no delegation path -- see §3 below for why that matters
+   and what this implementation does instead).
+3. **Per-application `runtime`/`developer` roles** -- created by
+   `0003_provision_application.sql`, one pair per application. These *are*
+   what the `r2db-api` process uses at request time, via
+   `r2db_api.postgres.PostgresCell`. Each is a plain login role with
+   `CONNECT` on exactly one application's database (and nothing else in
+   the cluster), with no `CREATEROLE`, `CREATEDB`, or superuser of its own.
+
+## 3. RLS automation: why not a template-database event trigger, and what runs instead
+
+Architecture §8.5 condition 3 asks for RLS to survive without depending on
+runtime code remembering to enable it, and names a preferred approach:
+(a) a `CREATE EVENT TRIGGER` in a template database, so `CREATE DATABASE
+... TEMPLATE` propagates automatic RLS enablement to every future table in
+every application database, with no application code involved at all.
+
+**This runbook does not implement (a).** `CREATE EVENT TRIGGER` is
+unconditionally superuser-only in PostgreSQL -- there is no ownership or
+`GRANT`-based delegation path for it, unlike every other privilege this
+migration set manages. §2 above documents the bootstrap/cluster
+administrator who runs `0001` as either "an existing superuser, **or** a
+role with `CREATEROLE` and `CREATEDB`" -- deliberately not requiring true
+superuser. Depending on event-trigger automation would silently require
+the *stronger* of those two options every time, on a target (the existing
+VPS, §5.3) where that is not confirmed to hold, and RLS automation would
+then only be as trustworthy as "did whoever ran 0001 happen to have
+superuser that day." That is exactly the kind of unverified assumption
+CLAUDE.md's Security Invariants section asks not to be papered over.
+
+**What runs instead is (b):** `PostgresCell._create_entity`
+(`r2db-api/src/r2db_api/postgres.py`) still enables and forces RLS on
+every table it creates, exactly as before this revision -- and
+additionally, in the same transaction, calls
+`PostgresCell.verify_row_level_security()`, which re-derives from live
+`pg_class`/`pg_namespace` catalog state whether *every* table in the
+application's database has RLS enabled and forced, and refuses to let the
+transaction commit if not. This is checked, not assumed: a bug in the
+RLS-enabling code, or a table created by some future code path that
+forgets to call it, is caught before commit, not discovered later.
+
+`0003_provision_application.sql` additionally installs a SQL-level
+equivalent of the same query, `public._r2db_missing_rls`, directly inside
+every application's own database -- so an operator (or a monitoring
+script) can run `SELECT * FROM _r2db_missing_rls;` against any application
+database at any time, independent of the application process, and expect
+an empty result. `r2db-api/tests/test_postgres.py::
+test_verify_row_level_security_detects_missing_rls` exercises both forms,
+including deliberately disabling RLS on a table outside `PostgresCell` to
+confirm the check actually detects drift rather than only ever agreeing
+with what `PostgresCell` itself already believes.
+
+## 4. Connection ceiling
+
+Historical note: before this section's current revision, every
+`PostgresCell` created its own two `_RolePool`s (`runtime`/`developer`) and
+held them forever once opened, lazily up to `pool_size` connections each.
+Effective cluster-wide consumption was `applications × 2 roles ×
+pool_size`, growing without bound as applications were onboarded -- at
+`pool_size = 4`, 11 applications already reached 88 connections and 13
+reached 104, against this cluster's default `max_connections = 100`. That
+unbounded growth is what `r2db_api.postgres.SharedPoolManager` fixes.
+
+`PostgresCell`'s `runtime`/`developer` pools are no longer private to that
+cell. They are handles (`_PoolHandle`) onto pools owned by one shared,
+process-wide `SharedPoolManager` (`default_pool_manager`, or an injected
+one), keyed by `(application_id, role)`, with:
+
+- **idle eviction** -- a pool unused for `R2DB_POOL_IDLE_SECONDS` (default
+  `300`) is closed and dropped from the cache the next time the manager is
+  consulted for any key;
+- **an LRU cap on live pools**, `R2DB_POOL_CACHE_MAX` (default `32`) -- the
+  property that actually decouples the ceiling from application count:
+  however many applications are onboarded, at most `cache_max` pools are
+  ever open in this manager at once, the least-recently-used one evicted
+  to make room for a new one beyond that;
+- **a fixed per-pool connection cap**, `R2DB_POOL_SIZE` (default `2`) +
+  `R2DB_POOL_MAX_OVERFLOW` (default `2`) = `4` connections per pool --
+  matching the currently deployed reference implementation's effective
+  per-application capacity (`r2-vps/apps/r2db-api/src/r2db_api/pools.py`'s
+  SQLAlchemy `pool_size=2, max_overflow=2`), though this module's pools do
+  not distinguish a "core" size from "overflow" the way SQLAlchemy's do --
+  both knobs simply sum into one `maxconn` (`SharedPoolManager`'s
+  `_default_maxconn`).
+
+Eviction never closes a connection some caller currently has checked out
+(`_RolePool.retire()`): a pool being evicted closes only the connections
+idle in its own queue immediately; any connection still in flight is
+closed when its caller returns it, not before.
+
+The cluster-wide ceiling is now:
+
+`cache_max` bounds the number of live *pools*, and the manager keys a pool
+by `(application_id, role)` -- so the role factor is already inside
+`cache_max` and must not be multiplied in again:
+
+```
+live_pools        = min(applications × 2 roles, cache_max)
+total_connections = live_pools × (pool_size + pool_max_overflow)
+```
+
+which, past `applications × 2 = cache_max`, stops growing with application
+count at all:
+
+```
+ceiling_connections = cache_max × (pool_size + pool_max_overflow)
+```
+
+**Worked example**, at every knob's default (`cache_max = 32`, `pool_size +
+pool_max_overflow = 4`):
+
+```
+32 pool-cache slots × 4 = 128 connections    (worst case, cache fully saturated)
+```
+
+This is exactly the ceiling the currently deployed implementation already
+lives with (`pool_cache_max = 32`, `pool_size = 2` + `max_overflow = 2`),
+so an operator sizing this deployment can reuse the existing deployment's
+experience rather than starting from scratch.
+
+That is still an operator-facing figure to size against `max_connections`
+(PostgreSQL's own default is 100) -- 128 exceeds a default-configured
+cluster on its own, before counting the control-plane role, any
+interactive `psql` session, or `superuser_reserved_connections` (default
+3). The difference from before is that this figure is now a *knob*, not a
+function of how many applications happen to be onboarded: fifteen
+applications and one hundred applications produce the identical worst-case
+ceiling once `applications ≥ cache_max`, where previously each additional
+application raised it by `2 × pool_size` with no limit at all.
+
+Concretely, before onboarding a new application:
+
+1. Query the cluster's configured ceiling: `SHOW max_connections;`.
+2. Compute `min(already-provisioned applications + 1, R2DB_POOL_CACHE_MAX)
+   × 2 × (R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW)` and confirm it leaves
+   headroom below that ceiling for the control role, interactive/admin
+   sessions, and `superuser_reserved_connections`.
+3. If the ceiling is close, either raise `max_connections` (a PostgreSQL
+   restart is required) or lower `R2DB_POOL_CACHE_MAX` and/or
+   `R2DB_POOL_SIZE`/`R2DB_POOL_MAX_OVERFLOW` -- all four are plain
+   environment-variable settings consulted when `SharedPoolManager`'s
+   default instance is constructed, not fixed by this migration set. A
+   single cell can still request its own per-pool cap by passing
+   `PostgresCell(..., pool_size=...)` explicitly, same as before.
+4. If neither is acceptable, treat this as the "re-evaluate topology"
+   signal architecture §8.3 already anticipates (connection pooling
+   middleware such as pgbouncer, or revisiting the topology decision) --
+   this runbook does not implement that; it only gives the operator the
+   figure to decide with.
+
+**+ platform pool (fixed, additive).** `0005_credential_store.sql` (§9)
+adds one more consumer of connections that the arithmetic above does not
+yet account for: `r2db_api.credential_store.PostgresCredentialStore`, which
+the running API process uses to read credential/application state from
+`r2dbsvc_registry` on every request (design docs/design/
+R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md, P2-D4). This is a
+single, separate pool -- not registered with `SharedPoolManager`, not keyed
+by `(application_id, role)`, and not subject to the idle-eviction/LRU-cap
+sweep described above at all -- so it does not multiply with application
+count the way the per-application ceiling does. Its cap is fixed:
+`R2DB_PLATFORM_POOL_SIZE` (default `4`). The full cluster-wide ceiling,
+accounting for this process's platform pool alongside its per-application
+one, is therefore:
+
+```
+ceiling_connections = (cache_max × (pool_size + pool_max_overflow)) + platform_pool_size
+                     = (32 × 4) + 4                                  (worked example, all defaults)
+                     = 132
+```
+
+Include this fixed `+ platform_pool_size` term in step 2 of the "before
+onboarding a new application" checklist above -- it does not change with
+the number of applications onboarded, but it is still real connection
+headroom to reserve alongside the control role, interactive/admin
+sessions, and `superuser_reserved_connections`.
+
+## 5. Order of operations
+
+```
+1. (cluster admin)   psql "$R2DBSVC_BOOTSTRAP_ADMIN_DSN" \
+                       -v control_password="$R2DBSVC_CONTROL_PASSWORD" \
+                       -f r2db-api/migrations/0001_bootstrap_control_plane.sql
+
+2. (r2dbsvc_control) psql "$R2DBSVC_CONTROL_DSN" \
+                       -f r2db-api/migrations/0002_provisioning_functions.sql
+
+3. (r2dbsvc_control) -- once per application being onboarded:
+                     psql "$R2DBSVC_CONTROL_DSN" \
+                       -v app_slug='myapp' \
+                       -v runtime_password="$(openssl rand -base64 32)" \
+                       -v developer_password="$(openssl rand -base64 32)" \
+                       -f r2db-api/migrations/0003_provision_application.sql
+
+                     Record the two generated passwords in your secret
+                     manager immediately -- nothing in this flow returns or
+                     stores them in recoverable form.
+```
+
+Step 1 and step 2 are each safe to re-run: `0001` checks
+`pg_roles`/`pg_database` before creating anything, and `0002` uses `CREATE
+SCHEMA IF NOT EXISTS` / `CREATE OR REPLACE FUNCTION`. Step 3 is **not**
+idempotent by design -- it raises if the slug is already provisioned, so a
+re-run is a deliberate signal, not silently absorbed.
+
+**CCR-13 note (procedural only -- no application database has actually been
+provisioned against this cluster yet, so this has not been exercised):**
+`0003_provision_application.sql` now also creates two DOMAINs,
+`public._r2db_json_object`/`public._r2db_json_array`
+(`docs/design/R2DB_CCR13_STORAGE_V1.md` R-7 addendum, "object/array の
+DOMAIN 型統一"), inside the application database it provisions. Because
+step 3 is not re-runnable against an already-provisioned slug, an
+application database provisioned with a pre-CCR-13 `0003` before this
+DOMAIN addition landed will be missing both -- `field_type: "object"`/
+`"array"` on that application will fail until an operator applies just the
+two `CREATE DOMAIN` statements (see `0003`'s own body for the exact SQL) by
+hand against that one application's database, as the `developer` role, the
+same way `0003` itself does it. This is a one-time, per-already-provisioned-
+application catch-up step, not a routine part of onboarding a new
+application (which always gets both from a single, current `0003` run).
+
+**Why step 3 is a multi-statement script, not a single function call (a
+change from the previous, schema-per-application revision of this
+runbook):** `CREATE DATABASE` cannot run inside a transaction block, which
+every statement inside a PL/pgSQL function body implicitly is. Database-
+per-application therefore cannot be provisioned by one opaque function
+call the way schema-per-application could; `0003_provision_application.sql`
+is a real, readable psql script for exactly this reason -- see its header
+comment for the full mechanics (it creates the database, closes `PUBLIC`'s
+default `CONNECT`, reconnects into the new database via `\c`, and sets up
+`public`'s ownership/RLS-verification view there).
+
+To remove an application (e.g. tearing down a test/staging application):
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' \
+  -f r2db-api/migrations/0004_deprovision_application.sql
+```
+
+This drops that application's entire database (every table in it, along
+with the `public` schema and every grant inside it) and both its roles. It
+does not touch any other application's database, role, or data -- verified
+for exactly this property by `r2db-api/tests/test_postgres.py::
+test_cross_database_connect_is_refused_at_the_database_level` and
+`::test_cross_application_isolation_at_the_application_level`.
+
+Deprovisioning a slug that was never provisioned now raises loudly
+(a deliberate behavioural change from the previous single-function
+`deprovision_application`, which silently no-op'd in that case -- see
+`0002_provisioning_functions.sql`'s header for why).
+
+**If `0005_credential_store.sql` has been applied on this platform database,
+clear this application's credentials first.** `0004` refuses to proceed
+(before touching anything -- no `pg_terminate_backend`, no `DROP DATABASE`,
+no `DROP ROLE`) while any `credentials` row still references this slug
+(`application_slug` is `ON DELETE RESTRICT`, by design -- §9). The error
+names the count and the remedy:
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' -f r2db-api/migrations/0004_deprovision_application.sql
+ERROR:  application myapp still has 2 credential row(s) referencing it -- revoke it first
+(python -m r2db_api.ops revoke-credential <credential_id>), then delete the row
+(python -m r2db_api.ops delete-credential <credential_id>) before deprovisioning
+```
+
+For every credential row still referencing the slug: `python -m r2db_api.ops
+revoke-credential <credential_id>` (stop it from authenticating), then
+`python -m r2db_api.ops delete-credential <credential_id>` (actually clear
+the row -- unlike revoke, this is permanent and is the only thing that
+satisfies the foreign key). `python -m r2db_api.ops list-credentials` finds
+every row for a given application. Once none remain, re-run `0004`. A
+platform database that has never had `0005` applied at all skips this check
+entirely (`0004` detects the guard function's absence and behaves exactly
+as it did before `0005` existed) -- see `0004_deprovision_application.sql`'s
+own header for the `to_regprocedure`-gated mechanics.
+
+If `0004` reports `database "..." is being accessed by other users`, this
+is very likely a still-running autovacuum worker that visited the
+database's system catalogs after `0003`'s own `CREATE ROLE`/`CREATE
+DATABASE` -- `0004` deliberately does not attempt to terminate background
+workers (doing so requires true superuser, which `r2dbsvc_control` is
+not); simply re-run `0004` a few seconds later, once autovacuum has
+finished on its own.
+
+### A note on `psql`'s password variables
+
+Steps that pass a password use `psql`'s own `-v name=value` /
+`:'name'`-in-SQL substitution, not a `DO $$ ... $$` block -- `psql`
+deliberately does not expand `:'var'` inside a dollar-quoted body, so a
+password can only reach a plain, non-dollar-quoted statement this way (see
+the comment at the top of `0001_bootstrap_control_plane.sql` for why that
+matters). Whatever secret-manager tooling replaces `$(openssl rand ...)` in
+your actual deploy script should preserve that same shape: the password
+value flows through `-v`, never concatenated into SQL text your own script
+builds. `0003`'s identifier substitutions (database/role names computed by
+`0002`'s functions) use psql's matching `:"name"`-in-SQL identifier form,
+for the same reason.
+
+Passwords set via `CREATE ROLE ... PASSWORD ...` / `ALTER ROLE ...
+PASSWORD ...` appear in plaintext in that statement's SQL text. If cluster
+statement logging (`log_statement`) is enabled at `all` or `mod`, either
+run steps 1 and 3 with logging temporarily reduced for that session, or
+treat the log destination itself as credential-bearing and handle it under
+the same access controls as a secret store. This is a general PostgreSQL
+operational property of `CREATE ROLE ... PASSWORD`, not specific to this
+migration set.
+
+## 6. Environment variables the `r2db-api` process itself reads
+
+None of the variables in §5 above (`R2DBSVC_BOOTSTRAP_ADMIN_DSN`,
+`R2DBSVC_CONTROL_DSN`) are read by the `r2db-api` application process --
+those are operator-only, per §2.
+
+**See §10 for the actual, implemented contract.** This section previously
+described the application process's own environment variables as
+"suggested naming, not yet implemented" -- that follow-up wiring step
+(`r2db_api.main`, the composition root uvicorn/systemd starts as
+`r2db_api.main:app`) now exists; §10 is the current, accurate reference
+for it, not this section.
+
+## 7. Network isolation (§5.3 C-3) -- verify, do not assume
+
+This runbook and the migration SQL cannot prove PostgreSQL is unreachable
+from outside the VPS; that is deployment configuration, not application
+code, per §5.3 C-3. Before/alongside running `0001`, confirm on the target
+host:
+
+- `postgresql.conf`'s `listen_addresses` does not bind a public interface
+  (loopback / Unix socket only, matching how this runbook's own local
+  development and test setup connects via `host=/tmp` / `localhost`).
+- `pg_hba.conf` restricts each `r2dbsvc_*` role to the expected local
+  socket/loopback method, and does not grant it (or `PUBLIC`) a broader
+  `host` line reachable from outside.
+
+Record the actual verified configuration in
+`security/CONTROL_MAPPING.md` as deployment-control evidence once this is
+run against the real VPS -- that document, not this runbook, is where
+platform-control evidence for the common Security Invariants is expected to
+live per CLAUDE.md's development order.
+
+## 8. Local development / test posture
+
+`r2db-api/tests/test_postgres.py` runs steps 1-4 above end-to-end against a
+local PostgreSQL server, entirely under a random-per-run throwaway prefix
+(`r2dbtest<8 hex chars>_...`, never `r2dbsvc_`), and drops everything it
+created -- including its own throwaway control-plane bootstrap and every
+per-application database it provisioned -- in a fixture teardown that runs
+even on failure. It takes its admin/bootstrap DSN from
+`R2DB_TEST_ADMIN_DSN` (default: `host=/tmp port=5432 dbname=postgres`,
+matching a typical local Homebrew/Postgres.app socket setup), so the same
+test file can run against a differently-configured server (including,
+eventually, the VPS's own PostgreSQL instance, once §5.3's connection
+constraints allow reaching it for a controlled test run) by overriding that
+one variable -- never by editing the test file.
+
+If PostgreSQL is not reachable, these tests fail with a message naming the
+DSN that failed; they do not skip (§5.3 C-5).
+
+## 9. Credential store and the `r2dbsvc_api` role (`0005_credential_store.sql`)
+
+Companion to design docs/design/
+R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md (decisions
+P2-D1/P2-D2/P2-D3/P2-D4). Before this migration, the only place a
+credential's verifier or an application's enabled/disabled state existed
+was `r2db_api.auth.CredentialStore`'s in-memory Python dict -- gone on
+every process restart, and never shared between processes. This is the
+migration that fixes that.
+
+**Run once, after 0002** (order relative to 0003/0004 does not matter --
+this is control-plane bootstrap, independent of any one application),
+connected as `r2dbsvc_control`:
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v api_password="$R2DBSVC_API_PASSWORD" \
+  -f r2db-api/migrations/0005_credential_store.sql
+```
+
+`R2DBSVC_API_PASSWORD` is a new environment-variable *name*, generated the
+same way `R2DBSVC_CONTROL_PASSWORD` is (§5's note on `psql`'s password
+variables applies identically here). Like `0001`/`0002`, this file is safe
+to re-run: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF
+NOT EXISTS` are natively idempotent, the role-creation statement uses the
+same conditional-`\gexec` idiom `0001` already established, and `GRANT` is
+naturally idempotent.
+
+**What it adds:**
+
+| Object | Purpose |
+|---|---|
+| `r2dbsvc_registry.applications.enabled` (new column, default `true`) | Persists what was previously only `DataService`'s in-memory `_disabled_apps` set -- without this, a CLI-disabled application silently re-enables itself on the next process restart (fail-open). Not a new lifecycle state; same meaning as the in-memory set it replaces. |
+| `r2dbsvc_registry.credentials` (new table) | Mirrors `r2db_api.auth.CredentialRecord`'s shape (credential_id / application / role / verifier / enabled / revoked) field-for-field, plus `created_at`/`updated_at`. Only the verifier (`HMAC-SHA256(pepper, secret)`) is ever stored -- the secret itself is shown once, at issue/rotate time, by `python -m r2db_api.ops`, and is never written anywhere. `role` stays restricted to `runtime`/`developer`; a control-credential role is intentionally not a value this column accepts yet (added, additively, only once CCR-14 is resolved -- see the design doc's §0). `application_slug` is `ON DELETE RESTRICT`, not `CASCADE`, per the CCR-14 lessons-learned record: a previous implementation's `CASCADE` silently severed the audit trail's link from a credential back to its application. |
+| `r2dbsvc_api` (new login role) | `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10`. Granted `CONNECT` on `r2dbsvc_platform`, `USAGE` on `r2dbsvc_registry`, and `SELECT` (only) on `applications`/`credentials`. This is the role the *running API process* authenticates as (`R2DB_PLATFORM_DSN`, §6/§10) -- strictly read-only, and a completely different role from `r2dbsvc_control`, which keeps every write privilege and remains operator/CLI-only (§2, §5.3 C-2). A compromise of the running API process cannot alter a credential's `enabled`/`revoked` state or an application's `enabled` flag through this role's grants -- it can only read the state `python -m r2db_api.ops` (connected as `r2dbsvc_control`) already wrote. |
+| `r2dbsvc_registry.assert_no_credentials_for_deprovision` (new function) | Called by `0004_deprovision_application.sql`, immediately after `begin_deprovision_application` and before anything destructive runs: refuses to deprovision an application while any credential row still references it (see §5's deprovisioning note). Not called at all -- gracefully -- on a platform database that has never had `0005` applied. |
+
+**Managing rows in these tables is exclusively `python -m r2db_api.ops`'s
+job** (`r2db_api/ops.py`) -- there is no other supported way to issue,
+rotate, revoke, disable, enable, or (permanently) delete a credential, or
+disable/enable an application, until CCR-14 (control plane endpoints) is
+resolved (spec/CCR_DISPOSITION.md: undecided as of this writing). Run
+`python -m r2db_api.ops --help` for the full subcommand list; it requires
+`R2DB_CONTROL_DSN` (the `r2dbsvc_control` DSN, never the read-only
+`r2dbsvc_api` one) and `R2DB_CREDENTIAL_PEPPER` (the same pepper value the
+running API process is configured with -- a credential issued with the
+wrong pepper never authenticates). `delete-credential` is the one
+genuinely destructive, irreversible subcommand here (every other one is a
+soft state change on a row that stays on record) -- it exists specifically
+to satisfy the deprovisioning guard above, which a revoke/disable alone
+cannot: the guard is a real foreign key, and only removing the row clears
+it. It is itself guarded: it refuses a credential that is not already
+revoked, so the lifecycle is always revoke first, then delete -- a live
+credential can never vanish without a revocation having been recorded. **This CLI has no durable audit sink behind it yet** (existing
+outstanding work) -- see its own module docstring for that gap before
+relying on it for production change control.
+
+## 10. Environment variables the `r2db-api` process itself reads (as of `r2db_api.main`)
+
+§6 above described this as a "suggested naming, not yet implemented"
+follow-up step; it is now implemented (`r2db_api/main.py`, design P2-D5).
+`r2db_api.main:app` is the module-level ASGI application uvicorn/systemd
+start (`ExecStart=... uvicorn r2db_api.main:app ...`, see `deploy/systemd/
+r2dbsvc-api.service` and `deploy/env/api.env.example`, P3-D8). It reads, at
+import time -- a missing/invalid value below is an import-time failure,
+not a partial startup:
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `R2DB_CREDENTIAL_PEPPER` | yes | Verifier HMAC pepper -- same value `python -m r2db_api.ops` must be run with. |
+| `R2DB_PLATFORM_DSN` | yes | The `r2dbsvc_api` role's DSN against `r2dbsvc_platform` (§9's read-only role). |
+| `R2DB_SERVE_APPS` | yes | Comma-separated application slugs this process serves. Each one is checked against `r2dbsvc_registry.applications` at startup: unregistered or `enabled = false` both fail startup loudly. |
+| `R2DB_APP_<SLUG_UPPER>_RUNTIME_DSN` | yes, per served slug | That application's `runtime` role DSN (`PostgresCell`'s `runtime_dsn`). |
+| `R2DB_APP_<SLUG_UPPER>_DEVELOPER_DSN` | yes, per served slug | That application's `developer` role DSN (`PostgresCell`'s `developer_dsn`). |
+| `R2DB_POOL_*` | no | Existing per-application pool tuning -- see `SharedPoolManager` and §4. |
+| `R2DB_PLATFORM_POOL_SIZE` | no, default `4` | The platform pool's own cap -- see §4's "+ platform pool" note. |
+| `R2DB_PLATFORM_SCHEMA` | no, default `r2dbsvc_registry` | **TEST-ONLY -- never set this in a real deployment.** Overrides the registry schema name `PostgresCredentialStore`/`r2db_api.main` look `applications`/`credentials` up under. Its only reason to exist is so this repository's own test suite and the conformance adapter -- which run the real migration files with `r2dbsvc` textually rewritten to a random throwaway prefix, to avoid colliding with anything else in a shared local cluster -- can point a built app at their own rewritten schema. A real deployment always uses the literal schema `0005_credential_store.sql` creates and must leave this unset. |
+
+The corresponding synthetic entries already exist in `deploy/env/api.env.example`
+(P3-D8), following the existing repository-root `.env.example` pattern --
+name only, never a real value.

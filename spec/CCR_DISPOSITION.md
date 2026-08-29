@@ -17,4 +17,95 @@
 | CCR-11 | 採用 | Application-bound user/session、role/scope/policyを共通意味論とし、business PersonやUI authorityは除外 | user/identity capability実装時にpeer同等の policy/revoke 証拠を確認 |
 | CCR-12 | 採用 | audit emission/query分離とcontrol/audit-only queryは SI-02/10/14 に整合 | business auditを上位層から取り込む場合、security evidenceとの混同がない契約を別途審査 |
 
-却下・保留となるCCRはない。Google Cloud、SQLite、PostgreSQL、Cloud Run、secret manager等の実装制御は共通契約へ昇格せず、各peerの証拠として扱う。
+CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、SQLite、PostgreSQL、Cloud Run、secret manager等の実装制御は共通契約へ昇格せず、各peerの証拠として扱う。
+
+## 追加契約変更 (2026-08-27, 依頼者承認済み)
+
+以下の2件は新規CCRではなく、既採用の意味論を機械可読化する additive 変更 (`versioning.compatibility` の範囲内)。判断は `docs/design/R2DB_SERVICE_LAYER_ARCHITECTURE.md` D-6 の要判断事項として依頼者へ提示され、承認された。
+
+| 変更 | 実現するCCR | 内容 | 再検討条件 |
+|---|---|---|---|
+| `audit.sink_failure_policy` の追加 | CCR-06 | security-relevant denial・control-plane変更はaudit sink障害時にfail-closed、通常のdata-operation eventはbounded buffer + 明示的alertとする方針を契約文言化 | 実sinkの運用実績でbounded bufferの許容遅延・alert経路の要件が不足すると判明した場合 |
+| `CapabilityDocument.authorization_propagation_bound_ms` の追加 (`required`化含む) | CCR-10 | `lifecycle.propagation_bound` が要求する「有限boundをprofileで公開する」を検証可能にする機械可読フィールドを追加 | 将来sessionキャッシュ等でbound値が0固定でなくなる場合、より詳細な粒度 (credential種別別など) が必要か再評価 |
+
+いずれも新しい共通Capabilityや安全outcomeを追加するものではなく、既存の CCR-06 (canonical audit) / CCR-10 (revoke/disable伝播bound) が既に要求していた意味論を、`spec/data-service-api.v1.json` 上で検証・実装可能な形にしたものである。
+
+## CCR-13〜15 採否記録 (r2db-api 起票)
+
+入力は `r2db-api/contracts/COMMON_CONTRACT_CHANGE_REQUEST.md` 第4版。CCR-01〜12 と異なり、**起票時点では採否未決である。** いずれも共通契約の骨格に関わるため、実装着手前に判断する。
+
+第1版〜第3版はそれぞれ独立レビューを経て改稿した (第3版へのレビューは体制変更後の Opus による)。訂正の記録は下記および CCR 文書内の訂正欄に保持する。
+
+| CCR | 判定 | 論点 | 残る従属判断 |
+|---|---|---|---|
+| CCR-13 行の指し示し可能性 | **採用 (2026-08-28)** | `allowed_mutations` に既にある `upsert` は一意性の概念なしには意味を定義できず、r2db-api は実装の選択した意味論で enabled 申告している (統治下の実証)。entity は mutation 能力区分 (読み取り専用 / 追記専用 / 追記・削除 / 可変) を宣言し、update / upsert を支持する entity にのみ addressability を要求。結果は5性質に分解、revision の被参照先は6条項で固定。アドレス再利用は案iii (catalog 宣言) で裁定済み。**`MutationResult` の v1 拡張も行う (依頼者裁定 2026-08-28)** | なし |
+| CCR-14 制御プレーン | **採用 (2026-08-28、全体)** | `control` role、`control_credential` scheme、`lifecycle.credential` の意味論は採用済みで endpoint だけが無かった。提供は必須とせず `capability_status` で申告。reset は既存 credential 全失効、revoke は終端、制御面にも SI-08 の資源境界 | in-band 発行 (案A / 案B — CCR 文書が「採否と同時に判断」と定める)。base path `/control/v1` の確認 |
+| CCR-15 entity をまたぐ atomicity | **採用 (2026-08-28)** | 形状は `POST /v1/data/mutations` + 新規定義 `ScopedMutationRequest` / `ScopedMutation` (既存 `Mutation` は無変更、per-entity endpoint は body の `entity` を拒否し続ける)。対話的トランザクションは明示的に排除 (再検討条件付き) | `batch_entities` の境界値 (配備 profile) と enforcement layer の申告方法 |
+
+### 判断の軸
+
+優先順位は **堅牢で安全であること、次に最大限の自由があること**。道路にゲートを設けるのではなく、ガードレールを設ける。
+
+- **機構ではなく結果を要求する。** SI-00 が containment を要求して topology を要求しないのと同じ形にする
+- **ガードレールは危険のある場所に置く。** 安全要求のスコープは危険の所在から導く。危険の無い区間への無条件の要求はそれ自体がゲートになる
+- **能力の提供を強制しない。** 契約は形状と意味論を定め、可用性は `capability_status` で申告させる
+- **結果は検証可能な性質に分解する。** 散文のままの結果は適合テストが書けず、「機構は自由」が「何も固定されていない」に転化する
+
+### 各版の誤りの記録
+
+**第1版 (第2版で訂正)**
+
+- `idempotency_key` は行の同一性を前提としない。`MutationRequest` に属するリクエスト単位の項目であり、これに基づく「未宣言 entity では利用不可」提案は追記専用データから冪等性を奪うものだった。撤回
+- `upsert` を引用していなかった。契約が意味を与えられない操作を既に許可しているという最強の根拠を落としていた
+- `expected_revision` の「実装不能」は言い過ぎ。正確には「相互運用可能な形で有効化できない」
+- saga の証拠を誤った要求に紐づけていた。示すのは entity をまたぐ atomicity の欠落であり、CCR-15 として分離した
+- 読み取り側 (catalog のキー宣言、query 結果の revision) を欠いていた
+- 現行 VPS 実装の教訓を一つしか記録していなかった (実際は三つ)
+
+**第2版 (第3版で訂正)**
+
+- 無条件の普遍的 addressability は、読み取り専用 entity を塞ぐ新しいゲートだった。可変 entity へスコープを絞った
+- revision の被参照先を、問題と指摘しながら固定していなかった。5条項で固定した
+- SQLite rowid の引用が自らの結果 (不変性) を満たしていなかった (`VACUUM` による振り直し、実測確認済み)
+- 「三実装が三様に乖離」は数え方が誤り。統治下の公開面乖離はゼロであり、見込みの問題として論じ直した
+- 採用延期の選択肢を断定 (「延期する理由にはならない」) で消していた。三案として依頼者に戻した
+- CCR-15 が形状を提案しておらず変更要求になっていなかった
+
+**第3版 (第4版で訂正。独立レビュー Opus の指摘による)**
+
+- 性質4がアドレス再利用 (ABA) を塞いでいなかった。VACUUM 経路だけを塞ぎ、削除後の明示的 insert による再利用 (SQLite `INTEGER PRIMARY KEY` の最大 id 再利用、実測確認済み) を残していた — 自ら訂正した誤りと同じ形の再発。性質5を追加し、明示的再利用の扱いは案i/案ii として依頼者判断へ
+- 「行を狙った mutation」が未定義で、追記・削除型 entity を意図せず塞ぎうた。宣言区分で定義し直し、addressability の trigger を update / upsert に限定
+- CCR-15 の要求本文が自己矛盾 (「`Mutation` に `entity` 必須」と「追加禁止」の併記)。`ScopedMutation` / `ScopedMutationRequest` の新規定義として解消
+- CCR-14 の形状表が未決のはずの案A を既定として書いていた (不確実性の断定化の変種)。共通部と案A差分に書き分けた
+- 「両 peer は `CAPABILITY_UNSUPPORTED` で拒否」は事実誤認 (MitateDB-api は受理する面を構造的に持たない)
+- ほか: idempotency 保持境界の変更表への固定漏れ、機構列挙の内容ハッシュ (性質4と非両立)、revision の他行非依存条項、サーバ採番識別子の越境推論条項、制御面の資源境界 (SI-08)、control credential 保存条項、rotate 失効時点、reset の既存 credential 失効、三案の非対称な利害記載、CCR-14/15 の変更表欠落 — いずれも第4版で補った
+
+**レビュー側の誤り (同じく記録する)**
+
+- 第2版レビューは「契約側 r2db-api は schema-per-application」と結論したが、事実に反する (`r2db-api/migrations/0003_provision_application.sql` が `CREATE DATABASE` を発行し、`PostgresCell` の `schema` 引数は各 DB 内の `public` を指す)。ただし「CCR が peer の topology を断定すべきでない」という指摘自体は妥当であり、第3版は topology の断定を除いた
+
+### 裁定の記録 (依頼者)
+
+1. **CCR-13/14/15: 三件とも採用** (2026-08-28)。CCR-14 は全体採用 (安全条項のみ先行 / 全体延期は不採用)
+2. **CCR-13: `MutationResult` の v1 拡張を行う** (2026-08-28)
+3. **CCR-13: アドレス再利用は案iii (再利用の有無を catalog で宣言)** (2026-08-28)。理由: 宣言による見える化が本契約の設計思想 (区分宣言・一意性宣言・`capability_status`) に最も馴染み、想定利用形態では利用設計者が AI エージェントであるため「宣言を読まないクライアント」という案iii の弱点が実質消える。案i (再利用禁止。将来のサロゲート鋳造不能な可変データ — 外部表透過 — を塞ぐ) / 案ii (precondition の領分。晒され方を知る手段が無い) は不採用。案iii強 (再利用宣言 entity への precondition 必須化) は将来の additive 強化として残す
+
+### 従属判断 — すべて裁定済み (2026-08-28)
+
+1. **CCR-14: in-band 発行は案B** (依頼者が起票側推奨に委任)。control credential の発行は bootstrap / reset の帯域外儀式に限り、公開 HTTP 面での `role=control` 発行要求は `CAPABILITY_UNSUPPORTED`。根拠: 失効を生き延びる永続性の排除が安全第一の軸で優先し、案Aの利便 (運用者追加にサーバ権限不要) は単一運用者の現配備では実質発生しない。**明確化 (裁定時)**: 帯域外に限るのは control credential のみ — application credential (runtime/developer) の発行は in-band に残る。オンボーディングをサーバログインなしに完結することが本 CCR の目的の一部であり、永続性の論証は自己複製する control credential に固有のため。**再検討条件**: 運用者追加が頻繁になり帯域外儀式が実運用の障害と実証された場合、案Aへの移行を additive な契約変更として審査 (endpoint の追加は削除より容易 — 案Bから始めることは後戻りのない選択ではない)
+2. **CCR-14: base path は `/control/v1` で確定** (依頼者、旧実装との非重複を条件とし、条件は同日、旧実装の実ソースから全 router を列挙して検証済み) — 旧実装の最上位パス名前空間 (`/`、`/health`、`/ready`、`/v1/tables`、`/v1/schema`、`/v1/meta`、`/admin`、`/admin/api`、`/console`、`/embed`) に `/control` で始まるものは無い。なおこの実測で、引き継ぎ文書の旧パス一覧に無かった `/v1/schema` prefix の共有が判明した (完全一致は無し。段階2の path 振り分けで `/v1/schema/operations` に exact-match が要る — `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §4 に記録)
+3. **CCR-15: `batch_entities` の参照 profile 値は 4** (依頼者が起票側推奨に委任)。保守的に始めて実証で緩める (SI-08 のガードレールの流儀)。申告は既存の `limits` / `limit_enforcement` に載せる。**再検討条件**: 実クライアントで不足が実証されれば profile 値の引き上げは additive
+
+4. **CCR-13 実装期の追加従属判断 (2026-08-28、依頼者裁定): 複数 unique key 下の upsert は案B (キー選択フィールド)。** 契約が upsert の存在判定を「宣言された一意性キー」と単数で定めたまま、キーが2つ以上宣言された entity での判定キーが未定義だった (実装フェーズの独立レビューが指摘)。裁定は `Mutation` / `ScopedMutation` への任意フィールド `unique_key` (catalog の `unique_keys[].name` を参照) の追加。意味論: キー1つなら省略可 (そのキーに既定)、複数キーで省略は `VALIDATION_FAILED` (判定が曖昧)、未宣言キー名は `NOT_FOUND`、upsert 以外の operation への付与は `VALIDATION_FAILED`。判断材料: 「upsert の判定キーは1つだが、別系統の一意性をガードレールとして併置する」形 (users の username+email 等) は予見可能に発生し、PostgreSQL 自身の `ON CONFLICT` も同じ理由で conflict 対象の明示を必須にしている。案A (複数キー時は拒否を契約に明記) は不採用 — ただし案A から案B への後日移行も additive であることは確認済みで、選好は「必要が実証されてから足す」より「曖昧さを最初から契約語彙で消す」に置かれた。**版数の扱い**: 契約 1.1.0 は main 未マージ・未リリースのため、本追補は 1.1.0 の公開前訂正として織り込み、版数は据え置く (公開後であれば 1.2.0 となる変更である)。同時に残る open question: `contains` 演算子の意味定義 (リテラル部分一致か) は依然裁定待ち
+
+5. **CCR-13 実装期の追加従属判断 (2026-08-28、依頼者裁定): `contains` の意味定義は案i + 補足案 (`matches` の同時追加)。** `contains` は契約上 operator 名の列挙のみで意味が無く、実装間でワイルドカード解釈が分岐しうる状態だった (実装フェーズの独立レビューが指摘。当時の r2db-api は `%`/`_` を素通し — バインド境界は無事で、意味論のみの問題)。裁定: (a) `contains` を「リテラル部分一致 (値のどの文字もワイルドカードとして解釈しない)」と契約に明記、(b) 同時にパターン一致演算子 `matches` (`%` = 任意列、`_` = 任意1文字、バックスラッシュでエスケープ) を additive 追加する。依頼者の判断理由: **一般的に行える (期待される) ことは最初から普通に行えるべき** — パターン検索の道を「必要が実証されてから」に先送りせず、安全な既定 (リテラル) と明示的なパターン演算子を最初から並置する。**両演算子とも大文字小文字を区別する** (依頼者確認済み。PostgreSQL と SQLite の LIKE の既定差という peer 間分岐を契約側で封鎖する。区別しない比較は将来の別演算子として additive に追加可能)。`matches` を提供しない実装は `CAPABILITY_UNSUPPORTED` で正直に拒否し、別演算子として黙って解釈しない。版数の扱いは従属判断4と同じ (1.1.0 の公開前追補)。実装への反映: r2db-api 両 cell のエスケープ修正と `matches` 実装、MitateDB-api の `contains` エスケープ (定義された以上ワイルドカード素通しは不適合) と `matches` の正直拒否、C-03 value corpus へのワイルドカード・エスケープ文字 probe 追加。**文言確定 (2026-08-28、実装レビューでの発見を受けた厳格読みの明文化)**: 末尾の裸バックスラッシュ (エスケープすべき次の文字が無い) は `VALIDATION_FAILED` — PostgreSQL の LIKE はこの形を格納データ依存で実行時エラーにするため、リテラル扱い・黙認のどちらも peer 間分岐か非決定性を生む。拒否は最も厳格で、緩和は将来 additive に可能
+
+配備の DB 認証 posture も同日、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
+
+採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。
+
+### 実装順序 (採用後)
+
+CLAUDE.md の開発順序に従う: 共通契約 (`spec/data-service-api.v1.json`) の文言化 → conformance 条件 → 各 peer 実装。CCR-13 の storage 実装は `field_type` の型付き列化と同時に行うのが最も安い (CCR 文書「両 peer 適用可能性」)。
+
+**文言化は完了した (2026-08-28、契約 1.1.0)。** 全従属判断の裁定を反映し、独立レビュー (Opus) を経て確定。1.1.0 の追加はすべて additive であり、両 peer は 1.1.0 を申告した上で新 capability (`row_addressability` / `cross_entity_mutation` / `control_plane`) を unavailable と申告する。あわせて r2db-api の `upsert` は、一意性宣言 (`unique_keys`) の実装が公開面の申告更新とともに完了するまで `CAPABILITY_UNSUPPORTED` として拒否される (2026-08-28 追記: CCR-13 storage 実装 WP-2 で意味論は in-memory 実装済み。公開面の拒否は `DataService` の暫定ゲートで維持され、WP-5 の申告更新と同一コミットで解除される — `docs/design/R2DB_CCR13_STORAGE_V1.md` §3) — 契約が意味を与えられない操作を enabled と申告し続けることが 1.1.0 で規則違反になったため。次段は conformance 条件の登録 (`conformance-tests/CONDITIONS.md`): application credential の control endpoint への fail-closed、control credential の data/schema 拒否、`role=control` 発行の拒否 (案B)、revoke の終端性、per-entity endpoint の body `entity` 拒否、cross-entity の実行前検証、応答の契約 schema 検証。

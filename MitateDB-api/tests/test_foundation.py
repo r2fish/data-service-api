@@ -8,6 +8,7 @@ from mitatedb_api import (ControlPlane, Filter, FoundationConfig,
                           MitateDataService, Role)
 from mitatedb_api.errors import (AuthenticationError,
                                  AuthorizationStateUnavailable,
+                                 CapabilityError, NotFoundError,
                                  ResourceLimitError, ValidationError)
 
 
@@ -47,12 +48,88 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.runtime.insert("notes", {"title); DROP TABLE notes;--": "x"})
 
+    def test_contains_filter_is_honestly_rejected_never_executed_as_a_like_wildcard(self):
+        # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains` is a
+        # contract-listed filter operator this peer declares `unsupported`
+        # in its own `structured_query` capability entry (`_OPS` in cell.py
+        # has no entry for it) -- it must never be silently executed with
+        # SQL LIKE wildcard pass-through semantics (which would also
+        # violate Q-2's "no wildcard interpretation" rule for `contains`
+        # even if it were implemented). A row whose title would match a
+        # naive `%<value>%` LIKE search must not silently come back; the
+        # operator is refused outright instead.
+        #
+        # Conformance-review finding (WP-5a, C-12 reverse condition): this
+        # used to assert `ValidationError` here, but `contains` is real
+        # contract vocabulary this peer's own capability document declares
+        # `unsupported` -- `capability_status.rules` requires
+        # `CAPABILITY_UNSUPPORTED` for exactly that combination
+        # ("recognized but not provided"), the same distinction `matches`
+        # below already drew correctly. `cell.py::_where` previously
+        # special-cased only `matches`; it now treats `contains`/`matches`/
+        # `is_null` uniformly.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "50% off everything"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.read("notes", filters=[Filter("title", "contains", "50%")])
+        # No partial/silent execution: the row is untouched and still
+        # readable via a supported operator.
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "50% off everything")
+
+    def test_matches_filter_is_capability_unsupported_not_validation_failed(self):
+        # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `matches` is
+        # additive vocabulary this peer does not implement, refused with
+        # `CapabilityError` (-> `CAPABILITY_UNSUPPORTED`) rather than
+        # `ValidationError` (-> `VALIDATION_FAILED`): a positive, honest
+        # "recognized but not provided" answer, not "malformed request" --
+        # the same answer `contains`/`is_null` now give (see the two
+        # neighboring tests).
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "hello"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.read("notes", filters=[Filter("title", "matches", "hel%")])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "hello")
+
+    def test_is_null_filter_is_capability_unsupported_not_validation_failed(self):
+        # Conformance-review finding (WP-5a, C-12 reverse condition): like
+        # `contains` above, `is_null` is real contract vocabulary
+        # (`allowed_query_operators`) this peer declares `unsupported` in
+        # its own `structured_query` capability entry, but the pre-fix code
+        # fell through to the generic "operator this peer does not
+        # implement at all" branch and raised `ValidationError` instead of
+        # `CapabilityError` -- disagreeing with its own declaration. Fixed
+        # alongside `contains` in `cell.py::_where`.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "hello"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.read("notes", filters=[Filter("title", "is_null", None)])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "hello")
+
     def test_transaction_rolls_back(self):
         self.dev.create_collection("notes", {"title": "text"})
         with self.assertRaises(ValidationError):
             self.runtime.transact([
                 {"type": "insert", "collection": "notes", "values": {"title": "first"}},
                 {"type": "unsupported", "collection": "notes", "values": {"title": "second"}},
+            ])
+        self.assertEqual(self.runtime.read("notes"), [])
+
+    def test_transact_insert_with_expected_revision_is_rejected_before_execution(self):
+        # Conformance-review finding (docs/design/CONFORMANCE_ADAPTER_V1.md
+        # section 12, correction B-2): `transact()`'s "insert" branch used to
+        # ignore any operation-dict key it did not itself read, so an
+        # `expected_revision` (a revision precondition this peer does not
+        # implement) rode along on an otherwise-valid insert and the row
+        # still committed -- silently dropping a real request semantic
+        # instead of refusing it (contract `versioning.unknown_capability`:
+        # "The service returns CAPABILITY_UNSUPPORTED without executing a
+        # fallback."). This must be refused before any row is written, and
+        # must not affect unrelated, well-formed inserts in the same batch.
+        self.dev.create_collection("notes", {"title": "text"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "notes", "values": {"title": "first"}},
+                {"type": "insert", "collection": "notes", "values": {"title": "second"}, "expected_revision": "deadbeef"},
             ])
         self.assertEqual(self.runtime.read("notes"), [])
 
@@ -73,6 +150,18 @@ class FoundationTests(unittest.TestCase):
         self.control.credentials.authorization_state_available = False
         with self.assertRaises(AuthorizationStateUnavailable):
             self.service.open_session(self.dev_id, self.dev_secret)
+
+    def test_revoke_of_unknown_credential_id_is_rejected_not_silently_ignored(self):
+        # Control-plane fail-open: an operator revoking a credential id that
+        # does not exist must not be told (by silence) that the revoke
+        # succeeded, since no such credential was ever active in the first
+        # place.
+        with self.assertRaises(NotFoundError):
+            self.control.revoke_credential("no-such-credential-id")
+        # A real credential is unaffected by the failed call above.
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "still-active"})
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "still-active")
 
     def test_bounded_inputs_and_explicit_destructive_confirmation(self):
         config = FoundationConfig(max_batch_items=1)

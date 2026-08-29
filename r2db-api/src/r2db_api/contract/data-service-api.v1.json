@@ -1,0 +1,251 @@
+{
+  "$id": "https://example.invalid/data-service-api/v1/contract",
+  "title": "Common Data Service API contract",
+  "document_type": "machine-readable-api-contract",
+  "description": "Platform-independent structured Data Service API semantics for r2db-api and MitateDB-api.",
+  "contract_version": "1.1.0",
+  "media_type": "application/json",
+  "security": {
+    "schemes": {
+      "application_credential": {
+        "type": "http",
+        "scheme": "Bearer",
+        "description": "Opaque credential presented over TLS. The service stores only a verifier/digest and never returns the secret."
+      },
+      "control_credential": {
+        "type": "http",
+        "scheme": "Bearer",
+        "description": "A separately authenticated Control/Audit authority; application credentials are not accepted. The service stores only a verifier/digest; the secret is returned exactly once, at issue or rotate time. An authentication secret is never reused as signing-key or other cryptographic material."
+      }
+    },
+    "roles": ["runtime", "developer", "control", "audit"],
+    "scope": "Application and role are derived from authoritative credential state; request fields cannot select either.",
+    "failure": "Unknown, expired, revoked, disabled, or unavailable authorization state fails closed."
+  },
+  "versioning": {
+    "base_path": "/v1",
+    "control_base_path": "/control/v1",
+    "compatibility": "Additive fields and capabilities are allowed; removal or semantic change requires a new major version. The control surface follows the same compatibility rules.",
+    "discovery": "GET /v1/capabilities returns the negotiated contract version, capabilities, roles, and finite limits.",
+    "control_discovery": "Where the control plane is provided, GET /control/v1/capabilities returns the control surface's own capability document; a separately deployed control surface must not be assumed to share a host with /v1/capabilities, and /v1/capabilities accepting control authority is a co-hosting convenience, not a requirement.",
+    "unknown_capability": "The service returns CAPABILITY_UNSUPPORTED without executing a fallback."
+  },
+  "capability_status": {
+    "contract_target": "Endpoint and schema sections describe peer-target semantics; an implementation publishes its own status for each capability.",
+    "status_enum": ["enabled", "partial", "unavailable", "planned"],
+    "enforcement_enum": ["enforced", "reference_wall_clock", "deployment_required", "unavailable"],
+    "defined": {
+      "structured_query": "Structured predicate query over declared entities.",
+      "atomic_mutation": "Single-entity atomic mutation batches.",
+      "application_catalog": "Catalog discovery of this Application's entities.",
+      "schema_operations": "Structured schema change operations.",
+      "audit_query": "Audit evidence query under control/audit authority.",
+      "best_effort_transactions": "Per-item outcome batches with declared partial-result semantics.",
+      "idempotency": "Request-level idempotency_key deduplication with finite retention bounds.",
+      "revision_preconditions": "Per-row revision preconditions as defined by structured_operations.revision_preconditions.",
+      "row_addressability": "Catalog mutation-class declarations and the addressability properties defined by structured_operations.addressability.",
+      "cross_entity_mutation": "One atomic mutation unit across multiple entities via POST /v1/data/mutations.",
+      "control_plane": "The in-band control surface under /control/v1."
+    },
+    "rules": ["A capability must not be advertised as enabled unless its operations are executable.", "Optional target operations may be unavailable and must fail with CAPABILITY_UNSUPPORTED.", "Every discovered finite limit names its enforcement layer; deployment_required is not an application-code proof."]
+  },
+  "endpoints": {
+    "capabilities": {
+      "method": "GET",
+      "path": "/v1/capabilities",
+      "auth": "application or control",
+      "response": "CapabilityDocument"
+    },
+    "query": {
+      "method": "POST",
+      "path": "/v1/data/{entity}/query",
+      "auth": "runtime or developer",
+      "request": "QueryRequest",
+      "response": "QueryResult",
+      "semantics": "Entity and fields are validated identifiers; predicates/operators are from the structured allowlist; values are bound, never executable text."
+    },
+    "mutate": {
+      "method": "POST",
+      "path": "/v1/data/{entity}/mutations",
+      "auth": "runtime or developer",
+      "request": "MutationRequest",
+      "response": "MutationResult",
+      "semantics": "A batch is atomic unless explicitly declared best_effort by a capability that defines partial-result semantics. The body carries no entity field; a body entity field is rejected as an unknown field."
+    },
+    "cross_entity_mutate": {
+      "method": "POST",
+      "path": "/v1/data/mutations",
+      "auth": "runtime or developer",
+      "request": "ScopedMutationRequest",
+      "response": "MutationResult",
+      "semantics": "One atomic unit across entities within the authenticated Application's storage scope. Validation of every operation across every entity completes before any execution begins. Availability is declared via the cross_entity_mutation capability; the entity count is bounded by batch_entities and the operation count by batch_items."
+    },
+    "catalog": {
+      "method": "GET",
+      "path": "/v1/catalog",
+      "auth": "runtime or developer",
+      "response": "CatalogDocument"
+    },
+    "schema": {
+      "method": "POST",
+      "path": "/v1/schema/operations",
+      "auth": "developer",
+      "request": "SchemaOperationRequest",
+      "response": "SchemaOperationResult",
+      "semantics": "Schema changes are structured and attributable; destructive changes require explicit destructive semantics and appropriate authority."
+    },
+    "audit_query": {
+      "method": "POST",
+      "path": "/v1/audit/query",
+      "auth": "control or audit",
+      "request": "AuditQueryRequest",
+      "response": "AuditResult",
+      "semantics": "Application credentials are denied. Emission is a service consequence and cannot be authored by an application caller."
+    }
+  },
+  "control_endpoints": {
+    "control_capabilities": {"method": "GET", "path": "/control/v1/capabilities", "auth": "control", "response": "CapabilityDocument"},
+    "register_application": {"method": "POST", "path": "/control/v1/applications", "auth": "control", "request": "ApplicationRegistrationRequest", "response": "ApplicationStateResult"},
+    "list_applications": {"method": "GET", "path": "/control/v1/applications", "auth": "control", "response": "ApplicationsResult"},
+    "disable_application": {"method": "POST", "path": "/control/v1/applications/{application_id}/disable", "auth": "control", "response": "ApplicationStateResult"},
+    "enable_application": {"method": "POST", "path": "/control/v1/applications/{application_id}/enable", "auth": "control", "response": "ApplicationStateResult"},
+    "issue_credential": {"method": "POST", "path": "/control/v1/credentials", "auth": "control", "request": "CredentialIssueRequest", "response": "CredentialIssued", "semantics": "Issues an application credential (runtime or developer). The secret appears exactly once, in this response. A role=control issuance request is refused with CAPABILITY_UNSUPPORTED: control-credential issuance exists only in the out-of-band bootstrap/reset ceremony. The role value control remains in the request schema so that a future contract change lifting this restriction is additive."},
+    "list_credentials": {"method": "GET", "path": "/control/v1/credentials", "auth": "control", "response": "CredentialsResult", "semantics": "Never returns secrets or verifiers."},
+    "rotate_credential": {"method": "POST", "path": "/control/v1/credentials/{credential_id}/rotate", "auth": "control", "response": "CredentialRotated", "semantics": "Replaces the same credential's secret. The replaced secret's invalidation is effective when this response succeeds and propagates within authorization_propagation_bound_ms; no overlap window is defined."},
+    "revoke_credential": {"method": "POST", "path": "/control/v1/credentials/{credential_id}/revoke", "auth": "control", "request": "CredentialRevokeRequest", "response": "CredentialStateResult", "semantics": "Terminal. A revoked credential can never be made valid again; enable does not apply. Revoking the last active control credential is permitted and requires explicit confirmation via the request's destructive/confirmation fields; what constitutes a valid confirmation is a pending contract decision (the destructive-confirmation semantics question), and this clause is not effective until it is resolved."},
+    "disable_credential": {"method": "POST", "path": "/control/v1/credentials/{credential_id}/disable", "auth": "control", "response": "CredentialStateResult"},
+    "enable_credential": {"method": "POST", "path": "/control/v1/credentials/{credential_id}/enable", "auth": "control", "response": "CredentialStateResult", "semantics": "Reverses disable only. A revoked credential is not resurrected."}
+  },
+  "control_plane": {
+    "provision": "Providing the control surface is optional. Availability is declared via the control_plane capability; a deployment that declares applications statically and provides no control surface is conformant, and unprovided operations fail with CAPABILITY_UNSUPPORTED.",
+    "separability": "The control surface must be deployable separately from the application surface. The contract does not require co-hosting; where co-hosted, SI-00 conformance evidence must address how the boundary between the surfaces is preserved.",
+    "authority": "Application credentials fail closed on every control endpoint; control credentials are rejected on data/schema endpoints.",
+    "issuance": "Only runtime and developer credentials are issuable in-band. Control credentials are created solely by the out-of-band bootstrap or reset ceremony; an in-band role=control issuance request is refused with CAPABILITY_UNSUPPORTED (not a schema violation, so that lifting the restriction later is an additive capability change).",
+    "identifiers": "application_id uses the stricter lowercase slug rule (^[a-z][a-z0-9_]{0,32}$), deliberately narrower than structured_operations.identifier: an application_id becomes platform namespace material (database and role names) in implementations, where case-folding and length decoration make the general identifier rule unsafe.",
+    "application_deletion": "Not defined in v1; disable is the terminal application state. A future deletion capability is a separate contract change bound to destructive semantics and must not sever audit linkage.",
+    "bootstrap": [
+      "Runs under operator/OS authority and is not reachable from any public HTTP surface.",
+      "No default or hardcoded credential exists.",
+      "While a control credential exists, bootstrap cannot run again without an explicit reset.",
+      "Bootstrap emits canonical audit events.",
+      "The initial control credential is not permanent: it expires or requires rotation; the mechanism is implementation-free."
+    ],
+    "reset": [
+      "Runs under operator/OS authority only.",
+      "Revokes every existing control credential; a reset that leaves prior control credentials valid would be a second issuance path that survives revocation.",
+      "Destroys neither Application data nor audit evidence.",
+      "Emits canonical audit events.",
+      "A credential issued by reset follows the same non-permanence rule as the bootstrap credential."
+    ],
+    "bounds": "The control surface publishes its own limits and limit_enforcement via control discovery. Application count, credentials per application, and control operation rate are finite (limits classes: applications, credentials_per_application, control_requests_per_minute)."
+  },
+  "structured_operations": {
+    "allowed_query_operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"],
+    "query_operators": {
+      "contains": "Literal substring containment, case-sensitive: every character of the value is matched verbatim, and no character of the value is interpreted as a wildcard or pattern token.",
+      "matches": "Wildcard pattern match, case-sensitive: % matches any sequence including the empty one, _ matches exactly one character, and a backslash escapes the next character. A pattern ending in an unescaped backslash has no next character to escape and is refused with VALIDATION_FAILED. An implementation not providing matches refuses it with CAPABILITY_UNSUPPORTED; it is never silently interpreted as a different operator.",
+      "case_folding": "Neither operator folds case; a case-insensitive comparison would be a separate additive operator."
+    },
+    "allowed_mutations": ["insert", "update", "upsert", "delete"],
+    "allowed_schema_operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"],
+    "identifier": "ASCII letters, digits, and underscore; first character must be a letter or underscore; implementation may apply a stricter known-catalog policy.",
+    "values": "JSON values are passed through a parameter-binding boundary; values are never interpolated into native command text.",
+    "sql": "No public operation accepts SQL, database-native command text, scripts, or connection credentials.",
+    "scope": "The target Application is the authenticated credential's server-derived scope. A client application_id, database, schema, or role field is not authority.",
+    "mutation_classes": {
+      "enum": ["read_only", "append_only", "append_delete", "mutable"],
+      "supports": {"read_only": [], "append_only": ["insert"], "append_delete": ["insert", "delete"], "mutable": ["insert", "update", "upsert", "delete"]},
+      "rule": "Where row_addressability is enabled, every entity declares one mutation class in the catalog, and a declared class rejects every mutation it does not support with CAPABILITY_UNSUPPORTED. delete under append_delete is set semantics (all rows matching the predicate); an entity that needs guaranteed single-row deletion declares the mutable class.",
+      "declaration_required": "There is no default for an undeclared entity: an implementation must not advertise row_addressability as enabled until every entity carries a declaration."
+    },
+    "addressability": {
+      "applies_to": "Entities declaring the mutable class.",
+      "properties": [
+        "Declared: the catalog entry names the field set that constitutes the row address.",
+        "Visible: address fields are ordinary selectable fields and appear in query results.",
+        "Targetable: a where+eq over the full address set matches at most one row; a write that would duplicate an address set fails with CONFLICT.",
+        "Immutable: address values do not change during a row's lifetime; an update that modifies an address field fails with VALIDATION_FAILED.",
+        "No spontaneous reassignment: a retired address is reassigned only as the result of explicit client mutations (delete then insert); maintenance operations (compaction, vacuum, rebuild, restart) never renumber or reassign addresses. Conformance evidence combines automated tests over inducible disturbances with review evidence over maintenance paths."
+      ],
+      "reuse_declaration": "Every mutable entity's catalog entry declares whether a retired address can be reused by a later insert (address_reuse: never or possible); a client reads the declaration to decide whether revision preconditions are required for its access pattern.",
+      "assigned_identifiers": "Server-assigned address values returned by MutationResult are Application-scoped; their values and increments must not permit inferring another Application's existence or activity. Each assigned_addresses element carries the created row's address-field values under address, one element per insert (and upsert resolving to insert) in operation order; on the cross-entity endpoint the element also names its entity."
+    },
+    "upsert": "upsert's existence test is the entity's declared domain uniqueness: a key created by create_index with unique true, surfaced in the catalog as the EntityDescriptor's unique_keys. upsert on an entity without a declared uniqueness key, and upsert or update on an entity not declaring the mutable class, fail with CAPABILITY_UNSUPPORTED. Where an entity declares more than one uniqueness key, the operation names the deciding key in its unique_key field using the catalog key name; with exactly one declared key, unique_key may be omitted and defaults to that key. An upsert omitting unique_key on an entity with multiple declared keys fails with VALIDATION_FAILED (the existence test would be ambiguous), a unique_key naming no declared key fails with NOT_FOUND, and unique_key on any operation other than upsert fails with VALIDATION_FAILED. On an entity with no declared uniqueness key, upsert fails with CAPABILITY_UNSUPPORTED regardless of any unique_key field (the capability check precedes key-name resolution).",
+    "revision_preconditions": {
+      "capability": "revision_preconditions",
+      "clauses": [
+        "A revision is an implementation-issued opaque string; clients do not interpret its content.",
+        "Its scope is one row; it is distinct from any entity schema revision.",
+        "It changes every time a mutation of that row commits.",
+        "It does not change on mutations of other rows.",
+        "The expected_revision comparison is atomic with the mutation.",
+        "A mismatch fails with PRECONDITION_FAILED. A missing target row fails with NOT_FOUND for update and delete, and for upsert when no uniqueness match exists (a precondition asserts a known existing row; it is never silently ignored by resolving to insert). expected_revision on insert fails with VALIDATION_FAILED. Without expected_revision, an update or delete matching zero rows remains a success with affected 0; NOT_FOUND applies only when a precondition asserted existence."
+      ],
+      "query_results": "An implementation advertising revision_preconditions as enabled returns row revisions alongside query results (QueryResult.revisions, index-aligned with items) for entities of the append_delete and mutable classes — the classes that support row mutation and can therefore use a precondition. read_only and append_only entities carry no revisions: a recomputed read-only projection has no stable row for a revision to name, and requiring one there would gate the very class those declarations exist to admit. Implementations not advertising the capability are not required to maintain revisions."
+    }
+  },
+  "transactions": {
+    "default": "atomic",
+    "atomic": "All operations in the declared atomic unit commit together or leave no externally visible partial state.",
+    "best_effort": "Only a capability that declares best_effort may return per-item outcomes; the contract must identify partial effects.",
+    "cross_entity": "The cross_entity_mutation capability executes one atomic unit across entities within a single Application's storage scope. Cross-Application atomicity is not defined. Validation of every operation across every entity completes before any execution begins.",
+    "interactive": "No interactive transaction surface (begin/commit held open across client round trips) is defined in v1; the atomic unit is a single request. Holding locks and connections across client round trips is an SI-08 hazard. Reconsideration: a design that structurally proves finite bounds on cross-round-trip resource holding may be reviewed as a separate contract change.",
+    "retry": "Clients use idempotency_key, revision preconditions, or explicit conflict handling; retries do not silently widen scope."
+  },
+  "errors": {
+    "content_type": "application/problem+json",
+    "shape": {"type": "string", "code": "string", "message": "string", "request_id": "string", "details": "object"},
+    "codes": ["AUTH_REQUIRED", "AUTH_INVALID", "AUTH_REVOKED", "APPLICATION_DISABLED", "AUTH_STATE_UNAVAILABLE", "FORBIDDEN", "SCOPE_MISMATCH", "VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED", "NOT_FOUND", "CONFLICT", "PRECONDITION_FAILED", "LIMIT_EXCEEDED", "DESTRUCTIVE_CONFIRMATION_REQUIRED", "ATOMICITY_FAILED", "SERVICE_UNAVAILABLE"],
+    "disclosure": "No credential material, SQL, row values, stack traces, database names, role names, connection details, or sensitive existence distinctions are returned. Safe field-level diagnostics remain allowed."
+  },
+  "limits": {
+    "finite_required": true,
+    "profile": "Limits are deployment-profile values and are returned by capability discovery.",
+    "classes": ["request_bytes", "batch_items", "batch_entities", "result_items", "query_complexity", "execution_ms", "concurrency", "requests_per_minute", "schema_objects", "operation_depth", "idempotency_entries", "idempotency_retention_ms", "applications", "credentials_per_application", "control_requests_per_minute"],
+    "example_profile": {"request_bytes": 1048576, "batch_items": 100, "batch_entities": 4, "result_items": 1000, "query_complexity": 50, "execution_ms": 5000, "concurrency": 32, "requests_per_minute": 600, "schema_objects": 1000, "operation_depth": 8, "idempotency_entries": 10000, "idempotency_retention_ms": 86400000, "applications": 100, "credentials_per_application": 10, "control_requests_per_minute": 60}
+  },
+  "lifecycle": {
+    "credential": "Control authority may issue, rotate, revoke, disable, or enable credentials. Revocation is terminal: a revoked credential can never be made valid again, and enable reverses disable only. Disable/enable are reversible operational states. Rotation replaces the same credential's secret; the replaced secret's invalidation is effective when the rotate response succeeds. A revoked credential is rejected on subsequent authorization after the documented propagation bound.",
+    "application": "A disabled Application rejects all application-facing operations; authorization state unavailable for a protected operation fails closed.",
+    "user_session": "Where Application User/Identity is enabled, user/session status and policy are server-bound and revocation is fail-closed within the published bound.",
+    "propagation_bound": "Each deployment publishes a finite authorization-state propagation bound in its profile; indefinite stale authorization is non-conformant."
+  },
+  "audit": {
+    "emission": "The service emits canonical attributable events for authentication/authorization denials, lifecycle changes, destructive and privilege-sensitive operations, and security-control failures.",
+    "sink_failure_policy": "Failure to durably record an authentication/authorization denial, a credential or Application lifecycle change, a destructive or privilege-sensitive operation, or a security-control failure fails the operation closed. Failure to record an ordinary data-operation event may be absorbed by a bounded buffer that raises an explicit operational alert; it must not silently discard events without that alert.",
+    "fields": ["event_id", "event_class", "occurred_at", "request_id", "application_id", "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code"],
+    "forbidden_fields": ["credential", "token", "password", "secret", "private_key", "sql", "row_value"],
+    "immutability": "Application authority cannot author, override, update, or delete security evidence. The sink is append-only and externally governed where required by the deployment.",
+    "query_authority": "Audit evidence query is separate from emission and requires control/audit authority."
+  },
+  "schemas": {
+    "QueryRequest": {"type": "object", "additionalProperties": false, "required": ["select"], "properties": {"select": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "order_by": {"type": "array", "maxItems": 10, "items": {"$ref": "#/definitions/Order"}}, "page": {"$ref": "#/definitions/Page"}}},
+    "MutationRequest": {"type": "object", "additionalProperties": false, "required": ["operations"], "properties": {"operations": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/definitions/Mutation"}}, "transaction": {"enum": ["atomic", "best_effort"]}, "idempotency_key": {"type": "string", "maxLength": 128}}},
+    "ScopedMutationRequest": {"type": "object", "additionalProperties": false, "required": ["operations"], "properties": {"operations": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/definitions/ScopedMutation"}}, "idempotency_key": {"type": "string", "maxLength": 128}}},
+    "SchemaOperationRequest": {"type": "object", "additionalProperties": false, "required": ["operation", "entity"], "properties": {"operation": {"enum": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"]}, "entity": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "fields": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}, "index": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "unique": {"type": "boolean"}, "field_type": {"enum": ["string", "integer", "number", "boolean", "object", "array"]}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}, "revision": {"type": "string", "maxLength": 128}}},
+    "CapabilityDocument": {"type": "object", "additionalProperties": false, "required": ["contract_version", "capabilities", "limits", "limit_enforcement", "authorization_propagation_bound_ms"], "properties": {"contract_version": {"type": "string"}, "capabilities": {"type": "object", "additionalProperties": {"type": "object", "required": ["status"], "properties": {"status": {"enum": ["enabled", "partial", "unavailable", "planned"]}}}}, "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}, "limit_enforcement": {"type": "object", "additionalProperties": {"enum": ["enforced", "reference_wall_clock", "deployment_required", "unavailable"]}}, "authorization_propagation_bound_ms": {"type": "integer", "minimum": 0}, "application_scope": {"type": "string"}, "role": {"enum": ["runtime", "developer", "control", "audit"]}}},
+    "QueryResult": {"type": "object", "required": ["items", "next_page"], "properties": {"items": {"type": "array"}, "next_page": {"type": ["string", "null"]}, "revisions": {"type": "array", "items": {"type": "string"}}}},
+    "MutationResult": {"type": "object", "required": ["committed", "affected"], "properties": {"committed": {"type": "boolean"}, "affected": {"type": "integer", "minimum": 0}, "assigned_addresses": {"type": "array", "items": {"type": "object", "required": ["address"], "properties": {"entity": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "address": {"type": "object"}}}}}},
+    "CatalogDocument": {"type": "object", "required": ["application_scope", "entities"], "properties": {"application_scope": {"type": "string"}, "entities": {"type": "array", "items": {"$ref": "#/definitions/EntityDescriptor"}}}},
+    "SchemaOperationResult": {"type": "object", "required": ["committed", "revision"], "properties": {"committed": {"type": "boolean"}, "revision": {"type": "string"}}},
+    "AuditQueryRequest": {"type": "object", "properties": {"event_classes": {"type": "array", "maxItems": 20}, "after": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}}},
+    "AuditResult": {"type": "object", "required": ["events"], "properties": {"events": {"type": "array", "items": {"type": "object"}}}},
+    "ApplicationRegistrationRequest": {"type": "object", "additionalProperties": false, "required": ["application_id"], "properties": {"application_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,32}$"}}},
+    "ApplicationStateResult": {"type": "object", "required": ["application_id", "enabled"], "properties": {"application_id": {"type": "string"}, "enabled": {"type": "boolean"}}},
+    "ApplicationsResult": {"type": "object", "required": ["applications"], "properties": {"applications": {"type": "array", "items": {"type": "object", "required": ["application_id", "enabled"], "properties": {"application_id": {"type": "string"}, "enabled": {"type": "boolean"}}}}}},
+    "CredentialIssueRequest": {"type": "object", "additionalProperties": false, "required": ["application_id", "role"], "properties": {"application_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,32}$"}, "role": {"enum": ["runtime", "developer", "control"]}}},
+    "CredentialIssued": {"type": "object", "required": ["credential_id", "application_id", "role", "secret"], "properties": {"credential_id": {"type": "string"}, "application_id": {"type": "string"}, "role": {"enum": ["runtime", "developer"]}, "secret": {"type": "string"}}},
+    "CredentialsResult": {"type": "object", "required": ["credentials"], "properties": {"credentials": {"type": "array", "items": {"type": "object", "required": ["credential_id", "role", "enabled", "revoked"], "properties": {"credential_id": {"type": "string"}, "application_id": {"type": "string"}, "role": {"enum": ["runtime", "developer", "control", "audit"]}, "enabled": {"type": "boolean"}, "revoked": {"type": "boolean"}}}}}},
+    "CredentialRevokeRequest": {"type": "object", "additionalProperties": false, "properties": {"destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}}},
+    "CredentialRotated": {"type": "object", "required": ["credential_id", "secret"], "properties": {"credential_id": {"type": "string"}, "secret": {"type": "string"}}},
+    "CredentialStateResult": {"type": "object", "required": ["credential_id", "enabled", "revoked"], "properties": {"credential_id": {"type": "string"}, "enabled": {"type": "boolean"}, "revoked": {"type": "boolean"}}}
+  },
+  "definitions": {
+    "Predicate": {"type": "object", "additionalProperties": false, "required": ["field", "operator"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "operator": {"enum": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]}, "value": {}}},
+    "Order": {"type": "object", "additionalProperties": false, "required": ["field", "direction"], "properties": {"field": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "direction": {"enum": ["asc", "desc"]}}},
+    "Page": {"type": "object", "additionalProperties": false, "properties": {"size": {"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": {"type": "string", "maxLength": 512}}},
+    "Mutation": {"type": "object", "additionalProperties": false, "required": ["operation"], "properties": {"operation": {"enum": ["insert", "update", "upsert", "delete"]}, "values": {"type": "object", "maxProperties": 100}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "expected_revision": {"type": "string", "maxLength": 128}, "unique_key": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}}},
+    "ScopedMutation": {"type": "object", "additionalProperties": false, "required": ["operation", "entity"], "properties": {"operation": {"enum": ["insert", "update", "upsert", "delete"]}, "entity": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "values": {"type": "object", "maxProperties": 100}, "where": {"type": "array", "maxItems": 50, "items": {"$ref": "#/definitions/Predicate"}}, "expected_revision": {"type": "string", "maxLength": 128}, "unique_key": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "destructive": {"type": "boolean"}, "confirmation": {"type": "string", "maxLength": 128}}},
+    "EntityDescriptor": {"type": "object", "required": ["entity", "fields"], "properties": {"entity": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "fields": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}, "mutation_class": {"enum": ["read_only", "append_only", "append_delete", "mutable"]}, "address_fields": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}, "address_reuse": {"enum": ["never", "possible"]}, "unique_keys": {"type": "array", "items": {"type": "object", "required": ["name", "fields"], "properties": {"name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "fields": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}}}}}, "if": {"required": ["mutation_class"], "properties": {"mutation_class": {"const": "mutable"}}}, "then": {"required": ["entity", "fields", "mutation_class", "address_fields", "address_reuse"]}}
+  }
+}
