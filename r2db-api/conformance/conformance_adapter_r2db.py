@@ -23,7 +23,7 @@ import os
 import sys
 import uuid
 from dataclasses import replace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NoReturn, Sequence
 
 # The common port lives at conformance-tests/adapter.py. When the combined
 # suite runs from the repository root (root pyproject.toml pythonpath,
@@ -45,10 +45,12 @@ from adapter import (  # noqa: E402
     BatchOperation,
     ConformanceAdapter,
     ConformanceDenial,
+    ControlCredentialHandle,
     CredentialHandle,
     Fixture,
     PayloadNotExpressible,
     ScopeView,
+    SurfaceAbsent,
     TamperVector,
 )
 
@@ -131,6 +133,146 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         handle = self.issue_credential(probe_app, "runtime")
         session = self.authenticate(handle)
         return self._call(lambda: self._service.capabilities(session))
+
+    # ------------------------------------------------------------------
+    # control plane HTTP surface (port v1.5) -- surface-absent branch
+    # ------------------------------------------------------------------
+    #
+    # Control-plane HTTP work (CCR-14 design docs/design/
+    # R2DB_CCR14_CONTROL_PLANE_V1.md, work packages WP-2 onward) has not
+    # landed in `r2db_api.src` as of this port revision -- there is no
+    # `/control/v1` surface, no `ControlPlaneService`, and no bootstrap/
+    # reset CLI ritual to call into. Every one of the 13 port v1.5
+    # operations therefore takes the surface-absent branch (design section
+    # 4, form (a)) unconditionally, via this one shared helper (avoids 13
+    # near-duplicate `SurfaceAbsent` call sites making 13 near-duplicate
+    # claims that could drift out of sync with each other).
+    #
+    # The claim itself: `public_operation_callables()` -- the same five
+    # real `DataService` callables (`authenticate`/`capabilities`/`query`/
+    # `mutate`/`schema`) C-03's native-command-surface check already
+    # inspects -- has no parameter shaped like a control-plane primitive
+    # (`credential`/`control`/`bootstrap`/`rotate`/`revoke`), independently
+    # re-verified by the caller via `signature_forbids_parameters` against
+    # `self.public_operation_callables()`, never accepted on this
+    # comment's word alone (C-17 precedent density,
+    # `MitateDB-api/conformance/conformance_adapter_mitatedb.py:443-476`).
+    # `ControlAuthority` (`self._control`, used only by the privileged
+    # out-of-band setup group above -- `provision_application`/
+    # `issue_credential`/etc.) is a private, non-application-facing
+    # authority: `r2db_api.topology`'s own structural validation is what
+    # actually keeps it unreachable from `public_operation_callables()`'s
+    # five entries (`r2db-api/tests/test_topology.py`), not a promise this
+    # adapter makes on the peer's behalf.
+    def _control_surface_absent(self, operation: str, requested: str) -> NoReturn:
+        raise SurfaceAbsent(
+            self.name, operation,
+            f"no control-plane entry point exists on this peer's public surface (requested: {requested})",
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["credential", "control", "bootstrap", "rotate", "revoke"],
+        )
+
+    # port v1.5
+    def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+        """No control-plane capabilities entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("control_capabilities", f"actor={actor!r}")
+
+    # port v1.5
+    def register_application_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+    ) -> Mapping[str, Any]:
+        """No in-band application-registration entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("register_application_inband", f"application_id={application_id!r}")
+
+    # port v1.5
+    def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        """No in-band application-listing entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("list_applications", f"actor={actor!r}")
+
+    # port v1.5
+    def set_application_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        """No in-band application enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent(
+            "set_application_enabled_inband", f"application_id={application_id!r} enabled={enabled!r}"
+        )
+
+    # port v1.5
+    def issue_credential_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
+    ) -> CredentialHandle:
+        """No in-band credential-issuance entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent(
+            "issue_credential_inband", f"application_id={application_id!r} role={role!r}"
+        )
+
+    # port v1.5
+    def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        """No in-band credential-listing entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("list_credentials", f"actor={actor!r}")
+
+    # port v1.5
+    def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
+        """No in-band credential-rotation entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("rotate_credential", f"credential_ref={credential_ref!r}")
+
+    # port v1.5
+    def revoke_credential_inband(
+        self,
+        actor: "CredentialHandle | ControlCredentialHandle",
+        credential_ref: str,
+        *,
+        destructive: bool | None = None,
+        confirmation: str | None = None,
+    ) -> Mapping[str, Any]:
+        """No in-band credential-revocation entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent(
+            "revoke_credential_inband",
+            f"credential_ref={credential_ref!r} destructive={destructive!r} confirmation={confirmation!r}",
+        )
+
+    # port v1.5
+    def set_credential_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        """No in-band credential enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent(
+            "set_credential_enabled_inband", f"credential_ref={credential_ref!r} enabled={enabled!r}"
+        )
+
+    # port v1.5
+    def bootstrap(self) -> ControlCredentialHandle:
+        """No out-of-band bootstrap ritual mechanism exists on this adapter's peer connection yet -- WP-2 has not
+        landed; see `_control_surface_absent`."""
+        self._control_surface_absent("bootstrap", "ritual bootstrap (no actor -- out-of-band by contract)")
+
+    # port v1.5
+    def reset(self) -> ControlCredentialHandle:
+        """No out-of-band reset ritual mechanism exists on this adapter's peer connection yet; see `_control_surface_absent`."""
+        self._control_surface_absent("reset", "ritual reset (no actor -- out-of-band by contract)")
+
+    # port v1.5
+    def control_credential(self) -> ControlCredentialHandle:
+        """No control credential can be minted -- bootstrap/reset do not exist yet; see `_control_surface_absent`."""
+        self._control_surface_absent("control_credential", "privileged control-credential setup")
+
+    # port v1.5
+    def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
+        """No control-plane audit trail exists to observe yet; see `_control_surface_absent`."""
+        self._control_surface_absent("control_audit_events", "control-plane audit observation")
+
+    # port v1.5 (fix-round): the inverse of `provision_application`.
+    # `ControlAuthority` (checked by source inspection) has no
+    # application-removal method of any kind -- `register_application`/
+    # `set_application_enabled`/`set_credential_state`/`issue_credential`
+    # is the entire real surface -- consistent with the contract keeping
+    # application deletion out of v1 scope. There is therefore no real
+    # mechanism to wire this to yet, exactly like the other 13 port v1.5
+    # operations.
+    def deprovision_application(self, application_id: str) -> None:
+        """No application-removal mechanism exists on this peer yet; see `_control_surface_absent`."""
+        self._control_surface_absent("deprovision_application", f"application_id={application_id!r}")
 
     # ------------------------------------------------------------------
     # application plane

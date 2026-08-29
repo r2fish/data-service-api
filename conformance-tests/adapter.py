@@ -68,6 +68,26 @@ class CredentialHandle:
 
 
 @dataclass(frozen=True)
+class ControlCredentialHandle:
+    """A control-plane credential handle (port v1.5, design docs/design/
+    R2DB_CCR14_CONTROL_PLANE_V1.md section 4). Deliberately a distinct type
+    from `CredentialHandle`, not a variant of it: a control credential
+    belongs to no Application at all (the contract's `control_credential`
+    scheme has no `application_id`/`role` slot the way an application
+    credential's `runtime`/`developer` scheme does -- design section R-2:
+    "control credential is not FK'd to any Application"). Minting a
+    `ControlCredentialHandle` with a placeholder `application_id`/`role`
+    just to satisfy `CredentialHandle`'s shape would let a scope-tampering
+    defect hide behind a value this port itself fabricated; keeping the
+    types disjoint makes such a value a type error instead of a silent
+    coercion.
+    """
+
+    credential_ref: str  # opaque reference (e.g. "ctl_...")
+    secret: str  # synthetic test value only. Never a real credential.
+
+
+@dataclass(frozen=True)
 class ScopeView:
     application_id: str
     role: str
@@ -164,6 +184,31 @@ class SurfaceAbsent(Exception):
     Must never be raised to excuse a peer that genuinely received and
     mishandled a request -- that is what `ConformanceDenial` and the
     suite's own assertions are for.
+
+    `exempt_parameters` (port v1.5 fix-round, design docs/design/
+    R2DB_CCR14_CONTROL_PLANE_V1.md WP-1 independent review, major M-7):
+    an optional sequence of qualified `"<callable.__qualname__>.<param>"`
+    strings (the exact label `signature_forbids_parameters` itself emits
+    for a violation) naming a REAL parameter on the declared `surface`
+    that happens to match one of `forbidden_parameters`'s fragments by
+    coincidence, but cannot actually carry the absent capability -- e.g. a
+    peer's ordinary session-authentication entry point taking a parameter
+    literally named `credential_id`, which identifies an *already-issued*
+    application credential rather than anything control-plane-shaped. An
+    exemption is not a way to make an inconvenient violation disappear:
+    a consumer verifying this claim (`signature_forbids_parameters(surface,
+    forbidden_parameters)`) MUST additionally assert the violations it
+    finds are EXACTLY `exempt_parameters` -- no more (an unexempted, live
+    violation is still a genuine claim failure) and no less (a stale or
+    padded exemption naming a parameter that does not actually appear as a
+    violation is itself suspicious: it either no longer applies, having
+    been carried over from a prior surface, or was never a real exemption
+    to begin with). The justification for each exemption belongs in the
+    adapter's own source, next to the `SurfaceAbsent` call site that
+    supplies it -- this constructor does not validate the justification's
+    content, only that the mechanism exists for a consumer to hold the
+    claim to account. Empty by default: most `SurfaceAbsent` claims need
+    no exemption at all.
     """
 
     def __init__(
@@ -174,6 +219,7 @@ class SurfaceAbsent(Exception):
         *,
         surface: Sequence[Callable],
         forbidden_parameters: Sequence[str],
+        exempt_parameters: Sequence[str] = (),
     ) -> None:
         if not surface:
             raise ValueError("SurfaceAbsent requires a non-empty surface to inspect")
@@ -184,6 +230,7 @@ class SurfaceAbsent(Exception):
         self.reason = reason
         self.surface = tuple(surface)
         self.forbidden_parameters = tuple(forbidden_parameters)
+        self.exempt_parameters = tuple(exempt_parameters)
         super().__init__(f"{adapter}: {operation} has no surface on this peer: {reason}")
 
 
@@ -428,6 +475,23 @@ class ConformanceAdapter(ABC):
     @abstractmethod
     def provision_application(self, application_id: str) -> None: ...
 
+    # port v1.5 (fix-round, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
+    # WP-1 independent review, supervisor ruling on B-1/B-2): the inverse of
+    # `provision_application` -- test-harness-only cleanup performed through
+    # the peer's operator-privileged path, never a public API capability
+    # (the contract keeps application deletion out of v1 scope entirely;
+    # this is not a `revoke_credential_inband`-style in-band operation and
+    # has no port v1.5 in-band counterpart). Exists so C-14 vector 5's
+    # `applications` resource-bound drive can undo the permanent Applications
+    # it registers to saturate the bound, instead of poisoning the
+    # session-scoped adapter's registry for every later test that shares it.
+    # A peer with real out-of-band deletion support (WP-5 onward) implements
+    # this for real; a peer with no control plane at all raises
+    # `SurfaceAbsent` the same way the other privileged setup/observation
+    # operations below do (`control_credential`/`control_audit_events`).
+    @abstractmethod
+    def deprovision_application(self, application_id: str) -> None: ...
+
     @abstractmethod
     def issue_credential(self, application_id: str, role: str) -> CredentialHandle: ...
 
@@ -461,6 +525,273 @@ class ConformanceAdapter(ABC):
         real SI-13 gap -- the suite must show that as a failure, not accept
         an escape hatch (design principle 4: uncertainty must not silently
         become permission).
+        """
+
+    # ------------------------------------------------------------------
+    # control plane HTTP surface (port v1.5, design docs/design/
+    # R2DB_CCR14_CONTROL_PLANE_V1.md section 4 "conformance -- port
+    # extension and C-14/C-15 executable化")
+    # ------------------------------------------------------------------
+    #
+    # CCR-14's contract adds an in-band `/control/v1` surface (11
+    # endpoints) alongside the pre-existing out-of-band provisioning
+    # primitives above (`provision_application`/`issue_credential`/
+    # `revoke_credential`/`disable_application`/`enable_application`).
+    # Those two groups play different roles on this port and must not be
+    # confused: the group above is this adapter's own privileged,
+    # out-of-band mechanism for building test preconditions -- never
+    # itself the thing C-14/C-15 verify. The 13 operations below ARE the
+    # thing under test: each presents a request to whatever real in-band
+    # entry point a genuine application/control credential holder would
+    # use, exactly as every other operation on this ABC already does for
+    # its own plane (adapters observe the peer, they do not stand in for
+    # it). 11 contract endpoints collapse onto 9 in-band operations here:
+    # `POST .../applications/{id}/enable` and `.../disable` fold into one
+    # `set_application_enabled_inband(..., enabled: bool)`, and the
+    # credential pair does the same for `set_credential_enabled_inband`.
+    #
+    # `actor: CredentialHandle | ControlCredentialHandle` on every in-band
+    # operation below is presented to the peer's real entry point exactly
+    # as received -- this adapter never pre-filters by credential kind or
+    # role before presenting the request. **Authorization is the peer's
+    # own decision to make, not this port's.** This is what lets C-14
+    # vector 1 (an application credential -- `issue_credential`'s ordinary
+    # output -- handed here as `actor` against every one of these 13
+    # operations) be a genuine measurement of the peer's own fail-closed
+    # behavior, rather than the adapter enforcing the boundary locally and
+    # reporting success regardless of what the peer itself would have
+    # done.
+    #
+    # A denial is always `ConformanceDenial`, with `code` set by
+    # `classify()` from a real native failure the peer's own real entry
+    # point produced -- an adapter that raises one without ever presenting
+    # the request is exactly the fabrication `SurfaceAbsent`'s own
+    # docstring forbids (design principle 4), applied here to denial just
+    # as it already is to absence-claims. A peer with no in-band surface
+    # at all raises `SurfaceAbsent` instead (carrying `surface`/
+    # `forbidden_parameters`, C-17 precedent, so the claim is
+    # independently re-verifiable via `signature_forbids_parameters`
+    # rather than trusted); a peer whose surface exists but whose
+    # `control_plane` capability is declared `unavailable` refuses every
+    # real entry point uniformly with `CAPABILITY_UNSUPPORTED` instead
+    # (design section 4's two forms: (a) surface-absent, (b)
+    # declared-unavailable -- see `test_c14_authority_boundary.py`'s
+    # module docstring for how the condition suite dispatches between
+    # them).
+    #
+    # A conformance build of a peer that DOES implement this surface (a
+    # future work package's responsibility, not this port revision's) MUST
+    # configure its SI-08 resource-boundary classes (`applications`,
+    # `credentials_per_application`, `control_requests_per_minute`) small
+    # enough to actually be driven past in one test run -- 200 or below is
+    # recommended. A bound that is only theoretically finite (e.g. a
+    # production-scale default left in place) makes C-14 vector 5
+    # unexercisable in practice, which is exactly the "declared but never
+    # actually driven" gap design principle 4 forbids for any boundary
+    # claim.
+
+    @abstractmethod
+    def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+        """`GET /control/v1/capabilities`-equivalent: the peer's own real
+        control-plane `CapabilityDocument`, exactly as `capability_document()`
+        already requires for the application plane -- never a document this
+        adapter assembles or invents on the peer's behalf. `actor` may be
+        any credential kind; per design section 2's endpoint table this is
+        the one control endpoint a `must_rotate` control credential remains
+        authorized for.
+        """
+
+    @abstractmethod
+    def register_application_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+    ) -> Mapping[str, Any]:
+        """`POST /control/v1/applications`-equivalent: registers
+        `application_id` as a "registered, not yet provisioned" Application
+        (design section R-4) and returns the peer's real response. Never
+        fabricates the registration outside the real entry point.
+        """
+
+    @abstractmethod
+    def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        """`GET /control/v1/applications`-equivalent: the peer's real
+        listing (`application_id`, `enabled`) of every registered
+        Application, exactly as returned -- not filtered or reshaped here.
+
+        Response-shape normalization (design docs/design/
+        R2DB_CCR14_CONTROL_PLANE_V1.md WP-1 independent review, major M-2):
+        the contract's real response is an envelope object (e.g.
+        `{"applications": [...]}`), not a bare array; this method unwraps
+        that envelope and returns the row *sequence* itself, so every
+        caller on this port works with the row list directly rather than
+        re-deriving the envelope key on every call site. Row keys are the
+        contract's own field names (`application_id`, `enabled`), passed
+        through unmodified -- never renamed to a port-invented vocabulary.
+        """
+
+    @abstractmethod
+    def set_application_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        """`POST .../applications/{id}/enable`/`.../disable`-equivalent,
+        collapsed onto one boolean per this group's own convention (see the
+        header comment above): `enabled=True` presents the real `enable`
+        request, `enabled=False` the real `disable` request -- never both,
+        and never simulated locally.
+        """
+
+    @abstractmethod
+    def issue_credential_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
+    ) -> CredentialHandle:
+        """`POST /control/v1/credentials`-equivalent: presents `role`
+        (`"runtime"`/`"developer"`/`"control"`) to the peer's real issuance
+        entry point exactly as given -- `role="control"` is deliberately
+        not pre-filtered here (contract plan B reserves control-credential
+        issuance to the bootstrap/reset ritual and refuses in-band
+        `role="control"` with `CAPABILITY_UNSUPPORTED`; this method's job
+        is only to present the request -- C-14 vector 3 is what asserts
+        the peer's own refusal and its evaluation order). Returns the
+        port's existing `CredentialHandle` type on a genuine
+        `runtime`/`developer` success, carrying the one-time-issued real
+        secret.
+
+        Response-shape normalization (M-2, mirrors `list_credentials`
+        below): the peer's real issuance response is unwrapped into this
+        port's `CredentialHandle` shape by the adapter, exactly as
+        `issue_credential`'s existing out-of-band counterpart already does
+        -- `CredentialHandle.credential_ref` holds the same value the peer
+        publishes as the contract's `credential_id`.
+        """
+
+    @abstractmethod
+    def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        """`GET /control/v1/credentials`-equivalent: the peer's real
+        combined application+control credential listing (no secrets, no
+        verifiers -- design section 2's own restriction), exactly as
+        returned.
+
+        Response-shape normalization (M-2): unwraps the contract's real
+        envelope (e.g. `{"credentials": [...]}`) into the row sequence,
+        same as `list_applications` above. Row keys are the CONTRACT's own
+        field names, passed through unmodified: `credential_id`,
+        `application_id` (absent on a control-credential row), `role`,
+        `enabled`, `revoked`. This port's own `CredentialHandle.
+        credential_ref` / `ControlCredentialHandle.credential_ref` field
+        holds the exact same value the peer publishes here as
+        `credential_id` -- a caller matching a handle against a row from
+        this method compares `handle.credential_ref == row["credential_id"]`,
+        never `row["credential_ref"]` (that key does not exist on the
+        real response; `credential_ref` is this port's own handle-field
+        name, not contract vocabulary).
+        """
+
+    @abstractmethod
+    def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
+        """`POST .../credentials/{id}/rotate`-equivalent: presents a real
+        rotation request for `credential_ref` (application or control
+        credential -- the peer resolves which store by trying both, design
+        section 2's own "id prefix is not promoted to semantics" rule) and
+        returns whatever the peer's real response carries (a fresh
+        one-time secret on success). Declared `-> object` rather than a
+        named port type because a rotate response's shape legitimately
+        differs between an application-credential rotation and a
+        control-credential rotation on the same peer, and this port does
+        not need to unify them to observe rotation's own effect -- a
+        caller that needs a usable handle back reads the peer's real
+        response for a `secret`-shaped field (see `test_c15_..._is_not_
+        permanent`'s own handling) rather than this port inventing a
+        second, unified rotate-result type.
+        """
+
+    @abstractmethod
+    def revoke_credential_inband(
+        self,
+        actor: "CredentialHandle | ControlCredentialHandle",
+        credential_ref: str,
+        *,
+        destructive: bool | None = None,
+        confirmation: str | None = None,
+    ) -> Mapping[str, Any]:
+        """`POST .../credentials/{id}/revoke`-equivalent. `destructive`/
+        `confirmation` follow the same pass-through convention `delete`'s
+        own docstring already establishes on this port (an adapter must
+        not upgrade or invent confirmation state) -- design section 0.5
+        notes this endpoint's confirmation *check* is presently suspended
+        (contract Q-1 unresolved), so a real peer built against this
+        design accepts the request whether or not these are supplied; the
+        port still carries them faithfully so a future peer that does
+        enforce confirmation is exercised identically without a second
+        port revision.
+        """
+
+    @abstractmethod
+    def set_credential_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        """`POST .../credentials/{id}/enable`/`.../disable`-equivalent,
+        collapsed the same way `set_application_enabled_inband` is.
+        """
+
+    # --- out-of-band ritual hooks (bootstrap/reset are, by contract,
+    # never in-band operations at all -- see design section R-5) ---
+
+    @abstractmethod
+    def bootstrap(self) -> ControlCredentialHandle:
+        """Executes the peer's real out-of-band bootstrap ritual (design
+        section R-5: `python -m r2db_api.ops bootstrap` or equivalent) and
+        returns the resulting control credential. No `actor` parameter --
+        by contract this ritual has no in-band caller at all (plan B's own
+        premise); an adapter runs the peer's real ritual mechanism (a CLI
+        subprocess, a direct call into the peer's own bootstrap function --
+        whichever is genuinely how an operator would invoke it), never
+        fabricates a credential row itself. Raises `ConformanceDenial` on
+        the peer's own real refusal (e.g. a control credential already
+        exists, C-15 vector 1) or `SurfaceAbsent` where no such ritual
+        mechanism exists on this peer at all yet.
+        """
+
+    @abstractmethod
+    def reset(self) -> ControlCredentialHandle:
+        """Executes the peer's real out-of-band reset ritual (design
+        section R-5) and returns the resulting control credential. Same
+        "real mechanism, no fabrication" contract as `bootstrap`.
+        """
+
+    # --- privileged setup / observation (not itself the in-band surface
+    # under test -- same category as `provision_application` above) ---
+
+    @abstractmethod
+    def control_credential(self) -> ControlCredentialHandle:
+        """Returns a control credential with the bootstrap/reset ritual
+        already completed and any must-rotate gate (design section R-5)
+        already cleared, ready to use as `actor` for any in-band operation
+        -- this port's equivalent of `issue_credential`'s role for the
+        application plane. Building this may require more than one real
+        peer call (bootstrap, then a real rotate to clear must-rotate) --
+        never a shortcut that skips a real gate the peer itself enforces.
+
+        MUST return a handle that is genuinely valid AT CALL TIME (design
+        docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md WP-1 independent review,
+        major M-4) -- never a memoized value from an earlier call. C-15
+        deliberately revokes and resets control credentials mid-test
+        (`test_c15_bootstrap_refused_while_any_control_credential_exists`,
+        `test_c15_reset_revokes_every_control_credential_...`); an adapter
+        that caches its first-ever `control_credential()` result and
+        returns the same stale handle on every subsequent call would make
+        those tests silently exercise a revoked/superseded credential
+        instead of a live one, which is not conformant to this method's
+        contract.
+        """
+
+    @abstractmethod
+    def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
+        """Observes the peer's own real control-plane audit trail (design
+        section R-6), exactly as recorded -- never assembled or inferred
+        by this adapter from other calls' side effects. Used by C-15
+        vector 4 to confirm state-change and denial events are both
+        durably recorded; not itself gated behind any `actor`, since audit
+        observation in a conformance build is adapter-privileged the same
+        way `provision_application` is.
         """
 
     # --- application plane ---

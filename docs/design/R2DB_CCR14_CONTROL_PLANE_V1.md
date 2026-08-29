@@ -4,6 +4,7 @@
 - 改訂: v1.1 — WP-0 独立レビュー (Opus、blocker 3 / major 10 / minor 10 / nit 2、全指摘を実測で裏取り済み・誤指摘 0) を反映。§8 訂正記録
 - 改訂: v1.2 — 依頼者との Q-1 検討 (2026-08-29) を反映: 確認機構の守備範囲の明文化 (§0.5)、CLI break-glass への control credential enable/rotate 追加 (R-10)、誤配・侵害への装備 (R-11)、契約 additive 候補2件 (§6)。§9 改訂記録
 - 改訂: v1.3 — 抑止宣言の採用 (依頼者合意、2026-08-29): 制御面の拒否応答に「徒労」と「帰属」の真実の宣言を載せる (R-11、§2)。§9 改訂記録
+- 改訂: v1.4 — WP-1 完了 (2026-08-29): port v1.5 / C-14・C-15 executable 化の実装レビュー (Opus、blocker 2 / major 7 / minor 7 / nit 2) の反映と、実装中の監督決定・変異注入結果。§10 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -269,3 +270,37 @@ blocker 3 / major 10 / minor 10 / nit 2。全指摘を監督が一次ソース�
 - 依頼者指摘「人は control credential をテストアプリに渡す。悪意ある者に渡ることもある」を受けて R-11 を新設: 可逆性の全数・監査の不可消去・持続化不能の明文化、playbook / sandbox 規則 / `ops.py audit-report` の WP-6 組み込み、契約 additive 候補2件 (audit role 読み取り、発行凍結)、複数本運用の不採用
 - disable された唯一の control credential の復活手段として CLI break-glass に enable / rotate を追加 (R-10)。revoke の復活は意図的に作らない (reset が正準)
 - v1.3: 抑止宣言を採用 (R-11、§2)。API に意図の判定器は置けない (正規と悪意の要求は構文上同一) — 代わりに、拒否応答へ「徒労」(in-band の control credential 作成経路は存在しない) と「帰属」(耐久記録・不可消去) の**真実の宣言**を載せ、要求を組み立てる利用者側 AI エージェントの安全学習に読ませる。期待効果は依頼者が「エージェントが警告・注意を出せば十分 (慎重化 + 面倒くさそうの醸成)」と確定。虚偽の宣言は禁止、安全はこの層に依存しない
+
+## 10. WP-1 実装記録 (2026-08-29、v1.4)
+
+WP-1 (port v1.5 + C-14/C-15 テスト実装 + 3 adapter surface-absent 分岐) を実装した。実装: Sonnet、独立レビュー: Opus (blocker 2 / major 7 / minor 7 / nit 2)、全指摘反映済み。suite は 544 → 575 passed (C-14/C-15 各5条件 × 3 adapter = 30 + traceability 検査1)。詳細な実装・変異記録は `docs/design/CONFORMANCE_ADAPTER_V1.md` §15。
+
+### 10.1 レビューが捕捉した主要欠陥 (全て provided 分岐 = WP-5 で初めて走るコードに集中)
+
+- **B-1**: C-14 ベクタ5の `LIMIT_EXCEEDED` は資源クラスを判別できず、契約 example_profile の値では applications 駆動が必ず rate limiter に先に当たる — rate limiter だけ実装した peer がベクタ5全体を空洞的に緑にできた。→ 位置算術で修正 (10.2-b)
+- **B-2**: applications 上限の駆動が session-scoped adapter の registry を回復不能に飽和させ、以後の全テストを汚染 (契約に削除経路が無い)。→ 特権 setup op `deprovision_application` の新設で修正 (10.2-a)
+- **major**: C-15 ベクタ1のテスト順序依存 / list 応答の鍵名が契約と乖離 (`credential_ref`→`credential_id`) / C-14 ベクタ4が R-4 の「登録済み・未 provisioning」を勘定せず data-plane authenticate を要求 / `control_credential()` の有効性義務未記載 / ベクタ2の縮約が無根拠 / C-15 ベクタ2の監査不変検査が文書の主張に対し未実装 / MitateDB の証拠 surface からの `open_session` 丸ごと除外が将来の回帰穴
+- **レビュア誤り 1件** (記録する慣例): B-1 の修正案として「契約の problem+json は既に `details.resource` を持つ」と提示されたが、実測で契約 `errors.shape` の `details` は自由形 object でありそのようなキーは存在しない。監督が一次ソースで裏取りして不採用にし、契約語彙を発明しない位置算術を採った
+
+### 10.2 監督決定 (いずれも覆せる。契約変更なし)
+
+- (a) **port v1.5 の具体形**: 設計 §4 の op 列に加え、特権 setup/観測 op として `control_credential()` (儀式完遂済み handle の用意)・`control_audit_events()` (監査観測)・`deprovision_application()` (登録の後始末 — 運用者特権経路の逆操作であり公開 API 能力では決してない) を追加。計14 abstract method。in-band op は毎呼び出し `actor` handle を取る (事前フィルタ禁止 — application credential を渡した fail-closed 実測が C-14 ベクタ1)。control credential は `ControlCredentialHandle` 別型 (application に属さない、R-2 整合)。list 系は契約 envelope を剥がし行の鍵は契約のまま返す
+- (b) **ベクタ5は位置算術で資源クラスを帰属**: 宣言 bound ちょうどまで成功→次の1件で `LIMIT_EXCEEDED`。早すぎる拒否は「クラスを帰属できない」として赤。conformance build 要件: applications/credentials bound ≤ 200、`control_requests_per_minute` > 両駆動の最悪要求数 + 64。rate クラスは恒久 bound が及ばない `control_capabilities` の burst で帰属し、窓 rollover (≤61s、provided 分岐のみ) 後の回復で過渡性 = rate クラスであることを証明
+- (c) **ベクタ4の実効性判定は control-plane レベル**: in-band 登録の効果は list 出現 + credential 発行成功まで。data-plane authenticate は要求しない (R-4: 登録済み・未 provisioning の credential は serving されるまでデータ面に到達しない — これは正しい fail-closed であり登録の欠陥ではない)
+- (d) **ベクタ2は authenticate 一点に縮約** (根拠明文化): 両 peer とも認証が全 data/schema endpoint の単一の門であるため endpoint 列挙と等価。認証を経ずに data endpoint へ到達できる peer が現れたら拡張が要る
+- (e) **C-15 ベクタ5の port 表現可能形**: 固定・空・ありがち秘密の不通 + 儀式2回の発行秘密の相違。「独立に bootstrap した2環境」の完全形は実装側テスト/review evidence
+- (f) **exemption 機構** (レビュー M-7 の採用形): `SurfaceAbsent.exempt_parameters` を新設し、テストは violations と宣言 exemption の**厳密一致** + 証拠 surface ⊇ `public_operation_callables()` を要求。MitateDB は全 surface + `open_session.credential_id` の1件 exemption (application 認証入口であり control 要求を運べない)。宣言の弱化・水増し・surface 削りの3変異が全て赤になることを実測
+- (g) **form (b) (declared-unavailable) の真正性検査は延期**: 捏造 `CAPABILITY_UNSUPPORTED` が port レベルで検出不能なことを変異 (M5/M9) で実測し、受理境界として明記。正の存在確認 op (`control_inband_surface()`) は form-(b) peer の初登録時に導入する
+- (h) **traceability の逆向き検査**: `test_conditions_register.py` に「marker を持つ条件は executable status を持つ」第3検査を追加 (変異 M6 が露出した片方向性の是正。逆向き C-12 と同じ発想)
+- (i) C-14 の CONDITIONS 行への SI-08 追加は本 WP で実施 (§4 の記載どおり)。audit sink 故障注入 fail-closed は WP-2/WP-3 の実装側テストスコープ
+- (j) C-15 ベクタ3は rotation-forcing 実現形で記述 (契約は機構自由 — TTL を選ぶ将来 peer には時刻注入の port 拡張が要る旨をテスト docstring に明記)
+
+### 10.3 変異注入 (検出力の実測)
+
+9変異中7が期待どおり赤: 実在パラメータの surface 混入 / 絶無主張なき成功 / 申告偽装 (enabled) / fragment 弱化 / exemption 水増し / surface 削り / CONDITIONS status 格下げ。緑のまま = 受理境界 2 (M5/M9、10.2-g で意図的に受理)。生存変異が実在のテスト欠落を示した例は無し (M6 は同一セッション内で是正済み)。
+
+### 10.4 WP-5 への申し送り
+
+- provided 分岐 (C-14/C-15 の enabled 側) は静的レビューのみで未実行。WP-5 の完了条件に「provided 分岐 green + 変異による検出力確認」が含まれる (§5 のとおり)
+- ベクタ5の rate 回復チェックは最大 61 秒を要する (CI タイムアウトに注意)。applications 駆動の precondition (`既存数 < bound`) は fixture 消費と bound 設定の関係に依存 — conformance build の bound は suite 自身の登録消費より十分大きく取ること
+- `deprovision_application` の実実装 (r2db 2 adapter) は WP-5 で行う (現在は3 adapter とも SurfaceAbsent)

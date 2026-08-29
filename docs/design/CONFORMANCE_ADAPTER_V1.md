@@ -2,9 +2,9 @@
 
 ## 文書情報
 
-- 版数: 1.4 (§13 を新設。port v1.3: `docs/design/R2DB_CCR13_STORAGE_V1.md` work package WP-5a 由来の coordinated revision -- C-17/C-18 の test file 実装・実行可能化、C-12 逆向き条件 (query 演算子)、`attempt_mutation` への `unique_key`、`attempt_mutation_with_addresses`、`attempt_filter`、r2db plug の型配線有効化、C-03 の contains/matches value corpus 拡張。逆向き条件の実提示で発見した `MitateDB-api` の `contains`/`is_null` 非適合 (`CAPABILITY_UNSUPPORTED` ではなく `VALIDATION_FAILED`) を是正)
-- 発行日: 2026-08-28
-- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)
+- 版数: 1.5 (§15 を新設。port v1.5: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` work package WP-1 由来の coordinated revision -- control-plane HTTP 面を検証するための 13 新規 abstract method (`ControlCredentialHandle` 型を含む)、C-14 (authority boundary)/C-15 (bootstrap/reset lifecycle) の test file 実装・実行可能化 (structural-evidence 分岐)、3 adapter 全ての `SurfaceAbsent` 実装。§15.9: 独立レビュー (blocker 2 / major 7 / minor 7 / nit 2、判定 approve-with-fixes) の fix-round を反映 -- 14番目の abstract method `deprovision_application`、`SurfaceAbsent.exempt_parameters`、C-14 vector 5 の positional-arithmetic 書き直し (B-1/B-2)、`test_conditions_register.py` への第3検査追加 (item 10、監督許可のscope拡張))
+- 発行日: 2026-08-29
+- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
 ## 1. 解決する問題
@@ -1105,3 +1105,401 @@ One more addition to the NORMATIVE surface: the new `@abstractmethod`
 takes a sequence of. Identical breaking-change consequence for any plug
 outside this repository: `ConformanceAdapter` remains an `ABC`, so a
 third-party plug missing the new method fails to instantiate at all.
+
+## 15. v1.5 port revision (coordinated with docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md work package WP-1)
+
+`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §4 raises C-14 (control-plane
+authority boundary) and C-15 (bootstrap/reset lifecycle), both registered
+in `conformance-tests/CONDITIONS.md` as `not yet executable` before this
+revision. Unlike §12's C-17/C-18 (whose *test* files were deliberately
+deferred to a later work package because no registered peer had landed
+the behavior they exercise), WP-1 makes C-14/C-15 executable immediately:
+every registered adapter has an honest, real answer to give right now --
+"no such surface exists" -- and design principle 4 (uncertainty must not
+silently become permission) treats an unwritten test for an honestly
+absent surface as exactly the kind of silent permission it forbids. This
+section is therefore a coordinated revision across the NORMATIVE surface
+this document's §4 defines and all three registered plugs
+(`conformance_adapter_r2db.py`, `conformance_adapter_r2db_http.py`,
+`conformance_adapter_mitatedb.py`), in the same change, exactly as §11-§14
+did for their own additions -- and it is a *complete* one this time (no
+plug left with a stub pending a future landing), because every plug's
+answer this time is uniformly the same, honest `SurfaceAbsent`.
+
+### 15.1 `ControlCredentialHandle`
+
+A new frozen dataclass, `credential_ref: str` / `secret: str`, deliberately
+*not* a variant of `CredentialHandle`: a control credential belongs to no
+Application at all (the contract's `control_credential` scheme has no
+`application_id`/`role` slot the way `runtime`/`developer` credentials do,
+design R2DB_CCR14_CONTROL_PLANE_V1 §R-2). Minting one with a placeholder
+`application_id`/`role` to reuse `CredentialHandle`'s shape would let a
+scope-tampering defect hide behind a value this port itself fabricated;
+the two types stay disjoint so such a value is a type error rather than a
+silent coercion. It duck-types compatibly with every currently-registered
+plug's `authenticate()` (which reads only `.secret`, or `.credential_ref`
++ `.secret` for `MitateDB-api`), which is what lets C-14 vector 2 present
+a `ControlCredentialHandle` to the application-plane `authenticate()`
+without a third, unifying handle type.
+
+### 15.2 Thirteen new `@abstractmethod`s
+
+The contract's 11 `/control/v1` endpoints fold onto 9 in-band port
+operations (`set_application_enabled_inband`/`set_credential_enabled_
+inband` each carry an `enabled: bool` instead of being split into an
+`enable_*_inband`/`disable_*_inband` pair): `control_capabilities`,
+`register_application_inband`, `list_applications`, `set_application_
+enabled_inband`, `issue_credential_inband`, `list_credentials`, `rotate_
+credential`, `revoke_credential_inband`, `set_credential_enabled_inband`.
+Two out-of-band ritual hooks follow the same shape as the pre-existing
+`provision_application`/`issue_credential` privileged-setup group rather
+than the in-band group: `bootstrap`/`reset` (no `actor` parameter at all
+-- by contract these rituals have no in-band caller, plan B's own
+premise). Two more privileged setup/observation operations complete the
+set: `control_credential` (a ritual-completed, fully-authorized control
+credential, ready to use as `actor`) and `control_audit_events` (an
+observation of the peer's own real audit trail).
+
+Every in-band operation's `actor` parameter is typed `CredentialHandle |
+ControlCredentialHandle` and is presented to the peer's real entry point
+exactly as received, with no adapter-side pre-filtering by credential
+kind or role -- **authorization is the peer's decision, never the
+port's**. This is what lets C-14 vector 1 (an ordinary application
+credential, `issue_credential`'s own output, handed here as `actor`
+against all 11 endpoints) be a genuine measurement of the peer's own
+fail-closed behavior rather than the adapter enforcing the boundary
+itself and reporting success regardless of what the peer would have
+done. `adapter.py`'s own new group-header comment (immediately preceding
+`control_capabilities` in the ABC) states this, and the shared
+resource-boundary-exercisability requirement (recommended <=200 for
+every SI-08 class a conformance build declares), once for the whole
+group rather than duplicated 13 times.
+
+**Fourteenth method, WP-1 fix-round (§15.9 below):** `deprovision_
+application(application_id: str) -> None` was added alongside
+`provision_application` (not in this in-band group -- it is a privileged,
+out-of-band, test-harness-only cleanup operation, never a public API
+capability) to give C-14 vector 5's `applications` resource-bound drive a
+way to undo what it registers.
+
+### 15.3 Two absence forms, both genuinely verified
+
+Design §4 defines two shapes a peer without a real, `enabled` in-band
+surface may honestly take, neither of which is a skip:
+
+- **(a) surface-absent**: no real call on the peer's public surface could
+  receive the request at all. The port operation raises `SurfaceAbsent`
+  (the same exception §12.5 introduced for `create_unique_index`/
+  `expected_revision`), carrying `surface`/`forbidden_parameters` so a
+  consumer independently re-verifies the claim via `signature_forbids_
+  parameters` rather than trusting it.
+- **(b) declared-unavailable**: a real entry point exists, but the peer's
+  `control_plane` capability is declared `unavailable`, so every real
+  entry point refuses uniformly with `CAPABILITY_UNSUPPORTED`. No
+  currently-registered peer takes this branch; the mechanism is defined
+  now so a future deployment shape that does (design §4's own adapter x
+  phase table leaves room for one) needs no further port revision.
+
+`test_c14_authority_boundary.py`/`test_c15_bootstrap_reset_lifecycle.py`
+dispatch between "provided" (`control_plane: enabled`) and "absent"
+(anything else) once, at the top of every test function, on
+`capability_document()["capabilities"]["control_plane"]["status"]` --
+the same pattern §13.7 established for C-17/C-18's `row_addressability`/
+`revision_preconditions` branching. Both files' absence branch goes one
+step further than that precedent: a shared per-file helper (`_assert_
+control_operation_absent_or_uniformly_refused`, deliberately duplicated
+between the two files rather than factored into a third module -- §15.6
+below) requires every operation exercised in one test to report the
+*same* form, since a `control_plane` declaration is supposed to mean one
+consistent thing about the peer's topology, not a per-operation coin
+flip.
+
+### 15.4 All three plugs: uniformly `SurfaceAbsent`, one shared helper each
+
+As of this revision, control-plane HTTP work (`docs/design/
+R2DB_CCR14_CONTROL_PLANE_V1.md` work packages WP-2 onward) has not landed
+in either peer's `src/`. Every one of the 13 new operations therefore
+takes the surface-absent branch, unconditionally, on all three plugs --
+via one shared private helper per plug (`_control_surface_absent`,
+avoiding 13 near-duplicate `SurfaceAbsent` call sites per plug that could
+drift out of sync with each other), each carrying comment density
+matching the C-17 precedent
+(`MitateDB-api/conformance/conformance_adapter_mitatedb.py:443-476`,
+`create_unique_index`'s own `SurfaceAbsent` raise) for why its own
+particular evidence supports the "absent" claim:
+
+- **`r2db-api` (in-process)**: evidence is `public_operation_callables()`
+  (the same five `DataService` callables C-03's native-command-surface
+  check already inspects). `ControlAuthority` is a private,
+  non-application-facing authority; `r2db_api.topology`'s own structural
+  validation, not this adapter, is what keeps it unreachable from that
+  five-callable surface.
+- **`r2db-api-http`**: same signature-level evidence, plus a live
+  measurement no other plug can make: before raising, the helper
+  inspects `self._app.app.routes` -- the real, running Starlette app's
+  own route table (`self._app` is the exact `RequestByteBoundMiddleware`-
+  wrapped app `create_app` built in `__init__`, now kept on the instance
+  for this purpose; `.app` is that middleware's own wrapped Starlette
+  instance) -- for any route whose `.path` starts with `/control`. Finding
+  one raises `AssertionError` rather than proceeding on a claim the
+  peer's own live state would contradict. This turns the absence claim
+  from a comment into a measurement, the strongest form of "confirmed by
+  source inspection, never assumed" available to an HTTP-boundary plug.
+- **`MitateDB-api`**: **superseded by the WP-1 fix-round (§15.9, independent
+  review major M-7)** -- an earlier revision of this plug excluded
+  `MitateDataService.open_session` from its evidence `surface` entirely to
+  dodge a signature-check false positive; that exclusion is reverted here
+  in favor of the `exempt_parameters` mechanism (§15.9 below), which keeps
+  the evidence surface honestly complete (the FULL, unmodified
+  `public_operation_callables()`) while still not treating the one known-
+  harmless name collision as a finding. `open_session(self, credential_id,
+  secret)`'s real `credential_id` parameter is this peer's ordinary
+  session-authentication argument (identifying which *already-issued*
+  application credential is authenticating) -- structurally incapable of
+  originating a bootstrap/reset/issue-role-control/rotate/revoke-shaped
+  request under any argument value. Its name nonetheless contains the
+  substring `"credential"`, which trips `signature_forbids_parameters`'s
+  deliberately coarse substring match. **Verified empirically, not
+  assumed, both before and after the fix**: running `signature_forbids_
+  parameters` against the full `public_operation_callables()` reports
+  exactly one violation, `MitateDataService.open_session.credential_id`
+  -- confirmed against this peer's own real `__qualname__` rather than
+  guessed -- which the plug now declares verbatim as its one
+  `exempt_parameters` entry.
+
+All three plugs pass the same `forbidden_parameters=["credential",
+"control", "bootstrap", "rotate", "revoke"]` -- verified, per-plug, to
+produce zero `signature_forbids_parameters` violations against the
+surface each one actually declares.
+
+### 15.5 Mutation-injection results (WP-1 completion condition)
+
+Recorded in this work's own implementation report
+(`WP1_IMPLEMENTATION_REPORT.md`) rather than duplicated here, per §13.7's
+precedent for C-17/C-18's own detection-power verification. Six mutations
+were exercised in the initial round (M1-M6): weakening a plug's declared
+`SurfaceAbsent` `surface` to include a real, control-shaped parameter; a
+plug returning a fabricated success instead of `SurfaceAbsent`; a plug's
+capability document lying `control_plane: enabled` while no real surface
+backs it; weakening `forbidden_parameters` to a narrow, non-covering
+fragment list; an adapter fabricating a `CAPABILITY_UNSUPPORTED` denial
+instead of raising `SurfaceAbsent` (a measured, reported result, not an
+assumed one); and reverting `CONDITIONS.md`'s C-14 row to `not yet
+executable` (a measured gap in `test_conditions_register.py`, closed by
+§15.9's item 10 below). **The WP-1 fix-round (§15.9) re-ran M1-M6 under
+the strengthened M-7 helper and added three more (M7-M9)** -- see the
+implementation report's fix-round section for the full, re-measured
+table.
+
+### 15.6 Design decision: no shared `_c1415_common.py`
+
+`test_c14_authority_boundary.py` and `test_c15_bootstrap_reset_lifecycle.py`
+share several helpers in shape (`_control_plane_status`, `_assert_control_
+operation_absent_or_uniformly_refused`, `_assert_uniform_absence_form`).
+Rather than factor these into a third shared module, or have one file
+import from the other, each file carries its own copy. This mirrors
+design principle 2 (the port stays condition-driven and minimal) applied
+one level down: a helper that exists only to serve two specific
+condition files' own dispatch logic is not NORMATIVE port surface, and
+`adapter.py` is deliberately not the place test-only, condition-specific
+logic accumulates. A new shared test-support module would trade a small,
+easily-audited ~40-line duplication for a permanent cross-file coupling
+(a change to one condition's helper silently changing the other
+condition's behavior) -- judged the worse trade, especially since every
+other condition file in this suite (`test_c01_scope_binding.py` through
+`test_c18_revision_precondition_semantics.py`) is already independently
+self-contained in exactly this way.
+
+### 15.7 `CONDITIONS.md`: C-14/C-15 move to `executable (three adapters)`
+
+Both rows' `Status` column now begins `executable (three adapters)` and
+records: the test file name and marker; that all three adapters currently
+take the structural-evidence (surface-absent) branch; the declared-
+unavailable form (b)'s definition, with no currently-registered peer
+example; and that the "provided" branch is real, executable verification
+code that becomes non-vacuous once a registered adapter's peer implements
+`/control/v1` and flips its declaration (`r2db-api`/`r2db-api-http`, work
+package WP-5; `MitateDB-api` stays surface-absent through the next phase
+per design §4's own adapter x phase table). The C-14 row's `Invariants`
+column gains `SI-08` (the resource-boundary vector, §4 vector 5); C-15's
+stays `SI-13, SI-14` unchanged.
+
+### 15.8 Compatibility impact (mirrors §12.7/§13.8/§14.3)
+
+One new value type (`ControlCredentialHandle`) and, after the WP-1
+fix-round (§15.9), fourteen new `@abstractmethod`s (`deprovision_
+application` being the fourteenth) plus one new keyword-only field on the
+pre-existing `SurfaceAbsent` exception (`exempt_parameters`, defaulted to
+`()` so every pre-existing `SurfaceAbsent` call site anywhere in this
+repository remains source-compatible unchanged) are additions to the
+NORMATIVE surface this document's §4 defines. Identical breaking-change
+consequence for any plug outside this repository, at a larger scale than
+any prior revision: a third-party `ConformanceAdapter` subclass missing
+even one of the fourteen fails to instantiate at all (`ConformanceAdapter`
+remains an `ABC`). Applied identically in shape across all three plugs
+registered in this repository in the same change, so nothing here is left
+with a stub -- and, unlike every prior coordinated revision (§11-§14),
+every plug's *behavior* is identical too (uniformly `SurfaceAbsent`), not
+merely its shape, since no registered peer yet has a real control-plane
+surface to diverge over.
+
+### 15.9 WP-1 fix-round (independent review: blocker 2 / major 7 / minor 7 / nit 2, verdict approve-with-fixes; supervisor rulings)
+
+An independent review of the initial WP-1 implementation (§15.1-§15.8
+above) found two blockers, seven majors, seven minors, and two nits. Every
+item was applied in one coordinated fix-round across `adapter.py`, all
+three plugs, both condition test files, `CONDITIONS.md`,
+`test_conditions_register.py` (a supervisor-authorized, narrow scope
+extension: item 10 only), and this document. §15.1-§15.8 above were
+edited in place where a fix superseded their original account (marked
+explicitly, e.g. §15.4's `MitateDB-api` bullet); this section records the
+fix-round as a whole for audit-trail completeness, the same role §10
+plays for the original v1.0 implementation review.
+
+**Blockers B-1/B-2 -- C-14 vector 5 rewritten (positional arithmetic, not
+a contract resource label).** The original vector 5 had two defects: (1)
+`LIMIT_EXCEEDED` carries no class-discriminating field in the contract's
+own problem+json shape (`spec/data-service-api.v1.json` `errors.shape`:
+`details` is free-form, no canonical `resource` key -- the reviewer's own
+suggestion to use one was independently checked against the contract text
+by the supervisor and found to not exist; this suite does not invent
+contract vocabulary to paper over that absence), so a rate-limiter-only
+peer could pass all three class checks vacuously, and with the contract's
+`example_profile` (`applications: 100`, `credentials_per_application: 10`,
+`control_requests_per_minute: 60`) the `applications` drive would
+necessarily trip the rate limiter at request 61 before ever reaching its
+own bound; (2) the `applications` drive permanently saturated the
+registry with no deletion path, poisoning the session-scoped adapter for
+every later test. Fixed by: a new 14th port op, `deprovision_application`
+(§15.2 above); reading the current `applications` count before driving
+and requiring EXACTLY `bound - current` successes before `LIMIT_EXCEEDED`
+(any earlier refusal fails with an explicit "cannot attribute the refusal
+to this class" message); the same exact-position requirement for
+`credentials_per_application`; running `control_requests_per_minute`
+LAST, via a burst of `control_capabilities` (an operation no permanent
+bound applies to -- that operation choice IS the class attribution); a
+documented headroom precondition (`rate_limit >
+applications_headroom_drive + credentials_drive + 64`) that fails loudly,
+before any drive runs, if a conformance build's rate limit cannot
+possibly give the other two drives room to reach their own bounds; and a
+post-burst recovery check (sleep to the next minute-window rollover,
+bounded <=61s, provided-branch-only, documented cost) proving the refusal
+was transient rather than permanent and un-poisoning the rate window for
+later tests.
+
+**Major M-1 -- C-15 vector 1 cross-test-ordering dependency removed.** The
+original provided branch assumed some *other* test in the module had
+already called `control_credential()`, establishing a control credential
+to test bootstrap's `CONFLICT` refusal against. Fixed: the test now calls
+`control_credential()` itself, first.
+
+**Major M-2 -- response-shape normalization documented, and a real bug
+fixed.** `list_applications`/`list_credentials`/`issue_credential_inband`/
+`rotate_credential`'s port docstrings now state explicitly that the
+adapter unwraps the contract's envelope response and returns the row
+sequence, and that row keys are the CONTRACT's own field names
+(`credential_id`, not this port's own `CredentialHandle.credential_ref`
+field name) -- `list_credentials()`'s real response rows have no
+`credential_ref` key at all. This corrected a real bug in C-15 vector 1's
+revoke loop, which read `row["credential_ref"]` (a `KeyError` waiting to
+happen against a real peer's real response) instead of
+`row["credential_id"]`.
+
+**Major M-3 -- C-14 vector 4 no longer requires data-plane reachability.**
+The original provided branch authenticated the in-band-issued credential
+and asserted a successful `scope_of()` roundtrip. Per design R-4, an
+in-band-registered Application is legitimately "registered but
+unprovisioned" -- its data-plane `authenticate()` fails closed by design
+until an operator separately provisions it, so asserting success there
+would fail a conformant peer. Fixed: the provided branch now asserts
+presence in `list_applications()` plus a non-empty secret from in-band
+issuance -- both control-plane-level properties -- and the test's
+docstring records this reasoning as a supervisor ruling, overridable.
+
+**Major M-4 -- `control_credential()`'s "valid at call time" contract made
+explicit.** The port docstring now states explicitly that this method
+must never return a memoized handle from an earlier call: C-15
+deliberately revokes and resets control credentials mid-test, and a
+caching implementation would silently exercise a stale credential instead
+of a live one.
+
+**Major M-5 -- C-14 vector 2's authenticate-only contraction documented.**
+The provided branch was, and remains, a single `authenticate()` call
+rather than a probe of every data/schema endpoint individually. The
+test's docstring now states explicitly why that is sufficient today (both
+peers gate every data-plane operation behind one `authenticate()` step,
+design R-8) and what would require widening it (a future peer with a
+data-plane entry point reachable without that step) -- a supervisor
+ruling, overridable.
+
+**Major M-6 -- C-15 vector 2 implements what `CONDITIONS.md` already
+claimed.** The provided branch now snapshots `control_audit_events()`
+before reset and asserts the pre-reset sequence survives as a PREFIX of
+the post-reset trail (append-only across reset -- new events may be
+appended, none rewritten or removed), and asserts via `list_credentials()`
+that exactly one non-revoked control credential remains afterward.
+
+**Major M-7 -- `SurfaceAbsent` gains `exempt_parameters`; the absence
+helper's verification strengthened; `MitateDB-api` reverts to the full
+surface.** See §15.1 (`SurfaceAbsent`'s own docstring), the M-7 paragraphs
+now in §15.4's `MitateDB-api` bullet (superseding the original open_
+session-exclusion account), and both test files' `_assert_control_
+operation_absent_or_uniformly_refused`. Summary: `exempt_parameters` names
+real, justified parameters that match a forbidden fragment by coincidence
+but cannot carry the absent capability; the absence helper now requires
+`signature_forbids_parameters`'s violations to EXACTLY equal the declared
+exemptions (not merely a subset) and requires the declared evidence
+`surface` to cover at least the peer's own `public_operation_callables()`
+-- closing both a false-negative gap (an adapter exempting away a real
+violation) and a new one this same review surfaced (an adapter shrinking
+its evidence surface to dodge a violation elsewhere on the peer).
+
+**Minors (all fixed):** C-15 vector 1's revoke loop now revokes the
+actor's own credential last and passes no `destructive`/`confirmation`
+fields, with a docstring note that this call site will need the
+canonical confirmation phrase once contract Q-1 (design §0.5) is
+adjudicated; `_control_plane_status` (both test files) now raises an
+explicit, actionable `AssertionError` naming the missing key instead of
+propagating a bare `KeyError`; C-14 vector 3-iv's `credentials_per_
+application` saturation now uses in-band issuance (the control actor)
+rather than the out-of-band `issue_credential` setup primitive, with
+cleanup revokes; C-15 vector 4's secret-echo check now also asserts the
+control actor's own secret (not only the application credential's) never
+appears in an audit event; this document's §15.4 `r2db-api-http` bullet
+is softened to note the live route-table check guards only the co-hosted
+misconfiguration case under design R-1's default separate-ASGI-app
+deployment shape, not the default shape itself.
+
+**Nits (both fixed):** §15.8 above now says "one new value type" (not
+"two") and separately calls out the new `exempt_parameters` field; C-14
+vector 1's redundant-but-more-specific `not in {NOT_FOUND,
+CAPABILITY_UNSUPPORTED}` pre-assertion is now commented explaining why it
+is kept despite being logically implied by the membership check that
+follows it.
+
+**Item 10 (supervisor-authorized scope extension) -- `test_conditions_
+register.py` gains a third check.** The original two checks are both
+one-directional and cannot detect a condition's status regressing (e.g.
+CONDITIONS.md text reverted to "not yet executable") while its test file
+and markers remain collected and passing -- measured directly by mutation
+M6 (§15.5), which the original two checks did not catch. A new test,
+`test_every_marked_condition_id_maps_to_an_executable_status`, closes
+this: every condition id carried by a collected `@pytest.mark.
+condition(...)` marker must map to a CONDITIONS.md row whose Status
+starts with `executable`.
+
+**Form (b) authenticity (M5 disposition, documentation-only, no code
+change).** Recorded in full in `CONDITIONS.md`'s C-14 status text and
+both test files' module docstrings: the declared-unavailable form's
+uniform `CAPABILITY_UNSUPPORTED` acceptance is adapter-honesty plus
+review evidence at this port level, since `ConformanceDenial` carries no
+provenance evidence the way `SurfaceAbsent`'s `surface`/`forbidden_
+parameters` do (measured directly, mutation M5, re-measured as M9 under
+this fix-round). A positive-existence check is deliberately DEFERRED
+until a real form-(b) peer first registers, rather than speculatively
+designed against no real example now.
+
+**Re-verification:** full mutation table (M1-M9, all re-measured under
+the strengthened M-7 helper) and exact pass counts are in this work's
+implementation report (`WP1_IMPLEMENTATION_REPORT.md`), fix-round
+section.

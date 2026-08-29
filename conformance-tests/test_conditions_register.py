@@ -101,3 +101,37 @@ def test_every_marked_condition_id_is_registered_in_conditions_md(request: pytes
         f"@pytest.mark.condition(...) id(s) used in the suite are not rows in "
         f"{CONDITIONS_PATH}: {sorted(unknown)}"
     )
+
+
+def test_every_marked_condition_id_maps_to_an_executable_status(request: pytest.FixtureRequest):
+    """The reverse direction of `test_every_executable_condition_has_a_marked_test`
+    (supervisor-authorized scope extension, WP-1 fix-round item 10):
+    that check only ever catches an ID that CONDITIONS.md calls executable
+    but the suite does not mark -- removing an ID from CONDITIONS.md's own
+    "executable" set can only shrink that check's set difference, never
+    grow it, so a condition's status silently regressing (e.g. reverted to
+    "not yet executable") while its test file and `@pytest.mark.
+    condition(...)` markers are still collected and passing goes entirely
+    undetected by that check alone (measured directly: CCR-14 WP-1 fix-round
+    mutation M6 demonstrated exactly this gap). This test closes it: every
+    condition id actually carried by a collected marker must map to a
+    CONDITIONS.md row whose Status starts with `executable`.
+
+    Scope assumption, stated explicitly: `@pytest.mark.condition(...)`
+    markers are used only within `conformance-tests/` today (the
+    peer-local suites under `r2db-api/tests/`/`MitateDB-api/tests/` do not
+    use this marker at all). If that ever changes, this check simply
+    quantifies over whatever the collected session actually carries --
+    no assumption here needs updating.
+    """
+    statuses = _parse_conditions_md()
+    marked_ids = _collect_marked_condition_ids(request)
+    not_executable = {
+        cid for cid in marked_ids
+        if not statuses.get(cid, "").strip().lower().startswith("executable")
+    }
+    assert not not_executable, (
+        f"@pytest.mark.condition(...) id(s) are collected/marked in the suite, but {CONDITIONS_PATH} does "
+        f"not record an 'executable' Status for them (either missing entirely or downgraded): "
+        f"{sorted(not_executable)}"
+    )
