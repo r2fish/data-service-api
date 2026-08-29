@@ -1822,6 +1822,59 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         return result["items"], result.get("revisions")
 
     # ------------------------------------------------------------------
+    # WP-1 (contract 1.2.0, docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-1,
+    # subordinate ruling 7(A) reverse-validation) -- thin, NON-normative raw
+    # response accessors.
+    #
+    # These are deliberately NOT part of the abstract `ConformanceAdapter`
+    # port: extending that frozen surface is a coordinated design revision
+    # (R-6/port v1.6, a later work package), not this one. Every method
+    # above this block already goes through `_send`/`_query_request`/
+    # `_mutate_request`/`_control_send` and then unwraps or normalizes the
+    # real response for the port's own typed return shape (an `int`, a
+    # `(items, revisions)` tuple, an unwrapped envelope row-sequence, ...).
+    # That normalization is exactly what a reverse schema-conformance check
+    # (`conformance-tests/test_c11_response_schema_conformance.py`'s new
+    # response-schema tests) must NOT go through: it needs the real,
+    # unmodified JSON body the peer's own HTTP handler produced, to check it
+    # against the contract's now-closed response schemas
+    # (`additionalProperties: false`). Each method below calls the exact
+    # same private transport helper the corresponding normalized port method
+    # already uses, and returns its body untouched -- no new HTTP surface,
+    # no behavior change, pure observation. A future adapter (this one or a
+    # peer's) may optionally grow the same method names; the reverse-
+    # validation test duck-types their presence via `getattr(...)` rather
+    # than requiring them.
+    def raw_query_result(
+        self, session: object, entity: str, select: Sequence[str], where: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        assert isinstance(session, _Session)
+        return self._query_request(session, entity, select=list(select), where=where)
+
+    def raw_mutation_result(
+        self, session: object, entity: str, operations: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        assert isinstance(session, _Session)
+        return self._mutate_request(session, entity, [dict(op) for op in operations])
+
+    def raw_schema_operation_result(self, session: object, body: Mapping[str, Any]) -> dict[str, Any]:
+        assert isinstance(session, _Session)
+        return self._send("POST", self._schema_path(), session, json_body=dict(body))
+
+    def raw_list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> dict[str, Any]:
+        return self._control_send("GET", "/control/v1/applications", actor)
+
+    def raw_issue_credential(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
+    ) -> dict[str, Any]:
+        return self._control_send(
+            "POST", "/control/v1/credentials", actor, json_body={"application_id": application_id, "role": role},
+        )
+
+    def raw_list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> dict[str, Any]:
+        return self._control_send("GET", "/control/v1/credentials", actor)
+
+    # ------------------------------------------------------------------
     # attack-surface declarations
     # ------------------------------------------------------------------
 
