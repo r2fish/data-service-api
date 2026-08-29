@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -101,7 +102,23 @@ class ConformanceDenial(Exception):
     native exception's message text: neither as a constructor argument nor
     baked into its own ``str()``. Carrying it would let a verbatim payload
     reflection slip past assertions made directly against the
-    ``ConformanceDenial`` itself.
+    ``ConformanceDenial`` itself. Port v1.6 (design docs/design/
+    DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 2) adds ``details`` -- a
+    *mapping* -- alongside this, additively: a structured problem+json/
+    native-exception ``details`` mapping (e.g. ``required_confirmation``/
+    ``consequence``/``reversible_alternative``/``recovery`` for
+    ``DESTRUCTIVE_CONFIRMATION_REQUIRED``) carries genuine, code-specific
+    machine-readable declarations a caller needs to act on (the
+    declare-and-echo protocol below reads ``required_confirmation`` off of
+    exactly this). This does not weaken the message-exclusion rationale
+    above: ``details`` is never free text and is deliberately not populated
+    with anything resembling a message -- each adapter wires only the
+    peer's own structured details mapping (a problem+json response's
+    ``details`` object, or a native exception's own ``details`` attribute),
+    never a string built from interpolating request data. A denial with no
+    such mapping available (most denials; most native exceptions have no
+    ``details`` at all) simply carries an empty mapping, never `None` --
+    callers may read ``denial.details.get(...)`` unconditionally.
 
     Adapters should chain the native exception using standard Python
     exception chaining: ``raise ConformanceDenial(...) from native_exc``.
@@ -112,10 +129,13 @@ class ConformanceDenial(Exception):
     ``classify()``.
     """
 
-    def __init__(self, code: str, adapter: str, native_type: str = "") -> None:
+    def __init__(
+        self, code: str, adapter: str, native_type: str = "", *, details: Mapping[str, Any] | None = None
+    ) -> None:
         self.code = code
         self.adapter = adapter
         self.native_type = native_type
+        self.details: dict[str, Any] = dict(details) if details else {}
         super().__init__(
             f"ConformanceDenial(code={code!r}, adapter={adapter!r}, native_type={native_type!r})"
         )
@@ -234,14 +254,42 @@ class SurfaceAbsent(Exception):
         super().__init__(f"{adapter}: {operation} has no surface on this peer: {reason}")
 
 
-# Sentinel for `ConformanceAdapter.delete(..., confirmation=...)`.
+# Sentinel for `ConformanceAdapter.delete(..., confirmation=...)` (and every
+# other destructive-operation call site that resolves this sentinel through
+# an adapter's own `_resolve_confirmation`: `attempt_batch_with_addresses`'s
+# `BatchOperation.confirmation`, `drop_entity`). `revoke_credential_inband`
+# is deliberately NOT one of these: it passes its own `confirmation`
+# parameter straight through, unresolved, exactly as its own docstring
+# already states -- a caller that needs declare-and-echo for it (C-06
+# vector V7) drives the real probe/echo round trip itself, directly against
+# the port method, rather than asking an adapter to resolve this sentinel
+# on its behalf.
 #
-# Peers legitimately spell their destructive-confirmation token differently
-# (`r2db-api` requires the literal "DELETE"; `MitateDB-api` uses a boolean
-# `confirm`). The port therefore normalizes *intent*, not spelling:
+# Peers legitimately spell their destructive-confirmation token differently.
+# Before contract 1.2.0 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md), that
+# meant a fixed, peer-specific literal (`r2db-api` required the literal
+# "DELETE"; `MitateDB-api` used a boolean `confirm=True`). Port v1.6
+# (design R-6 item 1) replaces that fixed-token resolution with
+# declare-and-echo for any peer declaring `contract_version >= 1.2.0`: the
+# adapter itself has no business hardcoding a phrase the contract now
+# requires the *peer* to compute and declare (`phrase_construction`'s own
+# "spelling is implementation-defined" rule) -- `resolve_valid_confirmation`,
+# below, is the shared mechanism every adapter uses to do this (probe the
+# real destructive entry point with no confirmation, read the phrase off
+# the peer's own denial, echo it back). A peer still declaring `1.1.0`
+# keeps receiving its legacy fixed token unchanged, so pre-1.2.0 coverage
+# of this port is not disturbed.
+#
+# The port therefore still normalizes *intent*, not spelling, from an
+# adapter call site's point of view:
 #
 #   confirmation=None                -> supply NO confirmation to the peer
-#   confirmation=VALID_CONFIRMATION  -> supply whatever token this peer requires
+#   confirmation=VALID_CONFIRMATION  -> supply a real, currently-valid
+#                                        confirmation for this exact
+#                                        request (declare-and-echo if the
+#                                        peer declares >= 1.2.0; the
+#                                        peer's legacy fixed token
+#                                        otherwise)
 #   confirmation=<any other string>  -> pass that string through verbatim
 #
 # `destructive` is always passed through faithfully. An adapter MUST NOT
@@ -312,6 +360,158 @@ def assert_no_payload_echo(native_exc: BaseException | None, payload: Any, *, co
         raise AssertionError(
             f"native exception echoed payload verbatim{suffix}: "
             f"payload={payload_str!r} native_message={text!r}"
+        )
+
+
+def _walk_string_leaves(value: Any, path: str) -> list[tuple[str, str]]:
+    """Recursively descend into `dict`/`list`/`tuple` structures, returning
+    every `(path, string_value)` leaf found. `path` is a human-readable
+    breadcrumb (`"details['x'][2]"`) for diagnostics only."""
+    if isinstance(value, str):
+        return [(path, value)] if value else []
+    if isinstance(value, Mapping):
+        leaves: list[tuple[str, str]] = []
+        for key, sub in value.items():
+            leaves.extend(_walk_string_leaves(sub, f"{path}[{key!r}]"))
+        return leaves
+    if isinstance(value, (list, tuple)):
+        leaves = []
+        for index, sub in enumerate(value):
+            leaves.extend(_walk_string_leaves(sub, f"{path}[{index}]"))
+        return leaves
+    return []
+
+
+def assert_no_payload_echo_in_details(details: Mapping[str, Any], payload: Any, *, context: str = "") -> None:
+    """`assert_no_payload_echo`'s exact check, applied to every value of a
+    `ConformanceDenial.details` mapping instead of a native exception's
+    `str()` (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 2 /
+    WP-0 MA-3 / C-06 vector V8): a destructive-confirmation denial's
+    `required_confirmation`/`consequence`/`reversible_alternative`/
+    `recovery` are exactly the kind of machine-readable declarations an
+    adversarial target name/value could otherwise leak through verbatim
+    (e.g. a `required_confirmation` phrase that echoes an unvalidated
+    identifier back to the caller -- phrase_construction's own "only
+    identifier-validated target names" rule exists to prevent this).
+
+    Recurses into any `dict`/`list`/`tuple` nesting (review correction M-4:
+    "details 全値" means every string leaf reachable from the mapping, not
+    only its own top-level values -- a future denial that nests a per-
+    operation list of consequences, for instance, must not go unchecked
+    just because it is one level deeper). Only string leaves are inspected
+    (a leaf can legitimately be `None`, a bool, or a number; only a string
+    can contain a verbatim substring match at all). Uses the same
+    length/type floor as `assert_no_payload_echo` to avoid false positives
+    against short/non-string payloads.
+    """
+    if not isinstance(payload, str) or len(payload) < _MIN_ECHO_PAYLOAD_LEN:
+        return
+    for path, value in _walk_string_leaves(details, "details"):
+        if payload in value:
+            suffix = f" ({context})" if context else ""
+            raise AssertionError(
+                f"denial {path} echoed payload verbatim{suffix}: "
+                f"payload={payload!r} value={value!r}"
+            )
+
+
+# Exactly three dot-separated non-negative integers, each with no leading
+# zero (`0` itself is the one exception -- `"01"` is not a valid component).
+# Deliberately narrower than full semver (no pre-release/build-metadata
+# suffix, no surrounding whitespace): `contract_version` is this repository's
+# own closed vocabulary (`spec/data-service-api.v1.json`'s own
+# `contract_version` values are always bare `MAJOR.MINOR.PATCH`), and
+# silently accepting a shape the contract itself never produces would hide
+# a real declaration defect behind a permissive parse (review correction
+# m-4: a raw `int()` on an unexpected shape used to raise `ValueError` with
+# no explanation, which surfaced as an opaque pytest ERROR -- distinct from
+# a clean, diagnosable FAILED -- in every one of C-06's 8 vector tests the
+# first time this was exercised against a malformed version).
+_SEMVER_RE = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+
+
+def parse_semver(version: str) -> tuple[int, int, int]:
+    """Parse a `MAJOR.MINOR.PATCH` string into a comparable tuple of ints
+    (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6 / WP-0 m-3): a
+    naive string comparison would misrank e.g. "1.10.0" below "1.2.0",
+    which is exactly the trap the design calls out by name for the
+    contract-version branch this parses for. Raises `ValueError`, naming
+    the unsupported shape explicitly, on anything that is not exactly three
+    dot-separated non-negative integers with no leading zeros and no
+    surrounding text -- including a pre-release/build-metadata suffix
+    (`"1.2.0-rc1"`, `"1.2.0+build5"`) or incidental whitespace (`" 1.2.0"`):
+    this port never guesses at a version string it cannot parse, and never
+    silently truncates a suffix it does not understand.
+    """
+    match = _SEMVER_RE.fullmatch(version)
+    if match is None:
+        raise ValueError(
+            f"unsupported version format: {version!r} -- expected exactly MAJOR.MINOR.PATCH "
+            "(non-negative integers, no leading zeros, no pre-release/build suffix, no surrounding text)"
+        )
+    return tuple(int(p) for p in match.groups())  # type: ignore[return-value]
+
+
+def contract_version_at_least(contract_version: str, minimum: str) -> bool:
+    """`True` iff `contract_version` (a peer's own declared `capability_
+    document()["contract_version"]`) is >= `minimum` under semver-tuple
+    comparison (never a string comparison -- see `parse_semver`)."""
+    return parse_semver(contract_version) >= parse_semver(minimum)
+
+
+def resolve_valid_confirmation(
+    *, contract_version: str, legacy_token: Any, probe: Callable[[], Any]
+) -> Any:
+    """Resolve the `VALID_CONFIRMATION` sentinel into a real confirmation
+    value for the peer at hand (design docs/design/
+    DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1, declare-and-echo; port v1.6).
+
+    A peer declaring `contract_version` < 1.2.0 gets `legacy_token`
+    unchanged -- its own fixed, peer-specific confirmation spelling, exactly
+    as every adapter supplied before this port revision. A peer declaring
+    `contract_version` >= 1.2.0 instead gets a real probe -> echo round
+    trip: `probe` is called, expected to present the SAME destructive
+    operation the caller is about to retry (same entity/scope), with
+    `destructive=True` and NO confirmation supplied, through whatever real
+    entry point a genuine client would use. The peer is expected to refuse
+    it with `DESTRUCTIVE_CONFIRMATION_REQUIRED`, and the phrase this
+    function returns is read directly off that denial's own
+    `details["required_confirmation"]` -- never guessed, hardcoded, or
+    assembled by this port itself (`phrase_construction`'s own "spelling is
+    implementation-defined" rule, and Q1-D2: "句の綴りは契約で固定せず...
+    クライアントは常に復唱").
+
+    Raises `AssertionError` (a suite finding, not a harness bug) if the
+    probe does not behave the way a contract_version >= 1.2.0 peer must:
+    succeeding outright (SI-09 regression -- an unconfirmed destructive
+    operation must never execute), denying with any code other than
+    `DESTRUCTIVE_CONFIRMATION_REQUIRED`, or denying without a non-empty
+    string `required_confirmation` in its details.
+    """
+    if not contract_version_at_least(contract_version, "1.2.0"):
+        return legacy_token
+    try:
+        probe()
+    except ConformanceDenial as denial:
+        if denial.code != "DESTRUCTIVE_CONFIRMATION_REQUIRED":
+            raise AssertionError(
+                "declare-and-echo probe (destructive=True, no confirmation) against a peer declaring "
+                f"contract_version={contract_version!r} (>= 1.2.0) expected DESTRUCTIVE_CONFIRMATION_REQUIRED, "
+                f"got {denial.code!r}"
+            ) from denial
+        phrase = denial.details.get("required_confirmation")
+        if not isinstance(phrase, str) or not phrase:
+            raise AssertionError(
+                f"peer declares contract_version={contract_version!r} (>= 1.2.0) but its "
+                "DESTRUCTIVE_CONFIRMATION_REQUIRED denial's details carried no non-empty "
+                f"required_confirmation phrase (details={denial.details!r})"
+            ) from denial
+        return phrase
+    else:
+        raise AssertionError(
+            f"declare-and-echo probe (destructive=True, no confirmation) succeeded against a peer declaring "
+            f"contract_version={contract_version!r} (>= 1.2.0) -- an unconfirmed destructive operation must "
+            "never execute (SI-09)"
         )
 
 
@@ -872,6 +1072,46 @@ class ConformanceAdapter(ABC):
         its peer's native confirmation is non-conformant: it makes the
         port's destructive semantics decorative and prevents C-06 from ever
         being expressed honestly on this port.
+        """
+
+    @abstractmethod
+    def drop_entity(
+        self,
+        session,
+        entity: str,
+        *,
+        destructive: bool,
+        confirmation: str | None,
+    ) -> None:
+        """Present a real `drop_entity` schema operation (`SchemaOperationRequest.
+        operation == "drop_entity"`) to the peer exactly as a real client
+        attempting the contract's destructive schema vocabulary would (port
+        v1.6, design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 3;
+        `drop_index` is deliberately left to a future port revision, Q1-D5).
+
+        `destructive`/`confirmation` follow the EXACT same pass-through
+        convention `delete`'s own docstring establishes: `destructive` MUST
+        be passed through faithfully, `confirmation` follows the
+        `VALID_CONFIRMATION` sentinel protocol (declare-and-echo for a peer
+        declaring `contract_version >= 1.2.0`, that peer's legacy fixed
+        token otherwise -- see `resolve_valid_confirmation`). An adapter
+        MUST NOT upgrade a non-destructive/unconfirmed request into a
+        confirmed destructive one, for the identical reason `delete`'s
+        docstring already states.
+
+        Raises `ConformanceDenial` on the peer's own real refusal, exactly
+        like every other schema operation on this ABC. Raises
+        `SurfaceAbsent` instead when the peer's public surface has no
+        schema-operation entry point that could plausibly receive a
+        destructive drop request at all -- confirmed by source inspection,
+        never assumed, and carrying `surface`/`forbidden_parameters` per
+        `SurfaceAbsent`'s own docstring so a consumer can verify the claim
+        independently via `signature_forbids_parameters`. A peer whose real
+        schema dispatcher exists but simply does not execute `drop_entity`
+        (a present, real refusal) raises `ConformanceDenial` with
+        `CAPABILITY_UNSUPPORTED` instead -- never `SurfaceAbsent` for that
+        case, per the same "adapter は peer の不足を埋めない" discipline
+        `create_unique_index`'s docstring already states.
         """
 
     @abstractmethod
