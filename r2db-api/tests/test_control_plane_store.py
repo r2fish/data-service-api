@@ -57,6 +57,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore
 from r2db_api.credential_store import PostgresControlCredentialStore, PostgresCredentialStore, validate_control_pepper_separation
 from r2db_api.errors import FoundationError
+from r2db_api.structured import RESET_CONTROL_CREDENTIALS
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -729,7 +730,7 @@ def test_reset_revokes_all_and_issues_one_new_credential_atomically_and_touches_
         finally:
             app_store.close()
 
-        reset_result = _run_cli(info, "reset")
+        reset_result = _run_cli(info, "reset", "--confirm", RESET_CONTROL_CREDENTIALS)
         assert reset_result.returncode == 0, reset_result.stderr
         new_id, new_secret = _parse_issued(reset_result.stdout)
         assert new_id != old_id
@@ -786,7 +787,7 @@ def test_reset_atomicity_fault_injection_leaves_old_state_completely_intact(
                 cur.execute(rename_away)
             conn.commit()
         try:
-            faulted = _run_cli(info, "reset")
+            faulted = _run_cli(info, "reset", "--confirm", RESET_CONTROL_CREDENTIALS)
             assert faulted.returncode != 0, "reset must fail when control_audit cannot be written"
         finally:
             with psycopg.connect(info.control_dsn) as conn:
@@ -808,10 +809,219 @@ def test_reset_atomicity_fault_injection_leaves_old_state_completely_intact(
         # A subsequent, un-faulted reset still works normally -- the failed
         # attempt left the table in a clean, reusable state, not a
         # half-applied one.
-        recovered = _run_cli(info, "reset")
+        recovered = _run_cli(info, "reset", "--confirm", RESET_CONTROL_CREDENTIALS)
         assert recovered.returncode == 0, recovered.stderr
     finally:
         _sweep_prefix(info.admin_dsn, info.prefix)
+
+
+# ===========================================================================
+# Q-1 WP-4 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4):
+# `reset`'s own declare-and-echo gate.
+# ===========================================================================
+
+_DECLARATION_DETAILS_KEYS = {"required_confirmation", "consequence", "reversible_alternative", "recovery"}
+
+
+def test_cli_reset_without_confirm_declares_and_touches_nothing(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """An unconfirmed `reset` executes nothing at all: the pre-existing
+    control credential is neither revoked nor replaced, and no row is
+    added -- the confirmation gate runs before `_control_store()`/
+    `_control_audit_sink()` are even constructed (`ops._require_cli_
+    confirmation`'s own docstring), so not even a connection is opened."""
+    info = _provision_platform(tmp_path_factory)
+    try:
+        bootstrapped = _run_cli(info, "bootstrap")
+        assert bootstrapped.returncode == 0, bootstrapped.stderr
+        old_id, old_secret = _parse_issued(bootstrapped.stdout)
+
+        control = _control_store(info)
+        try:
+            before = control.list_all()
+        finally:
+            control.close()
+
+        refused = _run_cli(info, "reset")
+        assert refused.returncode == 2, refused.stderr
+        assert refused.stdout == ""
+        declaration = json.loads(refused.stderr.strip())
+        assert declaration["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        details = declaration["details"]
+        assert set(details) == _DECLARATION_DETAILS_KEYS, "all four contract-required declaration keys must be present"
+        # Opus review MA-2: literal expected value, not the imported
+        # constant re-compared against itself -- a mutation of `structured.
+        # RESET_CONTROL_CREDENTIALS`'s own value would otherwise silently
+        # agree with whatever this test imports, since both sides would be
+        # the same (mutated) object.
+        assert details["required_confirmation"] == "RESET_CONTROL_CREDENTIALS"
+        assert isinstance(details["consequence"], str) and details["consequence"], "consequence must be a non-empty string"
+        assert isinstance(details["reversible_alternative"], str) and details["reversible_alternative"]
+        assert isinstance(details["recovery"], str) and details["recovery"]
+
+        control = _control_store(info)
+        try:
+            after = control.list_all()
+            context = control.authenticate(old_secret)
+            assert context.credential_id == old_id
+        finally:
+            control.close()
+        assert after == before, "an unconfirmed reset must not change any control_credentials row"
+    finally:
+        _sweep_prefix(info.admin_dsn, info.prefix)
+
+
+def test_cli_reset_wrong_confirm_phrase_declares_and_touches_nothing(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Contract `valid_confirmation`'s exact-match rule, adversarially: a
+    suffix, a prefix, a case fold, and an empty string are all refused --
+    never a prefix/suffix/truthy/presence check."""
+    info = _provision_platform(tmp_path_factory)
+    try:
+        bootstrapped = _run_cli(info, "bootstrap")
+        assert bootstrapped.returncode == 0, bootstrapped.stderr
+        old_id, old_secret = _parse_issued(bootstrapped.stdout)
+
+        control = _control_store(info)
+        try:
+            before = control.list_all()
+        finally:
+            control.close()
+
+        # Literal, not the imported constant (Opus review MA-2) -- see the
+        # identical note above.
+        for wrong in (
+            "RESET_CONTROL_CREDENTIALSX",
+            "RESET_CONTROL_CREDENTIAL",
+            "reset_control_credentials",
+            "",
+        ):
+            refused = _run_cli(info, "reset", "--confirm", wrong)
+            assert refused.returncode == 2, refused.stderr
+            declaration = json.loads(refused.stderr.strip())
+            assert declaration["details"]["required_confirmation"] == "RESET_CONTROL_CREDENTIALS"
+
+        control = _control_store(info)
+        try:
+            after = control.list_all()
+            context = control.authenticate(old_secret)
+            assert context.credential_id == old_id
+        finally:
+            control.close()
+        assert after == before, "no wrong-phrase attempt above may have changed any control_credentials row"
+    finally:
+        _sweep_prefix(info.admin_dsn, info.prefix)
+
+
+def _run_cli_no_env(*args: str) -> subprocess.CompletedProcess:
+    """Opus review MA-3: runs the CLI with NONE of this codebase's own
+    `R2DB_*` environment variables set at all -- not `R2DB_CONTROL_DSN`,
+    not `R2DB_CONTROL_CREDENTIAL_PEPPER` -- to prove the confirmation gate
+    really does run before any environment variable is even required, let
+    alone before a database connection is opened. `PYTHONPATH` is kept
+    (needed only so the subprocess can import `r2db_api` at all; it is not
+    part of this CLI's own documented environment contract)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("R2DB_")}
+    env["PYTHONPATH"] = str(SRC_DIR)
+    return subprocess.run([sys.executable, "-m", "r2db_api.ops", *args], capture_output=True, text=True, env=env)
+
+
+def test_cli_reset_without_confirm_refuses_before_any_env_var_is_required() -> None:
+    """Opus review MA-3: with no `R2DB_*` environment variable set at all,
+    an unconfirmed `reset` still produces the ordinary gate declaration --
+    not `_require_env`'s "R2DB_CONTROL_DSN is required" -- proving the gate
+    runs before `_control_store()` even looks at the environment, let alone
+    connects to a database. No platform to provision/sweep here at all:
+    this process never reaches anything that would need one."""
+    result = _run_cli_no_env("reset")
+    assert result.returncode == 2, result.stderr
+    assert result.stdout == ""
+    assert "R2DB_CONTROL_DSN" not in (result.stderr or ""), "must not have reached the env-var check at all"
+    declaration = json.loads(result.stderr.strip())
+    assert declaration["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert declaration["details"]["required_confirmation"] == "RESET_CONTROL_CREDENTIALS"
+
+
+def test_cli_reset_confirmation_phrase_is_deterministic_across_denials(tmp_path_factory: pytest.TempPathFactory) -> None:
+    info = _provision_platform(tmp_path_factory)
+    try:
+        bootstrapped = _run_cli(info, "bootstrap")
+        assert bootstrapped.returncode == 0, bootstrapped.stderr
+
+        first = _run_cli(info, "reset")
+        second = _run_cli(info, "reset")
+        assert first.returncode == second.returncode == 2
+        phrase_1 = json.loads(first.stderr.strip())["details"]["required_confirmation"]
+        phrase_2 = json.loads(second.stderr.strip())["details"]["required_confirmation"]
+        # Literal expected value (Opus review MA-2) -- see the note above.
+        assert phrase_1 == phrase_2 == "RESET_CONTROL_CREDENTIALS"
+    finally:
+        _sweep_prefix(info.admin_dsn, info.prefix)
+
+
+def test_cli_reset_echo_of_declared_phrase_succeeds(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The probe->echo protocol end to end: an operator who does not
+    already know the phrase gets it from a first, refused invocation's own
+    stderr declaration, and echoing it back verbatim on a second invocation
+    proceeds exactly as `reset` always has."""
+    info = _provision_platform(tmp_path_factory)
+    try:
+        bootstrapped = _run_cli(info, "bootstrap")
+        assert bootstrapped.returncode == 0, bootstrapped.stderr
+        old_id, old_secret = _parse_issued(bootstrapped.stdout)
+
+        probe = _run_cli(info, "reset")
+        assert probe.returncode == 2
+        phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+
+        echoed = _run_cli(info, "reset", "--confirm", phrase)
+        assert echoed.returncode == 0, echoed.stderr
+        new_id, new_secret = _parse_issued(echoed.stdout)
+        assert new_id != old_id
+        assert new_secret != old_secret
+
+        control = _control_store(info)
+        try:
+            with pytest.raises(FoundationError) as exc:
+                control.authenticate(old_secret)
+            assert exc.value.code == "AUTH_REVOKED"
+            context = control.authenticate(new_secret)
+            assert context.credential_id == new_id
+        finally:
+            control.close()
+    finally:
+        _sweep_prefix(info.admin_dsn, info.prefix)
+
+
+def test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases() -> None:
+    """WP-4 item A's own "3 面 (data/control/CLI) 書式一致" follow-through:
+    the CLI's two destructive-confirmation phrases (`RESET_CONTROL_
+    CREDENTIALS`/`delete_credential_confirmation_phrase`) live in the exact
+    same module (`structured.py`) as the data/schema-plane phrase functions
+    and the control-plane's own `revoke_last_control_credential_
+    confirmation_phrase` -- `ops.py` imports these exact module-level
+    symbols rather than re-deriving its own spelling.
+
+    Opus review MI-3 (measured): the `delete_credential_confirmation_
+    phrase is` assertion below genuinely proves no re-derivation -- function
+    objects are never coalesced by CPython the way equal string literals
+    can be, so an accidental copy/shadow in `ops.py` (even one that happened
+    to produce identical output) would fail this `is` check. The `RESET_
+    CONTROL_CREDENTIALS is` assertion does NOT carry the same guarantee:
+    CPython interns short, identifier-like string literals, so a `ops.py`
+    that hardcoded its own literal `"RESET_CONTROL_CREDENTIALS"` instead of
+    importing the constant would, in practice, still pass an `is` check
+    against `structured.RESET_CONTROL_CREDENTIALS` (confirmed by measurement
+    -- a separately-written literal of the same text interned to the same
+    object). This assertion is kept because it is still true and documents
+    the intended sharing, but the actual regression coverage for `RESET_
+    CONTROL_CREDENTIALS`'s own correctness comes from the literal-value
+    assertions in the `test_cli_reset_*` tests above (Opus review MA-2),
+    not from this identity check.
+    """
+    import r2db_api.ops as ops
+    import r2db_api.structured as structured
+
+    assert ops.delete_credential_confirmation_phrase is structured.delete_credential_confirmation_phrase
+    assert ops.RESET_CONTROL_CREDENTIALS is structured.RESET_CONTROL_CREDENTIALS
 
 
 def test_bootstrap_audit_write_failure_aborts_the_whole_bootstrap(tmp_path_factory: pytest.TempPathFactory) -> None:

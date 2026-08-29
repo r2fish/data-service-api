@@ -415,6 +415,70 @@ def revoke_last_control_credential_confirmation_phrase(credential_id: str) -> st
     return phrase
 
 
+# Q-1 WP-4 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4): the ceremony
+# CLI's (`ops.py`) own two gated subcommands, `reset` and `delete-credential`
+# (Q1-D4/WP-0 MA-1 excludes `revoke-credential` -- it targets application
+# credentials, the same operation class Q1-D1 already leaves unconfirmed).
+# Both phrases live here, alongside the other three, so `ops.py` never
+# re-derives its own spelling -- the same "one shared definition, three
+# surfaces" discipline this module's header comment already documents for
+# data/schema plane + control plane + CLI.
+
+RESET_CONTROL_CREDENTIALS = "RESET_CONTROL_CREDENTIALS"
+"""`ops.py cmd_reset`'s destructive-confirmation phrase -- a fixed constant,
+not a function, and carrying no per-request state fingerprint at all.
+Unlike `delete`/`drop_entity`/`drop_index` (a target identifiable by a name
+that can be re-created) or `REVOKE_LAST_CONTROL_CREDENTIAL <credential_id>`
+(a specific row, itself a never-reused fingerprint), `reset`'s own target is
+"every row in the control_credentials store" -- there is no narrower name
+for that target to be re-created under, and its consequence class (revoke
+every existing row, mint exactly one new must_rotate row) is identical no
+matter how many rows currently exist or what state they are in. A state
+fingerprint exists to invalidate a stale phrase once ITS OWN target's state
+changes (Q1-D3/contract `phrase_construction` rule (c)) -- but there is no
+state `reset`'s own scope could change in without also changing what
+running `reset` again would itself just do (revoke whatever is currently
+there) to something functionally equivalent, so a computed fingerprint would
+never actually distinguish one call from the next. This matches contract
+`phrase_construction`'s own "deterministic given only operation, target, and
+consequence class" rule: for `reset`, that triple never varies, so neither
+does the phrase."""
+
+
+def delete_credential_confirmation_phrase(credential_id: str) -> str:
+    """`DELETE_CREDENTIAL <credential_id>` -- `ops.py cmd_delete_credential`'s
+    destructive-confirmation phrase. `credential_id` is itself a random,
+    never-reused value, minted by either of this codebase's two application-
+    credential issuance paths -- the CLI's own `ops._new_credential_id`
+    (`issue-credential`) and the in-band `control_plane._new_credential_id`
+    (`POST /control/v1/credentials`) -- both producing the identical `crd_` +
+    16 lowercase hex format (`_CREDENTIAL_ID_PREFIX`/`secrets.token_hex(8)`).
+    Exactly the same reasoning `revoke_last_control_credential_confirmation_
+    phrase` above already documents for `ctl_` ids: a deleted row's id can
+    never legitimately reappear naming a *different*, later row, so the id
+    already serves as its own fingerprint with no separate state fingerprint
+    needed.
+
+    Q-1 WP-4 followup (Opus review MA-1): this function itself performs no
+    validation -- `ops.cmd_delete_credential` validates `credential_id`
+    against `^crd_[0-9a-f]{16}$` (`ops._APPLICATION_CREDENTIAL_ID_PATTERN`,
+    matching both minters above) *before* ever calling this function, the
+    same way every caller of `delete_confirmation_phrase`/`drop_entity_
+    confirmation_phrase`/`drop_index_confirmation_phrase` is downstream of
+    `validate_identifier` first. This is what makes contract
+    `phrase_construction` rules (c) (a phrase never reflects an unvalidated
+    client-supplied string back to the client) and (d) (bounded length) hold
+    for the CLI's own phrase, not merely for the data/schema plane's: a
+    format-validated `credential_id` is always exactly 20 characters, so the
+    `assert` below is unreachable in practice given that upstream check (no
+    digest escape hatch is needed here, unlike the where/entity digests
+    `delete`/`drop_entity`/`drop_index` fall back to for a contract identifier
+    length this format check does not itself bound)."""
+    phrase = f"DELETE_CREDENTIAL {credential_id}"
+    assert len(phrase) <= _PHRASE_MAX_LENGTH, "delete_credential_confirmation_phrase exceeded the contract's confirmation maxLength"
+    return phrase
+
+
 def require_destructive_confirmation(
     destructive: bool,
     confirmation: Any,

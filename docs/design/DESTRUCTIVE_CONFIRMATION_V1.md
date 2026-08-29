@@ -1,6 +1,6 @@
 # Q-1 実効化設計 — 宣言と復唱 (destructive confirmation)、契約 1.2.0
 
-- 版数: v1.3 (2026-08-30。WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
+- 版数: v1.4 (2026-08-30。WP-4 実装 (儀式 CLI `ops.py` の `reset`/`delete-credential` declare-and-echo 化 + runbook/playbook 更新) を §6.1-6.6 に記録し、その独立レビュー (Opus、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き) への全対応を §6.7-6.8 に追記 (WP-3 followup が §5.6 で v1.3 のまま追記記録したのと同じ前例に倣い、版数は据え置き)。v1.3 は WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録したもの。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
 - 正典: `spec/CCR_DISPOSITION.md` 従属判断6 (裁定、2026-08-29) および従属判断7 (2026-08-29、依頼者裁定案を監督検証のうえ WP-1 で記録)。たたき台と守備範囲合意は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §0.5。本書は裁定を**実施する**設計であり、裁定内容を再交渉しない
 - 適用範囲: 共通契約 (spec) + conformance (C-06) + r2db-api (データ/schema 面・制御面・儀式 CLI) + MitateDB-api
 - 実施順序は裁定どおり: 契約 1.2.0 文言化 → C-06 共通 suite → CCR-14 休止条項の実効化 (r2db) → MitateDB の確認内容検証の適合修正
@@ -242,3 +242,92 @@ WP-3 の独立レビュー (Opus) が発見した項目と、その全対応の�
 - conformance-tests 単独: **251 passed / 0 failed / 0 skipped (155.09s)**
 - `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (22.48s)**
 - 新設/更新テストファイル: `r2db-api/tests/test_limit_class_vocabulary.py` (新設)、`test_foundation.py`/`test_postgres.py`/`test_control_plane_service.py`/`test_control_plane_store.py`/`test_control_http.py` (追加テスト)、`conformance-tests/test_c06_destructive_confirmation.py`/`test_c15_bootstrap_reset_lifecycle.py`/`CONDITIONS.md` (陳腐化文言修正)。
+
+## 6. WP-4 実装記録 (儀式 CLI declare-and-echo 化、v1.4 追記)
+
+### 6.1 実装内容
+
+- **句構成の共有モジュール**: `r2db_api/structured.py` に `RESET_CONTROL_CREDENTIALS` (定数 -- `reset` の対象は「control_credentials ストア全体」であり、名前による再作成という概念自体が存在せず、帰結クラス (全行失効・新規1本発行) も現在の行数・状態に依存しないため、状態指紋を持たない定数句とした。理由はコメントとして関数のすぐ上に記録) と `delete_credential_confirmation_phrase(credential_id)` (`DELETE_CREDENTIAL <credential_id>` -- `credential_id` はランダム生成・再利用皆無 (`ops._new_credential_id`) であり、`revoke_last_control_credential_confirmation_phrase` と同じ理由でそれ自体が指紋を兼ねる) を追加。両者とも既存の3関数 (`delete_confirmation_phrase`/`drop_entity_confirmation_phrase`/`drop_index_confirmation_phrase`) と同じモジュールに置き、`ops.py` はこれを import して参照する (再実装しない -- `test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases` がオブジェクト同一性で固定)。
+- **CLI gate**: `ops.py` に `_require_cli_confirmation` を新設し、`reset`/`delete-credential` の両サブコマンドの**先頭**で呼ぶ (`_control_store()`/`_store()` の構築より前 -- store 未構築のためデータベースへは一切接続しない)。不一致/未指定時は `FoundationError("DESTRUCTIVE_CONFIRMATION_REQUIRED", ..., status=409)` を組み立てその `.problem()` (`type`/`code`/`message`/`request_id`/`details` -- 公開 HTTP 面の problem+json と同形) を1行の JSON として stderr に出力し `SystemExit(2)` する。`main()` の通常の `FoundationError` ハンドラ (`error: CODE: message` + exit 1) は経由しない -- store/監査シンク構築前であり巻き戻すトランザクションが存在しないための意図的な分岐。拒否は state-changing でないため `control_audit` への書き込みも行わない (既存の `_write_control_audit`/MI-3 の規約と整合)。
+- **`--confirm`引数**: `reset`/`delete-credential` の argparse サブパーサに `--confirm PHRASE` (default `None`) を追加。`--help` 文言も更新したが、既存テストがアサートする "CCR-14"/"ritual"/"break-glass" の3語はいずれもモジュール冒頭の description 文字列にあり変更していないため green のまま。
+- **`revoke-credential` は不変**: Q1-D4/WP-0 MA-1 の裁定どおり対象外。`--confirm` 引数自体を追加していない (存在しないフラグを渡すと argparse の "unrecognized arguments" で失敗する -- `test_cli_revoke_credential_remains_ungated_and_has_no_confirm_flag` で固定)。
+
+### 6.2 宣言の確定文言
+
+一次ソース (`POSTGRES_PROVISIONING_RUNBOOK.md` §12/§13、`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` step 1、`credential_store.py::delete`/`set_state` の docstring) から導出。設計書 R-4 の目安文言とは reversible_alternative の対象操作名が異なる (§6.4 で報告) が、consequence/recovery の骨子は目安と一致する。
+
+**`reset`**:
+- `required_confirmation`: `RESET_CONTROL_CREDENTIALS`
+- `consequence`: "Every existing control credential is revoked and exactly one new, must_rotate credential is issued in the same transaction; the in-band control-plane surface (/control/v1) is then usable for nothing beyond GET .../capabilities and self-rotate until that new credential completes its first rotation (POSTGRES_PROVISIONING_RUNBOOK.md §12)."
+- `reversible_alternative`: "If the specific problem is only a disabled (not revoked) control credential, or only an uncaptured secret for one that is still enabled and not revoked, `enable-control-credential <credential_id>` or `rotate-control-credential <credential_id>` respectively recovers without revoking anything at all -- narrower than reset, but only available when credential_id is known and that credential is not already revoked (POSTGRES_PROVISIONING_RUNBOOK.md §13). Once a control credential is actually revoked, or none is known/trusted, reset is the only recovery."
+- `recovery`: "Reset itself remains available if access is lost again for any reason -- it needs no prior credential to run and is the universal fallback for every one of §13's lockout paths. It is not meant to be re-run routinely after a prior invocation already reported success (CONTROL_PLANE_COMPROMISE_PLAYBOOK.md step 1: run once per incident, not on every retry)."
+
+**`delete-credential`**:
+- `required_confirmation`: `DELETE_CREDENTIAL <credential_id>`
+- `consequence`: "The credential row is permanently removed; unlike revoke, no row remains afterward at all -- it disappears from list-credentials and there is nothing left to inspect or re-enable by this credential_id."
+- `reversible_alternative`: "revoke-credential <credential_id> -- terminal (no un-revoke) but the row itself stays on record and remains listable; it does not, however, clear 0004_deprovision_application.sql's foreign-key guard, which requires the row's removal, not merely its revocation."
+- `recovery`: `null` (真に不可逆 -- `delete`/`drop_entity` と同じ理由で捏造しない)
+
+### 6.3 conformance adapter の CLI 呼び出し追随
+
+`r2db-api/conformance/conformance_adapter_r2db_http.py` の grep で、`ops` を subprocess 経由で呼ぶ箇所は `_run_ops_cli` の2呼び出し元 (`_repair_control_actor` と port `reset()`) のみで、いずれも `self._run_ops_cli("reset")` を呼んでいた。両方とも新設の `_run_reset_ops_cli()` (probe→echo の2段呼び出しを内包し、従来の `CompletedProcess` 契約をそのまま返す) に差し替えた。`bootstrap` 呼び出し (`_repair_control_actor` の非-has_any分岐、port `bootstrap()`) は無変更 (bootstrap は gate 対象外)。`_run_reset_ops_cli` は WP-0 MA-1/Q1-D2 の「句のハードコード禁止」を CLI 呼び出し側でも守り、`RESET_CONTROL_CREDENTIALS` が今回の実装では定数であることを知っていても宣言から毎回読み取る (port v1.6 の `_resolve_confirmation`/`resolve_valid_confirmation` と同じ規律)。これは conformance の意味論変更ではなく「CLI 利用者としての追随」であることを確認: `test_c15_bootstrap_reset_lifecycle.py` (15 件) と `test_c13_revocation_terminality.py` を含む `test_c06_destructive_confirmation.py` (計 44 件) が無変更で green。
+
+### 6.4 逸脱・疑義
+
+- **reversible_alternative の対象操作名**: 設計書 R-4 の目安文言は `reset` の reversible_alternative を「個別の revoke-credential・disable 系」としていたが、実装を確認すると CLI の `revoke-credential`/`disable-credential` サブコマンドは application credential 専用 (`_store()` = `PostgresCredentialStore`) であり、control credential には作用しない。control credential 単体を狙う軽量な代替として CLI に実在するのは `enable-control-credential`/`rotate-control-credential` のみ (`POSTGRES_PROVISIONING_RUNBOOK.md` §13 が明記する2つの限定的シナリオ)。真実側に合わせ、reversible_alternative はこの2コマンドを指す文言とし、適用条件 (credential_id が既知かつ未失効の場合のみ) も明記した。
+- CLI の gate 評価順序 (§ evaluation_order の「対象存在確認の後」) は、`delete-credential` については字義どおりには実装していない -- 確認ゲートを `_store()` 構築 (= 対象存在/失効前提の確認と同じ関数呼び出し) より完全に前に置いたため、存在しない/未失効の credential_id に対しても不一致な `--confirm` は `NOT_FOUND`/`VALIDATION_FAILED` ではなく `DESTRUCTIVE_CONFIRMATION_REQUIRED` を返す。これは「拒否時に一切 DB へ触れない」という本 WP のテスト要求 (item D) を字義通りに満たすための意図的な選択であり、CLI には元々 HTTP 面のような分離された「対象存在チェック」ステップが存在しない (`store.delete` 自身が存在確認と実行を一体で行う) ため、契約 R-1-5 の評価順序をそのまま移植する対象が無い。既存テスト `test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_nothing` はこの選択の影響 (正しい `--confirm` を渡さなければ "not yet revoked" という本来の precondition 拒否を観測できない) を受けるため、正しい句を渡すよう更新した (§6.5 参照)。
+- `POSTGRES_PROVISIONING_RUNBOOK.md` §9 (0004 の deprovision ガード付近) にも `delete-credential` の実行例があったため、design が明示的に指定した §12/§13 に加えてここも更新した (スコープをわずかに超えるが、更新しなければ読者に旧い1段呼び出しの誤った例を示すことになるため)。
+
+### 6.5 テスト + 変異
+
+- 新設 CLI テスト: `r2db-api/tests/test_control_plane_store.py` に `reset` gate 用5件 (無 --confirm/誤句/決定論/echo成功/3面共有identity)、`r2db-api/tests/test_credential_persistence.py` に `delete-credential` gate 用4件 + `revoke-credential` 非gate確認1件を追加。既存テスト2箇所 (`test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_nothing` の delete-credential 呼び出し2箇所、`test_control_plane_store.py` の `reset` 呼び出し3箇所) を `--confirm` 付きに更新。
+- 変異3本 (`structured.py`/`ops.py` を scratchpad へバックアップ後に注入、実測後に復元し `diff` で完全一致確認):
+  - (a) `confirm != phrase` を `not confirm` (存在チェック化) に変異 → `test_cli_reset_wrong_confirm_phrase_declares_and_touches_nothing`/`test_cli_delete_credential_wrong_confirm_phrase_declares_and_touches_nothing` が赤 (末尾に文字を足した誤句が誤って通過)。
+  - (b) 拒否後も `SystemExit(2)` を発生させず実行を継続させる変異 → `test_cli_reset_without_confirm_declares_and_touches_nothing` が赤 (returncode が 2 でなく 0 になり、reset が実際に実行されたことを検出)。
+  - (c) details から `recovery` キーを欠落させる変異 → `test_cli_reset_without_confirm_declares_and_touches_nothing`/`test_cli_delete_credential_without_confirm_declares_and_touches_nothing` の両方が赤 (`set(details) == 4キー` アサーションが検出)。
+
+### 6.6 テスト実測 (すべて同期・フォアグラウンド実行)
+
+- root suite (`pytest -q`、リポジトリルート、conformance-tests + r2db-api/tests + MitateDB-api/tests): **1 回目 797 passed / 0 failed / 0 skipped (198.20s)、2 回目 797 passed / 0 failed / 0 skipped (191.71s)** (WP-3 の 787 baseline + 本 WP 新設 10 件 = 797。`test_control_plane_store.py` に 6 件 (`reset` gate 5件 + 3面共有 identity 1件)、`test_credential_persistence.py` に 4 件 (`delete-credential` gate 3件 + `revoke-credential` 非gate確認 1件))
+- conformance-tests 単独: **251 passed / 0 failed / 0 skipped (156.98s)** -- WP-3 baseline と完全一致 (本 WP は conformance-tests 配下のテストファイルを一切変更していない。儀式経路 (`test_c15_bootstrap_reset_lifecycle.py` 15件・`test_c13_revocation_terminality.py`・`test_c06_destructive_confirmation.py` 計44件) は adapter 追随のみで無変更 green)
+- `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (28.94s)** -- WP-3 baseline と完全一致 (本 WP はデータ/schema 面に触れていない)
+- `test_control_plane_store.py`/`test_credential_persistence.py` の2ファイル単独: **102 passed / 0 failed / 0 skipped (13.6s)**
+
+### 6.7 Opus レビュー往復 (WP-4 followup、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き)
+
+WP-4 の独立レビュー (Opus) が発見した項目と、その全対応の記録。以降 "MA-1"/"MA-2"/"MA-3" は本 followup 固有のラベル -- `ops.py` 内の既存コメントにある同名の "MA-3 (round-2 review)"(儀式 advisory lock の理由付け、WP-2 由来)や `_write_control_audit` の "MI-3" note とは別物であり、混同しないこと。
+
+**major MA-1 (`delete-credential` の未検証 credential_id 反射)**: gate **直前** (`_require_cli_confirmation` 呼び出しより前、`_store()` 構築より前 -- DB へは一切触れない) に `_APPLICATION_CREDENTIAL_ID_PATTERN = re.compile(r"^crd_[0-9a-f]{16}$")` (`ops.py`) による書式検証を追加。不一致は `fail("VALIDATION_FAILED", ...)` (既存の `main()` エラー経路、exit 1、DB 接続なしのまま)。これにより契約 `phrase_construction` rule (c) (未検証入力の句反射禁止) と (d) (長さ有界) が CLI の `delete-credential` でも構造的に成立する: `structured.py::delete_credential_confirmation_phrase` の `assert len(phrase) <= _PHRASE_MAX_LENGTH` は、書式検証済み id (常に20文字) しか到達しなくなったため到達可能性という意味では実質不変だが、"到達しうる入力の範囲" という意味で健全化された (前回 WP-4 本体コミット時点ではこの assert は未検証の任意長文字列を理論上受け得た -- 後述の逸脱是正参照)。実測: `test_cli_delete_credential_rejects_malformed_credential_id_before_any_env_var_is_required` (7 パラメータ -- 非16進・大文字・17桁・`ctl_`接頭辞・空文字列など) を新設、全件 green。レビュア変異 (検証自体を `if False:` に無効化) を自分で再注入し 7 件すべて赤を実測 (無効化後は不正な id がそのまま `required_confirmation` に反射される様子も実測ログに残る) -- scratchpad 経由で復元、`diff` で完全一致確認済み。
+
+**逸脱の存在と本修正での解消 (報告漏れの是正)**: WP-4 本体 (§6.1-6.6) の時点では、`delete-credential` の句構成が **未検証の `args.credential_id` をそのまま `delete_credential_confirmation_phrase` に渡していた** -- これは契約 `phrase_construction` rule (c) (「対象名は当該実装の識別子検証を通過したものに限る」) に対する r2db CLI 側の実際の逸脱であり、WP-4 本体の §6.4 逸脱一覧にこの項目を記載すべきだったが記載していなかった (報告漏れ)。データ面/schema 面 (`structured.py` の `delete`/`drop_entity`/`drop_index`) は `validate_identifier` を経由済みの値だけを句に渡すため元々 rule (c) を満たしていたが、CLI の `delete-credential` だけはこの検証ステップを持たず、コマンドライン引数をほぼ生のまま渡していた。実害の有無: 本 WP-4 本体時点でも `--confirm` 側は exact-match 必須のため、任意の credential_id 文字列を渡しても実際に `store.delete` へ到達するには依然として exact-match した `--confirm` を用意する必要があり、悪用可能な穴ではなかった (declare-and-echo の exact-match 性質そのものが実害を防いでいた) -- が、契約の字義には反しており、MA-1 で構造的に解消した。
+
+**major MA-2 (句テストの自己比較)**: `test_cli_reset_*`/`test_cli_delete_credential_*` の宣言内容 assert を、本番関数/定数の再呼び出し (`RESET_CONTROL_CREDENTIALS`/`delete_credential_confirmation_phrase(credential_id)`) との自己比較から、リテラル期待値 (`"RESET_CONTROL_CREDENTIALS"` / `f"DELETE_CREDENTIAL {credential_id}"`) への直接 assert に置換 (`test_control_plane_store.py` 3箇所、`test_credential_persistence.py` 3箇所)。加えて cross-target テスト `test_cli_delete_credential_cross_target_phrase_is_rejected` を新設 -- credential A の宣言句を credential B の `--confirm` に流用すると拒否され、A・B いずれも削除されないことを確認。レビュア変異 M-C (`delete_credential_confirmation_phrase` から `credential_id` を除去し常に `"DELETE_CREDENTIAL"` を返す) を自分で再注入し実測: リテラル期待値を使う5テスト (無 --confirm・誤句・決定論・no-env・cross-target) すべて赤。**同時に、関数 identity テスト (`test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases`) はこの変異下でも green のまま** であることを実測で確認 (同一関数オブジェクトを指しているという事実は変異後も真のまま -- 関数の中身が壊れたことは identity では検出できない)。これは MI-3 の指摘 (下記) を裏付ける実測でもあり、「関数 assert (identity) + リテラル期待値 assert」の両輪がそれぞれ異なる欠陥クラス (誤ったシンボル参照 vs. 正しいシンボルだが誤った実装) を担当することを実証した。scratchpad 経由で復元、`diff` で完全一致確認済み。
+
+**major MA-3 (拒否時「接続すら開かない」の未検証)**: `_run_cli_no_env` ヘルパーを両テストファイルに新設 -- `R2DB_*` 環境変数を一切与えず (`PYTHONPATH` のみ) `reset`/`delete-credential` を起動し、exit 2 + stderr の宣言 JSON を assert、かつ `"R2DB_CONTROL_DSN" not in stderr` (= `_require_env` の到達なし) を assert。`test_cli_reset_without_confirm_refuses_before_any_env_var_is_required`・`test_cli_delete_credential_without_confirm_refuses_before_any_env_var_is_required` を新設、両方 green (`platform`/`_provision_platform` フィクスチャ不要 -- 本物の PostgreSQL に一切触れないため)。レビュア変異 M-A (gate を `_control_store()`/`_store()` 構築の**後**へ移動) を自分で再注入し実測: 両テストとも赤 (`_require_env` の `"R2DB_CONTROL_DSN is required"` という平文エラーが stderr に現れ、JSON 宣言も `R2DB_CONTROL_DSN` 不在の assert も両方失敗)。scratchpad 経由で復元、`diff` で完全一致確認済み。
+
+**minor MI-1 (拒否識別記述の統一)**: `exit 2` 単独ではなく **「exit 2 かつ stderr の JSON 宣言」** が本 R-4 拒否の識別条件であることを明記 -- `ops.py` の module docstring (`--confirm` フラグの概要段落)、`POSTGRES_PROVISIONING_RUNBOOK.md` §9/§12、`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` step 1 のコメント/地の文を訂正。理由: `argparse` 自身の usage error と、この CLI の他の `_die` 系失敗 (環境変数欠落等) も exit 2 を返すため、exit code 単独では R-4 拒否を一意に識別できない (`_require_cli_confirmation` 自身の docstring は元々この区別を書けていたため訂正不要 -- 逸脱ではなく、他箇所の言い回しを本来の意図に揃える訂正)。
+
+**minor MI-2 (FK guard 帰属の訂正)**: 「`0004_deprovision_application.sql`'s foreign-key guard」という帰属は不正確 -- 実際の外部キー (`ON DELETE RESTRICT`) は `0005_credential_store.sql` の `credentials.application_slug` 列定義にあり、`0004` はその FK 違反を検知して拒否する側 (`assert_no_credentials_for_deprovision` 関数 -- この関数自体も定義は 0005 側)。`ops.py` の `_DELETE_CREDENTIAL_REVERSIBLE_ALTERNATIVE`・`cmd_delete_credential` 冒頭コメント・`POSTGRES_PROVISIONING_RUNBOOK.md` §9 を「0005 の FK、0004 のスクリプトが検知」という正確な帰属に訂正。
+
+**minor MI-3 (定数の identity assert は無保証)**: `test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases` の docstring を訂正 -- `delete_credential_confirmation_phrase is ...` (関数オブジェクト) は再定義/コピーを確実に検出するが、`RESET_CONTROL_CREDENTIALS is ...` (文字列リテラル定数) は CPython の文字列 interning により、`ops.py` が独自に同一テキストのリテラルをハードコードしていても `is` が真になりうる (レビュアが実測: 別々に書いた同一内容のリテラルが同一オブジェクトに intern される)。よって定数側の実効的な回帰網は MA-2 のリテラル期待値テスト群であり、identity assert ではないことを docstring に明記。テスト自体は削除せず維持 (共有の意図を示す文書的価値はある)。
+
+**minor MI-4 (RAISE EXCEPTION 文言の追随)**: `0005_credential_store.sql:164`(`assert_no_credentials_for_deprovision` 内)の `RAISE EXCEPTION` 文言を、`delete-credential` が2段 (`--confirm` なしで宣言取得→復唱) になったことを反映して更新 (`--confirm ...; run it once without --confirm first to see the exact value to pass` を追記)。`POSTGRES_PROVISIONING_RUNBOOK.md` §9 の引用 ERROR ブロックも同文言に同期。**設計記録**: この migration ファイルは `CREATE OR REPLACE FUNCTION` で定義された関数本体の文言のみの変更であり、スキーマ自体(列・制約・インデックス)は無変更。実機で `0005` を適用済みの provisioned database は本 followup 時点で存在しない (このリポジトリの `r2db-api/tests/` は毎回使い捨てのテスト用プラットフォームを都度 `psql -f` で再構築する運用であり、`test_credential_persistence.py`/`test_control_plane_store.py` の実行そのものが実質的な「適用」を都度行っている) ため、既存の実運用データベースに対する追加のロールバック/再適用スクリプトは不要 -- 次にこのファイルを `psql -f` する実行(テストの次回実行含む)から新文言が有効になる。
+
+**minor MI-5 (delete-credential consequence の反実仮想化)**: gate はカレデンシャルの存在確認より前に走るため、「行は必ず削除される」という宣言は、存在しない credential_id に対しては真でない (反実仮想) 主張になり得た。`_DELETE_CREDENTIAL_CONSEQUENCE` を「The credential row, **if it exists**, is permanently removed...」+ 条件付けの理由 (gate が存在確認より前にあること) の注記を追加する文言に訂正。
+
+**nit N-1**: `test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_nothing` の第1アサーション (`--confirm` 付き delete-credential が「未失効」で拒否される箇所) を `returncode == 1` + `"VALIDATION_FAILED"`/`"Credential is not revoked"` という具体的な理由の固定に締めた (旧: `returncode != 0` + `"revoke" in stderr.lower()` -- gate 拒否 (exit 2) でも `reversible_alternative` 文言に "revoke-credential" が含まれるため偶然 green になりうる曖昧なアサーションだった)。
+
+**nit N-2**: `conformance_adapter_r2db_http.py::_run_reset_ops_cli` の stderr パースを「stderr 全体を1つの JSON としてパース」から「stderr の**最終非空行**を JSON としてパース」に変更 -- 前置の警告行等があっても頑健になる一方、最終行自体が壊れた JSON なら従来どおり fail-loud (例外を捕捉し probe をそのまま返す、フェイク句を捏造しない) という性質は維持。
+
+**nit N-3**: `DEPLOYMENT_RUNBOOK.md:562` の「`ops.py reset` is the single recovery step」を、2段ゲート化と整合する文言 (「a two-step, `--confirm`-gated invocation」+ playbook/runbook への参照) に更新。
+
+**nit N-4**: `structured.py::delete_credential_confirmation_phrase` の docstring に、application credential のミンタが2系統存在すること (`ops._new_credential_id` = CLI `issue-credential`、`control_plane._new_credential_id` = in-band `POST /control/v1/credentials`) を併記 (旧文言は CLI 側のミンタしか言及していなかった)。
+
+**完了条件チェック**: (1) 全件対応済み (上記)。(2) レビュア変異 M-A (MA-3)・M-C (MA-2 -- 「M-D」相当、関数 identity assert では非検出・リテラル期待値 assert でのみ検出という両輪性を実測で確認)・MA-1 独自変異 (検証無効化) をいずれも自分で再注入し赤を実測、scratchpad 経由で復元し `diff` で完全一致確認済み (詳細は各 major 項目内)。(3) 下記実測結果を参照。(4) 本節が該当 (MA-1 実測ログは同項目内、逸脱 (c) の「WP-4 本体時点で実害はなかったが契約の字義には反していた」という判定は上記「逸脱の存在と本修正での解消」に記載)。
+
+### 6.8 テスト実測 (followup、すべて同期・フォアグラウンド実行)
+
+- root suite (`pytest -q`、リポジトリルート): **1 回目 807 passed / 0 failed / 0 skipped (195.82s)、2 回目 807 passed / 0 failed / 0 skipped (198.82s)** (§6.6 の 797 + 本 followup 新設 10 件 = 807 -- `test_control_plane_store.py` +1 (`reset` no-env)、`test_credential_persistence.py` +9 (cross-target 1 + delete-credential no-env 1 + malformed-id 7パラメータ))
+- conformance-tests 単独: **251 passed / 0 failed / 0 skipped (156.44s)** -- 無変更 (adapter 内部実装のみの変更であり conformance テストファイル自体は touch していない)
+- `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (28.76s)** -- 無変更
+- 儀式経路 conformance (`test_c15_bootstrap_reset_lifecycle.py`/`test_c13_revocation_terminality.py`/`test_c06_destructive_confirmation.py`): 59 passed (N-2 のパース変更後も green)

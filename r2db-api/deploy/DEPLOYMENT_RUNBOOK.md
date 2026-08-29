@@ -559,5 +559,7 @@ see that module's docstring for the authoritative list):**
    credential yet.
 
 **Compromise/misuse:** see `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`
-(R-11) -- `ops.py reset` is the single recovery step from a lost, leaked, or
-misused control credential.
+(R-11) -- `ops.py reset` (a two-step, `--confirm`-gated invocation as of
+Q-1 WP-4; see that playbook's own step 1 and `POSTGRES_PROVISIONING_
+RUNBOOK.md` §12) is the recovery step from a lost, leaked, or misused
+control credential.

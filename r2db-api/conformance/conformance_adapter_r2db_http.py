@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import os
 import re
 import secrets
@@ -1171,7 +1172,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         preflight guess -- that the cached handle is no longer live (WP-1
         M-4: "never memoized past validity")."""
         has_any = self._control_credentials_has_any()
-        result = self._run_ops_cli("reset" if has_any else "bootstrap")
+        # Q-1 WP-4: `reset` (unlike `bootstrap`) now goes through the
+        # gate's own probe->echo resolution (`_run_reset_ops_cli`) --
+        # `bootstrap` is unaffected (never gated; refusing an already-
+        # populated store is `CONFLICT`, not a `destructive_confirmation`
+        # matter).
+        result = self._run_reset_ops_cli() if has_any else self._run_ops_cli("bootstrap")
         if result.returncode != 0:
             raise RuntimeError(f"r2db_api.ops {'reset' if has_any else 'bootstrap'} failed: {result.stderr}")
         credential_id, secret = self._parse_issued_stdout(result.stdout)
@@ -1272,6 +1278,66 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         env["R2DB_CONTROL_CREDENTIAL_PEPPER"] = self._control_pepper
         env["R2DB_PLATFORM_SCHEMA"] = self._platform.schema
         return subprocess.run([sys.executable, "-m", "r2db_api.ops", *args], capture_output=True, text=True, env=env)
+
+    def _run_reset_ops_cli(self) -> subprocess.CompletedProcess:
+        """Q-1 WP-4 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4):
+        `python -m r2db_api.ops reset` is now gated by `--confirm
+        RESET_CONTROL_CREDENTIALS` -- this is this adapter's own CLI-caller
+        equivalent of the wire surfaces' probe->echo resolution (`_resolve_
+        confirmation`/`resolve_valid_confirmation`, used elsewhere in this
+        same file), not a change to what this adapter asks the ritual to
+        do or a new conformance semantic. A first, unconfirmed invocation
+        is refused (exit 2, the declaration as one line of JSON on stderr,
+        `ops._require_cli_confirmation`'s own shape); this reads
+        `required_confirmation` from that declaration and echoes it back on
+        a second invocation -- exactly what an operator following
+        `POSTGRES_PROVISIONING_RUNBOOK.md` §12/§13 or `CONTROL_PLANE_
+        COMPROMISE_PLAYBOOK.md` step 1 does by hand. `RESET_CONTROL_
+        CREDENTIALS` happens to be a fixed constant in this WP's own
+        implementation, but this adapter deliberately does not hardcode it
+        (contract `destructive_confirmation.client_obligation`: "Guessing,
+        memorizing, or hardcoding a phrase is not a supported integration
+        pattern") -- it is read fresh from the declaration every time,
+        exactly like every other `VALID_CONFIRMATION` resolution in this
+        file.
+
+        Every caller of this method previously called `self._run_ops_cli
+        ("reset")` directly and used the returned `CompletedProcess`
+        exactly as `_run_ops_cli`'s own docstring promises (`returncode`/
+        `stdout`/`stderr`) -- this method preserves that same external
+        contract, returning the SECOND (confirmed) invocation's own
+        `CompletedProcess` on the ordinary path so no caller needs to
+        change anything beyond the one call site.
+        """
+        probe = self._run_ops_cli("reset")
+        if probe.returncode != 2:
+            # Not this gate's own refusal shape at all (e.g. a genuine
+            # database/environment failure, or a future implementation
+            # change) -- surface it exactly as before, unmodified, so every
+            # caller's existing error handling (returncode/stderr parsing)
+            # is completely unaffected.
+            return probe
+        try:
+            # nit N-2 (Opus review): the declaration is the LAST non-empty
+            # line of stderr, not "the whole stripped stream is one JSON
+            # document" -- robust to some other line (a warning a
+            # dependency prints, etc.) appearing before it, while still
+            # failing loud (M-F's own concern) if the actual last line
+            # isn't parseable JSON at all: this does not silently scan
+            # backwards past a genuinely malformed final line.
+            lines = [line for line in probe.stderr.splitlines() if line.strip()]
+            if not lines:
+                raise ValueError("empty stderr")
+            declaration = json.loads(lines[-1])
+            phrase = declaration["details"]["required_confirmation"]
+            if not isinstance(phrase, str):
+                raise TypeError("required_confirmation must be a string")
+        except (ValueError, KeyError, TypeError):
+            # Exit code 2 but not a declaration this adapter recognizes --
+            # return the original failed CompletedProcess unmodified rather
+            # than fabricating a phrase or masking the real problem.
+            return probe
+        return self._run_ops_cli("reset", "--confirm", phrase)
 
     @staticmethod
     def _parse_issued_stdout(stdout: str) -> tuple[str, str]:
@@ -1502,7 +1568,9 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     # port v1.5 (ritual -- design R-5, no in-band actor by contract)
     def reset(self) -> ControlCredentialHandle:
-        result = self._run_ops_cli("reset")
+        # Q-1 WP-4: `reset` is now gated -- see `_run_reset_ops_cli`'s own
+        # docstring for the probe->echo resolution this delegates to.
+        result = self._run_reset_ops_cli()
         if result.returncode != 0:
             code = self._ops_cli_denial_code(result.stderr)
             raise ConformanceDenial(code=code, adapter=self.name, native_type="OpsCliFailure") from RuntimeError(result.stderr)

@@ -35,6 +35,22 @@ durable `control_audit` events in a time window as JSON Lines -- see
 `cmd_audit_report`'s own docstring and `r2db-api/docs/CONTROL_PLANE_
 COMPROMISE_PLAYBOOK.md` for the recovery sequence it supports.
 
+Q-1 WP-4 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4): `reset` and
+`delete-credential` -- the two genuinely destructive subcommands this
+module offers (Q1-D4/WP-0 MA-1 excludes `revoke-credential`, which targets
+application credentials, the same class of operation Q1-D1 already leaves
+unconfirmed everywhere in this contract) -- now require a `--confirm
+<phrase>` flag, following the same declare-and-echo protocol the wire
+surfaces already implement (`structured.require_destructive_confirmation`/
+`control_plane.py`'s revoke gate): an omitted or mismatched `--confirm`
+executes nothing, prints the operation's own declaration (the confirmation
+phrase to echo, plus consequence/reversible_alternative/recovery) as one
+line of JSON to stderr, and exits 2; the exact same phrase echoed back on a
+second invocation proceeds normally. See `_require_cli_confirmation`'s own
+docstring for the mechanics and `POSTGRES_PROVISIONING_RUNBOOK.md` §12/§13
+and `CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` step 1 for the operator-facing
+walkthrough of `reset`'s own two-step shape under this gate.
+
 Every state-changing subcommand below -- both the pre-existing ones and the
 new control-credential ones -- now writes a canonical event to
 `r2dbsvc_registry.control_audit` in the *same transaction* as the state
@@ -60,6 +76,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -78,6 +95,7 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .errors import FoundationError, fail
+from .structured import RESET_CONTROL_CREDENTIALS, delete_credential_confirmation_phrase
 
 _CREDENTIAL_ID_PREFIX = "crd_"
 # WP-5 round-2 review NIT-2: the control-credential id prefix ("ctl_") now
@@ -87,6 +105,25 @@ _CREDENTIAL_ID_PREFIX = "crd_"
 # a control credential id itself, so it no longer needs its own copy of
 # that prefix constant.
 _ACTOR_TYPE = "operator_cli"
+
+# Q-1 WP-4 followup (Opus review MA-1): the exact shape both of this
+# codebase's application-credential minters produce -- this module's own
+# `_new_credential_id` (`issue-credential`) and the in-band `control_plane.
+# _new_credential_id` (`POST /control/v1/credentials`), `_CREDENTIAL_ID_
+# PREFIX` + `secrets.token_hex(8)` in both cases. `cmd_delete_credential`
+# validates its own `credential_id` argument against this pattern *before*
+# the confirmation gate (see that function's own comment) -- a plain,
+# no-DB-access string check that rejects an unrecognized shape as
+# `VALIDATION_FAILED` via the ordinary `fail()`/`main()` error path, never
+# reaching `delete_credential_confirmation_phrase` with unvalidated input.
+# This is the CLI's own equivalent of `validate_identifier` gating every
+# data-plane phrase-construction call (`structured.py`'s own header
+# comment, rule (c): a phrase never reflects unvalidated client input back
+# to the client) and closes rule (d) (bounded length) the same way: a
+# format-validated id is always exactly 20 characters, so no digest escape
+# hatch is needed for this phrase the way `delete`/`drop_entity`/
+# `drop_index` need one for a contract-unbounded identifier.
+_APPLICATION_CREDENTIAL_ID_PATTERN = re.compile(r"^crd_[0-9a-f]{16}$")
 
 # MA-3 (round-2 review): arbitrary, fixed 64-bit `pg_advisory_xact_lock` key
 # for the bootstrap/reset ritual only -- see `_lock_ritual` below. Chosen
@@ -284,6 +321,125 @@ def _lock_ritual(conn: "psycopg.Connection[Any]") -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLI declare-and-echo gate (Q-1 WP-4, docs/design/DESTRUCTIVE_CONFIRMATION_
+# V1.md R-4) -- `reset` and `delete-credential` only (Q1-D4/WP-0 MA-1: this
+# CLI's `revoke-credential` targets application credentials, exactly the
+# operation class Q1-D1 already leaves unconfirmed -- gating it here would
+# put friction on playbook step 3's own bulk-revoke incident-response flow
+# for no contract-required reason). Every other subcommand's external
+# behaviour is unchanged by this WP.
+# ---------------------------------------------------------------------------
+
+_RESET_CONSEQUENCE = (
+    "Every existing control credential is revoked and exactly one new, "
+    "must_rotate credential is issued in the same transaction; the in-band "
+    "control-plane surface (/control/v1) is then usable for nothing beyond "
+    "GET .../capabilities and self-rotate until that new credential "
+    "completes its first rotation (POSTGRES_PROVISIONING_RUNBOOK.md §12)."
+)
+_RESET_REVERSIBLE_ALTERNATIVE = (
+    "If the specific problem is only a disabled (not revoked) control "
+    "credential, or only an uncaptured secret for one that is still "
+    "enabled and not revoked, `enable-control-credential <credential_id>` "
+    "or `rotate-control-credential <credential_id>` respectively recovers "
+    "without revoking anything at all -- narrower than reset, but only "
+    "available when credential_id is known and that credential is not "
+    "already revoked (POSTGRES_PROVISIONING_RUNBOOK.md §13). Once a "
+    "control credential is actually revoked, or none is known/trusted, "
+    "reset is the only recovery."
+)
+_RESET_RECOVERY = (
+    "Reset itself remains available if access is lost again for any "
+    "reason -- it needs no prior credential to run and is the universal "
+    "fallback for every one of §13's lockout paths. It is not meant "
+    "to be re-run routinely after a prior invocation already reported "
+    "success (CONTROL_PLANE_COMPROMISE_PLAYBOOK.md step 1: run once per "
+    "incident, not on every retry)."
+)
+
+_DELETE_CREDENTIAL_CONSEQUENCE = (
+    "The credential row, if it exists, is permanently removed; unlike "
+    "revoke, no row remains afterward at all -- it disappears from "
+    "list-credentials and there is nothing left to inspect or re-enable by "
+    "this credential_id. (Whether it exists at all is not yet checked at "
+    "the point this declaration is made -- the confirmation gate runs "
+    "before that -- so this is phrased conditionally rather than asserting "
+    "a row that may not be there.)"
+)
+_DELETE_CREDENTIAL_REVERSIBLE_ALTERNATIVE = (
+    "revoke-credential <credential_id> -- terminal (no un-revoke) but the "
+    "row itself stays on record and remains listable; it does not, "
+    "however, clear 0005_credential_store.sql's own `credentials."
+    "application_slug` foreign key (`ON DELETE RESTRICT`), which "
+    "0004_deprovision_application.sql's script detects and refuses "
+    "against and which only removing the row (not merely revoking it) "
+    "satisfies."
+)
+_DELETE_CREDENTIAL_RECOVERY = None
+
+
+def _require_cli_confirmation(
+    confirm: str | None,
+    *,
+    phrase: str,
+    message: str,
+    consequence: str,
+    reversible_alternative: str | None,
+    recovery: str | None,
+) -> None:
+    """Contract 1.2.0 `destructive_confirmation`'s exact-match rule
+    (`structured.require_destructive_confirmation`'s own HTTP-facing
+    counterpart), applied to this CLI's own `--confirm <phrase>` flag: a
+    valid confirmation is `confirm == phrase` as an exact string (no
+    presence/truthy/prefix check) -- there is no separate `destructive`
+    boolean here, since invoking `reset`/`delete-credential` at all already
+    *is* the destructive intent signal a wire request's own `destructive:
+    true` field stands in for.
+
+    Checked FIRST, before any store/audit-sink construction, in both
+    callers below: both phrases (`RESET_CONTROL_CREDENTIALS`, a constant;
+    `DELETE_CREDENTIAL <credential_id>`, a pure function of the CLI's own
+    argument) are fully computable with no database read at all, so a
+    rejected confirmation leaves the platform database completely
+    untouched -- not even a connection is opened -- satisfying the same
+    "denial reads/writes nothing" guarantee the wire surfaces get from
+    their own evaluation order (contract `destructive_confirmation.
+    evaluation_order`), even though the CLI has no separate shape/auth/
+    target-existence steps of its own to interleave this after.
+
+    On denial: prints one line of problem+json-shaped JSON (`FoundationError.
+    problem()`'s own shape: type/code/message/request_id/details) to
+    stderr and exits 2 -- deliberately NOT routed through `main()`'s
+    ordinary `FoundationError` handling (`f"error: {code}: {message}"` text,
+    exit 1): this predates any store/audit construction, so there is
+    nothing transactional to unwind, and R-4's own contract for this CLI is
+    exit code 2 + JSON-on-stderr specifically, distinguishable at a glance
+    from every other CLI failure mode (argparse usage errors; a
+    `FoundationError` the ceremony/store itself raises after this gate
+    passes; a raw `psycopg.Error`).
+
+    Writes no `control_audit` event either way: a rejection changes no
+    state at all (this module's own pre-existing convention, `_write_
+    control_audit`'s MI-3 note -- only successful state changes are
+    durably recorded by this CLI).
+    """
+    if confirm != phrase:
+        error = FoundationError(
+            "DESTRUCTIVE_CONFIRMATION_REQUIRED",
+            message,
+            details={
+                "required_confirmation": phrase,
+                "consequence": consequence,
+                "reversible_alternative": reversible_alternative,
+                "recovery": recovery,
+            },
+            status=409,
+        )
+        print(json.dumps(error.problem(), sort_keys=False), file=sys.stderr)
+        raise SystemExit(2)
+
+
+# ---------------------------------------------------------------------------
 # Application-credential subcommands (pre-existing; now audited -- §8 M-10).
 # ---------------------------------------------------------------------------
 
@@ -372,14 +528,40 @@ def cmd_disable_credential(args: argparse.Namespace) -> int:
 def cmd_delete_credential(args: argparse.Namespace) -> int:
     # Genuinely destructive and irreversible -- unlike revoke/disable
     # (soft state changes on a row that stays on record), this removes the
-    # row outright. Exists specifically to satisfy `0004_deprovision_
-    # application.sql`'s `assert_no_credentials_for_deprovision` guard: an
-    # application can never be deprovisioned while a credential row
-    # (revoked or not) still references it, since that reference is a real
-    # foreign key (`ON DELETE RESTRICT`), and revoking alone does not clear
-    # a foreign key. The recommended sequence is revoke, confirm nothing is
-    # relying on it, then delete -- this command performs only the second
-    # half.
+    # row outright. Exists specifically to satisfy `0005_credential_store.
+    # sql`'s own `credentials.application_slug` foreign key (`ON DELETE
+    # RESTRICT`) -- the guard `0004_deprovision_application.sql`'s script
+    # detects and refuses against (`assert_no_credentials_for_deprovision`):
+    # an application can never be deprovisioned while a credential row
+    # (revoked or not) still references it, and revoking alone does not
+    # clear that foreign key. The recommended sequence is revoke, confirm
+    # nothing is relying on it, then delete -- this command performs only
+    # the second half.
+    #
+    # Q-1 WP-4 followup (Opus review MA-1): `credential_id` is validated
+    # against `_APPLICATION_CREDENTIAL_ID_PATTERN` *before* the confirmation
+    # gate below, and before any database access -- an unrecognized shape is
+    # `VALIDATION_FAILED` via the ordinary `fail()`/`main()` error path (see
+    # that constant's own comment for why), never reaching `delete_
+    # credential_confirmation_phrase` with unvalidated input.
+    if not _APPLICATION_CREDENTIAL_ID_PATTERN.fullmatch(args.credential_id):
+        fail("VALIDATION_FAILED", f"credential_id must match {_APPLICATION_CREDENTIAL_ID_PATTERN.pattern!r}.")
+    #
+    # Q-1 WP-4 (design R-4): gated by `--confirm DELETE_CREDENTIAL
+    # <credential_id>` -- checked before `_store()` is even constructed (see
+    # `_require_cli_confirmation`'s own docstring), so an omitted/mismatched
+    # `--confirm` never touches the database at all, regardless of whether
+    # this credential_id exists or is already revoked (both are the *next*
+    # thing checked, inside `store.delete` itself, only once this gate has
+    # already passed).
+    _require_cli_confirmation(
+        args.confirm,
+        phrase=delete_credential_confirmation_phrase(args.credential_id),
+        message="Confirmation required to permanently delete this credential row.",
+        consequence=_DELETE_CREDENTIAL_CONSEQUENCE,
+        reversible_alternative=_DELETE_CREDENTIAL_REVERSIBLE_ALTERNATIVE,
+        recovery=_DELETE_CREDENTIAL_RECOVERY,
+    )
     store = _store()
     try:
         with store.unit_of_work() as work:
@@ -619,7 +801,7 @@ def cmd_bootstrap(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_reset(_args: argparse.Namespace) -> int:
+def cmd_reset(args: argparse.Namespace) -> int:
     """Revokes every existing control credential and issues one new one,
     atomically (R-5/design §7 "reset の原子性"): both the revoke-all and the
     new `add` run inside the same `unit_of_work()`, so there is never a
@@ -638,7 +820,24 @@ def cmd_reset(_args: argparse.Namespace) -> int:
     identical note -- `reset_control_credentials` (`control_plane.py`) is
     the shared product-code ceremony; this CLI supplies the Postgres store/
     audit sink and the advisory lock.
+
+    Q-1 WP-4 (design R-4): gated by `--confirm RESET_CONTROL_CREDENTIALS`
+    -- checked before `_control_store()`/`_control_audit_sink()` are even
+    constructed (see `_require_cli_confirmation`'s own docstring), so an
+    omitted/mismatched `--confirm` leaves the platform database completely
+    untouched, no connection opened at all -- unlike `bootstrap` above,
+    which stays exactly as it was (non-destructive; refusing an already-
+    populated store is a `CONFLICT`, never a `destructive_confirmation`
+    matter).
     """
+    _require_cli_confirmation(
+        args.confirm,
+        phrase=RESET_CONTROL_CREDENTIALS,
+        message="Confirmation required to reset all control credentials.",
+        consequence=_RESET_CONSEQUENCE,
+        reversible_alternative=_RESET_REVERSIBLE_ALTERNATIVE,
+        recovery=_RESET_RECOVERY,
+    )
     store = _control_store()
     audit = _control_audit_sink()
     try:
@@ -746,9 +945,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "delete-credential",
-        help="PERMANENTLY delete a credential row (irreversible; refused unless the credential is already revoked -- revoke first. Needed to clear the deprovisioning guard's foreign key)",
+        help=(
+            "PERMANENTLY delete a credential row (irreversible; refused unless the credential is already revoked -- "
+            "revoke first. Needed to clear the deprovisioning guard's foreign key). Requires --confirm "
+            "'DELETE_CREDENTIAL <credential_id>' -- omit or get it wrong and the declaration prints to stderr as "
+            "JSON and this exits 2 without touching the database"
+        ),
     )
     p.add_argument("credential_id")
+    p.add_argument(
+        "--confirm", default=None, metavar="PHRASE",
+        help="echo 'DELETE_CREDENTIAL <credential_id>' (from a prior refusal's stderr declaration) to proceed",
+    )
     p.set_defaults(func=cmd_delete_credential)
 
     p = sub.add_parser("list-credentials", help="list credentials (never prints verifier/secret)")
@@ -784,7 +992,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "reset",
-        help="revoke every existing control credential and issue one new one, atomically -- the canonical recovery from a lost/leaked/lockout control credential",
+        help=(
+            "revoke every existing control credential and issue one new one, atomically -- the canonical recovery "
+            "from a lost/leaked/lockout control credential. Requires --confirm RESET_CONTROL_CREDENTIALS -- omit "
+            "or get it wrong and the declaration prints to stderr as JSON and this exits 2 without touching the "
+            "database"
+        ),
+    )
+    p.add_argument(
+        "--confirm", default=None, metavar="PHRASE",
+        help="echo RESET_CONTROL_CREDENTIALS (from a prior refusal's stderr declaration) to proceed",
     )
     p.set_defaults(func=cmd_reset)
 

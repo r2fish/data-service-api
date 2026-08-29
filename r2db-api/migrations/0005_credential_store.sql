@@ -161,7 +161,7 @@ DECLARE
 BEGIN
     SELECT count(*) INTO v_count FROM r2dbsvc_registry.credentials WHERE application_slug = p_app_slug;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'application % still has % credential row(s) referencing it -- revoke it first (python -m r2db_api.ops revoke-credential <credential_id>), then delete the row (python -m r2db_api.ops delete-credential <credential_id>) before deprovisioning', p_app_slug, v_count;
+        RAISE EXCEPTION 'application % still has % credential row(s) referencing it -- revoke it first (python -m r2db_api.ops revoke-credential <credential_id>), then delete the row (python -m r2db_api.ops delete-credential <credential_id> --confirm ...; run it once without --confirm first to see the exact value to pass) before deprovisioning', p_app_slug, v_count;
     END IF;
 END;
 $fn$;

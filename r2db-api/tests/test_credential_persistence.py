@@ -31,6 +31,7 @@ exactly like `test_postgres.py::app_a`.
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import subprocess
@@ -47,6 +48,7 @@ from starlette.testclient import TestClient
 
 from r2db_api.credential_store import PostgresCredentialStore
 from r2db_api.errors import FoundationError
+from r2db_api.structured import delete_credential_confirmation_phrase
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -647,12 +649,26 @@ def test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_noth
         # the remedy itself is guarded too: a credential that was never
         # revoked cannot be deleted (deleting it would erase the only
         # record that access was ever cut). Revoke first, then delete.
-        refused = _run_cli(platform, "delete-credential", credential_id)
-        assert refused.returncode != 0, "deleting a live (never-revoked) credential must be refused"
-        assert "revoke" in (refused.stderr or "").lower()
+        # Q-1 WP-4: `delete-credential` is now gated (design R-4) -- passing
+        # the correct `--confirm` here so this test still exercises the
+        # underlying "must already be revoked" precondition it is actually
+        # about, not merely the confirmation gate that now runs before it.
+        confirm = delete_credential_confirmation_phrase(credential_id)
+        refused = _run_cli(platform, "delete-credential", credential_id, "--confirm", confirm)
+        # nit N-1 (Opus review): pinned to the exact precondition failure
+        # (`credential_store.PostgresCredentialStore.delete`'s own
+        # `VALIDATION_FAILED`, routed through `main()`'s ordinary
+        # `FoundationError` handler -- exit 1, not the R-4 gate's exit 2),
+        # not merely "some non-zero exit containing the word revoke" --
+        # this is what proves the confirmation gate above already passed
+        # and this refusal is the underlying "not yet revoked" precondition
+        # the confirm-phrase construction ensured we would actually reach.
+        assert refused.returncode == 1, "deleting a live (never-revoked) credential must be refused by the precondition, not the gate"
+        assert "VALIDATION_FAILED" in refused.stderr
+        assert "Credential is not revoked" in refused.stderr
         revoked = _run_cli(platform, "revoke-credential", credential_id)
         assert revoked.returncode == 0, revoked.stderr
-        deleted = _run_cli(platform, "delete-credential", credential_id)
+        deleted = _run_cli(platform, "delete-credential", credential_id, "--confirm", confirm)
         assert deleted.returncode == 0, deleted.stderr
 
         # Deprovisioning now succeeds -- no exception, and this function's
@@ -853,6 +869,248 @@ def test_cli_revoke_credential_produces_auth_revoked(platform: types.SimpleNames
         assert exc.value.code == "AUTH_REVOKED"
     finally:
         reader.close()
+
+
+def test_cli_revoke_credential_remains_ungated_and_has_no_confirm_flag(platform: types.SimpleNamespace) -> None:
+    """Q1-D4/WP-0 MA-1: `revoke-credential` (application credentials) is
+    deliberately excluded from the Q-1 R-4 gate -- unlike `reset`/`delete-
+    credential`, it does not even accept a `--confirm` flag at all, and
+    executes exactly as it always has, with no confirmation of any kind."""
+    slug = _fresh_slug("cl")
+    _register_application(platform, slug)
+    issued = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued.returncode == 0, issued.stderr
+    credential_id, secret = _parse_issued(issued.stdout)
+
+    revoked = _run_cli(platform, "revoke-credential", credential_id)
+    assert revoked.returncode == 0, revoked.stderr
+    reader = _read_store(platform)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            reader.authenticate(secret)
+        assert exc.value.code == "AUTH_REVOKED"
+    finally:
+        reader.close()
+
+    rejected_flag = _run_cli(platform, "revoke-credential", credential_id, "--confirm", "anything")
+    assert rejected_flag.returncode != 0, "revoke-credential must not accept a --confirm flag at all (it was never given one)"
+
+
+# ---------------------------------------------------------------------------
+# Q-1 WP-4 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4):
+# `delete-credential`'s own declare-and-echo gate.
+# ---------------------------------------------------------------------------
+
+_DECLARATION_DETAILS_KEYS = {"required_confirmation", "consequence", "reversible_alternative", "recovery"}
+
+
+def test_cli_delete_credential_without_confirm_declares_and_touches_nothing(platform: types.SimpleNamespace) -> None:
+    """An unconfirmed `delete-credential` executes nothing at all -- the row
+    is not removed, even though it is already revoked and would otherwise be
+    eligible for deletion (the confirmation gate runs strictly before that
+    precondition is even reached, see `ops._require_cli_confirmation`)."""
+    slug = _fresh_slug("ch")
+    _register_application(platform, slug)
+    issued = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued.returncode == 0, issued.stderr
+    credential_id, _secret = _parse_issued(issued.stdout)
+    revoked = _run_cli(platform, "revoke-credential", credential_id)
+    assert revoked.returncode == 0, revoked.stderr
+
+    refused = _run_cli(platform, "delete-credential", credential_id)
+    assert refused.returncode == 2, refused.stderr
+    assert refused.stdout == ""
+    declaration = json.loads(refused.stderr.strip())
+    assert declaration["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    details = declaration["details"]
+    assert set(details) == _DECLARATION_DETAILS_KEYS, "all four contract-required declaration keys must be present"
+    # Opus review MA-2: asserted against a literal expected value, not the
+    # production function's own output -- self-comparing against `delete_
+    # credential_confirmation_phrase(credential_id)` here would make this
+    # assertion pass even if that function were mutated to no longer
+    # incorporate `credential_id` at all (its caller and this test would
+    # simply agree on the same wrong answer). See `test_cli_delete_
+    # credential_confirmation_phrase_literal_and_cross_target` below for the
+    # dedicated mutation-sensitive coverage this shorthand doesn't replace.
+    assert details["required_confirmation"] == f"DELETE_CREDENTIAL {credential_id}"
+    assert isinstance(details["consequence"], str) and details["consequence"], "consequence must be a non-empty string"
+    assert isinstance(details["reversible_alternative"], str) and details["reversible_alternative"]
+    assert details["recovery"] is None, "delete-credential is genuinely irreversible -- recovery is truthfully null"
+
+    listed = _run_cli(platform, "list-credentials")
+    assert listed.returncode == 0, listed.stderr
+    assert credential_id in listed.stdout, "an unconfirmed delete-credential must not have removed the row"
+
+
+def test_cli_delete_credential_wrong_confirm_phrase_declares_and_touches_nothing(platform: types.SimpleNamespace) -> None:
+    """Contract `valid_confirmation`'s exact-match rule, adversarially: a
+    suffix, a prefix, a case fold, and an empty string are all refused --
+    never a prefix/suffix/truthy/presence check."""
+    slug = _fresh_slug("ci")
+    _register_application(platform, slug)
+    issued = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued.returncode == 0, issued.stderr
+    credential_id, _secret = _parse_issued(issued.stdout)
+    revoked = _run_cli(platform, "revoke-credential", credential_id)
+    assert revoked.returncode == 0, revoked.stderr
+
+    # Literal, not `delete_credential_confirmation_phrase(credential_id)`
+    # (Opus review MA-2) -- see the identical note above.
+    phrase = f"DELETE_CREDENTIAL {credential_id}"
+    for wrong in (phrase + "X", phrase[:-1], phrase.lower(), ""):
+        refused = _run_cli(platform, "delete-credential", credential_id, "--confirm", wrong)
+        assert refused.returncode == 2, refused.stderr
+        declaration = json.loads(refused.stderr.strip())
+        assert declaration["details"]["required_confirmation"] == phrase
+
+    listed = _run_cli(platform, "list-credentials")
+    assert credential_id in listed.stdout, "no wrong-phrase attempt above may have removed the row"
+
+
+def test_cli_delete_credential_confirmation_phrase_is_deterministic(platform: types.SimpleNamespace) -> None:
+    slug = _fresh_slug("cj")
+    _register_application(platform, slug)
+    issued = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued.returncode == 0, issued.stderr
+    credential_id, _secret = _parse_issued(issued.stdout)
+
+    first = _run_cli(platform, "delete-credential", credential_id)
+    second = _run_cli(platform, "delete-credential", credential_id)
+    assert first.returncode == second.returncode == 2
+    phrase_1 = json.loads(first.stderr.strip())["details"]["required_confirmation"]
+    phrase_2 = json.loads(second.stderr.strip())["details"]["required_confirmation"]
+    # Literal expected value (Opus review MA-2) -- see the note above.
+    assert phrase_1 == phrase_2 == f"DELETE_CREDENTIAL {credential_id}"
+
+
+def _run_cli_no_env(*args: str) -> subprocess.CompletedProcess:
+    """Opus review MA-3: runs the CLI with NONE of this codebase's own
+    `R2DB_*` environment variables set at all -- not `R2DB_CONTROL_DSN`,
+    not `R2DB_CREDENTIAL_PEPPER` -- to prove the confirmation gate really
+    does run before any environment variable is even required, let alone
+    before a database connection is opened. `PYTHONPATH` is kept (needed
+    only so the subprocess can import `r2db_api` at all)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("R2DB_")}
+    env["PYTHONPATH"] = str(SRC_DIR)
+    return subprocess.run([sys.executable, "-m", "r2db_api.ops", *args], capture_output=True, text=True, env=env)
+
+
+def test_cli_delete_credential_without_confirm_refuses_before_any_env_var_is_required() -> None:
+    """Opus review MA-3: with no `R2DB_*` environment variable set at all,
+    an unconfirmed `delete-credential` (given a format-valid, if made-up,
+    credential_id -- MA-1's own format check needs no environment either)
+    still produces the ordinary gate declaration -- not `_require_env`'s
+    "R2DB_CONTROL_DSN is required" -- proving the gate runs before
+    `_store()` even looks at the environment, let alone connects to a
+    database. No `platform` fixture needed here at all: this process never
+    reaches anything that would need one."""
+    result = _run_cli_no_env("delete-credential", "crd_" + "a" * 16)
+    assert result.returncode == 2, result.stderr
+    assert result.stdout == ""
+    assert "R2DB_CONTROL_DSN" not in (result.stderr or ""), "must not have reached the env-var check at all"
+    declaration = json.loads(result.stderr.strip())
+    assert declaration["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert declaration["details"]["required_confirmation"] == "DELETE_CREDENTIAL crd_" + "a" * 16
+
+
+@pytest.mark.parametrize(
+    "bad_credential_id",
+    [
+        "not-a-credential-id",
+        "crd_tooshort",
+        "crd_" + "g" * 16,  # not hex
+        "crd_" + "A" * 16,  # uppercase, not lowercase hex
+        "ctl_" + "a" * 16,  # a control-credential id shape, not application
+        "crd_" + "a" * 17,  # one hex digit too many
+        "",
+    ],
+)
+def test_cli_delete_credential_rejects_malformed_credential_id_before_any_env_var_is_required(bad_credential_id: str) -> None:
+    """Opus review MA-1: `cmd_delete_credential` validates `credential_id`
+    against `^crd_[0-9a-f]{16}$` -- the exact shape both application-
+    credential minters (`ops._new_credential_id`/`control_plane._new_
+    credential_id`) produce -- strictly before the confirmation gate and
+    with no environment variable required either, so a malformed id is
+    `VALIDATION_FAILED` (exit 1, `main()`'s ordinary error path), never
+    reaching `delete_credential_confirmation_phrase` at all (which would
+    otherwise reflect this unvalidated string straight into the declared
+    `required_confirmation`, contract `phrase_construction` rule (c))."""
+    result = _run_cli_no_env("delete-credential", bad_credential_id)
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    assert "VALIDATION_FAILED" in result.stderr
+    assert "credential_id must match" in result.stderr
+    # Not the gate's shape at all -- no JSON, no DESTRUCTIVE_CONFIRMATION_
+    # REQUIRED code, and critically, the rejected string itself is never
+    # echoed back (rule (c): no unvalidated-input reflection).
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stderr.strip())
+    if bad_credential_id:
+        assert bad_credential_id not in result.stderr, "the rejected string itself must never be echoed back"
+
+
+def test_cli_delete_credential_echo_of_declared_phrase_succeeds(platform: types.SimpleNamespace) -> None:
+    """The probe->echo protocol end to end: an operator who does not
+    already know the phrase gets it from a first, refused invocation's own
+    stderr declaration, and echoing it back verbatim on a second invocation
+    deletes the row exactly as `delete-credential` always has."""
+    slug = _fresh_slug("ck")
+    _register_application(platform, slug)
+    issued = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued.returncode == 0, issued.stderr
+    credential_id, _secret = _parse_issued(issued.stdout)
+    revoked = _run_cli(platform, "revoke-credential", credential_id)
+    assert revoked.returncode == 0, revoked.stderr
+
+    probe = _run_cli(platform, "delete-credential", credential_id)
+    assert probe.returncode == 2
+    phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+
+    echoed = _run_cli(platform, "delete-credential", credential_id, "--confirm", phrase)
+    assert echoed.returncode == 0, echoed.stderr
+
+    listed = _run_cli(platform, "list-credentials")
+    assert credential_id not in listed.stdout, "the echoed, confirmed delete-credential must have removed the row"
+
+
+def test_cli_delete_credential_cross_target_phrase_is_rejected(platform: types.SimpleNamespace) -> None:
+    """Opus review MA-2: credential A's own declared phrase must not
+    validate a delete of credential B -- the phrase's own `credential_id`
+    component is load-bearing, not decorative. Also exercises MA-2's own
+    mutation-sensitivity requirement: a mutant `delete_credential_
+    confirmation_phrase` that dropped `credential_id` from its output
+    entirely (returning a fixed string regardless of argument) would make
+    every credential's declared phrase identical, and this test would then
+    catch that by A's phrase being wrongly accepted for B."""
+    slug = _fresh_slug("cm")
+    _register_application(platform, slug)
+
+    issued_a = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued_a.returncode == 0, issued_a.stderr
+    credential_a, _secret_a = _parse_issued(issued_a.stdout)
+    revoked_a = _run_cli(platform, "revoke-credential", credential_a)
+    assert revoked_a.returncode == 0, revoked_a.stderr
+
+    issued_b = _run_cli(platform, "issue-credential", slug, "runtime")
+    assert issued_b.returncode == 0, issued_b.stderr
+    credential_b, _secret_b = _parse_issued(issued_b.stdout)
+    revoked_b = _run_cli(platform, "revoke-credential", credential_b)
+    assert revoked_b.returncode == 0, revoked_b.stderr
+
+    probe_a = _run_cli(platform, "delete-credential", credential_a)
+    assert probe_a.returncode == 2
+    phrase_a = json.loads(probe_a.stderr.strip())["details"]["required_confirmation"]
+    assert phrase_a == f"DELETE_CREDENTIAL {credential_a}"
+    assert phrase_a != f"DELETE_CREDENTIAL {credential_b}"
+
+    cross = _run_cli(platform, "delete-credential", credential_b, "--confirm", phrase_a)
+    assert cross.returncode == 2, "credential A's own declared phrase must never validate a delete of credential B"
+    declaration = json.loads(cross.stderr.strip())
+    assert declaration["details"]["required_confirmation"] == f"DELETE_CREDENTIAL {credential_b}"
+
+    listed = _run_cli(platform, "list-credentials")
+    assert credential_a in listed.stdout, "the rejected cross-target attempt must not have deleted A either"
+    assert credential_b in listed.stdout, "the rejected cross-target attempt must not have deleted B"
 
 
 def test_cli_disable_and_enable_credential(platform: types.SimpleNamespace) -> None:
