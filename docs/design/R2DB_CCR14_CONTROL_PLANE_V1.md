@@ -23,7 +23,7 @@
 
 **含まない**: MitateDB-api の HTTP 層 (次フェーズ。本フェーズでは port の surface-absent 分岐で C-14/C-15 に応答する)、application-plane の耐久 audit sink (フェーズ3。ただし R-6 が control-plane 分だけ先行耐久化する)、Application の PostgreSQL 実 provisioning の HTTP 化 (R-4)、Application 削除 (契約が v1 対象外と明記)、`/v1/audit/query` の実装 (audit_query capability は unavailable のまま)。
 
-## 0.5 契約論点 Q-1 — **裁定済み (2026-08-29)**。実施は WP-5 完了後、それまで条項休止のまま先行する
+## 0.5 契約論点 Q-1 — **裁定済み (2026-08-29)**。実施は WP-5 完了後、それまで条項休止のまま先行する — **実施完了 (2026-08-30)。休止条項は解除済み。実施記録は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (v1.6)**
 
 **Q-1: 破壊的確認の有効性定義 (C-06 共通化の前提)。** 契約 1.1.0 の `revoke_credential` 意味論は「最後の有効な control credential の失効は許可され、明示的確認を要する — ただし有効な確認の定義は未解決の契約判断であり、**解決まで本条項は実効化しない**」と自ら定める。よって本実装は revoke を確認検査なしで提供することが契約適合であり、独自の確認規則を発明して契約の空白を埋めることは (CCR-13 の Q-1 で是正した欠陥の形の再発になるため) しない。`CredentialRevokeRequest` の `destructive`/`confirmation` フィールドは schema どおり受理し、内容は検査しない。**この状態は MitateDB の既知欠落 (確認トークン不検証) と同型である**ことを明記して裁定を仰ぐ。裁定のたたき台 (依頼者との往復で具体化、2026-08-29): **サーバが危険を宣言し、クライアントがそれを復唱したときのみ有効**とする状態レスな二段階方式。確認なしの破壊的要求は `DESTRUCTIVE_CONFIRMATION_REQUIRED` で拒否し、その problem+json に正準の確認句 (`required_confirmation` — 操作・対象・帰結クラスから決定論的に構成、再作成可能な対象は状態指紋を含める)、`consequence`、**可逆な代替 (`reversible_alternative`) と復旧経路 (`recovery`)** を機械可読で宣言する。有効な確認 = `destructive: true` + 確認句の全文一致。サーバは句を再計算できるため無状態 (トークン保存・失効・SI-08 の新資源を持ち込まない)。確定後に additive に実効化 (拒否コードは既に契約語彙にある)。**本設計はこの裁定を実装のブロッカーにしない** — 確定後の実効化は語彙追加なしの意味論追加で済む。
 

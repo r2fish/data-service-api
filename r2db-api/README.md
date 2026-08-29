@@ -95,7 +95,7 @@ versus what remains unevidenced.
   correlate.
 - **A third conformance adapter, `r2db-api-http`**
   (`conformance/conformance_adapter_r2db_http.py`), running
-  C-01/C-03/C-08/C-11/C-12/C-14/C-15/C-17/C-18 over this real
+  C-01/C-03/C-06/C-08/C-11/C-12/C-14/C-15/C-17/C-18 over this real
   HTTP+PostgreSQL stack rather than in-process. C-14 (control-plane
   authority boundary) and C-15 (bootstrap/reset lifecycle) run against a
   real `/control/v1` for this adapter and against a real, in-process

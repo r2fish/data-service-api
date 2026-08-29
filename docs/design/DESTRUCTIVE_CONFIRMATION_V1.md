@@ -1,6 +1,6 @@
 # Q-1 実効化設計 — 宣言と復唱 (destructive confirmation)、契約 1.2.0
 
-- 版数: v1.5 (2026-08-30。WP-5 実装 (MitateDB-api の確認内容検証の適合修正 — R-5 全部 + 版数 flip + limits 語彙適合 + C-06 厳格分岐の初実行デバッグ) を §7 に記録)。v1.4 は WP-4 実装 (儀式 CLI `ops.py` の `reset`/`delete-credential` declare-and-echo 化 + runbook/playbook 更新) を §6.1-6.6 に記録し、その独立レビュー (Opus、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き) への全対応を §6.7-6.8 に追記したもの (WP-3 followup が §5.6 で v1.3 のまま追記記録したのと同じ前例に倣い、WP-4 時点では版数を据え置いた)。v1.3 は WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録したもの。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
+- 版数: v1.6 (2026-08-30。WP-6 (記録整理 — Q-1 実効化の最終 WP。ドキュメントのみ、コード変更なし) を §8 に記録し、Q-1 全体の完了総括と将来課題台帳を新設。suite は WP-5 followup の 814 passed から不変 (文書のみの変更のため))。v1.5 は WP-5 実装 (MitateDB-api の確認内容検証の適合修正 — R-5 全部 + 版数 flip + limits 語彙適合 + C-06 厳格分岐の初実行デバッグ) を §7 に記録)。v1.4 は WP-4 実装 (儀式 CLI `ops.py` の `reset`/`delete-credential` declare-and-echo 化 + runbook/playbook 更新) を §6.1-6.6 に記録し、その独立レビュー (Opus、blocker 0 / major 3 / minor 5 / nit 4、全件実測裏付き) への全対応を §6.7-6.8 に追記したもの (WP-3 followup が §5.6 で v1.3 のまま追記記録したのと同じ前例に倣い、WP-4 時点では版数を据え置いた)。v1.3 は WP-3 実装 (r2db-api の declare-and-echo 実効化 — R-2 全部 + R-3 + limit_class/212 再分類 + 版数 flip 両面 + 旧固定句 27+ 箇所更新 + TRUTHFUL_DETERRENCE 更新) を §4 に記録したもの。v1.2 は v1.1 への WP-1 実装フェーズ独立レビュー (Opus、blocker 1 / major 8 / minor 4 / nit 4、全件実測裏付き) を全反映。v1.1 は v1.0 への WP-0 独立レビュー (blocker 3 / major 7 / minor 10 / nit 3、全件実測裏付き) を全反映し、従属判断7 (契約スキーマ閉鎖ほか) を統合したもの)
 - 正典: `spec/CCR_DISPOSITION.md` 従属判断6 (裁定、2026-08-29) および従属判断7 (2026-08-29、依頼者裁定案を監督検証のうえ WP-1 で記録)。たたき台と守備範囲合意は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §0.5。本書は裁定を**実施する**設計であり、裁定内容を再交渉しない
 - 適用範囲: 共通契約 (spec) + conformance (C-06) + r2db-api (データ/schema 面・制御面・儀式 CLI) + MitateDB-api
 - 実施順序は裁定どおり: 契約 1.2.0 文言化 → C-06 共通 suite → CCR-14 休止条項の実効化 (r2db) → MitateDB の確認内容検証の適合修正
@@ -485,3 +485,33 @@ WP-5 本体 (§7.6) から Q1-D11 (root 812) を経て、本 followup (MA-1〜n-
 - conformance-tests 単独: **252 passed / 0 failed / 0 skipped (156.02s)** — 251 (Q1-D11 後、無変更) + `test_c06_v2b_wire_vacuity_guard` 1 件 = 252。
 - `r2db-api/tests/test_postgres.py` 単独: **181 passed / 0 failed / 0 skipped (21.74s)** — 無変更 (r2db-api には一切触れていない)。
 - `MitateDB-api/tests` 単独: **18 passed (0.02s)** (`test_foundation.py` 17 件 [Q1-D11 後の 16 + 本 followup 新設 1 件]、`test_limit_class_vocabulary.py` 1 件)。
+
+## 8. Q-1 完了総括と将来課題台帳 (WP-6、v1.6)
+
+WP-6 (記録整理 — Q-1 実効化の最終 WP) を実施した。**本 WP はドキュメントのみで、コード変更・コミットを伴わない** (発注の制約どおり)。裁定 (`spec/CCR_DISPOSITION.md` 従属判断6/7) は WP-1〜WP-5 の単一コミット群で実施済み — 契約 1.2.0 文言化 (WP-1) → C-06 共通 suite + port v1.6 (WP-2) → r2db-api 実効化 (WP-3) → 儀式 CLI declare-and-echo 化 (WP-4) → MitateDB-api 適合修正 (WP-5)。本節はその完了を宣言し、実装中に生まれた将来課題を一本の台帳に集約する。
+
+### 8.1 台帳
+
+**(a) C-06 v2 候補: port `drop_index` op** (出典: §1 R-6 item 3、監督決定 Q1-D5)。port v1.6 が追加した破壊的 schema op は `drop_entity` のみ — `drop_index` は句構成・宣言 details とも r2db 側は実装済み (`drop_index_confirmation_phrase`、SI-09 行のとおり)だが、共通 conformance の C-06 検証ベクタとしてはまだ被覆されていない。次に C-06 へ触れる WP で追加すること。
+
+**(b) `atomic_mutation` の `operations` 語彙の解釈 (バッチ固有 vs 一般語彙 — 契約質問)** (出典: §7.9 MA-1、§7.8)。MitateDB-api の WP-5 独立レビューが、`capabilities().atomic_mutation.operations` の文言 (`capability_status.defined.atomic_mutation` = "Single-entity atomic mutation batches") が「複数操作をまとめたバッチ実行の可否」を指すのか「一般的な mutation 語彙の実行可否」を指すのか、契約自身が判別しない論点であることを発見した。r2db-api はどちらの解釈でも同一の宣言になる (単一の `mutate()` が単発・バッチを均一に扱うため両解釈が収束する) ため、この論点を顕在化させない。MitateDB-api は現行宣言 (`operations: ["insert","update","delete"]`) を「一般語彙」解釈のもとでは真実、「バッチ限定」解釈のもとでは偽と判定し、依頼者裁定の指示 (独断せず両解釈と影響を報告) に従い**解釈も挙動も変更しなかった** (`cell.py` のコメントに調査全内容を記録)。契約 `capability_status.defined.atomic_mutation` の文言自体を明確化する CCR を将来提起することを推奨する。
+
+**(c) 受理境界一覧** (ブラックボックス conformance suite が構造的に検出できない、または当実装では観測不能な事項):
+- **V2b の「0 行削除+拒否偽装」は原理的に検出不能** (出典: §7.9 mi-2)。`_batch_delete_capability_absent` のような「要求どおり 0 行を削除しつつ拒否として振る舞う」経路 (実際には受理して実行し、たまたま 0 行だったケース) は、前後の行数検査だけでは構造的に区別できない。ブラックボックス conformance テスト一般の限界として記録する。
+- **句の正規化禁止 (Unicode 正規化・大小文字畳み込みの禁止) は純 ASCII peer では観測不能** (出典: §5.6 nit n-4)。r2db の句が entity/index/credential_id (すべて ASCII 識別子または16進 digest) のみで構成される純 ASCII 文字列であるため、r2db 自身の実装では「正規化により偽陽性一致が起きる」具体的なケースが観測不能。規範自体は契約の一般原則として有効であり、r2db がたまたまこの穴の実例を提供しないという限界。
+- **CLI 定数句の interning による identity assert の無保証** (出典: §6.7 minor MI-3)。`RESET_CONTROL_CREDENTIALS` のような文字列リテラル定数は CPython の文字列 interning により、`ops.py` が独自に同一内容のリテラルをハードコードしていても `is` 比較が偶然真になりうる — 定数側の実効的な回帰網はリテラル期待値テスト (MA-2) であり、identity assert (`test_cli_phrases_share_the_structured_module_with_data_and_control_plane_phrases`) はこの種の欠陥を捕捉しない。関数オブジェクトの identity assert は依然有効 (再定義・コピーの検出に機能する) が、定数の identity assert は文書的価値のみと理解すること。
+- **null の真実性は検証不能** (出典: §1 R-1 item 2)。`reversible_alternative`/`recovery` の null は「真実として存在しない」の宣言だが、実在する代替を null と偽る実装をテストで検出することはできない — 真実性は宣言原則 (SI 全体) が負う限界であり、機構では埋められない。
+
+**(d) L4 (r2db `request_bytes` の control discovery 宣言) は Q-1 に吸収されず未実施のまま** (出典: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §14.4 L4、監督決定 D-2、§13.3)。CCR-14 WP-6 (D-2) は「宣言面の変更は conformance 証拠を伴うコード WP に載せる規律を優先する」として、`GET /control/v1/capabilities` が `request_bytes` リソースクラスを公開していない既知ギャップ (enforce は実在するが discovery が未宣言) を「Q-1 バッチ、契約 1.2.0 検討時」に繰延べる、と申し送っていた。**本 WP-6 の実施範囲を確認した結果、Q-1 (§1-§7 の全 WP) はこの宣言追加を一度も実施していない** — Q-1 は destructive confirmation の文言化・実効化に閉じたスコープであり、`request_bytes` discovery はそのスコープに含まれる作業項目ではなかった。D-2 が見込んだ「次のコード WP」は Q-1 では実現しなかったことをここに正直に記録し、次のコード WP (契約変更を伴わない宣言 flip のみで完結する) へ改めて繰延べる。
+
+**(e) 契約 additive 候補束 (1.3.0 検討時に一括判断)** (出典: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §14.4「契約 additive 候補束」、`security/CONTROL_MAPPING.md` R-11 節、本書 §2 R-1 item 「従属判断7 (A)」の封筒閉鎖注記):
+1. **`CredentialsResult.must_rotate` の露出** (出典: R2DB_CCR14 §2、§8 m-9)。運用者が儀式未完遂の credential を in-band で見分けたくなった場合の additive フィールド。現行は契約に無いフィールドの独自追加を避け、非露出のまま。
+2. **`audit.fields` への対象識別子 (`target_id`) の追加** (出典: R2DB_CCR14 §12.2 MI-6/MI-11、§12.4)。credential lifecycle イベントが対象 credential を識別できず、`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` の「侵害窓中に発行/失効された credential の列挙」が監査行だけでは完結しない (`list-credentials` との突合で補っているが恒久策ではない)。
+3. **`audit` role による制御面読み取り (一覧・capabilities) の許可** (出典: R2DB_CCR14 §1 R-11、§14.4)。「配れる弱い credential」を用意し、root (`role=control`) を配る動機を消す。
+4. **per-application 発行凍結 (CLI 限定トグル)** (出典: R2DB_CCR14 §1 R-11、§14.4)。盗まれた control credential からデータ面への最短経路 (任意 app への credential 発行) を app 単位で閉じる。
+
+これら4件はいずれも独立に判断してよいが、契約バージョンの分散 (小さな additive 変更を都度別バージョンで出す) を避けるため、1.3.0 検討時に一括して依頼者へ諮ることを推奨する (CCR-14 側の台帳の推奨方針を継承)。
+
+### 8.2 Q-1 の完了宣言
+
+契約 1.2.0 (declare-and-echo destructive confirmation) は文言化・r2db-api 実効化・儀式 CLI 実効化・MitateDB-api 適合修正のすべてが単一コミット規律のもとで完了し、C-06 は3 adapter で厳格分岐が executable として走る。CCR-14 の `revoke_credential` 休止条項 (`spec/CCR_DISPOSITION.md` 従属判断6) は解除された。残る作業は上記台帳の5項目 (a)-(e) のみであり、いずれも新規の安全ギャップではなく、既知の・正直に記録された future-work candidate である。
