@@ -48,7 +48,7 @@ what "executable" certifies here.
 
 ## Taxonomies used by the executable conditions
 
-The eight conditions marked `executable (three adapters)` above are built on
+The conditions marked `executable (three adapters)` above are built on
 shared taxonomies defined normatively in `conformance-tests/adapter.py`
 (design `docs/design/CONFORMANCE_ADAPTER_V1.md` sections 4.3 and 4.4, and
 `docs/design/CONFORMANCE_CONDITIONS_V1_1.md` section 2 for the C-13

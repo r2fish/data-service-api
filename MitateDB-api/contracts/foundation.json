@@ -4,7 +4,7 @@
   "status": "local-executable-foundation",
   "public_contract": {
     "source_of_truth": "../../spec/",
-    "ownership": "common-contract-owned-by-r2db-api-workstream",
+    "ownership": "common-contract-not-owned-by-either-implementation",
     "implementation_must_not_define_public_endpoints_here": true
   },
   "authority_topology": {
