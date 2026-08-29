@@ -336,6 +336,41 @@ def app_b(platform: types.SimpleNamespace) -> Iterator[types.SimpleNamespace]:
 LIMITS = ResourceLimits()
 
 
+# --- destructive-confirmation phrase probes (WP-3, declare-and-echo -------
+# effectivization): the old fixed tokens "DELETE"/"DROP_ENTITY"/"DROP_INDEX"
+# this WP retires are replaced everywhere below with a real probe -> echo
+# round trip against `PostgresCell` itself -- a plain unconfirmed attempt
+# (`destructive: True`, no `confirmation`) is always denied with
+# `DESTRUCTIVE_CONFIRMATION_REQUIRED` and never mutates anything, so
+# reading the real, currently-valid phrase off that denial's own
+# `details["required_confirmation"]` and echoing it back is the same
+# protocol a real client (and this repository's own conformance suite,
+# `adapter.resolve_valid_confirmation`) uses -- never a hand-rolled digest/
+# revision computation that could silently drift from the real
+# implementation. ------------------------------------------------------
+
+
+def _delete_phrase(cell: PostgresCell, entity: str, where: list[dict]) -> str:
+    with pytest.raises(FoundationError) as exc:
+        cell.transact(entity, [{"operation": "delete", "where": where, "destructive": True}], LIMITS)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    return exc.value.details["required_confirmation"]
+
+
+def _drop_entity_phrase(cell: PostgresCell, entity: str) -> str:
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema({"operation": "drop_entity", "entity": entity, "destructive": True}, developer=True, limits=LIMITS)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    return exc.value.details["required_confirmation"]
+
+
+def _drop_index_phrase(cell: PostgresCell, entity: str, index: str) -> str:
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema({"operation": "drop_index", "entity": entity, "index": index, "destructive": True}, developer=True, limits=LIMITS)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    return exc.value.details["required_confirmation"]
+
+
 def P(field: str, operator: str, value: object = None) -> Predicate:
     """`PostgresCell.query`'s `where` parameter, per the `StorageBackend`
     protocol, is `list[Predicate]` -- already parsed. In the real request
@@ -972,7 +1007,7 @@ def test_drop_entity_requires_destructive_confirmation(app_a: types.SimpleNamesp
             cell.apply_schema({"operation": "drop_entity", "entity": "widgets"}, developer=True, limits=LIMITS)
         assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
         assert any(item["entity"] == "widgets" for item in cell.catalog())
-        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": "DROP_ENTITY"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": _drop_entity_phrase(cell, "widgets")}, developer=True, limits=LIMITS)
         assert cell.catalog() == []
     finally:
         cell.close()
@@ -1027,9 +1062,10 @@ def test_mutation_operations_insert_update_delete_succeed_and_upsert_is_capabili
         rows = cell.query("items", select=["label"], where=[], page_size=10, limits=LIMITS)
         assert rows.items == [{"label": "a"}]
 
+        delete_where = [{"field": "label", "operator": "eq", "value": "a"}]
         outcome = cell.transact(
             "items",
-            [{"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "destructive": True, "confirmation": "DELETE"}],
+            [{"operation": "delete", "where": delete_where, "destructive": True, "confirmation": _delete_phrase(cell, "items", delete_where)}],
             LIMITS,
         )
         assert outcome.affected == 1
@@ -1365,10 +1401,10 @@ def test_create_index_rejects_address_field_and_drop_index_requires_destructive_
             cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag"}, developer=True, limits=LIMITS)
         assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
         assert cell.catalog()[0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
-        cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": _drop_index_phrase(cell, "shapes", "by_tag")}, developer=True, limits=LIMITS)
         assert cell.catalog()[0]["unique_keys"] == []
         with pytest.raises(FoundationError) as exc:
-            cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+            cell.apply_schema({"operation": "drop_index", "entity": "shapes", "index": "by_tag", "destructive": True, "confirmation": "irrelevant, the index no longer exists"}, developer=True, limits=LIMITS)
         assert exc.value.code == "NOT_FOUND"
         # Dropping the (now non-unique) index frees `upsert` back to
         # CAPABILITY_UNSUPPORTED -- proving the index is actually gone, not
@@ -1519,7 +1555,8 @@ def test_unique_key_is_rejected_on_insert_update_and_delete(app_a: types.SimpleN
             cell.transact("notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "unique_key": "by_body"}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         with pytest.raises(FoundationError) as exc:
-            cell.transact("notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "unique_key": "by_body", "destructive": True, "confirmation": "DELETE"}], LIMITS)
+            where = [{"field": "id", "operator": "eq", "value": 1}]
+            cell.transact("notes", [{"operation": "delete", "where": where, "unique_key": "by_body", "destructive": True, "confirmation": _delete_phrase(cell, "notes", where)}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
     finally:
         cell.close()
@@ -1598,9 +1635,10 @@ def test_expected_revision_with_no_predicate_match_is_not_found(app_a: types.Sim
             )
         assert exc.value.code == "NOT_FOUND"
         with pytest.raises(FoundationError) as exc:
+            where = [{"field": "id", "operator": "eq", "value": 999}]
             cell.transact(
                 "docs",
-                [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "expected_revision": revision, "destructive": True, "confirmation": "DELETE"}],
+                [{"operation": "delete", "where": where, "expected_revision": revision, "destructive": True, "confirmation": _delete_phrase(cell, "docs", where)}],
                 LIMITS,
             )
         assert exc.value.code == "NOT_FOUND"
@@ -1634,7 +1672,8 @@ def test_expected_revision_without_precondition_zero_row_update_and_delete_still
         cell.apply_schema({"operation": "create_entity", "entity": "docs", "fields": ["body"]}, developer=True, limits=LIMITS)
         outcome = cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 999}], "values": {"body": "v2"}}], LIMITS)
         assert outcome.affected == 0
-        outcome = cell.transact("docs", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        where = [{"field": "id", "operator": "eq", "value": 999}]
+        outcome = cell.transact("docs", [{"operation": "delete", "where": where, "destructive": True, "confirmation": _delete_phrase(cell, "docs", where)}], LIMITS)
         assert outcome.affected == 0
     finally:
         cell.close()
@@ -1950,7 +1989,8 @@ def test_id_is_never_reused_after_delete_or_a_failed_batch(app_a: types.SimpleNa
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
         cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
-        cell.transact("widgets", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 2}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        delete_where = [{"field": "id", "operator": "eq", "value": 2}]
+        cell.transact("widgets", [{"operation": "delete", "where": delete_where, "destructive": True, "confirmation": _delete_phrase(cell, "widgets", delete_where)}], LIMITS)
         cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
         ids = sorted(row["id"] for row in cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items)
         assert ids == [1, 3]  # id 2 is gone forever
@@ -1965,9 +2005,37 @@ def test_id_is_never_reused_after_delete_or_a_failed_batch(app_a: types.SimpleNa
         assert ids_after == [1, 3, 5]  # id 4 was consumed and gapped
 
         # drop_entity + recreate is a new entity: addressing restarts at 1.
-        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": "DROP_ENTITY"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": _drop_entity_phrase(cell, "widgets")}, developer=True, limits=LIMITS)
         cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
         cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
+    finally:
+        cell.close()
+
+
+def test_delete_phrase_invalidated_by_drop_recreate_of_the_same_entity_under_the_same_name(app_a: types.SimpleNamespace) -> None:
+    """Opus review minor m-2, monitor decision Q1-D10 (reviewer's own
+    measured scenario, against real PostgreSQL): probe a `delete` phrase
+    for `widgets` at its current schema_revision, `drop_entity` `widgets`,
+    `create_entity` `widgets` again (same name), then echo the OLD phrase
+    against the freshly re-created entity's identical-looking delete
+    request -- it must now be denied. Before this fix the where-digest-only
+    delete phrase carried no state fingerprint at all, so the stale phrase
+    would incorrectly still validate."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+        where = [{"field": "id", "operator": "eq", "value": 1}]
+        old_phrase = _delete_phrase(cell, "widgets", where)
+
+        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": _drop_entity_phrase(cell, "widgets")}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
+        cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)  # the re-created entity's own fresh row
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("widgets", [{"operation": "delete", "where": where, "destructive": True, "confirmation": old_phrase}], LIMITS)
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
         assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
     finally:
         cell.close()
@@ -1982,7 +2050,8 @@ def test_id_is_never_reused_after_vacuum(app_a: types.SimpleNamespace) -> None:
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
         cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
-        cell.transact("widgets", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 2}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        delete_where = [{"field": "id", "operator": "eq", "value": 2}]
+        cell.transact("widgets", [{"operation": "delete", "where": delete_where, "destructive": True, "confirmation": _delete_phrase(cell, "widgets", delete_where)}], LIMITS)
 
         conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
         try:

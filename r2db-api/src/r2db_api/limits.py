@@ -32,7 +32,7 @@ class ResourceLimits:
         if bound is None:
             fail("VALIDATION_FAILED", "Unknown resource class.", details={"field": kind})
         if actual < 0 or actual > bound:
-            fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": kind, "limit": bound})
+            fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": kind, "limit_class": kind, "limit": bound})
 
     def check_request(self, request: Any) -> None:
         # Iterative bounded measurement avoids recursive repr() and avoids
@@ -51,13 +51,13 @@ class ResourceLimits:
             if isinstance(item, dict):
                 total += 2
                 if len(item) > bound // 8:
-                    fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit": bound})
+                    fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound})
                 stack.extend(item.keys())
                 stack.extend(item.values())
             elif isinstance(item, (list, tuple, set)):
                 total += 2
                 if len(item) > bound // 8:
-                    fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit": bound})
+                    fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound})
                 stack.extend(item)
             elif isinstance(item, str):
                 total += len(item) * 4
@@ -68,11 +68,11 @@ class ResourceLimits:
             else:
                 fail("VALIDATION_FAILED", "Request contains an unsupported value type.")
             if total > bound:
-                fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit": bound})
+                fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound})
 
     def check_deadline(self, deadline: float, clock: Callable[[], float]) -> None:
         if clock() > deadline:
-            fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": self.execution_ms})
+            fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": self.execution_ms})
 
     def check_depth(self, value: Any) -> None:
         stack = [(value, 0)]
@@ -87,7 +87,7 @@ class ResourceLimits:
             seen.add(marker)
             next_depth = current + 1
             if next_depth > self.operation_depth:
-                fail("LIMIT_EXCEEDED", "Operation nesting exceeds the configured limit.", status=413, details={"resource": "operation_depth", "limit": self.operation_depth})
+                fail("LIMIT_EXCEEDED", "Operation nesting exceeds the configured limit.", status=413, details={"resource": "operation_depth", "limit_class": "operation_depth", "limit": self.operation_depth})
             children = item.values() if isinstance(item, dict) else item
             stack.extend((child, next_depth) for child in children)
 

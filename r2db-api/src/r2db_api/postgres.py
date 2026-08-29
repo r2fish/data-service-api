@@ -124,6 +124,9 @@ from .structured import (
     _validate_predicate_types,
     bind_mutation,
     bind_schema_operation,
+    delete_confirmation_phrase,
+    drop_entity_confirmation_phrase,
+    drop_index_confirmation_phrase,
     require_destructive_confirmation,
     validate_identifier,
     validate_page_size,
@@ -935,9 +938,9 @@ class PostgresCell:
                         _run(cur, statement, where_params)
                         rows = cur.fetchall()
             except psycopg.errors.QueryCanceled:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.Error:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         # R-6: `rows` was fetched with `LIMIT page_size + 1` (the look-ahead
@@ -1032,9 +1035,9 @@ class PostgresCell:
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
             except psycopg.errors.QueryCanceled:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
                 self._fail_unique_conflict(entity, exc)
             except psycopg.errors.DataError:
@@ -1147,7 +1150,14 @@ class PostgresCell:
             # R-4, corrigendum m-5: destructive confirmation is checked
             # before any precondition-related outcome (never resolves to a
             # PRECONDITION_FAILED/NOT_FOUND).
-            require_destructive_confirmation(bound.destructive, bound.confirmation, "DELETE", "Delete requires explicit destructive confirmation.")
+            require_destructive_confirmation(
+                bound.destructive, bound.confirmation,
+                delete_confirmation_phrase(entity, bound.where, self._read_schema_revision(conn)),
+                "Delete requires explicit destructive confirmation.",
+                consequence="Rows matching the filter are permanently deleted; there is no in-band restore.",
+                reversible_alternative=None,
+                recovery=None,
+            )
             affected = self._delete(conn, entity, where_sql, where_params, bound.expected_revision)
             return affected, None
 
@@ -1478,7 +1488,14 @@ class PostgresCell:
                     elif bound.operation == "drop_entity":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
-                        require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_ENTITY", "Drop requires explicit destructive confirmation.")
+                        require_destructive_confirmation(
+                            bound.destructive, bound.confirmation,
+                            drop_entity_confirmation_phrase(bound.entity, self._read_schema_revision(conn)),
+                            "Drop requires explicit destructive confirmation.",
+                            consequence="The entity and all of its rows and indexes are permanently destroyed; re-creating an entity of the same name creates a new entity, not a restore.",
+                            reversible_alternative=None,
+                            recovery=None,
+                        )
                         self._drop_entity(conn, bound.entity)
                     elif bound.operation == "add_field":
                         if bound.entity not in catalog:
@@ -1506,13 +1523,20 @@ class PostgresCell:
                         # removes a guardrail and can silently re-enable
                         # upsert -- SI-09 destructive confirmation applies
                         # exactly like drop_entity.
-                        require_destructive_confirmation(bound.destructive, bound.confirmation, "DROP_INDEX", "Dropping an index requires explicit destructive confirmation.")
+                        require_destructive_confirmation(
+                            bound.destructive, bound.confirmation,
+                            drop_index_confirmation_phrase(bound.entity, bound.index, self._read_schema_revision(conn)),
+                            "Dropping an index requires explicit destructive confirmation.",
+                            consequence="The index is destroyed; query semantics are unaffected, only performance (and any uniqueness guarantee it enforced) are lost.",
+                            reversible_alternative=None,
+                            recovery="create_index with the same definition restores it -- an index carries no data of its own, so this fully restores a non-unique index; recreating a UNIQUE index re-validates existing rows against that uniqueness and can instead fail with CONFLICT if data written after the drop now violates it.",
+                        )
                         self._drop_index(conn, table_info.indexes[bound.index]["physical"])
                     revision = self._bump_revision(conn)
             except psycopg.errors.QueryCanceled:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
-                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit": limits.execution_ms})
+                fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.UniqueViolation as exc:
                 # R-5: `create_index(unique=True)` against data that
                 # already violates the requested uniqueness.
@@ -1679,6 +1703,28 @@ class PostgresCell:
         statement = sql.SQL("DROP INDEX {name}").format(name=sql.Identifier(physical_name))
         with conn.cursor() as cur:
             _run(cur, statement)
+
+    def _read_schema_revision(self, conn: "psycopg.Connection[Any]") -> int:
+        """Read-only counterpart to `_bump_revision` below (design docs/
+        design/DESTRUCTIVE_CONFIRMATION_V1.md R-2 item 1, WP-0 m-1): a plain
+        `SELECT` of the current `schema_revision`, in the SAME transaction
+        as the pending schema operation, used to compute a `drop_entity`/
+        `drop_index` confirmation phrase's own state fingerprint before the
+        destructive-confirmation gate runs (and therefore before this same
+        transaction's own `_bump_revision` call increments it again).
+        `migrations/0003_provision_application.sql` inserts this table's one
+        row (`revision = 0`) at provisioning time, so the `SELECT` always
+        finds it in practice; the `0` fallback below exists only so this
+        method never raises on a row that -- against that expectation --
+        turns out to be missing, mirroring `_bump_revision`'s own
+        insert-if-missing defensiveness without itself writing anything.
+        """
+        table = sql.Identifier(_REVISION_TABLE)
+        select = sql.SQL("SELECT revision FROM {table}").format(table=table)
+        with conn.cursor() as cur:
+            _run(cur, select)
+            row = cur.fetchone()
+            return int(row[0]) if row is not None else 0
 
     def _bump_revision(self, conn: "psycopg.Connection[Any]") -> int:
         table = sql.Identifier(_REVISION_TABLE)

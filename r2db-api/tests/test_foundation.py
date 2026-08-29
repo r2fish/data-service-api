@@ -9,7 +9,31 @@ import time
 from r2db_api import ControlAuthority, CredentialStore, DataService
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
-from r2db_api.structured import ApplicationCell, Predicate, QueryOutcome
+from r2db_api.structured import (
+    ApplicationCell,
+    Predicate,
+    QueryOutcome,
+    delete_confirmation_phrase,
+    drop_entity_confirmation_phrase,
+    drop_index_confirmation_phrase,
+)
+
+
+def _delete_phrase(entity: str, where: list[dict], schema_revision: int = 0) -> str:
+    """Test-local helper (WP-3, declare-and-echo effectivization; `schema_
+    revision` parameter added per Opus review minor m-2/Q1-D10, which folded
+    the Application's schema_revision into the delete phrase too): computes
+    the REAL, current `delete` confirmation phrase from the same shared
+    function `structured.py`'s own `require_destructive_confirmation` call
+    site uses, rather than a hardcoded literal (the old fixed `"DELETE"`
+    token this WP retires) -- every local test that exercises a real
+    destructive `delete` now echoes this exact phrase back. `schema_
+    revision` defaults to `0` -- every call site below either passes the
+    real cell's own `cell.schema_revision` explicitly, or (the `service`-
+    fixture-based call sites) never performs a schema operation before its
+    own delete call, so the freshly-provisioned cell's schema_revision is
+    genuinely still `0` at that point."""
+    return delete_confirmation_phrase(entity, [Predicate(field=p["field"], operator=p["operator"], value=p.get("value")) for p in where], schema_revision)
 
 
 @pytest.fixture
@@ -468,21 +492,126 @@ def test_schema_deadline_failure_rolls_back_entity_catalog_and_revision():
     assert absent.value.code == "NOT_FOUND"
 
 
+def test_delete_rejects_truthy_non_boolean_destructive_before_confirmation(service):
+    """Review blocker B-1 (data plane -- `bind_mutation`'s pre-existing
+    `isinstance(bool)` check, structured.py:229, newly locked down by a
+    real test): a truthy-but-non-boolean `destructive` (the string
+    `"true"`) must be rejected as `VALIDATION_FAILED` -- never silently
+    coerced by a loose `bool(...)` cast into a real destructive delete.
+    The real, currently-valid confirmation phrase is supplied anyway (so
+    this test proves the TYPE check denies it, not merely a missing/wrong
+    confirmation), and the row is not deleted."""
+    runtime = service.authenticate("secret-a")
+    before = service.query(runtime, "notes", select=["id"])
+    where = [{"field": "id", "operator": "eq", "value": 1}]
+    phrase = _delete_phrase("notes", where)
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "delete", "where": where, "destructive": "true", "confirmation": phrase}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert service.query(runtime, "notes", select=["id"]) == before
+
+
+def test_drop_entity_rejects_truthy_non_boolean_destructive_before_confirmation():
+    """Review blocker B-1 (schema plane -- `bind_schema_operation`'s new
+    `isinstance(bool)` check, symmetric with `bind_mutation`'s): same
+    truthy-non-boolean rejection, for `drop_entity`."""
+    cell = _cell()
+    _create_entity(cell, "widgets")
+    phrase = drop_entity_confirmation_phrase("widgets", cell.schema_revision)
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": "true", "confirmation": phrase}, developer=True, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert any(item["entity"] == "widgets" for item in cell.catalog())
+
+
+def test_drop_index_rejects_truthy_non_boolean_destructive_before_confirmation():
+    """Review blocker B-1 (schema plane, `drop_index` twin of the
+    `drop_entity` test immediately above)."""
+    cell = _cell()
+    _create_entity(cell, "widgets")
+    _add_field(cell, "widgets", "tag")
+    _create_index(cell, "widgets", "by_tag", ["tag"], unique=True)
+    phrase = drop_index_confirmation_phrase("widgets", "by_tag", cell.schema_revision)
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema({"operation": "drop_index", "entity": "widgets", "index": "by_tag", "destructive": "true", "confirmation": phrase}, developer=True, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert cell.catalog()[0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
+
+
+def test_delete_phrase_invalidated_by_drop_recreate_of_the_same_entity_under_the_same_name():
+    """Opus review minor m-2, monitor decision Q1-D10 (reviewer's own
+    measured scenario): probe a `delete` phrase for `widgets` at its
+    current schema_revision, `drop_entity` `widgets`, `create_entity`
+    `widgets` again (same name -- contract `phrase_construction` rule (b):
+    re-creation under the same name must invalidate any previously-valid
+    phrase for that name). Before this fix, the where-digest-only delete
+    phrase had no state fingerprint at all, so the OLD phrase, echoed
+    against the freshly re-created entity's identical-looking delete
+    request, would incorrectly still validate -- this asserts it is now
+    denied instead."""
+    cell = _cell()
+    _create_entity(cell, "widgets")
+    cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
+    where = [{"field": "id", "operator": "eq", "value": 1}]
+    old_phrase = _delete_phrase("widgets", where, cell.schema_revision)
+
+    cell.apply_schema(
+        {"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": drop_entity_confirmation_phrase("widgets", cell.schema_revision)},
+        developer=True, limits=LIMITS,
+    )
+    _create_entity(cell, "widgets")
+    cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)  # the re-created entity's own fresh row (address restarts at 1)
+
+    with pytest.raises(FoundationError) as exc:
+        cell.transact("widgets", [{"operation": "delete", "where": where, "destructive": True, "confirmation": old_phrase}], LIMITS)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    # the re-created entity's own fresh row survives the denied attempt.
+    assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
+
+
+def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded(service):
+    """Opus review minor m-3: a bidirectional test for the Q1-D8
+    reclassification (structured.py:212) -- this was not actually covered
+    by any existing test before this review round. A `Mutation.values`
+    exceeding the contract's own fixed `maxProperties: 100` shape bound is
+    `VALIDATION_FAILED` (400), never `LIMIT_EXCEEDED` (a deployment-tunable
+    `limits.classes` resource this is not), with `details == {"field":
+    "values"}`. This check runs before the per-key `known_fields`
+    membership loop (structured.py), so the 101 field names here never
+    need to correspond to any real declared field."""
+    runtime = service.authenticate("secret-a")
+    too_many_values = {f"field_{i}": i for i in range(101)}
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{"operation": "insert", "values": too_many_values}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.code != "LIMIT_EXCEEDED"
+    assert exc.value.details == {"field": "values"}
+
+
 def test_every_advertised_resource_limit_has_a_deterministic_boundary():
     service, context = _limited(batch_items=1)
     with pytest.raises(FoundationError) as error:
         service.mutate(context, "items", [{"operation": "insert", "values": {"id": 3}}, {"operation": "insert", "values": {"id": 4}}])
     assert error.value.code == "LIMIT_EXCEEDED"
+    # Opus review M-1(b): a representative behavioral (runtime) assertion of
+    # `limit_class` on a real response -- this one exercises `ResourceLimits.
+    # check`'s own dynamic `kind`-as-limit_class call site (limits.py:35),
+    # the one non-literal case `test_limit_class_vocabulary.py`'s static
+    # scan allowlists by name.
+    assert error.value.details["limit_class"] == "batch_items"
 
     service, context = _limited(result_items=1)
     with pytest.raises(FoundationError) as error:
-        service.mutate(context, "items", [{"operation": "delete", "where": [{"field": "id", "operator": "in", "value": [1, 2]}], "destructive": True, "confirmation": "DELETE"}])
+        where = [{"field": "id", "operator": "in", "value": [1, 2]}]
+        service.mutate(context, "items", [{"operation": "delete", "where": where, "destructive": True, "confirmation": _delete_phrase("items", where)}])
     assert error.value.code == "LIMIT_EXCEEDED"
+    assert error.value.details["limit_class"] == "result_items"
 
     service, context = _limited(query_complexity=1)
     with pytest.raises(FoundationError) as error:
         service.query(context, "items", select=["id"], where=[{"field": "id", "operator": "eq", "value": 1}])
     assert error.value.code == "LIMIT_EXCEEDED"
+    assert error.value.details["limit_class"] == "query_complexity"
 
     service, context = _limited(operation_depth=2)
     with pytest.raises(FoundationError) as error:
@@ -800,10 +929,12 @@ def test_drop_index_requires_destructive_confirmation():
     with pytest.raises(FoundationError) as exc:
         cell.apply_schema({"operation": "drop_index", "entity": "idx_target", "index": "by_tag"}, developer=True, limits=LIMITS)
     assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
-    cell.apply_schema({"operation": "drop_index", "entity": "idx_target", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+    phrase = exc.value.details["required_confirmation"]
+    assert phrase == drop_index_confirmation_phrase("idx_target", "by_tag", cell.schema_revision)
+    cell.apply_schema({"operation": "drop_index", "entity": "idx_target", "index": "by_tag", "destructive": True, "confirmation": phrase}, developer=True, limits=LIMITS)
     assert cell.catalog()[0]["unique_keys"] == []
     with pytest.raises(FoundationError) as exc:
-        cell.apply_schema({"operation": "drop_index", "entity": "idx_target", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "drop_index", "entity": "idx_target", "index": "by_tag", "destructive": True, "confirmation": phrase}, developer=True, limits=LIMITS)
     assert exc.value.code == "NOT_FOUND"
 
 
@@ -895,7 +1026,8 @@ def test_unique_key_is_rejected_on_insert_update_and_delete():
         cell.transact("notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "unique_key": "by_body"}], LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
     with pytest.raises(FoundationError) as exc:
-        cell.transact("notes", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "unique_key": "by_body", "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        where = [{"field": "id", "operator": "eq", "value": 1}]
+        cell.transact("notes", [{"operation": "delete", "where": where, "unique_key": "by_body", "destructive": True, "confirmation": _delete_phrase("notes", where, cell.schema_revision)}], LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
 
 
@@ -1270,7 +1402,8 @@ def test_expected_revision_with_no_predicate_match_is_not_found():
         cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 999}], "values": {"body": "v2"}, "expected_revision": revision}], LIMITS)
     assert exc.value.code == "NOT_FOUND"
     with pytest.raises(FoundationError) as exc:
-        cell.transact("docs", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "expected_revision": revision, "destructive": True, "confirmation": "DELETE"}], LIMITS)
+        where = [{"field": "id", "operator": "eq", "value": 999}]
+        cell.transact("docs", [{"operation": "delete", "where": where, "expected_revision": revision, "destructive": True, "confirmation": _delete_phrase("docs", where, cell.schema_revision)}], LIMITS)
     assert exc.value.code == "NOT_FOUND"
 
 
@@ -1294,7 +1427,8 @@ def test_expected_revision_without_precondition_zero_row_update_and_delete_still
     cell = _docs_cell()
     outcome = cell.transact("docs", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 999}], "values": {"body": "v2"}}], LIMITS)
     assert outcome.affected == 0
-    outcome = cell.transact("docs", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 999}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+    where = [{"field": "id", "operator": "eq", "value": 999}]
+    outcome = cell.transact("docs", [{"operation": "delete", "where": where, "destructive": True, "confirmation": _delete_phrase("docs", where, cell.schema_revision)}], LIMITS)
     assert outcome.affected == 0
 
 
@@ -1560,7 +1694,8 @@ def test_id_is_never_reused_after_delete_a_failed_batch_or_entity_recreation():
     cell = _cell()
     _create_entity(cell, "widgets")
     cell.transact("widgets", [{"operation": "insert", "values": {}}, {"operation": "insert", "values": {}}], LIMITS)
-    cell.transact("widgets", [{"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 2}], "destructive": True, "confirmation": "DELETE"}], LIMITS)
+    where = [{"field": "id", "operator": "eq", "value": 2}]
+    cell.transact("widgets", [{"operation": "delete", "where": where, "destructive": True, "confirmation": _delete_phrase("widgets", where, cell.schema_revision)}], LIMITS)
     cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
     ids = sorted(row["id"] for row in cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items)
     assert ids == [1, 3]  # id 2 is gone forever, never reused within this entity's lifetime
@@ -1574,7 +1709,7 @@ def test_id_is_never_reused_after_delete_a_failed_batch_or_entity_recreation():
     assert ids_after == [1, 3, 5]  # id 4 was consumed and gapped by the rolled-back batch
 
     # drop_entity + recreate is a new entity: addressing restarts at 1.
-    cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": "DROP_ENTITY"}, developer=True, limits=LIMITS)
+    cell.apply_schema({"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": drop_entity_confirmation_phrase("widgets", cell.schema_revision)}, developer=True, limits=LIMITS)
     _create_entity(cell, "widgets")
     cell.transact("widgets", [{"operation": "insert", "values": {}}], LIMITS)
     assert cell.query("widgets", select=["id"], where=[], page_size=10, limits=LIMITS).items == [{"id": 1}]
@@ -1599,7 +1734,7 @@ def test_schema_objects_limit_charges_indexes_and_recovers_capacity_after_drop_i
 
     # Dropping the first index frees exactly one slot back (5 -> 4), so the
     # second create_index -- identical in every other respect -- now fits.
-    cell.apply_schema({"operation": "drop_index", "entity": "widgets", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"}, developer=True, limits=limits)
+    cell.apply_schema({"operation": "drop_index", "entity": "widgets", "index": "by_tag", "destructive": True, "confirmation": drop_index_confirmation_phrase("widgets", "by_tag", cell.schema_revision)}, developer=True, limits=limits)
     cell.apply_schema({"operation": "create_index", "entity": "widgets", "index": "by_other", "fields": ["other"]}, developer=True, limits=limits)
     assert set(cell.indexes["widgets"]) == {"by_other"}
 
@@ -1682,10 +1817,11 @@ def test_service_mutate_update_and_delete_where_matches_executes(service):
     affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "renamed"}}])
     assert affected == 1
     assert service.query(runtime, "notes", select=["body"]) == [{"body": "renamed"}]
+    where = [{"field": "body", "operator": "matches", "value": "rename%"}]
     affected = service.mutate(
         runtime,
         "notes",
-        [{"operation": "delete", "where": [{"field": "body", "operator": "matches", "value": "rename%"}], "destructive": True, "confirmation": "DELETE"}],
+        [{"operation": "delete", "where": where, "destructive": True, "confirmation": _delete_phrase("notes", where)}],
     )
     assert affected == 1
     assert service.query(runtime, "notes", select=["body"]) == []
@@ -1731,7 +1867,11 @@ def test_service_schema_create_index_and_drop_index_execute(service):
     assert isinstance(revision, int)
     runtime = service.authenticate("secret-a")
     assert service.catalog(runtime)["entities"][0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
-    service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag", "destructive": True, "confirmation": "DROP_INDEX"})
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag", "destructive": True})
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    phrase = exc.value.details["required_confirmation"]
+    service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag", "destructive": True, "confirmation": phrase})
     assert service.catalog(runtime)["entities"][0]["unique_keys"] == []
 
 

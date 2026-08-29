@@ -547,27 +547,40 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         if where_field is not None:
             item["where"] = [{"field": where_field, "operator": "eq", "value": where_value}]
         if destructive:
-            # Same VALID_CONFIRMATION sentinel protocol as `delete()` above
-            # (port v1.6 declare-and-echo), extended to batch operations
-            # (port v1.4): `destructive` is only ever meaningful when true
-            # (bind_mutation's own default is false), so it is only set
-            # here rather than always present. `session`/`entity` are only
-            # required when `confirmation is VALID_CONFIRMATION` (the probe
-            # needs a real entry point to present itself to); every other
-            # caller of this batch operation on this peer passes a real
-            # confirmation string or `None` directly.
+            # `destructive` is only ever meaningful when true (bind_
+            # mutation's own default is false), so it is only set here
+            # rather than always present.
             item["destructive"] = True
+        # port v1.6 declare-and-echo (WP-3, C-06 V2b-wire, review
+        # recommendation from port v1.6's own review): `confirmation` is set
+        # whenever the caller supplies one, INDEPENDENT of `destructive` --
+        # an earlier revision of this method only ever set `confirmation`
+        # inside the `if destructive:` branch above, which made it
+        # impossible to construct a request whose wire OMITS `destructive`
+        # entirely (not merely `false`) while still carrying a real,
+        # currently-valid `confirmation` phrase for the identical request --
+        # exactly the literal wire-omission shape contract `valid_
+        # confirmation`'s "a missing destructive field is equivalent to
+        # false, never to true" rule requires this peer to still deny.
+        # `session`/`entity` are only required when `confirmation is VALID_
+        # CONFIRMATION` (the probe needs a real entry point to present
+        # itself to); every other caller of this batch operation on this
+        # peer passes a real confirmation string or `None` directly.
+        if confirmation is not None:
             if confirmation is VALID_CONFIRMATION:
                 assert session is not None and entity is not None, (
                     "_build_mutation_item: VALID_CONFIRMATION requires session/entity to build its probe"
                 )
                 # Snapshot of `item` as it stands right now (operation/
-                # values/where/destructive, no confirmation yet) -- the
-                # probe presents this SAME shape, unconfirmed, to the SAME
-                # real entry point the caller is about to retry, so the
-                # phrase it reads back is valid for the actual call that
-                # follows.
+                # values/where/destructive, no confirmation yet). The probe
+                # itself always presents `destructive: True` regardless of
+                # this call's own `destructive` argument -- a probe must
+                # reliably trigger the peer's own denial to read the real
+                # phrase back, independent of whether the OUTER request
+                # under construction carries `destructive: True` or omits
+                # it entirely.
                 probe_item = dict(item)
+                probe_item["destructive"] = True
 
                 def probe(_session=session, _entity=entity, _probe_item=probe_item) -> None:
                     self._call(lambda: self._service.mutate(_session, _entity, [dict(_probe_item)]))
@@ -880,7 +893,26 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # above) exercises with a still-live, distinct actor.
         def inband_rotate_revoked_control_credential_attempt() -> None:
             actor = self.control_credential()
-            self._call(lambda: self._control_service.revoke_credential(actor.secret, actor.credential_ref))
+            # port v1.6 declare-and-echo (WP-3, design docs/design/
+            # DESTRUCTIVE_CONFIRMATION_V1.md R-3): same fix as
+            # conformance_adapter_r2db_http.py's identical vector -- the
+            # revoke here is a SETUP step (this vector's real target is the
+            # `rotate` call below, against a now-genuinely-revoked control
+            # credential), so it probes -> echoes the real phrase to
+            # actually complete the revoke.
+            try:
+                self._call(lambda: self._control_service.revoke_credential(actor.secret, actor.credential_ref, destructive=True))
+            except ConformanceDenial as denial:
+                # Opus review minor m-4: only the gate's own denial code is
+                # a probe to echo past -- any OTHER denial here is a real,
+                # unexpected finding (e.g. an auth failure) and must
+                # propagate, never be silently swallowed as if it were the
+                # gate.
+                if denial.code != "DESTRUCTIVE_CONFIRMATION_REQUIRED":
+                    raise
+                phrase = denial.details["required_confirmation"]
+                revoked = self._call(lambda: self._control_service.revoke_credential(actor.secret, actor.credential_ref, destructive=True, confirmation=phrase))
+                assert revoked.get("revoked") is True, f"echoing the real phrase did not actually revoke the credential: {revoked!r}"
             self._call(lambda: self._control_service.rotate_credential(actor.secret, actor.credential_ref))
 
         return [

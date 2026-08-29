@@ -28,7 +28,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from r2db_api.audit import ControlAuditSink
-from r2db_api.auth import ControlCredentialStore, CredentialStore
+from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore
 from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend, PostgresControlBackend
 from r2db_api.credential_store import (
     PostgresApplicationRegistry,
@@ -39,6 +39,7 @@ from r2db_api.credential_store import (
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ControlPlaneLimits
 from r2db_api.service import ControlAuthority, DataService
+from r2db_api.structured import revoke_last_control_credential_confirmation_phrase
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
@@ -886,6 +887,12 @@ def test_applications_limit_at_exact_bound(kind, platform):
         assert exc.value.code == "LIMIT_EXCEEDED"
         assert exc.value.details["resource"] == "applications"
         assert exc.value.details["limit"] == baseline + 2
+        # Opus review M-1(b): a representative behavioral (runtime)
+        # assertion of `limit_class` on a real response, complementing
+        # `test_limit_class_vocabulary.py`'s static AST scan (which proves
+        # every call site *declares* it, not that a real response actually
+        # carries the value this test asserts).
+        assert exc.value.details["limit_class"] == "applications"
     finally:
         h.cleanup()
 
@@ -907,6 +914,7 @@ def test_credentials_per_application_limit_ignores_revoked_rows(kind, platform):
         assert exc.value.code == "LIMIT_EXCEEDED"
         assert exc.value.details["resource"] == "credentials_per_application"
         assert exc.value.details["limit"] == 1
+        assert exc.value.details["limit_class"] == "credentials_per_application"  # Opus review M-1(b)
 
         # Revoking the existing credential frees the slot -- a revoked
         # credential must never count against this limit (R-7).
@@ -933,6 +941,7 @@ def test_control_requests_per_minute_limit_and_window_recovery(kind, platform):
         assert exc.value.code == "LIMIT_EXCEEDED"
         assert exc.value.status == 429
         assert exc.value.details["resource"] == "control_requests_per_minute"
+        assert exc.value.details["limit_class"] == "control_requests_per_minute"  # Opus review M-1(b)
 
         # Window rollover: advancing the injected clock past 60s frees the
         # window without a real wall-clock sleep (work order §3: the time
@@ -1039,7 +1048,17 @@ def test_revoke_is_terminal_and_enable_does_not_un_revoke(kind, platform):
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
-def test_revoke_request_accepts_q1_fields_without_inspecting_them(kind, platform):
+def test_application_credential_revoke_accepts_q1_fields_without_inspecting_them(kind, platform):
+    """Contract 1.2.0 `destructive_confirmation.non_destructive_requests`
+    (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3): an application
+    credential's revocation never meets the "last remaining active control
+    credential" gate condition at all, so `destructive`/`confirmation` are
+    accepted (schema-valid) but never inspected -- this is now a NARROWER
+    claim than this test's own pre-WP-3 name implied (which read as "no
+    revoke ever inspects these fields" -- no longer true now that the last-
+    active-control-credential gate exists, see `test_revoking_the_last_
+    live_control_credential_requires_confirmation` below for that path).
+    """
     h = _build_harness(kind, platform)
     try:
         cred_id = _fresh_id("ctl_")
@@ -1062,6 +1081,105 @@ def test_revoke_request_accepts_q1_fields_without_inspecting_them(kind, platform
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
+def test_revoking_a_non_last_control_credential_accepts_q1_fields_without_inspecting_them(kind, platform):
+    """The task-list's other named non-gate path (design docs/design/
+    DESTRUCTIVE_CONFIRMATION_V1.md R-3/Q1-D1): revoking a control credential
+    that is NOT the last remaining active one never meets the gate
+    condition either -- only application-credential revoke was covered by
+    the test immediately above. Two live control credentials exist here
+    (the seeded `cred_id` plus a second one); revoking the second one,
+    unconfirmed, must succeed and must leave `cred_id` itself untouched.
+    """
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "q1-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        second_id = _fresh_id("ctl_")
+        second_secret = "q1-secret2-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(second_id, second_secret, must_rotate=False)
+
+        # Two live control credentials now exist -- `second_id` is not the
+        # last one, so its revoke is never gated.
+        result = h.service.revoke_credential(secret, second_id)
+        assert result["revoked"] is True
+
+        # `cred_id` itself is untouched and still fully live.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_revoke_credential_rejects_truthy_non_boolean_destructive_and_non_string_confirmation(kind, platform):
+    """Review blocker B-1 (control plane, service level): `ControlPlaneService.
+    revoke_credential` type-checks its own `destructive`/`confirmation`
+    parameters UNCONDITIONALLY -- before `_locate_credential` even runs,
+    regardless of whether this particular revoke would ever meet the gate
+    condition. A truthy-but-non-boolean `destructive` (the string `"true"`)
+    and a non-string `confirmation` (an int) must each be rejected as
+    `VALIDATION_FAILED`, and the target credential must remain untouched.
+    """
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "b1-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.revoke_credential(secret, cred_id, destructive="true", confirmation="whatever")
+        assert exc.value.code == "VALIDATION_FAILED"
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.revoke_credential(secret, cred_id, destructive=True, confirmation=12345)
+        assert exc.value.code == "VALIDATION_FAILED"
+
+        # untouched by either rejected attempt.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_revoking_an_already_revoked_different_credential_is_never_gated_by_target_identity(kind, platform):
+    """Opus review minor m-1: the gate's "is this the last active one"
+    judgment must check the TARGET credential's own identity against the
+    sole active row, not merely that exactly one active row exists overall
+    -- `len(active_ids) == 1 and active_ids[0] == credential_id`, never
+    `len(active_ids) == 1` alone. With exactly one live control credential
+    (`cred_id`), revoking a DIFFERENT, already-revoked credential must
+    never be gated: it executes unconditionally (an idempotent no-op),
+    unconfirmed."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "m1-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        other_id = _fresh_id("ctl_")
+        other_secret = "m1-other-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(other_id, other_secret, must_rotate=False)
+        h.revoke_control_credential_directly(other_id)  # already revoked -- not an active row
+
+        # Exactly one active row (cred_id) exists now -- revoking the
+        # OTHER, already-revoked credential must not be gated.
+        result = h.service.revoke_credential(secret, other_id)
+        assert result["revoked"] is True
+
+        # cred_id itself is untouched and still fully live.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
 def test_issuance_to_a_disabled_application_is_allowed(kind, platform):
     h = _build_harness(kind, platform)
     try:
@@ -1078,21 +1196,223 @@ def test_issuance_to_a_disabled_application_is_allowed(kind, platform):
         h.cleanup()
 
 
+def _ensure_sole_active_control_credential(h: types.SimpleNamespace, keep_id: str) -> None:
+    """Test-only setup helper (not a product concern): the `platform`
+    fixture backing the `postgres` harness is module-scoped (real
+    PostgreSQL schema, shared across every test in this module), so control
+    credentials seeded by earlier tests in this same module run can remain
+    live (enabled and not revoked) here -- unlike the `memory` harness,
+    which builds a brand-new, empty `ControlCredentialStore` per test, so
+    this is a genuine no-op there. Revokes every OTHER live row directly
+    (bypassing the service layer entirely, the same store-level access
+    `seed_control_credential` itself uses) so the gate's own "exactly one
+    active row" precondition is genuinely true regardless of what earlier
+    tests left behind.
+    """
+    if h.kind != "postgres":
+        return
+    for credential_id, enabled, revoked in h.control_credentials_store.list_all():
+        if credential_id != keep_id and enabled and not revoked:
+            h.revoke_control_credential_directly(credential_id)
+
+
 @pytest.mark.parametrize("kind", BACKENDS)
-def test_revoking_the_last_live_control_credential_is_permitted(kind, platform):
+def test_revoking_the_last_live_control_credential_requires_confirmation(kind, platform):
+    """Contract 1.2.0 `destructive_confirmation` (design docs/design/
+    DESTRUCTIVE_CONFIRMATION_V1.md R-3): revoking the LAST remaining active
+    (enabled and not revoked) control credential now requires a valid
+    confirmation -- this WP's own effectivization of the previously-pending
+    Q-1 question (superseding this test's own pre-WP-3 name/behavior, which
+    asserted this was unconditionally permitted). Unconfirmed -> denied with
+    the four-key declaration; confirmed with the real, freshly-computed
+    phrase -> executes, and the credential is genuinely revoked (`AUTH_
+    REVOKED` on the next authenticated call, unchanged from before this WP).
+    """
     h = _build_harness(kind, platform)
     try:
         cred_id = _fresh_id("ctl_")
         secret = "last-secret-" + secrets.token_urlsafe(8)
         h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
 
-        result = h.service.revoke_credential(secret, cred_id)
+        with pytest.raises(FoundationError) as exc:
+            h.service.revoke_credential(secret, cred_id)
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        assert exc.value.status == 409
+        details = exc.value.details
+        for key in ("required_confirmation", "consequence", "reversible_alternative", "recovery"):
+            assert key in details, f"missing declaration key {key!r}: {details!r}"
+        assert isinstance(details["required_confirmation"], str) and details["required_confirmation"]
+        assert isinstance(details["consequence"], str) and details["consequence"]
+        assert details["required_confirmation"] == revoke_last_control_credential_confirmation_phrase(cred_id)
+
+        # the credential is still fully live -- an unconfirmed probe never
+        # executes (SI-09).
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+
+        result = h.service.revoke_credential(
+            secret, cred_id, destructive=True, confirmation=details["required_confirmation"]
+        )
         assert result["revoked"] is True
         with pytest.raises(FoundationError) as exc:
             h.service.capabilities(secret)
         assert exc.value.code == "AUTH_REVOKED"
     finally:
         h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_revoking_the_last_live_control_credential_denial_carries_audited_and_attribution(kind, platform):
+    """r2db-local test (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md
+    R-3; moved here from C-06's own V7 per that vector's own docstring,
+    review M-7 supervisor ruling -- the contract itself declares `audited`
+    an OPTIONAL, code-agnostic key, never a `DESTRUCTIVE_CONFIRMATION_
+    REQUIRED`-specific requirement, so this stays r2db-local rather than
+    promoted into the common suite): the gate's own denial goes through
+    `_deny`, which durably records the denial and attaches truthful
+    `audited: true`/`attribution` declarations alongside the four contract-
+    required keys on the SAME `details` mapping.
+    """
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "aud-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        before_events = len(h.audit_events())
+        with pytest.raises(FoundationError) as exc:
+            h.service.revoke_credential(secret, cred_id)
+        details = exc.value.details
+        assert details.get("audited") is True, f"audited: true was not attached to the gate denial: {details!r}"
+        assert isinstance(details.get("attribution"), str) and details["attribution"], (
+            f"attribution was not attached to the gate denial: {details!r}"
+        )
+        # every one of the contract's own four declarations still present
+        # alongside audited/attribution (design R-3: "audited 等が同居する").
+        for key in ("required_confirmation", "consequence", "reversible_alternative", "recovery"):
+            assert key in details
+
+        # Opus review M-3: `audited: true` must be backed by a REAL, durable
+        # audit row -- not merely a details key the response happens to
+        # carry. Reads the audit sink back (an independent connection/pool
+        # from the state-changing `control_credentials_unit_of_work` the
+        # gate's own denial fires from inside, per `_deny`'s own updated
+        # docstring) and confirms the denial event genuinely landed.
+        after_events = h.audit_events()
+        assert len(after_events) == before_events + 1, (
+            f"expected exactly one new durable audit event for this denial -- before={before_events}, "
+            f"after={len(after_events)}"
+        )
+        denial_event = after_events[-1]
+        assert denial_event["outcome"] == "deny"
+        assert denial_event["reason_code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        assert denial_event["actor_id"] == cred_id
+
+        # ... and the credential itself is genuinely NOT revoked (the gate
+        # denial must never have a side effect on the credential it denied
+        # revoking) -- it still authenticates.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+class _GateOrderProbeBackend:
+    """`ControlBackend` test double (WP-3 mutation-injection completion
+    condition (vi), design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3/
+    WP-0 MA-2): a minimal, deterministic way to catch the exact mutation
+    that same condition names -- moving the gate's own "is this the last
+    active control credential" judgment to before `control_credentials_
+    unit_of_work` opens (or after it closes), rather than inside it.
+
+    `control_credentials_unit_of_work` hands out a `_Work` token that is
+    `active` only for the duration of the `with` block; `control_
+    credentials_locked` (the method `ControlPlaneService.revoke_credential`
+    calls to make that judgment) asserts the token it was given is still
+    `active` at the moment it is called. A real, live PostgreSQL connection
+    (`PostgresControlCredentialStore.list_all_for_update`'s own `FOR UPDATE`
+    lock, exercised directly and deterministically by `test_control_plane_
+    store.py::test_control_credentials_locked_scan_serializes_against_a_
+    concurrent_scan`) is what actually SERIALIZES two real concurrent
+    revokes against each other in production; this test double instead
+    verifies, without any real concurrency or timing dependence, that
+    `ControlPlaneService`'s own orchestration calls that locking read at
+    the one call site where its serialization guarantee is real -- inside
+    the open transaction, not before or after it.
+    """
+
+    class _Work:
+        def __init__(self) -> None:
+            self.active = False
+
+    def __init__(self, *, credential_id: str) -> None:
+        self._credential_id = credential_id
+        self.locked_call_count = 0
+
+    def authenticate(self, secret):
+        return ControlAuthContext("ctl_probe_actor", False)
+
+    def credential_state(self, credential_id):
+        return None  # never an application credential on this double
+
+    def control_credential_state(self, credential_id):
+        if credential_id == self._credential_id:
+            return (True, False)  # enabled, not revoked
+        return None
+
+    @contextmanager
+    def control_credentials_unit_of_work(self):
+        work = self._Work()
+        work.active = True
+        try:
+            yield work
+        finally:
+            work.active = False
+
+    def control_credentials_locked(self, work):
+        self.locked_call_count += 1
+        assert getattr(work, "active", False) is True, (
+            "control_credentials_locked was called while its own control_credentials_unit_of_work's "
+            "`work` token was not active -- the gate's judgment must be made INSIDE the same "
+            "transaction as the state change (design R-3/WP-0 MA-2), never before it opens or after "
+            "it closes"
+        )
+        return [(self._credential_id, True, False)]
+
+    def set_control_credential_state(self, credential_id, *, enabled, revoked, work):
+        assert getattr(work, "active", False) is True, (
+            "set_control_credential_state was called outside the open control_credentials_unit_of_work"
+        )
+
+
+class _NullAudit:
+    def append(self, **kwargs):
+        return None
+
+
+def test_revoke_credential_gate_judgment_is_made_inside_the_open_transaction():
+    """Deterministic, non-timing-dependent counterpart to `test_control_
+    plane_store.py::test_control_credentials_locked_scan_serializes_
+    against_a_concurrent_scan` -- see `_GateOrderProbeBackend`'s own
+    docstring. Constructs a real `ControlPlaneService` against the probe
+    backend above (a single control credential, the gate's own
+    precondition) and calls the real, unmodified `revoke_credential` --
+    the probe's own internal assertion is what actually catches mutation
+    (vi) ("gate 判定を uow 外へ"): if the real orchestration is ever changed
+    to read `control_credentials_locked` before opening (or after closing)
+    the transaction, this test fails immediately and unconditionally,
+    regardless of any real thread scheduling.
+    """
+    credential_id = "ctl_probe_only"
+    backend = _GateOrderProbeBackend(credential_id=credential_id)
+    service = ControlPlaneService(backend, audit=_NullAudit())
+
+    with pytest.raises(FoundationError) as exc:
+        service.revoke_credential("irrelevant-secret", credential_id)
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert backend.locked_call_count == 1
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
@@ -1301,7 +1621,7 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         caps = h.service.capabilities(secret)
-        assert caps["contract_version"] == "1.1.0"
+        assert caps["contract_version"] == "1.2.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         assert caps["capabilities"]["audit_query"]["status"] == "unavailable"
         assert caps["limits"] == {"applications": 42, "credentials_per_application": 7, "control_requests_per_minute": 99}

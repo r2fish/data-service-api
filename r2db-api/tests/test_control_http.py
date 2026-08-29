@@ -488,6 +488,60 @@ async def test_revoke_with_no_body_at_all_exercises_empty_branch(control_harness
 
 
 # ===========================================================================
+# 7b. Destructive confirmation gate (WP-3, design docs/design/
+#     DESTRUCTIVE_CONFIRMATION_V1.md R-3) over a REAL HTTP round trip --
+#     `control_harness`'s own single seeded control credential is always
+#     the sole live one, i.e. always the gate's own precondition.
+# ===========================================================================
+
+
+async def test_revoke_last_control_credential_unconfirmed_is_409_over_http(control_harness):
+    """The harness's own control credential is the SOLE live one --
+    revoking it without a valid confirmation must be denied over real HTTP
+    with the four-key declaration, and the credential must remain fully
+    live (still authenticates) afterward."""
+    transport = httpx.ASGITransport(app=create_control_app(control_harness.service))
+    headers = _auth(control_harness.secret)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        response = await client.post(
+            f"/control/v1/credentials/{control_harness.credential_id}/revoke",
+            headers=headers, json={"destructive": True},
+        )
+        assert response.status_code == 409
+        body = response.json()
+        assert body["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+        for key in ("required_confirmation", "consequence", "reversible_alternative", "recovery"):
+            assert key in body["details"]
+        still_alive = await client.get("/control/v1/capabilities", headers=headers)
+    assert still_alive.status_code == 200
+
+
+async def test_revoke_last_control_credential_with_wire_truthy_non_boolean_destructive_is_validation_failed(control_harness):
+    """Review blocker B-1, real wire reproduction: a request whose
+    `destructive` field is the STRING `"false"` (a non-boolean value a
+    loose `bool(...)` cast would silently coerce to `True`) must be
+    rejected as a shape defect (`VALIDATION_FAILED`, 400) -- the HTTP
+    layer's own `_check_object_shape` does not validate per-field JSON
+    types (only extra/missing keys, `http.py`'s own docstring), so this is
+    exactly the wire shape that would otherwise reach `ControlPlaneService.
+    revoke_credential` unvalidated; that method's own new `isinstance`
+    check (review blocker B-1) is what actually catches it. The sole
+    control credential must remain fully live (not revoked) afterward.
+    """
+    transport = httpx.ASGITransport(app=create_control_app(control_harness.service))
+    headers = _auth(control_harness.secret)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        response = await client.post(
+            f"/control/v1/credentials/{control_harness.credential_id}/revoke",
+            headers=headers, json={"destructive": "false", "confirmation": "irrelevant -- shape check runs first"},
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_FAILED"
+        still_alive = await client.get("/control/v1/capabilities", headers=headers)
+    assert still_alive.status_code == 200
+
+
+# ===========================================================================
 # 8. `control_main.build_control_app` (work order §4 item 8): required-env
 #    failures, pepper-equality failure, a normal env returns an ASGI app
 #    without ever connecting, and a module-level `app` exists (§8 m-10,

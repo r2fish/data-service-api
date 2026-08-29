@@ -124,7 +124,7 @@ class DataService:
             # than a new C-12 "declared unavailable, executes anyway" gap.
             schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
             return {
-                "contract_version": "1.1.0",
+                "contract_version": "1.2.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -323,7 +323,7 @@ class DataService:
         self._acquire_rate(canonical)
         with self._active_lock:
             if self._active >= self.limits.concurrency:
-                fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit": self.limits.concurrency})
+                fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
             self._active += 1
         try:
             yield canonical
@@ -347,7 +347,7 @@ class DataService:
             window = self._rate_windows.setdefault(context.credential_id, [])
             window[:] = [stamp for stamp in window if now - stamp < 60]
             if len(window) >= self.limits.requests_per_minute:
-                fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit": self.limits.requests_per_minute})
+                fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit_class": "requests_per_minute", "limit": self.limits.requests_per_minute})
             window.append(now)
 
     def _event(self, context: AuthContext, event_class: str, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, *, request_id: str | None = None) -> None:
