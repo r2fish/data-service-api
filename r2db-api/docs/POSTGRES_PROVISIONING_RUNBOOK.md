@@ -368,14 +368,36 @@ names the count and the remedy:
 psql "$R2DBSVC_CONTROL_DSN" -v app_slug='myapp' -f r2db-api/migrations/0004_deprovision_application.sql
 ERROR:  application myapp still has 2 credential row(s) referencing it -- revoke it first
 (python -m r2db_api.ops revoke-credential <credential_id>), then delete the row
-(python -m r2db_api.ops delete-credential <credential_id>) before deprovisioning
+(python -m r2db_api.ops delete-credential <credential_id> --confirm ...; run it
+once without --confirm first to see the exact value to pass) before deprovisioning
 ```
 
 For every credential row still referencing the slug: `python -m r2db_api.ops
 revoke-credential <credential_id>` (stop it from authenticating), then
 `python -m r2db_api.ops delete-credential <credential_id>` (actually clear
 the row -- unlike revoke, this is permanent and is the only thing that
-satisfies the foreign key). `python -m r2db_api.ops list-credentials` finds
+satisfies `0005_credential_store.sql`'s own `credentials.application_slug`
+foreign key, `ON DELETE RESTRICT` -- the constraint `0004`'s deprovisioning
+script detects and refuses against, via `0005`'s own `assert_no_credentials_
+for_deprovision` guard function, shown above). **Q-1 WP-4: `delete-
+credential` is genuinely destructive and is now gated (design
+docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4) the same way `reset` is
+(§12 above)** -- an invocation with no `--confirm`, or the wrong one, is
+refused: **exit code 2 *and* the declaration printed as one line of JSON on
+stderr** (exit code 2 alone is not this refusal's signature -- `argparse`'s
+own usage errors and this CLI's other `_die`-based failures also exit 2;
+only the JSON-on-stderr shape identifies an R-4 confirmation refusal
+specifically), and nothing is deleted:
+
+```
+python -m r2db_api.ops delete-credential <credential_id>
+# refused: exit 2 + the declaration as JSON on stderr; the row above is untouched
+python -m r2db_api.ops delete-credential <credential_id> \
+  --confirm "DELETE_CREDENTIAL <credential_id>"
+# succeeds -- the row is now gone
+```
+
+`python -m r2db_api.ops list-credentials` finds
 every row for a given application. Once none remain, re-run `0004`. A
 platform database that has never had `0005` applied at all skips this check
 entirely (`0004` detects the guard function's absence and behaves exactly
@@ -657,17 +679,51 @@ prints `credential_id`/`secret` once (never stored anywhere by this process
 beyond the verifier) and writes one canonical `control_credential_lifecycle`
 audit event in the same transaction as the issuance.
 
-**`reset`** -- the general-purpose recovery, at any time:
+**`reset`** -- the general-purpose recovery, at any time. **Q-1 WP-4 (design
+docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4): `reset` is genuinely
+destructive (it revokes every existing control credential) and is now gated
+by the same declare-and-echo confirmation protocol the rest of this
+contract's destructive operations use -- `reset` is now a two-step
+invocation, not one:**
 
 ```
+# Step 1: declaration (no --confirm, or a wrong one) -- refused: exit code 2
+# *and* the confirmation phrase to echo (plus consequence/reversible_
+# alternative/recovery) printed as one line of JSON on stderr. Nothing is
+# touched at all. (Exit code 2 alone is not this refusal's signature --
+# `argparse`'s own usage errors and this CLI's `_die`-based failures
+# [missing env var, etc.] also exit 2; only the JSON-on-stderr shape
+# identifies an R-4 confirmation refusal specifically.)
 R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... python -m r2db_api.ops reset
+
+# Step 2: echo the declared phrase back verbatim -- this is the invocation
+# that actually runs the ritual.
+R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... \
+  python -m r2db_api.ops reset --confirm RESET_CONTROL_CREDENTIALS
 ```
 
-Revokes **every** existing control credential and issues exactly one new
-one, atomically (both in the same transaction -- there is never a moment
-where the old credentials are revoked but no new one exists yet, or vice
-versa). Touches nothing in `applications`/`credentials`/`control_audit`
-beyond the one canonical event this itself writes.
+**The first, unconfirmed invocation above is the declaration step, not an
+attempt at the ritual itself -- `reset` has not run at all when it exits 2
+with the JSON declaration on stderr.** Nothing in `control_credentials`/
+`applications`/`credentials`/`control_audit`
+is read or written by that first invocation (the confirmation phrase,
+`RESET_CONTROL_CREDENTIALS`, is a fixed constant needing no database state
+to compute -- see `structured.RESET_CONTROL_CREDENTIALS`'s own docstring for
+why `reset`'s phrase carries no state fingerprint, unlike a re-creatable
+named target). An operator who already knows the phrase (as documented
+here) may skip straight to step 2; an operator who does not (or who wants to
+confirm this documentation is still accurate) gets it fresh from step 1's
+own stderr declaration every time -- guessing or hardcoding a phrase from
+memory alone is never the supported path (contract
+`destructive_confirmation.client_obligation`), even though this operation's
+own phrase happens to be a fixed string in this implementation.
+
+Once actually confirmed (step 2), `reset` revokes **every** existing control
+credential and issues exactly one new one, atomically (both in the same
+transaction -- there is never a moment where the old credentials are
+revoked but no new one exists yet, or vice versa). Touches nothing in
+`applications`/`credentials`/`control_audit` beyond the one canonical event
+this itself writes.
 
 **Both rituals serialize against each other** via a fixed-key
 `pg_advisory_xact_lock` (`ops.py`'s own `_RITUAL_ADVISORY_LOCK_KEY`),
@@ -736,7 +792,14 @@ specific guidance those additions make possible, not a contradiction of R-5):
 recovery once a control credential has actually been revoked, or when the
 `credential_id` itself is not known/trusted) -- it is simply heavier than
 necessary for cases 1 and 2 above, now that lighter, targeted recovery
-exists for them.
+exists for them. Since Q-1 WP-4, `reset` is the two-step, gated invocation
+§12 above documents (a first, unconfirmed call declares the phrase and
+touches nothing; echoing it back on a second call runs the ritual) -- that
+first, declaring call is always safe to run in every one of the three
+lockout scenarios above, including case 3 (the rate window has no bearing
+on this CLI at all, per that bullet's own note), so an operator unsure which
+case applies can always start with an unconfirmed `reset` to get the exact
+phrase to echo, with nothing at risk from that first call alone.
 
 ## 14. Manual recovery from a crash between `begin_provision_application` and `finish_provision_application`
 

@@ -90,8 +90,10 @@ from, and step 3 below is where it is addressed.
 ## Recovery sequence
 
 Run these in order. Steps 2-4 are idempotent to re-run if interrupted.
-**Step 1 (`reset`) is not** -- see its own note below; run it once per
-incident, not on every retry.
+**Step 1's confirmed invocation (`reset --confirm ...`) is not** -- see its
+own note below; run it once per incident, not on every retry. (Step 1's
+first, unconfirmed/declaration invocation carries no such restriction --
+see that step's own note.)
 
 **Prerequisite, checked once at the start, not per step**: steps 1/2
 authenticate to PostgreSQL as `r2dbsvc_control` (`R2DB_CONTROL_DSN`) and, for
@@ -109,11 +111,38 @@ starting step 3, not discovered mid-incident as a blocker.
 
 ### 1. Revoke every control credential and mint a fresh one
 
+**Q-1 WP-4 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-4): `reset`
+is genuinely destructive (it revokes every existing control credential) and
+is now gated by this contract's declare-and-echo confirmation protocol --
+it is a two-step invocation, not one:**
+
 ```
+# Step 1: declaration -- no --confirm, so this is refused: exit code 2 *and*
+# the declaration (the exact phrase to echo, plus consequence/reversible_
+# alternative/recovery) printed as one line of JSON on stderr. Nothing is
+# touched at all: no credential is revoked, no new one is issued. (Exit
+# code 2 alone does not mean this -- `argparse` usage errors and this
+# CLI's other `_die`-based failures also exit 2; only the JSON-on-stderr
+# shape identifies this specific refusal.)
 R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... python -m r2db_api.ops reset
+
+# Step 2: echo the declared phrase back verbatim -- THIS is the invocation
+# that actually revokes every control credential and mints a fresh one.
+R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... \
+  python -m r2db_api.ops reset --confirm RESET_CONTROL_CREDENTIALS
 ```
 
-This is the single step that ends the compromised credential's ability to
+**The first, unconfirmed invocation above is the declaration step, not an
+attempt at the ritual itself -- `reset` has not run, and nothing has been
+revoked, until step 2 succeeds.** This matters for this playbook's own
+"run once per incident" rule below: the declaration step is always safe to
+run, any number of times, including as a first action the instant a
+compromise is suspected and before anything else in this document -- it
+reads/writes nothing (`RESET_CONTROL_CREDENTIALS` is a fixed phrase needing
+no database state to compute). Only step 2, the confirmed invocation, is
+the one-time, non-idempotent action the note below is about.
+
+Step 2 is the step that ends the compromised credential's ability to
 authenticate, immediately -- `reset` revokes **every** existing control
 credential (not only the one believed compromised; if more than one is
 live, or which one leaked is not certain, this closes all of them without
@@ -129,14 +158,16 @@ disabling applications. Investigation (steps 2-3 below) does not need the
 old credential to still work; `control_audit` already has everything it
 recorded.
 
-**Not idempotent -- run this once per incident.** A `reset` that already
-succeeded prints a credential you are meant to save and use; re-running
-`reset` again after that success revokes *that* credential too and mints
-yet another new one, discarding the secret you just captured for no
-reason. Re-run this step only if it did not complete (e.g. the connection
-dropped before it printed a credential, or the process was killed before
-exit) -- never as a routine "make sure" re-run after it already reported
-success.
+**Step 2 (the confirmed invocation) is not idempotent -- run it once per
+incident.** A confirmed `reset` that already succeeded prints a credential
+you are meant to save and use; re-running the confirmed invocation again
+after that success revokes *that* credential too and mints yet another new
+one, discarding the secret you just captured for no reason. Re-run step 2
+only if it did not complete (e.g. the connection dropped before it printed
+a credential, or the process was killed before exit) -- never as a routine
+"make sure" re-run after it already reported success. The declaration step
+(step 1) carries no such restriction; running it again, at any time, for
+any reason, is always safe.
 
 ### 2. Enumerate what happened during the compromise window
 
