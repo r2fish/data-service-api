@@ -31,6 +31,8 @@ API specification first: given the common specification, base URL, and authorize
 
 Security Invariants are intentionally **pavement and guardrails, not a capability allowlist or development gate**. They define outcomes that must remain true while leaving API capability, architecture and platform controls free to evolve. A new capability is not rejected merely because it has no previous implementation pattern; it must preserve the applicable invariants and make its security properties verifiable.
 
+Because this API's integrators are assumed to be AI agents, refusals on the control plane carry **truthful deterrence declarations** — true, fixed statements (durable attributed audit, no in-band path to mint control credentials) written to be read by the caller's own AI and to make it warn its human. See `docs/security/TRUTHFUL_DETERRENCE_DECLARATIONS.md`.
+
 ## Public repository security
 
 This repository is intentionally public-by-design. Implementation details may be visible; access to real systems must never depend on source secrecy.
