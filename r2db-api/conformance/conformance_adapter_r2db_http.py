@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -55,7 +56,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, NoReturn, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -84,18 +85,48 @@ from adapter import (  # noqa: E402
     Fixture,
     PayloadNotExpressible,
     ScopeView,
-    SurfaceAbsent,
     TamperVector,
     load_contract_error_codes,
 )
 
+# CCR-14 WP-5 round 2 (MINOR-3): `r2db_api.control_main` now ends with a
+# module-level `app = build_control_app()` (design §8 m-10) -- a bare
+# `import r2db_api.control_main` (needed below for `assemble_control_
+# stack`, the shared assembly core this adapter and `build_control_app`
+# both now use) reads `os.environ` the instant it first runs. This
+# adapter's own control-plane composition happens per-instance, later, in
+# `__init__` (a real, throwaway-provisioned platform database whose DSN
+# does not exist yet at *module* import time) -- it never uses this
+# module-level `app` at all. `setdefault` supplies harmless, unreachable
+# placeholder values purely so the import itself does not raise
+# (`build_control_app`'s own construction is zero-network -- see that
+# function's docstring -- so these values are never actually connected
+# to); `setdefault` (not a plain assignment) so a caller that legitimately
+# has these set in its real environment for some other reason is never
+# clobbered.
+os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_http_conformance_import_placeholder")
+os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-ctl-pepper")
+os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-app-pepper")
+
 from r2db_api import ControlAuthority, DataService  # noqa: E402
-from r2db_api.credential_store import PostgresCredentialStore  # noqa: E402
+from r2db_api.control_http import create_control_app  # noqa: E402
+from r2db_api.control_main import assemble_control_stack  # noqa: E402
+from r2db_api.credential_store import PostgresControlAuditSink, PostgresCredentialStore  # noqa: E402
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
+from r2db_api.limits import ControlPlaneLimits  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
 BASE_URL = "http://r2db-http-pg.conformance.invalid"
+
+# WP-5 round-2 review MINOR-1: the exact set of denial codes that mean "the
+# cached control credential is genuinely no longer live" (an authority
+# refusal), as opposed to a transient/unrelated denial (`LIMIT_EXCEEDED`,
+# `AUTH_STATE_UNAVAILABLE`, ...) that must never trigger a destructive
+# `ops.py reset` -- see `_privileged_control_send`/`control_credential`'s
+# own call sites, both of which now share this one set rather than each
+# hand-rolling (and risking drifting) their own copy.
+_REPAIRABLE_AUTH_DENIAL_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED", "FORBIDDEN"})
 
 # --------------------------------------------------------------------------
 # PostgreSQL bootstrap/provisioning (mirrors r2db-api/tests/test_postgres.py
@@ -108,6 +139,7 @@ BASE_URL = "http://r2db-http-pg.conformance.invalid"
 # --------------------------------------------------------------------------
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 # Same environment variable `r2db-api/tests/test_postgres.py` already uses,
 # deliberately reused rather than inventing a second name: one knob governs
@@ -189,6 +221,8 @@ class _Platform:
     admin_dsn: str
     control_dsn: str
     api_dsn: str
+    controlplane_dsn: str
+    schema: str
     platform_db: str
     provision_script: Path
     deprovision_script: Path
@@ -207,29 +241,35 @@ class _PgAppInfo:
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
     """Run the real `0001_bootstrap_control_plane.sql` /
-    `0002_provisioning_functions.sql` / `0005_credential_store.sql`
-    migrations (with `r2dbsvc` textually replaced by this run's unique
-    prefix) through the real `psql` binary -- the actual runbook an
-    operator would use, not a Python reimplementation of it (§5.3 C-5),
-    exactly as `test_postgres.py`'s `platform` fixture does. `0005` is
-    control-plane bootstrap exactly like `0001`/`0002` (independent of any
-    one application), so it runs here, once, rather than per-application --
-    it is what makes `PostgresCredentialStore` usable at all below (P2-D7:
-    this adapter must exercise the real, DB-backed credential store, not
-    the in-memory `CredentialStore` the previous revision of this file
-    used). Also rewrites `0003_provision_application.sql`/`0004_deprovision_
-    application.sql` the same way and keeps them (in `script_dir`, which the
-    caller keeps alive for this adapter's whole lifetime -- unlike
-    `test_postgres.py`'s `tmp_path_factory`-backed fixture, this adapter has
-    no per-test temporary directory to borrow) for `_provision_pg_app`/
-    `close()` to run once per application, since database-per-application
-    (architecture §8) means provisioning one application is itself now a
-    multi-statement script, not a single function call -- see 0002/0003's
-    own header comments for why.
+    `0002_provisioning_functions.sql` / `0005_credential_store.sql` /
+    `0006_control_plane_http.sql` migrations (with `r2dbsvc` textually
+    replaced by this run's unique prefix) through the real `psql` binary --
+    the actual runbook an operator would use, not a Python reimplementation
+    of it (§5.3 C-5), exactly as `test_postgres.py`'s `platform` fixture
+    does. `0005`/`0006` are control-plane bootstrap exactly like
+    `0001`/`0002` (independent of any one application), so they run here,
+    once, rather than per-application -- `0005` is what makes
+    `PostgresCredentialStore` usable at all below (P2-D7: this adapter must
+    exercise the real, DB-backed credential store, not the in-memory
+    `CredentialStore` the previous revision of this file used); `0006`
+    (CCR-14 WP-5) is what makes the real `/control/v1` control-plane
+    surface (`r2dbsvc_controlplane` role, `control_credentials`/
+    `control_audit` tables) usable. Also rewrites `0003_provision_
+    application.sql`/`0004_deprovision_application.sql` the same way and
+    keeps them (in `script_dir`, which the caller keeps alive for this
+    adapter's whole lifetime -- unlike `test_postgres.py`'s
+    `tmp_path_factory`-backed fixture, this adapter has no per-test
+    temporary directory to borrow) for `_provision_pg_app`/`close()` to run
+    once per application, since database-per-application (architecture §8)
+    means provisioning one application is itself now a multi-statement
+    script, not a single function call -- see 0002/0003's own header
+    comments for why.
     """
     control_role = f"{prefix}_control"
     api_role = f"{prefix}_api"
+    controlplane_role = f"{prefix}_controlplane"
     platform_db = f"{prefix}_platform"
+    schema = f"{prefix}_registry"
     control_password = secrets.token_urlsafe(24)
     # `0005_credential_store.sql` needs an `api_password` to create the
     # read-only `<prefix>_api` role -- this adapter's own `DataService` now
@@ -238,6 +278,11 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     # deployment's `r2dbsvc_api` role has, not the full-privilege control
     # role), see `__init__` below.
     api_password = secrets.token_urlsafe(24)
+    # `0006_control_plane_http.sql` needs a `controlplane_password` to
+    # create the least-privilege `<prefix>_controlplane` role (R-3) -- the
+    # role the WP-5 control-plane ASGI app connects as (`control_main.
+    # build_control_app`, `__init__` below), never `<prefix>_control`.
+    controlplane_password = secrets.token_urlsafe(24)
 
     rewritten: dict[str, Path] = {}
     for name in (
@@ -246,6 +291,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
         "0005_credential_store.sql",
+        "0006_control_plane_http.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -255,13 +301,17 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
     _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
+    _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
+    controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
 
     return _Platform(
         prefix=prefix,
         admin_dsn=admin_dsn,
         control_dsn=control_dsn,
         api_dsn=api_dsn,
+        controlplane_dsn=controlplane_dsn,
+        schema=schema,
         platform_db=platform_db,
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
@@ -652,7 +702,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 pepper="synthetic-conformance-pepper-r2db-http-0000",
                 schema=f"{prefix}_registry",
             )
-            self._service = DataService(self._credentials, cell_factory=self._make_cell)
+            self._service = DataService(self._credentials, cell_factory=self._make_cell, control_plane_status="enabled")
             self._control = ControlAuthority(self._service)
 
             app = create_app(self._service)
@@ -664,6 +714,70 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             self._app = app
             self._loop = asyncio.new_event_loop()
             self._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+
+            # ------------------------------------------------------------
+            # control plane (WP-5 provided branch): the real `/control/v1`
+            # ASGI app.
+            #
+            # WP-5 round-2 review MINOR-3: assembled via `r2db_api.
+            # control_main.assemble_control_stack` -- the same shared
+            # product-code assembly core `build_control_app` itself calls
+            # -- rather than calling `build_control_app` directly. That
+            # function returns only the finished ASGI app, with no handle
+            # back to the 4 Postgres stores it constructs internally --
+            # their `close()` (pool release) is wired only into the app's
+            # own ASGI `lifespan` protocol. This repository's conformance
+            # adapters do not drive ASGI lifespan at all (the installed
+            # httpx 0.28's `ASGITransport` has no `lifespan` parameter;
+            # `self._client`/`app` above -- the pre-existing DATA-plane
+            # wiring -- already establishes the same "no lifespan,
+            # `close()` releases pools directly" pattern this file uses
+            # throughout). §13.3's own measured R-7 rate-window problem
+            # (below) requires this adapter to be able to rebuild a fresh
+            # `ControlPlaneService` (a fresh, empty in-memory rate window)
+            # periodically -- WITHOUT leaking the old one's pooled
+            # connections, which a bare `build_control_app` call cannot
+            # support at all. `assemble_control_stack` returning `(service,
+            # stores)` instead of a finished app is exactly what lets this
+            # adapter hold real, closeable references while still using
+            # the same product assembly code a real deployment does.
+            # ------------------------------------------------------------
+            self._control_pepper = "synthetic-conformance-pepper-r2db-http-ctl-0000"
+            self._control_app_pepper = "synthetic-conformance-pepper-r2db-http-0000"
+            # Conformance-build limits profile -- see `_build_control_stack`'s
+            # own `applications` comment (mirrors `conformance_adapter_r2db.
+            # py`'s identical, measured rationale: the design's own "20"
+            # example does not account for every OTHER condition test's
+            # `build_fixture()` -> `provision_application()` also writing a
+            # real `applications` row on this same, session-scoped platform
+            # database).
+            self._control_limits = ControlPlaneLimits(applications=100, credentials_per_application=5, control_requests_per_minute=200)
+            # `pool_size=2` per store (8 total across the 4 stores) --
+            # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT 10` (0006) is
+            # the real, enforced ceiling here; the default `pool_size` (4,
+            # `R2DB_PLATFORM_POOL_SIZE`'s own default) would let 4 stores'
+            # pools alone threaten that limit before even accounting for a
+            # rebuild's old-and-new pools briefly coexisting.
+            self._control_pool_size = 2
+            self._control_app, self._control_stores = self._build_control_stack()
+            self._control_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+
+            # Durable audit observation (design §12.5(iv)/§4: "Postgres は
+            # control_audit に SELECT を持つ r2dbsvc_control 相当DSNの別
+            # インスタンスが要る" -- `r2dbsvc_controlplane` itself has no
+            # SELECT grant on `control_audit` at all, R-3, so this
+            # deliberately connects with `self._platform.control_dsn`
+            # instead of `controlplane_dsn`).
+            self._control_audit_reader = PostgresControlAuditSink(self._platform.control_dsn, schema=self._platform.schema, pool_size=2)
+
+            # `control_credential()`'s own maintained handle -- same
+            # memoize + call-time-validity-check contract as the in-process
+            # adapter's identical mechanism (WP-1 M-4).
+            self._control_credential_ref: str | None = None
+            self._control_credential_secret: str | None = None
+            # R-7 rate-window rebuild counter -- see `_privileged_control_
+            # send`'s own docstring.
+            self._control_request_count = 0
         except Exception:
             # Construction failed after the platform already exists: sweep
             # right now rather than waiting for interpreter shutdown, and
@@ -696,6 +810,27 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
     # backend wiring (design R2DB_SERVICE_LAYER_ARCHITECTURE Task 1)
     # ------------------------------------------------------------------
+
+    def _build_control_stack(self):
+        """Assembles one real `/control/v1` ASGI app via `r2db_api.
+        control_main.assemble_control_stack` (WP-5 round-2 review MINOR-3)
+        -- the exact same shared product-code assembly core `build_control_
+        app` itself calls -- and returns `(app, stores)` so the caller can
+        `close()` `stores` explicitly later. `create_control_app(service)`
+        is called with no `lifespan` argument: this adapter does not drive
+        ASGI lifespan at all (see `__init__`'s own note on why), so `stores`
+        is closed directly by this adapter's own code instead (`close()`/
+        the rebuild path in `_privileged_control_send`)."""
+        service, stores = assemble_control_stack(
+            controlplane_dsn=self._platform.controlplane_dsn,
+            app_pepper=self._control_app_pepper,
+            control_pepper=self._control_pepper,
+            schema=self._platform.schema,
+            pool_size=self._control_pool_size,
+            limits=self._control_limits,
+        )
+        app = create_control_app(service)
+        return app, stores
 
     def _make_cell(self, application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell:
         if entities:
@@ -750,6 +885,35 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         header_pairs.extend(extra_header_pairs)
         request = self._client.build_request(method, path, json=json_body, headers=header_pairs, params=params)
         response = self._run(self._client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__
+            ) from failure
+        if not response.content:
+            return {}
+        return response.json()
+
+    def _control_send(
+        self,
+        method: str,
+        path: str,
+        actor: "CredentialHandle | ControlCredentialHandle | None",
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """`_send`'s exact twin against the control-plane app/client
+        (`self._control_client`) instead of the data-plane one -- the same
+        Bearer-header/status/problem+json handling, deliberately duplicated
+        rather than parameterizing `_send` itself (R-1: no shared code path
+        between the two planes beyond the generic HTTP-failure/classify
+        machinery every method on this adapter already reuses)."""
+        self._control_request_count += 1
+        header_pairs: list[tuple[str, str]] = []
+        if actor is not None:
+            header_pairs.append(("authorization", f"Bearer {actor.secret}"))
+        request = self._control_client.build_request(method, path, json=json_body, headers=header_pairs)
+        response = self._run(self._control_client.send(request))
         if response.status_code >= 400:
             failure = _HttpFailure(response)
             raise ConformanceDenial(
@@ -828,29 +992,187 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
 
     def provision_application(self, application_id: str) -> None:
+        # UNCHANGED by the WP-5 C-08 upgrade (design §4: "置き換えられない
+        # もの...provision_applicationの実DB provisioning...は特権のまま残
+        # す") -- the real PostgreSQL database/role creation this performs
+        # (`_provision_pg_app`, 0003) has no in-band equivalent at all
+        # (design R-4: `/control/v1` registration only ever produces a
+        # "registered, not yet provisioned" row; the contract keeps real
+        # provisioning an operator runbook step). `0003`'s own `finish_
+        # provision_application` (0006-revised) is what actually writes the
+        # real `applications` registry row here (the "operator-first" flow
+        # the two-state registry design explicitly keeps working) -- this
+        # is why `issue_credential`/etc. below can safely presents an
+        # in-band request against `application_id` immediately afterward,
+        # without this method separately calling `register_application_
+        # inband` at all.
         info = _provision_pg_app(self._platform, application_id)
         self._app_pg[application_id] = info
         self._control.register_application(application_id)
 
+    def _ensure_control_actor(self) -> ControlCredentialHandle:
+        """Privileged internal helper (not a port method itself): returns a
+        control credential this adapter believes is currently valid and
+        must-rotate-cleared (WP-1 M-4's own contract for the PUBLIC
+        `control_credential()` method, which delegates here). Trusts the
+        cached handle without a preflight probe -- an extra `GET .../
+        capabilities` before every real call would double this adapter's
+        own control-plane HTTP traffic for no correctness benefit (measured,
+        this WP: exhausted the R-7 rate window purely from ordinary
+        `build_fixture()` setup traffic, well before any condition test's
+        own deliberate rate-boundary vector ran at all). A caller that
+        actually needs certainty the returned handle still authenticates
+        (`control_credential()` itself, C-15's own vectors) gets that from
+        the real operation it performs next -- `_repair_control_actor`
+        (below) is what `_privileged_control_send` calls on an actual
+        auth-denial, not this method preemptively.
+        """
+        if self._control_credential_ref is not None:
+            return ControlCredentialHandle(credential_ref=self._control_credential_ref, secret=self._control_credential_secret)
+        return self._repair_control_actor()
+
+    def _repair_control_actor(self) -> ControlCredentialHandle:
+        """Mints a genuinely fresh, must-rotate-cleared control credential
+        via the real out-of-band CLI ritual (`python -m r2db_api.ops
+        bootstrap`/`reset`, §5 WP-5 handoff's own recommendation: "実
+        CLI...実スタック証拠が最強"), then clears `must_rotate` via one real
+        in-band self-rotate HTTP call, and updates the tracked cache.
+        Called on first use (no cached handle at all) and whenever a
+        privileged setup call discovers -- from a real denial, not a
+        preflight guess -- that the cached handle is no longer live (WP-1
+        M-4: "never memoized past validity")."""
+        has_any = self._control_credentials_has_any()
+        result = self._run_ops_cli("reset" if has_any else "bootstrap")
+        if result.returncode != 0:
+            raise RuntimeError(f"r2db_api.ops {'reset' if has_any else 'bootstrap'} failed: {result.stderr}")
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        rotated = self._control_send(
+            "POST", f"/control/v1/credentials/{quote(credential_id, safe='')}/rotate",
+            ControlCredentialHandle(credential_ref=credential_id, secret=secret),
+        )
+        self._control_credential_ref = credential_id
+        self._control_credential_secret = rotated["secret"]
+        return ControlCredentialHandle(credential_ref=credential_id, secret=self._control_credential_secret)
+
+    # R-7/§13.3 (this WP's own measurement): the R-7 `control_requests_
+    # per_minute` window is process-global on `self._control_app`'s own
+    # `ControlPlaneService` instance (design R-7/round-2 review MI-7 --
+    # deliberately global, not per-credential, matching the real product).
+    # The WP-5 C-08 upgrade routes every ordinary `build_fixture()` setup
+    # call (issue_credential x4, occasional disable/enable) through this
+    # SAME rate-limited surface across the ENTIRE, long-running conformance
+    # session -- measured to exhaust a conformance-buildable (`<= 200`,
+    # `test_c14...`'s own `_MAX_EXERCISABLE_LIMIT`) window purely from
+    # ordinary fixture churn, well before any test's own deliberate rate
+    # vector runs. Design §12.5(ii)'s own anticipated mitigation for this
+    # exact "session-scoped adapter shares one window with everything else"
+    # shape (there, for the identical concern about C-08 traffic) is
+    # "rate を十分大きく取るか service を再構築する" -- raising is maxed out
+    # by the port's own SI-08 exercisability ceiling, so this rebuilds a
+    # fresh `ControlPlaneService` (a fresh, empty in-memory rate window)
+    # periodically. Real, persisted state (`applications`/`credentials`/
+    # `control_credentials`/`control_audit`, all in Postgres) is completely
+    # unaffected by rebuilding the ASGI app object -- only the in-memory
+    # counter resets, exactly as a real deployment's own 60-second sliding
+    # window already does continuously on its own. Only ever called from
+    # the C-08-upgraded PRIVILEGED setup helpers below
+    # (`issue_credential`/`revoke_credential`/`_set_registry_application_
+    # enabled`) -- never from any C-14/C-15 test's own direct measurement
+    # of this exact rate class (those call `_control_send`/`control_
+    # credential()` directly, never these three setup methods), so a
+    # rebuild here can never perturb an in-progress SI-08 rate observation.
+    _CONTROL_REBUILD_THRESHOLD = 40
+
+    def _privileged_control_send(self, method: str, path: str, *, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._control_request_count >= self._CONTROL_REBUILD_THRESHOLD:
+            # WP-5 round-2 review MINOR-2: build the NEW stack/client first,
+            # only close the OLD ones after the new ones exist -- pools are
+            # lazy (`_RolePool.__init__` opens no connection at all, see
+            # `control_main.py`'s own note), so a brief overlap between old
+            # and new pools costs nothing. The previous order (close old,
+            # then build new) left this adapter permanently bricked -- no
+            # working control client at all -- if `_build_control_stack()`
+            # itself ever raised.
+            old_client = self._control_client
+            old_stores = self._control_stores
+            self._control_app, self._control_stores = self._build_control_stack()
+            self._control_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+            self._control_request_count = 0
+            # The OLD stack's pooled connections must be released, not
+            # merely dereferenced -- see `_build_control_stack`'s own
+            # docstring: without this, every rebuild leaks up to `4 *
+            # self._control_pool_size` connections against `r2dbsvc_
+            # controlplane`'s own real, enforced `CONNECTION LIMIT 10`
+            # (0006), which this WP measured failing loudly as `AUTH_STATE_
+            # UNAVAILABLE` after only a couple of rebuilds.
+            self._run(old_client.aclose())
+            for store in old_stores:
+                store.close()
+        actor = self._ensure_control_actor()
+        try:
+            return self._control_send(method, path, actor, json_body=json_body)
+        except ConformanceDenial as exc:
+            if exc.code not in _REPAIRABLE_AUTH_DENIAL_CODES:
+                raise
+            # The cached handle was not actually live (revoked/disabled by
+            # some other test's own C-15 vector, or still must_rotate) --
+            # repair via a real ritual run and retry exactly once, never in
+            # a loop (a second failure is a genuine problem, not staleness).
+            actor = self._repair_control_actor()
+            return self._control_send(method, path, actor, json_body=json_body)
+
+    def _control_credentials_has_any(self) -> bool:
+        """Read-only existence probe used only to choose `bootstrap` vs
+        `reset` in `_ensure_control_actor` -- a direct, privileged read of
+        `control_credentials`' row count (never a public capability; this
+        adapter's own equivalent of `python -m r2db_api.ops list-apps`-style
+        operator tooling, connected as `r2dbsvc_control`, the only role with
+        `SELECT` on this table at all -- R-3)."""
+        statement = sql.SQL("SELECT count(*) FROM {table}").format(table=sql.Identifier(self._platform.schema, "control_credentials"))
+        with psycopg.connect(self._platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(statement)
+                (count,) = cur.fetchone()
+        return count > 0
+
+    def _run_ops_cli(self, *args: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+        env["R2DB_CONTROL_DSN"] = self._platform.control_dsn
+        env["R2DB_CONTROL_CREDENTIAL_PEPPER"] = self._control_pepper
+        env["R2DB_PLATFORM_SCHEMA"] = self._platform.schema
+        return subprocess.run([sys.executable, "-m", "r2db_api.ops", *args], capture_output=True, text=True, env=env)
+
+    @staticmethod
+    def _parse_issued_stdout(stdout: str) -> tuple[str, str]:
+        credential_id: str | None = None
+        secret: str | None = None
+        for line in stdout.splitlines():
+            if line.startswith("credential_id: "):
+                credential_id = line[len("credential_id: "):].strip()
+            elif line.startswith("secret: "):
+                secret = line[len("secret: "):].strip()
+        if not credential_id or not secret:
+            raise RuntimeError(f"could not parse issued credential from CLI output:\n{stdout}")
+        return credential_id, secret
+
     def issue_credential(self, application_id: str, role: str) -> CredentialHandle:
-        self._counter += 1
-        credential_id = f"httpconf-cred-{application_id}-{role}-{self._counter}"
-        secret = f"httpconf-secret-{self._counter}-{uuid.uuid4().hex}"
-        # `self._write_credentials`, not `self._control.issue_credential`:
-        # `ControlAuthority` can only reach `self._service._credentials`
-        # (`self._credentials`, the *read-only*-role store `DataService`
-        # holds), which would refuse this `INSERT` at the database
-        # privilege level -- see `__init__`'s comment on the two-store
-        # split. `work` is a required keyword-only argument on `add`/
-        # `set_state` (CCR-14 WP-2 round-2 review, ruling (A)) -- every
-        # call site in this file now opens its own `unit_of_work()`.
-        with self._write_credentials.unit_of_work() as work:
-            self._write_credentials.add(credential_id, application_id, role, secret, work=work)
-        return CredentialHandle(credential_ref=credential_id, application_id=application_id, role=role, secret=secret)
+        # WP-5 C-08 upgrade (design §4): a real in-band `POST /control/v1/
+        # credentials` request, replacing the previous direct `self.
+        # _write_credentials.add` DB write -- this out-of-band setup
+        # primitive's own EXTERNAL contract (return a real, usable
+        # `CredentialHandle`) is unchanged, but it now goes through the
+        # same real entry point C-14/C-15's own in-band operations exercise
+        # (§4's own "既存条件が...実スタック検証へ自動的に格上げされる").
+        result = self._privileged_control_send(
+            "POST", "/control/v1/credentials", json_body={"application_id": application_id, "role": role},
+        )
+        return CredentialHandle(credential_ref=result["credential_id"], application_id=result["application_id"], role=result["role"], secret=result["secret"])
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
-        with self._write_credentials.unit_of_work() as work:
-            self._write_credentials.set_state(handle.credential_ref, revoked=True, work=work)
+        # WP-5 C-08 upgrade: real in-band `POST .../credentials/{id}/revoke`.
+        self._privileged_control_send("POST", f"/control/v1/credentials/{quote(handle.credential_ref, safe='')}/revoke")
 
     def disable_application(self, application_id: str) -> None:
         self._set_registry_application_enabled(application_id, False)
@@ -859,39 +1181,34 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         self._set_registry_application_enabled(application_id, True)
 
     def _set_registry_application_enabled(self, application_id: str, enabled: bool) -> None:
-        """The *only* mechanism this adapter uses to disable/enable an
-        application -- a direct write to the database `applications.
-        enabled` column, exactly what `python -m r2db_api.ops disable-app`/
-        `enable-app` (P2-D6) does in a real deployment. This adapter
-        reproduces the same SQL rather than shelling out to that CLI, for
-        the same reason `_sweep_prefix` above is duplicated rather than
-        imported (no import-time dependency on another module this adapter
-        must not assume stays stable).
+        """WP-5 C-08 upgrade (design §4): real in-band `POST .../
+        applications/{id}/enable`/`.../disable`, replacing the previous
+        direct `UPDATE applications SET enabled = ...` this method used to
+        issue itself. Same external contract (an application's real,
+        database-backed `enabled` column changes, observed by every C-08
+        condition exactly as before -- see this method's own prior
+        docstring, preserved below, for why a DB-backed change is the
+        property that actually matters here); the *mechanism* now goes
+        through the real `/control/v1` surface instead of a hand-rolled
+        SQL statement this adapter no longer needs to reproduce.
 
-        Review-reported gap this fixes: an earlier revision of this method
-        *also* called `ControlAuthority.set_application_enabled` (which
-        only ever toggles `DataService`'s private in-memory `_disabled_
-        apps` set -- `DataService._check`/`.authenticate` still consult it
-        as a second, legacy layer). That in-memory toggle alone was enough
-        to make every C-08 disablement condition pass, which meant this
-        DB write could regress to a silent no-op without any conformance
-        test noticing -- confirmed by review: neutralizing this method's DB
-        write left the suite green while the in-memory call was still
-        present. `PostgresCredentialStore.authenticate`/`assert_active`
-        decide `APPLICATION_DISABLED` from the *database*
-        `applications.enabled` column alone (P2-D4); calling
+        Review-reported gap this fixes (pre-WP-5, still true of the real
+        entry point used here): an earlier revision of this method *also*
+        called `ControlAuthority.set_application_enabled` (which only ever
+        toggles `DataService`'s private in-memory `_disabled_apps` set --
+        `DataService._check`/`.authenticate` still consult it as a second,
+        legacy layer). That in-memory toggle alone was enough to make every
+        C-08 disablement condition pass, which meant the real DB-backed
+        change could regress to a silent no-op without any conformance test
+        noticing -- confirmed by review. `PostgresCredentialStore.
+        authenticate`/`assert_active` decide `APPLICATION_DISABLED` from
+        the *database* `applications.enabled` column alone (P2-D4); calling
         `ControlAuthority.set_application_enabled` here would only ever
         mask a bug in that DB-backed path, never actually exercise it, so
-        it is deliberately not called from this method at all.
+        it is still deliberately not called from this method at all.
         """
-        statement = sql.SQL("UPDATE {table} SET enabled = {enabled_ph} WHERE application_slug = {slug_ph}").format(
-            table=sql.Identifier(f"{self._platform.prefix}_registry", "applications"),
-            enabled_ph=sql.Placeholder(),
-            slug_ph=sql.Placeholder(),
-        )
-        with psycopg.connect(self._platform.control_dsn, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                cur.execute(statement, [enabled, application_id])
+        suffix = "enable" if enabled else "disable"
+        self._privileged_control_send("POST", f"/control/v1/applications/{quote(application_id, safe='')}/{suffix}")
 
     def set_authorization_state_available(self, available: bool) -> None:
         self._control.set_authorization_state_available(available)
@@ -918,101 +1235,70 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         return self._send("GET", "/v1/capabilities", session)
 
     # ------------------------------------------------------------------
-    # control plane HTTP surface (port v1.5) -- surface-absent branch
+    # control plane HTTP surface (port v1.5) -- provided branch (WP-5)
     # ------------------------------------------------------------------
     #
-    # Control-plane HTTP work (CCR-14 design docs/design/
-    # R2DB_CCR14_CONTROL_PLANE_V1.md, work packages WP-2 onward) has not
-    # landed in `r2db_api.src` as of this port revision: `create_app`
-    # (`r2db_api/http.py`) builds its `Starlette` app from the fixed
-    # `_ROUTES` list, none of which is `/control`-prefixed. Every one of
-    # the 13 port v1.5 operations therefore takes the surface-absent
-    # branch (design section 4, form (a)) unconditionally, via one shared
-    # helper (avoids 13 near-duplicate `SurfaceAbsent` call sites that
-    # could drift out of sync with each other).
-    #
-    # This adapter's claim is stronger than a signature-only check: before
-    # raising, it inspects `self._app.app.routes` -- the real, live route
-    # table of the exact ASGI app HTTP requests in this adapter are
-    # actually dispatched against (`self._app` is the
-    # `RequestByteBoundMiddleware`-wrapped app `__init__` built via
-    # `create_app`; `.app` is that middleware's own wrapped `Starlette`
-    # instance, `RequestByteBoundMiddleware.__init__`'s `self.app = app` in
-    # `r2db_api/http.py`) -- for any route whose `.path` starts with
-    # `/control`. If one is found, the "absent" claim below would be false
-    # against the peer's own live, running state, so this asserts loudly
-    # (`AssertionError`, never a silently-wrong `SurfaceAbsent`) rather
-    # than proceeding on stale reasoning. This turns the claim from a
-    # comment into a measurement, exactly as design section 4's "confirmed
-    # by source inspection, never assumed" standard requires -- here
-    # "source inspection" is inspection of the actual running app object,
-    # the strongest form available to this HTTP-boundary adapter.
-    #
-    # `public_operation_callables()` -- this adapter's own wrappers around
-    # the real application-facing HTTP surface -- is passed as the
-    # signature-level evidence for `signature_forbids_parameters`, exactly
-    # as the in-process plug's identical helper does (C-17 precedent
-    # density, `MitateDB-api/conformance/conformance_adapter_mitatedb.py:
-    # 443-476`).
-    def _control_surface_absent(self, operation: str, requested: str) -> NoReturn:
-        control_routes = [r for r in self._app.app.routes if getattr(r, "path", "").startswith("/control")]
-        if control_routes:
-            raise AssertionError(
-                f"{self.name}: claimed control-plane SurfaceAbsent for {operation!r}, but the live ASGI "
-                f"app already has {len(control_routes)} route(s) starting with '/control': "
-                f"{sorted(r.path for r in control_routes)!r}"
-            )
-        raise SurfaceAbsent(
-            self.name, operation,
-            f"no /control/v1 route exists in this peer's real, live ASGI app.routes (requested: {requested})",
-            surface=self.public_operation_callables(),
-            forbidden_parameters=["credential", "control", "bootstrap", "rotate", "revoke"],
-        )
+    # The real `/control/v1` ASGI app (`self._control_app`/`self.
+    # _control_client`, `__init__`/`_build_control_stack`) is assembled via
+    # `r2db_api.control_main.assemble_control_stack` (WP-5 round-2 review
+    # MINOR-3) -- the SAME shared product-code assembly core `build_control_
+    # app` (the real composition root a real deployment runs) calls
+    # internally, not a duplicated hand-assembly. This adapter still stops
+    # short of calling `build_control_app` itself: that function returns
+    # only the finished ASGI app, with no closeable handle back to its own
+    # 4 Postgres stores, which this adapter needs to periodically rebuild
+    # `ControlPlaneService` and reset its in-memory R-7 rate window without
+    # leaking connections (see `_privileged_control_send`'s own docstring)
+    # -- `create_control_app(service)` is called directly on the service
+    # `assemble_control_stack` returns, with no `lifespan` argument (this
+    # adapter does not drive ASGI lifespan at all, closing the 4 stores
+    # itself instead). Every in-band method below is a real HTTP request
+    # through `_control_send`, exactly as a genuine `/control/v1` caller
+    # would issue it -- this adapter never pre-filters by credential kind
+    # before presenting a request (design's own "Authorization is the
+    # peer's own decision to make, not this port's").
 
     # port v1.5
     def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-        """No control-plane capabilities entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("control_capabilities", f"actor={actor!r}")
+        return self._control_send("GET", "/control/v1/capabilities", actor)
 
     # port v1.5
     def register_application_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
     ) -> Mapping[str, Any]:
-        """No in-band application-registration entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("register_application_inband", f"application_id={application_id!r}")
+        return self._control_send("POST", "/control/v1/applications", actor, json_body={"application_id": application_id})
 
     # port v1.5
     def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        """No in-band application-listing entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("list_applications", f"actor={actor!r}")
+        # Response-shape normalization (M-2): unwraps the real
+        # `{"applications": [...]}` envelope (port docstring).
+        result = self._control_send("GET", "/control/v1/applications", actor)
+        return result["applications"]
 
     # port v1.5
     def set_application_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
     ) -> Mapping[str, Any]:
-        """No in-band application enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "set_application_enabled_inband", f"application_id={application_id!r} enabled={enabled!r}"
-        )
+        suffix = "enable" if enabled else "disable"
+        return self._control_send("POST", f"/control/v1/applications/{quote(application_id, safe='')}/{suffix}", actor)
 
     # port v1.5
     def issue_credential_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
     ) -> CredentialHandle:
-        """No in-band credential-issuance entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "issue_credential_inband", f"application_id={application_id!r} role={role!r}"
+        result = self._control_send(
+            "POST", "/control/v1/credentials", actor, json_body={"application_id": application_id, "role": role},
         )
+        return CredentialHandle(credential_ref=result["credential_id"], application_id=result["application_id"], role=result["role"], secret=result["secret"])
 
     # port v1.5
     def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        """No in-band credential-listing entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("list_credentials", f"actor={actor!r}")
+        result = self._control_send("GET", "/control/v1/credentials", actor)
+        return result["credentials"]
 
     # port v1.5
     def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
-        """No in-band credential-rotation entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("rotate_credential", f"credential_ref={credential_ref!r}")
+        return self._control_send("POST", f"/control/v1/credentials/{quote(credential_ref, safe='')}/rotate", actor)
 
     # port v1.5
     def revoke_credential_inband(
@@ -1023,58 +1309,151 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         destructive: bool | None = None,
         confirmation: str | None = None,
     ) -> Mapping[str, Any]:
-        """No in-band credential-revocation entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "revoke_credential_inband",
-            f"credential_ref={credential_ref!r} destructive={destructive!r} confirmation={confirmation!r}",
+        body: dict[str, Any] = {}
+        if destructive is not None:
+            body["destructive"] = destructive
+        if confirmation is not None:
+            body["confirmation"] = confirmation
+        return self._control_send(
+            "POST", f"/control/v1/credentials/{quote(credential_ref, safe='')}/revoke", actor,
+            json_body=body or None,
         )
 
     # port v1.5
     def set_credential_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
     ) -> Mapping[str, Any]:
-        """No in-band credential enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "set_credential_enabled_inband", f"credential_ref={credential_ref!r} enabled={enabled!r}"
-        )
+        suffix = "enable" if enabled else "disable"
+        return self._control_send("POST", f"/control/v1/credentials/{quote(credential_ref, safe='')}/{suffix}", actor)
 
-    # port v1.5
+    @staticmethod
+    def _ops_cli_denial_code(stderr: str) -> str:
+        """Extracts a contract error code from `ops.py main()`'s own
+        `print(f"error: {exc.code}: {exc.message}", file=sys.stderr)`
+        format (a `FoundationError` the CLI itself raised, e.g.
+        `cmd_bootstrap`'s `CONFLICT`). Anything else (a raw `psycopg.Error`,
+        an argparse usage error) does not match this shape and maps to
+        `UNCLASSIFIED` -- the identical "a native failure this adapter
+        cannot vouch for as a deliberate denial is never laundered into a
+        plausible-looking code" discipline `classify()` already applies to
+        every other native failure on this adapter."""
+        match = re.match(r"error: ([A-Z_]+): ", stderr.strip())
+        return match.group(1) if match else UNCLASSIFIED
+
+    # port v1.5 (ritual -- design R-5, no in-band actor by contract): the
+    # real out-of-band CLI (`python -m r2db_api.ops bootstrap`), connected
+    # as `r2dbsvc_control`-equivalent -- design §3 work order's own
+    # recommendation ("実 CLI...実スタック証拠が最強").
     def bootstrap(self) -> ControlCredentialHandle:
-        """No out-of-band bootstrap ritual mechanism is wired into this adapter yet -- WP-2 has not landed; see
-        `_control_surface_absent`."""
-        self._control_surface_absent("bootstrap", "ritual bootstrap (no actor -- out-of-band by contract)")
+        result = self._run_ops_cli("bootstrap")
+        if result.returncode != 0:
+            code = self._ops_cli_denial_code(result.stderr)
+            raise ConformanceDenial(code=code, adapter=self.name, native_type="OpsCliFailure") from RuntimeError(result.stderr)
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
 
-    # port v1.5
+    # port v1.5 (ritual -- design R-5, no in-band actor by contract)
     def reset(self) -> ControlCredentialHandle:
-        """No out-of-band reset ritual mechanism is wired into this adapter yet; see `_control_surface_absent`."""
-        self._control_surface_absent("reset", "ritual reset (no actor -- out-of-band by contract)")
+        result = self._run_ops_cli("reset")
+        if result.returncode != 0:
+            code = self._ops_cli_denial_code(result.stderr)
+            raise ConformanceDenial(code=code, adapter=self.name, native_type="OpsCliFailure") from RuntimeError(result.stderr)
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
 
-    # port v1.5
+    # port v1.5 (privileged setup)
     def control_credential(self) -> ControlCredentialHandle:
-        """No control credential can be minted -- bootstrap/reset do not exist yet; see `_control_surface_absent`."""
-        self._control_surface_absent("control_credential", "privileged control-credential setup")
+        """Unlike `_ensure_control_actor` (this adapter's own internal
+        helper for the C-08-upgraded setup primitives, which deliberately
+        trusts its cache to keep ordinary fixture-building traffic cheap --
+        see that method's own docstring), this PUBLIC port method verifies
+        liveness with one real preflight call before returning: WP-1 M-4's
+        contract ("genuinely valid AT CALL TIME") is load-bearing here
+        specifically, since C-15's own vectors revoke/reset control
+        credentials mid-suite and a LATER, unrelated test calling this
+        method must never receive a silently-dead handle it cannot itself
+        detect or retry around (unlike the setup primitives, which always
+        immediately use the actor for a real operation and can retry on
+        failure)."""
+        if self._control_credential_ref is not None:
+            probe = ControlCredentialHandle(credential_ref=self._control_credential_ref, secret=self._control_credential_secret)
+            try:
+                self._control_send("GET", "/control/v1/capabilities", probe)
+                return probe
+            except ConformanceDenial as exc:
+                # WP-5 round-2 review MINOR-1: only an actual authority
+                # denial means "repair via a destructive reset" -- a
+                # transient `LIMIT_EXCEEDED`/`AUTH_STATE_UNAVAILABLE` must
+                # propagate as-is (a `reset` in response to either would
+                # revoke a still-perfectly-live control credential and mask
+                # the real failure as a false "it was stale" story).
+                if exc.code not in _REPAIRABLE_AUTH_DENIAL_CODES:
+                    raise
+        return self._repair_control_actor()
 
-    # port v1.5
+    # port v1.5 (privileged observation)
     def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
-        """No control-plane audit trail exists to observe yet; see `_control_surface_absent`."""
-        self._control_surface_absent("control_audit_events", "control-plane audit observation")
+        # Design §12.5(iv)/§4: reads the DURABLE Postgres sink directly
+        # (`PostgresControlAuditSink.events()`, connected with
+        # `r2dbsvc_control`-equivalent privilege -- `r2dbsvc_controlplane`
+        # itself has no SELECT on `control_audit` at all, R-3).
+        rows = self._control_audit_reader.events()
+        columns = (
+            "event_id", "event_class", "occurred_at", "request_id", "application_id",
+            "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code", "recorded_at",
+        )
+        return [{col: value for col, value in zip(columns, row) if value is not None} for row in rows]
 
-    # port v1.5 (fix-round): the inverse of `provision_application`. The
-    # in-band, control-plane sense of "registered Application" (design R-4:
-    # a "registered, not yet provisioned" row created by `register_
-    # application_inband`) has no real removal mechanism on this peer at
-    # all -- consistent with the contract keeping application deletion out
-    # of v1 scope. This is deliberately distinct from `platform.
-    # deprovision_script` (0004, kept on `_Platform` in `__init__` but
-    # never invoked): that script tears down a *fully DB-provisioned*
-    # Application's real database/roles, a different, lower-level operation
-    # this adapter's own `provision_application` performs directly (not
-    # through any in-band control-plane surface) -- it is not a stand-in
-    # for undoing an in-band `register_application_inband` call, which
-    # never touches PostgreSQL provisioning at all (R-4's whole point).
+    # port v1.5 (fix-round): the inverse of `provision_application` --
+    # operator-privileged test-harness cleanup, never a public capability.
+    # Design §12.5(iii)/work order §3: handles BOTH shapes this adapter's
+    # own `provision_application`/`register_application_inband` can leave
+    # behind --
+    #
+    #   (a) registered-only (`database_name IS NULL` -- an in-band-only
+    #       registration, e.g. C-14 vector 5's own `applications` bound
+    #       drive): `0004`'s own `begin_deprovision_application` explicitly
+    #       REFUSES such a row (0006's own revision: "登録済みのみの行は
+    #       deprovision対象にならない") -- the registry-row-only DELETE the
+    #       work order itself prescribes ("0004は provisioned前提") is the
+    #       only correct removal for this shape.
+    #   (b) fully DB-provisioned (via the out-of-band `provision_
+    #       application` setup primitive, e.g. C-14 vector 5's own
+    #       `credentials_per_application` drive's `cred_app`): the real
+    #       0004 script, which additionally requires no surviving
+    #       `credentials` row for this slug at all (even a revoked one --
+    #       `assert_no_credentials_for_deprovision`) -- this method clears
+    #       any residual in-band-issued credential rows for the slug first
+    #       (the drive's own cleanup only ever revokes, never deletes, the
+    #       credentials it issued), mirroring what an operator's real
+    #       deprovisioning runbook step would do.
     def deprovision_application(self, application_id: str) -> None:
-        """No in-band application-removal mechanism exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("deprovision_application", f"application_id={application_id!r}")
+        provisioned_statement = sql.SQL("SELECT database_name IS NOT NULL FROM {table} WHERE application_slug = {ph}").format(
+            table=sql.Identifier(self._platform.schema, "applications"), ph=sql.Placeholder()
+        )
+        with psycopg.connect(self._platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(provisioned_statement, [application_id])
+                row = cur.fetchone()
+            if row is None:
+                return  # already gone -- nothing to clean up
+            provisioned = row[0]
+            if not provisioned:
+                delete_statement = sql.SQL("DELETE FROM {table} WHERE application_slug = {ph}").format(
+                    table=sql.Identifier(self._platform.schema, "applications"), ph=sql.Placeholder()
+                )
+                with conn.cursor() as cur:
+                    cur.execute(delete_statement, [application_id])
+                conn.commit()
+                return
+            delete_credentials_statement = sql.SQL("DELETE FROM {table} WHERE application_slug = {ph}").format(
+                table=sql.Identifier(self._platform.schema, "credentials"), ph=sql.Placeholder()
+            )
+            with conn.cursor() as cur:
+                cur.execute(delete_credentials_statement, [application_id])
+            conn.commit()
+        _run_psql(self._platform.control_dsn, self._platform.deprovision_script, {"app_slug": application_id})
+        self._app_pg.pop(application_id, None)
 
     # ------------------------------------------------------------------
     # application plane (over real HTTP)
@@ -1547,6 +1926,39 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
             self._control_call(_attempt)
 
+        # CCR-14 WP-5 (design §4/§8 M-3): `/control/v1`'s own in-band
+        # enable/rotate -- see `conformance_adapter_r2db.py`'s identical
+        # addition/rationale (this is the real-HTTP twin). WP-5 round-2
+        # review NIT-1: every vector below fetches its own control actor
+        # LAZILY, inside its own `attempt()` -- never captured eagerly at
+        # vector-construction time -- so a later vector in this same list
+        # revoking/resetting the tracked control credential (the control-
+        # credential-targeting vector does exactly that) can never leave an
+        # earlier-constructed-but-not-yet-attempted vector holding a stale
+        # actor if a future change reorders this list.
+        def inband_enable_attempt() -> None:
+            actor = self.control_credential()
+            self._control_send("POST", f"/control/v1/credentials/{quote(handle.credential_ref, safe='')}/enable", actor)
+
+        def inband_rotate_attempt() -> None:
+            actor = self.control_credential()
+            self._control_send("POST", f"/control/v1/credentials/{quote(handle.credential_ref, safe='')}/rotate", actor)
+
+        # WP-5 round-2 review MINOR-7 (observed denial code): because actor
+        # and target are the SAME now-revoked credential, the real HTTP
+        # `rotate` call's own authentication step denies this with
+        # `AUTH_REVOKED` -- never reaching the rotate handler's own "revoked
+        # target" `VALIDATION_FAILED` refusal, since the caller itself never
+        # authenticates in the first place. This vector's real detection
+        # power is therefore "a revoked control credential can no longer
+        # authenticate at all", not the target-revocation check the sibling
+        # application-credential vector (`inband_rotate_attempt`, above)
+        # exercises with a still-live, distinct actor.
+        def inband_rotate_revoked_control_credential_attempt() -> None:
+            actor = self.control_credential()
+            self._control_send("POST", f"/control/v1/credentials/{quote(actor.credential_ref, safe='')}/revoke", actor)
+            self._control_send("POST", f"/control/v1/credentials/{quote(actor.credential_ref, safe='')}/rotate", actor)
+
         return [
             TamperVector(
                 kind="credential_reactivation",
@@ -1559,6 +1971,24 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 name="r2db_http_set_state_enabled_true_after_revoke",
                 disposition="must_ignore",
                 attempt=enabled_true_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_http_inband_enable_revoked_application_credential",
+                disposition="must_ignore",
+                attempt=inband_enable_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_http_inband_rotate_revoked_application_credential",
+                disposition="must_deny",
+                attempt=inband_rotate_attempt,
+            ),
+            TamperVector(
+                kind="credential_reactivation",
+                name="r2db_http_inband_rotate_revoked_control_credential",
+                disposition="must_deny",
+                attempt=inband_rotate_revoked_control_credential_attempt,
             ),
         ]
 
@@ -1738,11 +2168,15 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     def close(self) -> None:
         try:
             self._run(self._client.aclose())
+            self._run(self._control_client.aclose())
         finally:
             for cell in self._provisioned_cells:
                 cell.close()
             self._credentials.close()
             self._write_credentials.close()
+            for store in self._control_stores:
+                store.close()
+            self._control_audit_reader.close()
             self._loop.close()
             try:
                 # Drops the platform database and every per-application

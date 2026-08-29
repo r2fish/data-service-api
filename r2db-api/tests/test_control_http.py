@@ -17,7 +17,11 @@ shape checks, byte-bound/problem+json/independence -- is correct.
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import types
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -25,12 +29,13 @@ import pytest
 
 from r2db_api.audit import ControlAuditSink
 from r2db_api.auth import ControlCredentialStore, CredentialStore
-from r2db_api import control_main
 from r2db_api.control_http import create_control_app
 from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend
 from r2db_api.http import create_app
 from r2db_api.limits import ControlPlaneLimits
 from r2db_api.service import ControlAuthority, DataService
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 BASE_URL = "http://r2db-control.example.invalid"
 PEPPER = "synthetic-test-pepper-control-http-app-0000"
@@ -485,7 +490,8 @@ async def test_revoke_with_no_body_at_all_exercises_empty_branch(control_harness
 # ===========================================================================
 # 8. `control_main.build_control_app` (work order §4 item 8): required-env
 #    failures, pepper-equality failure, a normal env returns an ASGI app
-#    without ever connecting, and no module-level `app` exists (§8 m-10).
+#    without ever connecting, and a module-level `app` exists (§8 m-10,
+#    flipped WP-5).
 # ===========================================================================
 
 _VALID_ENV = {
@@ -495,50 +501,104 @@ _VALID_ENV = {
 }
 
 
-def test_build_control_app_requires_controlplane_dsn():
+@pytest.fixture
+def control_main_module():
+    """CCR-14 WP-5: `r2db_api.control_main` now ends with a module-level
+    `app = build_control_app()` (§8 m-10's flip, same single commit as
+    `main.py`'s own declaration flip) -- a bare `import r2db_api.control_main`
+    therefore reads real `os.environ` the instant it first runs, exactly
+    like `r2db_api.main` already does (P2-D5). This mirrors `test_credential_
+    persistence.py`'s own `main_module` fixture for that exact reason: a
+    valid, synthetic environment (`_VALID_ENV` above -- zero-network,
+    `build_control_app`/its stores never connect eagerly, see
+    `test_build_control_app_returns_asgi_app_without_connecting`'s own
+    comment) is set via `pytest.MonkeyPatch` before the first import/reload,
+    so this file's own top-level collection never touches this module
+    (avoiding a collection-time crash for the whole root pytest suite, which
+    has no such environment configured ambiently) and every test below gets
+    a fresh, valid module object instead.
+    """
+    mp = pytest.MonkeyPatch()
+    for key, value in _VALID_ENV.items():
+        mp.setenv(key, value)
+    try:
+        import importlib
+        import sys
+
+        if "r2db_api.control_main" in sys.modules:
+            module = importlib.reload(sys.modules["r2db_api.control_main"])
+        else:
+            import r2db_api.control_main as module
+        yield module
+    finally:
+        mp.undo()
+
+
+def test_build_control_app_requires_controlplane_dsn(control_main_module):
     env = dict(_VALID_ENV)
     del env["R2DB_CONTROLPLANE_DSN"]
     with pytest.raises(RuntimeError, match="R2DB_CONTROLPLANE_DSN"):
-        control_main.build_control_app(env)
+        control_main_module.build_control_app(env)
 
 
-def test_build_control_app_requires_control_credential_pepper():
+def test_build_control_app_requires_control_credential_pepper(control_main_module):
     env = dict(_VALID_ENV)
     del env["R2DB_CONTROL_CREDENTIAL_PEPPER"]
     with pytest.raises(RuntimeError, match="R2DB_CONTROL_CREDENTIAL_PEPPER"):
-        control_main.build_control_app(env)
+        control_main_module.build_control_app(env)
 
 
-def test_build_control_app_requires_application_pepper():
+def test_build_control_app_requires_application_pepper(control_main_module):
     env = dict(_VALID_ENV)
     del env["R2DB_CREDENTIAL_PEPPER"]
     with pytest.raises(RuntimeError, match="R2DB_CREDENTIAL_PEPPER"):
-        control_main.build_control_app(env)
+        control_main_module.build_control_app(env)
 
 
-def test_build_control_app_rejects_equal_peppers():
+def test_build_control_app_rejects_equal_peppers(control_main_module):
     env = dict(_VALID_ENV)
     env["R2DB_CREDENTIAL_PEPPER"] = env["R2DB_CONTROL_CREDENTIAL_PEPPER"]
     with pytest.raises(RuntimeError, match="must not be equal"):
-        control_main.build_control_app(env)
+        control_main_module.build_control_app(env)
 
 
-def test_build_control_app_returns_asgi_app_without_connecting():
+def test_build_control_app_returns_asgi_app_without_connecting(control_main_module):
     # `R2DB_CONTROLPLANE_DSN` above points at a database that does not
     # exist -- if construction ever tried to connect, this would raise a
     # `psycopg` error instead of returning. `_RolePool.__init__` (postgres.py)
     # does not connect eagerly, which is exactly what this test pins down.
-    app = control_main.build_control_app(_VALID_ENV)
+    app = control_main_module.build_control_app(_VALID_ENV)
     assert app is not None
     assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
     assert len(app.app.routes) == 11
 
 
-def test_control_main_module_has_no_module_level_app():
-    # §8 m-10's own mechanical check: constructing a deployable-but-
-    # undeclared control plane must not be possible just by importing this
-    # module.
-    assert not hasattr(control_main, "app")
+def test_control_main_module_level_app_exists_and_is_asgi(control_main_module):
+    # §8 m-10's flip (WP-5, bound to the same single commit as `main.py`'s
+    # own declaration flip): importing this module now constructs a real
+    # module-level `app`, exactly like `r2db_api.main:app` already does --
+    # the inverse of the pre-WP-5 mechanical check of the same name.
+    assert hasattr(control_main_module, "app")
+    app = control_main_module.app
+    assert app is not None
+    assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
+    assert len(app.app.routes) == 11
+
+
+def test_import_r2db_api_control_main_module_succeeds_with_valid_environment():
+    # Mirrors `test_credential_persistence.py::
+    # test_import_r2db_api_main_module_succeeds_with_valid_environment`: a
+    # real `import` in a fresh subprocess (never polluting this pytest
+    # process' own `sys.modules`/`control_main_module` fixture state),
+    # proving the literal `r2db_api.control_main:app` ASGI-server entry
+    # point actually works end to end.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC_DIR)
+    env.update(_VALID_ENV)
+    script = "import r2db_api.control_main as m; assert m.app is not None; print('IMPORT_OK')"
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert "IMPORT_OK" in result.stdout
 
 
 # ===========================================================================

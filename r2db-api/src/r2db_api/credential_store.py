@@ -1015,8 +1015,22 @@ class PostgresControlAuditSink:
         called `cur.execute` directly and let a connection failure propagate
         as a raw `psycopg.Error`, the one read path in this file that had not
         been brought under that discipline yet.
+
+        WP-5 round-2 review NIT-4: `ORDER BY recorded_at` alone is not a
+        total order -- `recorded_at` is `DEFAULT now()`, a single
+        transaction-start timestamp, so two events inserted by the same
+        transaction (a state-change row + nothing else shares a
+        transaction today, but this is a durability property this method
+        should not assume stays true forever) or by two transactions that
+        happen to commit within the same clock tick can tie. This became
+        load-bearing this WP: C-15 vector 2's own prefix assertion
+        (`after_audit[:len(before_audit)] == before_audit`) needs a stable,
+        repeatable ordering across the `before`/`after` calls, not merely
+        "some order consistent with `recorded_at`" -- `event_id` (the
+        primary key, application-generated per `AuditSink.append`) is the
+        deterministic tiebreaker.
         """
-        statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at").format(
+        statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at, event_id").format(
             columns=sql.SQL(", ").join(sql.Identifier(name) for name in _CONTROL_AUDIT_COLUMNS), table=self._table
         )
         try:

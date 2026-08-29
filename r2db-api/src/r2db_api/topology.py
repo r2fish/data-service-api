@@ -4,31 +4,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-PLANES = ("application_data", "application_development", "application_identity", "control", "provisioning", "audit")
-
-# CCR-14 WP-4 (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.6, §3/§8 m-8):
-# the new `/control/v1` HTTP surface (`control_http.create_control_app`,
-# R-1) is a node distinct from the pre-existing `control` plane above --
-# `control` already models the provisioning/administrative *authority*
-# boundary this topology enforced before CCR-14 (the `ControlAuthority`/
-# operator-CLI world), while this new node is specifically the public-facing
-# HTTP process R-1/R-3 describe: a *separate* deployable process with its
-# own least-privilege DB role (`r2dbsvc_controlplane`) that structurally has
-# no route to Application real data at all.
-#
-# It is deliberately kept out of `PLANES` itself, in a second, additive
-# tuple: `tests/test_topology.py`'s pre-existing
-# `test_topology_has_all_planes_and_denies_application_escape` asserts
-# `set(PLANES) == {...}` by strict equality, not a subset check, and this
-# WP's own completion condition (§8 m-8) requires that assertion to stay
-# byte-identical and green -- widening `PLANES` itself would fail it on the
-# spot the moment a 7th name appeared in the set. `ALL_PLANES` is what
-# `can_reach`'s membership guard checks against instead, so every pre-
-# existing pairwise `can_reach` result among the original 6 planes is
-# unchanged (the guard only ever gets *more* permissive, and the new plane
-# is never a source/target any pre-existing call site names).
 CONTROL_HTTP_PLANE_NAME = "control_plane_http"
-ALL_PLANES = PLANES + (CONTROL_HTTP_PLANE_NAME,)
+
+# CCR-14 WP-5 (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.7, §5 WP-5 row
+# / §13.3): `control_plane_http` (added WP-4, R-1's independent `/control/v1`
+# HTTP process node) is now consolidated directly into `PLANES` -- the WP-4
+# freeze that kept it in a second, additive `ALL_PLANES` tuple only (so as
+# not to disturb `test_topology.py`'s then-existing strict-equality
+# assertion, §8 m-8) ends with this WP: the work order explicitly calls for
+# folding it in and updating that assertion to the resulting 7-name set.
+# `ALL_PLANES` stays as a plain alias (not removed outright) purely so any
+# reader/caller that still spells the older name keeps working unchanged --
+# the two names are now, and will stay, identical.
+PLANES = ("application_data", "application_development", "application_identity", "control", "provisioning", "audit", CONTROL_HTTP_PLANE_NAME)
+ALL_PLANES = PLANES
 
 
 @dataclass(frozen=True)

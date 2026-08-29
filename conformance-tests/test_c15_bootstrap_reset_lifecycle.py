@@ -44,15 +44,16 @@ Each file staying self-contained and independently readable -- the same
 property every other condition file in this suite already has -- was
 judged the better trade.
 
-As of this port revision (WP-1 of the CCR-14 design), all three registered
-adapters declare `control_plane: unavailable` and have no bootstrap/reset
-ritual mechanism at all, so every test below takes the surface-absent
-branch for every adapter. The "provided" branch each test function also
-contains is real, executable verification code: it becomes non-vacuous,
-and green, once a registered adapter's peer implements the ritual and
-flips its declaration to `enabled` (design section 5, work package WP-5).
-Per this repository's "skip is fail" rule and design principle 4, no
-branch here is ever skipped.
+As of this port revision (WP-5 of the CCR-14 design, the declaration
+flip), `r2db-api` (in-process) and `r2db-api-http` both declare
+`control_plane: enabled` and take the PROVIDED branch for real -- each
+runs the real bootstrap/reset ritual (`r2db_api.control_plane.
+bootstrap_control_credential`/`reset_control_credentials`, the ceremony
+core extracted out of `ops.py` this WP; the in-process adapter calls it
+directly, the HTTP adapter runs it via the real `python -m r2db_api.ops`
+CLI subprocess). `MitateDB-api` remains surface-absent for every test
+below. Per this repository's "skip is fail" rule and design principle 4,
+no branch here is ever skipped, for any adapter.
 
 Form (b) (declared-unavailable)'s known, measured acceptance-boundary
 limitation (mutation M5/M9: a fabricated `ConformanceDenial(CAPABILITY_
@@ -80,7 +81,12 @@ from adapter import (
 
 pytestmark = pytest.mark.condition("C-15")
 
-_FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "FORBIDDEN"})
+# WP-5 (design §13.3): widened to include `AUTH_REQUIRED` -- see
+# `test_c14_authority_boundary.py`'s identical set/comment for the full
+# rationale (an empty-secret probe measured, on both provided-branch r2db-api
+# adapters, to answer `AUTH_REQUIRED` rather than `AUTH_INVALID`; both are
+# genuine 401-series fail-closed outcomes, §8 m-7).
+_FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED", "FORBIDDEN"})
 
 
 def _unclassified_hint(code: str) -> str:
@@ -308,9 +314,24 @@ def test_c15_reset_revokes_every_control_credential_and_spares_application_plane
     # New control credential genuinely works.
     adapter.control_capabilities(new_control)
 
+    # WP-5 provided-branch fix (test-code bug, first execution -- WP-1's own
+    # §10.4 handoff predicted this class of defect): `reset()`'s own minted
+    # credential is must_rotate (design R-5) -- authorized for nothing but
+    # `control_capabilities`/self-rotate until a real rotation completes
+    # (test_c15_first_issued_credential_is_not_permanent, vector 3, is what
+    # actually verifies that gate). `list_credentials` is not on that
+    # allow-list, so this vector's own probe below must complete a real
+    # self-rotate first, exactly as an operator finishing the ritual would
+    # -- this does not change vector 2's own claim under test (exactly one
+    # non-revoked control credential remains after reset), only how this
+    # test authenticates to observe it.
+    rotated = adapter.rotate_credential(new_control, new_control.credential_ref)
+    new_secret = rotated["secret"] if isinstance(rotated, Mapping) else getattr(rotated, "secret")
+    full_new_control = ControlCredentialHandle(credential_ref=new_control.credential_ref, secret=new_secret)
+
     # M-6: exactly one non-revoked control credential remains after reset
     # -- the fresh one reset just minted.
-    control_rows_after = [row for row in adapter.list_credentials(new_control) if row.get("role") == "control"]
+    control_rows_after = [row for row in adapter.list_credentials(full_new_control) if row.get("role") == "control"]
     non_revoked_after = [row for row in control_rows_after if not row.get("revoked")]
     assert len(non_revoked_after) == 1 and non_revoked_after[0]["credential_id"] == new_control.credential_ref, (
         f"{adapter.name}: after reset, list_credentials() does not show exactly one non-revoked control "

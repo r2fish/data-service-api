@@ -8,6 +8,7 @@
 - 改訂: v1.5 — WP-2 完了 (2026-08-29): 0006 migration / unit-of-work / ControlCredentialStore / 儀式 CLI の実装レビュー (Opus、blocker 2 / major 5 / minor 9 / nit 2) の反映と監督決定 — 特に R-4 の関数分割の訂正 (provisioning 列の確定は finish 側)。§11 記録
 - 改訂: v1.6 — WP-3 完了 (2026-08-29): `ControlPlaneService` の実装レビュー (Opus、major 3 / minor 11 / nit 3) の反映と監督決定 — 特に AUTH_REQUIRED の監査対象化と抑止宣言の2分割 (記録/帰属)。§12 記録
 - 改訂: v1.7 — WP-4 完了 (2026-08-29): `control_http.py`/`control_main.py` (factory のみ)/AuthorityTopology 拡張の実装レビュー (Opus、major 2 / minor 6 / nit 2) の反映と監督決定 — 特に rate 前課金 (`check_rate` + `rate_precharged`) と control_plane_http→audit 辺の訂正。§13 記録
+- 改訂: v1.8 — WP-5 完了 (2026-08-29): 申告 flip (単一コミット) の実装レビュー (Opus、major 1 / minor 7 / nit 6) の反映と監督決定 — provided 分岐の初実行、C-08 格上げ、儀式コアの製品コード化、逆向き両方向の変異確認。§14 記録
 - 規範 (この設計はこれらを変更しない):
   - `spec/data-service-api.v1.json` 契約 1.1.0 — CCR-14 の文言化は**完了済み** (`control_endpoints` の 11 endpoint、`control_plane` 節、`capability_status.defined.control_plane`、schema 定義、`limits.classes` の制御面3クラス、`audit.sink_failure_policy`)
   - `spec/CCR_DISPOSITION.md` — 裁定: 全体採用 / **in-band 発行は案B** (`role=control` 発行は `CAPABILITY_UNSUPPORTED`、control credential は bootstrap/reset の帯域外儀式のみ) / base path `/control/v1` 確定
@@ -390,3 +391,37 @@ WP-4 (`control_http.py` の `create_control_app` + `control_main.py` composition
 - `control_plane_http` を `PLANES` に統合し厳密一致アサーションを更新 (m-8 の凍結は WP-4 で終了)
 - **`request_bytes` の宣言ギャップ**: 制御面は byte bound を enforce するが control discovery が当該クラスを公開しない — WP-5/WP-6 で declaration を判断 (契約 `limits.classes` に `request_bytes` は存在する)
 - conformance build の limits profile 例 (20, 5, 200) は headroom 算術を満たすことをレビューが確認済み。`R2DB_CONTROL_LIMIT_*` の3変数で注入可能 (コード変更不要)
+
+## 14. WP-5 実装記録 (2026-08-29、v1.8)
+
+WP-5 (申告 flip — 単一コミット) を実装した。実装: Sonnet、独立レビュー: Opus (major 1 / minor 7 / nit 6、blocker 0)、全指摘反映済み (NIT-3 除く軽微1件は据え置き)。実測: root suite **709 passed**、`test_postgres.py` 単独 180、`conformance-tests/` 単独 **202 passed** (複数回再現。C-14 ベクタ5 の rate 回復 sleep ≤61s × 2 adapter を含み約 150 秒)。MitateDB は無変更で surface-absent 分岐 56 test green のまま。完了条件「逆向き C-14 ベクタ4 が両方向で赤」を変異 M1 (unavailable 申告 + provided 実装) / M2 (enabled 申告 + SurfaceAbsent 復帰) で実測確認。
+
+### 14.1 flip の内容
+
+- R-9: `DataService(control_plane_status=...)` 注入 (既定 unavailable) + `main.py` の `R2DB_CONTROL_PLANE_STATUS` (不正値は起動失敗)。`capabilities.json` に control_plane (出荷既定 = unavailable を写す) + **逆向き artifact 突合テスト** (実応答の全 capability 名が artifact に列挙 — 既存の実在の書き漏れ `row_addressability` 等もこの新テストが捕捉し是正)
+- `control_main.py` に module-level `app` (main.py と同形)。`PLANES` へ `control_plane_http` 統合 (7要素、can_reach 全対不変)
+- **儀式コアの製品コード化**: bootstrap/reset の意味論を `control_plane.py` の関数に抽出。ops.py CLI は外部挙動不変 (advisory lock は CLI 経路のみ)。in-process adapter は**同じ製品コード**を in-memory ストアで呼ぶ — adapter による peer 模倣を排除
+- 両 r2db adapter provided 化: in-process = `ControlPlaneService` + `InMemoryControlBackend` 直結 / http = 共有 assembler (`control_main.assemble_control_stack` — レビュー後に抽出、composition root と adapter が同一の組み立てコードを使い pepper 分離検査も adapter 経路に乗る) による実 `/control/v1` ASGI + 実 CLI subprocess 儀式。**C-08 格上げ** (§4): issue/revoke/application enable/disable の特権 setup を実 in-band HTTP 化 — 「/control/v1 経由の変更が data 面へ伝播する」実スタック検証へ
+- C-13 再活性化ベクタ 5 本追加 (in-band enable/rotate × application/control)。うち control credential 対象の1本は案B の単一系譜制約 (actor = 対象にならざるを得ない) により must_deny 形 — 意味論の弱体化ではなく製品で表現可能な唯一の形 (レビュー承認)。実観測コードは `AUTH_REVOKED` (認証がゲートより先に落ちる)
+
+### 14.2 provided 分岐の初実行で露出した WP-1 テストコードのバグ (静的レビューのみの門の実証)
+
+1. C-15 ベクタ2 が must_rotate ゲートを考慮せず reset 直後の credential で一般操作を呼んでいた (自己 rotate 手順の挿入で修正 — ベクタの主張は不変)
+2. `_FAIL_CLOSED_CODES` に `AUTH_REQUIRED` が無かった (§13.3 予告どおり。m-7 整合で拡張)
+3. conformance-build の `applications` 上限は設計例示 20 では成立しない — 全条件テストの fixture 消費が registry を共有するため (実測: ベクタ5 到達時 80 件、セッション終端 89 件)。**100 に引き上げ** (headroom 算術 200 > 102+11+64 を満たす)。残余裕 11-20 件 — 台帳 L1 (fx の deprovision フック) を予定化
+4. http adapter は C-08 格上げの帰結として fixture トラフィックだけで rate 窓 (≤200) を枯渇 — **特権経路の service 周期再構築**で解決 (レビュー評決: ベクタ5 は自分の instance の窓を自分の要求で駆動しており誠実。R-7 の窓は本番でもプロセス毎)。この対策の実装中に「旧 stack の pool 未 close → CONNECTION LIMIT 10 枯渇」の自作バグを自己発見・修正 (レビューが lazy-pool 前提で new-first/close-after の順序も是正)
+
+### 14.3 監督決定・レビュー主要指摘 (いずれも覆せる)
+
+- **MAJOR-1**: http adapter のクラスヘッダが「build_control_app で組んでいる」と実装と逆の evidence 主張をしていた (書き換え漏れ) — 是正し、共有 assembler 抽出で逸脱自体をほぼ解消
+- `control_credential()` の修復経路は認証系 4 code に限定 (任意の拒否で破壊的 reset が走り原因を隠す形を排除)
+- 監査 events() に `event_id` の順序 tiebreaker (recorded_at はトランザクション時刻で全順序でない — C-15 の prefix 検証が load-bearing)
+- 実測値の訂正 (レビュア計装: 余裕 ~25 は誤り、正しくは 20/11)
+
+### 14.4 台帳 (将来課題)
+
+- **L1 (予定化)**: conformance fixture の Application deprovision フック — registry 消費を O(1) にし、上限 100 の残余裕枯渇 (テスト追加ごとに悪化) を根治
+- **L2 (次コミットで修正)**: `_sweep_stale_artifacts` に liveness ガードが無く、**別プロセスの pytest (--collect-only 含む) が実行中の run の role/DB を破壊する** — 実装者が「残留状態」と誤診断した一過性事象をレビュアが決定的に再現し、実在の並行性バグと確定。pg_stat_database の numbackends 検査等で防御する
+- L3: 特権 setup 専用の control stack 分離 (周期再構築の決定性改善 — WP-6 検討)
+- L4: `request_bytes` の control discovery 宣言 (継続)
+- 405 が code NOT_FOUND を運ぶ点の adapter classify 確認は未実施 (実経路に現れないため影響なし — レビュー NIT-6)

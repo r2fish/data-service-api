@@ -106,16 +106,20 @@ constructing every store below is itself a zero-network operation, which is
 what lets this module's own tests build a full app against a bogus DSN
 without needing a reachable PostgreSQL server at all.
 
-**No module-level `app` (design §8 m-10, binding for this WP)**: unlike
-`r2db_api.main`, which ends with `app = build_app()`, this file stops at
-`build_control_app` itself. Placing a module-level `app = build_control_app()`
-here would make this control-plane surface *importable and constructible*
-by any composition root (or ASGI server pointed at this module) while the
-application-plane's own `control_plane` capability declaration is still
-`unavailable` -- exactly the "deployable but undeclared" window the CCR-14
-single-commit rule (design §5) exists to prevent. WP-5 places `app = build_
-control_app()` here in the same commit that flips that declaration, not
-before.
+**Module-level `app` (design §8 m-10, WP-5 flip)**: this file now ends with
+`app = build_control_app()`, the same pattern `r2db_api.main` already
+establishes (`app = build_app()`) -- placed in the exact same single commit
+that flips the application-plane's own `control_plane` capability
+declaration to `enabled` (`main.py`'s `R2DB_CONTROL_PLANE_STATUS` handling),
+per the CCR-14 single-commit rule (design §5): this control-plane surface
+was never deployable-but-undeclared even for one commit. Importing this
+module now reads `os.environ` immediately, exactly like `r2db_api.main`
+already does -- any caller that needs to import this module without a real
+control-plane environment configured (this repository's own tests) must set
+one up first, via `pytest.MonkeyPatch`, before the first import, the same
+established pattern `test_credential_persistence.py`'s `main_module` fixture
+already uses for `r2db_api.main` (see `test_control_http.py`'s own
+`control_main_module` fixture, added this WP).
 """
 from __future__ import annotations
 
@@ -162,6 +166,60 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
 
 
+def assemble_control_stack(
+    *,
+    controlplane_dsn: str,
+    app_pepper: str,
+    control_pepper: str,
+    schema: str = DEFAULT_SCHEMA,
+    pool_size: int | None = None,
+    limits: ControlPlaneLimits | None = None,
+) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink]]:
+    """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
+    assembly core, shared by `build_control_app` below AND the WP-5
+    conformance HTTP adapter (`conformance_adapter_r2db_http.py`) -- the
+    adapter's own reason for needing this factored out at all: it must
+    periodically rebuild `ControlPlaneService` to reset the in-memory R-7
+    rate window (§13.3's own anticipated "session-scoped adapter shares one
+    window with everything else" concern, measured, WP-5, against real
+    ordinary fixture-building traffic once the C-08 upgrade moved that
+    in-band too), which means it needs a closeable handle back to the 4
+    stores this function constructs -- something `build_control_app`'s own
+    pre-round-2 shape (assemble-and-return-only-the-app) could not give it.
+    Round 1 of WP-5 duplicated this six-line assembly directly inside the
+    adapter instead (a documented deviation from calling `build_control_app`
+    itself); round 2 removes that duplication.
+
+    Validates pepper separation (R-2) unconditionally -- every caller gets
+    this check, not just `build_control_app`; the adapter's own two
+    peppers are genuinely distinct (`conformance_adapter_r2db_http.py`'s
+    `_control_pepper`/`_control_app_pepper`), so this call passes there too,
+    it does not merely skip the check.
+
+    Returns `(service, stores)` -- `stores` is `(applications, credentials,
+    control_credentials, audit)`, in the exact order each caller's own
+    shutdown/rebuild logic closes them. Building the ASGI app itself
+    (`create_control_app(service, ...)`) is left to the caller: `build_
+    control_app` below wraps it with a real ASGI `lifespan` hook; the
+    conformance adapter does not drive ASGI lifespan at all (see that
+    adapter's own docstring) and calls `create_control_app(service)` with
+    no `lifespan` argument, closing `stores` directly instead.
+    """
+    try:
+        validate_control_pepper_separation(app_pepper, control_pepper)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema, pool_size=pool_size)
+    credentials = PostgresCredentialStore(controlplane_dsn, pepper=app_pepper, schema=schema, pool_size=pool_size)
+    control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema, pool_size=pool_size)
+    audit = PostgresControlAuditSink(controlplane_dsn, schema=schema, pool_size=pool_size)
+
+    backend = PostgresControlBackend(applications=applications, credentials=credentials, control_credentials=control_credentials)
+    service = ControlPlaneService(backend, audit=audit, limits=limits or _DEFAULT_LIMITS)
+    return service, (applications, credentials, control_credentials, audit)
+
+
 def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     """Assemble the control-plane ASGI app from `env` (defaults to `os.environ`).
 
@@ -181,10 +239,6 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # for why this is `_require`d rather than read as optional, unlike
     # `ops.py`'s control-credential-only commands.
     app_pepper = _require(env, "R2DB_CREDENTIAL_PEPPER")
-    try:
-        validate_control_pepper_separation(app_pepper, control_pepper)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
 
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
@@ -195,13 +249,10 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         control_requests_per_minute=_optional_int(env, "R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE", _DEFAULT_LIMITS.control_requests_per_minute),
     )
 
-    applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema, pool_size=pool_size)
-    credentials = PostgresCredentialStore(controlplane_dsn, pepper=app_pepper, schema=schema, pool_size=pool_size)
-    control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema, pool_size=pool_size)
-    audit = PostgresControlAuditSink(controlplane_dsn, schema=schema, pool_size=pool_size)
-
-    backend = PostgresControlBackend(applications=applications, credentials=credentials, control_credentials=control_credentials)
-    service = ControlPlaneService(backend, audit=audit, limits=limits)
+    service, (applications, credentials, control_credentials, audit) = assemble_control_stack(
+        controlplane_dsn=controlplane_dsn, app_pepper=app_pepper, control_pepper=control_pepper,
+        schema=schema, pool_size=pool_size, limits=limits,
+    )
 
     @asynccontextmanager
     async def _lifespan(_app: Any):
@@ -222,9 +273,8 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     return create_control_app(service, lifespan=_lifespan)
 
 
-# Design §8 m-10 (binding for this WP): no `app = build_control_app()` here.
-# WP-5 places that line in the same single commit that flips the
-# application-plane's `control_plane` capability declaration to `enabled`
-# (design §5's single-commit rule) -- until then, this composition root is
-# reachable only by explicitly calling `build_control_app()` (this
-# repository's own tests do; no deployment entry point does).
+# Design §8 m-10, WP-5 flip: the literal uvicorn/systemd entry point,
+# `python -m uvicorn r2db_api.control_main:app` (or any ASGI server pointed
+# at this module) -- landed in the same single commit that flips
+# `main.py`'s `control_plane` declaration (design §5's single-commit rule).
+app = build_control_app()
