@@ -841,12 +841,16 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # (`self._credentials`, the *read-only*-role store `DataService`
         # holds), which would refuse this `INSERT` at the database
         # privilege level -- see `__init__`'s comment on the two-store
-        # split.
-        self._write_credentials.add(credential_id, application_id, role, secret)
+        # split. `work` is a required keyword-only argument on `add`/
+        # `set_state` (CCR-14 WP-2 round-2 review, ruling (A)) -- every
+        # call site in this file now opens its own `unit_of_work()`.
+        with self._write_credentials.unit_of_work() as work:
+            self._write_credentials.add(credential_id, application_id, role, secret, work=work)
         return CredentialHandle(credential_ref=credential_id, application_id=application_id, role=role, secret=secret)
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
-        self._write_credentials.set_state(handle.credential_ref, revoked=True)
+        with self._write_credentials.unit_of_work() as work:
+            self._write_credentials.set_state(handle.credential_ref, revoked=True, work=work)
 
     def disable_application(self, application_id: str) -> None:
         self._set_registry_application_enabled(application_id, False)
@@ -1520,11 +1524,28 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # a revoked credential, via `self._write_credentials` (the
         # full-DML-role store -- see `__init__`'s comment on why this,
         # never `self._control`, is used for control-plane writes here).
+        # `work` is a required keyword-only argument on `set_state` (CCR-14
+        # WP-2 round-2 review, ruling (A)) -- each attempt below opens its
+        # own `unit_of_work()` and passes the handle through. This must
+        # keep raising a `FoundationError` (never a bare `TypeError`) for
+        # `_control_call` to convert into a `ConformanceDenial` as before:
+        # `unit_of_work()`'s own `except BaseException: ... raise` re-raises
+        # `set_state`'s `FoundationError` unchanged through the `with`
+        # block, so `_control_call`'s `except FoundationError` still catches
+        # it exactly as it did when `set_state` raised directly.
         def revoked_false_attempt() -> None:
-            self._control_call(lambda: self._write_credentials.set_state(handle.credential_ref, revoked=False))
+            def _attempt() -> None:
+                with self._write_credentials.unit_of_work() as work:
+                    self._write_credentials.set_state(handle.credential_ref, revoked=False, work=work)
+
+            self._control_call(_attempt)
 
         def enabled_true_attempt() -> None:
-            self._control_call(lambda: self._write_credentials.set_state(handle.credential_ref, enabled=True))
+            def _attempt() -> None:
+                with self._write_credentials.unit_of_work() as work:
+                    self._write_credentials.set_state(handle.credential_ref, enabled=True, work=work)
+
+            self._control_call(_attempt)
 
         return [
             TamperVector(

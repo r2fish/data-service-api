@@ -119,7 +119,12 @@ def _load_registry_rows(platform_dsn: str, schema: str, slugs: list[str]) -> dic
     interpolated (D-4), even though both are fixed, code-authored/env-
     configured values here, never client input.
     """
-    statement = sql.SQL("SELECT application_slug, enabled, runtime_role, developer_role FROM {table} WHERE application_slug = ANY({slugs})").format(
+    # `database_name` is selected too (CCR-14 WP-2, R-4) purely to answer
+    # "is this slug provisioned yet" (`database_name IS NOT NULL` -- the
+    # same test `0006_control_plane_http.sql`'s own CHECK constraint and
+    # revised provisioning functions use; no separate status column exists)
+    # -- its actual value is never used below, only whether it is `None`.
+    statement = sql.SQL("SELECT application_slug, enabled, runtime_role, developer_role, database_name FROM {table} WHERE application_slug = ANY({slugs})").format(
         table=sql.Identifier(schema, "applications"), slugs=sql.Placeholder()
     )
     try:
@@ -132,7 +137,7 @@ def _load_registry_rows(platform_dsn: str, schema: str, slugs: list[str]) -> dic
             rows = cur.fetchall()
     finally:
         conn.close()
-    return {row[0]: {"enabled": row[1], "runtime_role": row[2], "developer_role": row[3]} for row in rows}
+    return {row[0]: {"enabled": row[1], "runtime_role": row[2], "developer_role": row[3], "provisioned": row[4] is not None} for row in rows}
 
 
 def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
@@ -167,6 +172,17 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             raise RuntimeError(f"application {slug!r} named in R2DB_SERVE_APPS is not registered in the platform registry ({schema}.applications)")
         if not row["enabled"]:
             raise RuntimeError(f"application {slug!r} named in R2DB_SERVE_APPS is disabled in the platform registry -- re-enable it (python -m r2db_api.ops enable-app {slug}) or remove it from R2DB_SERVE_APPS")
+        # R-4 (CCR-14 WP-2): a *registered-only* row (no provisioning
+        # columns set -- 0006's two-state `applications`) has no real
+        # database/roles to serve at all. Without this check, `_cell_
+        # factory` below would build a `PostgresCell` against DSNs this
+        # slug's `R2DB_APP_<SLUG>_*_DSN` env vars name, which reference a
+        # database/roles that were never actually provisioned -- every
+        # request against it would fail at connect time instead of this
+        # process refusing to start at all (P2-D5's "uzurusaku ochiru"
+        # startup-failure policy, same as the two checks above).
+        if not row["provisioned"]:
+            raise RuntimeError(f"application {slug!r} named in R2DB_SERVE_APPS is registered but not yet provisioned in the platform registry ({schema}.applications) -- provision it (0003_provision_application.sql) or remove it from R2DB_SERVE_APPS")
 
     # Computed from `env` (this function's own parameter), and always
     # passed explicitly below -- not left as `None` for `PostgresCredential

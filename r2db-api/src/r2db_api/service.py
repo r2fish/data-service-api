@@ -372,7 +372,15 @@ class ControlAuthority:
 
     def set_credential_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None) -> None:
         try:
-            self._service._credentials.set_state(credential_id, enabled=enabled, revoked=revoked)
+            # R-6/§8 B-2: chase `CredentialStore`/`PostgresCredentialStore`'s
+            # new `unit_of_work()`-required call form -- semantics are
+            # unchanged (this still commits/reverts exactly one call's
+            # worth of state, same as before WP-2; `ControlAuthority`'s own
+            # audit trail stays on the existing in-memory `AuditSink` below,
+            # not on the new `control_audit` table, which only `ops.py`'s
+            # ritual/CLI-path writes to in this work package).
+            with self._service._credentials.unit_of_work() as work:
+                self._service._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=work)
             self._control_event("credential_lifecycle", "set_credential_state", "allow", credential_id)
         except FoundationError as exc:
             self._control_event("control_failure", "set_credential_state", "deny", credential_id, exc.code)
@@ -382,7 +390,8 @@ class ControlAuthority:
         try:
             if application_id not in self._service._cells:
                 fail("NOT_FOUND", "Application was not found.", status=404)
-            self._service._credentials.add(credential_id, application_id, role, secret)
+            with self._service._credentials.unit_of_work() as work:
+                self._service._credentials.add(credential_id, application_id, role, secret, work=work)
             self._control_event("credential_lifecycle", "issue_credential", "allow", application_id)
         except FoundationError as exc:
             self._control_event("control_failure", "issue_credential", "deny", application_id, exc.code)

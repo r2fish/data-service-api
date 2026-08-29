@@ -129,11 +129,16 @@ def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
 
 @pytest.fixture(scope="module")
 def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleNamespace]:
-    """Bootstraps `0001`/`0002`/`0005` (control plane + credential store)
-    under one throwaway prefix, exactly like `test_postgres.py::platform`
-    plus the new `0005` step. `0003`/`0004` are rewritten and kept too, for
-    the one fixture (`provisioned_app`, below) that needs a real
-    per-application database.
+    """Bootstraps `0001`/`0002`/`0005`/`0006` (control plane + credential
+    store + control-plane HTTP storage, CCR-14 WP-2) under one throwaway
+    prefix, exactly like `test_postgres.py::platform` plus the `0005`/`0006`
+    steps. `0003`/`0004` are rewritten and kept too, for the one fixture
+    (`provisioned_app`, below) that needs a real per-application database.
+    `0006` is applied here (not only in `test_control_plane_store.py`)
+    because `python -m r2db_api.ops`'s pre-existing subcommands now write to
+    `control_audit` in the same transaction as their state change (§8
+    M-10) -- every `_run_cli` invocation in this file needs that table to
+    exist.
     """
     _require_admin_connection()
     admin_dsn = _admin_dsn()
@@ -144,6 +149,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
     schema = f"{prefix}_registry"
     control_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
+    controlplane_password = secrets.token_urlsafe(24)
 
     rewritten_dir = tmp_path_factory.mktemp("r2db_cred_migrations")
     rewritten: dict[str, Path] = {}
@@ -153,6 +159,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
         "0005_credential_store.sql",
+        "0006_control_plane_http.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = rewritten_dir / name
@@ -164,11 +171,13 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
         _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
+        _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
 
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
+    controlplane_dsn = _dsn_with(admin_dsn, user=f"{prefix}_controlplane", password=controlplane_password, dbname=platform_db)
 
     info = types.SimpleNamespace(
         prefix=prefix,
@@ -182,7 +191,10 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
         credential_store_sql=rewritten["0005_credential_store.sql"],
+        control_plane_sql=rewritten["0006_control_plane_http.sql"],
         api_password=api_password,
+        controlplane_dsn=controlplane_dsn,
+        controlplane_password=controlplane_password,
     )
     try:
         yield info
@@ -195,21 +207,44 @@ def _fresh_slug(letter: str) -> str:
 
 
 def _register_application(platform: types.SimpleNamespace, slug: str, *, enabled: bool = True) -> None:
-    """Insert a synthetic `applications` row directly, without running the
-    real `0003` script -- see this module's own docstring for why that is
-    the right tradeoff for tests that only exercise the credential store /
-    CLI, never `PostgresCell`/a real per-application database.
-    `database_name`/`runtime_role`/`developer_role` are synthetic
-    placeholders (never a real, connectable role) -- fine, because nothing
-    in this file's non-`provisioned_app` tests ever tries to connect as
-    them.
+    """Insert a synthetic, already-*provisioned* `applications` row
+    directly, without running the real `0003` script -- see this module's
+    own docstring for why that is the right tradeoff for tests that only
+    exercise the credential store / CLI, never `PostgresCell`/a real
+    per-application database. `database_name`/`runtime_role`/
+    `developer_role` are synthetic placeholders (never a real, connectable
+    role) -- fine, because nothing in this file's non-`provisioned_app`
+    tests ever tries to connect as them. `provisioned_at` is supplied
+    explicitly (CCR-14 WP-2, `0006_control_plane_http.sql` drops that
+    column's own `DEFAULT now()` -- see that migration's header): this
+    helper always produces a fully-provisioned row (all four columns set),
+    matching every existing caller's expectation that `_register_
+    application` alone is enough to issue/authenticate a credential against
+    `slug`. A *registered-only* row (all four columns NULL) is a distinct,
+    deliberately separate helper -- see `_register_application_only` below,
+    used by this WP's own two-state tests.
     """
     statement = sql.SQL(
-        "INSERT INTO {table} (application_slug, database_name, runtime_role, developer_role, enabled) VALUES (%s, %s, %s, %s, %s)"
+        "INSERT INTO {table} (application_slug, database_name, runtime_role, developer_role, enabled, provisioned_at) VALUES (%s, %s, %s, %s, %s, now())"
     ).format(table=sql.Identifier(platform.schema, "applications"))
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(statement, [slug, f"synthetic_db_{slug}", f"synthetic_{slug}_runtime", f"synthetic_{slug}_developer", enabled])
+        conn.commit()
+
+
+def _register_application_only(platform: types.SimpleNamespace, slug: str, *, enabled: bool = True) -> None:
+    """Insert a *registered-only* `applications` row (R-4/§8 B-1's new
+    state: all four provisioning columns NULL) -- the counterpart to
+    `_register_application` above, which always produces a fully-
+    provisioned row. Used by this WP's own two-state round-trip tests.
+    """
+    statement = sql.SQL("INSERT INTO {table} (application_slug, enabled) VALUES (%s, %s)").format(
+        table=sql.Identifier(platform.schema, "applications")
+    )
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(statement, [slug, enabled])
         conn.commit()
 
 
@@ -245,7 +280,8 @@ def test_credential_persists_and_is_visible_to_a_separate_store_instance(platfor
     _register_application(platform, slug)
     writer = _write_store(platform)
     try:
-        writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-persist")
+        with writer.unit_of_work() as work:
+            writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-persist", work=work)
     finally:
         writer.close()
 
@@ -268,7 +304,8 @@ def test_application_id_for_and_canonical_context_resolve_after_persistence(plat
     credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
-        writer.add(credential_id, slug, "developer", "s3cret-canonical")
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, slug, "developer", "s3cret-canonical", work=work)
         reader = _read_store(platform)
         try:
             assert reader.application_id_for(credential_id) == slug
@@ -297,7 +334,8 @@ def test_revoke_from_a_separate_connection_is_visible_immediately(platform: type
     try:
         writer = _write_store(platform)
         try:
-            writer.add(credential_id, slug, "runtime", "s3cret-revoke")
+            with writer.unit_of_work() as work:
+                writer.add(credential_id, slug, "runtime", "s3cret-revoke", work=work)
         finally:
             writer.close()
 
@@ -308,7 +346,8 @@ def test_revoke_from_a_separate_connection_is_visible_immediately(platform: type
         # so this is the actual mechanism, not a coincidence of timing.
         revoker = _write_store(platform)
         try:
-            revoker.set_state(credential_id, revoked=True)
+            with revoker.unit_of_work() as work:
+                revoker.set_state(credential_id, revoked=True, work=work)
         finally:
             revoker.close()
 
@@ -330,7 +369,8 @@ def test_application_disable_from_a_separate_connection_is_visible_immediately(p
     credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
-        writer.add(credential_id, slug, "runtime", "s3cret-appdisable")
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, slug, "runtime", "s3cret-appdisable", work=work)
     finally:
         writer.close()
 
@@ -372,7 +412,8 @@ def test_application_disable_survives_a_new_store_instance(platform: types.Simpl
     credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
-        writer.add(credential_id, slug, "runtime", "s3cret-restart-disable")
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, slug, "runtime", "s3cret-restart-disable", work=work)
     finally:
         writer.close()
 
@@ -488,7 +529,8 @@ def test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_recovers_o
         _register_application(platform, slug)
         writer = _write_store(platform)
         try:
-            writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-recovery")
+            with writer.unit_of_work() as work:
+                writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-recovery", work=work)
         finally:
             writer.close()
 
@@ -531,7 +573,8 @@ def test_0005_migration_is_idempotent(platform: types.SimpleNamespace) -> None:
     _register_application(platform, slug)
     writer = _write_store(platform)
     try:
-        writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-idempotent")
+        with writer.unit_of_work() as work:
+            writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-idempotent", work=work)
     finally:
         writer.close()
     reader = _read_store(platform)
@@ -568,7 +611,8 @@ def test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_noth
     credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
-        writer.add(credential_id, slug, "runtime", "s3cret-guard")
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, slug, "runtime", "s3cret-guard", work=work)
     finally:
         writer.close()
 
@@ -644,7 +688,8 @@ def test_add_unknown_application_is_not_found(platform: types.SimpleNamespace) -
     store = _write_store(platform)
     try:
         with pytest.raises(FoundationError) as exc:
-            store.add("crd_" + secrets.token_hex(8), "no-such-application-" + secrets.token_hex(4), "runtime", "whatever")
+            with store.unit_of_work() as work:
+                store.add("crd_" + secrets.token_hex(8), "no-such-application-" + secrets.token_hex(4), "runtime", "whatever", work=work)
         assert exc.value.code == "NOT_FOUND"
         assert exc.value.status == 404
     finally:
@@ -657,9 +702,11 @@ def test_add_duplicate_credential_id_is_conflict(platform: types.SimpleNamespace
     credential_id = "crd_" + secrets.token_hex(8)
     store = _write_store(platform)
     try:
-        store.add(credential_id, slug, "runtime", "s3cret-one")
+        with store.unit_of_work() as work:
+            store.add(credential_id, slug, "runtime", "s3cret-one", work=work)
         with pytest.raises(FoundationError) as exc:
-            store.add(credential_id, slug, "runtime", "s3cret-two")
+            with store.unit_of_work() as work:
+                store.add(credential_id, slug, "runtime", "s3cret-two", work=work)
         assert exc.value.code == "CONFLICT"
         assert exc.value.status == 409
     finally:
@@ -672,7 +719,8 @@ def test_add_rejects_role_outside_runtime_or_developer(platform: types.SimpleNam
     store = _write_store(platform)
     try:
         with pytest.raises(FoundationError) as exc:
-            store.add("crd_" + secrets.token_hex(8), slug, "control", "whatever")
+            with store.unit_of_work() as work:
+                store.add("crd_" + secrets.token_hex(8), slug, "control", "whatever", work=work)
         assert exc.value.code == "VALIDATION_FAILED"
     finally:
         store.close()
@@ -682,7 +730,8 @@ def test_set_state_unknown_credential_is_not_found(platform: types.SimpleNamespa
     store = _write_store(platform)
     try:
         with pytest.raises(FoundationError) as exc:
-            store.set_state("crd_does_not_exist_" + secrets.token_hex(4), enabled=False)
+            with store.unit_of_work() as work:
+                store.set_state("crd_does_not_exist_" + secrets.token_hex(4), enabled=False, work=work)
         assert exc.value.code == "NOT_FOUND"
     finally:
         store.close()
@@ -694,8 +743,10 @@ def test_rotate_replaces_the_secret_old_secret_rejected_new_secret_succeeds(plat
     credential_id = "crd_" + secrets.token_hex(8)
     store = _write_store(platform)
     try:
-        store.add(credential_id, slug, "runtime", "s3cret-before-rotate")
-        store.rotate(credential_id, "s3cret-after-rotate")
+        with store.unit_of_work() as work:
+            store.add(credential_id, slug, "runtime", "s3cret-before-rotate", work=work)
+        with store.unit_of_work() as work:
+            store.rotate(credential_id, "s3cret-after-rotate", work=work)
 
         with pytest.raises(FoundationError) as exc:
             store.authenticate("s3cret-before-rotate")
@@ -1038,7 +1089,8 @@ def test_build_app_serves_capabilities_over_real_http_and_shuts_down_cleanly(
     writer = _write_store(platform)
     try:
         credential_id = "crd_" + secrets.token_hex(8)
-        writer.add(credential_id, provisioned_app.slug, "runtime", "s3cret-main-e2e")
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, provisioned_app.slug, "runtime", "s3cret-main-e2e", work=work)
     finally:
         writer.close()
 
@@ -1109,6 +1161,26 @@ def test_build_app_disabled_slug_raises(platform: types.SimpleNamespace, main_mo
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
     }
     with pytest.raises(RuntimeError, match="disabled"):
+        main_module.build_app(env=env)
+
+
+def test_build_app_registered_only_slug_raises(platform: types.SimpleNamespace, main_module: types.ModuleType) -> None:
+    """R-4 (CCR-14 WP-2): a slug that is registered but not yet provisioned
+    (0006's two-state `applications` -- `database_name IS NULL`) must fail
+    startup exactly like an unregistered or disabled slug does, not be
+    silently served against DSNs that reference a database/roles nobody
+    ever actually provisioned."""
+    slug = _fresh_slug("mg")
+    _register_application_only(platform, slug)
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": PEPPER,
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": slug,
+        f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
+        f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
+    }
+    with pytest.raises(RuntimeError, match="not yet provisioned"):
         main_module.build_app(env=env)
 
 
