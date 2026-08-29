@@ -487,6 +487,19 @@ _STALE_ROLE_PATTERN = r"^r2dbhttp[0-9a-f]{8}_"
 _PREFIX_LENGTH = len("r2dbhttp") + 8  # "r2dbhttp" + 8 hex digits
 
 
+def _prefix_guard_key_param(prefix: str) -> list[str]:
+    # A single, obvious place naming the exact SQL parameter every
+    # `pg_advisory_lock`/`pg_try_advisory_lock`/`pg_advisory_unlock` call
+    # site below passes -- see `_sweep_stale_artifacts`'s own docstring
+    # (ledger item L2) for the full rationale. `hashtext(text)` (a stock
+    # PostgreSQL builtin, no extension required) maps the prefix string to
+    # a stable int4, which the single-`bigint`-argument advisory-lock
+    # functions accept via PostgreSQL's own implicit int4->bigint cast --
+    # this is the standard idiom for string-keyed advisory locks, not a
+    # bespoke hashing scheme this file invents.
+    return [prefix]
+
+
 def _sweep_stale_artifacts(admin_dsn: str) -> None:
     """Startup sweep: drop anything left over from a *previous* run of this
     adapter, before this run creates its own fresh prefix.
@@ -504,6 +517,42 @@ def _sweep_stale_artifacts(admin_dsn: str) -> None:
     is safe to run unconditionally against a shared local cluster that also
     holds unrelated, permanent objects (`r2db_control`, `r2db_admin`,
     `auth_api`, and this repository's other `app_*` databases).
+
+    **Ledger item L2 (WP-5 round-2 independent review, reproduced
+    deterministically): pattern-matching alone cannot tell a genuinely dead
+    prior run from THIS run's own sibling -- another process's adapter
+    construction, still alive, mid-provisioning.** A second process building
+    its own registered adapters (even a bare `pytest --collect-only`, which
+    constructs every registered adapter at collection time, `conftest.py`'s
+    `_discover_and_build`) calling this function while a first process's
+    run is between two `_run_psql` migration subprocess calls would --
+    before this fix -- see the first run's own prefix as abandoned (it
+    matches the pattern the instant its `_control` role/`_platform`
+    database exist) and drop it out from under it. A point-in-time activity
+    snapshot (`pg_stat_database.numbackends`, the reviewer's first-suggested
+    check) does not close this gap either: `numbackends` for a run's own
+    platform database can legitimately read 0 in that exact same window
+    (no `psql` subprocess connected at that instant, no pooled store
+    connections opened yet), which is precisely when the race was measured
+    to bite.
+
+    The actual fix is a **held lock, not a snapshot**: every live run
+    acquires a session-scoped PostgreSQL advisory lock keyed by its own
+    prefix (`__init__`'s `self._prefix_guard`) the moment its prefix is
+    chosen -- before anything under that prefix is created, so the lock is
+    already in place by the time the prefix becomes pattern-matchable at
+    all -- and holds it continuously (a dedicated connection kept open for
+    the run's entire lifetime, released only in `_cleanup`) until that run
+    is completely torn down. PostgreSQL itself releases a session-scoped
+    advisory lock the instant the owning connection's backend terminates,
+    for ANY reason including `SIGKILL`/a crash -- exactly the crash-safety
+    property this sweep still needs for genuinely dead residue, so a lock
+    is strictly stronger than the activity-snapshot alternative, not merely
+    different. Before touching any candidate prefix, this function tries to
+    take that same lock itself (`pg_try_advisory_lock`): a live owner still
+    holds it -> the attempt fails -> that prefix is skipped, sweep or no
+    sweep; a dead run's lock is already gone -> the attempt succeeds -> this
+    really is unowned residue -> sweep it, then release.
     """
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
@@ -518,7 +567,26 @@ def _sweep_stale_artifacts(admin_dsn: str) -> None:
         admin.close()
 
     for stale_prefix in stale_prefixes:
-        _sweep_prefix(admin_dsn, f"{stale_prefix}_platform", stale_prefix)
+        # Ledger item L2: liveness guard -- see this function's own
+        # docstring above for the full rationale. A fresh, short-lived
+        # connection is enough here (unlike the OWNING run's own
+        # long-lived `self._prefix_guard`): acquiring and immediately
+        # releasing the lock within one connection's session is exactly
+        # the "is anyone else holding this" probe `pg_try_advisory_lock`
+        # is for, and holding it for the duration of this prefix's own
+        # sweep (closing the connection only after `_sweep_prefix`
+        # returns) additionally serializes two sweepers racing the same
+        # dead prefix against each other.
+        guard = psycopg.connect(admin_dsn, autocommit=True)
+        try:
+            with guard.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", _prefix_guard_key_param(stale_prefix))
+                (acquired,) = cur.fetchone()
+            if not acquired:
+                continue  # a live process owns this prefix -- never touch it
+            _sweep_prefix(admin_dsn, f"{stale_prefix}_platform", stale_prefix)
+        finally:
+            guard.close()  # releases the advisory lock too (session-scoped)
 
 
 # --------------------------------------------------------------------------
@@ -618,6 +686,28 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         _sweep_stale_artifacts(admin_dsn)
 
         prefix = f"r2dbhttp{secrets.token_hex(4)}"
+
+        # Ledger item L2 (WP-5 round-2 independent review, reproduced
+        # deterministically): acquire this run's own liveness guard --
+        # a session-scoped PostgreSQL advisory lock keyed by `prefix`,
+        # held on a dedicated connection kept open for this adapter's
+        # entire lifetime (released only in `_cleanup`) -- BEFORE anything
+        # under this prefix is created, so the lock is already in place
+        # the instant this prefix becomes pattern-matchable (the moment
+        # `_bootstrap_platform` below creates the `_control` role) and a
+        # concurrent process' own `_sweep_stale_artifacts` can see it at
+        # all. See `_sweep_stale_artifacts`'s own docstring for the full
+        # race this closes and why a held lock, not a point-in-time
+        # `pg_stat_database.numbackends` snapshot, is what actually closes
+        # it. PostgreSQL releases this lock automatically the instant this
+        # connection's backend terminates for ANY reason (including a
+        # crash), so a run that dies without running `_cleanup` at all
+        # still stops guarding its own (now genuinely dead) prefix
+        # immediately -- the sweep's own crash-safety purpose is preserved.
+        self._prefix_guard = psycopg.connect(admin_dsn, autocommit=True)
+        with self._prefix_guard.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext(%s))", _prefix_guard_key_param(prefix))
+
         # Unlike `test_postgres.py`'s `platform` fixture (which can borrow
         # pytest's own `tmp_path_factory`, scoped to that one test module's
         # run), this adapter's rewritten `0003_provision_application.sql`/
@@ -634,9 +724,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         except Exception:
             # Bootstrap can partially succeed (e.g. 0001 ran, 0002 failed);
             # sweep unconditionally so a failed build never leaves residue
-            # in the local cluster.
+            # in the local cluster. Still holding `self._prefix_guard`
+            # throughout this cleanup (closed only afterward) -- exactly
+            # the same "hold the lock while sweeping this prefix" discipline
+            # `_sweep_stale_artifacts` itself follows for a dead prefix.
             _sweep_prefix(admin_dsn, f"{prefix}_platform", prefix)
             shutil.rmtree(self._script_dir, ignore_errors=True)
+            self._prefix_guard.close()
             raise
 
         # From this point on, this instance owns real, cluster-global
@@ -806,6 +900,15 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             _sweep_prefix(self._platform.admin_dsn, self._platform.platform_db, self._platform.prefix)
         finally:
             shutil.rmtree(self._script_dir, ignore_errors=True)
+            # Ledger item L2: release this run's own liveness guard only
+            # now, after this run's own prefix has actually been swept --
+            # holding it through our own teardown (rather than releasing it
+            # first and sweeping second) means a concurrent sweeper
+            # elsewhere can never observe a half-torn-down prefix as
+            # "unowned" and race our own cleanup. PostgreSQL releases the
+            # advisory lock itself the instant this connection closes;
+            # there is no separate `pg_advisory_unlock` call to make.
+            self._prefix_guard.close()
 
     # ------------------------------------------------------------------
     # backend wiring (design R2DB_SERVICE_LAYER_ARCHITECTURE Task 1)
