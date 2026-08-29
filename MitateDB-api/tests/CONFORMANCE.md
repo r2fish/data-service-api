@@ -13,6 +13,8 @@ in `spec/` is extracted.
 | Atomic transaction rolls back on a rejected operation | `test_transaction_rolls_back` | SI-11 |
 | Revocation, disable, and unavailable auth state fail closed | `test_disable_revoke_and_unavailable_state_fail_closed` | SI-13, SI-15 |
 | Batch and destructive-operation bounds are deterministic | `test_bounded_inputs_and_explicit_destructive_confirmation` | SI-08, SI-09 |
+| `delete` denies without a valid declare-and-echo confirmation, and the same phrase executes it (contract 1.2.0 `destructive_confirmation`) | `test_delete_without_confirmation_is_gated_not_conflated_with_empty_filters` | SI-09 |
+| `delete` rejects a non-boolean `destructive`/non-string `confirm` as a shape defect, never as a truthy confirmation | `test_delete_rejects_non_boolean_destructive_and_non_string_confirm` | SI-09 |
 
 Cloud Run/Cloud SQL identity, network, secret-manager, and externally governed
 append-only audit controls remain deployment evidence and must be added to

@@ -67,6 +67,7 @@ from mitatedb_api.errors import (  # noqa: E402
     AuthorizationStateUnavailable,
     CapabilityError,
     ConflictError,
+    DestructiveConfirmationRequired,
     FoundationError,
     NotFoundError,
     ResourceLimitError,
@@ -81,6 +82,13 @@ _CLASSIFY_ORDER = (
     (CapabilityError, "CAPABILITY_UNSUPPORTED"),
     (ValidationError, "VALIDATION_FAILED"),
     (ResourceLimitError, "LIMIT_EXCEEDED"),
+    # WP-5 (docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-5): no shared
+    # inheritance with any neighbor above/below, so this entry's exact
+    # position in the tuple does not affect classification -- placed here,
+    # matching the real evaluation order `ApplicationCell.delete` itself
+    # follows (shape/identifier validation, then confirmation, then
+    # execution).
+    (DestructiveConfirmationRequired, "DESTRUCTIVE_CONFIRMATION_REQUIRED"),
     (ConflictError, "CONFLICT"),
     (NotFoundError, "NOT_FOUND"),
 )
@@ -375,34 +383,34 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
 
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
-        # VALID_CONFIRMATION sentinel protocol (design section 10.1,
-        # updated port v1.6 for declare-and-echo -- design docs/design/
-        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1): `confirmation=None`
-        # supplies no confirmation (this peer's `confirm` stays falsy),
-        # VALID_CONFIRMATION resolves to a real, currently-valid
-        # confirmation via `_resolve_confirmation` (this peer still
-        # declares `contract_version: 1.1.0`, so that always resolves to
-        # this peer's own legacy fixed token `confirm=True` today -- the
-        # WP-5 flip is what would activate the declare-and-echo branch),
-        # and any other value passes through verbatim so a wrong token is
-        # still observable to this peer's own validation rather than
-        # silently upgraded. This peer's `delete()` has no separate
-        # `destructive` parameter -- deletion is unconditionally
-        # destructive and gated by `confirm` alone -- so there is nothing
-        # further for the port's `destructive` flag to faithfully pass
-        # through to here.
+        # VALID_CONFIRMATION sentinel protocol (design docs/design/
+        # DESTRUCTIVE_CONFIRMATION_V1.md R-6 item 1, port v1.6
+        # declare-and-echo), faithful pass-through mirroring both r2db-api
+        # plugs' own `delete()` (`conformance_adapter_r2db.py`): `destructive`
+        # always passes through exactly as given (WP-5 gave this peer's own
+        # `session.delete()` a real `destructive` keyword -- prior to WP-5
+        # this peer's deletion was unconditionally destructive with no such
+        # parameter at all, so this flag had nothing to reach; it now does).
+        # `confirmation=None` supplies no confirmation, `VALID_CONFIRMATION`
+        # resolves to a real, currently-valid confirmation for this exact
+        # request via `_resolve_confirmation` (declare-and-echo now that this
+        # peer declares `contract_version >= 1.2.0`; `legacy_token=True`
+        # remains this peer's own pre-1.2.0 fixed value, kept only as the
+        # dead fallback `_resolve_confirmation` would take for a peer
+        # declaring < 1.2.0 -- unreachable here post-flip, same as r2db-api
+        # keeping its own literal "DELETE" legacy_token in place after its
+        # WP-3 flip), and any other string passes through verbatim so a
+        # wrong token is still observable as a wrong token to this peer's
+        # own validation rather than silently upgraded.
         filters = [Filter(field, "eq", value)]
 
         def probe() -> None:
-            self._call(lambda: session.delete(entity, filters, confirm=False))
+            self._call(lambda: session.delete(entity, filters, destructive=True))
 
-        if confirmation is None:
-            peer_confirm: Any = False
-        else:
-            peer_confirm = self._resolve_confirmation(confirmation, probe=probe, legacy_token=True)
+        peer_confirm = self._resolve_confirmation(confirmation, probe=probe, legacy_token=True)
 
         def op() -> int:
-            result = session.delete(entity, filters, confirm=peer_confirm)
+            result = session.delete(entity, filters, destructive=destructive, confirm=peer_confirm)
             return result["deleted"]
         return self._call(op)
 
@@ -516,10 +524,24 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return self._call(update_op)
 
         if operation == "delete":
+            # This generic dispatcher (used by C-17/C-18 for delete
+            # attempts that are not themselves testing confirmation
+            # semantics -- C-12 deliberately excludes delete from its own
+            # `_EXERCISED_OPERATIONS`, "delete is left to C-06") must still
+            # present a genuinely valid confirmation to this peer's own
+            # real `session.delete()` post-WP-5, the same probe -> echo
+            # round trip `delete()` above performs, rather than a bare
+            # `confirm=True` (invalid now that `confirm` is a str -- WP-5
+            # R-5 -- not this peer's former bool).
             def delete_op() -> int:
                 if filters is None:
                     raise ValidationError("delete requires a non-empty filter")
-                result = session.delete(entity, filters, confirm=True)
+
+                def probe() -> None:
+                    self._call(lambda: session.delete(entity, filters, destructive=True))
+
+                peer_confirm = self._resolve_confirmation(VALID_CONFIRMATION, probe=probe, legacy_token=True)
+                result = session.delete(entity, filters, destructive=True, confirm=peer_confirm)
                 return result["deleted"]
             return self._call(delete_op)
 
@@ -621,19 +643,38 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
             if op.destructive:
                 item["destructive"] = True
-                # Same VALID_CONFIRMATION sentinel protocol as `delete()`
-                # above (port v1.6 declare-and-echo), extended to batch
-                # operations (port v1.4).
+            # V2b-wire (C-06, WP-5 review recommendation already realized
+            # by both r2db-api plugs in WP-3): `confirmation` is set
+            # whenever the caller supplies one, INDEPENDENT of `destructive`
+            # -- an earlier revision of this method only ever set it
+            # inside the `if op.destructive:` branch above, which made it
+            # impossible to construct a request whose wire OMITS
+            # `destructive` entirely (not merely `false`) while still
+            # carrying a real, currently-valid `confirmation` phrase for
+            # the identical request, exactly the literal wire-omission
+            # shape contract `valid_confirmation`'s "a missing destructive
+            # field is equivalent to false, never to true" rule requires
+            # this peer to still deny.
+            if op.confirmation is not None:
                 if op.confirmation is VALID_CONFIRMATION:
+                    # Same VALID_CONFIRMATION sentinel protocol as
+                    # `delete()` above (port v1.6 declare-and-echo),
+                    # extended to batch operations (port v1.4). The probe
+                    # always presents `destructive: True` regardless of
+                    # this call's own `destructive` argument -- a probe
+                    # must reliably trigger the peer's own denial to read
+                    # the real phrase back, independent of whether the
+                    # OUTER request under construction carries
+                    # `destructive: True` or omits it.
                     probe_item = dict(item)
-                    probe_item["confirm"] = False
+                    probe_item["destructive"] = True
 
                     def probe(_probe_item=probe_item) -> None:
                         self._call(lambda: session.transact([dict(_probe_item)]))
 
                     peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token=True)
                     item["confirm"] = peer_confirm
-                elif op.confirmation is not None:
+                else:
                     item["confirm"] = op.confirmation
             items.append(item)
 
@@ -1043,15 +1084,21 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
     def _deny(self, exc: BaseException) -> ConformanceDenial:
         # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
-        # item 2): this peer's own `FoundationError` base class has no
-        # `details` attribute at all today (`mitatedb_api/errors.py` --
-        # never touched by this WP, per CLAUDE.md's "peer 実装には一切触れ
-        # ない"), so `getattr(..., "details", None)` always falls through
-        # to `None` here -> an empty mapping on `ConformanceDenial`. Written
-        # this way (not simply omitting `details=`) so this adapter picks
-        # up a real `details` attribute for free the moment a future WP
-        # adds one to this peer's own error hierarchy, without a second
-        # edit to this call site.
+        # item 2). mi-3 correction (independent review): this comment used
+        # to say this peer's `FoundationError` hierarchy had no `details`
+        # attribute at all -- true before WP-5, false since. WP-5 gave
+        # `errors.ResourceLimitError` (`limit_class`) and the new
+        # `errors.DestructiveConfirmationRequired` (the contract's 4
+        # declared keys) a real `details` dict each. `getattr(exc,
+        # "details", None)` is this adapter's ONLY wiring for surfacing
+        # either onto `ConformanceDenial.details` -- there is no other call
+        # site translating them -- so this line is the real, load-bearing
+        # bridge C-06's `_assert_four_declarations`/`assert_no_payload_
+        # echo_in_details` and the limit-class behavioral tests all
+        # ultimately depend on, not a forward-looking no-op. Every OTHER
+        # `FoundationError` subclass still has no `details` attribute, so
+        # `getattr` still falls through to `None` (-> an empty mapping) for
+        # those, exactly as before.
         return ConformanceDenial(
             code=self.classify(exc), adapter=self.name, native_type=type(exc).__name__,
             details=getattr(exc, "details", None),
