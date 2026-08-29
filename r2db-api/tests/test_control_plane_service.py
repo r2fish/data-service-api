@@ -413,6 +413,52 @@ def test_rate_limit_precedes_authentication_and_is_not_audited(kind, platform):
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
+def test_check_rate_and_rate_precharged_charge_exactly_once(kind, platform):
+    """CCR-14 WP-4 round-2 (independent review MAJOR-1): `check_rate()` is
+    the public wrapper `control_http.py` calls before it does anything else
+    (including reading a request body), charging one token itself; the
+    caller then passes `rate_precharged=True` into the operation method it
+    calls next so the window is not charged a second time for the same
+    logical request -- this is the call pattern `control_http.py` uses on
+    every one of its 11 endpoints. Pinned directly at the service level here
+    (`test_control_http.py` pins the same thing end-to-end over HTTP)."""
+    h = _build_harness(kind, platform, limits=ControlPlaneLimits(applications=1000, credentials_per_application=1000, control_requests_per_minute=2))
+    try:
+        # One `check_rate()` + one `rate_precharged=True` call = exactly one
+        # token, not two -- two such pairs exhaust a bound of 2.
+        h.service.check_rate()
+        with pytest.raises(FoundationError) as exc1:
+            h.service.capabilities("bogus-secret-1", rate_precharged=True)
+        assert exc1.value.code == "AUTH_INVALID"  # not LIMIT_EXCEEDED -- the pair only spent 1 token
+
+        h.service.check_rate()
+        with pytest.raises(FoundationError) as exc2:
+            h.service.capabilities("bogus-secret-2", rate_precharged=True)
+        assert exc2.value.code == "AUTH_INVALID"
+
+        # 2 tokens spent against a bound of 2 -- a third `check_rate()` alone
+        # now trips it.
+        with pytest.raises(FoundationError) as exc3:
+            h.service.check_rate()
+        assert exc3.value.code == "LIMIT_EXCEEDED"
+    finally:
+        h.cleanup()
+
+    # A separate harness: `rate_precharged=True` with no preceding
+    # `check_rate()` call never charges the window at all -- confirms the
+    # flag is a pure skip of the internal charge, not a differently-priced
+    # one of its own.
+    h2 = _build_harness(kind, platform, limits=ControlPlaneLimits(applications=1000, credentials_per_application=1000, control_requests_per_minute=1))
+    try:
+        for _ in range(5):
+            with pytest.raises(FoundationError) as exc:
+                h2.service.capabilities("bogus-secret", rate_precharged=True)
+            assert exc.value.code == "AUTH_INVALID"
+    finally:
+        h2.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
 def test_role_control_issuance_refused_regardless_of_application_state(kind, platform):
     h = _build_harness(kind, platform, limits=ControlPlaneLimits(applications=1000, credentials_per_application=1, control_requests_per_minute=100_000))
     try:

@@ -427,6 +427,16 @@ class ControlPlaneService:
     See this module's header for the architecture this class embodies: every
     processing-order/authorization/limit/audit/deterrence judgment lives
     here; backends are dumb storage plumbing.
+
+    CCR-14 WP-4 round-2 (independent review MAJOR-1): every one of the 9
+    public operation methods below accepts a keyword-only `rate_precharged:
+    bool = False`. `False` (the default -- what every direct in-process
+    caller, including the WP-5 in-process conformance adapter, keeps using)
+    means the method charges the R-7 rate window itself, exactly as before
+    this fix. `True` means the caller already charged it via `check_rate()`
+    (see that method's own docstring) and this call must not charge it
+    again -- `control_http.py` is the one caller that does this, because it
+    has to charge the window before it can even read a request body.
     """
 
     def __init__(
@@ -448,9 +458,10 @@ class ControlPlaneService:
     # Public operations (design §1's operation catalog / §2's endpoint map)
     # =====================================================================
 
-    def capabilities(self, secret: str | None, *, request_id: str | None = None) -> dict[str, Any]:
+    def capabilities(self, secret: str | None, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
@@ -466,9 +477,10 @@ class ControlPlaneService:
             "role": "control",
         }
 
-    def register_application(self, secret: str | None, application_id: Any, *, request_id: str | None = None) -> dict[str, Any]:
+    def register_application(self, secret: str | None, application_id: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "register_application", request_id=request_id)
         self._validate_application_id(application_id)
@@ -484,16 +496,18 @@ class ControlPlaneService:
 
         return self._run_state_change(self._backend.applications_unit_of_work, _body)
 
-    def list_applications(self, secret: str | None, *, request_id: str | None = None) -> dict[str, Any]:
+    def list_applications(self, secret: str | None, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "list_applications", request_id=request_id)
         return {"applications": [{"application_id": app_id, "enabled": enabled} for app_id, enabled in self._backend.list_applications()]}
 
-    def set_application_enabled(self, secret: str | None, application_id: Any, enabled: Any, *, request_id: str | None = None) -> dict[str, Any]:
+    def set_application_enabled(self, secret: str | None, application_id: Any, enabled: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         # Nit (round-2 review): `enabled`'s own bool-ness must be checked
         # *before* it is used to pick an `operation` name at all -- unlike
@@ -521,9 +535,10 @@ class ControlPlaneService:
 
         return self._run_state_change(self._backend.applications_unit_of_work, _body)
 
-    def issue_credential(self, secret: str | None, application_id: Any, role: Any, *, request_id: str | None = None) -> dict[str, Any]:
+    def issue_credential(self, secret: str | None, application_id: Any, role: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "issue_credential", request_id=request_id)
         # (4) semantic/shape validation -- `role=control` is a *shape-valid*
@@ -558,9 +573,10 @@ class ControlPlaneService:
 
         return self._run_state_change(self._backend.credentials_unit_of_work, _body)
 
-    def list_credentials(self, secret: str | None, *, request_id: str | None = None) -> dict[str, Any]:
+    def list_credentials(self, secret: str | None, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "list_credentials", request_id=request_id)
         rows: list[dict[str, Any]] = []
@@ -572,9 +588,10 @@ class ControlPlaneService:
             rows.append({"credential_id": credential_id, "role": "control", "enabled": enabled, "revoked": revoked})
         return {"credentials": rows}
 
-    def rotate_credential(self, secret: str | None, credential_id: Any, *, request_id: str | None = None) -> dict[str, Any]:
+    def rotate_credential(self, secret: str | None, credential_id: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self_rotate = isinstance(credential_id, str) and credential_id == context.credential_id
         self._gate_must_rotate(context, "rotate_credential", request_id=request_id, self_rotate=self_rotate)
@@ -601,7 +618,7 @@ class ControlPlaneService:
 
         return self._run_state_change(self._backend.control_credentials_unit_of_work, _control_body)
 
-    def revoke_credential(self, secret: str | None, credential_id: Any, *, destructive: Any = None, confirmation: Any = None, request_id: str | None = None) -> dict[str, Any]:
+    def revoke_credential(self, secret: str | None, credential_id: Any, *, destructive: Any = None, confirmation: Any = None, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         # Q-1 (design §0.5): the contract's own destructive-confirmation
         # semantics are an undecided, not-yet-effective contract question --
         # `destructive`/`confirmation` are accepted here exactly as the
@@ -613,14 +630,16 @@ class ControlPlaneService:
         # enforcing it is an additive change to this one method.
         del destructive, confirmation
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         self._gate_must_rotate(context, "revoke_credential", request_id=request_id)
         return self._set_credential_state(context, credential_id, revoked=True, operation="revoke_credential", request_id=request_id)
 
-    def set_credential_enabled(self, secret: str | None, credential_id: Any, enabled: Any, *, request_id: str | None = None) -> dict[str, Any]:
+    def set_credential_enabled(self, secret: str | None, credential_id: Any, enabled: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
         request_id = request_id or _uuid()
-        self._check_rate()
+        if not rate_precharged:
+            self._check_rate()
         context = self._authenticate(secret, request_id)
         # Symmetric with `set_application_enabled`'s identical fix above --
         # same reasoning (an operation-name-selecting field must be
@@ -829,6 +848,39 @@ class ControlPlaneService:
         if extra_details:
             details.update(extra_details)
         fail(code, message, status=status, details=details)
+
+    def check_rate(self) -> None:
+        """CCR-14 WP-4 round-2 (independent review MAJOR-1): public wrapper
+        around `_check_rate` below, charging exactly one token against the
+        R-7 `control_requests_per_minute` window (or raising `LIMIT_EXCEEDED`/
+        429, same as every internal call site).
+
+        Exists so an HTTP binding layer (`control_http.py`) can charge the
+        window *before* it does anything else -- including reading/parsing a
+        request body -- for the 3 endpoints whose request schema is read off
+        the body before the corresponding service method is called at all
+        (design §12.5: those methods take already-extracted arguments, so
+        the HTTP layer must shape-check the body first; see `control_http.
+        py`'s own module docstring for why that ordering is otherwise
+        correct). Without a way to charge the window ahead of that shape
+        check, a malformed/unauthenticated body flood against `register_
+        application`/`issue_credential`/`revoke_credential` never touched
+        `_check_rate` at all -- an unbounded, unauthenticated path under a
+        `limit_enforcement: "enforced"` capability declaration (round-2
+        review MAJOR-1, measured).
+
+        A caller that calls `check_rate()` itself and then calls one of the
+        9 operation methods below **must** pass `rate_precharged=True` to
+        that call -- otherwise the window is charged twice for one logical
+        request. Every operation method's own default (`rate_precharged=
+        False`) keeps every *other* caller (this repository's own tests,
+        the in-process conformance adapter WP-5 will wire up) fully charged
+        exactly as before this fix: the in-process path calls a method
+        directly, once, with no separate `check_rate()` call, so the
+        internal `_check_rate()` below still runs and still charges one
+        token per call, unchanged.
+        """
+        self._check_rate()
 
     def _check_rate(self) -> None:
         """R-7 `control_requests_per_minute` -- a single, global window

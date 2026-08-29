@@ -24,10 +24,24 @@ planes:
   audit:
     identity: external-audit-writer
     mode: append_only
+  control_plane_http:
+    # CCR-14 WP-4 (docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md v1.6, R-1/R-3):
+    # the independent `/control/v1` HTTP process -- a distinct node from
+    # `control` above (which models the pre-existing provisioning/operator
+    # authority this HTTP surface fronts), with its own least-privilege DB
+    # role (`r2dbsvc_controlplane`) and no route to Application real data.
+    identity: control-plane-process
+    # Round-2 review MAJOR-2: `audit` added to egress_allow -- the process
+    # holds `GRANT INSERT ON control_audit` (0006_control_plane_http.sql,
+    # R-3) and R-6 requires it to write durable events there. Append-only
+    # (INSERT-only GRANT), same shape as `control`'s own `audit` edge above.
+    egress_allow: [control_plane_http, control, audit]
+    egress_deny: [application_data, application_development]
 boundaries:
   application_cells: "Each request resolves one cell from credential state; client scope fields are non-authoritative."
   database: "Application data authorities are independently scoped; no application authority receives control or provisioning credentials."
   audit: "Application code can request brokered event emission only; it cannot query, alter, or delete the sink."
+  control_plane_process: "The control-plane HTTP process (R-3) is a separate deployable with its own DB role; it has no DSN or grant that reaches Application real data."
 evidence:
   si_00: "negative reachability checks plus deployment identity/network/database-grant evidence"
   si_02: "public and developer egress deny control/provisioning"
