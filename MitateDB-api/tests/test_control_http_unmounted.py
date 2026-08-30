@@ -14,6 +14,8 @@ own real-request test once its own module-scoped teardown ran first).
 """
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -117,6 +119,47 @@ def test_body_entity_smuggling_is_rejected_as_unknown_field(control_app) -> None
                            json_body={"application_id": "shapeapp", "unexpected_extra_field": True}))
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# SI-10: an error response never leaks the underlying exception's own text --
+# the control-plane surface's own counterpart to `test_http.py`'s
+# `test_problem_response_never_leaks_the_underlying_exception_message`. That
+# app-plane test exercises the leak-proof renderer (`_problem_for_exception`)
+# in isolation; this one drives a REAL request through the mounted
+# `/control/v1` ASGI app so the whole `_endpoint`/`except Exception:` ->
+# `_generic_service_unavailable` path is covered end to end: an UNCLASSIFIED
+# raw exception (not a `FoundationError`, so it never reaches `_classify` at
+# all) raised from inside a backend method must collapse to the generic
+# `SERVICE_UNAVAILABLE` problem+json body, carrying NONE of the raw
+# exception's own message text.
+# ---------------------------------------------------------------------------
+
+
+def test_control_problem_response_never_leaks_the_underlying_exception_message(control_app, monkeypatch) -> None:
+    app, credential_id, secret = control_app
+    # A raw `RuntimeError` (deliberately NOT a `FoundationError`) injected
+    # into a backend method reached on every request's authentication step,
+    # planting secret-shaped text into its own message the way a real driver
+    # error would (a table/column name, a connection host). `_endpoint`'s
+    # `except Exception:` catches it and returns `_generic_service_
+    # unavailable`, whose message comes from the fixed per-CODE string table
+    # -- never from `str(exc)`.
+    marker = "control-internal-detail-leak-marker-4a7e2b"
+    service = app.app.state.control_service  # RequestByteBoundMiddleware -> inner Starlette app
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError(f"control store rejected credential {marker} at connection host 10.0.0.5")
+
+    monkeypatch.setattr(service._backend, "authenticate_control", _raise)
+
+    response = _run(_aget(app, "/control/v1/capabilities", headers=_auth_header(credential_id, secret)))
+    assert response.status_code == 503
+    body = response.json()
+    assert body["code"] == "SERVICE_UNAVAILABLE"
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert marker not in body["message"]
+    assert marker not in json.dumps(body)
 
 
 def test_revoke_last_active_control_credential_requires_confirmation_over_http(control_app) -> None:
