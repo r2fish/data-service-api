@@ -861,9 +861,9 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         ]
 
     def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
-        # `auth.py`'s `CredentialStore` has no un-revoke/enable-credential
-        # call at all (`revoke()` is one-way; the only other state-mutating
-        # methods that touch a credential's own row are `issue()`, which
+        # `auth.py`'s `CredentialStore` had no un-revoke/enable-credential
+        # call at all (`revoke()` was one-way; the only other state-mutating
+        # methods that touched a credential's own row were `issue()`, which
         # always mints a brand-new `credential_id` with no parameter to
         # force reuse of an existing one). The one real control-plane call
         # that *could* plausibly be mistaken for a reactivation path is
@@ -871,19 +871,41 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # separate flags on this peer (`_Credential.enabled` vs.
         # `_applications[...]`) -- exercised here as a real attempt rather
         # than assumed safe.
+        #
+        # (P3 WP-2: `enable()`/`disable()` are new -- individual, credential-
+        # level lifecycle calls that did not exist when the paragraph above
+        # was written -- and `revoke()` now sets a dedicated `revoked` flag
+        # (`_Credential.revoked = True`) rather than the `enabled` flag this
+        # paragraph originally described. The paragraph's own OUTCOME still
+        # holds: `enable()` unconditionally leaves `revoked` untouched (see
+        # `auth.CredentialStore.enable`'s own docstring), so a revoked
+        # credential still cannot authenticate after `enable()` -- but this
+        # vector set does not yet exercise `enable()` as a `must_deny` real
+        # reactivation attempt, since the `structurally_absent` vector below
+        # still lists it among the "no reactivation call exists" surface,
+        # which is no longer literally true. Rewriting this to a real
+        # `must_deny` vector (revoke -> enable -> re-authenticate) is
+        # deferred to the WP-5 flip commit, together with the `control_plane:
+        # enabled` declaration flip -- design docs/design/
+        # MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2 R-8/WP-0 round-2 M-4:
+        # "現宣言 structurally_absent の根拠...は enable_credential 実装の
+        # 瞬間に偽になる。WP-5 で...実ベクタ(must_deny)へ書き換え". This is a
+        # pre-anticipated, adjudicated deferral, not an oversight of this WP.)
         def enable_application_after_revoke_attempt() -> None:
             # `enable_application` only ever flips the *application*-level
             # flag (`_applications[...]`); it never touches a credential's
-            # own `enabled` state (`_Credential.enabled`, set False by
-            # `revoke()`) at all, so this call itself never raises -- it is
-            # a real, no-op-for-this-purpose control-plane call, not a
-            # denied one. `must_ignore` is the correct disposition:
-            # C-13's own must_ignore handling re-authenticates afterward
-            # and asserts the credential is still refused, which is the
-            # actual proof this attempt did not reactivate anything; that
-            # post-condition check does not belong inside attempt() itself
-            # (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md section 2:
-            # must_ignore's attempt() "may succeed").
+            # own state at all (P3 WP-2: `_Credential.enabled`/`revoked`,
+            # previously described here as "`_Credential.enabled`, set False
+            # by `revoke()`" -- `revoke()` no longer touches `enabled` at
+            # all, see the docstring above), so this call itself never
+            # raises -- it is a real, no-op-for-this-purpose control-plane
+            # call, not a denied one. `must_ignore` is the correct
+            # disposition: C-13's own must_ignore handling re-authenticates
+            # afterward and asserts the credential is still refused, which
+            # is the actual proof this attempt did not reactivate anything;
+            # that post-condition check does not belong inside attempt()
+            # itself (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md
+            # section 2: must_ignore's attempt() "may succeed").
             self._control.credentials.enable_application(handle.application_id)
 
         return [
@@ -897,6 +919,21 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 kind="credential_reactivation",
                 name="mitatedb_credential_store_has_no_reactivation_call",
                 disposition="structurally_absent",
+                # (P3 WP-2: `enable()`/`disable()` now exist on `auth.
+                # CredentialStore` as real, individual credential-level
+                # calls -- this vector's own name and premise ("no
+                # reactivation call exists") is no longer literally true of
+                # the class as a whole. It remains accurate for the NARROWER
+                # `surface` list actually inspected below (none of these
+                # specific callables' signatures accept a parameter that
+                # could force reactivation), which is all `structurally_
+                # absent`'s own mechanical check (`signature_forbids_
+                # parameters`) verifies. Widening this vector set to cover
+                # `enable()` for real -- a `must_deny` "revoke then enable
+                # then re-authenticate" vector -- is deferred to the WP-5
+                # flip commit alongside the `control_plane: enabled`
+                # declaration flip (design v1.2 R-8/WP-0 round-2 M-4, same
+                # citation as the docstring above).
                 surface=[
                     self._control.credentials.issue,
                     self._control.credentials.revoke,

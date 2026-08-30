@@ -221,6 +221,7 @@ control plane は契約 `control_endpoints` の 11 本を R-6 のとおり。
 - RLS defence-in-depth の併用 (R-1 不採用分。database-per-application が主境界として実測確立した後の追加層として)
 - IAM DB 認証 / Cloud SQL Connector の採否 (現行: 標準 DSN + Secret Manager 参照)
 - application database の `CONNECTION LIMIT` / pool 上限の運用チューニング (初版は保守的な固定値)
+- **platform registry 接続の bounded pool** (WP-2 レビュー N-1): `PostgresCredentialStore` は呼出ごと新規接続 (WP-2 の意図的判断 — fail-closed の一様観測)。HTTP 面では assert_active が操作ごとに走るため `mitatedbsvc_api` の `CONNECTION LIMIT 20` と衝突する — **WP-3 の composition で bounded pool 化または接続再利用が必須** (WP-3 完了条件に含める)
 - MitateDB の `drop_entity` / `drop_index` (schema 削除系) — 現宣言 unsupported のまま。C-06 V6 は共有 absence 機構継続
 
 ## 8. 訂正記録 (WP-0 独立レビュー)
@@ -262,6 +263,12 @@ WP-0 独立レビュー (Opus、2026-08-30) の結果: **blocker 2 / major 11 / 
 - 変異注入: 実装者 5+3 本、レビュアー 5+4 本 (第2回で生存した 3 本は検出力補強後に全て赤化を再実測)。生存変異ゼロ
 - 記録済みの軽微な挙動差 (m-14): transact のエラーメッセージ文言変化、`NotFoundError` 経路が rollback されるようになった改善
 - WP-3 への申し送り: in-process adapter `provision_application` は `_call` を通らず `ConflictError` 再分類が port 境界で未観測 (m-13)。`create_entity` fields 省略時の合成 `id` 列を C-11/C-17 が観測しないことの確認 (N-2)。boolean 列は両 backend とも INTEGER 表現 (bool↔int cast 不在のため)。PG の insert 返り値は ctid (安定性なし、`row_addressability: unavailable` は不変)
+
+### WP-2 実装記録 (2026-08-30)
+
+R-4 の credential 永続化: in-memory 側の enabled/revoked 独立2値化 (revoke=terminal、un-revoke 経路ゼロをレビューが grep 全数で確認)、`PostgresCredentialStore` 新規 (同一 call surface、pepper-HMAC digest のみ保存、`hmac.compare_digest` + 未知 id でもダミー digest 計算、DB 不達は全9メソッドで `AuthorizationStateUnavailable` fail-closed — レビューが9メソッド全数実測)。parity 基準 = 契約挙動 (核心: revoke → enable → 再認証 must_deny を両ストアで固定)。`assert_pepper_separation` 新設 (呼出は composition root、WP-3/4)。0002 credentials に revoked 列。root suite **873 → 887 passed** (+14)。
+
+独立レビュー1往復 (blocker 0 / major 1 / minor 6): **M-1 裁定** — `InsufficientPrivilege` (恒久的権限誤設定) を `AuthorizationStateUnavailable` から分離し新設 `StorageConfigurationError` へ (R-6 監査免除 (ii) の「store 不達」意味論を汚染しないため。HTTP 写像は `SERVICE_UNAVAILABLE` 提案 — WP-3 で確定)。m-1: disable/enable_application が影響有無 bool を返却 (無言 no-op の情報化)。m-5: DB の role 値が語彙外なら状態整合性喪失として `AuthorizationStateUnavailable`。m-6: adapter の C-13 根拠コメント3箇所へ補記 (実ベクタ化は WP-5 と同一コミット — **WP-2 が作った revoke→enable→再認証こそ C-13 の最強ベクタであり WP-5 投入必須**)。変異: 実装者4+1本、レビュアー5本 — **受理境界1件を記録**: `hmac.compare_digest` → `==` の変異は行動テストで構造的に検出不能 (タイミングのみの差)。定数時間比較はレビューとコード規律だけが守る性質。N-2: control credential store は WP-4 で同型の第2クラス (`control_credentials` テーブル、専用 pepper)。
 
 ### WP-1.5 実装記録 (2026-08-30)
 
