@@ -505,20 +505,41 @@ def _batch_delete_capability_absent(adapter, session, entity: str) -> bool:
     nothing is at risk even for a peer that WOULD execute it) and observing
     a real `CAPABILITY_UNSUPPORTED` denial.
 
-    WP-5 first-execution finding (MitateDB-api): unlike both r2db-api
-    adapters (a single `mutate()` dispatcher executes every mutation type,
-    batched or not, uniformly), `MitateDB-api`'s ONLY multi-operation
-    dispatcher (`ApplicationCell.transact`) never executes anything but an
-    `"insert"` item -- `update`/`delete`/`upsert` are refused with
-    `CapabilityError` unconditionally, before any destructive-confirmation
-    semantics are even inspected (a real, honestly-declared limitation of
-    this peer's own batch capability, not a bug: its dedicated single-
-    operation `delete()` method is the only real path to `destructive_
-    confirmation` semantics on this peer). `test_c06_v2b_wire_*` below
-    presents the WIRE-OMISSION-VIA-BATCH shape specifically, which simply
-    has no real entry point to reach on such a peer -- this is confirmed by
-    an actual observed denial each time, never assumed from a capability
-    declaration alone (design principle 4).
+    WP-5 first-execution finding (MitateDB-api), historical (Q-1 WP-5):
+    unlike both r2db-api adapters (a single `mutate()` dispatcher executes
+    every mutation type, batched or not, uniformly), `MitateDB-api`'s ONLY
+    multi-operation dispatcher (`ApplicationCell.transact`) at that time
+    never executed anything but an `"insert"` item -- `update`/`delete`/
+    `upsert` were refused with `CapabilityError` unconditionally, before any
+    destructive-confirmation semantics were even inspected.
+
+    **Superseded (phase 3 WP-1.5, P3-D2, docs/design/
+    MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-5):** `transact` now executes
+    `update`/`delete` for real, atomically with the rest of the same batch
+    -- converging this entry point's real behavior onto the pre-existing
+    `atomic_mutation.operations: [insert, update, delete]` declaration.
+    `upsert` alone remains a genuine, honestly-declared capability gap: no
+    execution path for it exists anywhere on this peer, batch or otherwise.
+    A batch-embedded `delete` now runs through the SAME single confirmation
+    choke (`_validate_delete_confirmation`) the dedicated single-operation
+    `delete()` method already used, so this peer's batch dispatcher is no
+    longer structurally incapable of reaching destructive-confirmation
+    semantics at all -- it is capable, and requires a real confirmation, the
+    same as both r2db-api adapters. Concretely: this function's own probe
+    below (an unconfirmed `delete` matching zero rows) now observes
+    `DESTRUCTIVE_CONFIRMATION_REQUIRED`, not `CAPABILITY_UNSUPPORTED`, on
+    this peer too -- so `_batch_delete_capability_absent` returns `False`
+    for every currently-registered adapter, including `MitateDB-api`. Its
+    `CAPABILITY_UNSUPPORTED`-based absence shortcut is retained rather than
+    removed (a future <1.2.0-shaped or otherwise batch-limited peer may
+    still take it) but is currently unreached by any registered adapter --
+    recorded in `conformance-tests/CONDITIONS.md`'s C-06 row, the same
+    disclosed-floor convention already used there for the baseline
+    contract-version branch. `test_c06_v2b_wire_*` below presents the
+    WIRE-OMISSION-VIA-BATCH shape specifically; on a peer where this
+    shortcut WOULD apply, that shape simply has no real entry point to
+    reach -- confirmed by an actual observed denial each time, never
+    assumed from a capability declaration alone (design principle 4).
 
     A peer that DOES execute delete through this dispatcher (destructive
     operations included) instead denies this exact probe with

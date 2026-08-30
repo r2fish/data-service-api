@@ -11,31 +11,54 @@ fresh entity this test creates. The *not*-enabled branch (currently only
 `MitateDB-api`, per its own honest `unavailable` declaration) does not skip
 -- design principle 4 ("uncertainty must not silently become permission")
 and this repository's own "skip is fail" rule both forbid that -- it instead
-runs `_assert_declaration_dependent_surface_is_structurally_absent`, the one
-real, falsifiable fact the design text prescribes for this side
-(docs/design/R2DB_CCR13_STORAGE_V1.md section 4: "宣言に依存する操作の不在は
-structural evidence"): `create_unique_index` raises `SurfaceAbsent`, and that
-claim is independently verified via `signature_forbids_parameters` rather
-than accepted on the adapter's word. Every test function in this module
-therefore makes a genuine assertion against every registered adapter, never
-a bare pass-through.
+runs `_assert_declaration_dependent_surface_is_absent_or_denied`, which
+accepts either of two honest evidence forms for this side (design
+docs/design/R2DB_CCR13_STORAGE_V1.md section 4: "宣言に依存する操作の不在は
+structural evidence", widened by docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+R-8/WP-2.5, B-2/D-H):
+
+  (a) **structurally absent** -- `create_unique_index` raises `SurfaceAbsent`
+      because no real entry point on the peer's public surface could even
+      receive an index-creation request at all. That claim is independently
+      verified via `signature_forbids_parameters` rather than accepted on
+      the adapter's word. This is the only form any currently-registered
+      adapter takes (`MitateDB-api`'s in-process `ApplicationDeveloper` has
+      no schema-mutation call with an index/uniqueness parameter).
+  (b) **real, present denial** -- `create_unique_index` raises a real
+      `ConformanceDenial(CAPABILITY_UNSUPPORTED)` because a real entry point
+      DOES exist (e.g. a mounted `/v1/schema/operations` dispatcher) but the
+      peer refuses this specific operation the way its own
+      `row_addressability: unavailable` declaration requires -- the same
+      "受理する but denies, before execution" shape `test_c18_revision_
+      precondition_semantics.py`'s unavailable side already establishes as
+      a legitimate alternative to (a), and `SurfaceAbsent`'s own docstring
+      itself forbids raising `SurfaceAbsent` to excuse a peer that actually
+      received and mishandled a request. Only `CAPABILITY_UNSUPPORTED` is
+      accepted here -- any other denial code is a genuine finding, not a
+      second honest form of absence. No currently-registered adapter takes
+      this form; it exists so a future adapter with a real, mounted schema
+      surface (a mount whose declared capability nonetheless stays
+      `unavailable`) is not forced to lie via `SurfaceAbsent` about an entry
+      point that demonstrably exists.
+
+Every test function in this module therefore makes a genuine assertion
+against every registered adapter, never a bare pass-through.
 """
 from __future__ import annotations
 
 import pytest
 
+from absence import assert_control_operation_absent_or_uniformly_refused
 from adapter import (
     CATALOG_SURFACE_ABSENT,
     UNCLASSIFIED,
     BatchOperation,
     ConformanceDenial,
     Fixture,
-    SurfaceAbsent,
     VALID_CONFIRMATION,
     fresh_identifier,
     load_contract,
     load_contract_error_codes,
-    signature_forbids_parameters,
 )
 from schema_check import assert_valid
 
@@ -62,26 +85,71 @@ def _row_addressability_enabled(adapter) -> bool:
     return document.get("capabilities", {}).get("row_addressability", {}).get("status") == "enabled"
 
 
-def _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx: Fixture) -> None:
-    """The one real, falsifiable fact design section 4 prescribes for a
+def _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx: Fixture) -> None:
+    """The falsifiable fact design section 4 prescribes for a
     `row_addressability: unavailable` peer: every operation whose meaning
     depends on a catalog uniqueness/address declaration -- `create_unique_
     index` chief among them, since `upsert`'s own key-selection vocabulary
-    (`unique_key`) is meaningless without one -- has no real receiving
-    surface on this peer's public API at all. `SurfaceAbsent`'s own
-    contract (docs/design/CONFORMANCE_ADAPTER_V1.md section 12, correction
-    B-1) forbids catching it and treating the bare exception as proof; the
-    claim is independently re-verified here via `signature_forbids_
-    parameters(exc.surface, exc.forbidden_parameters)`.
+    (`unique_key`) is meaningless without one -- must be either structurally
+    absent or, if a real entry point exists, refused before execution.
+
+    Two honest evidence forms are accepted (module docstring above; design
+    docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-8/WP-2.5, B-2/D-H):
+
+    (a) `SurfaceAbsent` -- no real entry point exists at all.
+    (b) `ConformanceDenial(CAPABILITY_UNSUPPORTED)` -- a real entry point
+        DOES exist and refuses this specific request, matching the peer's
+        own `row_addressability: unavailable` declaration.
+
+    Both forms' own verification is delegated to `absence.py`'s shared
+    `assert_control_operation_absent_or_uniformly_refused` -- the same
+    mechanism `test_c14_authority_boundary.py`'s control-plane absence
+    checks and C-06's `drop_entity` absent branch already use (WP-2.5
+    review m-1: this function used to reimplement form (a)'s re-
+    verification inline, `assert not signature_forbids_parameters(...)`,
+    without the shared helper's additional `declared_surface >=
+    public_operation_callables()` check -- migrating onto the shared
+    helper closes that gap for free, rather than hand-maintaining a second,
+    weaker copy of the same hardening). Only `CAPABILITY_UNSUPPORTED` is
+    accepted for form (b); any other denial code is a genuine finding (a
+    real entry point misclassifying the refusal), never a second form of
+    absence -- the shared helper enforces this identically to what this
+    function's own inline check used to.
+
+    Requirement (d) of WP-2.5, C-17-specific and therefore NOT part of the
+    shared helper (which has no notion of a capability-specific follow-up
+    state check): once the shared helper reports `"declared_unavailable"`
+    (form (b)), this additionally confirms no unique index was actually
+    created, by probing with two colliding inserts and requiring BOTH to
+    succeed -- a real unique index would have refused the second with
+    `CONFLICT`.
     """
     entity = fresh_identifier("c17_absent")
     adapter.create_entity(fx.developer_a, entity, {"label": "text"})
-    with pytest.raises(SurfaceAbsent) as ei:
-        adapter.create_unique_index(fx.developer_a, entity, fresh_identifier("idx"), ["label"])
-    violations = signature_forbids_parameters(ei.value.surface, ei.value.forbidden_parameters)
-    assert not violations, (
-        f"{adapter.name}: create_unique_index claimed SurfaceAbsent, but signature_forbids_parameters "
-        f"found real parameter(s) that could carry it: {violations}"
+    index_name = fresh_identifier("idx")
+
+    def _attempt_create_unique_index() -> None:
+        adapter.create_unique_index(fx.developer_a, entity, index_name, ["label"])
+
+    form = assert_control_operation_absent_or_uniformly_refused(adapter, _attempt_create_unique_index)
+    if form != "declared_unavailable":
+        return  # form (a), surface_absent -- nothing further to check here
+
+    # (d): a real entry point that genuinely refused the index request
+    # (form (b)) must not have created it anyway. Probed by attempting two
+    # inserts that would collide under the requested (label) unique index
+    # -- both must succeed, since no index was ever actually created.
+    adapter.attempt_mutation(
+        fx.runtime_a, entity, "insert", values={"label": "c17-dup-probe"}, where_field=None, where_value=None,
+    )
+    adapter.attempt_mutation(
+        fx.runtime_a, entity, "insert", values={"label": "c17-dup-probe"}, where_field=None, where_value=None,
+    )
+    rows = adapter.select_eq(fx.runtime_a, entity, ["label"], "label", "c17-dup-probe")
+    assert len(rows) == 2, (
+        f"{adapter.name}: create_unique_index was refused with CAPABILITY_UNSUPPORTED (a present-denial "
+        f"claim of no effect), but a duplicate-value probe found {len(rows)} row(s) instead of 2 -- an "
+        "index enforcing uniqueness on 'label' appears to have been created despite the refusal"
     )
 
 
@@ -94,7 +162,7 @@ def test_declared_entities_satisfy_declaration_required_completeness(adapter, fx
     adapter.insert(fx.runtime_a, entity, {"label": "seed"})
 
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     contract = load_contract()
@@ -156,7 +224,7 @@ def test_declared_entities_satisfy_declaration_required_completeness(adapter, fx
 
 def test_address_field_is_visible_and_targets_at_most_one_row(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_address")
@@ -201,7 +269,7 @@ def test_address_field_is_visible_and_targets_at_most_one_row(adapter, fx: Fixtu
 
 def test_update_that_would_change_an_address_field_is_rejected(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_immutable")
@@ -231,7 +299,7 @@ def test_update_that_would_change_an_address_field_is_rejected(adapter, fx: Fixt
 
 def test_unique_key_duplicate_write_is_refused_with_conflict(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_uniqconflict")
@@ -254,7 +322,7 @@ def test_unique_key_duplicate_write_is_refused_with_conflict(adapter, fx: Fixtur
 
 def test_upsert_on_entity_with_no_declared_unique_key_is_capability_unsupported(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_nokey")
@@ -298,7 +366,7 @@ def test_upsert_on_entity_with_no_declared_unique_key_is_capability_unsupported(
 
 def test_upsert_on_entity_with_one_declared_unique_key_resolves_insert_then_update(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_onekey")
@@ -333,7 +401,7 @@ def test_upsert_on_entity_with_one_declared_unique_key_resolves_insert_then_upda
 
 def test_upsert_on_entity_with_multiple_unique_keys_requires_named_unique_key(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_multikey")
@@ -390,7 +458,7 @@ def test_upsert_on_entity_with_multiple_unique_keys_requires_named_unique_key(ad
 
 def test_deleted_address_is_never_reused_by_a_later_insert(adapter, fx: Fixture):
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_reuse")
@@ -435,7 +503,7 @@ def test_assigned_addresses_membership_holds_when_mixed_in_one_batch(adapter, fx
     # confirmed delete together, and requires exactly one assigned_addresses
     # element -- the insert's -- no matter what else shares the batch.
     if not _row_addressability_enabled(adapter):
-        _assert_declaration_dependent_surface_is_structurally_absent(adapter, fx)
+        _assert_declaration_dependent_surface_is_absent_or_denied(adapter, fx)
         return
 
     entity = fresh_identifier("c17_batchmix")

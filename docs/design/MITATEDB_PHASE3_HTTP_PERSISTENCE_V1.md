@@ -205,7 +205,7 @@ control plane は契約 `control_endpoints` の 11 本を R-6 のとおり。
 9. **D-I**: L4 (r2db `request_bytes` の control discovery 宣言) は引き継ぎ書 §3 で「次のコード WP へ繰延べ」とされていたが、本フェーズでは扱わない (r2db 側を触らない原則優先の意図的逸脱。r2db の台帳項目として残置 — WP-0 N-3)。なお MitateDB 側は最初から宣言する (R-6) ため同ギャップは再生産しない
 10. **D-J (= P3-D2)**: mutate バッチの update/delete atomic 拡張 (R-5)。実挙動を既存宣言 `atomic_mutation.operations: [insert, update, delete]` へ収束させる。`DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(b) の解釈論点は MitateDB では実害消滅、契約明確化 CCR は台帳残置のまま
 11. **D-K**: control service `max-instances=1` を runbook 不変条件とする (rate limit のプロセス内 window の真実性条件。共有 window / deployment_required 化は台帳へ)
-12. **D-L (依頼者判断待ち)**: mitate-application の実要求棚卸し (Mitate repo `docs/work-orders/mitate-application-data-service-client-phase-b-requirements.md`) が **`cross_entity_mutation` の凍結解除検討**を要求 (状態変更 = 本体 entity + audit の 2 entity atomic 書込が Application の契約保証)。本フェーズには入れず現行スコープで完了させ、採否 (フェーズ3.5 で実装するか、クライアント側代替で凌ぐか) を依頼者へ提起する — 入れる場合 C-16 が初めて executable になり共通 suite 側作業も発生する
+12. **D-L (依頼者判断待ち → クライアント側正式回答受領、最終確認待ち)**: mitate-application の実要求棚卸し (Mitate repo `docs/work-orders/mitate-application-data-service-client-phase-b-requirements.md`) が **`cross_entity_mutation` の凍結解除検討**を要求。**2026-08-30 クライアント側セッション (mitate-cd) から「採用 — フェーズ3.5 として実装依頼」の正式回答を受領** (同文書 v1.2 §6 が正本): (i) 監査保証 (成功した状態変更 = ちょうど1 audit event) は原子性の問題であり max-instances=1 (直列化) では crash 窓を消せない、(ii) 代替3案は全て不採用、**保証を毀損する縮退でのカットオーバーは行わず cross_entity_mutation 成立まで Phase B カットオーバーを待つ** (現行 in-memory 継続)、(iii) スコープ下限: 1 atomic unit = 複数 entity にまたがる insert/update/delete の列 (全成功 or 全無効)、batch 上限 10 で十分、upsert / read-your-writes / preconditions / 実行順序観測は不要、新エラー語彙不要。C-16 executable 化と共通 suite 作業の発生は了解済み。**本フェーズ (3) は現行スコープのまま完了させる。フェーズ3.5 の着手は、他セッション経由の伝聞を依頼者承認とは扱わない規律により、本セッションの依頼者の直接確認を待つ** (完了報告で提起)
 
 ## 6. 本フェーズが閉じる既存台帳項目 / 閉じない項目
 
@@ -263,6 +263,12 @@ WP-0 独立レビュー (Opus、2026-08-30) の結果: **blocker 2 / major 11 / 
 - 変異注入: 実装者 5+3 本、レビュアー 5+4 本 (第2回で生存した 3 本は検出力補強後に全て赤化を再実測)。生存変異ゼロ
 - 記録済みの軽微な挙動差 (m-14): transact のエラーメッセージ文言変化、`NotFoundError` 経路が rollback されるようになった改善
 - WP-3 への申し送り: in-process adapter `provision_application` は `_call` を通らず `ConflictError` 再分類が port 境界で未観測 (m-13)。`create_entity` fields 省略時の合成 `id` 列を C-11/C-17 が観測しないことの確認 (N-2)。boolean 列は両 backend とも INTEGER 表現 (bool↔int cast 不在のため)。PG の insert 返り値は ctid (安定性なし、`row_addressability: unavailable` は不変)
+
+### WP-2.5 実装記録 (2026-08-30)
+
+共通側変更 (R-8 の裁定2件 + WP-1.5 繰延べ2件): C-17 unavailable 分岐が present-denial 形態を受理 (`absence.py` の共有ヘルパー `assert_control_operation_absent_or_uniformly_refused` へ**寄せる**形で実装 — インライン再実装の解消と同時に `declared_surface >= public_surface` 検査等のハードニングを獲得。`CAPABILITY_UNSUPPORTED` 限定 + 受理時は重複挿入プローブで index 不作成を検証)。C-11 は `_find_all_adapters_with` + parametrize で raw accessor を持つ全 adapter を検証。test_c06 docstring の歴史的経緯化、CONDITIONS.md へ absence shortcut 到達不能の残置記録と C-17 form-(b) 捏造不可判別限界の開示 (C-14 と同じ DEFERRED 宣言)。**新設分岐は stub adapter による永続 regression テストで固定** (レビュー M-2: 「誰も通らない新規コード」を残さない)。root suite **887 → 892 passed** (+5)。
+
+peer 側の同時修正 (別コミット、レビュー M-1): `public_operation_callables()` の陳腐化 — WP-1 追加の `create_entity`/`add_field` に加え実測で `capabilities` も欠落しており計3件追加 (C-17/C-15/C-11/absence.py の独立検証の証拠面が公開面全体を被覆していなかった)。introspection による全数被覆の機械固定テストを新設 (将来の面追加で自動赤化)。独立レビュー1往復 (blocker 0 / major 2 / minor 4、既存 3 adapter への検証緩和ゼロをレビュアーが入力クラス全数突合で確認)。
 
 ### WP-2 実装記録 (2026-08-30)
 

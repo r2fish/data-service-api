@@ -10,18 +10,31 @@ adapter's peer declares `revision_preconditions: enabled`. The `enabled`
 branch performs the real behavioral assertion the test's name describes.
 The *not*-enabled branch (currently only `MitateDB-api`) does not skip --
 design principle 4 and this repository's own "skip is fail" rule both
-forbid that. Unlike C-17's unavailable side (which needs `SurfaceAbsent`,
-since `create_unique_index` truly has no receiving call on that peer), this
-condition's unavailable side is a *real, present* denial: `MitateDB-api`'s
-`transact()` dispatcher is a genuine entry point for `expected_revision`
-(the same one `attempt_mutation`'s `upsert`/`expected_revision` handling
-already presents it to), and refuses it with `CAPABILITY_UNSUPPORTED`
-before touching any row (docs/design/CONFORMANCE_ADAPTER_V1.md section 12,
-correction B-2, and the accompanying `cell.py` fix that closed the
-allowlist gap that used to let it through silently). This is the "受理面を
-持つpeerなら実行前CAPABILITY_UNSUPPORTED + 状態不変" half of the design's own
-parenthetical for the unavailable side -- so every test function below
-makes a genuine, real assertion against every registered adapter.
+forbid that. This condition's unavailable side has always been a *real,
+present* denial, never `SurfaceAbsent`: `MitateDB-api`'s `transact()`
+dispatcher is a genuine entry point for `expected_revision` (the same one
+`attempt_mutation`'s `upsert`/`expected_revision` handling already presents
+it to), and refuses it with `CAPABILITY_UNSUPPORTED` before touching any
+row (docs/design/CONFORMANCE_ADAPTER_V1.md section 12, correction B-2, and
+the accompanying `cell.py` fix that closed the allowlist gap that used to
+let it through silently). This is the "受理面を持つpeerなら実行前
+CAPABILITY_UNSUPPORTED + 状態不変" half of the design's own parenthetical
+for the unavailable side -- so every test function below makes a genuine,
+real assertion against every registered adapter.
+
+Historical note (m-3, docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+R-8/WP-2.5): earlier revisions of this docstring contrasted this present-
+denial shape with "C-17's unavailable side, which needs `SurfaceAbsent`" --
+true at the time (`create_unique_index` truly had no receiving call on any
+registered peer), but no longer the full picture: WP-2.5 widened C-17's own
+unavailable side (`test_c17_declaration_agreement.py`) to accept this exact
+present-denial shape too, as a second honest evidence form alongside
+`SurfaceAbsent`, for a future peer whose schema surface is real but whose
+declared capability stays `unavailable`. `SurfaceAbsent` remains the only
+form any currently-registered adapter (`MitateDB-api`) actually takes for
+C-17, since its in-process schema surface genuinely has no index/uniqueness
+parameter at all -- but the two conditions no longer differ in what forms
+they accept, only in which form the current registry happens to exercise.
 """
 from __future__ import annotations
 
