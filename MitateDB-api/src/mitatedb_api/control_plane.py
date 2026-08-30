@@ -1,0 +1,1259 @@
+"""`ControlPlaneService`: the control-plane semantics layer (design v1.2
+R-6/R-7, WP-4).
+
+Implements the 11 `/control/v1` operations' logic (contract `control_
+endpoints`, `spec/data-service-api.v1.json`) as plain Python methods, tested
+directly (WP-4's own scope: this module is never mounted behind an ASGI app
+in this WP -- see `control_http.py`'s own module docstring and `main.py`,
+neither of which reference this module at all yet; the flip is WP-5).
+
+Independent implementation (R-2's closing paragraph: no code sharing
+between peers; r2db-api's own `control_plane.py`/`control_main.py` were
+read only as a reference for the SHAPE of problems a control plane in this
+position has to solve -- the concrete architecture below is different in
+several ways: MitateDB has no `ControlAuthority`/`DataService` equivalent
+this layer must delegate to for its own pre-existing audit trail, so this
+module's own application/credential registries are self-contained rather
+than wrapping another class; the in-memory "same transaction" guarantee is
+an explicit shared undo-log token (`control_auth._InMemoryWork`) rather
+than a per-domain context manager; and control-plane's own writes to the
+`applications`/`credentials` tables go through THIS module's own dedicated
+registry classes, never through `auth.CredentialStore`/`credential_store_
+postgres.PostgresCredentialStore` (the application-plane's read-only view)
+-- a deliberate choice reported in the WP-4 completion notes: it keeps
+every existing, already-reviewed application-plane file untouched, at the
+cost of a second, control-plane-only writer for the same two tables. This
+mirrors R-4's own process-role separation (`mitatedbsvc_api` only ever
+reads; `mitatedbsvc_controlplane` is a completely separate role) at the
+Python-class level too.
+
+Design principle this module follows throughout (matching R-6's own
+architecture note in the design document): every processing-order,
+authentication/authorization, must_rotate-gate, bound, and audit decision
+lives HERE, in `ControlPlaneService` -- never in a backend (`InMemory
+ControlBackend`/`PostgresControlBackend` are dumb storage plumbing; they
+never refuse anything ControlPlaneService did not already decide to
+refuse) and never (in WP-5) in the HTTP binding layer.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass
+import hashlib
+import hmac
+import json
+import re
+import secrets
+import threading
+import time
+from typing import Any, Optional
+import uuid
+
+import psycopg
+from psycopg import sql
+
+from .control_audit import ControlAuditSink, insert_control_audit_row
+from .control_auth import ControlCredentialStore, ControlPrincipal, _InMemoryWork
+from .errors import (AuthenticationError, AuthenticationRequiredError,
+                     AuthorizationError, AuthorizationStateUnavailable,
+                     CapabilityError, ConflictError,
+                     DestructiveConfirmationRequired, FoundationError,
+                     NotFoundError, ResourceLimitError,
+                     StorageConfigurationError, ValidationError)
+from .identifiers import validate_identifier
+
+DEFAULT_SCHEMA = "mitatedb_registry"
+
+# Contract `control_plane.identifiers` (spec/data-service-api.v1.json):
+# deliberately narrower than `identifiers._IDENTIFIER`'s general 63-byte
+# rule -- an application_id becomes platform namespace material.
+_APPLICATION_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,32}$")
+
+_ISSUABLE_ROLES = ("runtime", "developer", "control")
+
+
+def _new_request_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _new_credential_id() -> str:
+    return "crd_" + secrets.token_hex(12)
+
+
+def _new_secret() -> str:
+    return secrets.token_urlsafe(32)
+
+
+# ===========================================================================
+# Bounds (R-6: 3 finite resource classes + the request_bytes byte bound the
+# control-discovery response also publishes from the very first commit that
+# mounts anything, m-10 -- WP-4 never mounts an HTTP app, but the SERVICE
+# layer's own `control_capabilities()` result already carries this key so
+# WP-5's mount does not have to retrofit it).
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class ControlPlaneLimits:
+    """R-6 numeric constraints (WP-0 M-5): `applications`/`credentials_per_
+    application`/`control_requests_per_minute` are each capped at 200
+    (`_MAX_EXERCISABLE_LIMIT`), and `control_requests_per_minute` must
+    exceed `applications + 2*credentials_per_application + 67` (the
+    headroom+margin inequality a C-14 vector-5-style position-arithmetic
+    test needs room to walk up to a limit without the rate window itself
+    becoming the first bound hit). `request_bytes` is a separate, much
+    larger byte bound (unrelated to the ≤200 constraint) declared for
+    parity with R-6's "request_bytes を最初から宣言する" instruction.
+    """
+
+    applications: int = 100
+    credentials_per_application: int = 5
+    control_requests_per_minute: int = 200
+    request_bytes: int = 65536
+
+    def __post_init__(self) -> None:
+        for name in ("applications", "credentials_per_application", "control_requests_per_minute"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or not (1 <= value <= 200):
+                raise ValueError(f"{name} must be an integer in [1, 200]")
+        if self.control_requests_per_minute <= self.applications + 2 * self.credentials_per_application + 67:
+            raise ValueError(
+                "control_requests_per_minute must exceed applications + 2*credentials_per_application + 67"
+            )
+        if not isinstance(self.request_bytes, int) or isinstance(self.request_bytes, bool) or self.request_bytes < 1:
+            raise ValueError("request_bytes must be a positive integer")
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "applications": self.applications,
+            "credentials_per_application": self.credentials_per_application,
+            "control_requests_per_minute": self.control_requests_per_minute,
+            "request_bytes": self.request_bytes,
+        }
+
+
+# ===========================================================================
+# In-memory registries (control-plane's own writer view of `applications`/
+# `credentials` -- see this module's own header for why these are NOT
+# `auth.CredentialStore`).
+# ===========================================================================
+
+
+class InMemoryApplicationRegistry:
+    def __init__(self) -> None:
+        self._apps: dict[str, bool] = {}
+        self._lock = threading.RLock()
+
+    def exists(self, application_id: str) -> bool:
+        with self._lock:
+            return application_id in self._apps
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._apps)
+
+    def list_all(self) -> list[tuple[str, bool]]:
+        with self._lock:
+            return list(self._apps.items())
+
+    def register(self, application_id: str, *, work: Optional[_InMemoryWork] = None) -> None:
+        with self._lock:
+            if application_id in self._apps:
+                raise ConflictError("application already exists")
+            self._apps[application_id] = True
+        if work is not None:
+            work.on_rollback(lambda: self._apps.pop(application_id, None))
+
+    def set_enabled(self, application_id: str, enabled: bool, *, work: Optional[_InMemoryWork] = None) -> None:
+        with self._lock:
+            if application_id not in self._apps:
+                raise NotFoundError("application not found")
+            previous = self._apps[application_id]
+            self._apps[application_id] = enabled
+        if work is not None:
+            work.on_rollback(lambda: self._apps.__setitem__(application_id, previous))
+
+
+@dataclass
+class _AppCredential:
+    credential_id: str
+    application_id: str
+    role: str
+    digest: bytes
+    enabled: bool = True
+    revoked: bool = False
+
+
+class InMemoryCredentialRegistry:
+    """Control-plane's own in-memory writer for application credentials.
+    Uses the SAME digest algorithm (HMAC-SHA256 with `MITATEDB_CREDENTIAL_
+    PEPPER`) as `auth.CredentialStore`, so a credential minted here is, in
+    principle, verifiable by that class too -- reconciling the two
+    representations into one shared registry is a WP-5 wiring concern
+    (flagged in the WP-4 completion report), out of scope here (WP-4 tests
+    this store directly, with no adapter wiring)."""
+
+    def __init__(self, pepper: str) -> None:
+        if not isinstance(pepper, str) or len(pepper) < 16:
+            raise ValueError("credential pepper must be supplied externally (>=16 characters)")
+        self._pepper = pepper.encode("utf-8")
+        self._credentials: dict[str, _AppCredential] = {}
+        self._lock = threading.RLock()
+
+    def _digest(self, secret) -> bytes:
+        if not isinstance(secret, str):
+            secret = ""
+        return hmac.new(self._pepper, secret.encode("utf-8"), hashlib.sha256).digest()
+
+    def get_state(self, credential_id: str) -> Optional[tuple[bool, bool]]:
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            return (item.enabled, item.revoked) if item is not None else None
+
+    def count_active_for_application(self, application_id: str) -> int:
+        with self._lock:
+            return sum(1 for item in self._credentials.values()
+                       if item.application_id == application_id and not item.revoked)
+
+    def list_all(self) -> list[tuple[str, str, str, bool, bool]]:
+        with self._lock:
+            return [(item.credential_id, item.application_id, item.role, item.enabled, item.revoked)
+                   for item in self._credentials.values()]
+
+    def issue(self, application_id: str, role: str, *, credential_id: Optional[str] = None,
+              secret: Optional[str] = None, work: Optional[_InMemoryWork] = None) -> tuple[str, str]:
+        credential_id = credential_id or _new_credential_id()
+        secret = secret or _new_secret()
+        with self._lock:
+            self._credentials[credential_id] = _AppCredential(
+                credential_id=credential_id, application_id=application_id, role=role, digest=self._digest(secret))
+        if work is not None:
+            work.on_rollback(lambda: self._credentials.pop(credential_id, None))
+        return credential_id, secret
+
+    def rotate(self, credential_id: str, *, secret: Optional[str] = None,
+               work: Optional[_InMemoryWork] = None) -> str:
+        secret = secret or _new_secret()
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            if item is None:
+                raise NotFoundError("credential not found")
+            previous = item.digest
+            item.digest = self._digest(secret)
+        if work is not None:
+            work.on_rollback(lambda: setattr(item, "digest", previous))
+        return secret
+
+    def set_state(self, credential_id: str, *, enabled: Optional[bool] = None, revoked: Optional[bool] = None,
+                  work: Optional[_InMemoryWork] = None) -> None:
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            if item is None:
+                raise NotFoundError("credential not found")
+            previous_enabled, previous_revoked = item.enabled, item.revoked
+            if enabled is not None:
+                item.enabled = enabled
+            if revoked is not None:
+                item.revoked = revoked
+        if work is not None:
+            def _undo() -> None:
+                item.enabled = previous_enabled
+                item.revoked = previous_revoked
+            work.on_rollback(_undo)
+
+
+# ===========================================================================
+# PostgreSQL registries -- direct SQL against `applications`/`credentials`
+# (migration 0002), using the `mitatedbsvc_controlplane` role. NEVER shares
+# code with `credential_store_postgres.py` (see this module's own header).
+# ===========================================================================
+
+
+def _execute(cursor, statement, params=()):
+    """R-2 choke point. The ONLY call to `cursor.execute` in this module."""
+    if not isinstance(statement, (sql.SQL, sql.Composed)):
+        raise TypeError("control_plane.py only executes psycopg.sql.Composed/SQL objects, never str")
+    cursor.execute(statement, params)
+    return cursor
+
+
+class _PostgresRegistryBase:
+    def __init__(self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+        validate_identifier(schema, "schema")
+        self._dsn = dsn
+        self._connect_timeout = connect_timeout
+
+    def _connect(self) -> "psycopg.Connection":
+        try:
+            return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        except psycopg.Error as exc:
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+
+    def _own_connection(self, work):
+        if work is not None:
+            return work, False
+        return self._connect(), True
+
+
+class PostgresApplicationRegistry(_PostgresRegistryBase):
+    def __init__(self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+        super().__init__(dsn, schema=schema, connect_timeout=connect_timeout)
+        self._table = sql.Identifier(schema, "applications")
+
+    def exists(self, application_id: str) -> bool:
+        conn = self._connect()
+        try:
+            statement = sql.SQL("SELECT 1 FROM {table} WHERE application_id = {ph}").format(
+                table=self._table, ph=sql.Placeholder())
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [application_id])
+                    row = cur.fetchone()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return row is not None
+
+    def count(self) -> int:
+        conn = self._connect()
+        try:
+            statement = sql.SQL("SELECT count(*) FROM {table}").format(table=self._table)
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement)
+                    row = cur.fetchone()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return int(row[0])
+
+    def list_all(self) -> list[tuple[str, bool]]:
+        conn = self._connect()
+        try:
+            statement = sql.SQL("SELECT application_id, enabled FROM {table} ORDER BY registered_at").format(table=self._table)
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement)
+                    rows = cur.fetchall()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return [(row[0], row[1]) for row in rows]
+
+    def register(self, application_id: str, *, work=None) -> None:
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL("INSERT INTO {table} (application_id) VALUES ({ph})").format(
+            table=self._table, ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, [application_id])
+            if owns:
+                conn.commit()
+        except psycopg.errors.UniqueViolation as exc:
+            if owns:
+                conn.rollback()
+            raise ConflictError("application already exists") from exc
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+
+    def set_enabled(self, application_id: str, enabled: bool, *, work=None) -> None:
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL(
+            "UPDATE {table} SET enabled = {ph} WHERE application_id = {id_ph} RETURNING application_id"
+        ).format(table=self._table, ph=sql.Placeholder(), id_ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, [enabled, application_id])
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("application not found")
+            if owns:
+                conn.commit()
+        except NotFoundError:
+            if owns:
+                conn.rollback()
+            raise
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+
+
+class PostgresCredentialRegistry(_PostgresRegistryBase):
+    def __init__(self, dsn: str, *, pepper: str, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+        super().__init__(dsn, schema=schema, connect_timeout=connect_timeout)
+        if not isinstance(pepper, str) or len(pepper) < 16:
+            raise ValueError("credential pepper must be supplied externally (>=16 characters)")
+        self._pepper = pepper.encode("utf-8")
+        self._table = sql.Identifier(schema, "credentials")
+
+    def _digest(self, secret) -> bytes:
+        if not isinstance(secret, str):
+            secret = ""
+        return hmac.new(self._pepper, secret.encode("utf-8"), hashlib.sha256).digest()
+
+    def get_state(self, credential_id: str) -> Optional[tuple[bool, bool]]:
+        conn = self._connect()
+        try:
+            statement = sql.SQL("SELECT enabled, revoked FROM {table} WHERE credential_id = {ph}").format(
+                table=self._table, ph=sql.Placeholder())
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [credential_id])
+                    row = cur.fetchone()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return (row[0], row[1]) if row is not None else None
+
+    def count_active_for_application(self, application_id: str) -> int:
+        conn = self._connect()
+        try:
+            statement = sql.SQL(
+                "SELECT count(*) FROM {table} WHERE application_id = {ph} AND NOT revoked"
+            ).format(table=self._table, ph=sql.Placeholder())
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [application_id])
+                    row = cur.fetchone()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return int(row[0])
+
+    def list_all(self) -> list[tuple[str, str, str, bool, bool]]:
+        conn = self._connect()
+        try:
+            statement = sql.SQL(
+                "SELECT credential_id, application_id, role, enabled, revoked FROM {table} ORDER BY issued_at"
+            ).format(table=self._table)
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement)
+                    rows = cur.fetchall()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return [tuple(row) for row in rows]
+
+    def issue(self, application_id: str, role: str, *, credential_id: Optional[str] = None,
+              secret: Optional[str] = None, work=None) -> tuple[str, str]:
+        credential_id = credential_id or _new_credential_id()
+        secret = secret or _new_secret()
+        digest = self._digest(secret)
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL(
+            "INSERT INTO {table} (credential_id, application_id, role, digest) "
+            "VALUES ({id_ph}, {app_ph}, {role_ph}, {digest_ph})"
+        ).format(table=self._table, id_ph=sql.Placeholder(), app_ph=sql.Placeholder(),
+                  role_ph=sql.Placeholder(), digest_ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, [credential_id, application_id, role, digest])
+            if owns:
+                conn.commit()
+        except psycopg.errors.ForeignKeyViolation as exc:
+            if owns:
+                conn.rollback()
+            raise NotFoundError("unknown application") from exc
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+        return credential_id, secret
+
+    def rotate(self, credential_id: str, *, secret: Optional[str] = None, work=None) -> str:
+        secret = secret or _new_secret()
+        digest = self._digest(secret)
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL(
+            "UPDATE {table} SET digest = {digest_ph} WHERE credential_id = {id_ph} RETURNING credential_id"
+        ).format(table=self._table, digest_ph=sql.Placeholder(), id_ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, [digest, credential_id])
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("credential not found")
+            if owns:
+                conn.commit()
+        except NotFoundError:
+            if owns:
+                conn.rollback()
+            raise
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+        return secret
+
+    def set_state(self, credential_id: str, *, enabled: Optional[bool] = None, revoked: Optional[bool] = None,
+                  work=None) -> None:
+        assignments = []
+        params: list[Any] = []
+        if enabled is not None:
+            assignments.append(sql.SQL("enabled = {}").format(sql.Placeholder()))
+            params.append(enabled)
+        if revoked is not None:
+            assignments.append(sql.SQL("revoked = {}").format(sql.Placeholder()))
+            params.append(revoked)
+        if not assignments:
+            return
+        params.append(credential_id)
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL("UPDATE {table} SET {assignments} WHERE credential_id = {id_ph} RETURNING credential_id").format(
+            table=self._table, assignments=sql.SQL(", ").join(assignments), id_ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, params)
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("credential not found")
+            if owns:
+                conn.commit()
+        except NotFoundError:
+            if owns:
+                conn.rollback()
+            raise
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+
+
+# ===========================================================================
+# Backends: dumb storage plumbing `ControlPlaneService` drives. Each bundles
+# an application registry + credential registry + control-credential store
+# + audit sink/inserter, plus one `unit_of_work()` spanning all four (the
+# R-6 same-transaction guarantee).
+# ===========================================================================
+
+
+class InMemoryControlBackend:
+    def __init__(self, *, app_pepper: str, control_pepper: str) -> None:
+        self._applications = InMemoryApplicationRegistry()
+        self._credentials = InMemoryCredentialRegistry(app_pepper)
+        self._control_credentials = ControlCredentialStore(control_pepper)
+        self._audit = ControlAuditSink()
+        self._lock = threading.RLock()
+
+    @property
+    def control_credential_store(self) -> ControlCredentialStore:
+        return self._control_credentials
+
+    @property
+    def audit_sink(self) -> ControlAuditSink:
+        return self._audit
+
+    @contextmanager
+    def unit_of_work(self):
+        with self._lock:
+            work = _InMemoryWork()
+            try:
+                yield work
+            except BaseException:
+                work.rollback()
+                raise
+
+    def application_exists(self, application_id: str) -> bool:
+        return self._applications.exists(application_id)
+
+    def applications_count(self) -> int:
+        return self._applications.count()
+
+    def list_applications(self):
+        return self._applications.list_all()
+
+    def register_application(self, application_id: str, *, work) -> None:
+        self._applications.register(application_id, work=work)
+
+    def set_application_enabled(self, application_id: str, enabled: bool, *, work) -> None:
+        self._applications.set_enabled(application_id, enabled, work=work)
+
+    def credential_state(self, credential_id: str):
+        return self._credentials.get_state(credential_id)
+
+    def credentials_active_count(self, application_id: str) -> int:
+        return self._credentials.count_active_for_application(application_id)
+
+    def list_credentials(self):
+        return self._credentials.list_all()
+
+    def issue_credential(self, application_id: str, role: str, *, credential_id: str, secret: str, work) -> None:
+        self._credentials.issue(application_id, role, credential_id=credential_id, secret=secret, work=work)
+
+    def rotate_credential(self, credential_id: str, secret: str, *, work) -> None:
+        self._credentials.rotate(credential_id, secret=secret, work=work)
+
+    def set_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        self._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=work)
+
+    def control_credential_state(self, credential_id: str):
+        return self._control_credentials.get_state(credential_id)
+
+    def list_control_credentials(self):
+        return self._control_credentials.list_all()
+
+    def control_credentials_locked(self, work):
+        return self._control_credentials.locked_for_update(work)
+
+    def rotate_control_credential(self, credential_id: str, secret: str, *, work) -> None:
+        self._control_credentials.rotate(credential_id, secret=secret, work=work)
+
+    def set_control_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        if enabled is not None:
+            (self._control_credentials.enable if enabled else self._control_credentials.disable)(credential_id, work=work)
+        if revoked:
+            self._control_credentials.revoke(credential_id, work=work)
+
+    def authenticate_control(self, credential_id, secret) -> ControlPrincipal:
+        return self._control_credentials.authenticate(credential_id, secret)
+
+    def append_audit(self, *, work=None, **fields):
+        return self._audit.append(work=work, **fields)
+
+
+class PostgresControlBackend:
+    def __init__(self, *, applications: PostgresApplicationRegistry, credentials: PostgresCredentialRegistry,
+                 control_credentials, audit_schema: str, dsn: str, connect_timeout: int = 5) -> None:
+        self._applications = applications
+        self._credentials = credentials
+        self._control_credentials = control_credentials
+        self._audit_schema = audit_schema
+        self._dsn = dsn
+        self._connect_timeout = connect_timeout
+
+    @property
+    def control_credential_store(self):
+        return self._control_credentials
+
+    @contextmanager
+    def unit_of_work(self):
+        try:
+            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+        except psycopg.Error as exc:
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def application_exists(self, application_id: str) -> bool:
+        return self._applications.exists(application_id)
+
+    def applications_count(self) -> int:
+        return self._applications.count()
+
+    def list_applications(self):
+        return self._applications.list_all()
+
+    def register_application(self, application_id: str, *, work) -> None:
+        self._applications.register(application_id, work=work)
+
+    def set_application_enabled(self, application_id: str, enabled: bool, *, work) -> None:
+        self._applications.set_enabled(application_id, enabled, work=work)
+
+    def credential_state(self, credential_id: str):
+        return self._credentials.get_state(credential_id)
+
+    def credentials_active_count(self, application_id: str) -> int:
+        return self._credentials.count_active_for_application(application_id)
+
+    def list_credentials(self):
+        return self._credentials.list_all()
+
+    def issue_credential(self, application_id: str, role: str, *, credential_id: str, secret: str, work) -> None:
+        self._credentials.issue(application_id, role, credential_id=credential_id, secret=secret, work=work)
+
+    def rotate_credential(self, credential_id: str, secret: str, *, work) -> None:
+        self._credentials.rotate(credential_id, secret=secret, work=work)
+
+    def set_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        self._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=work)
+
+    def control_credential_state(self, credential_id: str):
+        return self._control_credentials.get_state(credential_id)
+
+    def list_control_credentials(self):
+        return self._control_credentials.list_all()
+
+    def control_credentials_locked(self, work):
+        return self._control_credentials.locked_for_update(work)
+
+    def rotate_control_credential(self, credential_id: str, secret: str, *, work) -> None:
+        self._control_credentials.rotate(credential_id, secret=secret, work=work)
+
+    def set_control_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        if enabled is not None:
+            (self._control_credentials.enable if enabled else self._control_credentials.disable)(credential_id, work=work)
+        if revoked:
+            self._control_credentials.revoke(credential_id, work=work)
+
+    def authenticate_control(self, credential_id, secret) -> ControlPrincipal:
+        return self._control_credentials.authenticate(credential_id, secret)
+
+    def append_audit(self, *, work, **fields):
+        return insert_control_audit_row(work, self._audit_schema, **fields)
+
+
+# ===========================================================================
+# Declare-and-echo phrases + declarations (contract 1.2.0 `destructive_
+# confirmation`).
+# ===========================================================================
+
+
+def _revoke_last_control_credential_phrase(credential_id: str) -> str:
+    return f"REVOKE control_credential {credential_id} @last_active=true"
+
+
+def _reset_confirmation_phrase(active_credential_ids: list[str]) -> str:
+    """State-fingerprinted (phrase_construction rule): the digest reflects
+    exactly which control credentials are currently active, so any change
+    to that set (another concurrent revoke/rotate/issue -- though nothing
+    in this codebase issues a control credential in-band, R-6's own
+    `deny_role_control`) invalidates a previously-obtained phrase."""
+    canonical = json.dumps(sorted(active_credential_ids), separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"RESET control_credentials @active={digest}"
+
+
+_REVOKE_LAST_CONSEQUENCE = (
+    "The last remaining active control credential is revoked; every in-band control-plane "
+    "credential becomes unusable until the out-of-band reset ceremony runs."
+)
+_REVOKE_LAST_REVERSIBLE_ALTERNATIVE = (
+    "disable_credential reverses (this specific revoke is terminal, a disable is not) -- but "
+    "re-enabling the last disabled control credential still requires its own out-of-band "
+    "break-glass step, so disabling only defers needing one, it does not avoid it."
+)
+_REVOKE_LAST_RECOVERY = "The out-of-band operator reset ceremony issues a fresh control credential."
+
+_RESET_CONSEQUENCE = (
+    "Every existing control credential -- including any already-disabled or already-revoked "
+    "row -- is revoked; exactly one new must-rotate control credential is issued in its place."
+)
+
+
+# ===========================================================================
+# ControlPlaneService
+# ===========================================================================
+
+
+class ControlPlaneService:
+    """Evaluation order (design R-6, fixed at every one of the 9 methods
+    below): rate-limit (pre-authentication) -> authenticate -> must_rotate
+    gate (authorization) -> [role=control capability denial, issue_
+    credential only] -> shape validation of the remaining request fields ->
+    target-existence resolution -> bounds -> [destructive-confirmation gate,
+    revoke_credential's last-active-control-credential case only] -> execute
+    + same-transaction audit.
+    """
+
+    def __init__(self, backend, *, limits: Optional[ControlPlaneLimits] = None, clock=None) -> None:
+        self._backend = backend
+        self._limits = limits or ControlPlaneLimits()
+        self._clock = clock or time.monotonic
+        self._rate_lock = threading.Lock()
+        self._rate_window: list[float] = []
+
+    # ---- shared machinery -------------------------------------------------
+
+    def check_rate(self) -> None:
+        """Public wrapper around `_check_rate` (charges exactly one token,
+        or raises `LIMIT_EXCEEDED`). Exists so an HTTP binding layer
+        (`control_http.py`) can charge the rate window BEFORE it does
+        anything else -- including reading/shape-checking a request body --
+        for the endpoints whose request fields are extracted from the body
+        before the corresponding service method is even called (`register_
+        application`/`issue_credential`/`revoke_credential`). A caller that
+        calls `check_rate()` itself must then pass `rate_precharged=True` to
+        the operation method it goes on to call, or the window is charged
+        twice for one logical request."""
+        self._check_rate()
+
+    def _check_rate(self) -> None:
+        """R-6 rate-limit, pre-authentication (design's own exemption (i):
+        never durably audited -- the actor is not yet known and auditing an
+        unauthenticated flood would itself be an amplification vector)."""
+        now = self._clock()
+        with self._rate_lock:
+            self._rate_window[:] = [stamp for stamp in self._rate_window if now - stamp < 60]
+            if len(self._rate_window) >= self._limits.control_requests_per_minute:
+                raise ResourceLimitError(
+                    "control-plane request rate limit exceeded", limit_class="control_requests_per_minute")
+            self._rate_window.append(now)
+
+    def _deny_audit(self, *, event_class: str, operation: str, target_kind: Optional[str] = None,
+                     request_id: Optional[str], actor_id: Optional[str] = None, actor_type: Optional[str] = None,
+                     role: Optional[str] = None, application_id: Optional[str] = None, reason_code: str) -> None:
+        """R-6: every denial (except the two exemptions -- rate-limit
+        pre-auth, and `AUTH_STATE_UNAVAILABLE`, neither of which calls this)
+        is durably recorded in its OWN transaction before the denial itself
+        is raised by the caller. If the durable write itself fails, the
+        failure is re-raised as a safe `FoundationError` (never a raw
+        exception) so SI-10 holds even when a test injects an audit fault
+        here."""
+        try:
+            with self._backend.unit_of_work() as work:
+                self._backend.append_audit(
+                    work=work, event_class=event_class, request_id=request_id, application_id=application_id,
+                    actor_type=actor_type, actor_id=actor_id, role=role, operation=operation,
+                    target_kind=target_kind, outcome="deny", reason_code=reason_code,
+                )
+        except FoundationError:
+            raise
+        except Exception as exc:
+            raise StorageConfigurationError("the denial could not be durably recorded") from exc
+
+    def _authenticate(self, credential_id: Optional[str], secret: Optional[str], *, request_id: str) -> ControlPrincipal:
+        if credential_id is None or secret is None:
+            self._deny_audit(event_class="authentication_denial", operation="control_authenticate",
+                             target_kind="control_credential", request_id=request_id, reason_code="AUTH_REQUIRED")
+            raise AuthenticationRequiredError("authentication is required")
+        try:
+            return self._backend.authenticate_control(credential_id, secret)
+        except AuthorizationStateUnavailable:
+            # Design exemption (ii): the store itself is unreachable, so a
+            # durable audit write is also impossible -- never attempted.
+            raise
+        except AuthenticationError:
+            self._deny_audit(event_class="authentication_denial", operation="control_authenticate",
+                             target_kind="control_credential", request_id=request_id, reason_code="AUTH_INVALID")
+            raise
+
+    def _gate_must_rotate(self, principal: ControlPrincipal, operation: str, *, request_id: str,
+                          self_rotate: bool = False) -> None:
+        """Allow-list (never a deny-list, design's own explicit warning):
+        only `control_capabilities` and a self-targeted `rotate_credential`
+        pass while `must_rotate` is true. `FORBIDDEN` (WP-0 m-4: C-15
+        requires this exact code, not `CAPABILITY_UNSUPPORTED`)."""
+        if not principal.must_rotate:
+            return
+        if operation == "control_capabilities" or (operation == "rotate_credential" and self_rotate):
+            return
+        self._deny_audit(event_class="authorization_denial", operation=operation, target_kind="control_credential",
+                         request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
+                         role="control", reason_code="FORBIDDEN")
+        raise AuthorizationError("this control credential must be rotated before performing this operation")
+
+    def _deny_role_control(self, principal: ControlPrincipal, application_id: Any, *, request_id: str) -> None:
+        self._deny_audit(event_class="capability_denial", operation="issue_credential", target_kind="credential",
+                         request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
+                         role="control", application_id=application_id if isinstance(application_id, str) else None,
+                         reason_code="CAPABILITY_UNSUPPORTED")
+        raise CapabilityError(
+            "issuing a role=control credential in-band is not supported; control credentials are "
+            "created only by the operator bootstrap/reset ceremony"
+        )
+
+    def _validate_application_id(self, application_id: Any) -> None:
+        if not isinstance(application_id, str) or not _APPLICATION_ID_PATTERN.fullmatch(application_id):
+            raise ValidationError("application_id must match ^[a-z][a-z0-9_]{0,32}$")
+
+    def _locate_credential(self, credential_id: Any) -> tuple[Optional[str], Optional[tuple]]:
+        if not isinstance(credential_id, str):
+            return None, None
+        state = self._backend.credential_state(credential_id)
+        if state is not None:
+            return "application", state
+        state = self._backend.control_credential_state(credential_id)
+        if state is not None:
+            return "control", state
+        return None, None
+
+    # ---- public operations --------------------------------------------------
+
+    def control_capabilities(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "control_capabilities", request_id=request_id)
+        limits = self._limits.as_dict()
+        limit_enforcement = {name: "enforced" for name in limits}
+        # R-7: the HTTP-layer enforcement fact (`control_http.py`, WP-5
+        # mount) is added on top of this service-layer default -- this
+        # process alone cannot enforce a byte bound with no HTTP boundary.
+        limit_enforcement["request_bytes"] = "unavailable"
+        return {
+            "contract_version": "1.2.0",
+            "capabilities": {
+                "control_plane": {"status": "enabled"},
+                "audit_query": {"status": "unavailable"},
+            },
+            "limits": limits,
+            "limit_enforcement": limit_enforcement,
+            "authorization_propagation_bound_ms": 0,
+            "role": "control",
+        }
+
+    def register_application(self, credential_id, secret, application_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "register_application", request_id=request_id)
+        self._validate_application_id(application_id)
+        if self._backend.application_exists(application_id):
+            raise ConflictError("application already exists")
+        if self._backend.applications_count() >= self._limits.applications:
+            raise ResourceLimitError("application registration limit exceeded", limit_class="applications")
+
+        with self._backend.unit_of_work() as work:
+            self._backend.register_application(application_id, work=work)
+            self._backend.append_audit(
+                work=work, event_class="application_lifecycle", request_id=request_id, application_id=application_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation="register_application", target_kind="application", outcome="allow", reason_code=None,
+            )
+        return {"application_id": application_id, "enabled": True}
+
+    def list_applications(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "list_applications", request_id=request_id)
+        return {"applications": [{"application_id": aid, "enabled": enabled}
+                                  for aid, enabled in self._backend.list_applications()]}
+
+    def set_application_enabled(self, credential_id, secret, application_id, enabled, *,
+                                 request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        if not isinstance(enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+        operation = "enable_application" if enabled else "disable_application"
+        self._gate_must_rotate(principal, operation, request_id=request_id)
+        if not self._backend.application_exists(application_id):
+            raise NotFoundError("application was not found")
+
+        with self._backend.unit_of_work() as work:
+            self._backend.set_application_enabled(application_id, enabled, work=work)
+            self._backend.append_audit(
+                work=work, event_class="application_lifecycle", request_id=request_id, application_id=application_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation=operation, target_kind="application", outcome="allow", reason_code=None,
+            )
+        return {"application_id": application_id, "enabled": enabled}
+
+    def issue_credential(self, credential_id, secret, application_id, role, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "issue_credential", request_id=request_id)
+        if role not in _ISSUABLE_ROLES:
+            raise ValidationError("role must be one of runtime, developer, control")
+        self._validate_application_id(application_id)
+        # Capability denial BEFORE target resolution (C-14 vector 3: a
+        # role=control request is refused uniformly regardless of whether
+        # the named application exists, is disabled, or is at its limit).
+        if role == "control":
+            self._deny_role_control(principal, application_id, request_id=request_id)
+        if not self._backend.application_exists(application_id):
+            raise NotFoundError("application was not found")
+        if self._backend.credentials_active_count(application_id) >= self._limits.credentials_per_application:
+            raise ResourceLimitError(
+                "credentials-per-application limit exceeded", limit_class="credentials_per_application")
+
+        new_credential_id = _new_credential_id()
+        new_secret = _new_secret()
+        with self._backend.unit_of_work() as work:
+            self._backend.issue_credential(application_id, role, credential_id=new_credential_id, secret=new_secret, work=work)
+            self._backend.append_audit(
+                work=work, event_class="credential_lifecycle", request_id=request_id, application_id=application_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation="issue_credential", target_kind="credential", outcome="allow", reason_code=None,
+            )
+        return {"credential_id": new_credential_id, "application_id": application_id, "role": role, "secret": new_secret}
+
+    def list_credentials(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "list_credentials", request_id=request_id)
+        rows: list[dict] = []
+        for cid, app_id, role, enabled, revoked in self._backend.list_credentials():
+            rows.append({"credential_id": cid, "application_id": app_id, "role": role, "enabled": enabled, "revoked": revoked})
+        for cid, enabled, revoked in self._backend.list_control_credentials():
+            # No `application_id` key at all, and `must_rotate` is never
+            # included (contract `CredentialsResult` item has neither).
+            rows.append({"credential_id": cid, "role": "control", "enabled": enabled, "revoked": revoked})
+        return {"credentials": rows}
+
+    def rotate_credential(self, credential_id, secret, target_credential_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self_rotate = isinstance(target_credential_id, str) and target_credential_id == principal.credential_id
+        self._gate_must_rotate(principal, "rotate_credential", request_id=request_id, self_rotate=self_rotate)
+        kind, state = self._locate_credential(target_credential_id)
+        if kind is None:
+            raise NotFoundError("credential was not found")
+        if state[1]:  # revoked
+            raise ValidationError("a revoked credential cannot be rotated")
+        new_secret = _new_secret()
+
+        if kind == "application":
+            with self._backend.unit_of_work() as work:
+                self._backend.rotate_credential(target_credential_id, new_secret, work=work)
+                self._backend.append_audit(
+                    work=work, event_class="credential_lifecycle", request_id=request_id,
+                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    operation="rotate_credential", target_kind="credential", outcome="allow", reason_code=None,
+                )
+            return {"credential_id": target_credential_id, "secret": new_secret}
+
+        with self._backend.unit_of_work() as work:
+            self._backend.rotate_control_credential(target_credential_id, new_secret, work=work)
+            self._backend.append_audit(
+                work=work, event_class="control_credential_lifecycle", request_id=request_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation="rotate_credential", target_kind="control_credential", outcome="allow", reason_code=None,
+            )
+        return {"credential_id": target_credential_id, "secret": new_secret}
+
+    def revoke_credential(self, credential_id, secret, target_credential_id, *, destructive=None, confirmation=None,
+                          request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._gate_must_rotate(principal, "revoke_credential", request_id=request_id)
+        # Shape-validate `destructive`/`confirmation` unconditionally
+        # (contract: these fields are ordinary, schema-validated optional
+        # fields regardless of whether this particular revoke ever meets
+        # the gate condition below).
+        if destructive is not None and not isinstance(destructive, bool):
+            raise ValidationError("destructive must be a boolean")
+        if confirmation is not None and not isinstance(confirmation, str):
+            raise ValidationError("confirmation must be a string")
+        kind, state = self._locate_credential(target_credential_id)
+        if kind is None:
+            raise NotFoundError("credential was not found")
+
+        if kind == "application":
+            # Contract `non_destructive_requests`: an application
+            # credential's revocation is never gated.
+            with self._backend.unit_of_work() as work:
+                self._backend.set_credential_state(target_credential_id, revoked=True, work=work)
+                self._backend.append_audit(
+                    work=work, event_class="credential_lifecycle", request_id=request_id,
+                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    operation="revoke_credential", target_kind="credential", outcome="allow", reason_code=None,
+                )
+            return {"credential_id": target_credential_id, "enabled": state[0], "revoked": True}
+
+        with self._backend.unit_of_work() as work:
+            rows = self._backend.control_credentials_locked(work)
+            matching = next((row for row in rows if row[0] == target_credential_id), None)
+            if matching is None:
+                raise NotFoundError("credential was not found")
+            _cid, enabled_now, revoked_now = matching
+            active_ids = [row[0] for row in rows if row[1] and not row[2]]
+            if len(active_ids) == 1 and active_ids[0] == target_credential_id:
+                phrase = _revoke_last_control_credential_phrase(target_credential_id)
+                if destructive is not True or confirmation != phrase:
+                    self._deny_audit(
+                        event_class="control_credential_lifecycle", operation="revoke_credential",
+                        target_kind="control_credential", request_id=request_id, actor_id=principal.credential_id,
+                        actor_type="control_credential", role="control",
+                        reason_code="DESTRUCTIVE_CONFIRMATION_REQUIRED",
+                    )
+                    raise DestructiveConfirmationRequired(
+                        "revoking the last remaining active control credential requires the current "
+                        "confirmation phrase",
+                        details={
+                            "required_confirmation": phrase,
+                            "consequence": _REVOKE_LAST_CONSEQUENCE,
+                            "reversible_alternative": _REVOKE_LAST_REVERSIBLE_ALTERNATIVE,
+                            "recovery": _REVOKE_LAST_RECOVERY,
+                            "audited": True,
+                        },
+                    )
+            self._backend.set_control_credential_state(target_credential_id, revoked=True, work=work)
+            self._backend.append_audit(
+                work=work, event_class="control_credential_lifecycle", request_id=request_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation="revoke_credential", target_kind="control_credential", outcome="allow", reason_code=None,
+            )
+        return {"credential_id": target_credential_id, "enabled": enabled_now, "revoked": True}
+
+    def set_credential_enabled(self, credential_id, secret, target_credential_id, enabled, *,
+                               request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+        request_id = request_id or _new_request_id()
+        if not rate_precharged:
+            self._check_rate()
+        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        if not isinstance(enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+        operation = "enable_credential" if enabled else "disable_credential"
+        self._gate_must_rotate(principal, operation, request_id=request_id)
+        kind, state = self._locate_credential(target_credential_id)
+        if kind is None:
+            raise NotFoundError("credential was not found")
+
+        if kind == "application":
+            with self._backend.unit_of_work() as work:
+                self._backend.set_credential_state(target_credential_id, enabled=enabled, work=work)
+                self._backend.append_audit(
+                    work=work, event_class="credential_lifecycle", request_id=request_id,
+                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    operation=operation, target_kind="credential", outcome="allow", reason_code=None,
+                )
+            return {"credential_id": target_credential_id, "enabled": enabled, "revoked": state[1]}
+
+        with self._backend.unit_of_work() as work:
+            self._backend.set_control_credential_state(target_credential_id, enabled=enabled, work=work)
+            self._backend.append_audit(
+                work=work, event_class="control_credential_lifecycle", request_id=request_id,
+                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                operation=operation, target_kind="control_credential", outcome="allow", reason_code=None,
+            )
+        return {"credential_id": target_credential_id, "enabled": enabled, "revoked": state[1]}
+
+
+# ===========================================================================
+# Ceremony core (design R-6: reusable product functions -- a future WP-5
+# CLI entry point and, separately, an in-process adapter both call this SAME
+# code; WP-4 builds no CLI at all, this module is imported and driven only
+# by direct tests).
+# ===========================================================================
+
+
+def bootstrap_control_credential(control_credentials, audit_append, *, work, credential_id: Optional[str] = None,
+                                  secret: Optional[str] = None, request_id: Optional[str] = None,
+                                  actor_type: str = "operator_cli") -> tuple[str, str]:
+    """Contract `control_plane.bootstrap`: refuses (`CONFLICT`) when ANY
+    control-credential row exists, including a fully-revoked one ("while a
+    control credential exists", not "while an unrevoked one exists").
+    Issues one must_rotate credential and appends the canonical audit event
+    inside the SAME `work` the caller already opened."""
+    if control_credentials.has_any(include_revoked=True, work=work):
+        raise ConflictError("a control credential already exists; bootstrap runs at most once -- use reset to recover")
+    credential_id, secret = control_credentials.issue(
+        must_rotate=True, credential_id=credential_id, secret=secret, work=work)
+    audit_append(
+        work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
+        actor_type=actor_type, actor_id=None, role=None, operation="bootstrap_control_credential",
+        target_kind="control_credential", outcome="allow", reason_code=None,
+    )
+    return credential_id, secret
+
+
+def reset_control_credentials(control_credentials, audit_append, *, work, destructive, confirmation,
+                              credential_id: Optional[str] = None, secret: Optional[str] = None,
+                              request_id: Optional[str] = None, actor_type: str = "operator_cli") -> tuple[str, str]:
+    """Contract `control_plane.reset`: revokes EVERY existing control
+    credential (including already-disabled/already-revoked rows) and mints
+    exactly one new must_rotate credential, atomically (`work`). Design R-6:
+    reset is one of the CLI's own irreversible subcommands and is therefore
+    gated by declare-and-echo -- the required phrase is a digest over the
+    currently-active credential id set (`_reset_confirmation_phrase`), so a
+    denial's own `required_confirmation` goes stale the moment that set
+    changes again."""
+    if not isinstance(destructive, bool):
+        raise ValidationError("destructive must be a boolean")
+    if confirmation is not None and not isinstance(confirmation, str):
+        raise ValidationError("confirmation must be a string")
+    rows = control_credentials.locked_for_update(work)
+    active_ids = [row[0] for row in rows if row[1] and not row[2]]
+    phrase = _reset_confirmation_phrase(active_ids)
+    if destructive is not True or confirmation != phrase:
+        raise DestructiveConfirmationRequired(
+            "reset requires the current confirmation phrase",
+            details={
+                "required_confirmation": phrase,
+                "consequence": _RESET_CONSEQUENCE,
+                "reversible_alternative": None,
+                "recovery": None,
+            },
+        )
+    credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
+    secret = secret or _new_secret()
+    control_credentials.revoke_all(work=work)
+    control_credentials.issue(must_rotate=True, credential_id=credential_id, secret=secret, work=work)
+    audit_append(
+        work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
+        actor_type=actor_type, actor_id=None, role=None, operation="reset_control_credentials",
+        target_kind="control_credential", outcome="allow", reason_code=None,
+    )
+    return credential_id, secret
+
+
+__all__ = [
+    "ControlPlaneLimits",
+    "ControlPlaneService",
+    "InMemoryApplicationRegistry",
+    "InMemoryCredentialRegistry",
+    "InMemoryControlBackend",
+    "PostgresApplicationRegistry",
+    "PostgresCredentialRegistry",
+    "PostgresControlBackend",
+    "bootstrap_control_credential",
+    "reset_control_credentials",
+]

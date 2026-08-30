@@ -231,4 +231,91 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     return create_app(service, request_bytes_limit=config.max_request_bytes, lifespan=_lifespan)
 
 
+def build_control_service(env: Mapping[str, str] | None = None):
+    """WP-4 (design v1.2 §3 WP-4 row): a control-plane composition
+    factory, prepared but never called by `build_app`/the module-level
+    `app` below and never referenced from `create_app`'s own route table --
+    the control surface is not mounted in this WP at all (R-7: mounting
+    `/control/v1` is a single WP-5 commit alongside the capability-
+    declaration flip from `unavailable` to `enabled`; doing so here, even
+    dormantly wired but unreachable, would risk exactly the "form (b)"
+    authenticity gap R-7 forbids). This function exists purely so that
+    WP-5's own mount is "call this, hand its result to `control_http.
+    create_control_app`, add it to the served routes" -- not new
+    composition code written under time pressure at flip time. Nothing in
+    this module calls it; `test_main.py::test_main_composition_root_
+    mounts_no_control_v1_route` fixes that as a regression test on `app`
+    itself (the route table), not on whether this function exists.
+
+    Reuses this module's own `assert_pepper_separation` call (the SAME
+    check `build_app` above already performs) -- an operator who
+    misconfigures both peppers identically must be refused here exactly as
+    loudly as on the application-plane side.
+
+    Environment variable contract (used only by THIS function, never by
+    `build_app`):
+
+        MITATEDB_CREDENTIAL_PEPPER          required (shared with build_app)
+        MITATEDB_CONTROL_CREDENTIAL_PEPPER  required (optional for build_app;
+                                             mandatory here -- the control
+                                             plane cannot exist without it)
+        MITATEDB_CONTROLPLANE_DSN           required -- `mitatedbsvc_
+                                             controlplane` role DSN against
+                                             `mitatedb_platform`
+        MITATEDB_PLATFORM_SCHEMA            optional, default
+                                             `credential_store_postgres.
+                                             DEFAULT_SCHEMA` (same knob
+                                             `build_app` reads)
+        MITATEDB_CONTROL_APPLICATIONS_LIMIT,
+        MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT,
+        MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT,
+        MITATEDB_CONTROL_REQUEST_BYTES_LIMIT
+                                             optional -- see `control_plane.
+                                             ControlPlaneLimits`' own
+                                             defaults when unset.
+    """
+    env = env if env is not None else os.environ
+
+    # Deferred imports (WP-4 module docstring note, mirrored from `build_
+    # app`'s own deferred `assert_pepper_separation` import above): keeps
+    # every control-plane module's own import cost paid only by a caller
+    # that actually invokes this factory, never by importing `main.py`
+    # itself (which every conformance/test run of the APPLICATION plane
+    # already does).
+    from .control_credential_store_postgres import PostgresControlCredentialStore
+    from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
+                                PostgresControlBackend, PostgresCredentialRegistry)
+    from .credential_store_postgres import assert_pepper_separation
+
+    app_pepper = _require(env, "MITATEDB_CREDENTIAL_PEPPER")
+    control_pepper = _require(env, "MITATEDB_CONTROL_CREDENTIAL_PEPPER")
+    assert_pepper_separation(app_pepper, control_pepper)
+
+    controlplane_dsn = _require(env, "MITATEDB_CONTROLPLANE_DSN")
+    schema = env.get("MITATEDB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
+
+    def _limit(name: str, default: int) -> int:
+        raw = env.get(name)
+        return int(raw) if raw else default
+
+    defaults = ControlPlaneLimits()
+    limits = ControlPlaneLimits(
+        applications=_limit("MITATEDB_CONTROL_APPLICATIONS_LIMIT", defaults.applications),
+        credentials_per_application=_limit(
+            "MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT", defaults.credentials_per_application),
+        control_requests_per_minute=_limit(
+            "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT", defaults.control_requests_per_minute),
+        request_bytes=_limit("MITATEDB_CONTROL_REQUEST_BYTES_LIMIT", defaults.request_bytes),
+    )
+
+    applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema)
+    credentials_registry = PostgresCredentialRegistry(controlplane_dsn, pepper=app_pepper, schema=schema)
+    control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema)
+    backend = PostgresControlBackend(
+        applications=applications, credentials=credentials_registry, control_credentials=control_credentials,
+        audit_schema=schema, dsn=controlplane_dsn,
+    )
+    return ControlPlaneService(backend, limits=limits)
+
+
 app = build_app()

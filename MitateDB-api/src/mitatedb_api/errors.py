@@ -14,6 +14,28 @@ class AuthenticationError(FoundationError):
     pass
 
 
+class AuthenticationRequiredError(AuthenticationError):
+    """WP-4 control-plane addition: raised when NO credential was presented
+    at all (contract ``AUTH_REQUIRED``), distinct from the base class' own
+    ``AUTH_INVALID`` meaning (a credential WAS presented but is wrong,
+    disabled, or revoked). A subclass of ``AuthenticationError`` (not a
+    sibling) so any existing ``isinstance(exc, AuthenticationError)`` check
+    elsewhere in this codebase still matches it -- classification order
+    matters wherever both are checked (``control_http.py``'s own
+    ``_CLASSIFY_ORDER`` checks this subclass first).
+
+    The application-plane HTTP layer (``http.py``) handles this same
+    missing-vs-invalid distinction structurally instead, with a local
+    ``_CredentialMissing`` exception raised *before* any session-layer
+    ``authenticate()`` call -- that layer never needs this class. The
+    control plane's own ``ControlPlaneService`` (``control_plane.py``)
+    accepts ``secret: Optional[str]`` directly on every public method and
+    is exercised by WP-4's own direct tests with no HTTP layer mounted at
+    all, so the missing-credential distinction has to live inside the
+    service layer itself here, not only at an HTTP adaptation boundary.
+    """
+
+
 class AuthorizationError(FoundationError):
     pass
 
