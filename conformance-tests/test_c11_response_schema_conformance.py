@@ -85,6 +85,18 @@ reporting requirement):
   corresponding test below fails loudly (never skips) -- this is currently
   unreachable in practice (r2db-api (http+postgres) always provides all six),
   but the failure path exists in case that ever regresses.
+
+  **WP-2.5 widening** (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+  R-8, D-H): the lookup below validates the real document from EVERY
+  registered adapter that exposes a given raw accessor, not merely the
+  first one found in registry order. Only one adapter provides these
+  accessors today, so this widening changes nothing about what is currently
+  exercised -- it exists so a future second provider (e.g.
+  `MitateDB-api-http`, phase 3 WP-3) is actually validated too, rather than
+  silently shadowed by whichever adapter the registry happens to list
+  first. Each provider is its own separate, individually-identified test
+  case (`pytest.mark.parametrize`, id = adapter name), so a schema defect
+  in a second provider's real document fails distinctly from the first's.
 - `AuditResult` has NO reverse-validation coverage anywhere in this suite:
   every registered implementation currently declares `audit_query`
   unavailable (`capability_status.defined.audit_query`), and no adapter (any
@@ -122,27 +134,56 @@ pytestmark = pytest.mark.condition("C-11")
 # --- shared helpers ---------------------------------------------------------
 
 
-def _find_adapter_with(method_name: str) -> tuple[str | None, Any, Callable | None]:
+def _find_all_adapters_with(method_name: str) -> list[tuple[str, Any, Callable]]:
     """Registry-wide (not fixture-parametrized) lookup for one of the
     optional, non-normative raw-accessor methods described in this module's
     docstring. Not every registered adapter provides these. Returns
-    `(name, adapter_obj, bound_method)`, or `(None, None, None)` if no
-    registered adapter currently does."""
-    for name, obj in registered_adapters().items():
-        method = getattr(obj, method_name, None)
-        if method is not None:
-            return name, obj, method
-    return None, None, None
+    `[(name, adapter_obj, bound_method), ...]` for EVERY registered adapter
+    that currently does, in registry order -- WP-2.5 widening
+    (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-8, D-H): earlier
+    revisions of this lookup returned only the first match, which meant a
+    second provider's real document was never actually validated by this
+    file at all. An empty list means no registered adapter currently
+    provides this accessor."""
+    return [
+        (name, obj, method)
+        for name, obj in registered_adapters().items()
+        if (method := getattr(obj, method_name, None)) is not None
+    ]
 
 
-def _require_adapter_with(method_name: str, schema_name: str) -> tuple[str, Any, Callable]:
-    """Like `_find_adapter_with`, but fails loudly (never skips) when no
-    registered adapter provides `method_name` (fix-round M-6): a silent skip
-    here would let the corresponding schema closure go entirely unverified
-    against any real response, which is exactly the "uncertainty silently
-    becomes permission" failure design principle 4
-    (`docs/design/CONFORMANCE_ADAPTER_V1.md`) forbids."""
-    name, obj, method = _find_adapter_with(method_name)
+def _require_params_for(method_name: str, schema_name: str) -> list[tuple[str, Any, Callable]]:
+    """Parametrize-list builder for `_find_all_adapters_with`: one entry per
+    real provider, or -- if none exists -- a single `(None, None, None)`
+    sentinel entry so the resulting test still runs (and fails loudly,
+    id="NO-PROVIDER") instead of collecting a `pytest.mark.parametrize`
+    list of length 0. WP-2.5 review m-2 correction: an empty parametrize
+    list does not vanish from the run silently -- measured directly,
+    pytest instead reports it as a SKIPPED test (`test_a[NOTSET] SKIPPED`
+    for a single call site; the four call sites below that use this
+    builder would each report their own SKIPPED this way, four total). But
+    this repository's own discipline treats skip as fail (design principle
+    4, `docs/design/CONFORMANCE_ADAPTER_V1.md`: "skip is silent permission
+    of the unknown") -- so a bare empty-list parametrize would still be the
+    exact failure mode fix-round M-6 already closed for the single-adapter
+    lookup this replaces, just re-surfacing as SKIPPED instead of a passing
+    green. The sentinel exists specifically to convert that SKIPPED into an
+    explicit, loud `AssertionError` instead (`_require_real_provider`,
+    below). `schema_name` is carried on the sentinel via the test body's
+    own assertion message, not this builder, so this stays a small,
+    adapter-agnostic helper reusable by every accessor below."""
+    found = _find_all_adapters_with(method_name)
+    return found if found else [(None, None, None)]
+
+
+def _ids_for(params: list[tuple[str, Any, Callable]]) -> list[str]:
+    return [name if name is not None else "NO-PROVIDER" for name, _obj, _method in params]
+
+
+def _require_real_provider(name: str | None, obj: Any, method_name: str, schema_name: str) -> None:
+    """Fails loudly (fix-round M-6, widened by WP-2.5's parametrize-based
+    vacuity guard above) when the `(None, None, None)` sentinel reached a
+    test body -- i.e. no registered adapter provides `method_name` at all."""
     if obj is None:
         raise AssertionError(
             f"no registered adapter exposes {method_name}() -- WP-1 reverse-validation for "
@@ -151,7 +192,6 @@ def _require_adapter_with(method_name: str, schema_name: str) -> tuple[str, Any,
             "a real document for every closed response schema (vacuity guard, mirrors "
             "test_c11_document_conformance.py's own registry-wide check for CatalogDocument)."
         )
-    return name, obj, method
 
 
 def _require_attr(obj: Any, adapter_name: str, method_name: str, sibling_method_name: str) -> Callable:
@@ -204,11 +244,78 @@ def _assert_surface_absent_claim(adapter_name: str, exc: SurfaceAbsent, public_s
     )
 
 
-# --- QueryResult / MutationResult / SchemaOperationResult (r2db http only) --
+# --- WP-2.5 review M-2: persistent regression guard for the widened -------
+# `_find_all_adapters_with` (only one real registered provider exists today,
+# so nothing above would ever notice this function silently regressing back
+# to first-match-only behavior -- independent review confirmed this by
+# re-injecting exactly that mutation and finding it survived the whole
+# registry). Two small, in-memory-only stub adapters (never registered in
+# registry.json, never presented to the shared `adapter`/`fx` fixtures) pin
+# the widened behavior directly against the real, unmutated function.
 
 
-def test_query_result_conforms_to_closed_schema():
-    name, obj, raw_query_result = _require_adapter_with("raw_query_result", "QueryResult")
+class _StubProviderWith:
+    """Test-only stand-in exposing the raw accessor under test."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def raw_query_result(self, session, entity, fields):
+        return {"items": []}
+
+
+class _StubProviderWithout:
+    """Test-only stand-in that deliberately does NOT expose the raw
+    accessor -- confirms the widened lookup still filters correctly rather
+    than just returning every registered adapter unconditionally."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def test_find_all_adapters_with_returns_every_provider_not_only_the_first(monkeypatch) -> None:
+    """Kills the "first-match 復帰" mutant (WP-2.5 review M-2): if
+    `_find_all_adapters_with` is ever reverted to first-match-only (e.g.
+    `return [next(...)]` or a stray `[:1]`), this test's two stub providers
+    -- both exposing `raw_query_result`, in registry order -- would collapse
+    from 2 results to 1, and the assertion below fails immediately. A third
+    stub without the accessor at all is interleaved to confirm the
+    filtering itself (not merely "return everything") still holds."""
+    stub_a = _StubProviderWith("StubAdapter-c11-provider-a")
+    stub_without = _StubProviderWithout("StubAdapter-c11-no-provider")
+    stub_b = _StubProviderWith("StubAdapter-c11-provider-b")
+    synthetic_registry = {
+        stub_a.name: stub_a,
+        stub_without.name: stub_without,
+        stub_b.name: stub_b,
+    }
+    monkeypatch.setattr(f"{__name__}.registered_adapters", lambda: dict(synthetic_registry))
+
+    found = _find_all_adapters_with("raw_query_result")
+    names = [name for name, _obj, _method in found]
+    assert names == [stub_a.name, stub_b.name], (
+        f"expected exactly the two stub providers of raw_query_result, in registry order, with the "
+        f"no-provider stub skipped -- got {names!r}"
+    )
+
+
+# --- QueryResult / MutationResult / SchemaOperationResult -------------------
+# WP-2.5: parametrized over EVERY registered adapter that provides the raw
+# accessor (registry order), not just the first one found -- see this
+# module's own docstring "WP-2.5 widening" note. Only `r2db-api
+# (http+postgres)` provides these today, so each list below currently has
+# exactly one entry (one test case, id = that adapter's name); a future
+# second provider gets its own separate, independently-failing test case
+# instead of being silently unvalidated.
+
+_QUERY_RESULT_PARAMS = _require_params_for("raw_query_result", "QueryResult")
+_MUTATION_RESULT_PARAMS = _require_params_for("raw_mutation_result", "MutationResult")
+_SCHEMA_OPERATION_RESULT_PARAMS = _require_params_for("raw_schema_operation_result", "SchemaOperationResult")
+
+
+@pytest.mark.parametrize("name,obj,raw_query_result", _QUERY_RESULT_PARAMS, ids=_ids_for(_QUERY_RESULT_PARAMS))
+def test_query_result_conforms_to_closed_schema(name, obj, raw_query_result):
+    _require_real_provider(name, obj, "raw_query_result", "QueryResult")
     contract = load_contract()
     schema = contract["schemas"]["QueryResult"]
     fx = obj.build_fixture()
@@ -216,8 +323,9 @@ def test_query_result_conforms_to_closed_schema():
     assert_valid(document, schema, contract, label=f"{name} raw_query_result()")
 
 
-def test_mutation_result_conforms_to_closed_schema():
-    name, obj, raw_mutation_result = _require_adapter_with("raw_mutation_result", "MutationResult")
+@pytest.mark.parametrize("name,obj,raw_mutation_result", _MUTATION_RESULT_PARAMS, ids=_ids_for(_MUTATION_RESULT_PARAMS))
+def test_mutation_result_conforms_to_closed_schema(name, obj, raw_mutation_result):
+    _require_real_provider(name, obj, "raw_mutation_result", "MutationResult")
     contract = load_contract()
     schema = contract["schemas"]["MutationResult"]
     fx = obj.build_fixture()
@@ -229,8 +337,11 @@ def test_mutation_result_conforms_to_closed_schema():
     assert_valid(document, schema, contract, label=f"{name} raw_mutation_result()")
 
 
-def test_schema_operation_result_conforms_to_closed_schema():
-    name, obj, raw_schema_operation_result = _require_adapter_with("raw_schema_operation_result", "SchemaOperationResult")
+@pytest.mark.parametrize(
+    "name,obj,raw_schema_operation_result", _SCHEMA_OPERATION_RESULT_PARAMS, ids=_ids_for(_SCHEMA_OPERATION_RESULT_PARAMS)
+)
+def test_schema_operation_result_conforms_to_closed_schema(name, obj, raw_schema_operation_result):
+    _require_real_provider(name, obj, "raw_schema_operation_result", "SchemaOperationResult")
     contract = load_contract()
     schema = contract["schemas"]["SchemaOperationResult"]
     fx = obj.build_fixture()
@@ -240,13 +351,18 @@ def test_schema_operation_result_conforms_to_closed_schema():
     assert_valid(document, schema, contract, label=f"{name} raw_schema_operation_result()")
 
 
-# --- ApplicationsResult / CredentialIssued / CredentialsResult (r2db http) --
+# --- ApplicationsResult / CredentialIssued / CredentialsResult -------------
+# WP-2.5: parametrized over every registered adapter providing
+# raw_list_applications, same widening as the block above.
+
+_APPLICATIONS_PARAMS = _require_params_for(
+    "raw_list_applications", "ApplicationsResult/CredentialIssued/CredentialsResult"
+)
 
 
-def test_control_plane_envelope_and_issuance_responses_conform_to_closed_schema():
-    name, obj, raw_list_applications = _require_adapter_with(
-        "raw_list_applications", "ApplicationsResult/CredentialIssued/CredentialsResult"
-    )
+@pytest.mark.parametrize("name,obj,raw_list_applications", _APPLICATIONS_PARAMS, ids=_ids_for(_APPLICATIONS_PARAMS))
+def test_control_plane_envelope_and_issuance_responses_conform_to_closed_schema(name, obj, raw_list_applications):
+    _require_real_provider(name, obj, "raw_list_applications", "ApplicationsResult/CredentialIssued/CredentialsResult")
     # fix-round n-1: `raw_issue_credential`/`raw_list_credentials` get the
     # same fail-loud treatment as `raw_list_applications` above, rather than
     # a bare, unguarded attribute access.

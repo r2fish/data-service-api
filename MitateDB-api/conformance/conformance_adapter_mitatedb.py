@@ -222,15 +222,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # below, confirmed against this peer's own real `__qualname__` rather
     # than guessed.
     #
-    # The other six callables (insert/read/update/delete/transact/
-    # create_collection) are exactly this peer's real application-facing
-    # schema/data dispatchers -- the same set `create_unique_index`'s own
-    # `SurfaceAbsent` above already uses as its `forbidden_parameters`
-    # evidence (C-17 precedent density, this file, lines ~443-476).
-    # `ControlPlane` (`self._control`, used only by the privileged
-    # out-of-band setup group above) is reachable only from this adapter's
-    # own setup code; no session object this peer ever hands to an
-    # application caller carries a reference to it (cell.py -- sessions
+    # The other nine callables (insert/read/update/delete/transact/
+    # capabilities/create_collection/create_entity/add_field -- WP-2.5
+    # review M-1 added capabilities/create_entity/add_field to this list,
+    # re-verified empirically against this now-ten-callable list to still
+    # report exactly this one violation) are exactly this peer's real
+    # application-facing schema/data dispatchers -- the same set
+    # `create_unique_index`'s own `SurfaceAbsent` above already uses as its
+    # `forbidden_parameters` evidence (C-17 precedent density, this file,
+    # lines ~443-476). `ControlPlane` (`self._control`, used only by the
+    # privileged out-of-band setup group above) is reachable only from this
+    # adapter's own setup code; no session object this peer ever hands to
+    # an application caller carries a reference to it (cell.py -- sessions
     # only ever hold a cell handle and a Principal).
     _CONTROL_EXEMPT_PARAMETERS: tuple[str, ...] = ("MitateDataService.open_session.credential_id",)
 
@@ -706,20 +709,20 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # debugging why a *specific* index attempt reported "absent" can
         # see what was actually asked for, not just that something was.
         #
-        # `ApplicationDeveloper.create_collection(name, fields)` is this
-        # peer's only schema-mutation call, and it has no parameter for
-        # indexes of any kind -- unlike `r2db-api`'s single generic
-        # `schema()` dispatcher, there is no entry point on this peer's
-        # public surface (confirmed by source inspection of cell.py: no
-        # other developer-facing method exists) that could even receive an
-        # index-creation request. Structurally absent, not denied -- see
-        # `SurfaceAbsent`'s docstring for why this must not become a
-        # fabricated `ConformanceDenial` instead.
+        # `ApplicationDeveloper`'s schema-mutation calls -- `create_
+        # collection`, and (P3-D1, WP-1) `create_entity`/`add_field` -- have
+        # no parameter for indexes of any kind -- unlike `r2db-api`'s single
+        # generic `schema()` dispatcher, there is no entry point on this
+        # peer's public surface (confirmed by source inspection of cell.py:
+        # no other developer-facing method exists either) that could even
+        # receive an index-creation request. Structurally absent, not
+        # denied -- see `SurfaceAbsent`'s docstring for why this must not
+        # become a fabricated `ConformanceDenial` instead.
         raise SurfaceAbsent(
             self.name, "create_unique_index",
-            "ApplicationDeveloper.create_collection has no index/uniqueness parameter, and no other "
-            f"schema-operation call exists on this peer (requested: entity={entity!r}, index={index!r}, "
-            f"fields={list(fields)!r})",
+            "ApplicationDeveloper's schema-mutation calls (create_collection/create_entity/add_field) have "
+            "no index/uniqueness parameter, and no other schema-operation call exists on this peer "
+            f"(requested: entity={entity!r}, index={index!r}, fields={list(fields)!r})",
             # This peer's entire public application-facing surface (the
             # same list `public_operation_callables()` below declares for
             # C-03's native-command-surface check), so a consumer can
@@ -734,23 +737,24 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     def drop_entity(self, session, entity: str, *, destructive: bool, confirmation: str | None) -> None:
         # port v1.6 (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-6
         # item 3): same structural-absence reasoning as `create_unique_
-        # index` immediately above -- `ApplicationDeveloper.create_
-        # collection(name, fields)` is this peer's only schema-mutation
-        # call, and it has no drop/destroy parameter of any kind. No other
-        # developer-facing method exists on this peer's public surface
-        # (confirmed by source inspection of cell.py) that could even
-        # receive a destructive drop request, so this is a structural
-        # absence, not a denial this adapter observed from a real call --
-        # exactly the honest form `SurfaceAbsent`'s own docstring requires,
-        # not a fabricated `ConformanceDenial`. `destructive`/`confirmation`
-        # are accepted only to match this ABC method's signature (the same
-        # convention `create_unique_index` above follows for its own unused
-        # `session` parameter) -- there is no real entry point to pass them
-        # through to.
+        # index` immediately above -- `ApplicationDeveloper`'s
+        # schema-mutation calls (`create_collection`, and, P3-D1/WP-1,
+        # `create_entity`/`add_field`) have no drop/destroy parameter of any
+        # kind. No other developer-facing method exists on this peer's
+        # public surface (confirmed by source inspection of cell.py) that
+        # could even receive a destructive drop request, so this is a
+        # structural absence, not a denial this adapter observed from a
+        # real call -- exactly the honest form `SurfaceAbsent`'s own
+        # docstring requires, not a fabricated `ConformanceDenial`.
+        # `destructive`/`confirmation` are accepted only to match this ABC
+        # method's signature (the same convention `create_unique_index`
+        # above follows for its own unused `session` parameter) -- there is
+        # no real entry point to pass them through to.
         raise SurfaceAbsent(
             self.name, "drop_entity",
-            "ApplicationDeveloper.create_collection has no drop/destroy parameter, and no other "
-            f"schema-operation call exists on this peer (requested: entity={entity!r})",
+            "ApplicationDeveloper's schema-mutation calls (create_collection/create_entity/add_field) have "
+            "no drop/destroy parameter, and no other schema-operation call exists on this peer "
+            f"(requested: entity={entity!r})",
             surface=self.public_operation_callables(),
             forbidden_parameters=["drop", "destroy"],
         )
@@ -780,6 +784,23 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # The genuine application-facing surface: everything an
         # authenticated application credential can reach. ControlPlane is
         # deliberately excluded; a session object has no reference to it.
+        #
+        # WP-2.5 review M-1: this list is the evidence surface every
+        # independent absence claim on this peer checks against
+        # (`signature_forbids_parameters` for C-03's native-command-surface
+        # check and every `SurfaceAbsent` re-verification; `declared_
+        # surface >= public_surface_set` for C-11/C-14/C-15's own re-
+        # verification of this adapter's `SurfaceAbsent` claims). It had
+        # drifted out of sync with `ApplicationRuntime`/`ApplicationDeveloper`'s
+        # own real public methods -- missing `capabilities` (always public,
+        # pre-existing) and `create_entity`/`add_field` (P3-D1, WP-1,
+        # missed at the time) -- which meant those downstream checks were
+        # silently inspecting less than this peer's actual public surface.
+        # `MitateDB-api/tests/test_conformance_public_surface_coverage.py`
+        # now pins this list to match those two classes' own real,
+        # non-underscore, plain-function members mechanically, so a future
+        # method addition here without a matching list update fails that
+        # test immediately.
         return [
             _MitateDataServiceClass.open_session,
             ApplicationRuntime.insert,
@@ -787,7 +808,10 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             ApplicationRuntime.update,
             ApplicationRuntime.delete,
             ApplicationRuntime.transact,
+            ApplicationRuntime.capabilities,
             ApplicationDeveloper.create_collection,
+            ApplicationDeveloper.create_entity,
+            ApplicationDeveloper.add_field,
         ]
 
     def tamper_vectors(self, fixture: Fixture) -> Sequence[TamperVector]:
