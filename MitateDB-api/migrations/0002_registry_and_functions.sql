@@ -98,12 +98,24 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.applications (
     provisioned_at  timestamptz
 );
 
+-- WP-2 (design v1.2 R-4/§3, credential store persistence): `enabled` and
+-- `revoked` are two INDEPENDENT booleans, matching contract
+-- `CredentialsResult`/`CredentialStateResult` (spec/data-service-api.v1.
+-- json), both of which require BOTH keys, always present, never merged
+-- into one. `enabled` is the reversible operational state (`disable`/
+-- `enable` toggle it, WP-2's own `PostgresCredentialStore`); `revoked` is
+-- terminal (contract `lifecycle.credential`: "Revocation is terminal: a
+-- revoked credential can never be made valid again, and enable reverses
+-- disable only") -- once `TRUE`, nothing in this migration set or in
+-- `credential_store_postgres.py` ever sets it back to `FALSE` (no
+-- un-revoke SQL statement exists anywhere in this repository).
 CREATE TABLE IF NOT EXISTS mitatedb_registry.credentials (
     credential_id  text PRIMARY KEY,
     application_id text NOT NULL REFERENCES mitatedb_registry.applications (application_id),
     role           text NOT NULL CHECK (role IN ('runtime', 'developer')),
     digest         bytea NOT NULL,
     enabled        boolean NOT NULL DEFAULT TRUE,
+    revoked        boolean NOT NULL DEFAULT FALSE,
     expires_at     timestamptz,
     issued_at      timestamptz NOT NULL DEFAULT now()
 );

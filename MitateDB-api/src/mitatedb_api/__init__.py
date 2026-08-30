@@ -28,10 +28,21 @@ try:
 except ImportError:  # pragma: no cover - environment-dependent (no psycopg)
     PostgresBackend = None
 
+# WP-2 (design v1.2 R-4/§3): same reasoning as `backend_postgres` above --
+# `credential_store_postgres` also imports `psycopg` unconditionally at
+# module level, so it is deferred here too rather than added to the
+# unconditional import list.
+try:
+    from .credential_store_postgres import PostgresCredentialStore, assert_pepper_separation
+except ImportError:  # pragma: no cover - environment-dependent (no psycopg)
+    PostgresCredentialStore = None
+    assert_pepper_separation = None
+
 __all__ = [
     "ApplicationCell",
     "ApplicationDeveloper",
     "ApplicationRuntime",
+    "assert_pepper_separation",
     # `ControlPlane` is a backward-compatible alias of `ProvisioningFacade`
     # (WP-1 R-3/WP-0 m-8 rename, `service.py`); both are exported.
     "ControlPlane",
@@ -40,6 +51,7 @@ __all__ = [
     "FoundationConfig",
     "MitateDataService",
     "PostgresBackend",
+    "PostgresCredentialStore",
     "Principal",
     "ProvisioningFacade",
     "Role",

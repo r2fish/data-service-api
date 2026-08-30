@@ -41,12 +41,16 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from mitatedb_api.auth import Principal, Role
+from mitatedb_api.auth import CredentialStore, Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend, _execute
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, Filter
 from mitatedb_api.config import FoundationConfig
-from mitatedb_api.errors import (ConflictError, DestructiveConfirmationRequired,
-                                 NotFoundError, ValidationError)
+from mitatedb_api.credential_store_postgres import (PostgresCredentialStore,
+                                                    _role_or_state_unavailable,
+                                                    assert_pepper_separation)
+from mitatedb_api.errors import (AuthenticationError, AuthorizationStateUnavailable,
+                                 ConflictError, DestructiveConfirmationRequired,
+                                 NotFoundError, StorageConfigurationError, ValidationError)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -1558,3 +1562,458 @@ def test_provisioning_guard_rejects_a_derived_role_name_that_would_exceed_nameda
             conn.close()
     finally:
         _sweep_prefix(admin_dsn, long_prefix)
+
+
+# --- WP-2 (design v1.2 R-4/§3): credential store persistence + parity -----
+
+_PARITY_PEPPER = "synthetic-parity-test-pepper-0123456789"
+
+
+@pytest.fixture
+def credential_app(platform) -> Iterator[str]:
+    """A lightweight "registered, unprovisioned" application row (R-4
+    two-state registry) -- exactly the shape `test_two_state_registry_
+    allows_deprovisioning_a_registered_but_unprovisioned_application`
+    above already proves 0004 can fully clean up. The credential-store
+    parity tests below only exercise `mitatedb_registry.credentials`/
+    `applications.enabled`, never a real per-application database or role
+    pair, so provisioning one (`provision_app`) would only add cost with
+    no additional coverage.
+    """
+    app_id = "credpar" + secrets.token_hex(4)
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("INSERT INTO {}.applications (application_id) VALUES (%s)").format(
+                    sql.Identifier(platform.registry_schema)
+                ),
+                [app_id],
+            )
+    finally:
+        conn.close()
+    try:
+        yield app_id
+    finally:
+        _run_psql(platform.provision_dsn, platform.deprovision_script, {"app_id": app_id})
+
+
+class _InMemoryCredentialHarness:
+    """`mitatedb_api.auth.CredentialStore` side of the shared parity
+    scenario below -- a fresh in-memory store + a single fresh
+    application, so this harness never shares state with any other test.
+    """
+
+    def __init__(self) -> None:
+        self.store = CredentialStore(_PARITY_PEPPER)
+        self.app_id = "credparim"
+        self.store.provision_application(self.app_id)
+
+    def issue(self, role):
+        return self.store.issue(self.app_id, role)
+
+    def authenticate(self, credential_id, secret):
+        return self.store.authenticate(credential_id, secret)
+
+    def assert_active(self, principal):
+        self.store.assert_active(principal)
+
+    def disable(self, credential_id):
+        self.store.disable(credential_id)
+
+    def enable(self, credential_id):
+        self.store.enable(credential_id)
+
+    def revoke(self, credential_id):
+        self.store.revoke(credential_id)
+
+    def disable_application(self):
+        return self.store.disable_application(self.app_id)
+
+    def enable_application(self):
+        return self.store.enable_application(self.app_id)
+
+
+class _PostgresCredentialHarness:
+    """`credential_store_postgres.PostgresCredentialStore` side of the
+    shared parity scenario below. Mirrors R-4's own process-role
+    separation for real: `writer` connects as `{prefix}svc_controlplane`
+    (the only role with INSERT/UPDATE on `credentials`/`applications`,
+    migration 0002) and is used for every lifecycle-changing call;
+    `reader` connects as `{prefix}svc_api` (SELECT-only) and is used for
+    every read (`authenticate`/`assert_active`) -- exactly the two
+    process roles a real application-plane process and a real
+    control-plane process would each hold in production, never the same
+    connection performing both.
+    """
+
+    def __init__(self, platform, app_id: str) -> None:
+        self.app_id = app_id
+        self.writer = PostgresCredentialStore(
+            platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema
+        )
+        self.reader = PostgresCredentialStore(
+            platform.api_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema
+        )
+
+    def issue(self, role):
+        return self.writer.issue(self.app_id, role)
+
+    def authenticate(self, credential_id, secret):
+        return self.reader.authenticate(credential_id, secret)
+
+    def assert_active(self, principal):
+        self.reader.assert_active(principal)
+
+    def disable(self, credential_id):
+        self.writer.disable(credential_id)
+
+    def enable(self, credential_id):
+        self.writer.enable(credential_id)
+
+    def revoke(self, credential_id):
+        self.writer.revoke(credential_id)
+
+    def disable_application(self):
+        return self.writer.disable_application(self.app_id)
+
+    def enable_application(self):
+        return self.writer.enable_application(self.app_id)
+
+
+def _assert_contract_credential_lifecycle(harness) -> None:
+    """WP-2 instruction #3: ONE scenario script, driven through the
+    harness's shared call surface against BOTH `auth.CredentialStore` and
+    `credential_store_postgres.PostgresCredentialStore` (see the two
+    harness classes above). Parity is judged against the CONTRACT's own
+    lifecycle rules (spec/data-service-api.v1.json `lifecycle.credential`
+    / `enable_credential.semantics`) -- WP-2's own explicit instruction is
+    that "現行 in-memory の挙動" is never the standard, so every assertion
+    below cites the contract text it enforces, not "whatever the old code
+    already did".
+    """
+    # issue -> authenticate succeeds.
+    credential_id, secret = harness.issue(Role.RUNTIME)
+    principal = harness.authenticate(credential_id, secret)
+    assert principal.role == Role.RUNTIME
+    harness.assert_active(principal)  # must not raise
+
+    # disable -> authenticate refused ("Disable/enable are reversible
+    # operational states", lifecycle.credential).
+    harness.disable(credential_id)
+    with pytest.raises(AuthenticationError):
+        harness.authenticate(credential_id, secret)
+    with pytest.raises(AuthenticationError):
+        harness.assert_active(principal)
+
+    # enable -> revived (disable's own reversal).
+    harness.enable(credential_id)
+    principal = harness.authenticate(credential_id, secret)
+    harness.assert_active(principal)
+
+    # role mismatch -> refused: `assert_active` re-checks the caller's own
+    # claimed role against the credential's real, server-bound role.
+    tampered = Principal(principal.application_id, principal.credential_id, Role.DEVELOPER)
+    with pytest.raises(AuthenticationError):
+        harness.assert_active(tampered)
+
+    # revoke -> authenticate refused ("Revocation is terminal: a revoked
+    # credential can never be made valid again", lifecycle.credential).
+    harness.revoke(credential_id)
+    with pytest.raises(AuthenticationError):
+        harness.authenticate(credential_id, secret)
+
+    # enable after revoke -> STILL refused. This is the parity-defining
+    # assertion WP-2 exists for: "Reverses disable only. A revoked
+    # credential is not resurrected." (enable_credential.semantics).
+    harness.enable(credential_id)
+    with pytest.raises(AuthenticationError):
+        harness.authenticate(credential_id, secret)
+    with pytest.raises(AuthenticationError):
+        harness.assert_active(principal)
+
+    # unknown credential id -> refused, never a crash or a different
+    # exception type than any other authentication failure.
+    with pytest.raises(AuthenticationError):
+        harness.authenticate("no-such-credential-id-ever-issued", "whatever-secret")
+
+    # disabled Application -> "A disabled Application rejects all
+    # application-facing operations" (lifecycle.application) even for a
+    # credential that was never itself disabled or revoked.
+    other_id, other_secret = harness.issue(Role.DEVELOPER)
+    other_principal = harness.authenticate(other_id, other_secret)
+    # WP-2 review m-1: `disable_application`/`enable_application` report
+    # whether the application id existed (`True` here -- this harness's
+    # own application was set up by the caller) rather than staying
+    # silent either way.
+    assert harness.disable_application() is True
+    with pytest.raises(AuthenticationError):
+        harness.authenticate(other_id, other_secret)
+    with pytest.raises(AuthenticationError):
+        harness.assert_active(other_principal)
+    assert harness.enable_application() is True
+    harness.authenticate(other_id, other_secret)  # revived
+
+
+def test_inmemory_credential_lifecycle_matches_the_contract() -> None:
+    """Baseline: the SAME scenario script the PostgreSQL-backed test below
+    runs, against `auth.CredentialStore` -- proves the in-memory store's
+    own WP-2 rewrite (enabled/revoked independence) is contract-correct
+    with no PostgreSQL involved at all."""
+    _assert_contract_credential_lifecycle(_InMemoryCredentialHarness())
+
+
+def test_postgres_credential_lifecycle_matches_the_contract(platform, credential_app) -> None:
+    """WP-2 instruction #3: the identical scenario script above, run
+    against `PostgresCredentialStore` instead -- the actual dual-
+    implementation parity proof. Any divergence between this test's
+    outcome and `test_inmemory_credential_lifecycle_matches_the_contract`
+    above is, by construction, a real parity gap between the two stores."""
+    _assert_contract_credential_lifecycle(_PostgresCredentialHarness(platform, credential_app))
+
+
+def test_postgres_credential_store_construction_rejects_a_missing_or_short_pepper() -> None:
+    """WP-2 instruction #4: fail-closed STORE CONSTRUCTION, mirroring
+    `auth.CredentialStore.__init__`'s identical existing rule -- a process
+    that somehow starts with no real pepper configured must never come up
+    able to authenticate anything."""
+    with pytest.raises(ValueError):
+        PostgresCredentialStore("host=/tmp port=5432 dbname=postgres", pepper=None)
+    with pytest.raises(ValueError):
+        PostgresCredentialStore("host=/tmp port=5432 dbname=postgres", pepper="too-short")
+
+
+def test_postgres_credential_pepper_env_var_is_honored_when_no_explicit_pepper_is_given(monkeypatch) -> None:
+    monkeypatch.setenv("MITATEDB_CREDENTIAL_PEPPER", _PARITY_PEPPER)
+    store = PostgresCredentialStore("host=/tmp port=5432 dbname=postgres")
+    assert store is not None  # construction alone must not touch the network
+
+
+def test_pepper_separation_detects_the_two_env_vars_configured_identically() -> None:
+    """WP-2 instruction #4: the cross-check function itself (no
+    composition root calls it yet in this WP -- see the function's own
+    docstring). Only raises when BOTH values are present, non-empty, AND
+    equal; either value missing is a distinct, already-fail-closed concern
+    each store's own constructor already owns, not this function's job."""
+    with pytest.raises(ValueError):
+        assert_pepper_separation("same-secret-value-0123456789", "same-secret-value-0123456789")
+    assert_pepper_separation("app-secret-0123456789", "control-secret-0123456789")
+    assert_pepper_separation(None, "control-secret-0123456789")
+    assert_pepper_separation("app-secret-0123456789", None)
+    assert_pepper_separation(None, None)
+    assert_pepper_separation("", "")
+
+
+def test_postgres_credential_store_fails_closed_when_the_database_is_unreachable() -> None:
+    """WP-2 instruction #5: a `PostgresCredentialStore` pointed at a DSN
+    that cannot be connected to at all must raise `errors.
+    AuthorizationStateUnavailable` -- this foundation's dedicated
+    fail-closed exception for "we could not verify this" -- from every
+    read path, never a raw `psycopg.Error`, and never silently treat
+    "could not check" as "credential invalid" (`AuthenticationError` would
+    be the wrong, fail-OPEN-shaped outcome here: it would let an operator
+    mistake "the platform database is down" for "that credential does not
+    exist"). Port 1 on the loopback admin/tcp path is not a real
+    PostgreSQL listener in this test environment -- `connect_timeout=1`
+    keeps this test from hanging on a black-holed port.
+
+    WP-2 review m-3: deliberately takes no fixture at all (no `platform`,
+    no `credential_app`) -- this test's own point is that it is entirely
+    independent of whether a real local PostgreSQL cluster exists; pulling
+    in `credential_app` (and therefore the module-scoped `platform`
+    bootstrap) would make an otherwise network-independent test depend on
+    unrelated cluster setup it never actually uses.
+    """
+    unreachable_dsn = "host=127.0.0.1 port=1 dbname=nonexistent connect_timeout=1"
+    store = PostgresCredentialStore(unreachable_dsn, pepper=_PARITY_PEPPER, connect_timeout=1)
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.authenticate("any-credential-id", "any-secret")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.assert_active(Principal("any-app", "any-credential-id", Role.RUNTIME))
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.get_state("any-credential-id")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.issue("any-app", Role.RUNTIME)
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.revoke("any-credential-id")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.disable("any-credential-id")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.enable("any-credential-id")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.disable_application("any-app")
+    with pytest.raises(AuthorizationStateUnavailable):
+        store.enable_application("any-app")
+
+
+def test_postgres_credential_store_get_state_reports_both_independent_booleans(platform, credential_app) -> None:
+    """R-4/CredentialsResult/CredentialStateResult: `enabled`/`revoked`
+    are two independently-observable booleans on the PostgreSQL store
+    too, not merely internally-independent-but-externally-conflated
+    ones."""
+    writer = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    credential_id, _secret = writer.issue(credential_app, Role.RUNTIME)
+    assert writer.get_state(credential_id) == (True, False)
+    writer.disable(credential_id)
+    assert writer.get_state(credential_id) == (False, False)
+    writer.enable(credential_id)
+    assert writer.get_state(credential_id) == (True, False)
+    writer.revoke(credential_id)
+    assert writer.get_state(credential_id) == (True, True)
+    writer.enable(credential_id)
+    assert writer.get_state(credential_id) == (True, True), "enable must never clear revoked"
+    assert writer.get_state("no-such-credential-id") is None
+
+
+def test_postgres_credential_store_write_paths_reject_unknown_credential_ids(platform, credential_app) -> None:
+    """Fail-closed parity with `auth.CredentialStore`: revoking/disabling/
+    enabling a credential id that does not exist must raise `NotFoundError`,
+    never silently succeed (an operator must not be told, by silence, that
+    a nonexistent credential was revoked/disabled/enabled)."""
+    writer = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    with pytest.raises(NotFoundError):
+        writer.revoke("no-such-credential-id")
+    with pytest.raises(NotFoundError):
+        writer.disable("no-such-credential-id")
+    with pytest.raises(NotFoundError):
+        writer.enable("no-such-credential-id")
+
+
+def test_postgres_credential_store_issue_rejects_an_unknown_application(platform) -> None:
+    writer = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    with pytest.raises(AuthenticationError):
+        writer.issue("no-such-application-id", Role.RUNTIME)
+
+
+# --- WP-2 review M-1: permanent privilege misconfiguration is its own ------
+# --- classification, never folded into AuthorizationStateUnavailable ------
+
+
+def test_postgres_credential_store_write_methods_via_a_read_only_role_raise_storage_configuration_error(
+    platform, credential_app
+) -> None:
+    """WP-2 review M-1 (blocker-adjacent): `mitatedbsvc_api` (migration
+    0002) has `SELECT`-only on `credentials`/`applications` -- calling any
+    write method through a store constructed with `platform.api_dsn` hits
+    a REAL PostgreSQL `InsufficientPrivilege`, a PERMANENT grant
+    misconfiguration for this role, never a transient one. This must
+    raise `errors.StorageConfigurationError`, never `errors.
+    AuthorizationStateUnavailable` (that class's own contract meaning --
+    "could not be safely established right now" -- would be a lie here:
+    retrying changes nothing about this role's own grants) and never a
+    raw `psycopg.errors.InsufficientPrivilege` escaping this module's
+    safe-classification boundary.
+    """
+    read_only = PostgresCredentialStore(platform.api_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    with pytest.raises(StorageConfigurationError):
+        read_only.issue(credential_app, Role.RUNTIME)
+    with pytest.raises(StorageConfigurationError):
+        read_only.revoke("does-not-matter-privilege-fails-first")
+    with pytest.raises(StorageConfigurationError):
+        read_only.disable("does-not-matter-privilege-fails-first")
+    with pytest.raises(StorageConfigurationError):
+        read_only.enable("does-not-matter-privilege-fails-first")
+    with pytest.raises(StorageConfigurationError):
+        read_only.disable_application(credential_app)
+    with pytest.raises(StorageConfigurationError):
+        read_only.enable_application(credential_app)
+
+
+@pytest.fixture
+def no_select_grant_dsn(platform) -> Iterator[str]:
+    """WP-2 review M-1: an ad hoc, throwaway login role with `CONNECT` on
+    the platform database but NO grant of any kind on `mitatedb_registry`
+    (not even `USAGE` on the schema) -- unlike every other role this
+    module's own tests use, this one cannot even attempt a `SELECT`
+    without PostgreSQL refusing it at the schema level. Exists solely to
+    prove the READ-path `InsufficientPrivilege` reclassification (`
+    authenticate`/`assert_active`/`get_state`) against a REAL grant
+    boundary, not only via `mitatedbsvc_api` (which legitimately can read,
+    so it cannot demonstrate a READ failing on privilege). Created and
+    dropped via `platform.admin_dsn` (superuser), independent of the
+    provisioning role's own `CREATEROLE` authority -- this role is not
+    part of R-4's own provisioning topology at all, purely a test
+    fixture.
+    """
+    role = "credparnopriv" + secrets.token_hex(4)
+    password = secrets.token_urlsafe(24)
+    admin = psycopg.connect(platform.admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} CONNECTION LIMIT 2").format(
+                sql.Identifier(role), sql.Literal(password)
+            ))
+            cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                sql.Identifier(platform.platform_db), sql.Identifier(role)
+            ))
+        yield _dsn_with(platform.admin_dsn, user=role, password=password, dbname=platform.platform_db)
+    finally:
+        with admin.cursor() as cur:
+            # `DROP ROLE` refuses while this role's own `GRANT CONNECT`
+            # above is still a live dependency (`DependentObjectsStillExist:
+            # ... privileges for database`) -- revoke it first.
+            cur.execute(sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(
+                sql.Identifier(platform.platform_db), sql.Identifier(role)
+            ))
+            cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+        admin.close()
+
+
+def test_postgres_credential_store_reads_via_a_no_privilege_role_raise_storage_configuration_error(
+    platform, no_select_grant_dsn,
+) -> None:
+    """WP-2 review M-1: the READ-path counterpart to the write-path test
+    above -- `authenticate`/`assert_active`/`get_state` against a role
+    with no grant at all on the registry schema must ALSO raise `errors.
+    StorageConfigurationError`, not `errors.AuthorizationStateUnavailable`.
+    """
+    store = PostgresCredentialStore(no_select_grant_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    with pytest.raises(StorageConfigurationError):
+        store.authenticate("any-credential-id", "any-secret")
+    with pytest.raises(StorageConfigurationError):
+        store.assert_active(Principal("any-app", "any-credential-id", Role.RUNTIME))
+    with pytest.raises(StorageConfigurationError):
+        store.get_state("any-credential-id")
+
+
+# --- WP-2 review m-1: disable_application/enable_application report -------
+# --- whether a row existed, instead of staying silent either way ----------
+
+
+def test_inmemory_disable_enable_application_report_whether_the_application_existed() -> None:
+    store = CredentialStore(_PARITY_PEPPER)
+    store.provision_application("credparbool")
+    assert store.disable_application("credparbool") is True
+    assert store.enable_application("credparbool") is True
+    assert store.disable_application("no-such-application-id") is False
+    assert store.enable_application("no-such-application-id") is False
+
+
+def test_postgres_disable_enable_application_report_whether_the_application_existed(platform, credential_app) -> None:
+    writer = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    assert writer.disable_application(credential_app) is True
+    assert writer.enable_application(credential_app) is True
+    assert writer.disable_application("no-such-application-id") is False
+    assert writer.enable_application("no-such-application-id") is False
+
+
+# --- WP-2 review m-5: a role value outside Role's own vocabulary is a -----
+# --- store-integrity fault, never silently downgraded to AuthenticationError
+
+
+def test_role_or_state_unavailable_classifies_an_out_of_vocabulary_role_as_state_unavailable() -> None:
+    """WP-2 review m-5: `_role_or_state_unavailable` is the single choke
+    point `authenticate`/`assert_active` both route a DB-sourced `role`
+    string through. A value outside `Role`'s own two members (`"runtime"`/
+    `"developer"`) must raise `errors.AuthorizationStateUnavailable` (a
+    store-integrity fault), never a bare `ValueError` (which would escape
+    this module's safe-classification boundary entirely) and never
+    silently produce a usable `Role` that would let a corrupted row
+    authenticate as some arbitrary role.
+    """
+    assert _role_or_state_unavailable("runtime") == Role.RUNTIME
+    assert _role_or_state_unavailable("developer") == Role.DEVELOPER
+    with pytest.raises(AuthorizationStateUnavailable):
+        _role_or_state_unavailable("control")  # a real contract role enum member, but not one this table's CHECK allows
+    with pytest.raises(AuthorizationStateUnavailable):
+        _role_or_state_unavailable("garbage-not-a-role-at-all")

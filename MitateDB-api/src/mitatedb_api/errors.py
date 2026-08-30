@@ -71,6 +71,45 @@ class AuthorizationStateUnavailable(FoundationError):
     """Raised when authorization state cannot be safely established."""
 
 
+class StorageConfigurationError(FoundationError):
+    """WP-2 review M-1 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_
+    V1.md v1.2 R-4/R-6): raised when a storage backend refuses an operation
+    because of a PERMANENT privilege/grant misconfiguration (PostgreSQL
+    ``InsufficientPrivilege`` -- a role missing a GRANT it should have,
+    e.g. a provisioning defect or a manual grant regression) rather than a
+    TRANSIENT unavailability (the platform database unreachable, a
+    connection timing out, a deadlock).
+
+    Deliberately a distinct class from :class:`AuthorizationStateUnavailable`
+    and never mapped to that class's own future contract code
+    (``AUTH_STATE_UNAVAILABLE``): R-6's own audit-write exemption (ii) --
+    "the two exceptions [to durably auditing every denial] are ... `AUTH_
+    STATE_UNAVAILABLE` (store itself is unreachable and audit write is
+    also impossible)" -- is reserved for genuine store unreachability, not
+    for a role that IS reachable but was granted the wrong privileges. A
+    catch-all ``except psycopg.Error`` that folded ``InsufficientPrivilege``
+    into ``AuthorizationStateUnavailable`` would silently manufacture a
+    false instance of that exemption for a case R-6 never intended to
+    cover -- a permanent misconfiguration that keeps failing on every
+    retry, not a transient condition auditing may legitimately be unable
+    to observe.
+
+    Proposed future HTTP mapping (no composition root exists yet in this
+    WP to wire it): the common contract's own ``SERVICE_UNAVAILABLE``
+    code (spec/data-service-api.v1.json ``errors.codes``) -- the generic
+    "the backend rejected this request for a reason outside the caller's
+    control" bucket this repository's own sibling peer (r2db-api's
+    ``credential_store.py``) already uses for an unclassified backend
+    write failure -- rather than ``AUTH_STATE_UNAVAILABLE``, whose own
+    contract meaning ("authorization state cannot be safely established
+    right now") implies a condition a retry might resolve; a privilege
+    misconfiguration will not resolve itself on retry and should alert an
+    operator differently than a transient outage would. This mapping
+    decision belongs to the WP-3/WP-4 composition root/HTTP adapter, not
+    this class -- reported here as the proposal WP-2's review asked for.
+    """
+
+
 class CapabilityError(FoundationError):
     """Raised for a name that is part of the common contract's own
     vocabulary -- a mutation operation (``structured_operations.
