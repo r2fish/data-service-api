@@ -374,6 +374,8 @@ WP-5 本体の上記判断 (「宣言数値と不一致のまま `query_complexi
 2. **既存 collection への schema 変更経路の不在**: `add_field`/`alter_field`/`create_index` もすべて `unsupported` であり、`schema_revision` 相当のカウンタも存在しない (grep 済み、ゼロ件)。よって「同名再作成」だけでなく「その他の schema 変化」の経路も存在しない。
 3. **結論**: collection は一度 create されると、そのプロセスの生存期間中は形状が不変であり、delete 句が無効化されるべき「状態変化」自体が発生し得ない。指紋を省略することは見落としではなく、r2db の Q1-D10 (同名 drop→create が可能なため指紋必須) とは異なる、MitateDB 自身の実際の機能に基づく別の真実の答えである。
 
+(補記、P3 WP-1: add_field 解禁により前提が変わり、delete 句に @schema_revision 指紋を追加した。docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md §0 例外節参照)
+
 ### 7.4 C-06 厳格分岐の MitateDB 初実行デバッグ (発見一覧)
 
 初回実行 (`pytest conformance-tests -k mitatedb`) で 1 件のみ失敗した (V1/V2/V3/V4/V5/V8 はすべて初回 green — 想定リスクは的中しなかった):

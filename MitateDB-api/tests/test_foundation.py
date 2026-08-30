@@ -5,11 +5,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitatedb_api import (ControlPlane, Filter, FoundationConfig,
-                          MitateDataService, Role)
+                          MitateDataService, ProvisioningFacade, Role)
 from mitatedb_api.cell import _canonical_where_json
 from mitatedb_api.errors import (AuthenticationError,
                                  AuthorizationStateUnavailable,
-                                 CapabilityError,
+                                 CapabilityError, ConflictError,
                                  DestructiveConfirmationRequired,
                                  NotFoundError, ResourceLimitError,
                                  ValidationError)
@@ -376,6 +376,173 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.runtime.delete("typed", [Filter("title", "eq", "x")], destructive=True, confirm=True)
         self.assertEqual(self.runtime.read("typed")[0]["title"], "x")
+
+    def test_add_field_is_declared_and_usable_by_developer_only(self):
+        # P3-D1 (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md §0
+        # exception, WP-1): `add_field` is now a real, developer-only
+        # capability -- declaration and implementation land in this same
+        # commit, on both backends. This pins the SQLite backend's own
+        # (default, in-process composition) behavior.
+        self.dev.create_collection("things", {"name": "text"})
+        declared = self.dev.capabilities()["capabilities"]["schema_operations"]
+        self.assertEqual(declared["operations"], ["create_entity", "add_field"])
+        self.assertNotIn("add_field", declared["unsupported"])
+        # A runtime session has no schema-mutation surface at all,
+        # `add_field` included (same authority boundary `create_collection`
+        # already enforces).
+        self.assertFalse(hasattr(self.runtime, "add_field"))
+
+        self.dev.add_field("things", "score", "integer")
+        self.runtime.insert("things", {"name": "a", "score": 5})
+        self.assertEqual(self.runtime.read("things", filters=[Filter("score", "eq", 5)])[0]["name"], "a")
+
+        with self.assertRaises(ConflictError):
+            self.dev.add_field("things", "score", "integer")
+        with self.assertRaises(NotFoundError):
+            self.dev.add_field("no_such_collection", "x", "text")
+        with self.assertRaises(ValidationError):
+            self.dev.add_field("things", "bad type", "integer")
+        with self.assertRaises(ValidationError):
+            self.dev.add_field("things", "unsupported_type_field", "not_a_type")
+
+    def test_add_field_respects_the_max_fields_shape_bound(self):
+        # Q1-D11-consistent classification (cell.py::add_field's own
+        # comment): the post-add field count mirrors the same fixed shape
+        # bound `create_collection`'s own field-count check already
+        # enforces -- `ValidationError`, not `ResourceLimitError` (keeps
+        # `test_limit_class_vocabulary.py`'s own AST-scanned call-site
+        # count unaffected by this WP, per P3 WP-1 round 2 instruction #7).
+        config = FoundationConfig(max_fields=2)
+        control = ControlPlane("synthetic-test-pepper-0123456789", config)
+        control.provision_application("narrow_add_field")
+        dev_id, dev_secret = control.issue_credential("narrow_add_field", Role.DEVELOPER)
+        dev = MitateDataService(control).open_session(dev_id, dev_secret)
+        dev.create_collection("full", {"a": "text", "b": "text"})
+        with self.assertRaises(ValidationError):
+            dev.add_field("full", "c", "text")
+
+    def test_create_entity_defaults_to_a_base_id_field_when_fields_omitted(self):
+        # P3 WP-1 round 2 instruction #6: contract `SchemaOperationRequest.
+        # fields` is optional for `create_entity`. `create_collection`
+        # itself is UNCHANGED -- it keeps rejecting an empty/missing
+        # `fields` outright for every existing caller.
+        self.dev.create_entity("bare")
+        self.runtime.insert("bare", {"id": 1})
+        self.assertEqual(self.runtime.read("bare")[0]["id"], 1)
+        with self.assertRaises(ValidationError):
+            self.dev.create_collection("still_strict", {})
+        self.assertFalse(hasattr(self.runtime, "create_entity"))
+
+    def test_delete_confirmation_phrase_is_invalidated_by_a_subsequent_add_field(self):
+        # P3 WP-1 round 2 instruction #5: `add_field` is "another schema
+        # change" on an existing collection -- the delete confirmation
+        # phrase must now include a schema-revision fingerprint
+        # (`cell._delete_confirmation_phrase`) so a phrase obtained BEFORE
+        # a schema change cannot be replayed AFTER one.
+        self.dev.create_collection("gated_by_revision", {"title": "text"})
+        self.runtime.insert("gated_by_revision", {"title": "keep-me"})
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.delete("gated_by_revision", [Filter("title", "eq", "keep-me")])
+        stale_phrase = ctx.exception.details["required_confirmation"]
+        self.assertIn("@schema_revision=", stale_phrase)
+
+        self.dev.add_field("gated_by_revision", "extra", "text")
+
+        # The stale phrase (issued before `add_field`) must be refused --
+        # NOT silently accepted -- even though its `@where=` digest still
+        # matches the same filters.
+        with self.assertRaises(DestructiveConfirmationRequired):
+            self.runtime.delete("gated_by_revision", [Filter("title", "eq", "keep-me")],
+                                destructive=True, confirm=stale_phrase)
+        self.assertEqual(self.runtime.read("gated_by_revision")[0]["title"], "keep-me")
+
+        # A freshly recomputed phrase (post-`add_field`) works and differs
+        # from the stale one.
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx2:
+            self.runtime.delete("gated_by_revision", [Filter("title", "eq", "keep-me")])
+        fresh_phrase = ctx2.exception.details["required_confirmation"]
+        self.assertNotEqual(fresh_phrase, stale_phrase)
+        result = self.runtime.delete("gated_by_revision", [Filter("title", "eq", "keep-me")],
+                                     destructive=True, confirm=fresh_phrase)
+        self.assertEqual(result, {"deleted": 1})
+
+    def test_sqlite_backend_still_round_trips_an_embedded_nul_byte(self):
+        # P3 WP-1 round 2 instruction #1: PostgreSQL's own backend
+        # deterministically REJECTS an embedded NUL byte
+        # (`backend_postgres.PostgresBackend.encode_value`) -- the SQLite
+        # backend's own pre-existing round-trip-accepts behavior for the
+        # identical payload (the common conformance corpus's own
+        # `nul_byte = "value\x00tail"`, conformance-tests/payloads.py)
+        # must NOT change. This pins that non-change directly.
+        self.dev.create_collection("nul_ok", {"value": "text"})
+        self.runtime.insert("nul_ok", {"value": "value\x00tail"})
+        self.assertEqual(self.runtime.read("nul_ok")[0]["value"], "value\x00tail")
+
+    def test_null_value_can_be_written_and_filtered_on_the_sqlite_backend(self):
+        # M-5 (independent review round 2): NULL is a valid value for any
+        # declared field type (no `NOT NULL` constraint exists anywhere in
+        # this foundation) -- pinned here on the SQLite backend as the
+        # regression baseline the PostgreSQL backend's own equivalent test
+        # (`tests/test_postgres.py`) is held to.
+        self.dev.create_collection("nullable", {"title": "text", "rank": "integer"})
+        self.runtime.insert("nullable", {"title": None, "rank": 1})
+        self.assertIsNone(self.runtime.read("nullable")[0]["title"])
+        # An `eq` filter against `None` must not raise (this is the actual
+        # regression: pre-fix, this backend's own PostgreSQL counterpart
+        # rejected `None` outright at the domain gate for ANY use,
+        # including a filter value) -- ordinary SQL three-valued-logic
+        # semantics apply (`title = NULL` is never true, even for a NULL
+        # row, on any SQL engine including SQLite), so this correctly
+        # returns no rows, not the NULL row itself (`is_null` -- a real,
+        # different operator this foundation declares `unsupported` --
+        # would be needed for that, and is out of this fix's scope).
+        self.assertEqual(self.runtime.read("nullable", filters=[Filter("title", "eq", None)]), [])
+        self.assertEqual(self.runtime.read("nullable", filters=[Filter("rank", "eq", 1)])[0]["title"], None)
+
+    def test_sqlite_backend_rejects_out_of_range_integer_deterministically_and_transact_recovers(self):
+        # M-7 (independent review round 2, defect fix -- see
+        # `backend_sqlite.SQLiteBackend.encode_value`'s own comment for
+        # why this is a genuine, deliberate CHANGE to this backend's
+        # external behavior, not a preserved quirk): before this fix,
+        # `10 ** 30` escaped as a raw `OverflowError` (not a
+        # `sqlite3.Error`), which `cell.py::transact`'s own `except`
+        # clause did not list -- leaving the connection's `BEGIN`
+        # transaction open FOREVER and wedging every subsequent
+        # `transact()` call on the SAME cell with `sqlite3.
+        # OperationalError: cannot start a transaction within a
+        # transaction`. This pins BOTH halves: the deterministic
+        # rejection, AND that `transact()` keeps working immediately
+        # afterward.
+        self.dev.create_collection("oob_sqlite", {"n": "integer"})
+        with self.assertRaises(ValidationError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "oob_sqlite", "values": {"n": 10 ** 30}},
+            ])
+        # The connection must not be wedged: a normal transact() right
+        # after must succeed (this is the exact failure mode that used to
+        # repeat forever once triggered).
+        result = self.runtime.transact([
+            {"type": "insert", "collection": "oob_sqlite", "values": {"n": 1}},
+        ])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(self.runtime.read("oob_sqlite")[0]["n"], 1)
+        # Also reachable via plain `insert()` (not just `transact()`).
+        with self.assertRaises(ValidationError):
+            self.runtime.insert("oob_sqlite", {"n": -(10 ** 30)})
+        self.runtime.insert("oob_sqlite", {"n": 2})
+        self.assertEqual(len(self.runtime.read("oob_sqlite")), 2)
+
+    def test_provisioning_facade_rename_and_duplicate_provision_is_a_safe_conflict(self):
+        # R-3/WP-0 m-8: `ControlPlane` is the backward-compatible alias of
+        # the renamed `ProvisioningFacade` (`service.py`); both names must
+        # refer to the exact same class. Re-provisioning an already-
+        # provisioned application_id must land on this foundation's own
+        # `errors.FoundationError` hierarchy (`ConflictError`), not an
+        # unclassified bare `ValueError`.
+        self.assertIs(ControlPlane, ProvisioningFacade)
+        with self.assertRaises(ConflictError):
+            self.control.provision_application("app_a")
 
     def test_audit_events_are_append_only_and_secret_free(self):
         self.dev.create_collection("notes", {"title": "text"})

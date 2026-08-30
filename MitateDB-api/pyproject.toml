@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-service-mitatedb-foundation"
+version = "0.1.0"
+description = "Reference foundation for the common structured Data Service API contract (MitateDB-api)"
+requires-python = ">=3.11"
+dependencies = [
+    # Application-plane/control-plane ASGI apps (WP-3/WP-4, not yet built
+    # in WP-1) will be Starlette apps, matching r2db-api's own stack
+    # choice (design v1.1 D-B: same execution-environment parts, no code
+    # sharing between the two peers).
+    "starlette>=1.0",
+    # `mitatedb_api.backend_postgres` imports `psycopg` unconditionally
+    # (module-level `import psycopg`), and the package `__init__.py`
+    # imports that module eagerly too -- so a fresh install following this
+    # package's own runbook needs it present from the start, the same
+    # review-reported gap r2db-api's own pyproject.toml already documents
+    # fixing for itself. `[binary]` pulls in psycopg's pre-built C
+    # extension (`libpq` included) rather than requiring the target
+    # machine to have `libpq`'s headers/toolchain to build the pure
+    # `psycopg` package from source.
+    "psycopg[binary]>=3.1",
+    # The eventual HTTP composition (WP-3) is meant to run with `uvicorn
+    # mitatedb_api.main:app`; declaring it here means `pip install` alone
+    # provides a working `uvicorn` binary in this package's own
+    # virtualenv.
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "httpx>=0.28",
+    "anyio>=4.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
