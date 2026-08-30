@@ -107,6 +107,7 @@ convention) -- can point this class at their own rewritten schema name.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -121,6 +122,7 @@ from .auth import Principal, Role
 from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
 from .identifiers import validate_identifier
+from .pool import BoundedConnectionPool
 
 DEFAULT_SCHEMA = "mitatedb_registry"
 
@@ -223,7 +225,8 @@ class PostgresCredentialStore:
     """
 
     def __init__(self, dsn: str, *, pepper: Optional[str] = None,
-                 schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+                 schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5,
+                 pool: Optional[BoundedConnectionPool] = None) -> None:
         pepper = pepper if pepper is not None else os.environ.get(_CREDENTIAL_PEPPER_ENV)
         # Fail-closed store construction (WP-2 instruction #4): an
         # application-plane process that somehow started without a real
@@ -238,6 +241,17 @@ class PostgresCredentialStore:
         self._connect_timeout = connect_timeout
         self._credentials_table = sql.Identifier(schema, "credentials")
         self._applications_table = sql.Identifier(schema, "applications")
+        # WP-3 (design v1.2 R-8 ledger / WP-2 review N-1): an optional
+        # bounded pool (`pool.BoundedConnectionPool`) replacing the
+        # per-call `psycopg.connect()`/`close()` WP-2 deliberately chose.
+        # `None` (the default) preserves WP-2's exact original behavior --
+        # every existing caller of this class (WP-2's own tests) is
+        # unaffected. The HTTP composition root (`mitatedb_api.main`) is
+        # the one caller that supplies a real pool, since it is the one
+        # process that calls `assert_active`/`authenticate` once per
+        # incoming HTTP request against `mitatedbsvc_api`'s own bounded
+        # `CONNECTION LIMIT`.
+        self._pool = pool
 
     def _digest(self, secret) -> bytes:
         if not isinstance(secret, str):
@@ -258,6 +272,67 @@ class PostgresCredentialStore:
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
 
+    @contextmanager
+    def _borrow_connection(self):
+        """The single choke point every method below acquires a connection
+        through (WP-3 pool wiring). Mechanically replaces the WP-2 shape
+        `conn = self._connect(); try: ...; finally: conn.close()` with
+        `with self._borrow_connection() as conn: ...` -- every method
+        body's own indentation and internal try/except is otherwise
+        unchanged, since this context manager's `no pool` branch is
+        exactly the WP-2 behavior it replaces.
+
+        Pool branch: a connection that raises `psycopg.Error` while
+        checked out is discarded (closed, never returned to the idle
+        pool) rather than assumed healthy. A connection that returns
+        normally -- including via a NON-`psycopg.Error` exception such as
+        `errors.NotFoundError` raised between a statement and this store's
+        own `conn.commit()`/`conn.rollback()` call (e.g. `revoke()`'s
+        `if row is None: raise NotFoundError(...)`, reached before that
+        method's own `conn.commit()`) -- still gets a defensive
+        `conn.rollback()` here before being released back to the pool.
+        Without this, a pooled connection could go idle mid-transaction
+        (harmless under WP-2's per-call-connect model, where the very next
+        line was always `conn.close()` regardless) and hand the NEXT
+        caller a connection with a dangling, uncommitted transaction still
+        open on it. `rollback()` with no transaction in progress is a
+        no-op, so this is safe to call unconditionally on every healthy
+        return, whether or not the method already rolled back itself.
+        """
+        if self._pool is not None:
+            conn = self._pool.acquire()
+            healthy = True
+            try:
+                yield conn
+            except psycopg.Error:
+                healthy = False
+                raise
+            finally:
+                if healthy:
+                    try:
+                        conn.rollback()
+                    except psycopg.Error:
+                        healthy = False
+                if healthy:
+                    self._pool.release(conn)
+                else:
+                    self._pool.discard(conn)
+        else:
+            conn = self._connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+    def close(self) -> None:
+        """Release every pooled connection this store holds (WP-3). A
+        no-op when constructed without a pool (`pool=None`, the WP-2
+        default) -- there is nothing this store itself owns to release in
+        that configuration, since every connection was already closed
+        immediately after its own single call."""
+        if self._pool is not None:
+            self._pool.closeall()
+
     # ---- read path ----------------------------------------------------
 
     def authenticate(self, credential_id, secret) -> Principal:
@@ -270,8 +345,7 @@ class PostgresCredentialStore:
         """
         if not isinstance(credential_id, str) or not credential_id:
             raise AuthenticationError("authentication failed")
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "SELECT c.digest, c.role, c.application_id, c.enabled, c.revoked, "
                 "c.expires_at, a.enabled FROM {credentials} c "
@@ -289,8 +363,6 @@ class PostgresCredentialStore:
                 ) from exc
             except psycopg.Error as exc:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
         # WP-2 review m-4: compute a real `hmac.compare_digest` call
         # against a fixed-shape 32-byte value UNCONDITIONALLY, whether or
         # not `row` was found -- an unknown `credential_id` must not
@@ -325,8 +397,7 @@ class PostgresCredentialStore:
         credential_id = getattr(principal, "credential_id", None)
         if not isinstance(credential_id, str) or not credential_id:
             raise AuthenticationError("authentication failed")
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "SELECT c.application_id, c.role, c.enabled, c.revoked, c.expires_at, a.enabled "
                 "FROM {credentials} c JOIN {applications} a ON a.application_id = c.application_id "
@@ -343,8 +414,6 @@ class PostgresCredentialStore:
                 ) from exc
             except psycopg.Error as exc:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
         if row is None:
             raise AuthenticationError("authentication failed")
         application_id, role, enabled, revoked, expires_at, app_enabled = row
@@ -363,8 +432,7 @@ class PostgresCredentialStore:
         """`(enabled, revoked)` for `credential_id`, or `None` if it does
         not exist -- same read-only, parity-test-facing role as `auth.
         CredentialStore.get_state`."""
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL("SELECT enabled, revoked FROM {table} WHERE credential_id = {ph}").format(
                 table=self._credentials_table, ph=sql.Placeholder()
             )
@@ -378,8 +446,6 @@ class PostgresCredentialStore:
                 ) from exc
             except psycopg.Error as exc:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
         return (row[0], row[1]) if row is not None else None
 
     # ---- write path (provisioning/control-plane tooling only) ---------
@@ -392,8 +458,7 @@ class PostgresCredentialStore:
         credential_id = secrets.token_hex(12)
         secret = secrets.token_urlsafe(32)
         digest = self._digest(secret)
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "INSERT INTO {table} (credential_id, application_id, role, digest, expires_at) "
                 "VALUES ({id_ph}, {app_ph}, {role_ph}, {digest_ph}, {expires_ph})"
@@ -414,8 +479,6 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
         # Same contract as `auth.CredentialStore.issue`: the secret is
         # returned once and never stored or returned again (only its
         # digest is durable, in the `digest` column above).
@@ -426,8 +489,7 @@ class PostgresCredentialStore:
         `auth.CredentialStore.revoke`'s identical rewrite this WP. No SQL
         statement anywhere in this module ever sets `revoked` back to
         `FALSE` (there is no un-revoke path to accidentally trigger)."""
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "UPDATE {table} SET revoked = TRUE WHERE credential_id = {ph} RETURNING credential_id"
             ).format(table=self._credentials_table, ph=sql.Placeholder())
@@ -449,15 +511,12 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
 
     def disable(self, credential_id):
         """Reversible operational state -- touches `enabled` only, never
         `revoked`. Fails closed on an unknown credential id, mirroring
         `revoke`."""
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "UPDATE {table} SET enabled = FALSE WHERE credential_id = {ph} RETURNING credential_id"
             ).format(table=self._credentials_table, ph=sql.Placeholder())
@@ -476,8 +535,6 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
 
     def enable(self, credential_id):
         """Reverses `disable` only (contract `enable_credential.
@@ -493,8 +550,7 @@ class PostgresCredentialStore:
 
         Fails closed on an unknown credential id, mirroring `disable`.
         """
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "UPDATE {table} SET enabled = TRUE WHERE credential_id = {ph} RETURNING credential_id"
             ).format(table=self._credentials_table, ph=sql.Placeholder())
@@ -513,8 +569,6 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
 
     def disable_application(self, application_id) -> bool:
         """Application-level toggle this same store also observes (via
@@ -535,8 +589,7 @@ class PostgresCredentialStore:
         worth surfacing, rather than this method deciding that for every
         caller by staying silent.
         """
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "UPDATE {table} SET enabled = FALSE WHERE application_id = {ph} RETURNING application_id"
             ).format(table=self._applications_table, ph=sql.Placeholder())
@@ -554,14 +607,11 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
 
     def enable_application(self, application_id) -> bool:
         """See `disable_application` above -- identical reasoning, opposite
         value, same `bool` return (WP-2 review m-1)."""
-        conn = self._connect()
-        try:
+        with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "UPDATE {table} SET enabled = TRUE WHERE application_id = {ph} RETURNING application_id"
             ).format(table=self._applications_table, ph=sql.Placeholder())
@@ -579,8 +629,6 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        finally:
-            conn.close()
 
 
 __all__ = ["PostgresCredentialStore", "assert_pepper_separation", "DEFAULT_SCHEMA"]

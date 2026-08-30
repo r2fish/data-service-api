@@ -391,6 +391,22 @@ class ApplicationCell:
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
 
+    def schema_revision(self, principal):
+        """m-2 (independent WP-3 review): the SAME monotonically-increasing
+        counter `_validate_delete_confirmation` already reads to fingerprint
+        a delete confirmation phrase (`_delete_confirmation_phrase`), now
+        also exposed as a read-only, authorized query -- so the HTTP
+        surface's `SchemaOperationResult.revision` field can report this
+        peer's REAL current schema-revision value after a `create_entity`/
+        `add_field` call, rather than a hardcoded placeholder that would
+        never actually change (a false declaration: the contract's own
+        `SchemaOperationResult.revision` field implies a real, observable
+        value, and always returning the same literal after every schema
+        change is not honest about what the peer just did)."""
+        self._require_data(principal)
+        with self._lock:
+            return self._backend.schema_revision()
+
     def insert(self, principal, collection, values):
         self._require_data(principal)
         collection, fields, params = self._prepare_values(collection, values)
@@ -682,18 +698,44 @@ class ApplicationCell:
             result.append(field)
         return result
 
+    # WP-3 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2
+    # R-5/§2): the HTTP `/v1/data/{entity}/query` endpoint maps contract
+    # `QueryRequest.order_by` -- an ARRAY of `Order` objects
+    # (`definitions.Order`, `maxItems: 10`), i.e. multi-field sort -- onto
+    # this seam. `_bind_order_by` therefore accepts three shapes and always
+    # returns either `None` or a non-empty LIST of `(field, direction)`
+    # tuples (never a bare tuple any more): `None` (no ordering), a single
+    # `{"field": ..., "direction": ...}` object (the pre-WP-3 shape --
+    # `tests/test_postgres.py`'s own existing call and every other
+    # pre-existing caller keep working unchanged, now normalized to a
+    # one-element list internally), or a list of such objects (the new,
+    # contract-shaped multi-field form). Both backends' own `read()` were
+    # updated in the same commit to consume this unified list-or-None
+    # shape (`backend_sqlite.py`/`backend_postgres.py`).
+    _MAX_ORDER_BY_TERMS = 10  # mirrors contract `definitions.QueryRequest.order_by.maxItems`
+
     def _bind_order_by(self, collection, order_by):
         if order_by is None:
             return None
-        if not isinstance(order_by, dict):
-            raise ValidationError("order_by must be an object")
-        field = self._identifier(order_by.get("field"), "order field")
-        if field not in self._backend.field_domains(collection):
-            raise ValidationError("unknown order field")
-        direction = order_by.get("direction", "asc")
-        if direction not in ("asc", "desc"):
-            raise ValidationError("invalid order direction")
-        return (field, direction)
+        if isinstance(order_by, dict):
+            order_by = [order_by]
+        if not isinstance(order_by, list) or not order_by:
+            raise ValidationError("order_by must be an object or a non-empty list of objects")
+        if len(order_by) > self._MAX_ORDER_BY_TERMS:
+            raise ValidationError("order_by term limit exceeded")
+        available = self._backend.field_domains(collection)
+        bound = []
+        for item in order_by:
+            if not isinstance(item, dict):
+                raise ValidationError("order_by must be an object or a non-empty list of objects")
+            field = self._identifier(item.get("field"), "order field")
+            if field not in available:
+                raise ValidationError("unknown order field")
+            direction = item.get("direction", "asc")
+            if direction not in ("asc", "desc"):
+                raise ValidationError("invalid order direction")
+            bound.append((field, direction))
+        return bound
 
     def _prepare_values(self, collection, values):
         collection = self._identifier(collection, "collection")
@@ -820,6 +862,10 @@ class ApplicationRuntime:
     def __authorize(self):
         if self.__guard is not None:
             self.__guard(self.__principal)
+
+    def schema_revision(self):
+        self.__authorize()
+        return self.__cell.schema_revision(self.__principal)
 
     def insert(self, collection, values):
         self.__authorize()

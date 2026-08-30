@@ -49,6 +49,20 @@ _SQLITE_INT64_MAX = 9223372036854775807
 _TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL",
           "boolean": "INTEGER", "json": "TEXT"}
 
+# M-4 (independent review): a closed lookup table, mirroring
+# `backend_postgres.py`'s own `_DIRECTION_SQL` constant dict (WP-2.5) --
+# this backend had none of its own, and instead concatenated `direction.
+# upper()` directly into the SQL TEXT string in `read()` below. `cell.py`'s
+# own `_bind_order_by` allowlist (`direction not in ("asc", "desc")`) is
+# ALREADY the only thing standing between an arbitrary string and this
+# backend's SQL text -- exactly the single-point-of-failure shape R-2/SI-04/
+# SI-05 exist to close structurally, not merely by convention at the caller.
+# A closed dict lookup here means an unexpected direction value raises
+# (`KeyError`, translated to `errors.ValidationError` at the call site
+# below) instead of ever reaching string concatenation, regardless of
+# whether `cell.py`'s own allowlist is ever weakened or bypassed.
+_DIRECTION_TOKENS = {"asc": "ASC", "desc": "DESC"}
+
 
 class SQLiteBackend:
     """One private ``:memory:`` connection per application cell."""
@@ -252,8 +266,25 @@ class SQLiteBackend:
         where, params = self._where_sql(filters)
         statement += where
         if order_by is not None:
-            field, direction = order_by
-            statement += " ORDER BY " + quote_identifier(field) + " " + direction.upper()
+            # WP-3: `order_by` is always `None` or a non-empty LIST of
+            # `(field, direction)` tuples now (`cell.py::_bind_order_by`),
+            # multi-field sort included -- a pre-WP-3 single-field caller
+            # already reaches this as a one-element list.
+            #
+            # M-4: `_DIRECTION_TOKENS[direction]` (a closed dict lookup),
+            # never `direction.upper()` concatenated directly into SQL
+            # text -- see that constant's own docstring. `KeyError` for an
+            # unexpected value is translated to `errors.ValidationError`
+            # here rather than escaping raw, matching this backend's own
+            # existing translation discipline for every other native
+            # driver exception in this file.
+            try:
+                order_terms = ", ".join(
+                    quote_identifier(field) + " " + _DIRECTION_TOKENS[direction] for field, direction in order_by
+                )
+            except KeyError as exc:
+                raise ValidationError("invalid order direction") from exc
+            statement += " ORDER BY " + order_terms
         statement += " LIMIT ?"
         params = list(params) + [limit]
         try:

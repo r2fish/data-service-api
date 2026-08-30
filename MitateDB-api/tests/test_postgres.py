@@ -772,6 +772,31 @@ def test_null_value_can_be_written_and_filtered_on_the_postgres_backend(app_a) -
         close_cell(cell)
 
 
+def test_postgres_backend_rejects_an_injection_shaped_order_by_direction(app_a) -> None:
+    """M-4 (independent WP-3 review): a direct, backend-level test --
+    bypassing `cell.py` entirely, exactly mirroring `MitateDB-api/tests/
+    test_order_by_direction_hardening.py`'s identical SQLite-backend test
+    -- proving `PostgresBackend.read()`'s own `_DIRECTION_SQL` closed dict
+    lookup rejects an unexpected `direction` value with `errors.
+    ValidationError` (a classified failure, not the raw, untranslated
+    `KeyError` this call site used to raise before this fix -- that
+    `KeyError` happened before the surrounding `try/except psycopg.Error`
+    block, so it was never caught at all)."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("orderby_probe", {"item_key": "integer"})
+        with pytest.raises(ValidationError):
+            cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "asc); SELECT 1 --")], 10)
+        with pytest.raises(ValidationError):
+            cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "ASC, (SELECT 1)")], 10)
+        # Regression guard: the two real directions still work.
+        assert cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "asc")], 10) == []
+        assert cell._backend.read("orderby_probe", ["item_key"], [], [("item_key", "desc")], 10) == []
+    finally:
+        close_cell(cell)
+
+
 def test_validate_value_domain_accepts_none_for_every_domain() -> None:
     """M-5, at the mechanism level (m-8 (i), no DB connection needed):
     `_validate_value_domain`/`_check_domain` are plain, connection-

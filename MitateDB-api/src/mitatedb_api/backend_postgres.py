@@ -579,10 +579,30 @@ class PostgresBackend:
         where, where_params = self._where_sql(filters)
         statement = statement + where
         if order_by is not None:
-            field, direction = order_by
-            statement = statement + sql.SQL(" ORDER BY {} {}").format(
-                sql.Identifier(field), _DIRECTION_SQL[direction]
-            )
+            # WP-3: `order_by` is always `None` or a non-empty LIST of
+            # `(field, direction)` tuples now (`cell.py::_bind_order_by`),
+            # multi-field sort included -- a pre-WP-3 single-field caller
+            # already reaches this as a one-element list.
+            #
+            # M-4 (independent review, consistency fix): an unexpected
+            # `direction` here used to raise a raw, untranslated `KeyError`
+            # (this dict lookup runs BEFORE the `try/except psycopg.Error`
+            # block below, so that block never saw it) -- never reachable
+            # through `cell.py`'s own allowlist today, but the identical
+            # defense-in-depth reasoning `backend_sqlite.py`'s own
+            # `_DIRECTION_TOKENS` lookup now documents applies here too:
+            # this backend's own SQL-composition step should fail with a
+            # classified `errors.ValidationError`, not an uncaught
+            # `KeyError`, regardless of what `cell.py` currently allows
+            # through.
+            try:
+                terms = sql.SQL(", ").join(
+                    sql.SQL("{} {}").format(sql.Identifier(field), _DIRECTION_SQL[direction])
+                    for field, direction in order_by
+                )
+            except KeyError as exc:
+                raise ValidationError("invalid order direction") from exc
+            statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
         params = list(where_params) + [limit]
         try:

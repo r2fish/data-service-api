@@ -1159,7 +1159,7 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # field), matching `test_c11`/`test_c12`'s own convention -- NOT each
 # adapter object's own `.name` property (`"r2db-api (http+postgres)"` for
 # the HTTP plug, used elsewhere in this file for diagnostic messages only).
-_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http", "MitateDB-api"})
+_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http", "MitateDB-api", "MitateDB-api-http"})
 _EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset()
 
 

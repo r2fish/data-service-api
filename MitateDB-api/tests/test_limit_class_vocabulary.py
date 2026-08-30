@@ -94,11 +94,12 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 6, (
-        f"expected exactly 6 ResourceLimitError(...) call sites (Q1-D11 count, design v1.5 §7: cell.py x5, "
+    assert len(findings) == 7, (
+        f"expected exactly 7 ResourceLimitError(...) call sites (Q1-D11 count, design v1.5 §7: cell.py x5, "
         f"config.py x1 -- down from WP-5's original 9 after Q1-D11 reclassified 3 shape-boundary checks in "
-        f"cell.py to ValidationError), found {len(findings)}: {findings!r} -- if a new call site was added or "
-        "removed intentionally, update this count in the same commit"
+        f"cell.py to ValidationError -- plus WP-3's own http.py x1, the ASGI request-byte-bound middleware's "
+        f"real `request_bytes` enforcement, design v1.2 R-5), found {len(findings)}: {findings!r} -- if a new "
+        "call site was added or removed intentionally, update this count in the same commit"
     )
 
     violations = []
