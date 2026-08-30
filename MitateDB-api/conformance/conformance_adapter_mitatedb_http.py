@@ -53,6 +53,7 @@ Public Repository Security Gate).
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import secrets
 import shutil
@@ -63,7 +64,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, NoReturn, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -89,7 +90,6 @@ from adapter import (  # noqa: E402
     Fixture,
     PayloadNotExpressible,
     ScopeView,
-    SurfaceAbsent,
     TamperVector,
     resolve_valid_confirmation,
 )
@@ -97,6 +97,10 @@ from adapter import (  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime  # noqa: E402
+from mitatedb_api.config import FoundationConfig  # noqa: E402
+from mitatedb_api.control_audit import read_control_audit_events  # noqa: E402
+from mitatedb_api.control_composition import build_control_service  # noqa: E402
+from mitatedb_api.control_http import create_control_app  # noqa: E402
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore  # noqa: E402
 from mitatedb_api.errors import AuthorizationStateUnavailable  # noqa: E402
 from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, create_app  # noqa: E402
@@ -104,6 +108,12 @@ from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, create_app  # n
 BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+
+# WP-5 (design v1.2 R-8): `MitateDB-api` is not pip-installed anywhere this
+# suite runs from -- the real CLI ritual (`python -m mitatedb_api.ops
+# bootstrap`/`reset`) needs its own explicit `PYTHONPATH` injection to be
+# importable as a subprocess (WP-0 m-11).
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 # Same admin-DSN knob `MitateDB-api/tests/test_postgres.py` already uses:
 # one shared convention across every PostgreSQL-backed test/harness in this
@@ -526,6 +536,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             from collections import OrderedDict
             self._cells: "OrderedDict[str, ApplicationCell]" = OrderedDict()
             self._contract_version_cache: str | None = None
+            self._capability_probe_session: "_Session | None" = None
+            self._capability_probe_app_id: "str | None" = None
 
             # Two PostgresCredentialStore instances against the SAME
             # platform database, matching R-4's own two-role architecture:
@@ -583,6 +595,48 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             import asyncio
             self._loop = asyncio.new_event_loop()
             self._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+
+            # ------------------------------------------------------------
+            # control plane (WP-5 provided branch): the real `/control/v1`
+            # ASGI app, assembled via THIS peer's own product composition
+            # core (`control_composition.build_control_service` +
+            # `control_http.create_control_app`) against the SAME
+            # `mitatedbsvc_controlplane` role/DSN `_bootstrap_platform`
+            # already provisioned above (R-4/R-8, mirrors r2db-http's own
+            # `assemble_control_stack` reuse -- "peer の不足を埋めない":
+            # this adapter never re-implements control-plane composition
+            # logic of its own).
+            #
+            # Limits: mirrors the in-process adapter's own measured
+            # rationale (`conformance_adapter_mitatedb.py`'s identical
+            # comment) -- `applications=100/credentials_per_application=5/
+            # control_requests_per_minute=200` satisfies R-6's numeric
+            # constraints with the same margin r2db-api measured
+            # sufficient for its own combined suite.
+            # ------------------------------------------------------------
+            self._control_app_pepper = "synthetic-conformance-pepper-mitatedb-http-0000"
+            self._control_pepper = "synthetic-conformance-pepper-mitatedb-http-ctl-0000"
+            control_env = {
+                "MITATEDB_CREDENTIAL_PEPPER": self._control_app_pepper,
+                "MITATEDB_CONTROL_CREDENTIAL_PEPPER": self._control_pepper,
+                "MITATEDB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
+                "MITATEDB_PLATFORM_SCHEMA": self._platform.schema,
+                "MITATEDB_CONTROL_APPLICATIONS_LIMIT": "100",
+                "MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT": "5",
+                "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT": "200",
+            }
+            self._control_service = build_control_service(control_env)
+            self._control_app = create_control_app(
+                self._control_service, request_bytes_limit=self._control_service.limits.request_bytes)
+            self._control_client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+
+            # `control_credential()`'s own maintained handle (memoize +
+            # call-time validity check -- port v1.5 WP-1 independent review
+            # major M-4), mirroring both the in-process adapter's and
+            # r2db-http's identical mechanism.
+            self._control_credential_ref: str | None = None
+            self._control_credential_secret: str | None = None
         except Exception:
             self._cleanup()
             atexit.unregister(self._cleanup)
@@ -687,7 +741,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         info = _provision_pg_app(self._platform, application_id)
         self._app_pg[application_id] = info
         self._cells[application_id] = ApplicationCell(
-            application_id, backend=PostgresBackend(info.runtime_dsn, info.developer_dsn)
+            application_id, FoundationConfig(control_plane_status="enabled"),
+            backend=PostgresBackend(info.runtime_dsn, info.developer_dsn),
         )
         self._evict_cells_over_cap()
         # Registry row: written by `mitatedb_registry.begin_provision_
@@ -696,18 +751,16 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # (migration 0002's own column default).
 
     def deprovision_application(self, application_id: str) -> None:
-        # R-8 (design v1.2, WP-0 m-2): "deprovision_application を含む
-        # control 系 16 call は SurfaceAbsent のまま とする" -- WP-3 keeps
-        # every control-plane-shaped port operation SurfaceAbsent on BOTH
-        # MitateDB adapters, regardless of whether real out-of-band
-        # deprovisioning SQL exists in the product (it does, `migrations/
-        # 0004_deprovision_application.sql`, exercised directly by this
-        # adapter's OWN internal teardown -- `_deprovision_pg_app`, used
-        # by `close()`'s prefix sweep, never by this PUBLIC port method).
-        # Exposing this as a real, working port operation is reserved for
-        # the WP-5 control-plane flip commit, matching the in-process
-        # adapter's identical (pre-existing) choice.
-        self._control_surface_absent("deprovision_application", f"application_id={application_id!r}")
+        # WP-5 flip: operator-privileged test-harness cleanup (never a
+        # public capability -- there is no `deprovision`/`unregister`
+        # entry point anywhere on this peer's own contract surface).
+        # Real, full teardown (drops the database + 2 roles) via the same
+        # migration script this adapter's own `close()` sweep uses --
+        # C-14 vector 5's own `applications`-bound drive must genuinely
+        # free registry+database+role state, not merely hide a row.
+        self._cells.pop(application_id, None)
+        self._app_pg.pop(application_id, None)
+        _deprovision_pg_app(self._platform, application_id)
 
     def issue_credential(self, application_id: str, role: str) -> CredentialHandle:
         role_enum = role if isinstance(role, Role) else Role(role)
@@ -738,16 +791,42 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return 0
 
     def capability_document(self) -> Mapping[str, Any]:
-        self._counter += 1
-        # application_id is bound by the control-plane's stricter 33-byte
-        # rule (`^[a-z][a-z0-9_]{0,32}$`, migration 0002's own `begin_
-        # provision_application` check) -- kept short so `self._counter`
-        # growing over a long test session never risks overflowing it.
-        probe_app = f"cap_probe_{self._counter}_{uuid.uuid4().hex[:8]}"
-        self.provision_application(probe_app)
-        handle = self.issue_credential(probe_app, "runtime")
-        session = self.authenticate(handle)
-        return self._send("GET", "/v1/capabilities", session)
+        # WP-5 (design v1.2 R-8 second-round M-1): the probe Application
+        # (a real database + 2 roles on this composition) is provisioned
+        # ONCE and its session reused for every later call -- mirrors the
+        # in-process adapter's identical fix. Directly relieves this
+        # adapter's own real Postgres DB/role churn (each probe used to
+        # cost one real `CREATE DATABASE` + 2 `CREATE ROLE`).
+        #
+        # First-execution finding (this WP): a bare "provision once, reuse
+        # forever" cache is UNSAFE on this specific adapter -- unlike the
+        # in-process adapter's unbounded dict, `self._cells` is a bounded
+        # LRU cache (`_MAX_OPEN_CELLS`, `__init__`'s own comment) that
+        # evicts (and CLOSES) the least-recently-used entry once another
+        # `provision_application` call pushes it over the cap. A probe
+        # cell that goes long enough between `capability_document()` calls
+        # (measured directly: running the combined suite reproduced this)
+        # gets evicted like any other application's cell, and every LATER
+        # reuse then crashes `_cell_factory`'s own `AssertionError` --
+        # surfaced as a generic 503 `SERVICE_UNAVAILABLE`, not a
+        # deliberate denial. Re-provisioning when the cached probe's own
+        # cell is no longer present -- the same self-healing shape
+        # `_ensure_control_actor` already uses for a stale control
+        # credential -- fixes this without giving up the steady-state
+        # savings the cache exists for.
+        if self._capability_probe_session is None or self._capability_probe_app_id not in self._cells:
+            self._counter += 1
+            # application_id is bound by the control-plane's stricter
+            # 33-byte rule (`^[a-z][a-z0-9_]{0,32}$`, migration 0002's own
+            # `begin_provision_application` check) -- kept short so
+            # `self._counter` growing over a long test session never risks
+            # overflowing it.
+            probe_app = f"cap_probe_{self._counter}_{uuid.uuid4().hex[:8]}"
+            self.provision_application(probe_app)
+            handle = self.issue_credential(probe_app, "runtime")
+            self._capability_probe_session = self.authenticate(handle)
+            self._capability_probe_app_id = probe_app
+        return self._send("GET", "/v1/capabilities", self._capability_probe_session)
 
     def _declared_contract_version(self) -> str:
         if self._contract_version_cache is None:
@@ -762,67 +841,284 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         )
 
     # ------------------------------------------------------------------
-    # control plane HTTP surface (port v1.5) -- surface-absent branch
-    # (design R-8: control 系 port op は SurfaceAbsent 維持 until WP-5)
+    # control plane HTTP surface (port v1.5) -- PROVIDED branch (WP-5 flip)
     # ------------------------------------------------------------------
+    #
+    # The real, mounted `/control/v1` ASGI app (`self._control_app`/
+    # `self._control_client`, `__init__` above) -- every one of the 14
+    # port v1.5 operations below presents its request to that same real
+    # surface over real HTTP, exactly as a genuine `/control/v1` caller
+    # would. `bootstrap`/`reset`/the internal handle-repair path drive the
+    # real out-of-band CLI ritual as a subprocess (`python -m mitatedb_api.
+    # ops bootstrap`/`reset`, R-8: "実 CLI subprocess") -- never this
+    # adapter re-implementing ceremony logic against the stores directly.
 
-    def _control_surface_absent(self, operation: str, requested: str) -> NoReturn:
-        raise SurfaceAbsent(
-            self.name, operation,
-            f"no control-plane entry point exists on this composition's mounted HTTP surface (requested: {requested})",
-            surface=self.public_operation_callables(),
-            forbidden_parameters=["credential", "control", "bootstrap", "rotate", "revoke"],
+    def _control_send(
+        self, method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers = {"authorization": f"Bearer {actor.credential_ref}.{actor.secret}"}
+        request = self._control_client.build_request(method, path, json=json_body, headers=headers)
+        response = self._run(self._control_client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
+            ) from failure
+        if not response.content:
+            return {}
+        return response.json()
+
+    def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+        return self._control_send("GET", "/control/v1/capabilities", actor)
+
+    def register_application_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+    ) -> Mapping[str, Any]:
+        return self._control_send(
+            "POST", "/control/v1/applications", actor, json_body={"application_id": application_id})
+
+    def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        result = self._control_send("GET", "/control/v1/applications", actor)
+        return result["applications"]
+
+    def set_application_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        verb = "enable" if enabled else "disable"
+        path = f"/control/v1/applications/{quote(application_id, safe='')}/{verb}"
+        return self._control_send("POST", path, actor)
+
+    def issue_credential_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
+    ) -> CredentialHandle:
+        result = self._control_send(
+            "POST", "/control/v1/credentials", actor, json_body={"application_id": application_id, "role": role})
+        return CredentialHandle(
+            credential_ref=result["credential_id"], application_id=result["application_id"], role=result["role"],
+            # http.py's own composite bearer form ("<credential_id>.<secret>"),
+            # matching this adapter's own out-of-band `issue_credential`.
+            secret=f"{result['credential_id']}.{result['secret']}",
         )
 
-    def control_capabilities(self, actor) -> Mapping[str, Any]:
-        self._control_surface_absent("control_capabilities", f"actor={actor!r}")
+    def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+        result = self._control_send("GET", "/control/v1/credentials", actor)
+        return result["credentials"]
 
-    def register_application_inband(self, actor, application_id: str) -> Mapping[str, Any]:
-        self._control_surface_absent("register_application_inband", f"application_id={application_id!r}")
+    def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
+        path = f"/control/v1/credentials/{quote(credential_ref, safe='')}/rotate"
+        return self._control_send("POST", path, actor)
 
-    def list_applications(self, actor) -> Sequence[Mapping[str, Any]]:
-        self._control_surface_absent("list_applications", f"actor={actor!r}")
+    def revoke_credential_inband(
+        self,
+        actor: "CredentialHandle | ControlCredentialHandle",
+        credential_ref: str,
+        *,
+        destructive: bool | None = None,
+        confirmation: str | None = None,
+    ) -> Mapping[str, Any]:
+        path = f"/control/v1/credentials/{quote(credential_ref, safe='')}/revoke"
+        body: dict[str, Any] = {}
+        if destructive is not None:
+            body["destructive"] = destructive
+        if confirmation is not None:
+            body["confirmation"] = confirmation
+        return self._control_send("POST", path, actor, json_body=body or None)
 
-    def set_application_enabled_inband(self, actor, application_id: str, enabled: bool) -> Mapping[str, Any]:
-        self._control_surface_absent("set_application_enabled_inband", f"application_id={application_id!r} enabled={enabled!r}")
+    def set_credential_enabled_inband(
+        self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
+    ) -> Mapping[str, Any]:
+        verb = "enable" if enabled else "disable"
+        path = f"/control/v1/credentials/{quote(credential_ref, safe='')}/{verb}"
+        return self._control_send("POST", path, actor)
 
-    def issue_credential_inband(self, actor, application_id: str, role: str) -> CredentialHandle:
-        self._control_surface_absent("issue_credential_inband", f"application_id={application_id!r} role={role!r}")
+    # ---- ritual (out-of-band CLI subprocess, R-8) --------------------
 
-    def list_credentials(self, actor) -> Sequence[Mapping[str, Any]]:
-        self._control_surface_absent("list_credentials", f"actor={actor!r}")
+    def _run_ops_cli(self, *args: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+        env["MITATEDB_CONTROLPLANE_DSN"] = self._platform.controlplane_dsn
+        env["MITATEDB_CONTROL_CREDENTIAL_PEPPER"] = self._control_pepper
+        env["MITATEDB_CREDENTIAL_PEPPER"] = self._control_app_pepper
+        env["MITATEDB_PLATFORM_SCHEMA"] = self._platform.schema
+        return subprocess.run(
+            [sys.executable, "-m", "mitatedb_api.ops", *args], capture_output=True, text=True, env=env)
 
-    def rotate_credential(self, actor, credential_ref: str) -> object:
-        self._control_surface_absent("rotate_credential", f"credential_ref={credential_ref!r}")
+    def _run_reset_ops_cli(self) -> subprocess.CompletedProcess:
+        """`python -m mitatedb_api.ops reset` self-gates on the ceremony
+        core's own declare-and-echo check (`ops.py`'s own module
+        docstring): a first, unconfirmed invocation is refused (exit 2,
+        the declaration as one line of JSON on stderr); this reads
+        `required_confirmation` from that declaration and echoes it back
+        on a second invocation -- this adapter's own equivalent of an
+        operator following the CLI's own printed instructions by hand.
+        Returns the SECOND (confirmed) invocation's own `CompletedProcess`
+        on the ordinary path."""
+        probe = self._run_ops_cli("reset")
+        if probe.returncode != 2:
+            # Not this gate's own refusal shape at all (e.g. a genuine
+            # database/environment failure) -- surface it unmodified.
+            return probe
+        lines = [line for line in probe.stderr.splitlines() if line.strip()]
+        if not lines:
+            raise RuntimeError(f"mitatedb_api.ops reset exited 2 with no parseable declaration on stderr: {probe.stderr!r}")
+        try:
+            declaration = json.loads(lines[-1])
+            phrase = declaration["details"]["required_confirmation"]
+        except Exception as exc:
+            raise RuntimeError(f"could not parse mitatedb_api.ops reset's own declaration: {probe.stderr!r}") from exc
+        return self._run_ops_cli("reset", "--confirm", phrase)
 
-    def revoke_credential_inband(self, actor, credential_ref: str, *, destructive=None, confirmation=None) -> Mapping[str, Any]:
-        self._control_surface_absent("revoke_credential_inband", f"credential_ref={credential_ref!r}")
+    def _parse_issued_stdout(self, stdout: str) -> tuple[str, str]:
+        credential_id: str | None = None
+        secret: str | None = None
+        for line in stdout.splitlines():
+            if line.startswith("credential_id: "):
+                credential_id = line[len("credential_id: "):].strip()
+            elif line.startswith("secret: "):
+                secret = line[len("secret: "):].strip()
+        if not credential_id or not secret:
+            raise RuntimeError(f"could not parse credential_id/secret from mitatedb_api.ops stdout: {stdout!r}")
+        return credential_id, secret
 
-    def set_credential_enabled_inband(self, actor, credential_ref: str, enabled: bool) -> Mapping[str, Any]:
-        self._control_surface_absent("set_credential_enabled_inband", f"credential_ref={credential_ref!r} enabled={enabled!r}")
+    def _ops_cli_denial(self, result: subprocess.CompletedProcess) -> ConformanceDenial:
+        """Translates a non-zero `python -m mitatedb_api.ops` exit into a
+        `ConformanceDenial` -- `ops.py`'s own `main()` prints one line of
+        JSON (`{"code": ..., "message": ...}`) on stderr for every
+        `FoundationError` (this WP's own addition to that module,
+        specifically so this adapter has a stable machine interface to
+        parse rather than pattern-matching free text). `message` is never
+        placed on `ConformanceDenial` itself (design section 4.1: the
+        native message text is deliberately excluded from that type) --
+        only `details` (structured, non-free-text) is passed through, here
+        always empty (`ops.py`'s own JSON line carries no separate
+        `details` object outside the destructive-confirmation gate, which
+        this adapter's `_run_reset_ops_cli` already resolves before ever
+        reaching this path)."""
+        lines = [line for line in result.stderr.splitlines() if line.strip()]
+        code = UNCLASSIFIED
+        if lines:
+            try:
+                body = json.loads(lines[-1])
+                if isinstance(body, dict) and isinstance(body.get("code"), str):
+                    code = body["code"]
+            except Exception:
+                pass
+        return ConformanceDenial(code=code, adapter=self.name, native_type="mitatedb_api.ops")
 
     def bootstrap(self) -> ControlCredentialHandle:
-        self._control_surface_absent("bootstrap", "ritual bootstrap (no actor -- out-of-band by contract)")
+        result = self._run_ops_cli("bootstrap")
+        if result.returncode != 0:
+            raise self._ops_cli_denial(result)
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
 
     def reset(self) -> ControlCredentialHandle:
-        self._control_surface_absent("reset", "ritual reset (no actor -- out-of-band by contract)")
+        result = self._run_reset_ops_cli()
+        if result.returncode != 0:
+            raise self._ops_cli_denial(result)
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
+
+    def _control_credentials_has_any(self) -> bool:
+        """Read-only existence probe used only to choose `bootstrap` vs
+        `reset` in `_repair_control_actor` -- a direct, privileged read of
+        `control_credentials`' row count via `mitatedbsvc_controlplane`
+        (which DOES hold `SELECT` on this one table, migration 0002 --
+        unlike `control_audit`, R-4)."""
+        statement = sql.SQL("SELECT count(*) FROM {table}").format(
+            table=sql.Identifier(self._platform.schema, "control_credentials"))
+        with psycopg.connect(self._platform.controlplane_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(statement)
+                (count,) = cur.fetchone()
+        return count > 0
+
+    def _control_actor_is_live(self, credential_ref: str, secret: str) -> bool:
+        try:
+            self._control_send(
+                "GET", "/control/v1/capabilities", ControlCredentialHandle(credential_ref=credential_ref, secret=secret))
+            return True
+        except ConformanceDenial:
+            return False
+
+    def _ensure_control_actor(self) -> ControlCredentialHandle:
+        """R-8 (`adapter の control credential handle はキャッシュし毎回
+        probe しない` -- read literally as "do not re-PROVISION a fresh
+        one every call", not "never re-validate the one already cached").
+        First-execution finding (this WP): a bare, unconditional cache
+        (this method's own original WP-5 revision) goes stale silently the
+        moment a LATER test's own real `adapter.reset()` call revokes
+        every existing control credential including the one this cache
+        still names -- `control_credential()` then hands out a dead handle
+        to whichever test asks next, which fails downstream with a
+        confusing `AUTH_INVALID` unrelated to what that test was actually
+        checking (measured directly: `test_c15...audit_and_denials_are_
+        recorded`, which runs after `test_c15...reset...atomically` in the
+        same session-scoped adapter). One cheap `GET .../capabilities`
+        against the CACHED handle -- not a fresh mint -- confirms liveness
+        before handing it out; only a genuinely dead cache pays the cost
+        of `_repair_control_actor`'s own real ritual run."""
+        if self._control_credential_ref is not None and self._control_actor_is_live(
+                self._control_credential_ref, self._control_credential_secret):
+            return ControlCredentialHandle(credential_ref=self._control_credential_ref, secret=self._control_credential_secret)
+        return self._repair_control_actor()
+
+    def _repair_control_actor(self) -> ControlCredentialHandle:
+        """Mints a genuinely fresh, must-rotate-cleared control credential
+        via the real out-of-band CLI ritual, then clears `must_rotate` via
+        one real in-band self-rotate HTTP call, and updates the tracked
+        cache (WP-1 M-4: never a memoized value past validity)."""
+        has_any = self._control_credentials_has_any()
+        result = self._run_reset_ops_cli() if has_any else self._run_ops_cli("bootstrap")
+        if result.returncode != 0:
+            raise RuntimeError(f"mitatedb_api.ops {'reset' if has_any else 'bootstrap'} failed: {result.stderr}")
+        credential_id, secret = self._parse_issued_stdout(result.stdout)
+        rotated = self._control_send(
+            "POST", f"/control/v1/credentials/{quote(credential_id, safe='')}/rotate",
+            ControlCredentialHandle(credential_ref=credential_id, secret=secret),
+        )
+        self._control_credential_ref = credential_id
+        self._control_credential_secret = rotated["secret"]
+        return ControlCredentialHandle(credential_ref=credential_id, secret=self._control_credential_secret)
 
     def control_credential(self) -> ControlCredentialHandle:
-        self._control_surface_absent("control_credential", "privileged control-credential setup")
+        return self._ensure_control_actor()
 
     def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
-        self._control_surface_absent("control_audit_events", "control-plane audit observation")
+        # `mitatedbsvc_controlplane` has INSERT-only on `control_audit`
+        # (R-4) -- reads with `provision_dsn` (the schema owner), the same
+        # separate reader R-8 calls for.
+        return read_control_audit_events(self._platform.provision_dsn, self._platform.schema)
 
     # ------------------------------------------------------------------
     # application plane
     # ------------------------------------------------------------------
 
-    def authenticate(self, handle: CredentialHandle) -> object:
+    def authenticate(self, handle: "CredentialHandle | ControlCredentialHandle") -> object:
         # A real HTTP round trip validates the bearer up front (fail fast,
         # same as a real client discovering an invalid credential
         # immediately) -- `GET /v1/capabilities` is application-authed
         # (M-9) and touches nothing but authentication + `assert_active`.
-        session = _Session(bearer=handle.secret, application_id=handle.application_id, role=handle.role)
+        #
+        # WP-5 flip (first-execution finding): C-14 vector 2 presents a
+        # REAL `ControlCredentialHandle` here (`control_plane_status:
+        # enabled` is exercised for the first time this WP) -- that type
+        # has no `application_id`/`role` attribute at all (design: a
+        # control credential belongs to no Application). `getattr(...,
+        # None)` avoids a harness-level `AttributeError` on that access;
+        # the actual rejection this vector requires still comes from the
+        # real server -- a control credential's digest matches no row in
+        # `<schema>.credentials` at all (it lives in the separate
+        # `control_credentials` table, R-4), so `_send` below still raises
+        # a genuine `ConformanceDenial` from the real HTTP response.
+        session = _Session(
+            bearer=handle.secret,
+            application_id=getattr(handle, "application_id", None),
+            role=getattr(handle, "role", None),
+        )
         self._send("GET", "/v1/capabilities", session)
         return session
 
@@ -1150,20 +1446,34 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # real, no-op-for-this-purpose control-plane call, not denied.
             self._write_store.enable_application(handle.application_id)
 
+        def inband_enable_credential_after_revoke_then_reauthenticate_denied_attempt() -> None:
+            # WP-5 flip (design v1.2 R-8 second-round M-4): `/control/v1`'s
+            # own in-band enable is now real on this composition too --
+            # `set_credential_enabled_inband` and `handle` (minted via the
+            # privileged `_write_store`) both ultimately act on the SAME
+            # `<schema>.credentials` row (R-4: the control-writer registry
+            # and the application-plane's own read-only store are two
+            # Python representations of one PostgreSQL table -- 2ストア
+            # 突合 is structural here, no adapter-side reconciliation shim
+            # needed the way the in-process adapter's own separate dicts
+            # required). `enable` itself succeeds (contract `enable_
+            # credential.semantics`: reverses disable only); the proof this
+            # is `must_deny`, not `must_ignore`, is that a genuine
+            # re-authenticate is chained inside this SAME `attempt()`.
+            control_actor = self.control_credential()
+            self.set_credential_enabled_inband(control_actor, handle.credential_ref, True)
+            self.authenticate(handle)
+
         return [
             TamperVector(
                 kind="credential_reactivation", name="mitatedb_http_enable_application_does_not_reactivate_revoked_credential",
                 disposition="must_ignore", attempt=enable_application_after_revoke_attempt,
             ),
             TamperVector(
-                kind="credential_reactivation", name="mitatedb_http_credential_store_has_no_reactivation_call",
-                disposition="structurally_absent",
-                surface=[
-                    self._write_store.issue, self._write_store.revoke, self._write_store.disable,
-                    self._write_store.enable, self._write_store.disable_application, self._write_store.enable_application,
-                    self._write_store.authenticate, self._write_store.assert_active,
-                ],
-                forbidden_parameters=["reactivate", "unrevoke", "un_revoke"],
+                kind="credential_reactivation",
+                name="mitatedb_http_inband_enable_credential_after_revoke_then_reauthenticate_denied",
+                disposition="must_deny",
+                attempt=inband_enable_credential_after_revoke_then_reauthenticate_denied_attempt,
             ),
         ]
 
@@ -1307,6 +1617,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         atexit.unregister(self._cleanup)
         try:
             self._run(self._client.aclose())
+        except Exception:
+            pass
+        try:
+            self._run(self._control_client.aclose())
         except Exception:
             pass
         self._loop.close()

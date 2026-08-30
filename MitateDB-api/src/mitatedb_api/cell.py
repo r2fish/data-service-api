@@ -924,7 +924,16 @@ class ApplicationRuntime:
                 "revision_preconditions": {"status": "unavailable"},
                 "row_addressability": {"status": "unavailable"},
                 "cross_entity_mutation": {"status": "unavailable"},
-                "control_plane": {"status": "unavailable"}
+                # WP-5 (design v1.2 R-7 flip): single source of truth is
+                # `config.control_plane_status`, composition-root-injected
+                # (`FoundationConfig.from_env`'s own `MITATEDB_CONTROL_
+                # PLANE_STATUS`, or a direct constructor value for a
+                # conformance adapter) -- never a hardcoded literal here,
+                # so the declaration and whatever `/control/v1` surface
+                # this deployment/adapter actually runs cannot drift apart
+                # (R-7: "宣言値と enforce 値が同一ソースから出ることを構造
+                # で保証する").
+                "control_plane": {"status": config.control_plane_status}
             },
             "limits": {
                 "batch_items": config.max_batch_items,

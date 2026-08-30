@@ -815,6 +815,15 @@ class ControlPlaneService:
         self._rate_lock = threading.Lock()
         self._rate_window: list[float] = []
 
+    @property
+    def limits(self) -> ControlPlaneLimits:
+        """WP-5: a public read accessor for the composition root
+        (`control_main.build_control_app`) to size the ASGI request-byte
+        bound (`limits.request_bytes`) from the SAME `ControlPlaneLimits`
+        instance this service enforces everything else against -- never a
+        second, independently-configured copy of that number."""
+        return self._limits
+
     # ---- shared machinery -------------------------------------------------
 
     def check_rate(self) -> None:
