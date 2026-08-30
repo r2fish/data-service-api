@@ -59,8 +59,10 @@ updated in the same commit as this flip.
   literal, without this suite hardcoding that literal itself), a
   case-changed phrase, another entity's correct phrase, another
   operation's correct phrase (`drop_entity`'s phrase presented to
-  `delete`), and the correct phrase for a *different* selection/where on
-  the same entity -- every one denied, state unchanged.
+  `delete` -- skipped, not failed, whenever `drop_entity` itself is
+  absent, in either honest form; WP-2.5c, see V6 below), and the correct
+  phrase for a *different* selection/where on the same entity -- every
+  one denied, state unchanged.
 - V4: phrase determinism -- two probes of the identical request yield the
   identical phrase; a second, independent credential for the same
   Application, of a DIFFERENT role (`developer`, not another `runtime`;
@@ -75,14 +77,21 @@ updated in the same commit as this flip.
   use of that entity) -- probe, re-probe the SAME request and require the
   identical phrase (establishing determinism BEFORE testing invalidation,
   review M-1), an unrelated schema change to the SAME entity, re-probe
-  (old phrase now denied), the freshly re-probed phrase succeeds.
-  Surface-absent peers (no schema-drop entry point) take the shared
-  absence mechanism (`absence.assert_control_operation_absent_or_
-  uniformly_refused`, the same mechanism `test_c14_authority_boundary.py`
-  uses for the control-plane surface, given its own `("drop", "destroy")`
+  (old phrase now denied), the freshly re-probed phrase succeeds. A peer
+  with no functioning `drop_entity` takes the shared absence mechanism
+  (`absence.assert_control_operation_absent_or_uniformly_refused`, the
+  same mechanism `test_c14_authority_boundary.py` uses for the
+  control-plane surface, given its own `("drop", "destroy")`
   forbidden-vocabulary guard, review M-5) instead of this vector's real
-  assertions, and additionally requires the absence claim to agree with
-  this peer's own declared `capabilities.schema_operations` (review M-6).
+  assertions, in either of TWO honest forms as of WP-2.5c (mirroring
+  C-17's own present-denial widening, docs/design/
+  MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-8): surface-absent (no
+  drop/destroy entry point at all -- `MitateDB-api` in-process today) or a
+  real, present `ConformanceDenial(CAPABILITY_UNSUPPORTED)` (a real entry
+  point exists but refuses this specific request; no currently-registered
+  adapter takes this form, additionally probed for no actual drop effect).
+  Either form additionally requires the absence claim to agree with this
+  peer's own declared `capabilities.schema_operations` (review M-6).
   Also applies a V3-equivalent adversarial subset to `drop_entity` itself.
 - V7: the in-band last-control-credential revoke gate -- control-plane-
   provided peers only; a surface-absent peer takes the same shared absence
@@ -366,6 +375,109 @@ def _probe_drop_entity(adapter, session, entity: str) -> ConformanceDenial:
     denial = excinfo.value
     _assert_probe_denial_code(adapter, denial, operation="drop_entity")
     return denial
+
+
+# `drop_entity`'s own absence-claim forbidden-vocabulary guard (review
+# correction M-5) -- distinct from C-14's own `("credential", "control")`,
+# since this absence claim is about schema/drop capability, not
+# control-plane authority. Shared by V3 and V6 below (WP-2.5c widening):
+# both need to tell a genuinely FUNCTIONING drop_entity (the common case,
+# every currently-registered adapter that declares row_addressability/
+# schema drop support) apart from a peer where it is honestly absent.
+_V6_ABSENCE_VOCABULARY = ("drop", "destroy")
+
+
+def _drop_entity_form_and_probe(adapter, session, entity: str) -> tuple[str, ConformanceDenial | None]:
+    """Presents an unconfirmed destructive `drop_entity` and classifies the
+    outcome into one of THREE honest forms (WP-2.5c, docs/design/
+    MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md R-8 -- the same widening C-17
+    took in WP-2.5, `test_c17_declaration_agreement.py`'s own present-
+    denial form, applied here to `drop_entity`):
+
+    - `"present"`: a real, functioning declare-and-echo entry point --
+      returns `("present", denial)` with `denial.code ==
+      DESTRUCTIVE_CONFIRMATION_REQUIRED`, so the caller can read its phrase
+      exactly as `_probe_drop_entity` already does. This is the ONLY form
+      any currently-registered adapter that supports `drop_entity` at all
+      takes (both `r2db-api` adapters).
+    - `"surface_absent"`: no real entry point exists at all (`MitateDB-api`
+      in-process today -- its `ApplicationDeveloper` has no drop/destroy
+      parameter anywhere on its public surface).
+    - `"declared_unavailable"`: a real entry point exists but refuses this
+      specific request with `CAPABILITY_UNSUPPORTED`, matching the peer's
+      own declared `schema_operations` capability. No currently-registered
+      adapter takes this form; it exists for a future adapter with a real,
+      mounted schema surface (e.g. a peer mounting `/v1/schema/operations`
+      the way `create_index` is present-but-refused per R-8 §2) whose
+      declared capability nonetheless does not include `drop_entity`.
+
+    The two absence forms are classified by `absence.py`'s shared
+    `assert_control_operation_absent_or_uniformly_refused` -- the same
+    mechanism C-14/C-15's control-plane absence checks and C-17's own
+    present-denial form already use (`None` is returned as the denial in
+    both cases; nothing to read a phrase from). Re-presenting the SAME
+    unconfirmed request a second time to reach that classifier is harmless:
+    an unconfirmed destructive operation must never execute on any
+    honestly-conformant peer, so a second identical attempt observes the
+    identical (non-)outcome.
+    """
+    def _attempt() -> None:
+        adapter.drop_entity(session, entity, destructive=True, confirmation=None)
+
+    try:
+        _attempt()
+    except ConformanceDenial as denial:
+        if denial.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED":
+            return "present", denial
+        # Any other code (chiefly CAPABILITY_UNSUPPORTED) is classified
+        # below, alongside SurfaceAbsent.
+    except SurfaceAbsent:
+        pass
+    else:
+        raise AssertionError(
+            f"{adapter.name}: an unconfirmed destructive drop_entity executed outright -- SI-09 violation"
+        )
+
+    form = assert_control_operation_absent_or_uniformly_refused(
+        adapter, _attempt, required_forbidden_vocabulary=_V6_ABSENCE_VOCABULARY,
+    )
+    return form, None
+
+
+def _assert_drop_entity_absence_agrees_with_declaration(adapter) -> None:
+    """Review correction M-6, unchanged in substance by WP-2.5c: the
+    absence claim (either honest form) must agree with this peer's OWN
+    declared `capabilities.schema_operations` -- a peer claiming absence
+    for `drop_entity` while its own capability document is silent about it
+    (or, worse, declares it supported) is an internally inconsistent
+    declaration, the same "declared status agrees with actual surface"
+    property C-14 already checks for its own capability. Satisfied either
+    by `status == "unavailable"` (the whole schema-operations surface is
+    off) or by `"drop_entity"` appearing in `unsupported` (a `partial`
+    surface that names this operation specifically -- `MitateDB-api`'s own
+    real declaration, measured: `status: "partial"`, `unsupported` includes
+    `"drop_entity"`)."""
+    schema_ops = _schema_operations_capability(adapter)
+    unsupported = schema_ops.get("unsupported", [])
+    assert schema_ops.get("status") == "unavailable" or "drop_entity" in unsupported, (
+        f"{adapter.name}: drop_entity is absent, but capabilities.schema_operations declares "
+        f"status={schema_ops.get('status')!r} and unsupported={unsupported!r} -- neither says "
+        "'unavailable' nor lists drop_entity as unsupported, so the absence claim disagrees with this "
+        "peer's own declared capability document"
+    )
+
+
+def _assert_drop_entity_present_denial_had_no_effect(adapter, session, entity: str) -> None:
+    """WP-2.5c requirement (d): a present-denial claim (a real entry point
+    refusing `drop_entity` with `CAPABILITY_UNSUPPORTED`) must not have
+    dropped the entity anyway -- probed the same way V6's own end-of-test
+    check already does for a genuine, executed drop (`entity in
+    adapter.entities(session)`), just asserted the opposite direction."""
+    assert entity in adapter.entities(session), (
+        f"{adapter.name}: drop_entity was refused with CAPABILITY_UNSUPPORTED (a present-denial claim of no "
+        f"effect), but {entity!r} is missing from entities() afterward -- it appears to have been dropped "
+        "despite the refusal"
+    )
 
 
 def _assert_delete_denied(
@@ -742,11 +854,14 @@ def test_c06_v3_confirmation_exact_match_required(adapter, fx: Fixture):
     _assert_delete_denied(adapter, session, entity, "item_key", 1, destructive=True, confirmation=other_phrase)
 
     # another OPERATION's correct phrase (drop_entity) presented to delete.
-    try:
-        drop_denial = _probe_drop_entity(adapter, fx.developer_a, other_entity)
-    except SurfaceAbsent:
-        pass  # this peer has no drop_entity surface at all -- nothing to cross-present here (V6 covers this).
-    else:
+    # WP-2.5c widening: both absence forms (`"surface_absent"` and the new
+    # `"declared_unavailable"` present-denial form) mean the same thing for
+    # THIS check -- there is no real drop_entity phrase to cross-present at
+    # all -- so both fall through identically to "nothing to do here" (V6
+    # covers the declaration-consistency/no-effect checks for either form
+    # on its own).
+    drop_form, drop_denial = _drop_entity_form_and_probe(adapter, fx.developer_a, other_entity)
+    if drop_form == "present":
         drop_phrase = drop_denial.details["required_confirmation"]
         _assert_delete_denied(adapter, session, entity, "item_key", 1, destructive=True, confirmation=drop_phrase)
 
@@ -826,9 +941,6 @@ def test_c06_v5_echo_executes(adapter, fx: Fixture):
 # ---------------------------------------------------------------------------
 
 
-_V6_ABSENCE_VOCABULARY = ("drop", "destroy")
-
-
 def test_c06_v6_drop_entity_fingerprint_invalidation(adapter, fx: Fixture):
     if _branch_for(adapter) != "strict":
         _assert_baseline_delete_invariant(adapter, fx)
@@ -849,41 +961,19 @@ def test_c06_v6_drop_entity_fingerprint_invalidation(adapter, fx: Fixture):
     entity = fresh_identifier("c06_v6_entity")
     adapter.create_entity(developer, entity, {"item_key": "integer"})
 
-    try:
-        first_denial = _probe_drop_entity(adapter, developer, entity)
-    except SurfaceAbsent:
-        # This peer has no schema-drop entry point at all (e.g.
-        # MitateDB-api) -- the shared C-14-originated absence mechanism
-        # (design R-6 item 4) verifies the claim independently rather than
-        # accepting it on the adapter's word. `("drop", "destroy")` is this
-        # vector's own forbidden-vocabulary guard (review correction M-5) --
-        # distinct from C-14's own `("credential", "control")`, since this
-        # absence claim is about schema/drop capability, not control-plane
-        # authority.
-        assert_control_operation_absent_or_uniformly_refused(
-            adapter, lambda: adapter.drop_entity(developer, entity, destructive=True, confirmation=None),
-            required_forbidden_vocabulary=_V6_ABSENCE_VOCABULARY,
-        )
-        # Review correction M-6: the absence claim must agree with this
-        # peer's OWN declared `capabilities.schema_operations` -- a peer
-        # claiming `SurfaceAbsent` for `drop_entity` while its own
-        # capability document is silent about it (or, worse, declares it
-        # supported) is an internally inconsistent declaration, the same
-        # "declared status agrees with actual surface" property C-14
-        # already checks for its own capability. Satisfied either by
-        # `status == "unavailable"` (the whole schema-operations surface
-        # is off) or by `"drop_entity"` appearing in `unsupported` (a
-        # `partial` surface that names this operation specifically --
-        # `MitateDB-api`'s own real declaration, measured: `status:
-        # "partial"`, `unsupported` includes `"drop_entity"`).
-        schema_ops = _schema_operations_capability(adapter)
-        unsupported = schema_ops.get("unsupported", [])
-        assert schema_ops.get("status") == "unavailable" or "drop_entity" in unsupported, (
-            f"{adapter.name}: drop_entity is SurfaceAbsent, but capabilities.schema_operations declares "
-            f"status={schema_ops.get('status')!r} and unsupported={unsupported!r} -- neither says "
-            "'unavailable' nor lists drop_entity as unsupported, so the absence claim disagrees with this "
-            "peer's own declared capability document"
-        )
+    # WP-2.5c widening: three honest forms are now distinguished (module
+    # docstring of `_drop_entity_form_and_probe`, above) -- `"present"`
+    # (the common case, a functioning declare-and-echo entry point) falls
+    # through to this test's normal body below; either absence form
+    # (`"surface_absent"`, e.g. `MitateDB-api` in-process today, or the new
+    # `"declared_unavailable"` present-denial form) returns early after the
+    # same declaration-consistency check and (for the new form only) the
+    # additional (d) no-effect probe.
+    form, first_denial = _drop_entity_form_and_probe(adapter, developer, entity)
+    if form != "present":
+        _assert_drop_entity_absence_agrees_with_declaration(adapter)
+        if form == "declared_unavailable":
+            _assert_drop_entity_present_denial_had_no_effect(adapter, developer, entity)
         return
 
     first_phrase = first_denial.details["required_confirmation"]
