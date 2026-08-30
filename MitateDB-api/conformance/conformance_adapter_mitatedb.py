@@ -623,15 +623,27 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # at once -- so every operation in the batch is presented to it
         # together, in one real call, exactly as `_attempt_mutation_
         # outcome`'s own `expected_revision`/`unique_key` branch already
-        # does for a single operation. This peer's `transact()` only ever
-        # truly executes a `"insert"` item; every other type in the same
-        # vocabulary (`update`/`delete`/`upsert`) is refused with
-        # `CapabilityError` regardless of what else is in the batch
-        # (`cell.py`'s own op-type dispatch) -- so a real mixed batch
-        # (insert alongside update/delete) is genuinely refused here, never
-        # silently split into several single-operation calls this adapter
-        # stitches together itself, which would prove nothing real about
-        # this peer's own (lack of) batch-mixing support.
+        # does for a single operation.
+        #
+        # P3-D2 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+        # R-5, WP-1.5): before this WP, `transact()` only ever truly
+        # executed an `"insert"` item -- every other type in the same
+        # vocabulary (`update`/`delete`/`upsert`) was refused with
+        # `CapabilityError` regardless of what else was in the batch, so a
+        # real mixed batch (insert alongside update/delete) was genuinely
+        # refused here. As of WP-1.5, `insert`/`update`/`delete` all
+        # execute for real, atomically, converging real behavior onto the
+        # existing `atomic_mutation.operations` declaration (unchanged by
+        # this WP -- no capability-envelope expansion); a batch-embedded
+        # `delete` goes through the identical declare-and-echo
+        # confirmation choke the dedicated `delete()` method above uses.
+        # `upsert` alone remains a real capability gap (`CapabilityError`),
+        # unaffected by this WP -- no execution path for it exists
+        # anywhere on this peer, batched or not. A real mixed batch is
+        # therefore genuinely executed here now, never silently split into
+        # several single-operation calls this adapter stitches together
+        # itself, which would prove nothing real about this peer's own
+        # batch-mixing support either way.
         items: list[dict[str, Any]] = []
         for op in operations:
             item: dict[str, Any] = {"type": op.operation, "collection": entity, "values": dict(op.values or {})}

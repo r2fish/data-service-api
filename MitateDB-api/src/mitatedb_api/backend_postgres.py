@@ -529,6 +529,50 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"rowid": rowid}
 
+    def update_in_transaction(self, collection, fields, params, filters):
+        # P3-D2 (WP-1.5): no commit/rollback here (unlike `update` below)
+        # -- mirrors `insert_in_transaction`'s own reasoning above. Runs
+        # inside the transaction the seam's own `transact()` already
+        # opened via `begin()` and will `commit()`/`rollback()` once,
+        # after every operation in the batch.
+        assignments = sql.SQL(", ").join(
+            sql.SQL("{} = %s").format(sql.Identifier(f)) for f in fields
+        )
+        statement = sql.SQL("UPDATE {} SET {}").format(sql.Identifier(collection), assignments)
+        where, where_params = self._where_sql(filters)
+        statement = statement + where
+        try:
+            with self._runtime.cursor() as cur:
+                _execute(cur, statement, list(params) + where_params)
+                updated = cur.rowcount
+        except psycopg.errors.UndefinedTable:
+            raise NotFoundError("collection not found")
+        except psycopg.Error as exc:
+            # B-1 (ii): translated, not rolled back here -- the OUTER
+            # `transact()` (`cell.py`) always calls `self._backend.
+            # rollback()` in its own `except` clause once this propagates.
+            raise ValidationError("storage backend rejected the request") from exc
+        return {"updated": updated}
+
+    def delete_in_transaction(self, collection, filters):
+        # P3-D2 (WP-1.5): no commit/rollback here (unlike `delete` below)
+        # -- same reasoning as `update_in_transaction` immediately above.
+        # `cell.ApplicationCell` has already run this request through the
+        # same declare-and-echo confirmation choke `delete()` itself uses
+        # before this is ever called.
+        statement = sql.SQL("DELETE FROM {}").format(sql.Identifier(collection))
+        where, params = self._where_sql(filters)
+        statement = statement + where
+        try:
+            with self._runtime.cursor() as cur:
+                _execute(cur, statement, params)
+                deleted = cur.rowcount
+        except psycopg.errors.UndefinedTable:
+            raise NotFoundError("collection not found")
+        except psycopg.Error as exc:
+            raise ValidationError("storage backend rejected the request") from exc
+        return {"deleted": deleted}
+
     def read(self, collection, selected, filters, order_by, limit):
         columns = sql.SQL(", ").join(sql.Identifier(x) for x in selected)
         statement = sql.SQL("SELECT {} FROM {}").format(columns, sql.Identifier(collection))
