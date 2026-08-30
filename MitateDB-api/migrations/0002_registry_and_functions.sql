@@ -120,11 +120,30 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.credentials (
     issued_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- WP-4 correction (design v1.2 R-4 item 1, "control credential store 二重
+-- 実装 + parity"): this table originally (WP-1) had no `revoked` column at
+-- all -- an oversight discovered while implementing WP-4's own `control_
+-- auth.ControlCredentialStore`/`control_credential_store_postgres.
+-- PostgresControlCredentialStore` pair, which requires the SAME independent
+-- enabled/revoked shape the sibling `credentials` table above already has
+-- (contract `CredentialsResult`/`CredentialStateResult` require both keys
+-- for every credential row regardless of kind). Added in place rather than
+-- as a separate follow-up migration: no real deployment has ever run this
+-- migration set against a persistent Cloud SQL instance yet (`security/
+-- CONTROL_MAPPING.md`'s own "Cloud SQL 実機 evidence は配備時まで absent"
+-- disclosure) -- every test harness in this repository re-runs the full
+-- 0001-0004 sequence from scratch against a throwaway-prefixed database on
+-- every run, so there is no live incremental-migration history this
+-- in-place edit could silently break. As with `credentials.revoked`
+-- immediately above: nothing in this migration set or in `control_
+-- credential_store_postgres.py` ever sets this back to `FALSE` (no
+-- un-revoke SQL statement exists anywhere in this repository).
 CREATE TABLE IF NOT EXISTS mitatedb_registry.control_credentials (
     credential_id text PRIMARY KEY,
     digest        bytea NOT NULL,
     must_rotate   boolean NOT NULL DEFAULT TRUE,
     enabled       boolean NOT NULL DEFAULT TRUE,
+    revoked       boolean NOT NULL DEFAULT FALSE,
     issued_at     timestamptz NOT NULL DEFAULT now()
 );
 

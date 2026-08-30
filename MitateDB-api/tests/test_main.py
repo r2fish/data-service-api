@@ -135,3 +135,109 @@ def test_build_app_serves_a_real_authenticated_request(main_module, platform, pr
     assert document["application_scope"] == probe_app.app_id
     assert document["role"] == "runtime"
     assert document["limit_enforcement"]["request_bytes"] == "enforced"
+
+
+# --------------------------------------------------------------------------
+# WP-4 (design v1.2 R-7): the control plane is built (`control_plane.py`/
+# `control_http.py`) but must NEVER be mounted anywhere in this WP's public
+# composition -- "declared-unavailable form (b) の状態を一瞬も経由しない".
+# Kept in THIS file (not a separate test module) deliberately: `main_module`
+# is a process-wide singleton import keyed to the module-scoped `platform`/
+# `probe_app` fixtures ABOVE -- a second test file importing `main_module`
+# via its OWN, differently-prefixed `platform`/`probe_app` would trigger a
+# second, independent `import mitatedb_api.main` bound to a throwaway
+# database that file's own teardown then drops, leaving whichever test file
+# runs later holding a dead connection (confirmed empirically while writing
+# this test: exactly this cross-file collision produced a spurious
+# `AUTH_STATE_UNAVAILABLE` in `test_build_app_serves_a_real_authenticated_
+# request` above when these checks first lived in their own module).
+def test_main_composition_root_mounts_no_control_v1_route(main_module) -> None:
+    inner = main_module.app.app  # `http.RequestByteBoundMiddleware.app` is the real Starlette app
+    paths = [route.path for route in inner.routes]
+    assert not any(path.startswith("/control/v1") for path in paths), (
+        f"main.py's own composition root must not mount /control/v1 in WP-4; found: {paths}"
+    )
+
+
+def test_build_app_never_references_the_control_plane_at_all(main_module) -> None:
+    """`build_app` (the function that actually produces the module-level
+    `app` object `uvicorn mitatedb_api.main:app` serves) must not import,
+    construct, or call anything control-plane-shaped -- checked at the
+    function-source level, not the whole module, because the module ALSO
+    defines `build_control_service` (design v1.2 §3 WP-4 row instruction
+    #6: "control 用 factory は用意するが公開 serve には出さない") which
+    legitimately references `control_plane`/`control_credential_store_
+    postgres` -- that factory is prepared for WP-5 to call, but `build_app`
+    itself must never reach it or any of its own dependencies."""
+    import inspect
+
+    source = inspect.getsource(main_module.build_app)
+    forbidden_snippets = (
+        "control_http", "control_plane", "ControlPlaneService", "create_control_app", "build_control_service",
+    )
+    for forbidden in forbidden_snippets:
+        assert forbidden not in source, (
+            f"build_app must not reference {forbidden!r} in WP-4 (the mount is a single WP-5 commit)"
+        )
+
+
+def test_control_service_factory_exists_but_is_never_called_at_import_time(main_module) -> None:
+    """Positive half of the same guarantee: `build_control_service`
+    (design v1.2 §3 WP-4 row instruction #6) is real, present, importable
+    code -- not merely planned -- but the module-level `app = build_app()`
+    statement that runs at import time never calls it (confirmed by the
+    test immediately above: `build_app`'s own source has zero reference to
+    it), so importing `mitatedb_api.main` alone (as every application-plane
+    test in this file already does) never constructs a control-plane
+    backend or opens a `MITATEDB_CONTROLPLANE_DSN` connection."""
+    assert callable(main_module.build_control_service)
+    import inspect
+
+    signature = inspect.signature(main_module.build_control_service)
+    assert "env" in signature.parameters
+
+
+def test_control_service_factory_builds_a_real_working_service(main_module, platform) -> None:
+    """The factory is not merely present -- calling it with real env
+    produces a genuinely working `control_plane.ControlPlaneService`
+    against the SAME throwaway PostgreSQL platform every other test in this
+    file already bootstrapped (`platform.controlplane_dsn`), independent of
+    whatever application(s) `main_module`'s own `app` happens to be serving."""
+    from mitatedb_api.control_plane import bootstrap_control_credential
+
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+        "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+    }
+    service = main_module.build_control_service(env)
+
+    backend = service._backend  # test-only reach-in, mirroring this file's own existing conventions
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    try:
+        rotated = service.rotate_credential(credential_id, secret, credential_id)
+        document = service.control_capabilities(credential_id, rotated["secret"])
+        assert document["capabilities"]["control_plane"]["status"] == "enabled"
+    finally:
+        # Clean up so this factory-only credential does not linger in the
+        # shared throwaway platform for the rest of the test session.
+        import psycopg
+        conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+        finally:
+            conn.close()
+
+
+def test_control_service_factory_rejects_identical_peppers(main_module, platform) -> None:
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+    }
+    with pytest.raises(ValueError):
+        main_module.build_control_service(env)
