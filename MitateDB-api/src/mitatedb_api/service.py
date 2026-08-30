@@ -4,12 +4,25 @@ from .audit import AuditSink
 from .auth import CredentialStore, Role
 from .cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
 from .config import FoundationConfig
-from .errors import AuthenticationError
+from .errors import AuthenticationError, ConflictError
 from .identifiers import validate_identifier
 
 
-class ControlPlane:
-    """Privileged provisioning facade, never reachable through a session."""
+class ProvisioningFacade:
+    """Privileged provisioning facade, never reachable through a session.
+
+    R-3/WP-0 m-8 (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md):
+    renamed from `ControlPlane` -- this class is an in-process,
+    SQLite-backed application/credential lifecycle facade used by the
+    local foundation composition and the in-process conformance adapter;
+    it is NOT the wire-level `/control/v1` control plane the design
+    document's own R-6 describes (a separate, not-yet-built component,
+    WP-4/5). The old name invited exactly that confusion. `ControlPlane`
+    is kept below as a backward-compatible alias -- every existing caller
+    (`tests/test_foundation.py`, `conformance/conformance_adapter_
+    mitatedb.py`) keeps working unchanged; new code should prefer
+    `ProvisioningFacade`.
+    """
 
     def __init__(self, pepper, config=None, audit=None):
         self.audit = audit or AuditSink()
@@ -20,7 +33,13 @@ class ControlPlane:
     def provision_application(self, application_id):
         validate_identifier(application_id, "application_id")
         if application_id in self.cells:
-            raise ValueError("application already provisioned")
+            # WP-0 m-8: a legitimate "this id is already provisioned"
+            # outcome must land on this foundation's own safe error
+            # classification hierarchy (`errors.FoundationError`), not an
+            # unclassified `ValueError` that would fall through every
+            # adapter's own `classify()` and surface as `SERVICE_
+            # UNAVAILABLE`/UNCLASSIFIED instead of `CONFLICT`.
+            raise ConflictError("application already provisioned")
         self.credentials.provision_application(application_id)
         self.cells[application_id] = ApplicationCell(
             application_id, self.config, self.audit,
@@ -34,6 +53,10 @@ class ControlPlane:
 
     def disable_application(self, application_id):
         self.credentials.disable_application(application_id)
+
+
+# Backward-compatible alias (see `ProvisioningFacade`'s own docstring).
+ControlPlane = ProvisioningFacade
 
 
 class MitateDataService:

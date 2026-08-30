@@ -25,6 +25,9 @@ class AuditSink:
         "", "role=runtime", "role=developer", "state_unavailable",
         "invalid_or_disabled", "schema_change", "create_collection",
         "delete_rows",
+        # P3-D1 (WP-1): `ApplicationCell.add_field`'s own `schema_change`
+        # audit event detail.
+        "add_field",
     }
     _SAFE_EVENTS = {
         "credential_issued", "credential_revoked", "application_disabled",
