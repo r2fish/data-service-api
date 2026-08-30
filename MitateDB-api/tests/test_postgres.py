@@ -329,12 +329,207 @@ def test_transact_only_executes_insert_and_rolls_back_the_whole_batch_on_failure
                 {"type": "unsupported", "collection": "notes", "values": {"title": "second"}},
             ])
         assert runtime.read("notes") == []
-        # Same seam-level semantics as the SQLite backend (P3 WP-1 round 2
-        # instruction #3): `update`/`delete`/`upsert` presented to
-        # `transact` are refused, not partially executed.
+        # P3-D2 (design v1.2 R-5, WP-1.5): `update` presented to `transact`
+        # now executes for real, atomically with the rest of the batch --
+        # this is the same seam-level convergence as the SQLite backend
+        # (see `test_foundation.py`'s own equivalent). Same as `insert`
+        # above: an unrelated failure later in the SAME batch still rolls
+        # the whole thing back, the `update` included.
+        from mitatedb_api.errors import CapabilityError
+        updated = runtime.transact([{"type": "update", "collection": "notes", "values": {"title": "x"},
+                                     "filters": [Filter("title", "eq", "first")]}])
+        assert updated == [{"updated": 0}]  # "first" was rolled back above; nothing to match
+        # `upsert` alone remains a real capability gap -- no execution path
+        # for it exists anywhere on this peer, batched or not.
+        with pytest.raises(CapabilityError):
+            runtime.transact([{"type": "upsert", "collection": "notes", "values": {"title": "x"}}])
+    finally:
+        close_cell(cell)
+
+
+def test_transact_executes_mixed_insert_update_delete_atomically(app_a) -> None:
+    """P3-D2 (design v1.2 R-5, WP-1.5): a real mixed batch
+    [insert, update, delete] executes as one atomic unit through
+    `transact()` -- converging real behavior onto the existing
+    `atomic_mutation.operations: ["insert", "update", "delete"]`
+    declaration (unchanged by this WP). The batch-embedded delete goes
+    through the identical declare-and-echo confirmation choke the
+    dedicated `delete()` method uses."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text", "rank": "integer"})
+        runtime.insert("widgets", {"title": "keep-updated", "rank": 1})
+        runtime.insert("widgets", {"title": "to-delete", "rank": 2})
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx:
+            runtime.transact([
+                {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 2)]},
+            ])
+        phrase = ctx.value.details["required_confirmation"]
+
+        results = runtime.transact([
+            {"type": "insert", "collection": "widgets", "values": {"title": "brand-new", "rank": 3}},
+            {"type": "update", "collection": "widgets", "values": {"title": "renamed"}, "filters": [Filter("rank", "eq", 1)]},
+            {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 2)],
+             "destructive": True, "confirm": phrase},
+        ])
+        assert len(results) == 3
+        assert "rowid" in results[0]
+        assert results[1] == {"updated": 1}
+        assert results[2] == {"deleted": 1}
+        rows = {row["rank"]: row["title"] for row in runtime.read("widgets")}
+        assert rows == {1: "renamed", 3: "brand-new"}
+    finally:
+        close_cell(cell)
+
+
+def test_transact_mixed_batch_rolls_back_everything_when_the_delete_confirmation_is_stale(app_a) -> None:
+    """The whole batch -- including the insert and update that would
+    otherwise have succeeded -- must roll back when a LATER operation in
+    the same batch (here, the delete) fails its own declare-and-echo
+    check. Proves atomicity, not merely that each operation is
+    individually validated."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text", "rank": "integer"})
+        runtime.insert("widgets", {"title": "seed", "rank": 1})
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx:
+            runtime.delete("widgets", [Filter("rank", "eq", 1)])
+        stale_phrase = ctx.value.details["required_confirmation"]
+        # Invalidate that phrase (P3-D1's own schema-revision fingerprint)
+        # by bumping the schema revision underneath it.
+        developer.add_field("widgets", "extra", "text")
+
+        with pytest.raises(DestructiveConfirmationRequired):
+            runtime.transact([
+                {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist", "rank": 99}},
+                {"type": "update", "collection": "widgets", "values": {"title": "should-not-persist-either"},
+                 "filters": [Filter("rank", "eq", 1)]},
+                {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+                 "destructive": True, "confirm": stale_phrase},
+            ])
+
+        rows = runtime.read("widgets")
+        assert len(rows) == 1 and rows[0]["title"] == "seed", (
+            "the insert and update earlier in the same batch must not have persisted"
+        )
+    finally:
+        close_cell(cell)
+
+
+def test_transact_delete_rejects_wire_omitted_destructive_with_valid_confirmation(app_a) -> None:
+    """The batch-embedded delete's own confirmation choke must reject the
+    exact V2b-wire shape (`destructive` key genuinely absent from the
+    wire, a real, currently-valid `confirm` phrase still present) the same
+    way the dedicated `delete()` method does -- a missing `destructive`
+    field is equivalent to `False`, never to `True` (contract
+    `valid_confirmation`)."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text", "rank": "integer"})
+        runtime.insert("widgets", {"title": "keep-me", "rank": 1})
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx:
+            runtime.transact([{"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)]}])
+        phrase = ctx.value.details["required_confirmation"]
+
+        # `destructive` genuinely OMITTED from the operation dict (not
+        # merely `False`), `confirm` present and currently valid.
+        with pytest.raises(DestructiveConfirmationRequired):
+            runtime.transact([{"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+                               "confirm": phrase}])
+        assert runtime.read("widgets") == [{"title": "keep-me", "rank": 1}]
+    finally:
+        close_cell(cell)
+
+
+def test_transact_upsert_rejected_regardless_of_other_batch_contents(app_a) -> None:
+    """P3-D2 does not touch `upsert`: it remains refused with
+    `CapabilityError` no matter what else shares the batch, and the whole
+    batch (including a real insert alongside it) still rolls back."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text", "rank": "integer"})
         from mitatedb_api.errors import CapabilityError
         with pytest.raises(CapabilityError):
-            runtime.transact([{"type": "update", "collection": "notes", "values": {"title": "x"}}])
+            runtime.transact([
+                {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist", "rank": 1}},
+                {"type": "upsert", "collection": "widgets", "values": {"title": "x", "rank": 2}},
+            ])
+        assert runtime.read("widgets") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_batch_update_and_delete_reject_the_same_mass_operation_shapes_as_dedicated_methods(app_a) -> None:
+    """M-1 (independent review, WP-1.5 follow-up): the batch-embedded
+    `update`/`delete` branches must apply the identical mass-operation
+    guards the dedicated `update()`/`delete()` methods already enforce --
+    an omitted/empty/`None` `filters` (a filter-less batch update/delete
+    would otherwise mass-mutate/mass-delete every row) and empty `values`
+    for `update` -- rejecting each of the 6 shapes below with
+    `ValidationError` before any write, and leaving the WHOLE BATCH's own
+    state unchanged (nothing commits, the well-formed `insert` sharing the
+    batch included). Same shapes as the SQLite-backend equivalent in
+    `test_foundation.py`, pinning the identical guard on the Postgres
+    backend too (`_validate_update`/`_validate_delete_confirmation` are
+    backend-independent, in `cell.py`)."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text"})
+        runtime.insert("widgets", {"title": "seed"})
+
+        bad_shapes = {
+            "update: filters key omitted": {"type": "update", "collection": "widgets", "values": {"title": "x"}},
+            "update: filters=[]": {"type": "update", "collection": "widgets", "values": {"title": "x"}, "filters": []},
+            "update: filters=None": {"type": "update", "collection": "widgets", "values": {"title": "x"}, "filters": None},
+            "update: values={}": {"type": "update", "collection": "widgets", "values": {},
+                                   "filters": [Filter("title", "eq", "seed")]},
+            "delete: filters key omitted": {"type": "delete", "collection": "widgets"},
+            "delete: filters=[]": {"type": "delete", "collection": "widgets", "filters": []},
+        }
+        for label, bad_op in bad_shapes.items():
+            with pytest.raises(ValidationError):
+                runtime.transact([
+                    {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist"}},
+                    bad_op,
+                ])
+            assert runtime.read("widgets") == [{"title": "seed"}], (
+                f"batch must not have written anything for shape {label!r}"
+            )
+    finally:
+        close_cell(cell)
+
+
+def test_transact_batch_delete_accepts_an_empty_values_key(app_a) -> None:
+    """m-4 (independent review, WP-1.5 follow-up): a batch delete
+    operation-dict carrying `values: {}` must be accepted (not a
+    capability-gap `CapabilityError`) on the Postgres backend too --
+    same wire shape `conformance_adapter_mitatedb.py::attempt_batch_with_
+    addresses` always constructs, regardless of operation type."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("widgets", {"title": "text"})
+        runtime.insert("widgets", {"title": "keep-me"})
+        with pytest.raises(DestructiveConfirmationRequired) as ctx:
+            runtime.transact([
+                {"type": "delete", "collection": "widgets", "values": {},
+                 "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase = ctx.value.details["required_confirmation"]
+        result = runtime.transact([
+            {"type": "delete", "collection": "widgets", "values": {},
+             "filters": [Filter("title", "eq", "keep-me")], "destructive": True, "confirm": phrase},
+        ])
+        assert result == [{"deleted": 1}]
+        assert runtime.read("widgets") == []
     finally:
         close_cell(cell)
 

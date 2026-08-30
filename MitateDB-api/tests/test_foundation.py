@@ -136,6 +136,232 @@ class FoundationTests(unittest.TestCase):
             ])
         self.assertEqual(self.runtime.read("notes"), [])
 
+    # --- P3-D2 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+    # R-5, WP-1.5): `transact()` update/delete atomic convergence. ---------
+
+    def test_transact_executes_mixed_insert_update_delete_atomically(self):
+        """A real mixed batch [insert, update, delete] executes as one
+        atomic unit -- converging real behavior onto the existing
+        `atomic_mutation.operations: ["insert", "update", "delete"]`
+        declaration (unchanged by this WP). The batch-embedded delete goes
+        through the identical declare-and-echo confirmation choke the
+        dedicated `delete()` method uses (same fingerprinted phrase)."""
+        self.dev.create_collection("widgets", {"title": "text", "rank": "integer"})
+        self.runtime.insert("widgets", {"title": "keep-updated", "rank": 1})
+        self.runtime.insert("widgets", {"title": "to-delete", "rank": 2})
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.transact([
+                {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 2)]},
+            ])
+        phrase = ctx.exception.details["required_confirmation"]
+
+        results = self.runtime.transact([
+            {"type": "insert", "collection": "widgets", "values": {"title": "brand-new", "rank": 3}},
+            {"type": "update", "collection": "widgets", "values": {"title": "renamed"}, "filters": [Filter("rank", "eq", 1)]},
+            {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 2)],
+             "destructive": True, "confirm": phrase},
+        ])
+        self.assertEqual(len(results), 3)
+        self.assertIn("rowid", results[0])
+        self.assertEqual(results[1], {"updated": 1})
+        self.assertEqual(results[2], {"deleted": 1})
+        rows = {row["rank"]: row["title"] for row in self.runtime.read("widgets")}
+        self.assertEqual(rows, {1: "renamed", 3: "brand-new"})
+
+    def test_transact_mixed_batch_rolls_back_everything_when_the_delete_confirmation_is_stale(self):
+        """The whole batch -- including the insert and update that would
+        otherwise have succeeded -- must roll back when a LATER operation
+        in the same batch (here, the delete) fails its own declare-and-
+        echo check. Proves atomicity, not merely per-operation
+        validation."""
+        self.dev.create_collection("widgets", {"title": "text", "rank": "integer"})
+        self.runtime.insert("widgets", {"title": "seed", "rank": 1})
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.delete("widgets", [Filter("rank", "eq", 1)])
+        stale_phrase = ctx.exception.details["required_confirmation"]
+        # Invalidate that phrase (P3-D1's own schema-revision fingerprint)
+        # by bumping the schema revision underneath it.
+        self.dev.add_field("widgets", "extra", "text")
+
+        with self.assertRaises(DestructiveConfirmationRequired):
+            self.runtime.transact([
+                {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist", "rank": 99}},
+                {"type": "update", "collection": "widgets", "values": {"title": "should-not-persist-either"},
+                 "filters": [Filter("rank", "eq", 1)]},
+                {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+                 "destructive": True, "confirm": stale_phrase},
+            ])
+
+        rows = self.runtime.read("widgets")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "seed")
+
+    def test_transact_delete_rejects_wire_omitted_destructive_with_valid_confirmation(self):
+        """The batch-embedded delete's own confirmation choke rejects the
+        exact V2b-wire shape (`destructive` key genuinely absent from the
+        wire, a real, currently-valid `confirm` phrase still present) the
+        same way the dedicated `delete()` method does -- a missing
+        `destructive` field is equivalent to `False`, never to `True`
+        (contract `valid_confirmation`)."""
+        self.dev.create_collection("widgets", {"title": "text", "rank": "integer"})
+        self.runtime.insert("widgets", {"title": "keep-me", "rank": 1})
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.transact([{"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)]}])
+        phrase = ctx.exception.details["required_confirmation"]
+
+        with self.assertRaises(DestructiveConfirmationRequired):
+            self.runtime.transact([{"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+                                    "confirm": phrase}])
+        self.assertEqual(self.runtime.read("widgets"), [{"title": "keep-me", "rank": 1}])
+
+    def test_transact_upsert_rejected_regardless_of_other_batch_contents(self):
+        """P3-D2 does not touch `upsert`: it remains refused with
+        `CapabilityError` no matter what else shares the batch, and the
+        whole batch (including a real insert alongside it) still rolls
+        back."""
+        self.dev.create_collection("widgets", {"title": "text", "rank": "integer"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist", "rank": 1}},
+                {"type": "upsert", "collection": "widgets", "values": {"title": "x", "rank": 2}},
+            ])
+        self.assertEqual(self.runtime.read("widgets"), [])
+
+    def test_transact_update_rejects_extra_capability_shaped_key(self):
+        """Same "capability gap, not malformed request" treatment
+        `expected_revision` already gets on `insert` (the neighboring
+        test above) extends to `update`: an unread extra key must not
+        silently ride along with an otherwise well-formed batch update."""
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "seed"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.transact([
+                {"type": "update", "collection": "notes", "values": {"title": "changed"},
+                 "filters": [Filter("title", "eq", "seed")], "expected_revision": "deadbeef"},
+            ])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "seed")
+
+    def test_transact_batch_delete_audit_is_deferred_past_commit_and_absent_on_rollback(self):
+        """A batch-embedded delete's own `destructive_data_operation`
+        audit record must never claim a write that a LATER operation in
+        the same batch caused to roll back (`transact()`'s own
+        `pending_audit` mechanism, P3-D2). Checked from both directions:
+        a rolled-back batch records nothing, and a committed batch records
+        exactly once per delete actually executed."""
+        self.dev.create_collection("widgets", {"title": "text", "rank": "integer"})
+        self.runtime.insert("widgets", {"title": "seed", "rank": 1})
+        before = len(self.control.audit.snapshot())
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.delete("widgets", [Filter("rank", "eq", 1)])
+        phrase = ctx.exception.details["required_confirmation"]
+        after_probe = len(self.control.audit.snapshot())
+        self.assertEqual(after_probe, before, "an unconfirmed delete probe must not itself be audited")
+
+        # A confirmed batch delete followed by a failing, unrelated
+        # operation: the whole batch rolls back, so no audit record for
+        # the delete may appear either.
+        with self.assertRaises(ValidationError):
+            self.runtime.transact([
+                {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+                 "destructive": True, "confirm": phrase},
+                {"type": "unsupported", "collection": "widgets", "values": {}},
+            ])
+        after_rollback = len(self.control.audit.snapshot())
+        self.assertEqual(after_rollback, before, "a rolled-back batch delete must not be audited")
+        self.assertEqual(self.runtime.read("widgets")[0]["title"], "seed")
+
+        # The same confirmed delete, alone, actually commits: exactly one
+        # new `destructive_data_operation` record appears.
+        result = self.runtime.transact([
+            {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
+             "destructive": True, "confirm": phrase},
+        ])
+        self.assertEqual(result, [{"deleted": 1}])
+        events_after_commit = self.control.audit.snapshot()[before:]
+        destructive_events = [e for e in events_after_commit if e.event_type == "destructive_data_operation"]
+        self.assertEqual(len(destructive_events), 1)
+
+    def test_transact_delete_rejects_extra_capability_shaped_key(self):
+        """Same treatment for `delete`: an unread extra key (here,
+        `unique_key`, which this peer has no concept of at all) is a
+        capability gap, checked before the confirmation phrase is even
+        constructed."""
+        self.dev.create_collection("notes", {"title": "text"})
+        self.runtime.insert("notes", {"title": "seed"})
+        with self.assertRaises(CapabilityError):
+            self.runtime.transact([
+                {"type": "delete", "collection": "notes", "filters": [Filter("title", "eq", "seed")],
+                 "unique_key": "whatever"},
+            ])
+        self.assertEqual(self.runtime.read("notes")[0]["title"], "seed")
+
+    def test_transact_batch_update_and_delete_reject_the_same_mass_operation_shapes_as_dedicated_methods(self):
+        """M-1 (independent review, WP-1.5 follow-up): the batch-embedded
+        `update`/`delete` branches must apply the identical mass-operation
+        guards the dedicated `update()`/`delete()` methods already
+        enforce -- an omitted/empty/`None` `filters` (a filter-less batch
+        update/delete would otherwise mass-mutate/mass-delete every row)
+        and empty `values` for `update` (a no-op that must still be
+        refused as a shape defect, not silently accepted) -- rejecting
+        each of the 6 shapes below with `ValidationError` before any
+        write, and leaving the WHOLE BATCH's own state unchanged (nothing
+        commits, the well-formed `insert` sharing the batch included).
+        This is the exact guard `_validate_update`/
+        `_validate_delete_confirmation` (the shared choke both dedicated
+        and batch-embedded paths pass through, m-1) is responsible for."""
+        self.dev.create_collection("widgets", {"title": "text"})
+        self.runtime.insert("widgets", {"title": "seed"})
+
+        bad_shapes = {
+            "update: filters key omitted": {"type": "update", "collection": "widgets", "values": {"title": "x"}},
+            "update: filters=[]": {"type": "update", "collection": "widgets", "values": {"title": "x"}, "filters": []},
+            "update: filters=None": {"type": "update", "collection": "widgets", "values": {"title": "x"}, "filters": None},
+            "update: values={}": {"type": "update", "collection": "widgets", "values": {},
+                                   "filters": [Filter("title", "eq", "seed")]},
+            "delete: filters key omitted": {"type": "delete", "collection": "widgets"},
+            "delete: filters=[]": {"type": "delete", "collection": "widgets", "filters": []},
+        }
+        for label, bad_op in bad_shapes.items():
+            with self.assertRaises(ValidationError, msg=label):
+                self.runtime.transact([
+                    {"type": "insert", "collection": "widgets", "values": {"title": "should-not-persist"}},
+                    bad_op,
+                ])
+            self.assertEqual(self.runtime.read("widgets"), [{"title": "seed"}],
+                             f"batch must not have written anything for shape {label!r}")
+
+    def test_transact_batch_delete_accepts_an_empty_values_key(self):
+        """m-4 (independent review, WP-1.5 follow-up): a batch delete
+        operation-dict carrying `values: {}` must be accepted (not a
+        capability-gap `CapabilityError`) -- `_TRANSACT_DELETE_KEYS`
+        deliberately lists `values` for exactly this wire shape.
+        Implementation-level necessity (not just contract-shape
+        permissiveness, see `_TRANSACT_DELETE_KEYS`'s own module-level
+        comment): `conformance_adapter_mitatedb.py::attempt_batch_with_
+        addresses` always sets an `"values"` key on every batch item
+        regardless of operation type, so this is a necessary condition for
+        the C-06 batch-delete vector to reach this peer's real entry point
+        at all -- pinned here locally too, not only via the common
+        conformance suite."""
+        self.dev.create_collection("widgets", {"title": "text"})
+        self.runtime.insert("widgets", {"title": "keep-me"})
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx:
+            self.runtime.transact([
+                {"type": "delete", "collection": "widgets", "values": {},
+                 "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase = ctx.exception.details["required_confirmation"]
+        result = self.runtime.transact([
+            {"type": "delete", "collection": "widgets", "values": {},
+             "filters": [Filter("title", "eq", "keep-me")], "destructive": True, "confirm": phrase},
+        ])
+        self.assertEqual(result, [{"deleted": 1}])
+        self.assertEqual(self.runtime.read("widgets"), [])
+
     def test_disable_revoke_and_unavailable_state_fail_closed(self):
         self.dev.create_collection("notes", {"title": "text"})
         self.runtime.insert("notes", {"title": "before-revoke"})

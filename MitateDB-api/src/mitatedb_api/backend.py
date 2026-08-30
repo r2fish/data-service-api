@@ -169,6 +169,25 @@ class StorageBackend:
         transaction opened by ``begin()`` (no implicit commit)."""
         raise NotImplementedError
 
+    def update_in_transaction(self, collection, fields, params, filters):
+        """P3-D2 (docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md
+        R-5, WP-1.5): same contract as ``update`` but executes inside the
+        transaction ``begin()`` already opened (no implicit commit) --
+        the ``transact()`` batch dispatcher's own update branch, mirroring
+        ``insert_in_transaction``'s own split from ``insert``."""
+        raise NotImplementedError
+
+    def delete_in_transaction(self, collection, filters):
+        """P3-D2 (WP-1.5): same contract as ``delete`` but executes
+        inside the transaction ``begin()`` already opened (no implicit
+        commit). ``cell.ApplicationCell`` has already run this exact
+        request through the SAME declare-and-echo confirmation choke
+        ``delete()`` itself uses (``_validate_delete_confirmation``)
+        before this is ever called -- a backend never sees an
+        unconfirmed destructive delete, whether it arrived through the
+        dedicated method or through a batch."""
+        raise NotImplementedError
+
     def close(self):
         """Release any held connections/resources. A no-op is
         acceptable for a backend with nothing to release."""

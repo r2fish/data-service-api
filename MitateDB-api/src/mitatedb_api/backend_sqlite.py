@@ -203,6 +203,37 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {"rowid": cursor.lastrowid}
 
+    def update_in_transaction(self, collection, fields, params, filters):
+        # P3-D2 (WP-1.5): no commit/rollback here (unlike `update` above)
+        # -- mirrors `insert_in_transaction`'s own reasoning above. Runs
+        # inside the transaction `transact()` already opened via
+        # `begin()` and will `commit()`/`rollback()` once, after every
+        # operation in the batch.
+        table = quote_identifier(collection)
+        where, where_params = self._where_sql(filters)
+        statement = "UPDATE " + table + " SET " + ", ".join(
+            quote_identifier(field) + " = ?" for field in fields) + where
+        try:
+            cursor = self._db.execute(statement, list(params) + where_params)
+        except sqlite3.DatabaseError:
+            raise NotFoundError("collection not found")
+        return {"updated": cursor.rowcount}
+
+    def delete_in_transaction(self, collection, filters):
+        # P3-D2 (WP-1.5): no commit/rollback here (unlike `delete` above)
+        # -- same reasoning as `update_in_transaction` immediately above.
+        # `cell.ApplicationCell` has already run this request through the
+        # same declare-and-echo confirmation choke `delete()` itself uses
+        # before this is ever called.
+        table = quote_identifier(collection)
+        where, params = self._where_sql(filters)
+        statement = "DELETE FROM " + table + where
+        try:
+            cursor = self._db.execute(statement, params)
+        except sqlite3.DatabaseError:
+            raise NotFoundError("collection not found")
+        return {"deleted": cursor.rowcount}
+
     def _where_sql(self, filters):
         clauses, params = [], []
         for item in filters:
