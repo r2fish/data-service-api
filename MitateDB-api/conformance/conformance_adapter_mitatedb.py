@@ -809,6 +809,11 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             ApplicationRuntime.delete,
             ApplicationRuntime.transact,
             ApplicationRuntime.capabilities,
+            # m-2 (independent WP-3 review): `schema_revision()`, added so
+            # the HTTP surface's `SchemaOperationResult.revision` can
+            # report a real, observable value instead of a hardcoded
+            # placeholder.
+            ApplicationRuntime.schema_revision,
             ApplicationDeveloper.create_collection,
             ApplicationDeveloper.create_entity,
             ApplicationDeveloper.add_field,

@@ -142,8 +142,10 @@ class StorageBackend:
     def read(self, collection, selected, filters, order_by, limit):
         """``filters``: list of already-bound ``cell.Filter`` (field
         verified to exist, operator verified supported, value already
-        encoded). ``order_by``: ``(field, "asc"|"desc")`` or ``None``.
-        Returns a list of ``dict`` rows."""
+        encoded). ``order_by``: ``None`` or a non-empty list of
+        ``(field, "asc"|"desc")`` tuples (WP-3: multi-field sort;
+        ``cell.py::_bind_order_by`` always normalizes to this shape, a
+        single-field caller included). Returns a list of ``dict`` rows."""
         raise NotImplementedError
 
     def update(self, collection, fields, params, filters):

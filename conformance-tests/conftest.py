@@ -125,16 +125,63 @@ def registered_adapters() -> dict[str, ConformanceAdapter]:
     return dict(_ADAPTER_BY_NAME)
 
 
+def _close_all_adapters() -> None:
+    """Closes every built adapter exactly once, tolerating a failing
+    `close()` on one adapter without skipping the rest (WP-2.5c review
+    item 1). Factored out of the session-end fixture below so a test can
+    invoke it directly and confirm it actually visits every adapter,
+    without needing a live nested pytest session to observe fixture
+    teardown timing."""
+    errors: list[str] = []
+    for name, adapter_obj in _BUILT_ADAPTERS:
+        try:
+            adapter_obj.close()
+        except Exception as exc:  # noqa: BLE001 - report, never swallow
+            errors.append(f"{name}: close() failed: {exc!r}")
+    if errors:
+        raise RuntimeError(
+            "adapter close() failure(s) at session teardown:\n" + "\n".join(f"  - {e}" for e in errors)
+        )
+
+
 @pytest.fixture(scope="session", params=_ADAPTER_NAMES, ids=_ADAPTER_NAMES)
 def adapter(request: pytest.FixtureRequest) -> ConformanceAdapter:
     """The registered `ConformanceAdapter` instances, one per registry
     entry, parametrized so every dependent test runs once per adapter with
-    the adapter name as the pytest test id. `close()` is guaranteed to run
-    at session teardown."""
-    name = request.param
-    adapter_obj = _ADAPTER_BY_NAME[name]
-    yield adapter_obj
-    adapter_obj.close()
+    the adapter name as the pytest test id.
+
+    WP-2.5c review item 1 correction: this fixture no longer closes its own
+    adapter in its own finalizer. A `scope="session"` fixture that also
+    carries `params` is torn down per PARAM, not once for the whole
+    session -- pytest's default test-item reordering groups all tests
+    sharing one param value together, and finalizes that param's fixture
+    instance as soon as the LAST test needing it finishes, which can be
+    long before the session itself ends (whenever collection moves on to
+    the next param group). The previous docstring here ("close() is
+    guaranteed to run at session teardown") was therefore not accurate --
+    `registered_adapters()` (used by registry-wide guards that read
+    `_ADAPTER_BY_NAME` directly, bypassing this fixture, e.g. `test_c06_
+    destructive_confirmation.py`'s vacuity-guard tests) could observe an
+    already-`close()`'d adapter mid-session. `close()` for every adapter
+    now happens exactly once, at the real end of the session, via
+    `_close_all_adapters_at_session_end` below (an autouse fixture with no
+    `params` of its own, so its own single finalizer runs only when the
+    whole session's fixture stack unwinds)."""
+    return _ADAPTER_BY_NAME[request.param]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_all_adapters_at_session_end():
+    """Session-teardown-only close, unconditionally applied (WP-2.5c
+    review item 1): closes every built adapter exactly once via
+    `_close_all_adapters()`. Deliberately carries no `params` of its own --
+    unlike the `adapter` fixture above, a plain `scope="session"` fixture
+    with no parametrization has exactly one instance for the whole run, so
+    its finalizer (this generator's code after `yield`) genuinely executes
+    only once, after every test in the session has finished, regardless of
+    which adapter param groups ran in what order."""
+    yield
+    _close_all_adapters()
 
 
 @pytest.fixture()

@@ -218,6 +218,7 @@ control plane は契約 `control_endpoints` の 11 本を R-6 のとおり。
 - **control rate limit の共有 window / deployment_required 化** (D-K の将来強化。max-instances>1 スケールが必要になったとき)
 - **revision_preconditions** (mitate-application が複数 instance 化したとき必須 — クライアント要求棚卸し C 節)
 - **application-plane の request rate / concurrency / execution time 境界** (SI-08 の残クラス。WP-0 M-1): Cloud Run の concurrency / max-instances / timeout を配備層 enforce として使う場合は `limit_enforcement: deployment_required` の宣言まで含めて別フェーズで設計する (契約 `capability_status.rules` — deployment_required is not an application-code proof)
+- **positive-existence check の設計 (WP-3 レビュー M-1 の帰結)**: CONDITIONS.md の C-14/C-17 が「form-(b) peer が登録されるまで DEFERRED」としていた positive-existence check のトリガーが、MitateDB-api-http の登録 (schema ops を mount しつつ create_index/drop_entity を present denial) で発火した。加えて対称的な限界が判明: HTTP peer の公開面は JSON operation enum であり、form-(a) SurfaceAbsent の独立検証 (`signature_forbids_parameters` = Python callable シグネチャ検査) は wire 語彙を検証できないため、「実際は mount しているのに SurfaceAbsent を偽装する」HTTP peer を機械検出できない (実測: drop_entity を偽 SurfaceAbsent に戻す変異が C-06 V3/V6 を赤化させない)。**安全性の本質 (index/entity が実際には作られ/消されていないこと) は present-denial 側の (d) probe が既に押さえており**、残る gap は「peer がどの evidence 形態を主張するかの自己整合性」= gaming vector のみ。port op としての positive-existence check (entry point の実在を wire レベルで実証させる仕組み) を将来設計する。本フェーズでは CONDITIONS.md に限界を正直に開示するに留める (C-14 の既存 DEFERRED 開示と同じ流儀)
 - RLS defence-in-depth の併用 (R-1 不採用分。database-per-application が主境界として実測確立した後の追加層として)
 - IAM DB 認証 / Cloud SQL Connector の採否 (現行: 標準 DSN + Secret Manager 参照)
 - application database の `CONNECTION LIMIT` / pool 上限の運用チューニング (初版は保守的な固定値)
@@ -263,6 +264,12 @@ WP-0 独立レビュー (Opus、2026-08-30) の結果: **blocker 2 / major 11 / 
 - 変異注入: 実装者 5+3 本、レビュアー 5+4 本 (第2回で生存した 3 本は検出力補強後に全て赤化を再実測)。生存変異ゼロ
 - 記録済みの軽微な挙動差 (m-14): transact のエラーメッセージ文言変化、`NotFoundError` 経路が rollback されるようになった改善
 - WP-3 への申し送り: in-process adapter `provision_application` は `_call` を通らず `ConflictError` 再分類が port 境界で未観測 (m-13)。`create_entity` fields 省略時の合成 `id` 列を C-11/C-17 が観測しないことの確認 (N-2)。boolean 列は両 backend とも INTEGER 表現 (bool↔int cast 不在のため)。PG の insert 返り値は ctid (安定性なし、`row_addressability: unavailable` は不変)
+
+### WP-3 実装記録 (2026-08-30)
+
+application-plane HTTP 面 (http.py: 契約7 endpoint、ASGI receive ループでの request_bytes 実測、multi-field order_by、page.cursor→CAPABILITY_UNSUPPORTED、problem+json、Bearer `credential_id.secret`、error→HTTP status は r2db 実マッピングと全 grep 突合一致)、composition root (main.py: env 注入・pepper 分離検証・request_bytes enforcement 宣言を HTTP composition のみ)、bounded pool (pool.py、composition で実配線 / adapter は逐次のため pool=None)、第4 adapter `MitateDB-api-http` (httpx ASGITransport + 実 PostgreSQL、prefix mitatedbhttp{hex8} + advisory lock sweep、name="MitateDB-api (http+postgres)")。registry.json required 登録 + `_EXPECTED_STRICT_ADAPTER_NAMES` 更新。root suite **892 → 1013 passed** (+121。既存 executable 全条件が 4 adapter で緑)。
+
+独立レビュー2往復 (初回 blocker 0 / major 4 / minor 6 → 全解消、統合確認で major 0)。主な発見と対応: **M-1** — adapter の drop_entity が wire で受理するのに偽 SurfaceAbsent を主張 → present-denial 化。真因の早期 close 問題 (M-2) は共通側 conftest fixture が param ローテーションで close していたことと判明し、**WP-2.5c で conftest を真の session teardown close へ修正** → `_ensure_alive`/registry 順序依存を撤去。**M-3** — create_entity の field_type 黙殺 (honor できない要求を成功受理し生成 entity が以後 integer を拒否) → CapabilityError。**M-4** — SQLite backend の order_by direction が唯一の防御なのに文字列連結で、allowlist 除去時に ORDER BY 内 subquery が実行される (SI-04/05 潜在違反) → 両 backend 定数マップ化 (レビューが injection の閉塞を直接実測)。**受理境界 (CONDITIONS.md 開示)**: HTTP peer の公開面は JSON operation enum であり form-(a) SurfaceAbsent の signature 検証は wire 語彙を見られないため、mount 済み peer の偽 SurfaceAbsent を機械検出できない (form-(b) fabrication と同クラス)。安全性の本質は present-denial 側の (d) probe が押さえ、残る gap は形態主張の自己整合性のみ → positive-existence check を §7 将来課題へ。変異注入は各往復で実施、生存はいずれも受理境界。
 
 ### WP-2.5 実装記録 (2026-08-30)
 
