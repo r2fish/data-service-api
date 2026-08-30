@@ -135,6 +135,65 @@ def test_build_app_serves_a_real_authenticated_request(main_module, platform, pr
     assert document["application_scope"] == probe_app.app_id
     assert document["role"] == "runtime"
     assert document["limit_enforcement"]["request_bytes"] == "enforced"
+    # WP-5 (design v1.2 R-9): an operator who never sets
+    # `MITATEDB_CONTROL_PLANE_STATUS` must see NO behavior change at all --
+    # this app was built (fixture `main_module`, module import time) from
+    # `_base_env`, which does not set that variable.
+    assert document["capabilities"]["control_plane"]["status"] == "unavailable"
+
+
+def test_build_app_rejects_invalid_control_plane_status_value(main_module, platform, probe_app):
+    env = _base_env(platform, probe_app)
+    env["MITATEDB_CONTROL_PLANE_STATUS"] = "ENABLED"  # wrong case -- not one of the two exact members
+    with pytest.raises(Exception, match="MITATEDB_CONTROL_PLANE_STATUS"):
+        main_module.build_app(env)
+
+
+def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(main_module, platform):
+    """WP-5 flip: `MITATEDB_CONTROL_PLANE_STATUS=enabled` really changes
+    what a real `/v1/capabilities` request answers -- not merely what
+    `FoundationConfig` holds in memory. Builds a SEPARATE app against its
+    own, dedicated, never-shared-with-other-tests application (mirrors
+    this file's own docstring reasoning for why `main_import_probe` is
+    never reused) so this test's own persistent connections do not
+    interfere with `main_module.app`'s already-built probe."""
+    # A dedicated, never-reused application id -- same reasoning as this
+    # file's own `main_import_probe` (module docstring): the resulting
+    # `ApplicationCell`'s 2 persistent PostgreSQL connections are
+    # deliberately never closed by this test (no ASGI server here to drive
+    # the lifespan-shutdown hook that would release them); `platform`'s own
+    # module-scoped `_sweep_prefix` teardown drops this run's entire
+    # throwaway database regardless, so this is not real residue.
+    flip_app = provision_app(platform, "main_control_plane_flip_probe")
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_SERVE_APPS": flip_app.app_id,
+        f"MITATEDB_APP_{flip_app.app_id.upper()}_RUNTIME_DSN": flip_app.runtime_dsn,
+        f"MITATEDB_APP_{flip_app.app_id.upper()}_DEVELOPER_DSN": flip_app.developer_dsn,
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+    }
+    app = main_module.build_app(env)
+
+    write_store = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
+    )
+    try:
+        credential_id, secret = write_store.issue(flip_app.app_id, Role.RUNTIME)
+    finally:
+        write_store.close()
+
+    import asyncio
+
+    async def _call():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {credential_id}.{secret}"})
+
+    response = asyncio.run(_call())
+    assert response.status_code == 200, response.text
+    assert response.json()["capabilities"]["control_plane"]["status"] == "enabled"
 
 
 # --------------------------------------------------------------------------

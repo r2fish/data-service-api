@@ -21,6 +21,33 @@ class FoundationConfig:
     max_filter_terms: int = 32
     max_request_bytes: int = 1_048_576
     max_schema_objects: int = 128
+    # WP-5 (design v1.2 R-7): "control_plane は WP-5 の flip まで両
+    # composition とも unavailable のまま。flip は...単一コミットで行う".
+    # Defaults `"unavailable"` so an operator who does not explicitly opt
+    # in (`MITATEDB_CONTROL_PLANE_STATUS=enabled`) sees no behavior change
+    # at all -- the single source of truth for this declaration
+    # (`cell.py::ApplicationRuntime.capabilities()`, R-3) reads this field,
+    # never a second, independently-drifting copy.
+    control_plane_status: str = "unavailable"
+
+    _VALID_CONTROL_PLANE_STATUSES = ("enabled", "unavailable")
+
+    def __post_init__(self) -> None:
+        # Reviewer finding m-1 (WP-5 review): `from_env` validates
+        # `MITATEDB_CONTROL_PLANE_STATUS` against this same vocabulary, but
+        # a construction that bypasses `from_env` entirely -- both
+        # conformance adapters build `FoundationConfig(control_plane_
+        # status=...)` directly -- reached the dataclass with no
+        # validation at all. R-7's "宣言値が単一ソースから出ることを構造で
+        # 保証する" is only as strong as the weakest constructor path, so
+        # the check belongs on the field itself, not only at the env-var
+        # boundary (which stays, for early/loud startup failure -- this is
+        # deliberate double coverage, not redundancy to remove).
+        if self.control_plane_status not in self._VALID_CONTROL_PLANE_STATUSES:
+            raise ValidationError(
+                f"control_plane_status must be one of {self._VALID_CONTROL_PLANE_STATUSES!r}, "
+                f"got {self.control_plane_status!r}"
+            )
 
     @classmethod
     def from_env(cls, environ=None):
@@ -45,6 +72,20 @@ class FoundationConfig:
             if number <= 0:
                 raise ValidationError("resource limits must be positive")
             parsed[field] = number
+        # R-9 runbook invariant 3 ("control service を停止/未配備にする場合
+        # は data 面の control_plane 宣言 env を同時に変更する"): a
+        # deployer declaration, not a detected fact -- this process cannot
+        # verify on its own whether a `/control/v1` process
+        # (`control_main.py`) is actually reachable. Rejects any value
+        # outside the two-member vocabulary at startup (loud, never a
+        # silent fallback) rather than only at first capabilities() read.
+        control_plane_status = values.get("MITATEDB_CONTROL_PLANE_STATUS") or "unavailable"
+        if control_plane_status not in cls._VALID_CONTROL_PLANE_STATUSES:
+            raise ValidationError(
+                f"MITATEDB_CONTROL_PLANE_STATUS must be one of {cls._VALID_CONTROL_PLANE_STATUSES!r}, "
+                f"got {control_plane_status!r}"
+            )
+        parsed["control_plane_status"] = control_plane_status
         return cls(**parsed)
 
     def validate_request_size(self, size):

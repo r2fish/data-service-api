@@ -25,8 +25,9 @@ import os
 import sqlite3
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Callable, Mapping, NoReturn, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 # The common port lives at conformance-tests/adapter.py. When the combined
 # suite runs from the repository root (root pyproject.toml pythonpath,
@@ -61,6 +62,15 @@ from adapter import (  # noqa: E402
 
 from mitatedb_api import ControlPlane, Filter, MitateDataService, Role  # noqa: E402
 from mitatedb_api.cell import ApplicationDeveloper, ApplicationRuntime  # noqa: E402
+from mitatedb_api.config import FoundationConfig  # noqa: E402
+from mitatedb_api.control_audit import ControlAuditSink  # noqa: E402
+from mitatedb_api.control_auth import ControlCredentialStore, _InMemoryWork  # noqa: E402
+from mitatedb_api.control_plane import (  # noqa: E402
+    ControlPlaneLimits,
+    ControlPlaneService,
+    bootstrap_control_credential,
+    reset_control_credentials,
+)
 from mitatedb_api.errors import (  # noqa: E402
     AuthenticationError,
     AuthorizationError,
@@ -94,6 +104,140 @@ _CLASSIFY_ORDER = (
 )
 
 
+class _ReconciledControlBackend:
+    """WP-5 flip -- `control_plane.ControlPlaneService` backend built
+    directly on THIS adapter's own `ProvisioningFacade`/`auth.
+    CredentialStore` (design v1.2 R-8, WP-4 handoff item i "2ストア突合").
+
+    Deliberately NOT `control_plane.InMemoryControlBackend`: that class is
+    WP-4's own self-contained pair of registries (`InMemoryApplication
+    Registry`/`InMemoryCredentialRegistry`), independent from `auth.
+    CredentialStore` by design (its own module docstring: "keeps every
+    existing, already-reviewed application-plane file untouched"). Using
+    it here would give this adapter two disconnected representations of
+    "which applications/credentials exist" -- an in-band `issue_credential_
+    inband` would mint a row `MitateDataService.open_session`'s own real
+    `authenticate()` could never see, which is exactly the gap the design
+    document flags as a WP-5 completion condition, not a cosmetic
+    difference. Every application/credential method below instead calls
+    `auth.CredentialStore`'s own methods (several added this WP purely to
+    give `ControlPlaneService` the read/write surface it needs, `auth.py`'s
+    own WP-5 docstring notes) -- the SAME dict `authenticate()` reads.
+
+    Control credentials and durable audit have no application-plane
+    analogue at all (a control credential belongs to no Application, and
+    an in-memory audit trail exists nowhere else on this peer) -- those two
+    delegate to the product's own, genuinely self-contained `control_auth.
+    ControlCredentialStore`/`control_audit.ControlAuditSink` unchanged.
+    """
+
+    def __init__(self, control: "ControlPlane", control_credentials: ControlCredentialStore,
+                 audit: ControlAuditSink) -> None:
+        self._control = control
+        self._control_credentials = control_credentials
+        self._audit = audit
+
+    @property
+    def control_credential_store(self) -> ControlCredentialStore:
+        return self._control_credentials
+
+    @property
+    def audit_sink(self) -> ControlAuditSink:
+        return self._audit
+
+    @contextmanager
+    def unit_of_work(self):
+        work = _InMemoryWork()
+        try:
+            yield work
+        except BaseException:
+            work.rollback()
+            raise
+
+    def application_exists(self, application_id: str) -> bool:
+        return self._control.credentials.application_exists(application_id)
+
+    def applications_count(self) -> int:
+        return self._control.credentials.applications_count()
+
+    def list_applications(self):
+        return self._control.credentials.list_applications()
+
+    def register_application(self, application_id: str, *, work) -> None:
+        self._control.provision_application(application_id)
+
+        def _undo() -> None:
+            self._control.cells.pop(application_id, None)
+            self._control.credentials.unregister_application(application_id)
+        work.on_rollback(_undo)
+
+    def set_application_enabled(self, application_id: str, enabled: bool, *, work) -> None:
+        current = dict(self._control.credentials.list_applications()).get(application_id)
+        if current is None:
+            raise NotFoundError("application not found")
+        (self._control.credentials.enable_application if enabled
+         else self._control.credentials.disable_application)(application_id)
+        work.on_rollback(
+            lambda: (self._control.credentials.enable_application if current
+                     else self._control.credentials.disable_application)(application_id)
+        )
+
+    def credential_state(self, credential_id: str):
+        return self._control.credentials.get_state(credential_id)
+
+    def credentials_active_count(self, application_id: str) -> int:
+        return self._control.credentials.credentials_active_count(application_id)
+
+    def list_credentials(self):
+        return self._control.credentials.list_credentials()
+
+    def issue_credential(self, application_id: str, role: str, *, credential_id: str, secret: str, work) -> None:
+        self._control.credentials.issue(application_id, role, credential_id=credential_id, secret=secret)
+        work.on_rollback(lambda: self._control.credentials.forget_credential(credential_id))
+
+    def rotate_credential(self, credential_id: str, secret: str, *, work) -> None:
+        snapshot = self._control.credentials.snapshot_credential_state(credential_id)
+        if snapshot is None:
+            raise NotFoundError("credential not found")
+        self._control.credentials.rotate(credential_id, secret)
+        work.on_rollback(lambda: self._control.credentials.restore_credential_state(credential_id, snapshot))
+
+    def set_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        snapshot = self._control.credentials.snapshot_credential_state(credential_id)
+        if snapshot is None:
+            raise NotFoundError("credential not found")
+        if enabled is not None:
+            (self._control.credentials.enable if enabled else self._control.credentials.disable)(credential_id)
+        if revoked:
+            self._control.credentials.revoke(credential_id)
+        work.on_rollback(lambda: self._control.credentials.restore_credential_state(credential_id, snapshot))
+
+    def control_credential_state(self, credential_id: str):
+        state = self._control_credentials.get_state(credential_id)
+        return None if state is None else (state[0], state[1])
+
+    def list_control_credentials(self):
+        return self._control_credentials.list_all()
+
+    def control_credentials_locked(self, work):
+        return self._control_credentials.locked_for_update(work)
+
+    def rotate_control_credential(self, credential_id: str, secret: str, *, work) -> None:
+        self._control_credentials.rotate(credential_id, secret=secret, work=work)
+
+    def set_control_credential_state(self, credential_id: str, *, enabled=None, revoked=None, work) -> None:
+        if enabled is not None:
+            (self._control_credentials.enable if enabled else self._control_credentials.disable)(credential_id, work=work)
+        if revoked:
+            self._control_credentials.revoke(credential_id, work=work)
+
+    def authenticate_control(self, credential_id, secret):
+        return self._control_credentials.authenticate(credential_id, secret)
+
+    def append_audit(self, *, work=None, **fields):
+        return self._audit.append(work=work, **fields)
+
+
 class MitateDBConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to the MitateDB-api foundation.
 
@@ -108,7 +252,15 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     def __init__(self) -> None:
         # Synthetic pepper for this conformance run only; never a real
         # deployment secret and never read from the environment.
-        self._control = ControlPlane("synthetic-conformance-pepper-mitatedb-0000000")
+        # WP-5 flip (design v1.2 R-7): `control_plane_status="enabled"` is
+        # a real constructor injection into the SAME `FoundationConfig`
+        # every provisioned cell shares (R-3: single source of truth) --
+        # not a value this adapter fabricates only inside
+        # `capability_document()`.
+        self._control = ControlPlane(
+            "synthetic-conformance-pepper-mitatedb-0000000",
+            config=FoundationConfig(control_plane_status="enabled"),
+        )
         self._service = MitateDataService(self._control)
         self._counter = 0
         # port v1.6 declare-and-echo (design docs/design/
@@ -117,6 +269,52 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # plugs' identical cache -- this peer's declared `contract_version`
         # is static for this adapter instance's whole lifetime.
         self._contract_version_cache: str | None = None
+        # WP-5 (design v1.2 R-8 second-round M-1): `capability_document()`
+        # used to provision a fresh, throwaway probe Application on EVERY
+        # call (measured: 39 of 155 applications this adapter provisioned
+        # across one full conformance session were probe-only churn). A
+        # single reused probe session removes that churn entirely and
+        # directly relieves headroom pressure on the `applications`
+        # resource bound C-14 vector 5 drives to its exact declared limit.
+        self._capability_probe_session: object | None = None
+
+        # ------------------------------------------------------------
+        # control plane (WP-5 provided branch): `ControlPlaneService`
+        # backed by `_ReconciledControlBackend` (this module, above) --
+        # application/credential writes land in THIS adapter's own
+        # `ControlPlane`/`auth.CredentialStore` (2ストア突合); control
+        # credentials and durable audit use the product's own
+        # self-contained `control_auth.ControlCredentialStore`/
+        # `control_audit.ControlAuditSink`.
+        #
+        # Limits (mirrors r2db-api's own WP-5 measured rationale,
+        # `conformance_adapter_r2db.py`'s identical comment): design v1.2
+        # R-6's own example ("20") does not account for every OTHER
+        # condition test's own `build_fixture()` -> `provision_application()`
+        # also registering a real application against this SAME adapter
+        # instance's shared state for the rest of the session.
+        # `applications=100/credentials_per_application=5/
+        # control_requests_per_minute=200` satisfies R-6's numeric
+        # constraints (each <=200; `200 > 100 + 2*5 + 67`) with the SAME
+        # margin r2db-api measured sufficient for its own, larger combined
+        # suite; WP-5's own completion condition requires recording this
+        # adapter's real measured `n_existing` (both at C-14 vector 5 and
+        # at session end) -- see the WP-5 completion report.
+        # ------------------------------------------------------------
+        self._control_credential_pepper = "synthetic-conformance-pepper-mitatedb-ctl-0000000"
+        self._control_credentials = ControlCredentialStore(self._control_credential_pepper)
+        self._control_audit = ControlAuditSink()
+        self._control_backend = _ReconciledControlBackend(self._control, self._control_credentials, self._control_audit)
+        self._control_limits = ControlPlaneLimits(
+            applications=100, credentials_per_application=5, control_requests_per_minute=200)
+        self._control_service = ControlPlaneService(self._control_backend, limits=self._control_limits)
+        # `control_credential()`'s own maintained handle (memoize + call-
+        # time validity check -- port v1.5 WP-1 independent review major
+        # M-4: "MUST return a handle that is genuinely valid AT CALL
+        # TIME...never a memoized value"), mirroring both r2db-api plugs'
+        # identical mechanism.
+        self._control_credential_ref: str | None = None
+        self._control_credential_secret: str | None = None
 
     # ------------------------------------------------------------------
     # control plane
@@ -155,12 +353,20 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # session (contract `endpoints.capabilities.auth`: "application or
         # control"), so this provisions a disposable application/credential
         # solely to obtain the peer's own real capability document -- it
-        # does not fabricate one in the adapter.
-        self._counter += 1
-        probe_app = f"conf_capability_probe_{self._counter}_{uuid.uuid4().hex[:8]}"
-        self.provision_application(probe_app)
-        handle = self.issue_credential(probe_app, "runtime")
-        session = self.authenticate(handle)
+        # does not fabricate one in the adapter. WP-5 (design v1.2 R-8
+        # second-round M-1): the probe application/session is provisioned
+        # ONCE and reused for every later call, not re-provisioned per call
+        # (this peer's own `capabilities()` reads no per-request state --
+        # `assert_active` re-checks the SAME session's authorization on
+        # every call, so a reused session observes the peer's current
+        # capability document exactly as faithfully as a fresh one would).
+        if self._capability_probe_session is None:
+            self._counter += 1
+            probe_app = f"conf_capability_probe_{self._counter}_{uuid.uuid4().hex[:8]}"
+            self.provision_application(probe_app)
+            handle = self.issue_credential(probe_app, "runtime")
+            self._capability_probe_session = self.authenticate(handle)
+        session = self._capability_probe_session
         return self._call(lambda: session.capabilities())
 
     def _declared_contract_version(self) -> str:
@@ -186,110 +392,77 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         )
 
     # ------------------------------------------------------------------
-    # control plane HTTP surface (port v1.5) -- surface-absent branch
+    # control plane HTTP surface (port v1.5) -- PROVIDED branch (WP-5 flip)
     # ------------------------------------------------------------------
     #
-    # This peer has no control-plane HTTP surface at all (design docs/
-    # design/R2DB_CCR14_CONTROL_PLANE_V1.md section 4's own adapter x
-    # phase table: MitateDB stays surface-absent through this phase and
-    # the next). Every one of the 14 port v1.5 operations therefore takes
-    # the surface-absent branch (design section 4, form (a))
-    # unconditionally, via one shared helper (avoids 14 near-duplicate
-    # `SurfaceAbsent` call sites that could drift out of sync with each
-    # other).
-    #
-    # The claim: none of this peer's real application-facing callables
-    # accept a control-plane-shaped parameter. Evidence is the FULL,
-    # unmodified `public_operation_callables()` (WP-1 fix-round, design
-    # independent review major M-7 -- an earlier revision of this file
-    # excluded `MitateDataService.open_session` from the evidence list
-    # entirely; that is reverted here in favor of the `exempt_parameters`
-    # mechanism below, which keeps the surface claim honestly complete
-    # while still not treating a known-harmless name collision as a
-    # finding). `open_session(self, credential_id, secret)`'s real
-    # `credential_id` parameter is this peer's ordinary
-    # session-authentication argument (it identifies which *already-
-    # issued* application credential is authenticating) -- structurally
-    # incapable of originating a bootstrap/reset/issue-role-control/
-    # rotate/revoke-shaped request under any argument value, since it
-    # never creates, lists, or mutates a credential of any kind. Its name
-    # nonetheless contains the substring "credential", which trips
-    # `signature_forbids_parameters`'s deliberately coarse substring
-    # match. Verified empirically (not assumed, both directions): running
-    # `signature_forbids_parameters` against the full `public_operation_
-    # callables()` reports exactly one violation,
-    # `MitateDataService.open_session.credential_id` -- the exact string
-    # below, confirmed against this peer's own real `__qualname__` rather
-    # than guessed.
-    #
-    # The other nine callables (insert/read/update/delete/transact/
-    # capabilities/create_collection/create_entity/add_field -- WP-2.5
-    # review M-1 added capabilities/create_entity/add_field to this list,
-    # re-verified empirically against this now-ten-callable list to still
-    # report exactly this one violation) are exactly this peer's real
-    # application-facing schema/data dispatchers -- the same set
-    # `create_unique_index`'s own `SurfaceAbsent` above already uses as its
-    # `forbidden_parameters` evidence (C-17 precedent density, this file,
-    # lines ~443-476). `ControlPlane` (`self._control`, used only by the
-    # privileged out-of-band setup group above) is reachable only from this
-    # adapter's own setup code; no session object this peer ever hands to
-    # an application caller carries a reference to it (cell.py -- sessions
-    # only ever hold a cell handle and a Principal).
-    _CONTROL_EXEMPT_PARAMETERS: tuple[str, ...] = ("MitateDataService.open_session.credential_id",)
+    # `control_plane.ControlPlaneService` (design v1.2 R-6, WP-4) is now a
+    # real, constructed facade on this adapter (`self._control_service`,
+    # `__init__` above) -- every one of the 14 port v1.5 in-band/ritual/
+    # privileged operations below presents its request to that same real
+    # service object, exactly as a real `/control/v1`-equivalent caller
+    # would (this adapter never pre-filters by credential kind/role before
+    # presenting a request). `_call` (this file's own existing helper,
+    # used by every application-plane method already) is reused unchanged:
+    # `ControlPlaneService` raises the identical `errors.FoundationError`
+    # every other service method raises, so `classify()` needs no
+    # control-plane-specific branch at all.
 
-    def _control_surface_absent(self, operation: str, requested: str) -> NoReturn:
-        raise SurfaceAbsent(
-            self.name, operation,
-            f"no control-plane entry point exists on this peer's public surface (requested: {requested})",
-            surface=self.public_operation_callables(),
-            forbidden_parameters=["credential", "control", "bootstrap", "rotate", "revoke"],
-            exempt_parameters=self._CONTROL_EXEMPT_PARAMETERS,
-        )
+    def _actor_id_secret(self, actor: "CredentialHandle | ControlCredentialHandle") -> tuple[str, str]:
+        # Both port handle types carry `.credential_ref`/`.secret`
+        # (application `CredentialHandle` and control-plane
+        # `ControlCredentialHandle` alike) -- this adapter never inspects
+        # which kind `actor` is before presenting it: `ControlPlaneService.
+        # _authenticate` tries the control-credential store only, so an
+        # application credential's id/secret simply fails to match there,
+        # exactly the fail-closed behavior C-14 vector 1 measures.
+        return actor.credential_ref, actor.secret
 
     # port v1.5
     def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-        """No control-plane capabilities entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("control_capabilities", f"actor={actor!r}")
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.control_capabilities(credential_id, secret))
 
     # port v1.5
     def register_application_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
     ) -> Mapping[str, Any]:
-        """No in-band application-registration entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("register_application_inband", f"application_id={application_id!r}")
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.register_application(credential_id, secret, application_id))
 
     # port v1.5
     def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        """No in-band application-listing entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("list_applications", f"actor={actor!r}")
+        credential_id, secret = self._actor_id_secret(actor)
+        result = self._call(lambda: self._control_service.list_applications(credential_id, secret))
+        return result["applications"]
 
     # port v1.5
     def set_application_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
     ) -> Mapping[str, Any]:
-        """No in-band application enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "set_application_enabled_inband", f"application_id={application_id!r} enabled={enabled!r}"
-        )
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.set_application_enabled(credential_id, secret, application_id, enabled))
 
     # port v1.5
     def issue_credential_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
     ) -> CredentialHandle:
-        """No in-band credential-issuance entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "issue_credential_inband", f"application_id={application_id!r} role={role!r}"
+        credential_id, secret = self._actor_id_secret(actor)
+        result = self._call(lambda: self._control_service.issue_credential(credential_id, secret, application_id, role))
+        return CredentialHandle(
+            credential_ref=result["credential_id"], application_id=result["application_id"],
+            role=result["role"], secret=result["secret"],
         )
 
     # port v1.5
     def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        """No in-band credential-listing entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("list_credentials", f"actor={actor!r}")
+        credential_id, secret = self._actor_id_secret(actor)
+        result = self._call(lambda: self._control_service.list_credentials(credential_id, secret))
+        return result["credentials"]
 
     # port v1.5
     def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
-        """No in-band credential-rotation entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("rotate_credential", f"credential_ref={credential_ref!r}")
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.rotate_credential(credential_id, secret, credential_ref))
 
     # port v1.5
     def revoke_credential_inband(
@@ -300,48 +473,132 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         destructive: bool | None = None,
         confirmation: str | None = None,
     ) -> Mapping[str, Any]:
-        """No in-band credential-revocation entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "revoke_credential_inband",
-            f"credential_ref={credential_ref!r} destructive={destructive!r} confirmation={confirmation!r}",
-        )
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.revoke_credential(
+            credential_id, secret, credential_ref, destructive=destructive, confirmation=confirmation))
 
     # port v1.5
     def set_credential_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
     ) -> Mapping[str, Any]:
-        """No in-band credential enable/disable entry point exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent(
-            "set_credential_enabled_inband", f"credential_ref={credential_ref!r} enabled={enabled!r}"
-        )
+        credential_id, secret = self._actor_id_secret(actor)
+        return self._call(lambda: self._control_service.set_credential_enabled(credential_id, secret, credential_ref, enabled))
 
-    # port v1.5
+    @contextmanager
+    def _control_ritual_unit_of_work(self):
+        """`control_auth.ControlCredentialStore` (unlike `_ReconciledControl
+        Backend`/`control_plane.InMemoryControlBackend`) is a plain store
+        with no `unit_of_work()` of its own -- the ceremony core
+        (`bootstrap_control_credential`/`reset_control_credentials`) needs
+        an `_InMemoryWork` token to pass as `work`, so this adapter builds
+        one directly, the same shape `InMemoryControlBackend.unit_of_work`
+        constructs internally."""
+        work = _InMemoryWork()
+        try:
+            yield work
+        except BaseException:
+            work.rollback()
+            raise
+
+    # port v1.5 (ritual -- design R-6, no in-band actor by contract)
     def bootstrap(self) -> ControlCredentialHandle:
-        """No out-of-band bootstrap ritual mechanism exists on this peer; see `_control_surface_absent`."""
-        self._control_surface_absent("bootstrap", "ritual bootstrap (no actor -- out-of-band by contract)")
+        # Real ceremony core (`control_plane.bootstrap_control_credential`)
+        # against this adapter's own in-memory control-credential store --
+        # the SAME product function `ops.py::cmd_bootstrap` calls against
+        # PostgreSQL (R-6: "儀式意味論の正本は再利用可能な product code に
+        # 置き...双方が同一コアを呼ぶ" -- this adapter never re-implements
+        # ceremony logic of its own).
+        def op() -> ControlCredentialHandle:
+            with self._control_ritual_unit_of_work() as work:
+                credential_id, secret = bootstrap_control_credential(
+                    self._control_credentials, self._control_audit.append, work=work)
+            return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
+        return self._call(op)
 
-    # port v1.5
+    # port v1.5 (ritual -- design R-6, no in-band actor by contract)
     def reset(self) -> ControlCredentialHandle:
-        """No out-of-band reset ritual mechanism exists on this peer; see `_control_surface_absent`."""
-        self._control_surface_absent("reset", "ritual reset (no actor -- out-of-band by contract)")
+        def op() -> ControlCredentialHandle:
+            credential_id, secret = self._reset_control_credentials_now()
+            return ControlCredentialHandle(credential_ref=credential_id, secret=secret)
+        return self._call(op)
 
-    # port v1.5
+    def _reset_control_credentials_now(self) -> tuple[str, str]:
+        """Runs the real reset ceremony to completion, resolving its own
+        declare-and-echo gate (`control_plane.reset_control_credentials`
+        recomputes and requires the CURRENT confirmation phrase, contract
+        `destructive_confirmation`) via the same probe -> echo pattern this
+        file's own `delete()`/batch-mutation methods already use for the
+        application-plane's identical gate: a first attempt with no
+        confirmation reads the real, currently-required phrase off the
+        denial, then a second attempt echoes it back exactly."""
+        def attempt(confirmation: str | None) -> tuple[str, str]:
+            with self._control_ritual_unit_of_work() as work:
+                return reset_control_credentials(
+                    self._control_credentials, self._control_audit.append, work=work,
+                    destructive=True, confirmation=confirmation,
+                )
+        try:
+            return attempt(None)
+        except DestructiveConfirmationRequired as exc:
+            return attempt(exc.details["required_confirmation"])
+
+    def _mint_or_repair_control_credential(self) -> None:
+        """Ensures `self._control_credential_ref`/`_secret` name a
+        currently-valid, must-rotate-cleared control credential (port v1.5
+        `control_credential()`'s own obligation, WP-1 independent review
+        major M-4: never a memoized value that might already be dead).
+        First call bootstraps (or, if a control-credential row already
+        exists -- some other test on this session-scoped adapter ran
+        first -- resets, to obtain a handle this adapter itself actually
+        knows the secret for). Every later call re-validates the tracked
+        secret directly against the real store (never assumed still
+        valid): C-15's own vectors deliberately revoke/reset control
+        credentials mid-suite, and a call here after one of those must
+        repair via a real `reset`, not keep handing out a now-dead handle.
+        Either path finishes with a genuine self-rotate (`ControlPlane
+        Service.rotate_credential`) to clear `must_rotate` -- never
+        bypassed, exactly like a real operator completing the ritual
+        would have to.
+        """
+        if self._control_credential_ref is not None:
+            try:
+                self._control_credentials.authenticate(self._control_credential_ref, self._control_credential_secret)
+                return  # still live, and already rotated by a prior call to this method
+            except FoundationError:
+                pass  # revoked/disabled since last use -- repair via reset below
+        if self._control_credentials.has_any(include_revoked=True):
+            credential_id, secret = self._reset_control_credentials_now()
+        else:
+            with self._control_ritual_unit_of_work() as work:
+                credential_id, secret = bootstrap_control_credential(
+                    self._control_credentials, self._control_audit.append, work=work)
+        rotated = self._control_service.rotate_credential(credential_id, secret, credential_id)
+        self._control_credential_ref = credential_id
+        self._control_credential_secret = rotated["secret"]
+
+    # port v1.5 (privileged setup)
     def control_credential(self) -> ControlCredentialHandle:
-        """No control credential can be minted -- bootstrap/reset do not exist; see `_control_surface_absent`."""
-        self._control_surface_absent("control_credential", "privileged control-credential setup")
+        self._mint_or_repair_control_credential()
+        return ControlCredentialHandle(credential_ref=self._control_credential_ref, secret=self._control_credential_secret)
 
-    # port v1.5
+    # port v1.5 (privileged observation)
     def control_audit_events(self) -> Sequence[Mapping[str, Any]]:
-        """No control-plane audit trail exists to observe; see `_control_surface_absent`."""
-        self._control_surface_absent("control_audit_events", "control-plane audit observation")
+        # Reads the DURABLE sink (`ControlAuditSink.snapshot()`) -- never
+        # `AuditSink` (foundation's own 6-field, application-plane-only
+        # trail), which is not the R-6 durable audit this port operation
+        # observes.
+        return [event.as_dict() for event in self._control_audit.snapshot()]
 
-    # port v1.5 (fix-round): the inverse of `provision_application`.
-    # `ControlPlane` (checked by source inspection of `service.py`) has no
-    # application-removal method of any kind -- `provision_application` is
-    # a one-way operation on this peer.
+    # port v1.5 (fix-round): the inverse of `provision_application` --
+    # operator-privileged test-harness cleanup, never a public capability
+    # (there is no `deprovision`/`unregister` entry point anywhere on this
+    # peer's own contract surface -- `application_deletion` is out of
+    # scope for contract 1.2.0). Implemented via direct adapter-privileged
+    # state removal, mirroring r2db-api's own identical WP-5 choice for the
+    # structurally identical case.
     def deprovision_application(self, application_id: str) -> None:
-        """No application-removal mechanism exists on this peer yet; see `_control_surface_absent`."""
-        self._control_surface_absent("deprovision_application", f"application_id={application_id!r}")
+        self._control.cells.pop(application_id, None)
+        self._control.credentials.unregister_application(application_id)
 
     # ------------------------------------------------------------------
     # application plane
@@ -890,52 +1147,40 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         ]
 
     def credential_reactivation_vectors(self, handle: CredentialHandle) -> Sequence[TamperVector]:
-        # `auth.py`'s `CredentialStore` had no un-revoke/enable-credential
-        # call at all (`revoke()` was one-way; the only other state-mutating
-        # methods that touched a credential's own row were `issue()`, which
-        # always mints a brand-new `credential_id` with no parameter to
-        # force reuse of an existing one). The one real control-plane call
-        # that *could* plausibly be mistaken for a reactivation path is
-        # `enable_application`, since applications and credentials are
-        # separate flags on this peer (`_Credential.enabled` vs.
-        # `_applications[...]`) -- exercised here as a real attempt rather
-        # than assumed safe.
-        #
-        # (P3 WP-2: `enable()`/`disable()` are new -- individual, credential-
-        # level lifecycle calls that did not exist when the paragraph above
-        # was written -- and `revoke()` now sets a dedicated `revoked` flag
-        # (`_Credential.revoked = True`) rather than the `enabled` flag this
-        # paragraph originally described. The paragraph's own OUTCOME still
-        # holds: `enable()` unconditionally leaves `revoked` untouched (see
-        # `auth.CredentialStore.enable`'s own docstring), so a revoked
-        # credential still cannot authenticate after `enable()` -- but this
-        # vector set does not yet exercise `enable()` as a `must_deny` real
-        # reactivation attempt, since the `structurally_absent` vector below
-        # still lists it among the "no reactivation call exists" surface,
-        # which is no longer literally true. Rewriting this to a real
-        # `must_deny` vector (revoke -> enable -> re-authenticate) is
-        # deferred to the WP-5 flip commit, together with the `control_plane:
-        # enabled` declaration flip -- design docs/design/
-        # MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2 R-8/WP-0 round-2 M-4:
-        # "現宣言 structurally_absent の根拠...は enable_credential 実装の
-        # 瞬間に偽になる。WP-5 で...実ベクタ(must_deny)へ書き換え". This is a
-        # pre-anticipated, adjudicated deferral, not an oversight of this WP.)
+        # WP-5 flip (design v1.2 R-8 second-round M-4): the prior
+        # `structurally_absent` vector's own premise ("no reactivation call
+        # exists on this peer at all") became false the instant
+        # `enable_credential` was wired through to a real, in-band
+        # control-plane operation (`set_credential_enabled_inband` ->
+        # `ControlPlaneService.set_credential_enabled` -> THIS SAME `auth.
+        # CredentialStore`, 2ストア突合) -- so it is rewritten here to the
+        # real `must_deny` vector the design's own R-8 citation calls for:
+        # revoke -> in-band enable(True) -> re-authenticate denied.
         def enable_application_after_revoke_attempt() -> None:
             # `enable_application` only ever flips the *application*-level
             # flag (`_applications[...]`); it never touches a credential's
-            # own state at all (P3 WP-2: `_Credential.enabled`/`revoked`,
-            # previously described here as "`_Credential.enabled`, set False
-            # by `revoke()`" -- `revoke()` no longer touches `enabled` at
-            # all, see the docstring above), so this call itself never
-            # raises -- it is a real, no-op-for-this-purpose control-plane
-            # call, not a denied one. `must_ignore` is the correct
-            # disposition: C-13's own must_ignore handling re-authenticates
-            # afterward and asserts the credential is still refused, which
-            # is the actual proof this attempt did not reactivate anything;
-            # that post-condition check does not belong inside attempt()
-            # itself (design docs/design/CONFORMANCE_CONDITIONS_V1_1.md
-            # section 2: must_ignore's attempt() "may succeed").
+            # own state at all, so this call itself never raises -- a real,
+            # no-op-for-this-purpose control-plane call, not a denied one.
+            # `must_ignore` is the correct disposition: C-13's own
+            # must_ignore handling re-authenticates afterward and asserts
+            # the credential is still refused, which is the actual proof
+            # this attempt did not reactivate anything.
             self._control.credentials.enable_application(handle.application_id)
+
+        def inband_enable_credential_after_revoke_then_reauthenticate_denied_attempt() -> None:
+            # `enable_credential` itself is NOT refused (contract `enable_
+            # credential.semantics`: "Reverses disable only" -- the call
+            # succeeds, `revoked` stays untouched) -- the proof this is a
+            # real `must_deny` vector, not a disguised `must_ignore` one,
+            # is that the SAME `attempt()` chains a real re-authenticate of
+            # `handle` afterward: `self.authenticate` raises via `_call`
+            # exactly like every other denial this file already surfaces,
+            # so a genuinely non-reactivating peer makes `attempt()` itself
+            # raise `ConformanceDenial` -- `must_deny`'s own contract.
+            control_actor = self.control_credential()
+            self._call(lambda: self._control_service.set_credential_enabled(
+                control_actor.credential_ref, control_actor.secret, handle.credential_ref, True))
+            self.authenticate(handle)
 
         return [
             TamperVector(
@@ -946,33 +1191,9 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             ),
             TamperVector(
                 kind="credential_reactivation",
-                name="mitatedb_credential_store_has_no_reactivation_call",
-                disposition="structurally_absent",
-                # (P3 WP-2: `enable()`/`disable()` now exist on `auth.
-                # CredentialStore` as real, individual credential-level
-                # calls -- this vector's own name and premise ("no
-                # reactivation call exists") is no longer literally true of
-                # the class as a whole. It remains accurate for the NARROWER
-                # `surface` list actually inspected below (none of these
-                # specific callables' signatures accept a parameter that
-                # could force reactivation), which is all `structurally_
-                # absent`'s own mechanical check (`signature_forbids_
-                # parameters`) verifies. Widening this vector set to cover
-                # `enable()` for real -- a `must_deny` "revoke then enable
-                # then re-authenticate" vector -- is deferred to the WP-5
-                # flip commit alongside the `control_plane: enabled`
-                # declaration flip (design v1.2 R-8/WP-0 round-2 M-4, same
-                # citation as the docstring above).
-                surface=[
-                    self._control.credentials.issue,
-                    self._control.credentials.revoke,
-                    self._control.credentials.disable_application,
-                    self._control.credentials.enable_application,
-                    self._control.credentials.provision_application,
-                    self._control.credentials.authenticate,
-                    self._control.credentials.assert_active,
-                ],
-                forbidden_parameters=["enabled", "revoked", "reactivate", "unrevoke", "un_revoke"],
+                name="mitatedb_inband_enable_credential_after_revoke_then_reauthenticate_denied",
+                disposition="must_deny",
+                attempt=inband_enable_credential_after_revoke_then_reauthenticate_denied_attempt,
             ),
         ]
 

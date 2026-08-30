@@ -1,0 +1,239 @@
+"""`python -m mitatedb_api.ops` (design v1.2 R-6, WP-5 flip) -- direct,
+real-subprocess tests.
+
+No other test file exercises this module as a subprocess (the HTTP
+conformance adapter, `conformance_adapter_mitatedb_http.py`, is the only
+OTHER caller, and it treats the CLI as an opaque black box for its own
+condition-test purposes). This file's own job is the CLI's *external
+contract* directly: exit codes, stdout/stderr shape, the declare-and-echo
+gate's own two-step protocol, and that state changes really land in
+PostgreSQL (including the accompanying `control_audit` row, same
+transaction).
+
+Uses `control_plane_harness.py`'s shared throwaway-platform fixture (same
+convention `test_control_ceremony.py`/`test_control_plane_postgres.py`
+already use for their own PostgreSQL-backed tests).
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import psycopg
+import pytest
+from psycopg import sql
+
+from .control_plane_harness import control_platform  # noqa: F401 (fixture)
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+
+_APP_PEPPER = "ops-cli-test-app-pepper-0000000000"
+_CONTROL_PEPPER = "ops-cli-test-control-pepper-0000000"
+
+
+def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER,
+             app_pepper: "str | None" = _APP_PEPPER) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    env["MITATEDB_CONTROLPLANE_DSN"] = control_platform.controlplane_dsn
+    env["MITATEDB_PLATFORM_SCHEMA"] = control_platform.registry_schema
+    if control_pepper is not None:
+        env["MITATEDB_CONTROL_CREDENTIAL_PEPPER"] = control_pepper
+    else:
+        env.pop("MITATEDB_CONTROL_CREDENTIAL_PEPPER", None)
+    if app_pepper is not None:
+        env["MITATEDB_CREDENTIAL_PEPPER"] = app_pepper
+    else:
+        env.pop("MITATEDB_CREDENTIAL_PEPPER", None)
+    return subprocess.run(
+        [sys.executable, "-m", "mitatedb_api.ops", *args], capture_output=True, text=True, env=env)
+
+
+def _parse_issued(stdout: str) -> tuple[str, str]:
+    credential_id = secret = None
+    for line in stdout.splitlines():
+        if line.startswith("credential_id: "):
+            credential_id = line[len("credential_id: "):].strip()
+        elif line.startswith("secret: "):
+            secret = line[len("secret: "):].strip()
+    assert credential_id and secret, f"could not parse stdout: {stdout!r}"
+    return credential_id, secret
+
+
+def _control_credentials_rows(control_platform) -> list[tuple]:
+    statement = sql.SQL("SELECT credential_id, enabled, revoked, must_rotate FROM {table} ORDER BY issued_at").format(
+        table=sql.Identifier(control_platform.registry_schema, "control_credentials"))
+    with psycopg.connect(control_platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(statement)
+            return cur.fetchall()
+
+
+def _control_audit_rows(control_platform) -> list[tuple]:
+    statement = sql.SQL("SELECT operation, outcome, actor_type FROM {table} ORDER BY audit_seq").format(
+        table=sql.Identifier(control_platform.registry_schema, "control_audit"))
+    with psycopg.connect(control_platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(statement)
+            return cur.fetchall()
+
+
+@pytest.fixture(autouse=True)
+def _clean_control_credentials(control_platform):
+    """Each test in this file gets a clean `control_credentials`/
+    `control_audit` slate -- module-scoped `control_platform` is shared
+    with every OTHER test function here, and `bootstrap`'s own CONFLICT
+    refusal (correctly) depends on prior state."""
+    with psycopg.connect(control_platform.provision_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {control_platform.registry_schema}.control_credentials")
+            cur.execute(f"DELETE FROM {control_platform.registry_schema}.control_audit")
+    yield
+
+
+def test_bootstrap_issues_a_real_must_rotate_credential(control_platform) -> None:
+    result = _run_ops(control_platform, "bootstrap")
+    assert result.returncode == 0, result.stderr
+    credential_id, secret = _parse_issued(result.stdout)
+    assert "must_rotate: true" in result.stdout
+
+    rows = _control_credentials_rows(control_platform)
+    assert len(rows) == 1
+    row_id, enabled, revoked, must_rotate = rows[0]
+    assert row_id == credential_id
+    assert enabled is True and revoked is False and must_rotate is True
+
+    audit_rows = _control_audit_rows(control_platform)
+    assert audit_rows == [("bootstrap_control_credential", "allow", "operator_cli")]
+
+
+def test_bootstrap_refused_with_conflict_while_a_control_credential_exists(control_platform) -> None:
+    first = _run_ops(control_platform, "bootstrap")
+    assert first.returncode == 0, first.stderr
+
+    second = _run_ops(control_platform, "bootstrap")
+    assert second.returncode == 1
+    body = json.loads(second.stderr.strip())
+    assert body["code"] == "CONFLICT"
+
+    # Refusing a second bootstrap must not touch state at all: still
+    # exactly the one row/one audit event the first invocation created.
+    assert len(_control_credentials_rows(control_platform)) == 1
+    assert len(_control_audit_rows(control_platform)) == 1
+
+
+def test_bootstrap_refused_with_conflict_even_when_the_only_row_is_revoked(control_platform) -> None:
+    """Contract `control_plane.bootstrap`: "while a control credential
+    exists" reads as row-existence, not "while an unrevoked one exists"
+    (design v1.2 R-6, WP-4's own M-6 disposition)."""
+    result = _run_ops(control_platform, "bootstrap")
+    credential_id, _secret = _parse_issued(result.stdout)
+    with psycopg.connect(control_platform.provision_dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("UPDATE {table} SET revoked = TRUE WHERE credential_id = {ph}").format(
+                    table=sql.Identifier(control_platform.registry_schema, "control_credentials"),
+                    ph=sql.Placeholder(),
+                ),
+                [credential_id],
+            )
+
+    second = _run_ops(control_platform, "bootstrap")
+    assert second.returncode == 1
+    assert json.loads(second.stderr.strip())["code"] == "CONFLICT"
+
+
+def test_reset_without_confirm_declares_the_phrase_and_touches_nothing(control_platform) -> None:
+    bootstrap_result = _run_ops(control_platform, "bootstrap")
+    original_id, _secret = _parse_issued(bootstrap_result.stdout)
+
+    denial = _run_ops(control_platform, "reset")
+    assert denial.returncode == 2
+    body = json.loads(denial.stderr.strip())
+    assert body["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert body["details"]["required_confirmation"].startswith("RESET control_credentials @active=")
+    assert body["details"]["consequence"]
+    # An unconfirmed denial reads state (to compute the phrase) but must
+    # write nothing: the original credential is still exactly as it was.
+    rows = _control_credentials_rows(control_platform)
+    assert len(rows) == 1 and rows[0][0] == original_id and rows[0][2] is False  # not revoked
+    assert len(_control_audit_rows(control_platform)) == 1  # only the original bootstrap event
+
+
+def test_reset_with_wrong_confirmation_is_also_refused_and_touches_nothing(control_platform) -> None:
+    _run_ops(control_platform, "bootstrap")
+    denial = _run_ops(control_platform, "reset", "--confirm", "not the right phrase at all")
+    assert denial.returncode == 2
+    assert json.loads(denial.stderr.strip())["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert len(_control_credentials_rows(control_platform)) == 1
+
+
+def test_reset_with_the_echoed_phrase_revokes_everything_and_mints_one_new_credential(control_platform) -> None:
+    bootstrap_result = _run_ops(control_platform, "bootstrap")
+    original_id, _secret = _parse_issued(bootstrap_result.stdout)
+
+    probe = _run_ops(control_platform, "reset")
+    phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+
+    confirmed = _run_ops(control_platform, "reset", "--confirm", phrase)
+    assert confirmed.returncode == 0, confirmed.stderr
+    new_id, new_secret = _parse_issued(confirmed.stdout)
+    assert new_id != original_id
+    assert "must_rotate: true" in confirmed.stdout
+
+    rows = {row[0]: row for row in _control_credentials_rows(control_platform)}
+    assert rows[original_id][2] is True  # revoked
+    assert rows[new_id][1] is True and rows[new_id][2] is False and rows[new_id][3] is True  # enabled, not revoked, must_rotate
+
+    audit_ops = [row[0] for row in _control_audit_rows(control_platform)]
+    assert audit_ops == ["bootstrap_control_credential", "reset_control_credentials"]
+
+
+def test_reset_bootstraps_from_empty_state_too(control_platform) -> None:
+    """`reset` is also the recovery path when NO control credential has
+    ever existed at all (not only the "revoke everything" case) -- the
+    ceremony core's own `has_any()` check inside `reset_control_
+    credentials` handles an empty table the same as a populated one."""
+    probe = _run_ops(control_platform, "reset")
+    assert probe.returncode == 2
+    phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+    # An empty active-id set still produces a real, deterministic phrase.
+    assert phrase.startswith("RESET control_credentials @active=")
+
+    confirmed = _run_ops(control_platform, "reset", "--confirm", phrase)
+    assert confirmed.returncode == 0, confirmed.stderr
+    assert len(_control_credentials_rows(control_platform)) == 1
+
+
+def test_two_independent_bootstrap_runs_never_mint_the_same_secret(control_platform) -> None:
+    first = _run_ops(control_platform, "bootstrap")
+    _id1, secret1 = _parse_issued(first.stdout)
+    probe = _run_ops(control_platform, "reset")
+    phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+    second = _run_ops(control_platform, "reset", "--confirm", phrase)
+    _id2, secret2 = _parse_issued(second.stdout)
+    assert secret1 != secret2
+
+
+def test_missing_controlplane_dsn_dies_loudly(control_platform) -> None:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC_DIR)
+    env.pop("MITATEDB_CONTROLPLANE_DSN", None)
+    env["MITATEDB_CONTROL_CREDENTIAL_PEPPER"] = _CONTROL_PEPPER
+    result = subprocess.run(
+        [sys.executable, "-m", "mitatedb_api.ops", "bootstrap"], capture_output=True, text=True, env=env)
+    assert result.returncode == 2
+    assert "MITATEDB_CONTROLPLANE_DSN is required" in result.stderr
+
+
+def test_identical_peppers_are_refused_before_any_database_access(control_platform) -> None:
+    same_pepper = "identical-pepper-value-used-for-both-0000"
+    result = _run_ops(control_platform, "bootstrap", control_pepper=same_pepper, app_pepper=same_pepper)
+    assert result.returncode == 2
+    assert "pepper" in result.stderr.lower()
+    # Refused before ever touching the platform database: still zero rows.
+    assert _control_credentials_rows(control_platform) == []

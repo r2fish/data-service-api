@@ -87,7 +87,21 @@ class CredentialStore:
         with self._lock:
             self._applications[application_id] = True
 
-    def issue(self, application_id, role, expires_at=None):
+    def issue(self, application_id, role, expires_at=None, *, credential_id=None, secret=None):
+        """WP-5 (design v1.2 R-8/§3 WP-5 row, item i "2ストア突合"):
+        `credential_id`/`secret` are now optional overrides -- when
+        omitted (every pre-existing call site), behavior is byte-for-byte
+        unchanged (both are still freshly random-generated here). When
+        supplied, this store records EXACTLY the given id/secret rather
+        than minting its own -- what lets `control_plane.ControlPlaneService`
+        (which always pre-generates the credential_id/secret it is about
+        to both store AND return to its own caller, so the two never
+        drift apart) issue a credential into THIS SAME store instead of a
+        second, disconnected in-memory registry. This is the reconciliation
+        the in-process conformance adapter's own control-plane backend
+        needs: a credential issued in-band (`issue_credential_inband`)
+        must be the exact row `authenticate()` below can read back.
+        """
         with self._lock:
             if application_id not in self._applications:
                 raise AuthenticationError("unknown application")
@@ -96,8 +110,8 @@ class CredentialStore:
             if expires_at is not None and (not isinstance(expires_at, datetime) or
                                            expires_at.tzinfo is None):
                 raise ValueError("expiry must be timezone-aware")
-            credential_id = secrets.token_hex(12)
-            secret = secrets.token_urlsafe(32)
+            credential_id = credential_id or secrets.token_hex(12)
+            secret = secret or secrets.token_urlsafe(32)
             self._credentials[credential_id] = _Credential(
                 credential_id=credential_id,
                 application_id=application_id,
@@ -174,6 +188,129 @@ class CredentialStore:
             item.enabled = True
             self.audit.record("credential_enabled", item.application_id,
                               credential_id)
+
+    def application_exists(self, application_id):
+        """WP-5 (2ストア突合): read-only existence check, mirroring
+        `control_plane.InMemoryApplicationRegistry.exists`'s own call
+        surface so this store can serve as (part of) a real `ControlPlane
+        Service` backend without that service having to know it is
+        talking to the application-plane's own store instead of a
+        dedicated control-only registry."""
+        with self._lock:
+            return application_id in self._applications
+
+    def applications_count(self):
+        """WP-5 (2ストア突合): total registered applications -- the same
+        count `control_plane.ControlPlaneService.register_application`'s
+        own `applications` resource bound is checked against, now backed
+        by the SAME dict `authenticate()`/`assert_active` above already
+        consult (not a second, adapter-only shadow count)."""
+        with self._lock:
+            return len(self._applications)
+
+    def list_applications(self):
+        """WP-5 (2ストア突合): `[(application_id, enabled), ...]` -- the
+        shape `control_plane.ControlPlaneService.list_applications` needs
+        from its backend."""
+        with self._lock:
+            return list(self._applications.items())
+
+    def credentials_active_count(self, application_id):
+        """WP-5 (2ストア突合): counts non-revoked credentials only (R-6:
+        "credentials_per_application は revoked 行を数えない")."""
+        with self._lock:
+            return sum(
+                1 for item in self._credentials.values()
+                if item.application_id == application_id and not item.revoked
+            )
+
+    def list_credentials(self):
+        """WP-5 (2ストア突合): `[(credential_id, application_id, role,
+        enabled, revoked), ...]` -- the shape `control_plane.
+        ControlPlaneService.list_credentials` needs from its backend."""
+        with self._lock:
+            return [
+                (item.credential_id, item.application_id, item.role.value, item.enabled, item.revoked)
+                for item in self._credentials.values()
+            ]
+
+    def unregister_application(self, application_id):
+        """WP-5 (2ストア突合): rollback-only primitive -- undoes
+        `provision_application` when a control-plane `register_application`
+        transaction's own same-transaction audit write fails after this
+        store's row was already written (R-6's fail-closed same-tx
+        guarantee: a failed operation must leave no trace, not merely no
+        SUCCESSFUL trace). Never reachable from any public in-band
+        capability -- there is no `deregister`/`unprovision` operation on
+        this peer's own contract surface; this exists solely so a
+        `ControlPlaneService` backend built on this store can honor an
+        undo-log rollback the same way `control_plane.
+        InMemoryApplicationRegistry.register`'s own `work.on_rollback`
+        already does for its self-contained registry."""
+        with self._lock:
+            self._applications.pop(application_id, None)
+
+    def forget_credential(self, credential_id):
+        """WP-5 (2ストア突合): rollback-only counterpart to `issue` --
+        undoes a fresh issuance whose accompanying same-transaction audit
+        write failed. Never reachable from any public in-band capability
+        (there is no credential-deletion operation on this peer's own
+        contract surface -- deleting a row outright is a stronger
+        operation than `revoke`, which this store already refuses to
+        reverse)."""
+        with self._lock:
+            self._credentials.pop(credential_id, None)
+
+    def snapshot_credential_state(self, credential_id):
+        """WP-5 (2ストア突合): rollback-only. Captures exactly enough
+        state (`digest`/`enabled`/`revoked`) to restore this credential to
+        its current row via `restore_credential_state` below, for a
+        control-plane transaction's own undo-log (`rotate_credential`/
+        `set_credential_state`'s own same-transaction-audit-failure case).
+        Returns `None` for an unknown id."""
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            return None if item is None else (item.digest, item.enabled, item.revoked)
+
+    def restore_credential_state(self, credential_id, snapshot):
+        """WP-5 (2ストア突合): rollback-only counterpart to `snapshot_
+        credential_state`. A no-op for a `None` snapshot (the credential
+        did not exist when the snapshot was taken) or an id that has since
+        disappeared. Deliberately capable of restoring `revoked=False` --
+        this is an undo of a FAILED, never-committed operation (R-6's
+        same-transaction fail-closed guarantee: nothing about a failed
+        attempt should remain in effect, including a revoke it performed),
+        not a public un-revoke capability; no in-band operation on this
+        peer's contract surface ever calls this method."""
+        if snapshot is None:
+            return
+        digest, enabled, revoked = snapshot
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            if item is not None:
+                item.digest = digest
+                item.enabled = enabled
+                item.revoked = revoked
+
+    def rotate(self, credential_id, secret=None):
+        """WP-5 (design v1.2 R-6, 2ストア突合): replaces an existing
+        credential's digest in place -- this peer's application-plane
+        store never needed a rotate operation before the in-band
+        control-plane surface (`control_plane.ControlPlaneService.
+        rotate_credential`) existed; that service is this method's first
+        caller. `credential_id`/`application_id`/`role` are unchanged;
+        only the secret (and therefore the stored digest) changes,
+        mirroring `control_auth.ControlCredentialStore.rotate`'s own
+        contract for the control-credential store. Fails closed on an
+        unknown id."""
+        secret = secret or secrets.token_urlsafe(32)
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            if item is None:
+                raise NotFoundError("credential not found")
+            item.digest = self._digest(secret)
+            self.audit.record("credential_rotated", item.application_id, credential_id)
+        return secret
 
     def get_state(self, credential_id):
         """`(enabled, revoked)` for `credential_id`, or `None` if it does
