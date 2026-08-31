@@ -566,16 +566,53 @@ def test_audit_write_fault_rolls_back_the_reset_ceremony_atomically() -> None:
 # from this tuple was previously invisible: it is used ONLY as the SELECT
 # projection list in `control_audit.read_control_audit_events` -- the R-8
 # reader WP-5's own C-15 will depend on to observe audit evidence at all.
+#
+# B-1 measure (Phase 3.5 WP-1, design docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-G "B-1 措置", P35-D14;
+# CCR_DISPOSITION.md subordinate ruling 8): contract 1.3.0 adds `target_id`
+# to `audit.fields` (13 fields), while `CONTROL_AUDIT_FIELDS` itself is
+# unchanged in this WP (exposing it is WP-5's own §4 "target_id" work item,
+# a peer src/ change this WP is not permitted to make). The exact-set-
+# equality form below would therefore go red for a reason that has nothing
+# to do with a real regression in this file's own subject matter. Loosened
+# to inclusion -- the original 12-field literal (frozen here, independent of
+# `CONTROL_AUDIT_FIELDS` itself, so this guard cannot be satisfied by
+# shrinking that tuple) must be a subset of `CONTROL_AUDIT_FIELDS`, which in
+# turn must be a subset of the contract's current `audit.fields` -- as an
+# explicit, single-peer, test-only exception to the usual single-commit
+# discipline (behavior unchanged). WP-5 restores 13-field exact equality
+# once `target_id` is actually populated and exposed by this peer.
 # --------------------------------------------------------------------------
 
+_ORIGINAL_TWELVE_CONTROL_AUDIT_FIELDS = frozenset({
+    "event_id", "event_class", "occurred_at", "request_id", "application_id",
+    "actor_type", "actor_id", "role", "operation", "target_kind", "outcome",
+    "reason_code",
+})
 
+
+# n-2: this test's NAME is deliberately retained as-is (still says "_exactly")
+# even though the body below is the loosened inclusion form -- WP-5 restores
+# real set-equality in this same function, so keeping the name stable across
+# both WPs keeps `git log`/`grep` on this identifier meaningful throughout.
 def test_control_audit_fields_matches_the_contract_audit_fields_exactly() -> None:
     from mitatedb_api.control_audit import CONTROL_AUDIT_FIELDS
 
     contract_fields = tuple(_SPEC["audit"]["fields"])
-    assert len(CONTROL_AUDIT_FIELDS) == 12
-    assert set(CONTROL_AUDIT_FIELDS) == set(contract_fields), (
-        f"control_audit.CONTROL_AUDIT_FIELDS {sorted(CONTROL_AUDIT_FIELDS)} must match contract "
-        f"audit.fields {sorted(contract_fields)} exactly -- a dropped/renamed/extra field here silently "
-        f"truncates every row `read_control_audit_events` (R-8's own reader) ever returns"
+    # Reviewer m-2: `len(...) >= 12` is already implied by the frozenset
+    # subset check below (12 known-distinct literals <= CONTROL_AUDIT_FIELDS
+    # forces at least 12 members); a bare `>= 12` count therefore added no
+    # coverage the subset check didn't already have. A uniqueness check does
+    # add coverage the old `len(...) == 12` used to provide incidentally (a
+    # duplicated field name would satisfy both the subset check and a bare
+    # length check while still being a real defect in this tuple).
+    assert len(set(CONTROL_AUDIT_FIELDS)) == len(CONTROL_AUDIT_FIELDS), (
+        f"control_audit.CONTROL_AUDIT_FIELDS {CONTROL_AUDIT_FIELDS} contains a duplicate field name"
+    )
+    assert _ORIGINAL_TWELVE_CONTROL_AUDIT_FIELDS <= set(CONTROL_AUDIT_FIELDS) <= set(contract_fields), (
+        f"control_audit.CONTROL_AUDIT_FIELDS {sorted(CONTROL_AUDIT_FIELDS)} must retain the original 12 "
+        f"core fields {sorted(_ORIGINAL_TWELVE_CONTROL_AUDIT_FIELDS)} and remain a subset of contract "
+        f"audit.fields {sorted(contract_fields)} -- a dropped/renamed core field, or a field this peer "
+        f"emits that the contract does not declare, silently corrupts every row "
+        f"`read_control_audit_events` (R-8's own reader) ever returns"
     )
