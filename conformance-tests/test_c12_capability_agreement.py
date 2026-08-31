@@ -14,8 +14,11 @@ from conftest import registered_adapters
 from adapter import (
     CATALOG_SURFACE_ABSENT,
     UNCLASSIFIED,
+    VALID_CONFIRMATION,
     ConformanceDenial,
     Fixture,
+    ScopedBatchOperation,
+    SurfaceAbsent,
     fresh_identifier,
     load_contract,
     load_contract_error_codes,
@@ -287,4 +290,170 @@ def test_at_least_one_adapter_exercises_a_positive_control_mutation():
         "no registered adapter declares any of insert/update/upsert as supported; the positive-control "
         "branch of test_declared_mutation_operations_match_observed_behavior is vacuous across the whole "
         "registry"
+    )
+
+
+# --- 5. cross_entity_mutation declaration agreement (phase 3.5 WP-3) -------
+#
+# design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md section 3:
+# "現行 C-12 は cross_entity を一切読まない" (WP-0 measurement) -- these two
+# tests close that gap, using the SAME "declared -> executes / undeclared ->
+# CAPABILITY_UNSUPPORTED before execution" shape test 1 above already
+# establishes for atomic_mutation, applied to attempt_cross_entity_batch().
+#
+# The reverse (negative) direction -- "declared NOT provided => refused" --
+# is scoped to adapters whose capability-unavailable form is a real
+# `ConformanceDenial` (design section 3's own restriction): an in-process
+# peer's absence form is `SurfaceAbsent`, port-defined and not itself a
+# `ConformanceDenial` this direction's "refused with CAPABILITY_UNSUPPORTED"
+# shape can assert against -- that peer's own absence claim is independently
+# verified instead by C-16 V5's own SurfaceAbsent structural re-check
+# (`conformance-tests/test_c16_cross_entity_atomicity.py`), not duplicated
+# here (CONDITIONS.md's C-12/C-16 disclosure records this split explicitly).
+
+
+def _declared_cross_entity_mutation(capability_document: dict, contract: dict) -> tuple[str, set[str], set[str]]:
+    entry = capability_document.get("capabilities", {}).get("cross_entity_mutation", {})
+    status = entry.get("status", "unavailable")
+    if status == "enabled":
+        # Mirrors _declared_mutation_operations' own "enabled with no
+        # per-operation operations key" handling above (phase 3.5 WP-3
+        # review m-5): a peer declaring the capability wholesale enabled,
+        # without narrowing it via an `operations` list, declares the
+        # FULL contract vocabulary for a ScopedMutation's own `operation`
+        # enum -- never silently treated as an empty declared set (which
+        # would leave this direction entirely untested for such a peer).
+        operations = set(
+            entry.get("operations", contract["definitions"]["ScopedMutation"]["properties"]["operation"]["enum"])
+        )
+        return status, operations, set(entry.get("unsupported", []))
+    if status == "partial":
+        return status, set(entry.get("operations", [])), set(entry.get("unsupported", []))
+    return status, set(), set()
+
+
+def test_declared_cross_entity_mutation_operations_match_observed_behavior(adapter, fx: Fixture):
+    contract = load_contract()
+    capability_document = adapter.capability_document()
+    status, declared_ops, declared_unsupported = _declared_cross_entity_mutation(capability_document, contract)
+
+    entity_a = fresh_identifier("c12ce_a")
+    adapter.create_entity(fx.developer_a, entity_a, {"label": "text"})
+
+    if status not in ("enabled", "partial"):
+        marker = f"c12ce-absent-{uuid.uuid4().hex[:8]}"
+        # M-3 (phase 3.5 WP-3 review): the same "refused ... and leaves
+        # state unchanged" bracketing every other negative-direction check
+        # in this file already uses (see test 1's own "else" branch above,
+        # test_c12:135-149) -- entity_a is freshly created and untouched,
+        # so its row count must still be 0 whichever honest form (below)
+        # this adapter takes.
+        count_before = adapter.count(fx.runtime_a, entity_a)
+
+        def _attempt() -> None:
+            adapter.attempt_cross_entity_batch(
+                fx.runtime_a, [ScopedBatchOperation(operation="insert", entity=entity_a, values={"label": marker})],
+            )
+
+        try:
+            _attempt()
+        except SurfaceAbsent:
+            # design section 3: this direction is scoped to wire-surface
+            # adapters -- see this section's own module-level comment.
+            return
+        except ConformanceDenial as denial:
+            _assert_is_contract_code(denial.code)
+            assert denial.code == "CAPABILITY_UNSUPPORTED", (
+                f"{adapter.name}: cross_entity_mutation is declared {status!r}, so attempt_cross_entity_batch() "
+                f"must deny with CAPABILITY_UNSUPPORTED if it denies at all, got {denial.code!r}"
+                f"{_unclassified_hint(denial.code)}"
+            )
+            assert adapter.count(fx.runtime_a, entity_a) == count_before, (
+                f"{adapter.name}: {entity_a!r} row count changed despite cross_entity_mutation being declared "
+                f"{status!r} and the attempt being refused"
+            )
+            return
+        else:
+            raise AssertionError(
+                f"{adapter.name}: cross_entity_mutation is declared {status!r}, but attempt_cross_entity_batch() "
+                "executed outright"
+            )
+
+    for operation in sorted(declared_ops):
+        marker = f"c12ce-{operation}-{uuid.uuid4().hex[:8]}"
+        if operation == "insert":
+            affected = adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(operation="insert", entity=entity_a, values={"label": marker}),
+            ])
+        elif operation == "update":
+            adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(operation="insert", entity=entity_a, values={"label": marker}),
+            ])
+            affected = adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(
+                    operation="update", entity=entity_a, values={"label": marker + "-updated"},
+                    where_field="label", where_value=marker,
+                ),
+            ])
+        elif operation == "delete":
+            adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(operation="insert", entity=entity_a, values={"label": marker}),
+            ])
+            affected = adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(
+                    operation="delete", entity=entity_a, where_field="label", where_value=marker,
+                    destructive=True, confirmation=VALID_CONFIRMATION,
+                ),
+            ])
+        else:
+            # upsert: no currently-registered adapter declares this
+            # supported for cross_entity_mutation (P35-D3) -- the loop
+            # still iterates over whatever `declared_ops` a future adapter
+            # names, but there is no positive-control shape to construct
+            # for an operation this WP's own design scope excludes.
+            continue
+        assert affected and affected >= 1, (
+            f"{adapter.name}: cross-entity {operation} is declared supported but attempt_cross_entity_batch() "
+            f"reported {affected!r} rows affected"
+        )
+
+    for operation in sorted(declared_unsupported):
+        marker = f"c12ce-unsupported-{operation}-{uuid.uuid4().hex[:8]}"
+        # M-3: same "refused ... and leaves state unchanged" bracketing
+        # as the unavailable-direction branch above -- entity_a's row
+        # count (whatever it is at this point in the loop) must be
+        # unchanged by a refused attempt.
+        count_before = adapter.count(fx.runtime_a, entity_a)
+        with pytest.raises(ConformanceDenial) as ei:
+            adapter.attempt_cross_entity_batch(fx.runtime_a, [
+                ScopedBatchOperation(operation=operation, entity=entity_a, values={"label": marker}),
+            ])
+        _assert_is_contract_code(ei.value.code)
+        assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
+            f"{adapter.name}: cross-entity {operation!r} is declared unsupported, so attempt_cross_entity_batch() "
+            f"must deny with CAPABILITY_UNSUPPORTED, got {ei.value.code!r}{_unclassified_hint(ei.value.code)}"
+        )
+        assert adapter.count(fx.runtime_a, entity_a) == count_before, (
+            f"{adapter.name}: {entity_a!r} row count changed despite cross-entity {operation!r} being declared "
+            "unsupported and the attempt being refused"
+        )
+
+
+def test_at_least_one_adapter_declares_a_cross_entity_mutation_operation():
+    # Vacuity guard symmetric to test_at_least_one_adapter_exercises_a_
+    # positive_control_mutation above: if no registered adapter declared
+    # cross_entity_mutation enabled/partial, the positive-control branch of
+    # test_declared_cross_entity_mutation_operations_match_observed_behavior
+    # would never actually run anywhere in the registry.
+    contract = load_contract()
+    saw_declared_operation = False
+    for _name, adapter_obj in registered_adapters().items():
+        status, declared_ops, _unsupported = _declared_cross_entity_mutation(adapter_obj.capability_document(), contract)
+        if status in ("enabled", "partial") and declared_ops:
+            saw_declared_operation = True
+            break
+    assert saw_declared_operation, (
+        "no registered adapter declares any cross_entity_mutation operation as supported; the "
+        "positive-control branch of test_declared_cross_entity_mutation_operations_match_observed_behavior "
+        "is vacuous across the whole registry"
     )

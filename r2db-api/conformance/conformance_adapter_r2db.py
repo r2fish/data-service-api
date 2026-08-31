@@ -49,7 +49,9 @@ from adapter import (  # noqa: E402
     CredentialHandle,
     Fixture,
     PayloadNotExpressible,
+    ScopedBatchOperation,
     ScopeView,
+    SurfaceAbsent,
     TamperVector,
     resolve_valid_confirmation,
 )
@@ -140,16 +142,56 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # build parameter raised to fit this adapter's real, measured
         # fixture churn, same category of adjustment the work order
         # explicitly permits for the rate class (§4: "rate と
-        # _MAX_EXERCISABLE_LIMIT の引き上げで対処してよい"). `100` leaves a
+        # _MAX_EXERCISABLE_LIMIT の引き上げで対処してよい"). `100` left a
         # margin of 20 over the measured `n_existing=80` at vector 5 itself
         # (11 by session end) while keeping the rate-headroom arithmetic
         # satisfiable under the port's own <=200 hard cap
         # (100 + 2 + (2*5+1) + 64 = 177 < 200).
+        #
+        # Phase 3.5 WP-3 (docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
+        # 130_V1.md §3): `100` stopped being enough --
+        # `test_c15_lifecycle_changes_emit_canonical_audit_and_denials_
+        # are_recorded` started failing with a genuine in-band
+        # LIMIT_EXCEEDED. CORRECTED causal analysis (independent review
+        # m-6; the first-pass comment here over-attributed this to
+        # `test_c16_cross_entity_atomicity.py`, which is WRONG): pytest
+        # collects test files in the order listed in `conftest.py`'s own
+        # discovery / alphabetically by module, so `test_c16_...` and
+        # `test_c17_...` etc. run STRICTLY AFTER `test_c14_authority_
+        # boundary.py`/`test_c15_bootstrap_reset_lifecycle.py` -- C-16's own
+        # `fx`-driven `provision_application` churn had not happened yet at
+        # the point this failure occurred and did not cause it. The actual
+        # binding event, measured directly: `test_c12_capability_
+        # agreement.py`'s own new cross_entity_mutation test (`test_c12_...`
+        # runs BEFORE `test_c14_...`/`test_c15_...`) adds `+2` applications
+        # via its own `fx` fixture, pushing `n_existing` to `99` by the time
+        # `test_c15_lifecycle_changes_emit_canonical_audit_and_denials_
+        # are_recorded` starts; that test's OWN `fx` fixture then adds `+2`
+        # more, landing at `101` -- one past `100` -- exactly at its own
+        # in-band `register_application_inband` call. The minimum bump that
+        # would have been SUFFICIENT was therefore `~102`, not the larger
+        # jump this comment originally reasoned toward from an inflated
+        # "roughly a dozen" estimate. `115` was chosen anyway for headroom
+        # against ordinary future suite growth (`115 + 2 + (2*5+1) + 64 =
+        # 192 < 200`, still safely under the rate-headroom ceiling), but
+        # leaves only a 7-unit margin under this class's own hard ceiling
+        # (`apps_limit <= 122`, the largest value that inequality can ever
+        # satisfy at `rate_limit=200`/`credentials_per_application=5`/
+        # `margin=64` -- `rate_limit` is already at the port's own
+        # `_MAX_EXERCISABLE_LIMIT`, so it cannot be raised further to buy
+        # more room here). The correct fix once that 7-unit margin is
+        # exhausted is NOT another bump (there are only 7 left before the
+        # ceiling) -- it is giving the fixture/application churn itself a
+        # teardown path (deprovisioning throwaway `build_fixture()`
+        # Applications the way `deprovision_application` already lets
+        # vector 5 clean up its own), tracked as future work in the design
+        # ledger (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`
+        # §7), not attempted in this WP.
         # ------------------------------------------------------------
         self._control_credentials = ControlCredentialStore(pepper="synthetic-conformance-pepper-r2db-ctl-0000")
         self._control_backend = InMemoryControlBackend(self._control, self._control_credentials)
         self._control_audit = ControlAuditSink()
-        self._control_limits = ControlPlaneLimits(applications=100, credentials_per_application=5, control_requests_per_minute=200)
+        self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200)
         self._control_service = ControlPlaneService(self._control_backend, audit=self._control_audit, limits=self._control_limits)
         # `control_credential()`'s own maintained handle (memoize +
         # call-time validity check -- see that method's docstring below;
@@ -669,6 +711,41 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # single-operation calls this adapter stitches together itself.
         result = self._call(lambda: self._service.mutate_result(session, entity, items))
         return result.affected, list(result.assigned_addresses)
+
+    def attempt_cross_entity_batch(self, session, operations: Sequence[ScopedBatchOperation]) -> int:
+        # P35 WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
+        # 130_V1.md, P35-D1): this peer's `cross_entity_mutation` stays
+        # `unavailable` -- no real per-request demand exists on this peer,
+        # only on `MitateDB-api` -- and `DataService` genuinely has no
+        # cross-entity entry point at all: `query`/`mutate` each take a
+        # single `entity` positional argument; `schema` takes ONE
+        # operation dict whose `entity` is a key within it, not a second
+        # entity argument or slot for more than one; there is no generic
+        # dispatcher anywhere on this peer that could carry more than one
+        # entity name in a single call the way `MitateDB-api`'s `transact`
+        # does (confirmed by source inspection of `service.py`, not
+        # assumed -- review correction n-3 (phase 3.5 WP-3): the prior
+        # revision of this comment additionally cited `mutate_result` here,
+        # which is real but is NOT part of `public_operation_callables()`
+        # -- this peer's declared application-facing evidence surface below
+        # -- and so does not itself belong in this claim's own reasoning).
+        # This is a structural absence, not a denial this adapter observed
+        # from a real call -- exactly the honest form `SurfaceAbsent`'s own
+        # docstring requires, matching the identical reasoning `create_
+        # unique_index`/`drop_entity` use on `conformance_adapter_
+        # mitatedb.py` for their own genuinely absent surfaces. `session`/
+        # `operations` are accepted only to match this ABC method's
+        # signature -- there is no real entry point to pass them through to.
+        raise SurfaceAbsent(
+            self.name, "attempt_cross_entity_batch",
+            "DataService has no cross-entity mutation entry point -- query/mutate each take a single entity "
+            "argument, schema takes one operation dict whose entity is a key (not a second entity slot), and "
+            "no generic multi-entity dispatcher exists on this peer "
+            f"(requested {len(operations)} operation(s) across "
+            f"{sorted({op.entity for op in operations})!r})",
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["entities", "cross_entity", "scoped"],
+        )
 
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         # Presented to the same real, single generic schema dispatcher every

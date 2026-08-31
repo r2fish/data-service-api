@@ -89,6 +89,7 @@ from adapter import (  # noqa: E402
     CredentialHandle,
     Fixture,
     PayloadNotExpressible,
+    ScopedBatchOperation,
     ScopeView,
     TamperVector,
     resolve_valid_confirmation,
@@ -710,6 +711,15 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             body.update(extra_body)
         return self._send("POST", self._data_path(entity, "mutations"), session, json_body=body)
 
+    def _cross_mutate(self, session: _Session, operations: list[dict[str, Any]]) -> dict[str, Any]:
+        # P35 WP-2/WP-3: the cross-entity counterpart of `_mutate` above --
+        # a fixed path (`POST /v1/data/mutations`, no per-request entity
+        # segment), each operation dict carrying its OWN `entity` key
+        # instead. `http.py::post_cross_entity_mutate` is the real, mounted
+        # dispatcher this composition genuinely receives the request
+        # through (`cross_entity_mutation: partial` as of WP-2's flip).
+        return self._send("POST", "/v1/data/mutations", session, json_body={"operations": operations})
+
     def _schema(self, session: _Session, body: Mapping[str, Any]) -> dict[str, Any]:
         return self._send("POST", "/v1/schema/operations", session, json_body=dict(body))
 
@@ -1294,6 +1304,46 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         result = self._mutate(session, entity, items)
         return result["affected"], result.get("assigned_addresses")
 
+    def _scoped_batch_item(self, session: _Session, op: ScopedBatchOperation) -> dict[str, Any]:
+        item: dict[str, Any] = {"operation": op.operation, "entity": op.entity}
+        if op.values is not None:
+            item["values"] = dict(op.values)
+        if op.where_field is not None:
+            item["where"] = [{"field": op.where_field, "operator": "eq", "value": op.where_value}]
+        if op.expected_revision is not None:
+            item["expected_revision"] = op.expected_revision
+        if op.unique_key is not None:
+            item["unique_key"] = op.unique_key
+        if op.destructive:
+            item["destructive"] = True
+        if op.confirmation is not None:
+            if op.confirmation is VALID_CONFIRMATION:
+                probe_item = dict(item)
+                probe_item["destructive"] = True
+
+                def probe(_probe_item=probe_item) -> None:
+                    self._cross_mutate(session, [dict(_probe_item)])
+
+                peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token="DELETE")
+                item["confirmation"] = peer_confirm
+            else:
+                item["confirmation"] = op.confirmation
+        return item
+
+    def attempt_cross_entity_batch(self, session: object, operations: Sequence[ScopedBatchOperation]) -> int:
+        # P35 WP-2/WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_
+        # CONTRACT_130_V1.md section 2/3): `cross_entity_mutation: partial`
+        # -- `POST /v1/data/mutations` (`_cross_mutate` above) is a real,
+        # mounted dispatcher on this composition. Same per-op declare-and-
+        # echo probe discipline as `attempt_batch_with_addresses` above: a
+        # batch-embedded delete's probe is presented to the SAME real
+        # cross-entity entry point this whole batch goes to, never a
+        # per-entity substitute.
+        assert isinstance(session, _Session)
+        items = [self._scoped_batch_item(session, op) for op in operations]
+        result = self._cross_mutate(session, items)
+        return result["affected"]
+
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
         assert isinstance(session, _Session)
         # R-8 item 1 / C-17 present-denial form: `/v1/schema/operations` is
@@ -1349,6 +1399,18 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     def raw_mutation_result(self, session: object, entity: str, operations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         assert isinstance(session, _Session)
         return self._mutate(session, entity, [dict(op) for op in operations])
+
+    def raw_cross_entity_mutation_result(self, session: object, operations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        # P35 WP-3 (design section 5): the cross-entity counterpart of
+        # `raw_mutation_result` above -- lets `test_c11_response_schema_
+        # conformance.py` reverse-validate a real `POST /v1/data/mutations`
+        # response against the contract's `MutationResult` schema too
+        # (design R-3: `{"committed", "affected"}` only, no
+        # `assigned_addresses`). `r2db-api-http` does not implement this
+        # accessor -- its own `cross_entity_mutation` stays unavailable, so
+        # it has no real document of this shape to offer.
+        assert isinstance(session, _Session)
+        return self._cross_mutate(session, [dict(op) for op in operations])
 
     def raw_schema_operation_result(self, session: object, body: Mapping[str, Any]) -> dict[str, Any]:
         assert isinstance(session, _Session)
