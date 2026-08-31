@@ -551,4 +551,112 @@ def test_break_glass_commands_require_the_control_credential_pepper_and_actor(co
 def test_audit_report_requires_provision_dsn(control_platform) -> None:
     result = _run_ops(control_platform, "audit-report")
     assert result.returncode == 2
+    # Review M-1: exit code 2 alone does not discriminate this `_die()`
+    # path from the declare-and-echo gate's own reserved exit 2
+    # (`_print_denial_and_exit`) -- the stderr message is what actually
+    # proves this failed for the right reason (a missing required env var,
+    # not a destructive-confirmation refusal).
     assert "MITATEDB_PROVISION_DSN is required" in result.stderr
+
+
+# ===========================================================================
+# Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §4/§1-D/§1-E): out-of-band `issue-audit-credential` ceremony CLI,
+# `freeze-issuance`/`unfreeze-issuance` CLI subcommands. Both are out-of-
+# band-only, driven with `MITATEDB_CONTROLPLANE_DSN` directly -- neither
+# needs `MITATEDB_CONTROL_CREDENTIAL_ID`/`_SECRET` (mirrors `bootstrap`/
+# `reset` above, not the WP-6 break-glass command family).
+# ===========================================================================
+
+
+def test_cli_issue_audit_credential_produces_a_ready_to_use_credential(control_platform) -> None:
+    """Out-of-band audit-credential issuance -- no in-band path exists for
+    `role="audit"` either. The printed secret already has `must_rotate:
+    false` (the ceremony issues and rotates before ever printing, design §4
+    M-1 -- there is no in-band self-rotate path for an audit principal to
+    otherwise clear it with)."""
+    result = _run_ops(control_platform, "issue-audit-credential")
+    assert result.returncode == 0, result.stderr
+    credential_id, secret = _parse_issued(result.stdout)
+    assert "must_rotate: false" in result.stdout
+    assert credential_id.startswith("ctl_")
+
+    store = PostgresControlCredentialStore(control_platform.controlplane_dsn, pepper=_CONTROL_PEPPER,
+                                           schema=control_platform.registry_schema)
+    principal = store.authenticate(credential_id, secret)
+    assert principal.credential_id == credential_id
+    assert principal.must_rotate is False
+    assert principal.role == "audit"
+
+
+def test_cli_issue_audit_credential_is_not_a_once_only_ritual(control_platform) -> None:
+    """Unlike `bootstrap`, any number of audit credentials may be issued --
+    there is no "first row" invariant to protect here, and this does not
+    refuse merely because a control credential already exists."""
+    _run_ops(control_platform, "bootstrap")
+    first = _run_ops(control_platform, "issue-audit-credential")
+    second = _run_ops(control_platform, "issue-audit-credential")
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    first_id, _ = _parse_issued(first.stdout)
+    second_id, _ = _parse_issued(second.stdout)
+    assert first_id != second_id
+
+
+def test_cli_freeze_issuance_then_unfreeze_round_trips(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "fzcli1")
+
+    frozen = _run_ops(control_platform, "freeze-issuance", "fzcli1")
+    assert frozen.returncode == 0, frozen.stderr
+    assert "frozen" in frozen.stdout
+
+    from mitatedb_api.errors import AuthorizationError
+    with pytest.raises(AuthorizationError):
+        service.issue_credential(actor_id, actor_secret, "fzcli1", "runtime")
+
+    unfrozen = _run_ops(control_platform, "unfreeze-issuance", "fzcli1")
+    assert unfrozen.returncode == 0, unfrozen.stderr
+    assert "no longer frozen" in unfrozen.stdout
+
+    issued = service.issue_credential(actor_id, actor_secret, "fzcli1", "runtime")
+    assert issued["application_id"] == "fzcli1"
+
+
+def test_cli_freeze_issuance_unknown_application_fails_closed(control_platform) -> None:
+    result = _run_ops(control_platform, "freeze-issuance", "definitely_not_registered_xyz")
+    assert result.returncode != 0
+
+
+def test_cli_freeze_issuance_writes_control_audit_row(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "fzcli2")
+    result = _run_ops(control_platform, "freeze-issuance", "fzcli2")
+    assert result.returncode == 0, result.stderr
+
+    statement = sql.SQL(
+        "SELECT operation, target_kind, application_id, target_id, outcome FROM {table} "
+        "WHERE operation = 'freeze_issuance' AND application_id = %s"
+    ).format(table=sql.Identifier(control_platform.registry_schema, "control_audit"))
+    with psycopg.connect(control_platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(statement, ["fzcli2"])
+            rows = cur.fetchall()
+    assert len(rows) == 1
+    operation, target_kind, application_id, target_id, outcome = rows[0]
+    assert target_kind == "application"
+    assert application_id == "fzcli2"
+    assert target_id == "fzcli2"
+    assert outcome == "allow"
+
+
+def test_cli_freeze_issuance_does_not_affect_already_issued_credentials(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "fzcli3")
+    issued = service.issue_credential(actor_id, actor_secret, "fzcli3", "runtime")
+
+    result = _run_ops(control_platform, "freeze-issuance", "fzcli3")
+    assert result.returncode == 0, result.stderr
+
+    state = service._backend.credential_state(issued["credential_id"])  # noqa: SLF001
+    assert state is not None and state[0] is True and state[1] is False  # still enabled, not revoked

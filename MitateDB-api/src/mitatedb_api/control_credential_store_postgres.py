@@ -37,7 +37,8 @@ import psycopg
 from psycopg import sql
 
 from .control_auth import ControlPrincipal
-from .errors import AuthenticationError, AuthorizationStateUnavailable, NotFoundError, StorageConfigurationError
+from .errors import (AuthenticationError, AuthorizationStateUnavailable, NotFoundError,
+                     StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -95,18 +96,27 @@ class PostgresControlCredentialStore:
 
     # ---- writes ---------------------------------------------------------
 
-    def issue(self, *, must_rotate: bool = False, credential_id: Optional[str] = None,
+    def issue(self, *, must_rotate: bool = False, role: str = "control", credential_id: Optional[str] = None,
               secret: Optional[str] = None, work=None) -> tuple[str, str]:
+        """Phase 3.5 WP-5: `role` defaults to `"control"` (every pre-WP-5
+        caller is unaffected); `"audit"` is the one other accepted value,
+        used only by `control_plane.issue_audit_credential_ceremony`. The
+        table's own `CHECK (role IN ('control', 'audit'))` (migration 0002,
+        in-place WP-5 revision) is the authoritative enforcement; this
+        Python-level check exists only to surface a clean `VALIDATION_
+        FAILED`-shaped error before ever reaching SQL."""
+        if role not in ("control", "audit"):
+            raise ValidationError("control-table credentials require control or audit role")
         credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
         secret = secret or secrets.token_urlsafe(32)
         digest = self._digest(secret)
         conn, owns = self._own_connection(work)
         statement = sql.SQL(
-            "INSERT INTO {table} (credential_id, digest, must_rotate) VALUES ({ph1}, {ph2}, {ph3})"
-        ).format(table=self._table, ph1=sql.Placeholder(), ph2=sql.Placeholder(), ph3=sql.Placeholder())
+            "INSERT INTO {table} (credential_id, digest, must_rotate, role) VALUES ({ph1}, {ph2}, {ph3}, {ph4})"
+        ).format(table=self._table, ph1=sql.Placeholder(), ph2=sql.Placeholder(), ph3=sql.Placeholder(), ph4=sql.Placeholder())
         try:
             with conn.cursor() as cur:
-                _execute(cur, statement, [credential_id, digest, must_rotate])
+                _execute(cur, statement, [credential_id, digest, must_rotate, role])
             if owns:
                 conn.commit()
         except psycopg.errors.InsufficientPrivilege as exc:
@@ -167,6 +177,10 @@ class PostgresControlCredentialStore:
         self._update_flag(credential_id, "enabled", True, work=work)
 
     def revoke_all(self, *, work=None) -> None:
+        """Phase 3.5 WP-5: deliberately stays role-agnostic -- revokes every
+        row regardless of `role`, including `"audit"` rows (the safe-side
+        choice for a reset: no stray audit credential is left live behind
+        an operator's back)."""
         conn, owns = self._own_connection(work)
         statement = sql.SQL("UPDATE {table} SET revoked = TRUE").format(table=self._table)
         try:
@@ -250,10 +264,19 @@ class PostgresControlCredentialStore:
             conn.close()
         return (row[0], row[1], row[2]) if row is not None else None
 
-    def list_all(self) -> list[tuple[str, bool, bool]]:
+    def list_all(self) -> list[tuple[str, bool, bool, bool, str]]:
+        """`(credential_id, enabled, revoked, must_rotate, role)`.
+
+        Phase 3.5 WP-5 (design §4/§1-B, P35-D7): `must_rotate` is now
+        selected (deliberately excluded before this WP); `role` is likewise
+        now selected -- see `control_auth.ControlCredentialStore.list_all`'s
+        identical rationale.
+        """
         conn = self._connect()
         try:
-            statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY issued_at").format(table=self._table)
+            statement = sql.SQL(
+                "SELECT credential_id, enabled, revoked, must_rotate, role FROM {table} ORDER BY issued_at"
+            ).format(table=self._table)
             try:
                 with conn.cursor() as cur:
                     _execute(cur, statement)
@@ -266,17 +289,24 @@ class PostgresControlCredentialStore:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         finally:
             conn.close()
-        return [(row[0], row[1], row[2]) for row in rows]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
-    def locked_for_update(self, work) -> list[tuple[str, bool, bool]]:
+    def locked_for_update(self, work) -> list[tuple[str, bool, bool, str]]:
         """`SELECT ... FOR UPDATE` on `work` (a connection already inside
         an open transaction) -- the real PostgreSQL analogue of `control_
         auth.ControlCredentialStore.locked_for_update`'s in-memory lock,
         used by `control_plane.py`'s revoke-last-active-control-credential
-        gate to make "is this the last active one" TOCTOU-safe."""
+        gate to make "is this the last active one" TOCTOU-safe.
+
+        Phase 3.5 WP-5: `role` is now selected too -- the gate's own
+        "active" count must count only `role="control"` rows (see
+        `control_auth.ControlCredentialStore.locked_for_update`'s identical
+        rationale)."""
         if work is None:
             raise ValueError("locked_for_update requires an open transaction (work=...)")
-        statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY issued_at FOR UPDATE").format(table=self._table)
+        statement = sql.SQL(
+            "SELECT credential_id, enabled, revoked, role FROM {table} ORDER BY issued_at FOR UPDATE"
+        ).format(table=self._table)
         try:
             with work.cursor() as cur:
                 _execute(cur, statement)
@@ -287,9 +317,12 @@ class PostgresControlCredentialStore:
             ) from exc
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        return [(row[0], row[1], row[2]) for row in rows]
+        return [(row[0], row[1], row[2], row[3]) for row in rows]
 
     def has_any(self, *, include_revoked: bool = True, work=None) -> bool:
+        """Phase 3.5 WP-5: deliberately stays role-agnostic (any row, control
+        OR audit, counts) -- see `control_auth.ControlCredentialStore.
+        has_any`'s identical rationale."""
         conn, owns = self._own_connection(work)
         try:
             where = sql.SQL("") if include_revoked else sql.SQL(" WHERE NOT revoked")
@@ -314,8 +347,9 @@ class PostgresControlCredentialStore:
             raise AuthenticationError("control authentication failed")
         conn = self._connect()
         try:
-            statement = sql.SQL("SELECT digest, enabled, revoked, must_rotate FROM {table} WHERE credential_id = {ph}").format(
-                table=self._table, ph=sql.Placeholder())
+            statement = sql.SQL(
+                "SELECT digest, enabled, revoked, must_rotate, role FROM {table} WHERE credential_id = {ph}"
+            ).format(table=self._table, ph=sql.Placeholder())
             try:
                 with conn.cursor() as cur:
                     _execute(cur, statement, [credential_id])
@@ -332,10 +366,10 @@ class PostgresControlCredentialStore:
         digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
         if row is None or not digest_matches:
             raise AuthenticationError("control authentication failed")
-        _digest, enabled, revoked, must_rotate = row
+        _digest, enabled, revoked, must_rotate, role = row
         if not enabled or revoked:
             raise AuthenticationError("control authentication failed")
-        return ControlPrincipal(credential_id, must_rotate)
+        return ControlPrincipal(credential_id, must_rotate, role)
 
 
 __all__ = ["PostgresControlCredentialStore", "DEFAULT_SCHEMA"]

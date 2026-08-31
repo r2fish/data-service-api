@@ -19,8 +19,10 @@ import json
 import httpx
 import pytest
 
-from mitatedb_api.control_http import create_control_app
-from mitatedb_api.control_plane import ControlPlaneLimits, ControlPlaneService, InMemoryControlBackend, bootstrap_control_credential
+from mitatedb_api.control_http import _ROUTES, create_control_app
+from mitatedb_api.control_plane import (_AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneLimits,
+                                        ControlPlaneService, InMemoryControlBackend,
+                                        bootstrap_control_credential)
 
 BASE_URL = "http://mitatedb-control-test.invalid"
 _APP_PEPPER = "control-http-unmounted-app-pepper-x"
@@ -176,3 +178,152 @@ def test_revoke_last_active_control_credential_requires_confirmation_over_http(c
                             json_body={"destructive": True, "confirmation": phrase}))
     assert confirmed.status_code == 200
     assert confirmed.json()["revoked"] is True
+
+
+# ===========================================================================
+# Phase 3.5 WP-5 control-plane bundle (design docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4): audit-role HTTP
+# authorization matrix (§1-D, structural completeness), issuance freeze
+# over real HTTP (§1-E).
+# ===========================================================================
+
+
+def _seed_audit_credential_over_backend(service, *, must_rotate: bool = False):
+    store = service._backend.control_credential_store  # noqa: SLF001 -- test-only direct seed
+    with service._backend.unit_of_work() as work:  # noqa: SLF001
+        credential_id, secret = store.issue(must_rotate=must_rotate, role="audit", work=work)
+    return credential_id, secret
+
+
+# The operation name each route maps to -- a second, independent source
+# (alongside `matrix` below) this test cross-checks BOTH against
+# `control_http._ROUTES` (the wire boundary's own route table) AND against
+# `control_plane._AUDIT_ROLE_ALLOWED_OPERATIONS` (the product code's own
+# allow-list), so a future route added to either the route table or the
+# allow-list without a corresponding update here fails the structural-
+# completeness assertion below, rather than silently never being exercised.
+_ROUTE_OPERATION_NAMES: dict[tuple[str, str], str] = {
+    ("GET", "/control/v1/capabilities"): "control_capabilities",
+    ("POST", "/control/v1/applications"): "register_application",
+    ("GET", "/control/v1/applications"): "list_applications",
+    ("POST", "/control/v1/applications/{application_id}/disable"): "disable_application",
+    ("POST", "/control/v1/applications/{application_id}/enable"): "enable_application",
+    ("POST", "/control/v1/credentials"): "issue_credential",
+    ("GET", "/control/v1/credentials"): "list_credentials",
+    ("POST", "/control/v1/credentials/{credential_id}/rotate"): "rotate_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/revoke"): "revoke_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/disable"): "disable_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/enable"): "enable_credential",
+}
+
+
+def test_audit_role_http_authorization_matrix_all_11_routes(control_app) -> None:
+    """Endpoint-by-endpoint audit-role authorization matrix, driven over
+    real HTTP against every one of the 11 routes `_ROUTES` declares (fail-
+    closed completeness). The 3 read-only routes return 200 for an
+    `audit`-role bearer; every other route returns 403 FORBIDDEN.
+
+    Structurally complete, not a hand-maintained list a future 10th route
+    could silently bypass -- the set of (method, route-template) pairs this
+    test exercises is asserted equal to `control_http._ROUTES` itself (a
+    route added there with no entry here fails immediately), and the
+    derived "allowed" subset is asserted equal to `control_plane._AUDIT_
+    ROLE_ALLOWED_OPERATIONS` (the product code's own allow-list, imported
+    directly rather than re-typed as a literal).
+    """
+    app, credential_id, secret = control_app
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    secret = rotate_resp.json()["secret"]
+
+    service = app.app.state.control_service  # RequestByteBoundMiddleware -> inner Starlette app
+    audit_id, audit_secret = _seed_audit_credential_over_backend(service)
+    audit_headers = _auth_header(audit_id, audit_secret)
+
+    register_resp = _run(_apost(app, "/control/v1/applications", headers=_auth_header(credential_id, secret),
+                                json_body={"application_id": "app_audit_matrix"}))
+    assert register_resp.status_code == 200
+    issue_resp = _run(_apost(app, "/control/v1/credentials", headers=_auth_header(credential_id, secret),
+                             json_body={"application_id": "app_audit_matrix", "role": "runtime"}))
+    assert issue_resp.status_code == 200
+    target_credential_id = issue_resp.json()["credential_id"]
+
+    # (method, route-template, body-or-None, expected status) -- one entry
+    # per key in `_ROUTE_OPERATION_NAMES`.
+    matrix = [
+        ("GET", "/control/v1/capabilities", None, 200),
+        ("POST", "/control/v1/applications", {"application_id": "app_audit_matrix_denied"}, 403),
+        ("GET", "/control/v1/applications", None, 200),
+        ("POST", "/control/v1/applications/{application_id}/disable", None, 403),
+        ("POST", "/control/v1/applications/{application_id}/enable", None, 403),
+        ("POST", "/control/v1/credentials", {"application_id": "app_audit_matrix", "role": "runtime"}, 403),
+        ("GET", "/control/v1/credentials", None, 200),
+        ("POST", "/control/v1/credentials/{credential_id}/rotate", None, 403),
+        ("POST", "/control/v1/credentials/{credential_id}/revoke", {}, 403),
+        ("POST", "/control/v1/credentials/{credential_id}/disable", None, 403),
+        ("POST", "/control/v1/credentials/{credential_id}/enable", None, 403),
+    ]
+    matrix_keys = {(method, template) for method, template, _body, _status in matrix}
+
+    # (1) `_ROUTE_OPERATION_NAMES`'s own keys must match `_ROUTES` exactly.
+    route_keys = {(method, route.path) for route in _ROUTES for method in (route.methods - {"HEAD"})}
+    assert set(_ROUTE_OPERATION_NAMES) == route_keys, (
+        f"_ROUTE_OPERATION_NAMES does not match control_http._ROUTES: "
+        f"missing={route_keys - set(_ROUTE_OPERATION_NAMES)} extra={set(_ROUTE_OPERATION_NAMES) - route_keys}"
+    )
+    # (2) this test's own `matrix` must cover every one of those routes.
+    assert matrix_keys == route_keys, (
+        f"matrix does not cover control_http._ROUTES exactly: "
+        f"missing={route_keys - matrix_keys} extra={matrix_keys - route_keys}"
+    )
+    # (3) the "allowed" subset this matrix expects (status 200) must equal
+    # the product code's own `_AUDIT_ROLE_ALLOWED_OPERATIONS` allow-list.
+    allowed_keys = {(m, t) for m, t, _b, status in matrix if status == 200}
+    denied_keys = {(m, t) for m, t, _b, status in matrix if status == 403}
+    assert allowed_keys | denied_keys == matrix_keys
+    allowed_operations = {_ROUTE_OPERATION_NAMES[key] for key in allowed_keys}
+    assert allowed_operations == _AUDIT_ROLE_ALLOWED_OPERATIONS
+
+    for method, template, body, expected_status in matrix:
+        path = template.format(application_id="app_audit_matrix", credential_id=target_credential_id)
+        if method == "GET":
+            response = _run(_aget(app, path, headers=audit_headers))
+        else:
+            response = _run(_apost(app, path, headers=audit_headers, json_body=body))
+        assert response.status_code == expected_status, f"{method} {path}: expected {expected_status}, got {response.status_code} ({response.text})"
+        if expected_status == 403:
+            assert response.json()["code"] == "FORBIDDEN"
+
+    # The audit credential itself was never touched by any of the 8
+    # refused attempts above -- still enabled, not revoked (confirmed by a
+    # 4th read).
+    still_alive = _run(_aget(app, "/control/v1/capabilities", headers=audit_headers))
+    assert still_alive.status_code == 200
+    assert still_alive.json()["role"] == "audit"
+
+
+def test_issuance_freeze_forbidden_over_http_then_unfreeze_allows_again(control_app) -> None:
+    """Freeze has no in-band HTTP toggle (design §1-E, P35-D6 -- CLI only);
+    this test flips the flag directly at the backend level (as `ops.py
+    freeze-issuance`/`unfreeze-issuance` do out-of-band) and confirms the
+    in-band `issue_credential` endpoint refuses/allows accordingly."""
+    app, credential_id, secret = control_app
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    secret = rotate_resp.json()["secret"]
+    headers = _auth_header(credential_id, secret)
+
+    register_resp = _run(_apost(app, "/control/v1/applications", headers=headers, json_body={"application_id": "app_freeze_http"}))
+    assert register_resp.status_code == 200
+
+    service = app.app.state.control_service  # RequestByteBoundMiddleware -> inner Starlette app
+    with service._backend.unit_of_work() as work:  # noqa: SLF001
+        service._backend.set_application_issuance_frozen("app_freeze_http", True, work=work)  # noqa: SLF001
+
+    denied = _run(_apost(app, "/control/v1/credentials", headers=headers, json_body={"application_id": "app_freeze_http", "role": "runtime"}))
+    assert denied.status_code == 403
+    assert denied.json()["code"] == "FORBIDDEN"
+
+    with service._backend.unit_of_work() as work:  # noqa: SLF001
+        service._backend.set_application_issuance_frozen("app_freeze_http", False, work=work)  # noqa: SLF001
+
+    allowed = _run(_apost(app, "/control/v1/credentials", headers=headers, json_body={"application_id": "app_freeze_http", "role": "runtime"}))
+    assert allowed.status_code == 200

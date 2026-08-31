@@ -71,6 +71,14 @@ _APPLICATION_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,32}$")
 
 _ISSUABLE_ROLES = ("runtime", "developer", "control")
 
+# Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- "An audit
+# credential is accepted only on the read-only control_capabilities,
+# list_applications, and list_credentials endpoints; every other control
+# endpoint fails it closed with FORBIDDEN." An allow-list (not a deny-list)
+# -- see `ControlPlaneService._authorize_role`'s own docstring for why.
+_AUDIT_ROLE_ALLOWED_OPERATIONS = frozenset({"control_capabilities", "list_applications", "list_credentials"})
+
 
 def _new_request_id() -> str:
     return uuid.uuid4().hex
@@ -142,6 +150,13 @@ class ControlPlaneLimits:
 class InMemoryApplicationRegistry:
     def __init__(self) -> None:
         self._apps: dict[str, bool] = {}
+        # Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+        # V1.md §4/§1-E, P35-D6): per-application issuance freeze. A separate
+        # dict (not folded into `_apps`'s own bool) so an application absent
+        # from it is unambiguously "not frozen" -- `register`'s own entry
+        # into `_apps` needs no matching entry here at all, `.get(id, False)`
+        # already defaults correctly.
+        self._frozen: dict[str, bool] = {}
         self._lock = threading.RLock()
 
     def exists(self, application_id: str) -> bool:
@@ -172,6 +187,30 @@ class InMemoryApplicationRegistry:
             self._apps[application_id] = enabled
         if work is not None:
             work.on_rollback(lambda: self._apps.__setitem__(application_id, previous))
+
+    def issuance_frozen(self, application_id: str) -> bool:
+        with self._lock:
+            return self._frozen.get(application_id, False)
+
+    def set_issuance_frozen(self, application_id: str, frozen: bool, *, work: Optional[_InMemoryWork] = None) -> None:
+        """Phase 3.5 WP-5 (§4/§1-E, P35-D6): follows the SAME `work.on_
+        rollback(...)` undo-log convention `set_enabled` above uses -- this
+        is what structurally closes the in-memory-backend freeze-snapshot
+        gap r2db-api's own WP-4 review (n-2) found in ITS in-memory backend
+        (a snapshot/rollback mechanism that had to be told about every new
+        piece of mutable state by hand): here, `_InMemoryWork` is a shared
+        undo-log any store participates in simply by registering its own
+        undo the same way every other write method in this module already
+        does, so there is no separate snapshot list that could forget this
+        one -- proactively unaffected by that lesson rather than needing a
+        fix for it."""
+        with self._lock:
+            if application_id not in self._apps:
+                raise NotFoundError("application not found")
+            previous = self._frozen.get(application_id, False)
+            self._frozen[application_id] = frozen
+        if work is not None:
+            work.on_rollback(lambda: self._frozen.__setitem__(application_id, previous))
 
 
 @dataclass
@@ -382,6 +421,62 @@ class PostgresApplicationRegistry(_PostgresRegistryBase):
         try:
             with conn.cursor() as cur:
                 _execute(cur, statement, [enabled, application_id])
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("application not found")
+            if owns:
+                conn.commit()
+        except NotFoundError:
+            if owns:
+                conn.rollback()
+            raise
+        except psycopg.errors.InsufficientPrivilege as exc:
+            if owns:
+                conn.rollback()
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            if owns:
+                conn.rollback()
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            if owns:
+                conn.close()
+
+    def issuance_frozen(self, application_id: str) -> bool:
+        """Phase 3.5 WP-5 (design §4/§1-E, P35-D6): `ControlPlaneService.
+        issue_credential`'s own read of this flag, evaluated only after the
+        `role=control` capability refusal and the target-existence check
+        (contract `issue_credential.semantics`'s own precedence sentence).
+        Returns `False` for an unknown `application_id` -- callers reach
+        this only after already confirming the application exists."""
+        conn = self._connect()
+        try:
+            statement = sql.SQL("SELECT issuance_frozen FROM {table} WHERE application_id = {ph}").format(
+                table=self._table, ph=sql.Placeholder())
+            try:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [application_id])
+                    row = cur.fetchone()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                raise StorageConfigurationError("privilege/configuration defect") from exc
+            except psycopg.Error as exc:
+                raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        finally:
+            conn.close()
+        return bool(row[0]) if row is not None else False
+
+    def set_issuance_frozen(self, application_id: str, frozen: bool, *, work=None) -> None:
+        """Phase 3.5 WP-5 (§4/§1-E, P35-D6): CLI-only, non-destructive
+        (mirrors `set_enabled` above -- no declare-and-echo confirmation
+        gate, same class as disable-application). No in-band endpoint
+        calls this -- only `ops.py freeze-issuance`/`unfreeze-issuance`."""
+        conn, owns = self._own_connection(work)
+        statement = sql.SQL(
+            "UPDATE {table} SET issuance_frozen = {ph} WHERE application_id = {id_ph} RETURNING application_id"
+        ).format(table=self._table, ph=sql.Placeholder(), id_ph=sql.Placeholder())
+        try:
+            with conn.cursor() as cur:
+                _execute(cur, statement, [frozen, application_id])
                 row = cur.fetchone()
                 if row is None:
                     raise NotFoundError("application not found")
@@ -625,6 +720,12 @@ class InMemoryControlBackend:
     def set_application_enabled(self, application_id: str, enabled: bool, *, work) -> None:
         self._applications.set_enabled(application_id, enabled, work=work)
 
+    def application_issuance_frozen(self, application_id: str) -> bool:
+        return self._applications.issuance_frozen(application_id)
+
+    def set_application_issuance_frozen(self, application_id: str, frozen: bool, *, work) -> None:
+        self._applications.set_issuance_frozen(application_id, frozen, work=work)
+
     def credential_state(self, credential_id: str):
         return self._credentials.get_state(credential_id)
 
@@ -712,6 +813,12 @@ class PostgresControlBackend:
     def set_application_enabled(self, application_id: str, enabled: bool, *, work) -> None:
         self._applications.set_enabled(application_id, enabled, work=work)
 
+    def application_issuance_frozen(self, application_id: str) -> bool:
+        return self._applications.issuance_frozen(application_id)
+
+    def set_application_issuance_frozen(self, application_id: str, frozen: bool, *, work) -> None:
+        self._applications.set_issuance_frozen(application_id, frozen, work=work)
+
     def credential_state(self, credential_id: str):
         return self._credentials.get_state(credential_id)
 
@@ -776,9 +883,20 @@ def _reset_confirmation_phrase(active_credential_ids: list[str]) -> str:
     return f"RESET control_credentials @active={digest}"
 
 
+# Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §4/§1-D, WP-4 m-1 symmetry): narrowed to MANAGEMENT credentials --
+# an active `role="audit"` credential, if any, is untouched by this specific
+# revoke and remains usable for the 3 read-only operations it was ever
+# allowed (`_AUDIT_ROLE_ALLOWED_OPERATIONS`). The original wording ("every
+# in-band control-plane credential becomes unusable") was true before this
+# WP (every row in `control_credentials` WAS a control credential) but is no
+# longer -- the actual consequence of losing the last CONTROL credential is
+# that no in-band MANAGEMENT operation remains possible, not that every row
+# is unusable.
 _REVOKE_LAST_CONSEQUENCE = (
     "The last remaining active control credential is revoked; every in-band control-plane "
-    "credential becomes unusable until the out-of-band reset ceremony runs."
+    "MANAGEMENT credential becomes unusable until the out-of-band reset ceremony runs (an "
+    "audit credential, if any, remains usable but is read-only and cannot manage credentials)."
 )
 _REVOKE_LAST_REVERSIBLE_ALTERNATIVE = (
     "disable_credential reverses (this specific revoke is terminal, a disable is not) -- but "
@@ -788,8 +906,10 @@ _REVOKE_LAST_REVERSIBLE_ALTERNATIVE = (
 _REVOKE_LAST_RECOVERY = "The out-of-band operator reset ceremony issues a fresh control credential."
 
 _RESET_CONSEQUENCE = (
-    "Every existing control credential -- including any already-disabled or already-revoked "
-    "row -- is revoked; exactly one new must-rotate control credential is issued in its place."
+    "Every existing control-table credential -- control OR audit, including any already-disabled "
+    "or already-revoked row -- is revoked; exactly one new must-rotate control credential is "
+    "issued in its place (an audit credential is not reissued automatically -- use "
+    "issue-audit-credential again if one is still needed)."
 )
 
 
@@ -800,12 +920,14 @@ _RESET_CONSEQUENCE = (
 
 class ControlPlaneService:
     """Evaluation order (design R-6, fixed at every one of the 9 methods
-    below): rate-limit (pre-authentication) -> authenticate -> must_rotate
-    gate (authorization) -> [role=control capability denial, issue_
-    credential only] -> shape validation of the remaining request fields ->
-    target-existence resolution -> bounds -> [destructive-confirmation gate,
-    revoke_credential's last-active-control-credential case only] -> execute
-    + same-transaction audit.
+    below): rate-limit (pre-authentication) -> authenticate -> audit-role
+    authorization gate (Phase 3.5 WP-5, §1-D/§4) -> must_rotate gate
+    (authorization) -> [role=control capability denial, issue_credential
+    only] -> shape validation of the remaining request fields ->
+    target-existence resolution -> [issuance-freeze denial, issue_credential
+    only, §1-E] -> bounds -> [destructive-confirmation gate, revoke_
+    credential's last-active-control-credential case only] -> execute +
+    same-transaction audit.
     """
 
     def __init__(self, backend, *, limits: Optional[ControlPlaneLimits] = None, clock=None) -> None:
@@ -853,20 +975,25 @@ class ControlPlaneService:
 
     def _deny_audit(self, *, event_class: str, operation: str, target_kind: Optional[str] = None,
                      request_id: Optional[str], actor_id: Optional[str] = None, actor_type: Optional[str] = None,
-                     role: Optional[str] = None, application_id: Optional[str] = None, reason_code: str) -> None:
+                     role: Optional[str] = None, application_id: Optional[str] = None, reason_code: str,
+                     target_id: Optional[str] = None) -> None:
         """R-6: every denial (except the two exemptions -- rate-limit
         pre-auth, and `AUTH_STATE_UNAVAILABLE`, neither of which calls this)
         is durably recorded in its OWN transaction before the denial itself
         is raised by the caller. If the durable write itself fails, the
         failure is re-raised as a safe `FoundationError` (never a raw
         exception) so SI-10 holds even when a test injects an audit fault
-        here."""
+        here.
+
+        Phase 3.5 WP-5 (§1-C/§4): `target_id` -- the single target
+        credential_id/application_id this denial concerns, when the caller
+        supplied one."""
         try:
             with self._backend.unit_of_work() as work:
                 self._backend.append_audit(
                     work=work, event_class=event_class, request_id=request_id, application_id=application_id,
                     actor_type=actor_type, actor_id=actor_id, role=role, operation=operation,
-                    target_kind=target_kind, outcome="deny", reason_code=reason_code,
+                    target_kind=target_kind, outcome="deny", reason_code=reason_code, target_id=target_id,
                 )
         except FoundationError:
             raise
@@ -889,29 +1016,107 @@ class ControlPlaneService:
                              target_kind="control_credential", request_id=request_id, reason_code="AUTH_INVALID")
             raise
 
+    def _authorize_role(self, principal: ControlPrincipal, operation: str, *, request_id: str,
+                        target_id: Optional[str] = None) -> None:
+        """Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+        V1.md §1-D/§4, P35-D12): contract `control_plane.authority` -- an
+        `audit`-role principal is accepted ONLY on the 3 read-only control
+        endpoints (`_AUDIT_ROLE_ALLOWED_OPERATIONS` below); every other
+        control endpoint fails it closed with `FORBIDDEN`, durably audited
+        (same discipline as `_gate_must_rotate` below, and deliberately
+        checked as a SEPARATE, orthogonal gate from it: this is a
+        role-authorization question, not a rotate-pending question -- a
+        `role="control"` principal is never affected by this method at all,
+        `must_rotate` or not).
+
+        Two different dimensions here, not one: the OPERATION check is a
+        genuine allow-list (`_AUDIT_ROLE_ALLOWED_OPERATIONS`), for the same
+        reason `_gate_must_rotate`'s own allow-list is one -- a deny-list of
+        operations would silently fail open the moment a new control
+        endpoint is added and nobody remembers to list it. The ROLE check
+        (`principal.role == "audit"` below) is, accurately, a deny-list: it
+        gates only the one specific role value `"audit"`, and any OTHER
+        role value would pass through this method entirely unrestricted.
+        That is safe only because `control_credentials.role` carries a
+        database `CHECK (role IN ('control', 'audit'))` (migration 0002) --
+        no third role value can ever be stored, so "any other role" can only
+        ever mean `"control"` in practice, which is exactly the role this
+        method is meant to leave unrestricted. This role-dimension deny-list
+        is backstopped by that constraint, not by anything in this method
+        itself.
+
+        Called at every one of the 9 public operations below, BEFORE
+        `_gate_must_rotate` -- both gates ultimately agree that a
+        rotate-pending audit principal may reach only `control_capabilities`
+        (see `_gate_must_rotate`'s own docstring), but this one runs first
+        so a non-rotate-pending audit principal calling a write endpoint
+        gets the role-authorization denial, not a confusing must_rotate one.
+        """
+        if principal.role == "audit" and operation not in _AUDIT_ROLE_ALLOWED_OPERATIONS:
+            self._deny_audit(event_class="authorization_denial", operation=operation, target_kind="control_credential",
+                             request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
+                             role=principal.role, reason_code="FORBIDDEN", target_id=target_id)
+            raise AuthorizationError(
+                "this audit credential is not authorized for this operation; audit credentials are accepted "
+                "only on the read-only control_capabilities, list_applications, and list_credentials endpoints"
+            )
+
     def _gate_must_rotate(self, principal: ControlPrincipal, operation: str, *, request_id: str,
                           self_rotate: bool = False) -> None:
         """Allow-list (never a deny-list, design's own explicit warning):
         only `control_capabilities` and a self-targeted `rotate_credential`
         pass while `must_rotate` is true. `FORBIDDEN` (WP-0 m-4: C-15
-        requires this exact code, not `CAPABILITY_UNSUPPORTED`)."""
+        requires this exact code, not `CAPABILITY_UNSUPPORTED`).
+
+        Phase 3.5 WP-5 (design §4 M-1): a `role="audit"` principal's own
+        allow-list while `must_rotate` is true is `control_capabilities`
+        ONLY -- self-rotate is deliberately NOT extended to it (in practice
+        `_authorize_role` above already forbids `rotate_credential` for an
+        audit principal unconditionally, but this method stays role-aware
+        on its own merits: `list_applications`/`list_credentials` both pass
+        `_authorize_role`'s allow-list, and this gate must still hold them
+        back while an audit credential's own `must_rotate` is true). This is
+        not a dead end: the out-of-band audit-credential issuance ceremony
+        (`issue_audit_credential_ceremony` below) issues AND rotates the
+        credential in the same transaction before ever printing a secret, so
+        a distributed audit credential's `must_rotate` is already `false` by
+        the time anyone can authenticate with it -- an in-band audit
+        principal is never actually stuck behind this gate in practice."""
         if not principal.must_rotate:
             return
-        if operation == "control_capabilities" or (operation == "rotate_credential" and self_rotate):
+        if operation == "control_capabilities":
+            return
+        if principal.role == "control" and operation == "rotate_credential" and self_rotate:
             return
         self._deny_audit(event_class="authorization_denial", operation=operation, target_kind="control_credential",
                          request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
-                         role="control", reason_code="FORBIDDEN")
+                         role=principal.role, reason_code="FORBIDDEN")
         raise AuthorizationError("this control credential must be rotated before performing this operation")
 
     def _deny_role_control(self, principal: ControlPrincipal, application_id: Any, *, request_id: str) -> None:
         self._deny_audit(event_class="capability_denial", operation="issue_credential", target_kind="credential",
                          request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
-                         role="control", application_id=application_id if isinstance(application_id, str) else None,
+                         role=principal.role, application_id=application_id if isinstance(application_id, str) else None,
                          reason_code="CAPABILITY_UNSUPPORTED")
         raise CapabilityError(
             "issuing a role=control credential in-band is not supported; control credentials are "
             "created only by the operator bootstrap/reset ceremony"
+        )
+
+    def _deny_issuance_frozen(self, principal: ControlPrincipal, application_id: str, *, request_id: str) -> None:
+        """Phase 3.5 WP-5 (design §4/§1-E, P35-D6/D13): `FORBIDDEN` -- the
+        contract's own chosen code for this refusal (no existing
+        application-disabled issuance refusal exists to match, so the
+        design stage fixed this one directly; `CONFLICT` was rejected as
+        easily confused with the two-state application registry).
+        Fail-closed, durably audited, same `_deny_audit` machinery as every
+        other refusal here."""
+        self._deny_audit(event_class="authorization_denial", operation="issue_credential", target_kind="credential",
+                         request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
+                         role=principal.role, application_id=application_id, reason_code="FORBIDDEN")
+        raise AuthorizationError(
+            "credential issuance for this application is frozen (an out-of-band deployer operation); "
+            "only an operator can lift the freeze"
         )
 
     def _validate_application_id(self, application_id: Any) -> None:
@@ -936,6 +1141,7 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "control_capabilities", request_id=request_id)
         self._gate_must_rotate(principal, "control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
         limit_enforcement = {name: "enforced" for name in limits}
@@ -944,7 +1150,10 @@ class ControlPlaneService:
         # process alone cannot enforce a byte bound with no HTTP boundary.
         limit_enforcement["request_bytes"] = "unavailable"
         return {
-            "contract_version": "1.2.0",
+            # Phase 3.5 (design §5 WP-5 row, B-3): this WP ships the 1.3.0
+            # obligations for this peer, so the flip lands in this same
+            # commit as the control bundle it accompanies.
+            "contract_version": "1.3.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": {"status": "unavailable"},
@@ -952,7 +1161,10 @@ class ControlPlaneService:
             "limits": limits,
             "limit_enforcement": limit_enforcement,
             "authorization_propagation_bound_ms": 0,
-            "role": "control",
+            # Phase 3.5 WP-5 (design §4, review m-6): the real, authenticated
+            # principal's own role -- never a hardcoded `"control"` literal
+            # (a `role="audit"` principal reaches this same method).
+            "role": principal.role,
         }
 
     def register_application(self, credential_id, secret, application_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
@@ -960,6 +1172,7 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "register_application", request_id=request_id)
         self._gate_must_rotate(principal, "register_application", request_id=request_id)
         self._validate_application_id(application_id)
         if self._backend.application_exists(application_id):
@@ -971,8 +1184,9 @@ class ControlPlaneService:
             self._backend.register_application(application_id, work=work)
             self._backend.append_audit(
                 work=work, event_class="application_lifecycle", request_id=request_id, application_id=application_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation="register_application", target_kind="application", outcome="allow", reason_code=None,
+                target_id=application_id,
             )
         return {"application_id": application_id, "enabled": True}
 
@@ -981,6 +1195,7 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "list_applications", request_id=request_id)
         self._gate_must_rotate(principal, "list_applications", request_id=request_id)
         return {"applications": [{"application_id": aid, "enabled": enabled}
                                   for aid, enabled in self._backend.list_applications()]}
@@ -994,6 +1209,8 @@ class ControlPlaneService:
         if not isinstance(enabled, bool):
             raise ValidationError("enabled must be a boolean")
         operation = "enable_application" if enabled else "disable_application"
+        self._authorize_role(principal, operation, request_id=request_id,
+                             target_id=application_id if isinstance(application_id, str) else None)
         self._gate_must_rotate(principal, operation, request_id=request_id)
         if not self._backend.application_exists(application_id):
             raise NotFoundError("application was not found")
@@ -1002,8 +1219,9 @@ class ControlPlaneService:
             self._backend.set_application_enabled(application_id, enabled, work=work)
             self._backend.append_audit(
                 work=work, event_class="application_lifecycle", request_id=request_id, application_id=application_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation=operation, target_kind="application", outcome="allow", reason_code=None,
+                target_id=application_id,
             )
         return {"application_id": application_id, "enabled": enabled}
 
@@ -1012,17 +1230,30 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "issue_credential", request_id=request_id)
         self._gate_must_rotate(principal, "issue_credential", request_id=request_id)
         if role not in _ISSUABLE_ROLES:
             raise ValidationError("role must be one of runtime, developer, control")
         self._validate_application_id(application_id)
-        # Capability denial BEFORE target resolution (C-14 vector 3: a
-        # role=control request is refused uniformly regardless of whether
-        # the named application exists, is disabled, or is at its limit).
+        # Capability denial BEFORE target resolution/freeze/limit (C-14
+        # vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the
+        # freeze refusal below): must refuse `role=control` even when the
+        # named application does not exist, is disabled, is frozen, or is
+        # already at its credential limit -- none of those questions are
+        # reached.
         if role == "control":
             self._deny_role_control(principal, application_id, request_id=request_id)
         if not self._backend.application_exists(application_id):
             raise NotFoundError("application was not found")
+        # Phase 3.5 WP-5 (§4/§1-E, P35-D6/D13): per-application issuance
+        # freeze -- an out-of-band (CLI-only) deployer operation.
+        # `FORBIDDEN`/fail-closed/durably audited, evaluated after target
+        # resolution (a freeze on a nonexistent application is meaningless)
+        # but before the credentials_per_application limit check (grouped
+        # with "application existence/state" resolution, contract `issue_
+        # credential.semantics`'s own precedence sentence).
+        if self._backend.application_issuance_frozen(application_id):
+            self._deny_issuance_frozen(principal, application_id, request_id=request_id)
         if self._backend.credentials_active_count(application_id) >= self._limits.credentials_per_application:
             raise ResourceLimitError(
                 "credentials-per-application limit exceeded", limit_class="credentials_per_application")
@@ -1033,8 +1264,9 @@ class ControlPlaneService:
             self._backend.issue_credential(application_id, role, credential_id=new_credential_id, secret=new_secret, work=work)
             self._backend.append_audit(
                 work=work, event_class="credential_lifecycle", request_id=request_id, application_id=application_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation="issue_credential", target_kind="credential", outcome="allow", reason_code=None,
+                target_id=new_credential_id,
             )
         return {"credential_id": new_credential_id, "application_id": application_id, "role": role, "secret": new_secret}
 
@@ -1043,14 +1275,29 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "list_credentials", request_id=request_id)
         self._gate_must_rotate(principal, "list_credentials", request_id=request_id)
         rows: list[dict] = []
         for cid, app_id, role, enabled, revoked in self._backend.list_credentials():
+            # Application-credential rows never carry `must_rotate` at all
+            # (P35-D7, contract `CredentialsResult.credentials[].must_
+            # rotate` description) -- the concept does not exist for them.
             rows.append({"credential_id": cid, "application_id": app_id, "role": role, "enabled": enabled, "revoked": revoked})
-        for cid, enabled, revoked in self._backend.list_control_credentials():
-            # No `application_id` key at all, and `must_rotate` is never
-            # included (contract `CredentialsResult` item has neither).
-            rows.append({"credential_id": cid, "role": "control", "enabled": enabled, "revoked": revoked})
+        for cid, enabled, revoked, must_rotate, ctl_role in self._backend.list_control_credentials():
+            # No `application_id` key at all (design §2, unchanged for
+            # `role="audit"` rows too -- neither kind belongs to an
+            # Application). Phase 3.5 WP-5 (§4/§1-B, P35-D7 reversal of the
+            # original §8 m-9 omission): `must_rotate` is now exposed here
+            # with its real value for every control-table row (control OR
+            # audit) -- the store has the value and contract 1.3.0 makes the
+            # field optional-additive, so there is no longer a reason to
+            # withhold it. This does widen who can observe a not-yet-
+            # rotated credential's existence (an `audit`-role principal can
+            # now read this same listing), but no secret/verifier is ever
+            # included, and this is documented, intended operational
+            # visibility (CONTROL_MAPPING.md SI-10/SI-02). `role` reads the
+            # real column instead of a hardcoded `"control"` literal.
+            rows.append({"credential_id": cid, "role": ctl_role, "enabled": enabled, "revoked": revoked, "must_rotate": must_rotate})
         return {"credentials": rows}
 
     def rotate_credential(self, credential_id, secret, target_credential_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
@@ -1059,6 +1306,8 @@ class ControlPlaneService:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
         self_rotate = isinstance(target_credential_id, str) and target_credential_id == principal.credential_id
+        self._authorize_role(principal, "rotate_credential", request_id=request_id,
+                             target_id=target_credential_id if isinstance(target_credential_id, str) else None)
         self._gate_must_rotate(principal, "rotate_credential", request_id=request_id, self_rotate=self_rotate)
         kind, state = self._locate_credential(target_credential_id)
         if kind is None:
@@ -1072,8 +1321,9 @@ class ControlPlaneService:
                 self._backend.rotate_credential(target_credential_id, new_secret, work=work)
                 self._backend.append_audit(
                     work=work, event_class="credential_lifecycle", request_id=request_id,
-                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                     operation="rotate_credential", target_kind="credential", outcome="allow", reason_code=None,
+                    target_id=target_credential_id,
                 )
             return {"credential_id": target_credential_id, "secret": new_secret}
 
@@ -1081,8 +1331,9 @@ class ControlPlaneService:
             self._backend.rotate_control_credential(target_credential_id, new_secret, work=work)
             self._backend.append_audit(
                 work=work, event_class="control_credential_lifecycle", request_id=request_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation="rotate_credential", target_kind="control_credential", outcome="allow", reason_code=None,
+                target_id=target_credential_id,
             )
         return {"credential_id": target_credential_id, "secret": new_secret}
 
@@ -1092,6 +1343,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         principal = self._authenticate(credential_id, secret, request_id=request_id)
+        self._authorize_role(principal, "revoke_credential", request_id=request_id,
+                             target_id=target_credential_id if isinstance(target_credential_id, str) else None)
         self._gate_must_rotate(principal, "revoke_credential", request_id=request_id)
         # Shape-validate `destructive`/`confirmation` unconditionally
         # (contract: these fields are ordinary, schema-validated optional
@@ -1112,8 +1365,9 @@ class ControlPlaneService:
                 self._backend.set_credential_state(target_credential_id, revoked=True, work=work)
                 self._backend.append_audit(
                     work=work, event_class="credential_lifecycle", request_id=request_id,
-                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                     operation="revoke_credential", target_kind="credential", outcome="allow", reason_code=None,
+                    target_id=target_credential_id,
                 )
             return {"credential_id": target_credential_id, "enabled": state[0], "revoked": True}
 
@@ -1122,16 +1376,29 @@ class ControlPlaneService:
             matching = next((row for row in rows if row[0] == target_credential_id), None)
             if matching is None:
                 raise NotFoundError("credential was not found")
-            _cid, enabled_now, revoked_now = matching
-            active_ids = [row[0] for row in rows if row[1] and not row[2]]
+            _cid, enabled_now, revoked_now, _matching_role = matching
+            # Phase 3.5 WP-5: filtered to `role == "control"` rows only --
+            # the destructive-confirmation gate exists to protect the LAST
+            # remaining active CONTROL credential (the only kind that can
+            # perform any control-plane management operation at all). An
+            # `"audit"` row existing alongside the sole active control
+            # credential must not be able to mask it as "not the last one":
+            # revoking that control credential would still leave zero
+            # credentials capable of management, even though an audit
+            # credential remains active. Symmetrically, revoking an audit
+            # credential itself never trips this gate at all (it is
+            # excluded from `active_ids`, so `active_ids[0] ==
+            # target_credential_id` can never hold for one) -- an ordinary,
+            # unconfirmed revoke, exactly like an application credential's.
+            active_ids = [row[0] for row in rows if row[1] and not row[2] and row[3] == "control"]
             if len(active_ids) == 1 and active_ids[0] == target_credential_id:
                 phrase = _revoke_last_control_credential_phrase(target_credential_id)
                 if destructive is not True or confirmation != phrase:
                     self._deny_audit(
                         event_class="control_credential_lifecycle", operation="revoke_credential",
                         target_kind="control_credential", request_id=request_id, actor_id=principal.credential_id,
-                        actor_type="control_credential", role="control",
-                        reason_code="DESTRUCTIVE_CONFIRMATION_REQUIRED",
+                        actor_type="control_credential", role=principal.role,
+                        reason_code="DESTRUCTIVE_CONFIRMATION_REQUIRED", target_id=target_credential_id,
                     )
                     raise DestructiveConfirmationRequired(
                         "revoking the last remaining active control credential requires the current "
@@ -1147,8 +1414,9 @@ class ControlPlaneService:
             self._backend.set_control_credential_state(target_credential_id, revoked=True, work=work)
             self._backend.append_audit(
                 work=work, event_class="control_credential_lifecycle", request_id=request_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation="revoke_credential", target_kind="control_credential", outcome="allow", reason_code=None,
+                target_id=target_credential_id,
             )
         return {"credential_id": target_credential_id, "enabled": enabled_now, "revoked": True}
 
@@ -1161,6 +1429,8 @@ class ControlPlaneService:
         if not isinstance(enabled, bool):
             raise ValidationError("enabled must be a boolean")
         operation = "enable_credential" if enabled else "disable_credential"
+        self._authorize_role(principal, operation, request_id=request_id,
+                             target_id=target_credential_id if isinstance(target_credential_id, str) else None)
         self._gate_must_rotate(principal, operation, request_id=request_id)
         kind, state = self._locate_credential(target_credential_id)
         if kind is None:
@@ -1171,8 +1441,9 @@ class ControlPlaneService:
                 self._backend.set_credential_state(target_credential_id, enabled=enabled, work=work)
                 self._backend.append_audit(
                     work=work, event_class="credential_lifecycle", request_id=request_id,
-                    actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                    actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                     operation=operation, target_kind="credential", outcome="allow", reason_code=None,
+                    target_id=target_credential_id,
                 )
             return {"credential_id": target_credential_id, "enabled": enabled, "revoked": state[1]}
 
@@ -1180,8 +1451,9 @@ class ControlPlaneService:
             self._backend.set_control_credential_state(target_credential_id, enabled=enabled, work=work)
             self._backend.append_audit(
                 work=work, event_class="control_credential_lifecycle", request_id=request_id,
-                actor_type="control_credential", actor_id=principal.credential_id, role="control",
+                actor_type="control_credential", actor_id=principal.credential_id, role=principal.role,
                 operation=operation, target_kind="control_credential", outcome="allow", reason_code=None,
+                target_id=target_credential_id,
             )
         return {"credential_id": target_credential_id, "enabled": enabled, "revoked": state[1]}
 
@@ -1209,7 +1481,7 @@ def bootstrap_control_credential(control_credentials, audit_append, *, work, cre
     audit_append(
         work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
         actor_type=actor_type, actor_id=None, role=None, operation="bootstrap_control_credential",
-        target_kind="control_credential", outcome="allow", reason_code=None,
+        target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id,
     )
     return credential_id, secret
 
@@ -1249,9 +1521,51 @@ def reset_control_credentials(control_credentials, audit_append, *, work, destru
     audit_append(
         work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
         actor_type=actor_type, actor_id=None, role=None, operation="reset_control_credentials",
-        target_kind="control_credential", outcome="allow", reason_code=None,
+        target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id,
     )
     return credential_id, secret
+
+
+def issue_audit_credential_ceremony(
+    control_credentials, audit_append, *, work,
+    credential_id: Optional[str] = None, request_id: Optional[str] = None,
+    actor_type: str = "operator_cli",
+) -> tuple[str, str]:
+    """Phase 3.5 WP-5 out-of-band audit-credential issuance ceremony (design
+    docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D,
+    P35-D12/M-1). Same extraction rationale as `bootstrap_control_
+    credential`/`reset_control_credentials` above (reusable product code,
+    not hand-rolled per caller -- `ops.py cmd_issue_audit_credential` is
+    this WP's own only caller today).
+
+    Unlike bootstrap/reset, this ceremony issues AND rotates the credential
+    in the SAME transaction, before a secret is ever handed back to the
+    caller: an `audit`-role principal has no in-band self-rotate path at all
+    (`ControlPlaneService._gate_must_rotate`'s own allow-list for
+    `role="audit"` while `must_rotate` is true is `control_capabilities`
+    ONLY -- design's own explicit decision not to extend self-rotate to it,
+    since the whole point of completing the rotation here is that no
+    in-band path should ever need to). Issuing with `must_rotate=true` and
+    leaving it to the operator to somehow clear it out-of-band-again would
+    be a dead end; this ceremony closes that gap structurally by never
+    printing a secret whose `must_rotate` is still true. The intermediate
+    `issue()`-time secret is generated, used once to satisfy `issue`'s own
+    required `secret` return value, and immediately discarded -- only the
+    final, post-`rotate()` secret is ever returned (and therefore ever
+    printed by `ops.py`).
+
+    Returns `(credential_id, secret)` -- `secret` is the one that actually
+    authenticates (post-rotation); `must_rotate` is `false` for it already.
+    """
+    credential_id, _issuance_secret = control_credentials.issue(
+        must_rotate=True, role="audit", credential_id=credential_id, work=work)
+    distributed_secret = control_credentials.rotate(credential_id, work=work)
+    audit_append(
+        work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
+        actor_type=actor_type, actor_id=None, role=None, operation="issue_audit_credential",
+        target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id,
+    )
+    return credential_id, distributed_secret
 
 
 __all__ = [
@@ -1265,6 +1579,7 @@ __all__ = [
     "PostgresControlBackend",
     "bootstrap_control_credential",
     "reset_control_credentials",
+    "issue_audit_credential_ceremony",
     # WP-6 (design v1.2 R-6 identifiers rule): exported so `ops.py`'s own
     # break-glass `deprovision` subcommand validates an operator-supplied
     # application_id against the SAME compiled pattern `register_

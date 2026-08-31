@@ -157,7 +157,9 @@ from psycopg import sql
 from .control_audit import insert_control_audit_row, read_control_audit_events
 from .control_composition import build_control_service
 from .control_credential_store_postgres import DEFAULT_SCHEMA, PostgresControlCredentialStore
-from .control_plane import _APPLICATION_ID_PATTERN, bootstrap_control_credential, reset_control_credentials
+from .control_plane import (_APPLICATION_ID_PATTERN, PostgresApplicationRegistry,
+                            bootstrap_control_credential, issue_audit_credential_ceremony,
+                            reset_control_credentials)
 from .credential_store_postgres import assert_pepper_separation
 from .errors import (AuthenticationError, AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError, DestructiveConfirmationRequired,
@@ -596,6 +598,112 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+# ===========================================================================
+# Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §4/§1-D/§1-E): out-of-band audit-credential issuance ceremony, and
+# per-application issuance-freeze toggle -- both CLI-only, no in-band
+# endpoint exists for either (P35-D6/D12).
+# ===========================================================================
+
+
+def cmd_issue_audit_credential(_args: argparse.Namespace) -> int:
+    """Phase 3.5 WP-5 (§4/§1-D, P35-D12): issues a new `role="audit"`
+    control-table credential. Out-of-band ONLY -- there is no in-band
+    issuance path for this role either (`CredentialIssueRequest`'s enum was
+    never extended to accept it, matching the pre-existing `role="control"`
+    rule; contract `control_plane.issuance`: "Audit credentials, like
+    control credentials, are issued only via the out-of-band ceremony").
+
+    Unlike `bootstrap`, this is not a once-only ritual -- any number of
+    audit credentials may exist, issued at any time; there is no "first
+    row" invariant to protect. It STILL takes the SAME `_lock_ritual`
+    advisory lock `bootstrap`/`reset` use (mirrors r2db-api's own review
+    lesson, applied here for this peer's own lock key): without it, this
+    command's `INSERT` could interleave with a concurrent `reset`'s
+    `revoke_all` -- `revoke_all` only revokes rows its own scan already saw,
+    so an audit-credential row inserted mid-reset (after that scan, before
+    `reset`'s transaction commits) would survive a reset that was supposed
+    to wipe every control-table row. Taking the same lock key serializes
+    this command against a concurrent `bootstrap`/`reset`/another
+    `issue-audit-credential`, closing that window.
+
+    `issue_audit_credential_ceremony` (`control_plane.py`) does the real
+    work -- see that function's own docstring for why it issues AND rotates
+    in the same transaction before ever handing back a secret (no in-band
+    self-rotate exists for an audit principal, design §4 M-1): the secret
+    printed below already has `must_rotate=false`.
+    """
+    dsn = _controlplane_dsn()
+    store = _control_store(dsn)
+    conn = psycopg.connect(dsn)
+    try:
+        _lock_ritual(conn)
+        credential_id, secret = issue_audit_credential_ceremony(
+            store, _audit_append, work=conn, actor_type=_ACTOR_TYPE,
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _print_secret_once(credential_id, secret)
+    print("must_rotate: false -- the issuance ceremony already completed rotation before this secret was printed")
+    return 0
+
+
+def _applications_registry(dsn: str) -> PostgresApplicationRegistry:
+    return PostgresApplicationRegistry(dsn, schema=_schema())
+
+
+def _set_issuance_frozen(application_id: str, frozen: bool, *, operation: str) -> int:
+    """Phase 3.5 WP-5 (design §4/§1-E, P35-D6): CLI-only, non-destructive --
+    same class as `_set_application_enabled`-style toggles (no
+    declare-and-echo confirmation gate; unlike `reset`/deprovision, freezing/
+    unfreezing issuance is fully reversible with no data loss). Not a
+    `ControlPlaneService` operation (there is no in-band endpoint at all for
+    this concept, P35-D6) -- writes directly against the control-plane DSN,
+    the same shape `bootstrap`/`reset` above already use, with a manually
+    appended `control_audit` row on the SAME connection/transaction.
+
+    `application_id` is format-validated BEFORE any database access or
+    audit write (mirrors `cmd_deprovision`'s own MA-1 guard, same rationale:
+    an unvalidated operator-supplied string must never land in a durable
+    `control_audit` row, here via `application_id`/`target_id` rather than a
+    confirmation phrase or subprocess argument)."""
+    if not _APPLICATION_ID_PATTERN.fullmatch(application_id):
+        raise ValidationError(f"application_id must match {_APPLICATION_ID_PATTERN.pattern!r}")
+    dsn = _controlplane_dsn()
+    registry = _applications_registry(dsn)
+    conn = psycopg.connect(dsn)
+    try:
+        registry.set_issuance_frozen(application_id, frozen, work=conn)
+        insert_control_audit_row(
+            conn, _schema(), event_class="application_lifecycle", operation=operation, outcome="allow",
+            target_kind="application", application_id=application_id, actor_type=_ACTOR_TYPE,
+            target_id=application_id,
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_freeze_issuance(args: argparse.Namespace) -> int:
+    _set_issuance_frozen(args.application_id, True, operation="freeze_issuance")
+    print(f"credential issuance for application {args.application_id} is now frozen")
+    return 0
+
+
+def cmd_unfreeze_issuance(args: argparse.Namespace) -> int:
+    _set_issuance_frozen(args.application_id, False, operation="unfreeze_issuance")
+    print(f"credential issuance for application {args.application_id} is no longer frozen")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m mitatedb_api.ops",
@@ -626,6 +734,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="echo the required_confirmation phrase from a prior refusal's stderr declaration to proceed",
     )
     p.set_defaults(func=cmd_reset)
+
+    p = sub.add_parser(
+        "issue-audit-credential",
+        help=(
+            "out-of-band: issue a new role=audit control-table credential (secret printed once). No in-band "
+            "issuance path exists for this role either -- CredentialIssueRequest's enum was not extended. The "
+            "printed secret already has must_rotate=false (the ceremony issues and rotates atomically before "
+            "printing, since an audit principal has no in-band self-rotate path)"
+        ),
+    )
+    p.set_defaults(func=cmd_issue_audit_credential)
+
+    p = sub.add_parser(
+        "freeze-issuance",
+        help="freeze credential issuance for an application (out-of-band; issue-credential against it then "
+             "refuses with FORBIDDEN) -- non-destructive, no confirmation gate",
+    )
+    p.add_argument("application_id")
+    p.set_defaults(func=cmd_freeze_issuance)
+
+    p = sub.add_parser(
+        "unfreeze-issuance",
+        help="lift a credential-issuance freeze for an application",
+    )
+    p.add_argument("application_id")
+    p.set_defaults(func=cmd_unfreeze_issuance)
 
     # ---- WP-6 break-glass command family ---------------------------------
     # Every subcommand below (except audit-report/deprovision, neither of

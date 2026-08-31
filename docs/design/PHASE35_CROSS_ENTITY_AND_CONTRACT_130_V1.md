@@ -181,3 +181,13 @@ conformance 364 passed / peer 861 passed (レビュアー・実装者の二重�
 独立レビュー **0 blocker / 1 major / 4 minor / 3 nit**、全数裁定・反映: M-1 = 上記濾過の回帰テスト 2 本 (両バックエンド) + 変異赤化実測 / m-1 = destructive-confirmation consequence 宣言を管理能力範囲へ縮小 (audit credential の読み取り残存を真実化) / m-2 = `issue-audit-credential` に儀式 advisory lock (reset 中の INSERT 生存経路の閉塞) / m-3 = fail-closed 列挙の構造的完全性 (route 表・allow-list から導出し新 operation が未分類のまま通過しない) / m-4 = C-06 行の版数 prose 陳腐化を WP-6 スコープへ / n-2 = in-memory backend の freeze snapshot 漏れ (latent) 閉塞 / n-1 (denial の target_id 非対称) は追認。
 
 r2db 574 passed / conformance 364 passed (レビュアー実測含む)。
+
+### 10.5 WP-5 (MitateDB 制御面束 + 版数 flip)
+
+実装: r2db WP-4 と対称の束4件 (must_rotate 露出 / target_id 13 フィールド化 + WP-1 B-1 テストの 13 等値復元 / audit role — 儀式限定発行・読み取り 3 op 許可・他 FORBIDDEN 耐久監査・revoke gate role 濾過を最初から適用 / 発行凍結 — 公開優先順位どおり) + `contract_version` 1.3.0 flip (両宣言箇所)。request_bytes は当 peer は元から二層宣言 + 単一ソース済み (確認のみ)。
+
+**peer 構造差 (実装者報告、監督追認)**: (1) in-memory backend の freeze rollback は既存の共有 undo-log 規約で自然に達成 (r2db WP-4 n-2 型の snapshot 漏れが構造的に起きない)。(2) freeze CLI は ControlPlaneService を経由しない生 registry 書込 + 手動 audit 行 — wire operation が存在しないため service 経由の選択肢自体が無く、bootstrap/reset と同型 (レビューが同一 tx 監査規律の保存を確認し是認。issue-audit-credential は抽出された儀式製品関数を呼ぶ)。(3) conformance adapter 内の第3 backend (`_ReconciledControlBackend`) にも freeze メソッドが必要だった (r2db に相当物なし)。(4) 儀式直列化は bootstrap/reset と同一の `pg_advisory_xact_lock` 定数 — mid-reset INSERT 生存経路なし (レビュー実測)。
+
+独立レビュー **0 blocker / 1 major / 4 minor / 3 nit**、全数裁定・反映: M-1 = 無関係アサーションの無断削除の復元 / m-1 = freeze CLI の識別子パターンガード (未検証文字列を耐久 audit 行に載せない) / m-2 = 第3 backend の freeze fail-open 閉塞 / m-3 = FORBIDDEN denial 行の PG 耐久読み戻し実測 (denial 専用 unit_of_work の独立 commit の証明) / m-4 = 孤児 audit 行 → bootstrap ConflictError → reset 復旧の両バックエンド実測 / n-2 = `_authorize_role` docstring の allow/deny 二面性の正確化 (role 次元は CHECK 制約が backstop の deny-list)。n-1 (denial target_id 非対称) は r2db と対称に追認。
+
+MitateDB 354 passed / conformance 364 passed。**これで両 peer とも 1.3.0 宣言・束4件実装済み — 契約 1.3.0 の version_binding 義務は全数出荷完了。**
