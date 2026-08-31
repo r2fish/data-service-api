@@ -27,15 +27,22 @@ import pytest
 from psycopg import sql
 
 from .control_plane_harness import control_platform  # noqa: F401 (fixture)
+from mitatedb_api.control_credential_store_postgres import PostgresControlCredentialStore
+from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
+                                        PostgresControlBackend, PostgresCredentialRegistry,
+                                        bootstrap_control_credential)
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
 _APP_PEPPER = "ops-cli-test-app-pepper-0000000000"
 _CONTROL_PEPPER = "ops-cli-test-control-pepper-0000000"
 
 
 def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER,
-             app_pepper: "str | None" = _APP_PEPPER) -> subprocess.CompletedProcess:
+             app_pepper: "str | None" = _APP_PEPPER, actor_credential_id: "str | None" = None,
+             actor_secret: "str | None" = None, provision_dsn: "str | None" = None,
+             migrations_dir: "Path | None" = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
@@ -49,6 +56,25 @@ def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER
         env["MITATEDB_CREDENTIAL_PEPPER"] = app_pepper
     else:
         env.pop("MITATEDB_CREDENTIAL_PEPPER", None)
+    # WP-6 break-glass command family's own environment (ops.py::_actor_
+    # credential/_provision_dsn/_migrations_dir) -- absent by default so the
+    # pre-existing bootstrap/reset tests above are unaffected.
+    if actor_credential_id is not None:
+        env["MITATEDB_CONTROL_CREDENTIAL_ID"] = actor_credential_id
+    else:
+        env.pop("MITATEDB_CONTROL_CREDENTIAL_ID", None)
+    if actor_secret is not None:
+        env["MITATEDB_CONTROL_CREDENTIAL_SECRET"] = actor_secret
+    else:
+        env.pop("MITATEDB_CONTROL_CREDENTIAL_SECRET", None)
+    if provision_dsn is not None:
+        env["MITATEDB_PROVISION_DSN"] = provision_dsn
+    else:
+        env.pop("MITATEDB_PROVISION_DSN", None)
+    if migrations_dir is not None:
+        env["MITATEDB_MIGRATIONS_DIR"] = str(migrations_dir)
+    else:
+        env.pop("MITATEDB_MIGRATIONS_DIR", None)
     return subprocess.run(
         [sys.executable, "-m", "mitatedb_api.ops", *args], capture_output=True, text=True, env=env)
 
@@ -84,15 +110,67 @@ def _control_audit_rows(control_platform) -> list[tuple]:
 
 @pytest.fixture(autouse=True)
 def _clean_control_credentials(control_platform):
-    """Each test in this file gets a clean `control_credentials`/
-    `control_audit` slate -- module-scoped `control_platform` is shared
-    with every OTHER test function here, and `bootstrap`'s own CONFLICT
-    refusal (correctly) depends on prior state."""
+    """Each test in this file gets a clean `applications`/`credentials`/
+    `control_credentials`/`control_audit` slate -- module-scoped
+    `control_platform` is shared with every OTHER test function here, and
+    `bootstrap`'s own CONFLICT refusal (correctly) depends on prior state.
+    WP-6: `applications`/`credentials` joined this cleanup alongside the
+    pre-existing two tables once the break-glass command family's own
+    tests below started registering applications/issuing credentials
+    (`credentials` is deleted before `applications` -- the same FK-safe
+    order `test_control_plane_postgres.py::backend`'s own teardown uses)."""
     with psycopg.connect(control_platform.provision_dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {control_platform.registry_schema}.credentials")
             cur.execute(f"DELETE FROM {control_platform.registry_schema}.control_credentials")
+            cur.execute(f"DELETE FROM {control_platform.registry_schema}.applications")
             cur.execute(f"DELETE FROM {control_platform.registry_schema}.control_audit")
     yield
+
+
+@pytest.fixture(scope="module")
+def deprovision_script_dir(tmp_path_factory, control_platform) -> Path:
+    """A copy of `0004_deprovision_application.sql` rewritten with this
+    module's own throwaway prefix (R-4's prefix-replacement convention,
+    identical to what `control_plane_harness.bootstrap_control_platform`
+    already does for `0001`/`0002`) -- the CLI's own `deprovision`
+    subcommand needs this because the UNMODIFIED script hardcodes the
+    literal `mitatedb_registry` schema, which does not exist on this
+    throwaway platform (only `{prefix}_registry` does). Pointed to via
+    `MITATEDB_MIGRATIONS_DIR` (`ops.py::_migrations_dir`'s own documented
+    override)."""
+    out_dir = tmp_path_factory.mktemp("mitatedb_ops_deprovision_" + control_platform.prefix)
+    text = (MIGRATIONS_DIR / "0004_deprovision_application.sql").read_text().replace(
+        "mitatedb", control_platform.prefix)
+    (out_dir / "0004_deprovision_application.sql").write_text(text)
+    return out_dir
+
+
+def _bootstrapped_actor(control_platform):
+    """Bootstraps + self-rotates a real control credential directly against
+    PostgreSQL (bypassing the CLI, mirroring `test_control_plane_postgres.
+    py::_bootstrapped`) and returns `(service, credential_id, secret)` --
+    this file's own break-glass subcommand tests use the resulting id/
+    secret as `MITATEDB_CONTROL_CREDENTIAL_ID`/`_SECRET` (exactly what a
+    real operator's own already-rotated control credential provides), and
+    use `service` directly (not the CLI) for setup calls this WP's break-
+    glass scope deliberately excludes (`register_application`/`issue_
+    credential` stay HTTP/in-band-only operations, design v1.2 §3 WP-6
+    row's own six-command list)."""
+    applications = PostgresApplicationRegistry(control_platform.controlplane_dsn, schema=control_platform.registry_schema)
+    credentials = PostgresCredentialRegistry(control_platform.controlplane_dsn, pepper=_APP_PEPPER,
+                                             schema=control_platform.registry_schema)
+    control_credentials = PostgresControlCredentialStore(control_platform.controlplane_dsn, pepper=_CONTROL_PEPPER,
+                                                         schema=control_platform.registry_schema)
+    backend = PostgresControlBackend(applications=applications, credentials=credentials,
+                                     control_credentials=control_credentials,
+                                     audit_schema=control_platform.registry_schema, dsn=control_platform.controlplane_dsn)
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(control_credentials, backend.append_audit, work=work)
+    service = ControlPlaneService(backend, limits=ControlPlaneLimits(
+        applications=20, credentials_per_application=5, control_requests_per_minute=190))
+    rotated = service.rotate_credential(credential_id, secret, credential_id)
+    return service, credential_id, rotated["secret"]
 
 
 def test_bootstrap_issues_a_real_must_rotate_credential(control_platform) -> None:
@@ -237,3 +315,240 @@ def test_identical_peppers_are_refused_before_any_database_access(control_platfo
     assert "pepper" in result.stderr.lower()
     # Refused before ever touching the platform database: still zero rows.
     assert _control_credentials_rows(control_platform) == []
+
+
+# ===========================================================================
+# WP-6 break-glass command family (design v1.2 §3 WP-6 row).
+# ===========================================================================
+
+
+def _run_bg(control_platform, actor_credential_id: str, actor_secret: str, *args: str,
+            **kwargs) -> subprocess.CompletedProcess:
+    return _run_ops(control_platform, *args, actor_credential_id=actor_credential_id,
+                    actor_secret=actor_secret, **kwargs)
+
+
+def test_list_applications_and_list_credentials_report_real_registry_state(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brklist1")
+    issued = service.issue_credential(actor_id, actor_secret, "brklist1", "runtime")
+
+    apps = _run_bg(control_platform, actor_id, actor_secret, "list-applications")
+    assert apps.returncode == 0, apps.stderr
+    apps_body = json.loads(apps.stdout)
+    assert {"application_id": "brklist1", "enabled": True} in apps_body["applications"]
+
+    creds = _run_bg(control_platform, actor_id, actor_secret, "list-credentials")
+    assert creds.returncode == 0, creds.stderr
+    creds_body = json.loads(creds.stdout)
+    by_id = {row["credential_id"]: row for row in creds_body["credentials"]}
+    assert by_id[issued["credential_id"]]["application_id"] == "brklist1"
+    assert by_id[issued["credential_id"]]["role"] == "runtime"
+    assert by_id[issued["credential_id"]]["revoked"] is False
+    # Contract's own mixed listing (R-6 m-6): the actor's own control
+    # credential appears too, with no application_id key at all.
+    assert by_id[actor_id]["role"] == "control"
+    assert "application_id" not in by_id[actor_id]
+
+
+def test_enable_and_disable_application_round_trip(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkapp1")
+
+    disabled = _run_bg(control_platform, actor_id, actor_secret, "disable-application", "brkapp1")
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout) == {"application_id": "brkapp1", "enabled": False}
+    assert dict(service.list_applications(actor_id, actor_secret)["applications"][0].items()) == {
+        "application_id": "brkapp1", "enabled": False}
+
+    enabled = _run_bg(control_platform, actor_id, actor_secret, "enable-application", "brkapp1")
+    assert enabled.returncode == 0, enabled.stderr
+    assert json.loads(enabled.stdout) == {"application_id": "brkapp1", "enabled": True}
+
+
+def test_enable_and_disable_credential_round_trip(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkcred1")
+    issued = service.issue_credential(actor_id, actor_secret, "brkcred1", "runtime")
+    target = issued["credential_id"]
+
+    disabled = _run_bg(control_platform, actor_id, actor_secret, "disable-credential", target)
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout) == {"credential_id": target, "enabled": False, "revoked": False}
+
+    enabled = _run_bg(control_platform, actor_id, actor_secret, "enable-credential", target)
+    assert enabled.returncode == 0, enabled.stderr
+    assert json.loads(enabled.stdout) == {"credential_id": target, "enabled": True, "revoked": False}
+
+
+def test_rotate_credential_replaces_the_secret_for_either_kind(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkrot1")
+    issued = service.issue_credential(actor_id, actor_secret, "brkrot1", "runtime")
+
+    rotated = _run_bg(control_platform, actor_id, actor_secret, "rotate-credential", issued["credential_id"])
+    assert rotated.returncode == 0, rotated.stderr
+    new_id, new_secret = _parse_issued(rotated.stdout)
+    assert new_id == issued["credential_id"]
+    assert new_secret != issued["secret"]
+
+    # Self-rotate (the actor's own control credential) also works -- the
+    # exact mechanism that clears a freshly bootstrap/reset must_rotate
+    # credential's own gate.
+    self_rotated = _run_bg(control_platform, actor_id, actor_secret, "rotate-credential", actor_id)
+    assert self_rotated.returncode == 0, self_rotated.stderr
+    _rid, rotated_secret = _parse_issued(self_rotated.stdout)
+    assert rotated_secret != actor_secret
+
+
+def test_revoke_application_credential_needs_no_confirmation(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkrev1")
+    issued = service.issue_credential(actor_id, actor_secret, "brkrev1", "runtime")
+
+    revoked = _run_bg(control_platform, actor_id, actor_secret, "revoke-credential", issued["credential_id"])
+    assert revoked.returncode == 0, revoked.stderr
+    assert json.loads(revoked.stdout)["revoked"] is True
+
+
+def test_revoke_last_active_control_credential_requires_declare_and_echo(control_platform) -> None:
+    """The core WP-6 gate this file's own completion condition #4 names:
+    an unconfirmed/mismatched revoke of the operator's OWN (only active)
+    control credential is refused and touches nothing; the echoed phrase
+    from that refusal makes it succeed."""
+    _service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+
+    denial = _run_bg(control_platform, actor_id, actor_secret, "revoke-credential", actor_id)
+    assert denial.returncode == 2
+    body = json.loads(denial.stderr.strip())
+    assert body["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert body["details"]["required_confirmation"].startswith(f"REVOKE control_credential {actor_id}")
+    rows = {row[0]: row for row in _control_credentials_rows(control_platform)}
+    assert rows[actor_id][2] is False  # not revoked -- the denial touched nothing
+
+    wrong_result = _run_bg(control_platform, actor_id, actor_secret, "revoke-credential", actor_id, "--confirm",
+                           "not the right phrase")
+    assert wrong_result.returncode == 2
+    assert json.loads(wrong_result.stderr.strip())["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    rows = {row[0]: row for row in _control_credentials_rows(control_platform)}
+    assert rows[actor_id][2] is False
+
+    phrase = body["details"]["required_confirmation"]
+    confirmed = _run_bg(control_platform, actor_id, actor_secret, "revoke-credential", actor_id, "--confirm", phrase)
+    assert confirmed.returncode == 0, confirmed.stderr
+    assert json.loads(confirmed.stdout)["revoked"] is True
+    rows = {row[0]: row for row in _control_credentials_rows(control_platform)}
+    assert rows[actor_id][2] is True
+
+
+def test_audit_report_prints_events_oldest_first_as_json_lines(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkaudit1")
+
+    result = _run_ops(control_platform, "audit-report", provision_dsn=control_platform.provision_dsn)
+    assert result.returncode == 0, result.stderr
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    operations = [line["operation"] for line in lines]
+    # bootstrap, self-rotate, register_application -- in that order.
+    assert operations == ["bootstrap_control_credential", "rotate_credential", "register_application"]
+    assert all("event_id" in line and "occurred_at" in line for line in lines)
+
+
+def test_audit_report_since_and_until_window_the_report(control_platform) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkaudit2")
+
+    far_future = _run_ops(control_platform, "audit-report", "--since", "2999-01-01T00:00:00Z",
+                          provision_dsn=control_platform.provision_dsn)
+    assert far_future.returncode == 0, far_future.stderr
+    assert far_future.stdout.strip() == ""
+
+    everything = _run_ops(control_platform, "audit-report", "--since", "2000-01-01T00:00:00Z",
+                          provision_dsn=control_platform.provision_dsn)
+    assert len(everything.stdout.splitlines()) == 3
+
+
+def test_deprovision_without_confirm_declares_the_phrase_and_touches_nothing(
+        control_platform, deprovision_script_dir) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkdep1")
+
+    denial = _run_ops(control_platform, "deprovision", "brkdep1",
+                      provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    assert denial.returncode == 2
+    body = json.loads(denial.stderr.strip())
+    assert body["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert body["details"]["required_confirmation"].startswith("DEPROVISION application brkdep1 @registered=")
+    assert body["details"]["consequence"]
+    # Untouched: the application is still registered.
+    assert any(row["application_id"] == "brkdep1"
+              for row in service.list_applications(actor_id, actor_secret)["applications"])
+
+
+def test_deprovision_with_wrong_confirmation_is_refused_and_touches_nothing(
+        control_platform, deprovision_script_dir) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkdep2")
+
+    denial = _run_ops(control_platform, "deprovision", "brkdep2", "--confirm", "not the right phrase",
+                      provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    assert denial.returncode == 2
+    assert json.loads(denial.stderr.strip())["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert any(row["application_id"] == "brkdep2"
+              for row in service.list_applications(actor_id, actor_secret)["applications"])
+
+
+def test_deprovision_with_the_echoed_phrase_removes_the_registration(
+        control_platform, deprovision_script_dir) -> None:
+    service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
+    service.register_application(actor_id, actor_secret, "brkdep3")
+    issued = service.issue_credential(actor_id, actor_secret, "brkdep3", "runtime")
+
+    probe = _run_ops(control_platform, "deprovision", "brkdep3",
+                     provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    phrase = json.loads(probe.stderr.strip())["details"]["required_confirmation"]
+
+    confirmed = _run_ops(control_platform, "deprovision", "brkdep3", "--confirm", phrase,
+                         provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    assert confirmed.returncode == 0, confirmed.stderr
+    assert "brkdep3" in confirmed.stdout
+    assert "deprovisioned" in confirmed.stdout
+
+    remaining = service.list_applications(actor_id, actor_secret)["applications"]
+    assert all(row["application_id"] != "brkdep3" for row in remaining)
+    # M-4 (WP-1): deprovision removes the application's credential rows in
+    # the same step -- the just-issued credential must be gone too, not
+    # merely the application row.
+    remaining_creds = {row["credential_id"] for row in service.list_credentials(actor_id, actor_secret)["credentials"]}
+    assert issued["credential_id"] not in remaining_creds
+
+
+def test_deprovision_of_an_unregistered_application_fails_loudly(control_platform, deprovision_script_dir) -> None:
+    result = _run_ops(control_platform, "deprovision", "never_registered_brk_app",
+                      provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    assert result.returncode == 1
+    assert json.loads(result.stderr.strip())["code"] == "NOT_FOUND"
+
+
+def test_deprovision_rejects_a_malformed_application_id_before_any_database_access(
+        control_platform, deprovision_script_dir) -> None:
+    result = _run_ops(control_platform, "deprovision", "Not-A-Valid-Id!",
+                      provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
+    assert result.returncode == 1
+    assert json.loads(result.stderr.strip())["code"] == "VALIDATION_FAILED"
+
+
+def test_break_glass_commands_require_the_control_credential_pepper_and_actor(control_platform) -> None:
+    """Missing `MITATEDB_CONTROL_CREDENTIAL_ID`/`_SECRET` dies loudly (exit
+    2) before any operation is attempted, the same `_die`/`_require_env`
+    contract every other required-environment variable in this module
+    already gets."""
+    result = _run_ops(control_platform, "list-applications")
+    assert result.returncode == 2
+    assert "MITATEDB_CONTROL_CREDENTIAL_ID is required" in result.stderr
+
+
+def test_audit_report_requires_provision_dsn(control_platform) -> None:
+    result = _run_ops(control_platform, "audit-report")
+    assert result.returncode == 2
+    assert "MITATEDB_PROVISION_DSN is required" in result.stderr

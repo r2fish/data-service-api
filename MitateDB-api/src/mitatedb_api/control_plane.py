@@ -1265,4 +1265,10 @@ __all__ = [
     "PostgresControlBackend",
     "bootstrap_control_credential",
     "reset_control_credentials",
+    # WP-6 (design v1.2 R-6 identifiers rule): exported so `ops.py`'s own
+    # break-glass `deprovision` subcommand validates an operator-supplied
+    # application_id against the SAME compiled pattern `register_
+    # application`/`issue_credential` already enforce, rather than
+    # maintaining a second, possibly-drifting copy of this contract regex.
+    "_APPLICATION_ID_PATTERN",
 ]
