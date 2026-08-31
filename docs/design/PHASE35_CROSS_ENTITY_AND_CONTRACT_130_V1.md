@@ -107,6 +107,10 @@
 - MitateDB PG backend の `_check_domain` float 分岐: 巨大 int → `real` 列で `OverflowError` が未捕捉 (pass 1 で 503)。SQLite 側は M-7 で同型を閉塞済みだが PG 側は未対応 (WP-2 レビュー n-3 の発見、pre-existing)
 - `ScopedMutation.entity` は attacker-controlled identifier position の新設だが C-03 の `MUST_COVER_IDENTIFIER_POSITIONS` に未列挙 — capability が executable になった今、injection 被覆の対象化を検討 (WP-3 レビュー n-4)
 - r2db conformance-build の `applications` 上限は 115 (WP-3 で 100 から引き上げ)。天井は C-14 の算術で 122 — 次に逼迫したときの正解は再引き上げでなく fixture teardown (`deprovision_application`) の導入 (WP-3 レビュー m-6)
+- **クライアント実測起票 3 件 (2026-09-01、mitate-cd — Phase B カットオーバー実装からの contract-first 報告。いずれも先方回避策実装済みで非急務。監督が実コードで裏取り済み)**:
+  1. **識別子受理域の開示ギャップ**: MitateDB は `^[a-z][a-z0-9_]{0,62}$` (identifiers.py:19) で contract 一般則 `^[A-Za-z_][A-Za-z0-9_]*$` より狭い。契約は「implementation may apply a stricter known-catalog policy」を明示許容するため**非適合ではない**が、狭化がクライアントから発見不能 (camelCase field が VALIDATION_FAILED になる理由が読めない)。候補: capabilities/catalog での受理文法の宣言化、または denial details での文法提示
+  2. **予約 collection 名の未文書化**: `audit_events` が両 backend で防御的予約 (backend_sqlite `_RESERVED` / backend_postgres `_RESERVED_EXACT`) だが契約・README に記載なし。クライアント向け予約名リストの文書化
+  3. **json 列の write/read 非対称 (要実測確認)**: 書込は native object/array 受理、読出は JSON text の string で返る (json→TEXT 格納の帰結と整合)。文書化または decode-on-read の裁定 — 対応 WP で実測から入ること
 - 継承分: `DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(a) drop_index C-06 v2 / (c) 受理境界一覧 / フェーズ4 耐久 audit sink / `MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` §7 全項
 
 ## 8. リスクとレビュー重点
