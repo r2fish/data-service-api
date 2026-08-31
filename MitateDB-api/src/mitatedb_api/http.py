@@ -590,17 +590,79 @@ async def post_mutate(request: Request) -> Response:
     return JSONResponse({"committed": True, "affected": affected}, status_code=200)
 
 
+def _scoped_mutation_item(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """P35 WP-2 (R-3, design docs/design/PHASE35_CROSS_ENTITY_AND_
+    CONTRACT_130_V1.md §2): the cross-entity counterpart of
+    `_mutation_item` above -- reads `entity` from EACH operation itself
+    (contract `ScopedMutation`, `Mutation` + a required `entity`) instead
+    of a single URL path segment shared by the whole request. Otherwise
+    identical field-by-field mapping onto `ApplicationCell.transact`'s own
+    operation-dict vocabulary (`_TRANSACT_INSERT_KEYS`/`_TRANSACT_UPDATE_
+    KEYS`/`_TRANSACT_DELETE_KEYS` in `cell.py`) -- an unsupported key
+    (`expected_revision`/`unique_key`) still rides along here exactly as
+    `_mutation_item` lets it, so `transact()`'s own single choke refuses
+    it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal
+    at this layer."""
+    _check_object_shape(raw, _DEFINITIONS["ScopedMutation"], label="cross-entity mutation operation")
+    item: dict[str, Any] = {"type": raw["operation"], "collection": raw["entity"]}
+    if "values" in raw:
+        item["values"] = raw["values"]
+    if "where" in raw:
+        item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
+    if "expected_revision" in raw:
+        item["expected_revision"] = raw["expected_revision"]
+    if "unique_key" in raw:
+        item["unique_key"] = raw["unique_key"]
+    if "destructive" in raw:
+        item["destructive"] = raw["destructive"]
+    if "confirmation" in raw:
+        item["confirm"] = raw["confirmation"]
+    return item
+
+
 @_endpoint
 async def post_cross_entity_mutate(request: Request) -> Response:
-    # `cross_entity_mutation: unavailable` (cell.py's own declaration,
-    # unchanged this WP) -- this endpoint exists only so the route itself
-    # resolves (distinctly from `POST /v1/data/{entity}/mutations`) and
-    # responds with the contract-defined failure shape, never a 404/405
-    # that would look like the endpoint does not exist at all. Authenticate
-    # first (same "authenticate first, then refuse" shape as every
-    # executing endpoint): an unauthenticated caller still gets AUTH_* first.
-    _authenticate(request)
-    raise CapabilityError("cross-entity atomic mutation is not available on this peer")
+    """P35 WP-2 (R-3/R-5): `cross_entity_mutation` is now `enabled`
+    (`cell.py::ApplicationRuntime.capabilities()`, same commit) -- this
+    endpoint dispatches for real instead of raising an unconditional
+    `CapabilityError`. `session.transact` is the SAME two-pass entry
+    point (`cell.py::ApplicationCell.transact`) the per-entity
+    `POST /v1/data/{entity}/mutations` endpoint already uses; the only
+    difference at this layer is where each operation's own `collection`
+    comes from (per-operation `entity`, via `_scoped_mutation_item`,
+    rather than one shared URL path segment).
+
+    `idempotency_key` is refused exactly like `post_mutate` does (P35-D3)
+    -- `ScopedMutationRequest` declares the same optional field, this
+    peer implements it nowhere. There is no `transaction` field on
+    `ScopedMutationRequest` at all (unlike `MutationRequest`) -- a
+    cross-entity batch has no `best_effort` mode to refuse here.
+
+    Response body is `{"committed", "affected"}` ONLY -- no
+    `assigned_addresses` (design M-6: this peer declares
+    `row_addressability`/`application_catalog` unavailable, so it has no
+    address-field vocabulary it could honestly attach to a response;
+    matches `post_mutate`'s own response shape exactly).
+    """
+    session = _authenticate(request)
+    body = await _read_json_object(request)
+    _check_object_shape(body, _SCHEMAS["ScopedMutationRequest"], label="ScopedMutationRequest")
+    if "idempotency_key" in body:
+        raise CapabilityError("idempotency_key is not supported by this peer")
+
+    operations = body.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise ValidationError("operations must be a non-empty array")
+    items = [_scoped_mutation_item(op) for op in operations]
+
+    results = session.transact(items)
+    affected = 0
+    for item, result in zip(items, results):
+        if item["type"] == "insert":
+            affected += 1
+        elif isinstance(result, dict):
+            affected += result.get("updated", result.get("deleted", 0))
+    return JSONResponse({"committed": True, "affected": affected}, status_code=200)
 
 
 @_endpoint

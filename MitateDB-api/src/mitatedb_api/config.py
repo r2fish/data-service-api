@@ -16,6 +16,16 @@ class FoundationConfig:
     """
 
     max_batch_items: int = 100
+    # P35 WP-2 (R-2, design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
+    # 130_V1.md §2): bounds the number of DISTINCT collection names
+    # `ApplicationCell.transact` may reference across one batch -- the
+    # same entity may repeat across multiple operations without counting
+    # twice (`batch_items` above already bounds total operation count,
+    # independently). Default 10 is the client-requested value (P35-D2,
+    # design §6) -- the contract's own non-normative reference profile
+    # (`limits.example_profile.batch_entities: 4`) is a different,
+    # unrelated number this deployment declaration does not have to match.
+    max_batch_entities: int = 10
     max_result_rows: int = 500
     max_fields: int = 64
     max_filter_terms: int = 32
@@ -54,6 +64,7 @@ class FoundationConfig:
         values = dict(os.environ if environ is None else environ)
         names = {
             "max_batch_items": "MITATEDB_MAX_BATCH_ITEMS",
+            "max_batch_entities": "MITATEDB_MAX_BATCH_ENTITIES",
             "max_result_rows": "MITATEDB_MAX_RESULT_ROWS",
             "max_fields": "MITATEDB_MAX_FIELDS",
             "max_filter_terms": "MITATEDB_MAX_FILTER_TERMS",

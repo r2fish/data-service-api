@@ -233,6 +233,20 @@ def test_unauthenticated_schema_invalid_body_is_auth_required_not_validation_fai
     assert response.json()["code"] == "AUTH_REQUIRED"
 
 
+def test_unauthenticated_cross_entity_shape_invalid_body_is_auth_required_not_validation_failed(app_a_stack):
+    """m-4 (independent review, WP-2 follow-up): the same auth-before-
+    shape-validation property the three tests above already pin for
+    `/v1/data/{entity}/query`/`/v1/schema/operations`, exercised for the
+    cross-entity endpoint too (newly real dispatch as of this WP) -- a
+    body that does not even satisfy `ScopedMutationRequest`'s own closed
+    shape (`{"bogus": 1}` has neither `operations` nor any recognized
+    key) must still surface `AUTH_REQUIRED`, not `VALIDATION_FAILED`, when
+    no credential is presented at all."""
+    response = _post(app_a_stack, "/v1/data/mutations", json_body={"bogus": 1})
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_REQUIRED"
+
+
 # ---------------------------------------------------------------------------
 # problem+json shape / request_id header.
 # ---------------------------------------------------------------------------
@@ -599,7 +613,9 @@ def test_nul_value_is_validation_failed(app_a_stack):
 @pytest.mark.parametrize(
     "method,path,body",
     [
-        ("POST", "/v1/data/mutations", {"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1}}]}),
+        # P35 WP-2: `/v1/data/mutations` (cross_entity_mutation) is no
+        # longer declared unavailable -- see the dedicated cross-entity
+        # mutation test section below for its own coverage.
         ("GET", "/v1/catalog", None),
         ("POST", "/v1/audit/query", {}),
     ],
@@ -648,10 +664,277 @@ def test_cross_entity_mutation_endpoint_route_resolves_distinctly(app_a_stack):
         json_body={"operations": [{"operation": "insert", "values": {"item_key": 1}}]},
     )
     # Resolves to post_mutate with entity="mutations" (which does not
-    # exist) -- NOT_FOUND, never CAPABILITY_UNSUPPORTED (the cross-entity
-    # endpoint's own uniform denial).
+    # exist) -- NOT_FOUND, never any response shape belonging to the real
+    # `/v1/data/mutations` cross-entity endpoint.
     assert response.status_code == 404
     assert response.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# P35 WP-2 (R-3/R-5): cross-entity mutation -- now `enabled`, real HTTP
+# dispatch through the same two-pass `ApplicationCell.transact` choke the
+# per-entity endpoint already uses.
+# ---------------------------------------------------------------------------
+
+
+def test_cross_entity_mutation_capability_is_declared_partial_with_batch_entities_limit(app_a_stack):
+    """M-1 (independent review, WP-2 follow-up): status is `"partial"`,
+    matching `atomic_mutation`'s own declared shape exactly."""
+    response = _get(app_a_stack, "/v1/capabilities", bearer=app_a_stack.runtime_bearer)
+    assert response.status_code == 200
+    document = response.json()
+    assert document["capabilities"]["cross_entity_mutation"] == {
+        "status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"],
+    }
+    assert document["limits"]["batch_entities"] == 10
+    assert document["limit_enforcement"]["batch_entities"] == "enforced"
+
+
+def test_cross_entity_mutation_commits_across_two_real_entities(app_a_stack):
+    entity_x = "http_cross_entity_x"
+    entity_y = "http_cross_entity_y"
+    _create_entity(app_a_stack, entity_x, fields=["label"])
+    _create_entity(app_a_stack, entity_y, fields=["label"])
+
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "insert", "entity": entity_x, "values": {"label": "x-row"}},
+            {"operation": "insert", "entity": entity_y, "values": {"label": "y-row"}},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"committed": True, "affected": 2}
+    # No `assigned_addresses` key at all (design M-6) -- not merely empty.
+    assert "assigned_addresses" not in response.json()
+
+    x_rows = _post(app_a_stack, f"/v1/data/{entity_x}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    y_rows = _post(app_a_stack, f"/v1/data/{entity_y}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert [r["label"] for r in x_rows.json()["items"]] == ["x-row"]
+    assert [r["label"] for r in y_rows.json()["items"]] == ["y-row"]
+
+
+def test_cross_entity_mutation_rolls_back_both_entities_when_a_later_operation_is_invalid(app_a_stack):
+    entity_x = "http_cross_entity_rollback_x"
+    entity_y = "http_cross_entity_rollback_y"
+    _create_entity(app_a_stack, entity_x, fields=["label"])
+    _create_entity(app_a_stack, entity_y, fields=["label"])
+
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "insert", "entity": entity_x, "values": {"label": "should-not-persist"}},
+            {"operation": "update", "entity": entity_y, "values": {"label": "y"}},  # missing required `where`
+        ]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+    x_rows = _post(app_a_stack, f"/v1/data/{entity_x}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    y_rows = _post(app_a_stack, f"/v1/data/{entity_y}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert x_rows.json()["items"] == []
+    assert y_rows.json()["items"] == []
+
+
+def test_cross_entity_mutation_request_shape_rejects_unknown_top_level_field(app_a_stack):
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1}}],
+                   "bogus_field": True},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+def test_cross_entity_mutation_operation_shape_rejects_unknown_field(app_a_stack):
+    """`ScopedMutation` (`additionalProperties: false`) closes each
+    operation's own shape too -- an unrecognized per-operation key is a
+    shape defect, not merely an unread capability-shaped key (that
+    distinction belongs to keys `ScopedMutation` DOES declare, like
+    `expected_revision`, refused instead with `CAPABILITY_UNSUPPORTED`
+    -- see the neighboring `expected_revision` test below)."""
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1},
+                                    "not_a_real_field": True}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+@pytest.mark.parametrize("bad_entity", [["shared_items"], {"name": "shared_items"}])
+def test_cross_entity_mutation_non_string_entity_is_validation_failed_not_service_unavailable(app_a_stack, bad_entity):
+    """B-1 (independent review, WP-2 follow-up): `ScopedMutation.entity`
+    is a wire-typed string field, but `_check_object_shape` only checks
+    the KEY SET, not each value's own type -- a well-formed key carrying
+    a non-string value (a JSON array or object where the contract expects
+    a string) must still be classified `VALIDATION_FAILED`, not escape as
+    an unclassified `SERVICE_UNAVAILABLE`. Pre-fix, `ApplicationCell.
+    _distinct_batch_entities` added this raw value straight into a `set`
+    before `_plan_operation` ever got a chance to classify it -- an
+    unhashable list/dict raised a bare `TypeError` that reached this
+    endpoint's own generic `except Exception` fallback as a 503."""
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "entity": bad_entity, "values": {"item_key": 1}}]},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+def test_cross_entity_mutation_idempotency_key_is_capability_unsupported(app_a_stack):
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1}}],
+                   "idempotency_key": "abc123"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+def test_cross_entity_mutation_upsert_is_capability_unsupported(app_a_stack):
+    entity = "http_cross_entity_upsert_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "upsert", "entity": entity, "values": {"label": "x"}}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+def test_cross_entity_mutation_expected_revision_is_capability_unsupported(app_a_stack):
+    """Same "unread capability-shaped key" refusal `post_mutate` already
+    gives `expected_revision` (`_TRANSACT_INSERT_KEYS` in `cell.py`),
+    exercised through the cross-entity endpoint too."""
+    entity = "http_cross_entity_expected_revision_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "entity": entity, "values": {"label": "x"},
+                                    "expected_revision": "deadbeef"}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+def test_cross_entity_mutation_requires_authentication(app_a_stack):
+    response = _post(
+        app_a_stack, "/v1/data/mutations",
+        json_body={"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1}}]},
+    )
+    assert response.status_code == 401
+    assert response.json()["code"] == "AUTH_REQUIRED"
+
+
+def test_cross_entity_mutation_batch_entities_boundary(app_a_stack):
+    """The declared default (`batch_entities: 10`, pinned above) is
+    enforced for real over real HTTP: 10 distinct entities in one batch
+    commit; an 11th distinct entity in the same batch is refused with
+    `LIMIT_EXCEEDED`/`limit_class=batch_entities`, and nothing from that
+    batch persists."""
+    # Short entity names deliberately: this fixture's own request_bytes_
+    # limit (1024) is an unrelated byte bound this test must stay well
+    # clear of, so the 413 asserted below is unambiguously batch_entities.
+    entities = [f"cxb{i}" for i in range(11)]
+    for entity in entities:
+        _create_entity(app_a_stack, entity, fields=["label"])
+
+    ok_ops = [{"operation": "insert", "entity": e, "values": {"label": "x"}} for e in entities[:10]]
+    response = _post(app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer, json_body={"operations": ok_ops})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 10
+
+    over_ops = [{"operation": "insert", "entity": e, "values": {"label": "y"}} for e in entities]  # 11 distinct
+    response = _post(app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer, json_body={"operations": over_ops})
+    assert response.status_code == 413
+    body = response.json()
+    assert body["code"] == "LIMIT_EXCEEDED"
+    assert body["details"]["limit_class"] == "batch_entities"
+    # The over-limit batch must not have inserted a second "y" row into
+    # any of the 10 entities that would otherwise have accepted it.
+    check = _post(app_a_stack, f"/v1/data/{entities[0]}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert [r["label"] for r in check.json()["items"]] == ["x"]
+
+
+def test_cross_entity_mutation_batch_entities_ignores_repeated_entity(app_a_stack):
+    """The SAME entity repeated across many operations counts once
+    toward `batch_entities`, regardless of how many operations touch it
+    (contract `endpoints.cross_entity_mutate.semantics`) -- bounded only
+    by `batch_items`, independently."""
+    # Kept small (not 20+) so the serialized body stays comfortably under
+    # this fixture's own `request_bytes_limit=1024` -- an unrelated byte
+    # bound this test does not exist to exercise.
+    entity = "http_cross_entity_repeat_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    ops = [{"operation": "insert", "entity": entity, "values": {"label": f"r{i}"}} for i in range(6)]
+    response = _post(app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer, json_body={"operations": ops})
+    assert response.status_code == 200, response.text
+    assert response.json()["affected"] == 6
+
+
+def test_cross_entity_mutation_delete_declare_and_echo_per_entity_wrong_entity_phrase_refused(app_a_stack):
+    """Each `ScopedMutation` delete builds its OWN confirmation phrase,
+    fingerprinted to its own entity name -- a phrase probed for entity A
+    must be refused when echoed back against entity B's delete, even
+    within the SAME cross-entity batch."""
+    entity_a = "http_cross_entity_delete_a"
+    entity_b = "http_cross_entity_delete_b"
+    _create_entity(app_a_stack, entity_a, fields=["label"])
+    _create_entity(app_a_stack, entity_b, fields=["label"])
+    for entity in (entity_a, entity_b):
+        response = _post(
+            app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+            json_body={"operations": [{"operation": "insert", "values": {"label": "keep-me"}}]},
+        )
+        assert response.status_code == 200, response.text
+
+    probe_a = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "delete", "entity": entity_a, "where": [{"field": "label", "operator": "eq", "value": "keep-me"}]},
+        ]},
+    )
+    assert probe_a.status_code == 409
+    phrase_a = probe_a.json()["details"]["required_confirmation"]
+    assert entity_a in phrase_a and entity_b not in phrase_a
+
+    # Using entity A's own valid phrase to confirm entity B's delete must
+    # be refused -- the fingerprint is entity-specific.
+    wrong_entity = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "delete", "entity": entity_b,
+             "where": [{"field": "label", "operator": "eq", "value": "keep-me"}],
+             "destructive": True, "confirmation": phrase_a},
+        ]},
+    )
+    assert wrong_entity.status_code == 409
+    assert wrong_entity.json()["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+
+    # The correct, matching phrase for entity B works.
+    probe_b = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "delete", "entity": entity_b, "where": [{"field": "label", "operator": "eq", "value": "keep-me"}]},
+        ]},
+    )
+    phrase_b = probe_b.json()["details"]["required_confirmation"]
+    assert phrase_b != phrase_a
+
+    committed = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "delete", "entity": entity_a,
+             "where": [{"field": "label", "operator": "eq", "value": "keep-me"}],
+             "destructive": True, "confirmation": phrase_a},
+            {"operation": "delete", "entity": entity_b,
+             "where": [{"field": "label", "operator": "eq", "value": "keep-me"}],
+             "destructive": True, "confirmation": phrase_b},
+        ]},
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json() == {"committed": True, "affected": 2}
 
 
 # ---------------------------------------------------------------------------

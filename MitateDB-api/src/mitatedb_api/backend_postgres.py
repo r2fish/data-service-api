@@ -194,6 +194,31 @@ def _validate_value_domain(value, domain=None):
         raise ValidationError(
             "value contains an embedded NUL character, which PostgreSQL text storage cannot represent"
         )
+    # Independent review B-2(ii) (WP-2 follow-up, same precedent as the
+    # NUL check immediately above): a Python `str` may contain a LONE
+    # UTF-16 surrogate code point (U+D800-U+DFFF) that is not part of a
+    # valid surrogate pair -- CPython's own `str` type allows constructing
+    # one (a literal `"\ud800"`, `surrogateescape`-decoded bytes, ...)
+    # even though no real Unicode text ever legitimately contains one.
+    # Measured directly (WP-2 review): binding such a value as a psycopg
+    # parameter raises a raw `UnicodeEncodeError` at the driver's own
+    # UTF-8 encoding step -- neither a `psycopg.Error` subclass NOR any
+    # `errors.FoundationError` this module's own layer (ii) backstop
+    # (`except psycopg.Error`, this module's per-DML-method final clause)
+    # ever catches, since the encoding happens before psycopg even issues
+    # a wire message PostgreSQL could reject. Rejected here, deterministically,
+    # at validation time -- the same treatment the embedded-NUL case
+    # above already gets, and for the identical reason (`cell.
+    # ApplicationCell._normalize_value` already turned any dict/list
+    # value into JSON text via `json.dumps`, which always escapes a lone
+    # surrogate as the 6-character `\ud800`-style sequence in its OWN
+    # output text, never a raw surrogate code point -- so only a value
+    # that is ALREADY a plain `str` at this point can carry one through
+    # to a bind parameter, exactly as for NUL).
+    if isinstance(value, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+        raise ValidationError(
+            "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8"
+        )
     # See this module's own `_TYPES` comment: `boolean` fields are
     # physically `INTEGER` columns on this backend (as on SQLite's),
     # so a Python `bool` is converted here too -- keeping both

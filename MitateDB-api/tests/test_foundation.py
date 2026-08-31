@@ -362,6 +362,296 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(result, [{"deleted": 1}])
         self.assertEqual(self.runtime.read("widgets"), [])
 
+    # --- P35 WP-2 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
+    # 130_V1.md §2): two-pass transact + batch_entities + cross-entity
+    # atomicity. ---------------------------------------------------------
+
+    def test_transact_two_pass_structure_zero_backend_calls_when_a_later_operation_fails_validation(self):
+        """P35-D10 (structural, white-box): a batch whose FIRST operation
+        is individually valid must never reach the backend at all -- not
+        `begin()`, not `insert_in_transaction()` -- when a LATER operation
+        in the same batch fails VALIDATION. This is not observable
+        black-box (the net effect, "nothing persists", is identical either
+        way); it is pinned here by wrapping the real SQLite backend's own
+        methods and counting calls directly."""
+        self.dev.create_collection("two_pass_probe", {"title": "text"})
+        cell = self.control.cells["app_a"]
+        backend = cell._backend
+        calls = {"begin": 0, "insert_in_transaction": 0}
+        real_begin = backend.begin
+        real_insert = backend.insert_in_transaction
+
+        def counting_begin():
+            calls["begin"] += 1
+            return real_begin()
+
+        def counting_insert(collection, fields, params):
+            calls["insert_in_transaction"] += 1
+            return real_insert(collection, fields, params)
+
+        backend.begin = counting_begin
+        backend.insert_in_transaction = counting_insert
+        try:
+            with self.assertRaises(ValidationError):
+                self.runtime.transact([
+                    {"type": "insert", "collection": "two_pass_probe", "values": {"title": "would-have-executed"}},
+                    {"type": "unsupported", "collection": "two_pass_probe", "values": {"title": "invalid"}},
+                ])
+        finally:
+            backend.begin = real_begin
+            backend.insert_in_transaction = real_insert
+        self.assertEqual(calls["begin"], 0, "the backend transaction must never open when pass 1 fails")
+        self.assertEqual(calls["insert_in_transaction"], 0, "an earlier, individually-valid op's DML must never reach the backend")
+        self.assertEqual(self.runtime.read("two_pass_probe"), [])
+
+    def test_transact_error_priority_validation_error_wins_over_an_earlier_execution_time_failure(self):
+        """P35-D9: in a batch mixing an operation that would fail at
+        BACKEND EXECUTION time with a LATER operation that fails
+        VALIDATION, the returned error is now the validation error --
+        pass 1 validates the whole batch (including the later,
+        validation-failing operation) before pass 2 ever executes
+        anything, so the earlier operation's own execution-time failure
+        is never even reached.
+
+        M-2 correction (independent review, WP-2 follow-up): the earlier
+        claim here ("no naturally-reachable execution-time failure") was
+        false -- the one known natural execution-time failure (a lone
+        UTF-16 surrogate code point in a value, escaping as a raw
+        `UnicodeEncodeError` on both backends) was reclassified to
+        deterministic validation-time rejection by WP-2 review B-2; the
+        synthesized `ConflictError` below remains the exercise vehicle
+        for this test's own subject (error-type priority), now the only
+        way to exercise an execution-time failure at all on either
+        backend."""
+        self.dev.create_collection("priority_probe", {"title": "text"})
+        cell = self.control.cells["app_a"]
+        backend = cell._backend
+        real_insert = backend.insert_in_transaction
+
+        def failing_insert(collection, fields, params):
+            raise ConflictError("synthetic execution-time failure")
+
+        backend.insert_in_transaction = failing_insert
+        try:
+            with self.assertRaises(ValidationError):
+                self.runtime.transact([
+                    {"type": "insert", "collection": "priority_probe", "values": {"title": "would-fail-at-execution"}},
+                    {"type": "unsupported", "collection": "priority_probe", "values": {"title": "invalid"}},
+                ])
+        finally:
+            backend.insert_in_transaction = real_insert
+        self.assertEqual(self.runtime.read("priority_probe"), [])
+
+    def test_transact_cross_entity_atomic_commit_across_two_entities(self):
+        self.dev.create_collection("cross_a", {"title": "text"})
+        self.dev.create_collection("cross_b", {"title": "text"})
+        results = self.runtime.transact([
+            {"type": "insert", "collection": "cross_a", "values": {"title": "a-row"}},
+            {"type": "insert", "collection": "cross_b", "values": {"title": "b-row"}},
+        ])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.runtime.read("cross_a")[0]["title"], "a-row")
+        self.assertEqual(self.runtime.read("cross_b")[0]["title"], "b-row")
+
+    def test_transact_cross_entity_rollback_when_later_entity_operation_is_invalid(self):
+        self.dev.create_collection("cross_c", {"title": "text"})
+        self.dev.create_collection("cross_d", {"title": "text"})
+        with self.assertRaises(ValidationError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "cross_c", "values": {"title": "should-not-persist"}},
+                # `filters` omitted -- a shape defect for `update`.
+                {"type": "update", "collection": "cross_d", "values": {"title": "x"}},
+            ])
+        self.assertEqual(self.runtime.read("cross_c"), [])
+        self.assertEqual(self.runtime.read("cross_d"), [])
+
+    def test_transact_batch_entities_boundary_and_distinct_count_ignores_repeats(self):
+        """P35-D2: `batch_entities` bounds DISTINCT collection names, not
+        operation count -- a cheap config override (`max_batch_entities=2`)
+        exercises both directions: 2 distinct entities in one batch is
+        fine; a 3rd distinct entity in the same batch is refused; and many
+        operations against a SINGLE entity never trips the bound at all,
+        no matter how many operations share it."""
+        config = FoundationConfig(max_batch_entities=2)
+        control = ControlPlane("synthetic-test-pepper-0123456789", config)
+        control.provision_application("entities_bound")
+        dev_id, dev_secret = control.issue_credential("entities_bound", Role.DEVELOPER)
+        runtime_id, runtime_secret = control.issue_credential("entities_bound", Role.RUNTIME)
+        dev = MitateDataService(control).open_session(dev_id, dev_secret)
+        runtime = MitateDataService(control).open_session(runtime_id, runtime_secret)
+        for name in ("ent_one", "ent_two", "ent_three"):
+            dev.create_collection(name, {"title": "text"})
+
+        # 2 distinct entities: at the declared bound, succeeds.
+        result = runtime.transact([
+            {"type": "insert", "collection": "ent_one", "values": {"title": "1"}},
+            {"type": "insert", "collection": "ent_two", "values": {"title": "1"}},
+        ])
+        self.assertEqual(len(result), 2)
+
+        # 3 distinct entities: over the declared bound, refused.
+        with self.assertRaises(ResourceLimitError) as ctx:
+            runtime.transact([
+                {"type": "insert", "collection": "ent_one", "values": {"title": "2"}},
+                {"type": "insert", "collection": "ent_two", "values": {"title": "2"}},
+                {"type": "insert", "collection": "ent_three", "values": {"title": "1"}},
+            ])
+        self.assertEqual(ctx.exception.details, {"limit_class": "batch_entities"})
+        # Nothing from the refused batch persisted (all-or-nothing, same
+        # as any other transact() failure).
+        self.assertEqual(len(runtime.read("ent_one")), 1)
+        self.assertEqual(len(runtime.read("ent_two")), 1)
+        self.assertEqual(runtime.read("ent_three"), [])
+
+        # Many operations against a SINGLE entity: distinct count is 1,
+        # never trips the batch_entities=2 bound regardless of how many
+        # operations share that one entity (bounded only by batch_items,
+        # independently, contract endpoints.cross_entity_mutate.semantics).
+        many_same_entity = [{"type": "insert", "collection": "ent_one", "values": {"title": f"r{i}"}} for i in range(10)]
+        result = runtime.transact(many_same_entity)
+        self.assertEqual(len(result), 10)
+
+    def test_transact_batch_entities_default_boundary_is_ten(self):
+        """The DECLARED default (`FoundationConfig.max_batch_entities ==
+        10`, unmodified config) is the one actually enforced: exactly 10
+        distinct entities in one batch succeeds; an 11th distinct entity
+        in the same batch is refused."""
+        self.assertEqual(self.runtime.capabilities()["limits"]["batch_entities"], 10)
+        names = [f"default_bound_{i}" for i in range(11)]
+        for name in names:
+            self.dev.create_collection(name, {"title": "text"})
+
+        ok_ops = [{"type": "insert", "collection": n, "values": {"title": "x"}} for n in names[:10]]
+        result = self.runtime.transact(ok_ops)
+        self.assertEqual(len(result), 10)
+
+        over_ops = [{"type": "insert", "collection": n, "values": {"title": "y"}} for n in names]  # 11 distinct
+        with self.assertRaises(ResourceLimitError) as ctx:
+            self.runtime.transact(over_ops)
+        self.assertEqual(ctx.exception.details, {"limit_class": "batch_entities"})
+        # The over-limit batch must not have added a second row anywhere.
+        self.assertEqual(len(self.runtime.read(names[0])), 1)
+
+    def test_transact_cross_entity_delete_wrong_entity_phrase_is_refused(self):
+        """Each batch-embedded delete's own confirmation phrase is
+        fingerprinted to ITS OWN collection name (`_delete_confirmation_
+        phrase`) -- a phrase probed against one entity must be refused
+        when echoed back for a DIFFERENT entity's delete, even within the
+        same cross-entity batch."""
+        self.dev.create_collection("phrase_a", {"title": "text"})
+        self.dev.create_collection("phrase_b", {"title": "text"})
+        self.runtime.insert("phrase_a", {"title": "keep-me"})
+        self.runtime.insert("phrase_b", {"title": "keep-me"})
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx_a:
+            self.runtime.transact([
+                {"type": "delete", "collection": "phrase_a", "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase_a = ctx_a.exception.details["required_confirmation"]
+        self.assertIn("phrase_a", phrase_a)
+
+        with self.assertRaises(DestructiveConfirmationRequired):
+            self.runtime.transact([
+                {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
+                 "destructive": True, "confirm": phrase_a},
+            ])
+        self.assertEqual(self.runtime.read("phrase_a")[0]["title"], "keep-me")
+        self.assertEqual(self.runtime.read("phrase_b")[0]["title"], "keep-me")
+
+        with self.assertRaises(DestructiveConfirmationRequired) as ctx_b:
+            self.runtime.transact([
+                {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase_b = ctx_b.exception.details["required_confirmation"]
+        self.assertNotEqual(phrase_a, phrase_b)
+
+        result = self.runtime.transact([
+            {"type": "delete", "collection": "phrase_a", "filters": [Filter("title", "eq", "keep-me")],
+             "destructive": True, "confirm": phrase_a},
+            {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
+             "destructive": True, "confirm": phrase_b},
+        ])
+        self.assertEqual(result, [{"deleted": 1}, {"deleted": 1}])
+        self.assertEqual(self.runtime.read("phrase_a"), [])
+        self.assertEqual(self.runtime.read("phrase_b"), [])
+
+    def test_transact_lone_surrogate_value_is_deterministic_validation_failure_and_earlier_entity_unchanged(self):
+        """B-2 (independent review, WP-2 follow-up -- the atomicity hole,
+        largest safety fix of that review): a lone UTF-16 surrogate code
+        point in a LATER operation's own value (`"\\ud800"`) must be
+        rejected deterministically at VALIDATION time (pass 1,
+        `encode_value`, B-2(ii)) -- not escape as a raw
+        `UnicodeEncodeError` during pass 2 execution, which pre-fix left
+        the EARLIER, individually-valid operation's own write sitting
+        uncommitted-but-visible (B-2(i)'s own atomicity hole). Both
+        entities must be left completely unchanged."""
+        self.dev.create_collection("surrogate_a", {"title": "text"})
+        self.dev.create_collection("surrogate_b", {"title": "text"})
+        with self.assertRaises(ValidationError):
+            self.runtime.transact([
+                {"type": "insert", "collection": "surrogate_a", "values": {"title": "should-not-persist"}},
+                {"type": "insert", "collection": "surrogate_b", "values": {"title": "\ud800"}},
+            ])
+        self.assertEqual(self.runtime.read("surrogate_a"), [])
+        self.assertEqual(self.runtime.read("surrogate_b"), [])
+
+    def test_transact_rollback_is_unconditional_for_a_non_foundation_error_raised_mid_pass_2(self):
+        """B-2(i) (independent review, WP-2 follow-up): structural pin of
+        the actual fix itself, independent of B-2(ii)'s currently-known
+        trigger -- ANY exception raised mid pass-2 execution (here, a
+        synthesized `RuntimeError` from a wrapped `insert_in_transaction`,
+        standing in for any future unclassified backend failure) must
+        still trigger `self._backend.rollback()` exactly once before
+        propagating, and must leave no partial effect from any EARLIER,
+        individually-valid operation in the same batch."""
+        self.dev.create_collection("rollback_a", {"title": "text"})
+        self.dev.create_collection("rollback_b", {"title": "text"})
+        cell = self.control.cells["app_a"]
+        backend = cell._backend
+        rollback_calls = {"count": 0}
+        real_rollback = backend.rollback
+        real_insert = backend.insert_in_transaction
+        call_index = {"n": 0}
+
+        def counting_rollback():
+            rollback_calls["count"] += 1
+            return real_rollback()
+
+        def failing_second_insert(collection, fields, params):
+            call_index["n"] += 1
+            if call_index["n"] == 2:
+                raise RuntimeError("synthetic non-FoundationError failure")
+            return real_insert(collection, fields, params)
+
+        backend.rollback = counting_rollback
+        backend.insert_in_transaction = failing_second_insert
+        try:
+            with self.assertRaises(RuntimeError):
+                self.runtime.transact([
+                    {"type": "insert", "collection": "rollback_a", "values": {"title": "should-not-persist"}},
+                    {"type": "insert", "collection": "rollback_b", "values": {"title": "would-fail-mid-execution"}},
+                ])
+        finally:
+            backend.rollback = real_rollback
+            backend.insert_in_transaction = real_insert
+        self.assertEqual(rollback_calls["count"], 1, "rollback must fire exactly once for the non-FoundationError failure")
+        self.assertEqual(self.runtime.read("rollback_a"), [])
+        self.assertEqual(self.runtime.read("rollback_b"), [])
+
+    def test_cross_entity_mutation_is_declared_partial(self):
+        """R-5 / M-1 (independent review, WP-2 follow-up): the declaration
+        flip -- `cross_entity_mutation` mirrors `atomic_mutation`'s own
+        declared shape exactly, `status` included (same `operations`
+        vocabulary AND the same `unsupported: ["upsert"]` truthful
+        refusal, so the same `"partial"` status), no longer `unavailable`
+        (§0's own "偽宣言" finding). `"enabled"` was the WP-2 review's own
+        blocker-adjacent M-1 finding -- a self-contradiction against this
+        peer's own declaration convention for the identical situation."""
+        declared = self.runtime.capabilities()["capabilities"]["cross_entity_mutation"]
+        self.assertEqual(declared, {
+            "status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"],
+        })
+
     def test_disable_revoke_and_unavailable_state_fail_closed(self):
         self.dev.create_collection("notes", {"title": "text"})
         self.runtime.insert("notes", {"title": "before-revoke"})
