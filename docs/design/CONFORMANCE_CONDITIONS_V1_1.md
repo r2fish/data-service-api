@@ -21,7 +21,7 @@
 | C-13 | credential の失効は終端である: revoke 後、peer のいかなる制御面も当該 credential を再有効化できず、authenticate は拒否され続ける | SI-13 | executable (3 adapters) |
 | C-14 | control 面の権限境界: application credential は全 control endpoint に fail-closed、control credential は data/schema endpoint で拒否、`role=control` の in-band 発行要求は `CAPABILITY_UNSUPPORTED` (案B) | SI-00, SI-02, SI-03 | not yet executable (control 面の実装が両 peer に無い。実装時に executable 化する) |
 | C-15 | bootstrap / reset のライフサイクル条項: 既存 control credential がある間 bootstrap は再実行不能、reset は既存 control credential を全失効、初回 credential は非恒久 | SI-13, SI-14 | not yet executable (同上) |
-| C-16 | entity をまたぐ atomicity: 単一リクエスト単位、全 entity の検証が実行に先行、`batch_entities` の有限境界 | SI-08, SI-11 | not yet executable (cross_entity_mutation が両 peer で unavailable)。ただし「per-entity endpoint が body の `entity` を拒否する」は本作業で C-01 の tamper vector として実効化する (下記 §4) |
+| C-16 | entity をまたぐ atomicity: 単一リクエスト単位、全 entity の検証が実行に先行、`batch_entities` の有限境界 | SI-08, SI-11 | not yet executable (cross_entity_mutation が両 peer で unavailable)。ただし「per-entity endpoint が body の `entity` を拒否する」は本作業で C-01 の tamper vector として実効化する (下記 §4)。**RESOLVED — 追記 (2026-08-31、フェーズ3.5 WP-3、house style — 原文は上記のまま保持)**: executable (4 adapters) へ移行済み。`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §3 (port v1.7、`test_c16_cross_entity_atomicity.py` 新設) で MitateDB 側の `cross_entity_mutation` が `partial` として実体化されたことに伴い、C-16 は MitateDB 2 adapter が PROVIDED 分岐 (V1〜V4)、r2db 2 adapter が ABSENT 分岐 (V5) を走る4 adapter executable 条件となった。詳細は `conformance-tests/CONDITIONS.md` の C-16 行を参照 |
 
 ## 2. port の改訂 (CONFORMANCE_ADAPTER_V1 の coordinated design revision)
 

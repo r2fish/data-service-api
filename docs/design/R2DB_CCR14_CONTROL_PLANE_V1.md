@@ -363,7 +363,7 @@ WP-3 (`ControlPlaneService` — §2 の操作カタログ + must_rotate ゲー�
 
 ### 12.4 台帳追加 (契約 additive 候補、§6 に接続)
 
-- **audit.fields への対象識別子 (target_id) の追加** (12.2 MI-6/MI-11): credential lifecycle イベントが対象 credential を識別できず、R-11 playbook の窓中差分列挙が audit 行だけでは完結しない。`ops.py` の既存イベントも同一のギャップ (WP-3 の退行ではない)
+- **audit.fields への対象識別子 (target_id) の追加** (12.2 MI-6/MI-11): credential lifecycle イベントが対象 credential を識別できず、R-11 playbook の窓中差分列挙が audit 行だけでは完結しない。`ops.py` の既存イベントも同一のギャップ (WP-3 の退行ではない)。**SHIPPED — §14.4 の追記を参照** (フェーズ3.5 WP-1/WP-4、`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §1-C/§4)
 
 ### 12.5 WP-4/WP-5 への申し送り (レビューの予見を含む)
 
@@ -427,6 +427,7 @@ WP-5 (申告 flip — 単一コミット) を実装した。実装: Sonnet、独
 - **L2— 修正済み (`ae815ee`、per-prefix advisory lock)**: `_sweep_stale_artifacts` の liveness ガード欠如 (別プロセスの pytest `--collect-only` を含む実行中 run の role/DB 破壊) は、本 WP-6 着手前に独立コミット `ae815ee` で修正済み。per-prefix の advisory lock により、他プロセスが同一 prefix を扱っている間のスイープを排他する形で対処した (§14.4 が「次コミットで修正」と記していた課題はクローズ)
 - **L3 — WP-6 で検討し、継続と判断**: 特権 setup 専用の control stack 分離 (周期再構築の決定性改善)。WP-5 で導入した「特権経路の service 周期再構築」(§14.2-4) は conformance adapter 内部の対症療法であり、専用スタックへの分離はテストの決定性を高める改善ではあるが、配備安全性には影響しない (本番の control-plane プロセスは conformance adapter のような周期再構築を必要としない — session-scoped adapter 固有の事情)。優先度は低いまま台帳に残す
 - **L4 — D-2 のとおり、WP-6 では実施しない**: `request_bytes` の control discovery 宣言 (§13.3 で識別されたギャップ — enforce はされているが `GET /control/v1/capabilities` が当該クラスを公開していない)。宣言面の変更は公開 API の申告に触れるため、conformance 証拠を伴うコード WP (Q-1 バッチ、契約 1.2.0 検討時) に載せる。docs WP である WP-6 の対象外 (監督決定 D-2、依頼者への申し送り)
+  > **RESOLVED — 追記 (2026-08-31、フェーズ3.5 WP-4、house style — 原文は上記のまま保持)**: `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §4「L4」が引き取り、出荷した。`ControlPlaneLimits.request_bytes` を単一ソース化 (`control_http` の `_BYTE_BOUND_LIMITS` が同一フィールドを読む)、service 層既定 `unavailable` / HTTP mount 側 `enforced` の二層宣言 (MitateDB と対称形)。`r2db-api/tests/test_control_http.py`・`test_control_plane_service.py` のローカル完全一致固定 2 箇所を同一コミット更新 (レビュー M-2)。`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(d) にも同種の追記あり。
 - 405 が code NOT_FOUND を運ぶ点の adapter classify 確認は未実施 (実経路に現れないため影響なし — レビュー NIT-6)
 
 **契約 additive 候補束 (Q-1 — 契約 1.2.0 検討時にまとめて判断)**: 個別に台帳へ散っていた4件を、Q-1 (破壊的確認の実効化) と同じ独立作業単位で一括検討する候補としてここに集約する。いずれも本フェーズのコード/契約には入れず、実装は現状のまま:
@@ -437,6 +438,8 @@ WP-5 (申告 flip — 単一コミット) を実装した。実装: Sonnet、独
 4. **`CredentialsResult` への `must_rotate` 露出** (§2、§8 m-9): 運用者が儀式未完遂の credential を in-band で見分けたくなった場合の additive フィールド
 
 これら4件は互いに独立でよいが、Q-1 の契約 1.2.0 検討と同じタイミングでまとめて依頼者に諮ることで、契約バージョンの分散 (小さな additive 変更を都度別バージョンで出す) を避ける
+
+> **SHIPPED — 追記 (2026-08-31、フェーズ3.5、house style — 原文は上記のまま保持)**: 依頼者直接承認 (2026-08-31) によりフェーズ3.5として着手し、4件とも契約 1.3.0 (WP-1) へ additive 一括収載のうえ、r2db 側は WP-4 で実装出荷した (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §1/§4)。(1) `target_id` — `audit.fields` 13番目のフィールドとして追加、全 emission 箇所で対象 credential/application の id を設定、`_CONTROL_AUDIT_COLUMNS` も同時更新。(2) `audit` role による読み取り — `control_capabilities`/`list_applications`/`list_credentials` の3 endpoint のみ許可、他8件は `FORBIDDEN` fail-closed + 耐久監査。発行は帯域外儀式限定のまま (in-band 化はしない、従属判断1 不変)。(3) per-application 発行凍結 — `issuance_frozen` 列 (in-place)、CLI 限定トグル、凍結時 `FORBIDDEN`。(4) `must_rotate` 露出 — `list_credentials` の control 行に実値を追加。詳細な制御/証跡は `security/CONTROL_MAPPING.md` の SI-02/SI-06/SI-07/SI-10/SI-15 各行を参照。
 
 ## 15. WP-6 実装記録 (2026-08-29、v1.9)
 
