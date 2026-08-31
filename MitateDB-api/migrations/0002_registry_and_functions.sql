@@ -18,7 +18,8 @@
 --                        | application-plane process role (`authenticate`)
 --   control_credentials | control credential digest/must_rotate/state;
 --                        | write+read: control-plane process role only
---   control_audit       | contract `audit.fields`' 12 columns + a server-
+--   control_audit       | contract `audit.fields`' columns (13 as of Phase
+--                        | 3.5 WP-5, `target_id` added) + a server-
 --                        | assigned `recorded_at` + a monotonic `audit_seq`
 --                        | (independent review M-1: a stable, gap-free
 --                        | ordering column C-15's own prefix-strict
@@ -86,6 +87,19 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
 CREATE SCHEMA IF NOT EXISTS mitatedb_registry AUTHORIZATION mitatedbsvc_provision;
 
+-- Phase 3.5 WP-5, 2026-08-31 (design docs/design/
+-- PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-E, P35-D6): `issuance_
+-- frozen` -- per-application credential-issuance freeze, an out-of-band
+-- (CLI-only) operation (`ops.py freeze-issuance`/`unfreeze-issuance`). Added
+-- here, in place, following this migration set's own established precedent
+-- for a column addition with no deployed instance to migrate (`control_
+-- credentials.revoked`/`.must_rotate`, phase 3 WP-4; `security/CONTROL_
+-- MAPPING.md`'s own "Cloud SQL 実機 evidence は配備時まで absent"
+-- disclosure still holds). `issue_credential` refuses with `FORBIDDEN` when
+-- the target application's row has this set (`ControlPlaneService.issue_
+-- credential`), evaluated after the `role=control` capability refusal but
+-- before the `credentials_per_application` limit check (contract `issue_
+-- credential.semantics`'s own precedence sentence).
 CREATE TABLE IF NOT EXISTS mitatedb_registry.applications (
     application_id  text PRIMARY KEY CHECK (application_id ~ '^[a-z][a-z0-9_]{0,32}$'),
     enabled         boolean NOT NULL DEFAULT TRUE,
@@ -95,7 +109,8 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.applications (
     runtime_role    text UNIQUE,
     developer_role  text UNIQUE,
     registered_at   timestamptz NOT NULL DEFAULT now(),
-    provisioned_at  timestamptz
+    provisioned_at  timestamptz,
+    issuance_frozen boolean NOT NULL DEFAULT FALSE
 );
 
 -- WP-2 (design v1.2 R-4/§3, credential store persistence): `enabled` and
@@ -138,12 +153,26 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.credentials (
 -- immediately above: nothing in this migration set or in `control_
 -- credential_store_postgres.py` ever sets this back to `FALSE` (no
 -- un-revoke SQL statement exists anywhere in this repository).
+-- Phase 3.5 WP-5, 2026-08-31 (design docs/design/
+-- PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-D, P35-D12): `role` --
+-- in-place addition (same "no deployed instance" precedent this table's own
+-- `revoked`/`must_rotate` columns already used). `'control'` (the only
+-- value this table held before this WP) and `'audit'` (Phase 3.5's new
+-- read-only-role principal, contract `security.roles`/`control_plane.
+-- authority`) share this one table -- neither kind is an application
+-- credential (`credentials` above stays completely separate, `role IN
+-- ('runtime', 'developer')`), and issuance for BOTH control-table roles
+-- stays out-of-band only (contract `control_plane.issuance`: "Audit
+-- credentials, like control credentials, are issued only via the
+-- out-of-band ceremony" -- no `CredentialIssueRequest` enum change,
+-- P35-D12).
 CREATE TABLE IF NOT EXISTS mitatedb_registry.control_credentials (
     credential_id text PRIMARY KEY,
     digest        bytea NOT NULL,
     must_rotate   boolean NOT NULL DEFAULT TRUE,
     enabled       boolean NOT NULL DEFAULT TRUE,
     revoked       boolean NOT NULL DEFAULT FALSE,
+    role          text NOT NULL DEFAULT 'control' CHECK (role IN ('control', 'audit')),
     issued_at     timestamptz NOT NULL DEFAULT now()
 );
 
@@ -160,6 +189,14 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.control_credentials (
 -- C-15's own prefix-strict comparison needs. Populated only by WP-4's
 -- control-plane product code -- this WP creates the durable,
 -- privilege-shaped table only.
+-- Phase 3.5 WP-5, 2026-08-31 (design docs/design/
+-- PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-C, B-1 measure):
+-- `target_id` -- in-place addition (same "no deployed instance" precedent
+-- as `control_credentials.role` above), the contract's 13th, optional
+-- `audit.fields` member. Nullable (the contract's own optionality note:
+-- "set when the event has a single target credential/application, omitted
+-- otherwise"). Placed last, before `recorded_at` (the DB-side insertion
+-- timestamp, deliberately kept as the final column).
 CREATE TABLE IF NOT EXISTS mitatedb_registry.control_audit (
     audit_seq     bigserial UNIQUE,
     event_id      text PRIMARY KEY,
@@ -174,6 +211,7 @@ CREATE TABLE IF NOT EXISTS mitatedb_registry.control_audit (
     target_kind   text,
     outcome       text NOT NULL,
     reason_code   text,
+    target_id     text,
     recorded_at   timestamptz NOT NULL DEFAULT now()
 );
 

@@ -156,14 +156,52 @@ def test_revoke_all_revokes_every_row_including_already_disabled(kind, pg_store)
 
 
 @pytest.mark.parametrize("kind", PARAM_STORES)
-def test_list_all_reports_every_row_without_must_rotate(kind, pg_store) -> None:
+def test_list_all_reports_every_row_with_must_rotate_and_role(kind, pg_store) -> None:
+    """Phase 3.5 WP-5 (design §4/§1-B/§1-D, P35-D7): `list_all()` now
+    carries `(credential_id, enabled, revoked, must_rotate, role)` -- both
+    `must_rotate` and `role` are real values, not withheld/hardcoded (the
+    withholding this test's own former name described was reversed this
+    WP -- `ControlPlaneService.list_credentials` is what actually decides
+    what a client sees; this store just reports the truth)."""
     store = _make(kind, pg_store)
     a, _ = store.issue()
     b, _ = store.issue(must_rotate=True)
+    c, _ = store.issue(role="audit")
     rows = {row[0]: row for row in store.list_all()}
-    assert set(rows) == {a, b}
-    for credential_id, enabled, revoked in rows.values():
+    assert set(rows) == {a, b, c}
+    for credential_id, enabled, revoked, _must_rotate, role in rows.values():
         assert isinstance(enabled, bool) and isinstance(revoked, bool)
+        assert role in ("control", "audit")
+    assert rows[a][3] is False
+    assert rows[b][3] is True
+    assert rows[a][4] == "control"
+    assert rows[c][4] == "audit"
+
+
+@pytest.mark.parametrize("kind", PARAM_STORES)
+def test_locked_for_update_reports_role(kind, pg_store) -> None:
+    """Phase 3.5 WP-5 (design §4/§1-D): `locked_for_update()` now carries
+    `(credential_id, enabled, revoked, role)` -- the revoke gate's own
+    "active control credential" count needs the real role to filter on."""
+    store = _make(kind, pg_store)
+    a, _ = store.issue()
+    b, _ = store.issue(role="audit")
+    if kind == "memory":
+        rows = {row[0]: row for row in store.locked_for_update()}
+    else:
+        import psycopg
+        conn = psycopg.connect(control_platform_dsn_for(pg_store))
+        try:
+            rows = {row[0]: row for row in store.locked_for_update(conn)}
+            conn.commit()
+        finally:
+            conn.close()
+    assert rows[a][3] == "control"
+    assert rows[b][3] == "audit"
+
+
+def control_platform_dsn_for(pg_store) -> str:
+    return pg_store._dsn  # noqa: SLF001 -- test-only direct DSN reuse for a raw locking connection
 
 
 # --------------------------------------------------------------------------

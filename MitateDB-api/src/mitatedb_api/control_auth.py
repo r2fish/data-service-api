@@ -31,7 +31,7 @@ import secrets
 from threading import RLock
 from typing import Callable, Optional
 
-from .errors import AuthenticationError, NotFoundError
+from .errors import AuthenticationError, NotFoundError, ValidationError
 
 # WP-2's own `_DUMMY_DIGEST` rationale, restated for this store: a
 # fixed-length (32 bytes), never-matching stand-in digest so `authenticate`
@@ -46,6 +46,13 @@ _DUMMY_DIGEST = hashlib.sha256(b"mitatedb-control-credential-store-timing-parity
 class ControlPrincipal:
     credential_id: str
     must_rotate: bool
+    # Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+    # V1.md §1-D/§4, P35-D12): `"control"` (the only value before this WP) or
+    # `"audit"` -- lets `ControlPlaneService` authorize per-endpoint (an audit
+    # principal is accepted only on the 3 read-only control endpoints) without
+    # a second lookup. Defaulted so every pre-WP-5 positional/keyword
+    # construction of this dataclass keeps working unchanged.
+    role: str = "control"
 
 
 class _InMemoryWork:
@@ -83,6 +90,10 @@ class _ControlCredential:
     must_rotate: bool = True
     enabled: bool = True
     revoked: bool = False
+    # Phase 3.5 WP-5 (§1-D/§4, P35-D12): `"control"` or `"audit"` -- both
+    # kinds share this one store/table (neither is an application
+    # credential); issuance for both stays out-of-band only.
+    role: str = "control"
 
 
 class ControlCredentialStore:
@@ -107,13 +118,21 @@ class ControlCredentialStore:
             secret = ""
         return hmac.new(self._pepper, secret.encode("utf-8"), hashlib.sha256).digest()
 
-    def issue(self, *, must_rotate: bool = False, credential_id: Optional[str] = None,
+    def issue(self, *, must_rotate: bool = False, role: str = "control", credential_id: Optional[str] = None,
               secret: Optional[str] = None, work: Optional[_InMemoryWork] = None) -> tuple[str, str]:
+        """Phase 3.5 WP-5: `role` defaults to `"control"` (every pre-WP-5
+        caller -- `bootstrap_control_credential`/`reset_control_credentials`
+        -- is unaffected); `"audit"` is the one other accepted value, used
+        only by `control_plane.issue_audit_credential_ceremony`. Only the
+        out-of-band CLI ceremonies ever call this method -- there is no
+        in-band issuance path for either role (P35-D12)."""
+        if role not in ("control", "audit"):
+            raise ValidationError("control-table credentials require control or audit role")
         credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
         secret = secret or secrets.token_urlsafe(32)
         with self._lock:
             self._credentials[credential_id] = _ControlCredential(
-                credential_id=credential_id, digest=self._digest(secret), must_rotate=must_rotate)
+                credential_id=credential_id, digest=self._digest(secret), must_rotate=must_rotate, role=role)
         if work is not None:
             work.on_rollback(lambda: self._credentials.pop(credential_id, None))
         return credential_id, secret
@@ -133,7 +152,11 @@ class ControlCredentialStore:
 
     def revoke_all(self, *, work: Optional[_InMemoryWork] = None) -> None:
         """R-6 reset ceremony primitive: revokes every row, including an
-        already-revoked one (idempotent no-op for those)."""
+        already-revoked one (idempotent no-op for those). Phase 3.5 WP-5:
+        deliberately stays role-agnostic -- `reset` revokes `role="audit"`
+        rows too (the safe-side choice: reset is meant to wipe the whole
+        control-table blast radius, not leave a stray audit credential
+        live behind an operator's back)."""
         with self._lock:
             previous = {credential_id: item.revoked for credential_id, item in self._credentials.items()}
             for item in self._credentials.values():
@@ -206,32 +229,56 @@ class ControlCredentialStore:
             item = self._credentials.get(credential_id)
             return (item.enabled, item.revoked, item.must_rotate) if item is not None else None
 
-    def list_all(self) -> list[tuple[str, bool, bool]]:
-        """`(credential_id, enabled, revoked)` -- `must_rotate` is
-        deliberately excluded (contract `CredentialsResult` items have no
-        `must_rotate` property at all; a caller needing it uses
-        `get_state`)."""
-        with self._lock:
-            return [(item.credential_id, item.enabled, item.revoked) for item in self._credentials.values()]
+    def list_all(self) -> list[tuple[str, bool, bool, bool, str]]:
+        """`(credential_id, enabled, revoked, must_rotate, role)`.
 
-    def locked_for_update(self, work: Optional[_InMemoryWork] = None) -> list[tuple[str, bool, bool]]:
-        """Same rows as `list_all()`, read while holding this store's own
-        lock -- the in-memory analogue of a PostgreSQL `SELECT ... FOR
-        UPDATE` (`control_plane.py`'s revoke-last-active-control-credential
-        gate, and the reset ceremony's own confirmation-phrase fingerprint,
-        both need to read this list atomically with respect to any other
-        concurrent mutation of it). `work` is accepted for call-surface
-        parity with `control_credential_store_postgres.
+        Phase 3.5 WP-5 (design §4/§1-B, P35-D7): `must_rotate` is now
+        selected -- it was deliberately excluded before this WP (contract
+        1.2.0's `CredentialsResult` item had no `must_rotate` property at
+        all) -- `ControlPlaneService.list_credentials` exposes it on a
+        control-table row now that contract 1.3.0 makes the field
+        optional-additive. `role` is likewise now selected so that method's
+        `role` key reads the real column instead of a hardcoded `"control"`
+        literal.
+        """
+        with self._lock:
+            return [(item.credential_id, item.enabled, item.revoked, item.must_rotate, item.role)
+                   for item in self._credentials.values()]
+
+    def locked_for_update(self, work: Optional[_InMemoryWork] = None) -> list[tuple[str, bool, bool, str]]:
+        """Same rows as `list_all()` minus `must_rotate`, read while holding
+        this store's own lock -- the in-memory analogue of a PostgreSQL
+        `SELECT ... FOR UPDATE` (`control_plane.py`'s revoke-last-active-
+        control-credential gate, and the reset ceremony's own confirmation-
+        phrase fingerprint, both need to read this list atomically with
+        respect to any other concurrent mutation of it). `work` is accepted
+        for call-surface parity with `control_credential_store_postgres.
         PostgresControlCredentialStore.locked_for_update` (which requires
         an open transaction to run `FOR UPDATE` against) but is not needed
         here: this store's own `self._lock`, held for the duration of this
         call, already serializes every other write method above against
-        this read."""
+        this read.
+
+        Phase 3.5 WP-5: `role` is now selected too -- the revoke gate's own
+        "active" count (`ControlPlaneService.revoke_credential`) must count
+        only `role="control"` rows; an `"audit"` credential existing
+        alongside the sole active control credential must not be allowed to
+        mask that control credential as "not the last one" (an audit
+        credential cannot perform any control-plane management operation at
+        all, so it does not relieve the lockout the gate exists to
+        prevent).
+        """
         del work
         with self._lock:
-            return [(item.credential_id, item.enabled, item.revoked) for item in self._credentials.values()]
+            return [(item.credential_id, item.enabled, item.revoked, item.role) for item in self._credentials.values()]
 
     def has_any(self, *, include_revoked: bool = True, work: Optional[_InMemoryWork] = None) -> bool:
+        """Phase 3.5 WP-5: deliberately stays role-agnostic (any row, control
+        OR audit, counts) -- `bootstrap`'s own existence check and `reset`'s
+        recovery path both still need to see an orphan `role="audit"` row
+        as "a control-table row exists" (an orphan audit row blocks
+        bootstrap; `reset` recovers it, since `revoke_all` below is
+        role-agnostic too)."""
         del work  # in-memory: the caller's own external lock already serializes this read
         with self._lock:
             if include_revoked:
@@ -248,7 +295,7 @@ class ControlCredentialStore:
             valid = item is not None and digest_matches and item.enabled and not item.revoked
             if not valid:
                 raise AuthenticationError("control authentication failed")
-            return ControlPrincipal(item.credential_id, item.must_rotate)
+            return ControlPrincipal(item.credential_id, item.must_rotate, item.role)
 
 
 __all__ = ["ControlCredentialStore", "ControlPrincipal", "_InMemoryWork"]

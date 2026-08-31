@@ -18,7 +18,8 @@ from .control_plane_harness import control_platform  # noqa: F401 (fixture)
 from mitatedb_api.control_credential_store_postgres import PostgresControlCredentialStore
 from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService,
                                         PostgresApplicationRegistry, PostgresControlBackend,
-                                        PostgresCredentialRegistry, bootstrap_control_credential)
+                                        PostgresCredentialRegistry, bootstrap_control_credential,
+                                        issue_audit_credential_ceremony)
 from mitatedb_api.errors import (AuthenticationError, AuthorizationError, CapabilityError,
                                  ConflictError, DestructiveConfirmationRequired, NotFoundError,
                                  ResourceLimitError)
@@ -119,6 +120,131 @@ def test_duplicate_registration_is_conflict_against_real_postgres(backend) -> No
     service.register_application(cid, secret, "dup")
     with pytest.raises(ConflictError):
         service.register_application(cid, secret, "dup")
+
+
+# ==========================================================================
+# Phase 3.5 WP-5 control-plane bundle (design docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4) against the real Postgres
+# backend: target_id, audit role, issuance freeze, revoke-gate role filter.
+# ==========================================================================
+
+
+def _seed_audit_credential_pg(backend, *, must_rotate: bool = False):
+    store = backend.control_credential_store
+    with backend.unit_of_work() as work:
+        credential_id, secret = store.issue(must_rotate=must_rotate, role="audit", work=work)
+    return credential_id, secret
+
+
+def test_target_id_populated_against_real_postgres(backend, control_platform) -> None:
+    service, cid, secret = _bootstrapped(backend)
+    service.register_application(cid, secret, "tidpgapp")
+    issued = service.issue_credential(cid, secret, "tidpgapp", "runtime")
+    result = service.revoke_credential(cid, secret, issued["credential_id"])
+    assert result["revoked"] is True
+
+    conn = psycopg.connect(control_platform.provision_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT target_id FROM {control_platform.registry_schema}.control_audit "
+                "WHERE operation = 'revoke_credential' AND target_kind = 'credential' "
+                "ORDER BY audit_seq DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.rollback()
+        conn.close()
+    assert row is not None and row[0] == issued["credential_id"]
+
+
+def test_audit_role_accepted_on_read_endpoints_and_forbidden_on_a_write_endpoint_against_real_postgres(backend, control_platform) -> None:
+    service, cid, secret = _bootstrapped(backend)
+    audit_id, audit_secret = _seed_audit_credential_pg(backend, must_rotate=False)
+
+    caps = service.control_capabilities(audit_id, audit_secret)
+    assert caps["role"] == "audit"
+    creds = service.list_credentials(audit_id, audit_secret)
+    assert any(row["credential_id"] == audit_id and row["role"] == "audit" for row in creds["credentials"])
+
+    with pytest.raises(AuthorizationError):
+        service.register_application(audit_id, audit_secret, "pgauditwrite")
+
+    # Review m-3: the FORBIDDEN denial's own `_deny_audit` call opens and
+    # commits its OWN independent unit_of_work -- prove that durably, not
+    # merely that the in-process exception was raised, by reading the row
+    # back from `control_audit` through the owner connection (same
+    # technique as `test_target_id_populated_against_real_postgres` above).
+    conn = psycopg.connect(control_platform.provision_dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT outcome, reason_code, role, actor_id FROM {control_platform.registry_schema}.control_audit "
+                "WHERE operation = 'register_application' AND actor_id = %s "
+                "ORDER BY audit_seq DESC LIMIT 1",
+                [audit_id],
+            )
+            row = cur.fetchone()
+    finally:
+        conn.rollback()
+        conn.close()
+    assert row is not None
+    outcome, reason_code, role, actor_id = row
+    assert outcome == "deny"
+    assert reason_code == "FORBIDDEN"
+    assert role == "audit"
+    assert actor_id == audit_id
+
+
+def test_issuance_freeze_forbids_then_unfreeze_allows_again_against_real_postgres(backend) -> None:
+    service, cid, secret = _bootstrapped(backend)
+    app_id = "pgfzapp"
+    service.register_application(cid, secret, app_id)
+
+    with backend.unit_of_work() as work:
+        backend.set_application_issuance_frozen(app_id, True, work=work)
+    with pytest.raises(AuthorizationError):
+        service.issue_credential(cid, secret, app_id, "runtime")
+
+    with backend.unit_of_work() as work:
+        backend.set_application_issuance_frozen(app_id, False, work=work)
+    issued = service.issue_credential(cid, secret, app_id, "runtime")
+    assert issued["application_id"] == app_id
+
+
+def test_issue_audit_credential_ceremony_against_real_postgres(backend) -> None:
+    with backend.unit_of_work() as work:
+        credential_id, secret = issue_audit_credential_ceremony(
+            backend.control_credential_store, backend.append_audit, work=work)
+    principal = backend.control_credential_store.authenticate(credential_id, secret)
+    assert principal.role == "audit"
+    assert principal.must_rotate is False
+
+
+def test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential_against_real_postgres(backend) -> None:
+    service, cid, secret = _bootstrapped(backend)
+    audit_id, audit_secret = _seed_audit_credential_pg(backend, must_rotate=False)
+
+    with pytest.raises(DestructiveConfirmationRequired):
+        service.revoke_credential(cid, secret, cid)
+
+    caps = service.control_capabilities(cid, secret)
+    assert caps["role"] == "control"
+    still_alive = service.control_capabilities(audit_id, audit_secret)
+    assert still_alive["role"] == "audit"
+
+
+def test_revoke_gate_revoking_the_audit_credential_itself_is_never_gated_against_real_postgres(backend) -> None:
+    service, cid, secret = _bootstrapped(backend)
+    audit_id, audit_secret = _seed_audit_credential_pg(backend, must_rotate=False)
+
+    result = service.revoke_credential(cid, secret, audit_id)
+    assert result == {"credential_id": audit_id, "enabled": True, "revoked": True}
+
+    with pytest.raises(AuthenticationError):
+        service.control_capabilities(audit_id, audit_secret)
+    caps = service.control_capabilities(cid, secret)
+    assert caps["role"] == "control"
 
 
 # ==========================================================================

@@ -269,7 +269,9 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     assert response.status_code == 200
     document = response.json()
     assert document["limit_enforcement"]["request_bytes"] == "enforced"
-    assert document["contract_version"] == "1.2.0"
+    # Phase 3.5 WP-5: contract_version flip lands in the same commit as the
+    # control-plane bundle it accompanies (design §5 WP-5 row, B-3).
+    assert document["contract_version"] == "1.3.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 

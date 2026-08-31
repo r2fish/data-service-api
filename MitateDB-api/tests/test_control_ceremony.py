@@ -20,7 +20,7 @@ from mitatedb_api.control_audit import ControlAuditSink, insert_control_audit_ro
 from mitatedb_api.control_auth import ControlCredentialStore, _InMemoryWork
 from mitatedb_api.control_credential_store_postgres import PostgresControlCredentialStore
 from mitatedb_api.control_plane import (bootstrap_control_credential, reset_control_credentials,
-                                        _reset_confirmation_phrase)
+                                        issue_audit_credential_ceremony, _reset_confirmation_phrase)
 from mitatedb_api.errors import ConflictError, DestructiveConfirmationRequired, ValidationError
 
 _PEPPER = "ceremony-test-pepper-value-here"
@@ -233,3 +233,118 @@ def test_reset_rejects_non_boolean_destructive_as_a_shape_defect(name, memory_ha
         with harness.unit_of_work() as work:
             reset_control_credentials(harness.store, harness.append_audit, work=work,
                                       destructive="true", confirmation="whatever")
+
+
+# ===========================================================================
+# Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §4/§1-D, P35-D12): out-of-band audit-credential issuance ceremony,
+# and `reset`'s own role-agnostic revocation of audit rows too.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("name", HARNESS_NAMES)
+def test_issue_audit_credential_ceremony_distributes_a_must_rotate_false_audit_credential(name, memory_harness, postgres_harness) -> None:
+    """Issues AND rotates in one transaction before returning a secret, so
+    the returned secret's `must_rotate` is already `False` (design §4 M-1:
+    no in-band self-rotate path exists for an audit principal, so the
+    ceremony itself must complete the rotate half)."""
+    harness = _harness(name, memory_harness, postgres_harness)
+    with harness.unit_of_work() as work:
+        credential_id, secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
+    principal = harness.store.authenticate(credential_id, secret)
+    assert principal.credential_id == credential_id
+    assert principal.must_rotate is False
+    assert principal.role == "audit"
+
+    events = harness.audit_events()
+    assert len(events) == 1
+    event = events[0]
+    operation = event.operation if name == "memory" else event["operation"]
+    outcome = event.outcome if name == "memory" else event["outcome"]
+    target_id = event.target_id if name == "memory" else event["target_id"]
+    assert operation == "issue_audit_credential"
+    assert outcome == "allow"
+    assert target_id == credential_id
+
+
+@pytest.mark.parametrize("name", HARNESS_NAMES)
+def test_issue_audit_credential_ceremony_is_not_a_once_only_ritual(name, memory_harness, postgres_harness) -> None:
+    """Unlike `bootstrap`, any number of audit credentials may be issued --
+    there is no "first row" invariant to protect here, and it does not
+    refuse merely because a control credential already exists."""
+    harness = _harness(name, memory_harness, postgres_harness)
+    with harness.unit_of_work() as work:
+        bootstrap_control_credential(harness.store, harness.append_audit, work=work)
+    with harness.unit_of_work() as work:
+        first_id, _first_secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
+    with harness.unit_of_work() as work:
+        second_id, _second_secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
+    assert first_id != second_id
+
+
+@pytest.mark.parametrize("name", HARNESS_NAMES)
+def test_reset_revokes_an_audit_credential_too(name, memory_harness, postgres_harness) -> None:
+    """`reset` stays role-agnostic (design §4, P35-D5-adjacent): an
+    orphan/live `role="audit"` row is revoked by `reset` exactly like every
+    `role="control"` row -- the safe-side choice, no stray audit credential
+    survives a reset behind an operator's back."""
+    harness = _harness(name, memory_harness, postgres_harness)
+    with harness.unit_of_work() as work:
+        control_id, control_secret = bootstrap_control_credential(harness.store, harness.append_audit, work=work)
+    with harness.unit_of_work() as work:
+        audit_id, audit_secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
+
+    active_ids = [row[0] for row in harness.store.list_all() if row[1] and not row[2]]
+    phrase = _reset_confirmation_phrase(active_ids)
+    with harness.unit_of_work() as work:
+        new_id, new_secret = reset_control_credentials(harness.store, harness.append_audit, work=work, destructive=True, confirmation=phrase)
+
+    # Both prior rows -- the original control credential AND the audit
+    # credential -- are dead; only the freshly reset credential survives.
+    with pytest.raises(Exception):
+        harness.store.authenticate(audit_id, audit_secret)
+    with pytest.raises(Exception):
+        harness.store.authenticate(control_id, control_secret)
+    new_principal = harness.store.authenticate(new_id, new_secret)
+    assert new_principal.role == "control"
+
+
+@pytest.mark.parametrize("name", HARNESS_NAMES)
+def test_orphan_audit_row_with_no_control_row_blocks_bootstrap_but_reset_recovers(name, memory_harness, postgres_harness) -> None:
+    """Review m-4: the documented recovery path -- an audit credential
+    issued with NO `role="control"` row ever existing at all still blocks
+    `bootstrap` (`has_any(include_revoked=True)` counts ANY control-table
+    row, `role` regardless -- contract text is "while a control credential
+    exists", and this table's own rows are never distinguished from an
+    "audit credential" by `bootstrap`'s own existence check). `reset`
+    recovers from this state exactly as it does from every other lockout --
+    revoking the orphan audit row too (role-agnostic, see the sibling test
+    above) and minting one fresh `role="control"` credential."""
+    harness = _harness(name, memory_harness, postgres_harness)
+
+    # No control credential is ever bootstrapped in this test at all --
+    # `issue_audit_credential_ceremony` is the ONLY control-table row this
+    # store ever holds before `reset` runs.
+    with harness.unit_of_work() as work:
+        audit_id, audit_secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
+
+    with pytest.raises(ConflictError):
+        with harness.unit_of_work() as work:
+            bootstrap_control_credential(harness.store, harness.append_audit, work=work)
+
+    # The orphan audit row is still live -- bootstrap's own refusal did not
+    # touch it.
+    principal = harness.store.authenticate(audit_id, audit_secret)
+    assert principal.role == "audit"
+
+    active_ids = [row[0] for row in harness.store.list_all() if row[1] and not row[2]]
+    phrase = _reset_confirmation_phrase(active_ids)
+    with harness.unit_of_work() as work:
+        new_id, new_secret = reset_control_credentials(
+            harness.store, harness.append_audit, work=work, destructive=True, confirmation=phrase)
+
+    with pytest.raises(Exception):
+        harness.store.authenticate(audit_id, audit_secret)
+    new_principal = harness.store.authenticate(new_id, new_secret)
+    assert new_principal.role == "control"
+    assert new_principal.must_rotate is True

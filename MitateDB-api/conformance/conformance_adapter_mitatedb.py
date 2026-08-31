@@ -137,6 +137,16 @@ class _ReconciledControlBackend:
         self._control = control
         self._control_credentials = control_credentials
         self._audit = audit
+        # Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+        # V1.md §4/§1-E, P35-D6): per-application issuance freeze -- like
+        # `control_plane.InMemoryControlBackend`'s own identical addition,
+        # this concept has no home on `self._control.credentials` at all
+        # (a control-plane-only concept the application-plane read view has
+        # never needed to know about), so it is genuinely new backend-local
+        # state here too, mutated only through `set_application_issuance_
+        # frozen` below via the same `work.on_rollback(...)` undo-log
+        # convention every other write method in this class already uses.
+        self._frozen_applications: set[str] = set()
 
     @property
     def control_credential_store(self) -> ControlCredentialStore:
@@ -182,6 +192,34 @@ class _ReconciledControlBackend:
             lambda: (self._control.credentials.enable_application if current
                      else self._control.credentials.disable_application)(application_id)
         )
+
+    def application_issuance_frozen(self, application_id: str) -> bool:
+        return application_id in self._frozen_applications
+
+    def set_application_issuance_frozen(self, application_id: str, frozen: bool, *, work) -> None:
+        # Review m-2 (Phase 3.5 WP-5): mirrors `set_application_enabled`
+        # above -- an unknown `application_id` must fail closed with
+        # `NotFoundError`, not silently record a freeze/unfreeze against an
+        # application that does not exist (the product registries,
+        # `InMemoryApplicationRegistry`/`PostgresApplicationRegistry`, both
+        # already refuse this the same way; this adapter's own local
+        # `_frozen_applications` set had no such check and would otherwise
+        # accept an application_id nothing else in this adapter recognizes).
+        current = dict(self._control.credentials.list_applications()).get(application_id)
+        if current is None:
+            raise NotFoundError("application not found")
+        was_frozen = application_id in self._frozen_applications
+        if frozen:
+            self._frozen_applications.add(application_id)
+        else:
+            self._frozen_applications.discard(application_id)
+
+        def _undo() -> None:
+            if was_frozen:
+                self._frozen_applications.add(application_id)
+            else:
+                self._frozen_applications.discard(application_id)
+        work.on_rollback(_undo)
 
     def credential_state(self, credential_id: str):
         return self._control.credentials.get_state(credential_id)

@@ -83,7 +83,7 @@ when PostgreSQL is unreachable, they fail loudly).
   execute+audit), three enforced resource classes
   (`applications`/`credentials_per_application`/
   `control_requests_per_minute`) plus its own `request_bytes` bound, and a
-  durable, same-transaction, 12-field audit trail
+  durable, same-transaction, 13-field audit trail
   (`mitatedb_registry.control_audit`, INSERT-only from the control-plane
   process' own role -- it cannot read its own writes back). A
   `role=control` credential can only ever be minted by the out-of-band

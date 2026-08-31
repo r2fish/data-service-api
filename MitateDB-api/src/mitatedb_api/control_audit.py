@@ -1,10 +1,12 @@
-"""Durable, 12-field control-plane audit evidence (design v1.2 R-4/R-6, WP-4).
+"""Durable, control-plane audit evidence (design v1.2 R-4/R-6, WP-4; field
+count updated to 13 by Phase 3.5 WP-5's `target_id` addition, §1-C/§4).
 
 Distinct from `audit.AuditSink`: that class is the foundation's own
 6-field, application-plane-only evidence sink (`event_type`/`application_id`/
 `credential_id`/`outcome`/`detail`/`occurred_at`). The common contract's own
-`audit.fields` (`spec/data-service-api.v1.json`) names 12 columns; this
-module is the control plane's own emitter of exactly those 12 fields, for
+`audit.fields` (`spec/data-service-api.v1.json`) names 13 columns as of
+contract 1.3.0 (12 through 1.2.0, plus the optional `target_id`); this
+module is the control plane's own emitter of exactly those fields, for
 both the in-memory (`ControlAuditSink`) and PostgreSQL (`insert_control_
 audit_row`, against migration `0002_registry_and_functions.sql`'s own
 `control_audit` table) backends.
@@ -31,10 +33,19 @@ from .errors import AuthorizationStateUnavailable, StorageConfigurationError
 from .identifiers import validate_identifier
 
 # Contract `audit.fields` (spec/data-service-api.v1.json), verbatim order.
+#
+# Phase 3.5 WP-5, 2026-08-31 (design docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-C/§4, B-1 measure, P35-D14):
+# `target_id` appended -- the contract's 13th, optional `audit.fields`
+# member ("set when the event has a single target credential/application,
+# omitted otherwise"). WP-1 loosened `test_control_plane_service.py`'s own
+# contract-agreement test to inclusion specifically so this addition would
+# not go red for a reason unrelated to this file; that test is restored to
+# exact 13-field set equality in this same WP.
 CONTROL_AUDIT_FIELDS = (
     "event_id", "event_class", "occurred_at", "request_id", "application_id",
     "actor_type", "actor_id", "role", "operation", "target_kind", "outcome",
-    "reason_code",
+    "reason_code", "target_id",
 )
 
 
@@ -52,13 +63,19 @@ class ControlAuditEvent:
     target_kind: Optional[str]
     outcome: str
     reason_code: Optional[str]
+    # Phase 3.5 WP-5 (§1-C/§4): the single target credential_id/
+    # application_id this event acted on, when one exists. Defaulted so
+    # every existing keyword-constructed `ControlAuditEvent(...)` call site
+    # keeps working unchanged, with `target_id` simply `None`.
+    target_id: Optional[str] = None
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
 class ControlAuditSink:
-    """In-memory, append-only, 12-field control-plane audit trail.
+    """In-memory, append-only, 13-field control-plane audit trail (Phase 3.5
+    WP-5: `target_id` added, §1-C/§4).
 
     A deliberately separate object from `audit.AuditSink` (design v1.2 R-6
     independent-review note m-3: "in-process control 監査 shape も契約
@@ -94,7 +111,8 @@ class ControlAuditSink:
                request_id: Optional[str] = None, application_id: Optional[str] = None,
                actor_type: Optional[str] = None, actor_id: Optional[str] = None,
                role: Optional[str] = None, target_kind: Optional[str] = None,
-               reason_code: Optional[str] = None, work: Any = None) -> ControlAuditEvent:
+               reason_code: Optional[str] = None, target_id: Optional[str] = None,
+               work: Any = None) -> ControlAuditEvent:
         if self._fault is not None:
             raise self._fault
         event = ControlAuditEvent(
@@ -110,6 +128,7 @@ class ControlAuditSink:
             target_kind=target_kind,
             outcome=outcome,
             reason_code=reason_code,
+            target_id=target_id,
         )
         with self._lock:
             self._events.append(event)
@@ -138,7 +157,8 @@ def insert_control_audit_row(conn: "psycopg.Connection", schema: str, *, event_c
                               operation: str, outcome: str, request_id: Optional[str] = None,
                               application_id: Optional[str] = None, actor_type: Optional[str] = None,
                               actor_id: Optional[str] = None, role: Optional[str] = None,
-                              target_kind: Optional[str] = None, reason_code: Optional[str] = None) -> str:
+                              target_kind: Optional[str] = None, reason_code: Optional[str] = None,
+                              target_id: Optional[str] = None) -> str:
     """Appends one row to `control_audit` (migration 0002) using `conn` --
     the SAME connection/transaction `control_plane.PostgresControlBackend`
     is already holding open for the state change this audit row accompanies
@@ -151,16 +171,19 @@ def insert_control_audit_row(conn: "psycopg.Connection", schema: str, *, event_c
     """
     event_id = uuid.uuid4().hex
     occurred_at = datetime.now(timezone.utc)
+    # Phase 3.5 WP-5 (§1-C/§4, B-1 measure): `target_id` appended as the
+    # 13th column, matching `CONTROL_AUDIT_FIELDS`'s own order above.
     statement = sql.SQL(
         "INSERT INTO {} (event_id, event_class, occurred_at, request_id, "
         "application_id, actor_type, actor_id, role, operation, target_kind, "
-        "outcome, reason_code) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})"
-    ).format(_control_audit_table(schema), *[sql.Placeholder() for _ in range(12)])
+        "outcome, reason_code, target_id) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})"
+    ).format(_control_audit_table(schema), *[sql.Placeholder() for _ in range(13)])
     try:
         with conn.cursor() as cur:
             cur.execute(statement, [event_id, event_class, occurred_at, request_id,
                                      application_id, actor_type, actor_id, role,
-                                     operation, target_kind, outcome, reason_code])
+                                     operation, target_kind, outcome, reason_code,
+                                     target_id])
     except psycopg.errors.InsufficientPrivilege as exc:
         raise StorageConfigurationError(
             "control audit insert refused by a privilege/configuration defect"
