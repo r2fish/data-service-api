@@ -75,7 +75,7 @@
 | WP-3 | 共通 suite: port v1.7 + C-16 新設 + C-12/C-11 拡張 + CONDITIONS.md + adapter 4 ファイル (m-7)。**C-16 PROVIDED 分岐の初実行は本 WP** (MitateDB 2 adapter)。既存 executable 全条件が 4 adapter で緑 | なし (検証範囲拡大のみ) |
 | WP-4 | r2db 制御面束 + L4 + **`contract_version` 1.3.0 flip**: must_rotate 露出・target_id・audit role・発行凍結・request_bytes 宣言・ローカル固定更新 (M-2) | あり (制御面拡張 + 版数宣言) |
 | WP-5 | MitateDB 制御面束 + **`contract_version` 1.3.0 flip**: 同4件 + B-1 テスト復元 (13 フィールド等値) | あり (制御面拡張 + 版数宣言) |
-| WP-6 | 記録整理: CONTROL_MAPPING (SI-08/SI-11/SI-14/SI-06/SI-07 に加え **SI-02/SI-15/SI-10** — レビュー m-5)・CONDITIONS・README・引き継ぎ・完了報告。**WP-1 独立レビュー m-3 の追加スコープ**: 契約 1.3.0 の `target_id` 追加で「12 フィールド」という記述が字面どおりでは古くなった prose 箇所を record-consolidation の対象に含める — `security/CONTROL_MAPPING.md` の「contract-vocabulary gap」該当行 (SI-14 行の r2db/MitateDB 両列、`target_id` 欠落を明記した箇所)、`r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (`target_id` 欠落の記述)、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` (`control_audit` 列を「12 named columns」と記す箇所) の計5箇所が、この時点でなお「12 フィールド / target_id 欠落」を未解消のギャップとして記述しており、WP-4/WP-5 の実装反映後に一括更新する対象として WP-6 が引き継ぐ | なし |
+| WP-6 | 記録整理: CONTROL_MAPPING (SI-08/SI-11/SI-14/SI-06/SI-07 に加え **SI-02/SI-15/SI-10** — レビュー m-5)・CONDITIONS・README・引き継ぎ・完了報告。**WP-1 独立レビュー m-3 の追加スコープ**: 契約 1.3.0 の `target_id` 追加で「12 フィールド」という記述が字面どおりでは古くなった prose 箇所を record-consolidation の対象に含める — `security/CONTROL_MAPPING.md` の「contract-vocabulary gap」該当行 (SI-14 行の r2db/MitateDB 両列、`target_id` 欠落を明記した箇所)、`r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (`target_id` 欠落の記述)、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` (`control_audit` 列を「12 named columns」と記す箇所) の計5箇所が、この時点でなお「12 フィールド / target_id 欠落」を未解消のギャップとして記述しており、WP-4/WP-5 の実装反映後に一括更新する対象として WP-6 が引き継ぐ。**WP-4 独立レビュー m-4 の追加**: `conformance-tests/CONDITIONS.md` C-06 行の「all four registered adapters declare `contract_version: 1.2.0`」は WP-4 (r2db 1.3.0 flip) で字面が古くなった (機械ガードは semver 比較で緑のまま) — WP-6 で更新 | なし |
 
 完了条件 (全 WP 共通、フェーズ3 §3 継承): テスト追加 + 変異注入 (scratchpad 復元、`git checkout` 不使用)、root suite 完走 (現基準 1161 + 増分)、宣言語彙全数固定の維持 (limit_class AST 件数の同一コミット更新)、独立レビュー往復、commit/push/main merge (`--no-ff`) 1 セット + identity 確認。
 
@@ -171,3 +171,13 @@ blocker 4 / major 8 / minor 8 / nit 3 — 全数裁定。主要な裁定:
 受理境界 (CONDITIONS.md 開示): V5 の form-(b) 捏造 (実 wire 要求を送らず CAPABILITY_UNSUPPORTED を偽装する adapter) は検出不能 — C-06/C-14/C-17 と同クラス、positive-existence check 台帳項目に合流。「検証先行」の黒箱観測は無部分効果のみ (P35-D10、二段パス構造は MitateDB ローカルテストが固定)。
 
 conformance 364 passed / peer 861 passed (レビュアー・実装者の二重実測)。
+
+### 10.4 WP-4 (r2db 制御面束 + L4 + 版数 flip)
+
+実装: must_rotate 露出 (control 行は実値、application 行は省略)、target_id (AuditEvent 13 フィールド化、`control_audit` nullable 列 in-place、全 emission 箇所 — control_plane 7 + ops 10 + 儀式 3 — で単一対象時に設定、audit-report の欠落注記解消)、audit role (`role` 列 in-place、発行は帯域外儀式 `issue-audit-credential` のみ = 単一 tx で issue+rotate、認可は読み取り専用 3 endpoint 許可・他 8 は FORBIDDEN + 耐久監査、must_rotate gate は audit に対し control_capabilities のみ、role ハードコード 3 箇所を実値化)、発行凍結 (`issuance_frozen` 列、CLI `freeze-issuance`/`unfreeze-issuance` 非破壊、凍結時 FORBIDDEN、優先順位 = role=control capability 拒否 → 対象解決 → 凍結 → 件数上限)、L4 (`ControlPlaneLimits.request_bytes` 単一ソース化 — middleware と discovery が同一オブジェクトを読む、二層 enforcement = service unavailable / HTTP enforced)、`contract_version` 1.3.0 flip (両宣言箇所 + テスト固定)。
+
+**実装者の裁量判断 (追認)**: (1) revoke gate の「最後の有効 control credential」計数を `role == "control"` 行に濾過 — audit 行が最後の管理 credential を「最後でない」と偽装し、未確認 revoke で管理能力ゼロに至る経路の防止。**正確な位置づけ (レビュー M-1 の訂正): pre-existing バグの修正ではなく、role 列を導入する本 WP 自身が持ち込みかけた退行の防止** (WP-4 以前は全行が control credential)。(2) `has_any()`/`revoke_all()` は role 非依存のまま — reset は audit 行も含め全 revoke (安全側)、孤児 audit 行は bootstrap を塞ぐが reset で復旧可能 (ロックアウトではない — レビューが復旧経路を実測確認)。
+
+独立レビュー **0 blocker / 1 major / 4 minor / 3 nit**、全数裁定・反映: M-1 = 上記濾過の回帰テスト 2 本 (両バックエンド) + 変異赤化実測 / m-1 = destructive-confirmation consequence 宣言を管理能力範囲へ縮小 (audit credential の読み取り残存を真実化) / m-2 = `issue-audit-credential` に儀式 advisory lock (reset 中の INSERT 生存経路の閉塞) / m-3 = fail-closed 列挙の構造的完全性 (route 表・allow-list から導出し新 operation が未分類のまま通過しない) / m-4 = C-06 行の版数 prose 陳腐化を WP-6 スコープへ / n-2 = in-memory backend の freeze snapshot 漏れ (latent) 閉塞 / n-1 (denial の target_id 非対称) は追認。
+
+r2db 574 passed / conformance 364 passed (レビュアー実測含む)。

@@ -614,36 +614,36 @@ class PostgresControlCredentialStore:
         if not secret:
             fail("AUTH_REQUIRED", "Authentication is required.", status=401)
         computed = self.verifier(secret)
-        statement = sql.SQL("SELECT credential_id, verifier, enabled, revoked, must_rotate FROM {table} WHERE verifier = {ph}").format(
+        statement = sql.SQL("SELECT credential_id, verifier, enabled, revoked, must_rotate, role FROM {table} WHERE verifier = {ph}").format(
             table=self._table, ph=sql.Placeholder()
         )
         row = self._fetch_or_503(statement, [computed])
         if row is None:
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
-        credential_id, db_verifier, enabled, revoked, must_rotate = row
+        credential_id, db_verifier, enabled, revoked, must_rotate, role = row
         if not hmac.compare_digest(db_verifier, computed):
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
         if revoked:
-            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=credential_id)
+            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=credential_id, role=role)
         if not enabled:
-            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=credential_id)
-        return ControlAuthContext(credential_id, must_rotate)
+            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=credential_id, role=role)
+        return ControlAuthContext(credential_id, must_rotate, role)
 
     def assert_active(self, context: ControlAuthContext) -> ControlAuthContext:
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
-        statement = sql.SQL("SELECT credential_id, enabled, revoked, must_rotate FROM {table} WHERE credential_id = {ph}").format(
+        statement = sql.SQL("SELECT credential_id, enabled, revoked, must_rotate, role FROM {table} WHERE credential_id = {ph}").format(
             table=self._table, ph=sql.Placeholder()
         )
         row = self._fetch_or_503(statement, [context.credential_id])
         if row is None:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
-        credential_id, enabled, revoked, must_rotate = row
+        credential_id, enabled, revoked, must_rotate, role = row
         if revoked:
             fail("AUTH_REVOKED", "Credential is not active.", status=401)
         if not enabled:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
-        return ControlAuthContext(credential_id, must_rotate)
+        return ControlAuthContext(credential_id, must_rotate, role)
 
     def _fetch_or_503(self, statement: sql.Composed, params: Sequence[Any]) -> tuple[Any, ...] | None:
         try:
@@ -657,7 +657,7 @@ class PostgresControlCredentialStore:
 
     # ---- write path (ritual-only: `ops.py`'s bootstrap/reset/break-glass) --
 
-    def add(self, credential_id: str, secret: str, *, work: _PostgresWork) -> None:
+    def add(self, credential_id: str, secret: str, *, role: str = "control", work: _PostgresWork) -> None:
         """Only reachable through `ops.py` (connected as `r2dbsvc_control`)
         -- `r2dbsvc_controlplane` (0006) is never granted INSERT on this
         table at all, so calling this against a control-plane-process
@@ -665,14 +665,24 @@ class PostgresControlCredentialStore:
         of this Python-level restriction. `work` is required (round-2
         ruling (A) -- see `PostgresCredentialStore.add`'s docstring for the
         full history).
+
+        Phase 3.5 WP-4: `role` defaults to `"control"` (every pre-WP-4 caller
+        -- `bootstrap_control_credential`/`reset_control_credentials` --
+        is unaffected); `"audit"` is the one other accepted value, used only
+        by `issue_audit_credential_ceremony` below. The table's own `CHECK
+        (role IN ('control', 'audit'))` (0006, in-place WP-4 revision) is the
+        authoritative enforcement; this Python-level check exists only to
+        surface a clean `VALIDATION_FAILED` before ever reaching SQL.
         """
+        if role not in {"control", "audit"}:
+            fail("VALIDATION_FAILED", "Control-table credentials require control or audit role.")
         verifier = self.verifier(secret)
-        statement = sql.SQL("INSERT INTO {table} (credential_id, verifier) VALUES ({id_ph}, {verifier_ph})").format(
-            table=self._table, id_ph=sql.Placeholder(), verifier_ph=sql.Placeholder()
+        statement = sql.SQL("INSERT INTO {table} (credential_id, verifier, role) VALUES ({id_ph}, {verifier_ph}, {role_ph})").format(
+            table=self._table, id_ph=sql.Placeholder(), verifier_ph=sql.Placeholder(), role_ph=sql.Placeholder()
         )
         try:
             with work.connection.cursor() as cur:
-                _execute(cur, statement, [credential_id, verifier])
+                _execute(cur, statement, [credential_id, verifier, role])
         except psycopg.errors.UniqueViolation:
             fail("CONFLICT", "Control credential already exists.", status=409)
         except psycopg.Error:
@@ -796,12 +806,19 @@ class PostgresControlCredentialStore:
         row = self._fetch_or_503(statement, [credential_id])
         return (row[0], row[1]) if row is not None else None
 
-    def list_all(self) -> list[tuple[str, bool, bool]]:
+    def list_all(self) -> list[tuple[str, bool, bool, bool, str]]:
         """`auth.ControlCredentialStore.list_all`'s Postgres counterpart --
-        `(credential_id, enabled, revoked)` tuples; `must_rotate` is
-        deliberately not selected here at all (design §2/§8 m-9: it must
-        never reach a `list_credentials` response)."""
-        statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY credential_id").format(table=self._table)
+        `(credential_id, enabled, revoked, must_rotate, role)` tuples.
+
+        Phase 3.5 WP-4 (design §4/§1-B, P35-D7): `must_rotate` is now
+        selected (it was deliberately omitted before this WP, §8 m-9 of the
+        original design) -- `ControlPlaneService.list_credentials` exposes it
+        on a control-plane credential row now that contract 1.3.0 makes the
+        field optional-additive. `role` is likewise now selected so
+        `list_credentials`' `role` key reads the real column instead of a
+        hardcoded `"control"` literal (design §4, review m-6).
+        """
+        statement = sql.SQL("SELECT credential_id, enabled, revoked, must_rotate, role FROM {table} ORDER BY credential_id").format(table=self._table)
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
@@ -811,7 +828,7 @@ class PostgresControlCredentialStore:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
             raise  # unreachable; fail() always raises
 
-    def list_all_for_update(self, work: _PostgresWork) -> list[tuple[str, bool, bool]]:
+    def list_all_for_update(self, work: _PostgresWork) -> list[tuple[str, bool, bool, str]]:
         """Row-locking counterpart to `list_all` above, used exclusively by
         `ControlPlaneService.revoke_credential`'s last-active-control-
         credential destructive-confirmation gate (design docs/design/
@@ -826,8 +843,16 @@ class PostgresControlCredentialStore:
         call's own single-row `SELECT ... FOR UPDATE` (see those methods
         above) blocks against this same lock too, since it necessarily
         locks a row this statement has already locked.
+
+        Phase 3.5 WP-4: `role` is now selected too -- the gate's own "active"
+        count (`ControlPlaneService.revoke_credential`) must count only
+        `role="control"` rows; an `"audit"` credential existing alongside the
+        sole active control credential must not be allowed to mask that
+        control credential as "not the last one" (an audit credential cannot
+        perform any control-plane management operation at all, so it does
+        not relieve the lockout the gate exists to prevent).
         """
-        statement = sql.SQL("SELECT credential_id, enabled, revoked FROM {table} ORDER BY credential_id FOR UPDATE").format(table=self._table)
+        statement = sql.SQL("SELECT credential_id, enabled, revoked, role FROM {table} ORDER BY credential_id FOR UPDATE").format(table=self._table)
         try:
             with work.connection.cursor() as cur:
                 _execute(cur, statement, [])
@@ -923,6 +948,41 @@ class PostgresApplicationRegistry:
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
 
+    def set_issuance_frozen(self, application_id: str, frozen: bool, *, work: _PostgresWork) -> None:
+        """Phase 3.5 WP-4 (design §4/§1-E, P35-D6): CLI-only, non-destructive
+        (mirrors `set_enabled` above -- no declare-and-echo confirmation
+        gate, same class as disable-app). There is no in-band endpoint that
+        calls this -- only `ops.py freeze-issuance`/`unfreeze-issuance`."""
+        statement = sql.SQL(
+            "UPDATE {table} SET issuance_frozen = {frozen_ph} WHERE application_slug = {id_ph} RETURNING application_slug"
+        ).format(table=self._table, frozen_ph=sql.Placeholder(), id_ph=sql.Placeholder())
+        try:
+            with work.connection.cursor() as cur:
+                _execute(cur, statement, [frozen, application_id])
+                row = cur.fetchone()
+                if row is None:
+                    fail("NOT_FOUND", "Application was not found.", status=404)
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+
+    def issuance_frozen(self, application_id: str) -> bool:
+        """`ControlPlaneService.issue_credential`'s own read of this flag
+        (design §4/§1-E): evaluated only after the `role=control` capability
+        refusal and the target-existence check (contract `issue_credential.
+        semantics`' own precedence sentence; C-14 vector 3 discipline).
+        Returns `False` for an unknown `application_id` -- callers reach
+        this only after already confirming the application exists."""
+        statement = sql.SQL("SELECT issuance_frozen FROM {table} WHERE application_slug = {ph}").format(table=self._table, ph=sql.Placeholder())
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [application_id])
+                    row = cur.fetchone()
+                    return bool(row[0]) if row else False
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
     def exists(self, application_id: str) -> bool:
         statement = sql.SQL("SELECT EXISTS(SELECT 1 FROM {table} WHERE application_slug = {ph})").format(table=self._table, ph=sql.Placeholder())
         try:
@@ -959,14 +1019,20 @@ class PostgresApplicationRegistry:
             raise  # unreachable; fail() always raises
 
 
+# Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-C/§4,
+# B-1 measure): `target_id` is the contract's 13th, optional `audit.fields`
+# member -- appended at the end (matching the contract's own field-list
+# order) rather than interleaved, so every existing positional reader of
+# this tuple keeps working on its first 12 elements unchanged.
 _CONTROL_AUDIT_COLUMNS = (
     "event_id", "event_class", "occurred_at", "request_id", "application_id",
     "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code",
+    "target_id",
 )
 _CONTROL_AUDIT_INSERT = (
     "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
-    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
-    "VALUES ({ph0}, {ph1}, {ph2}, {ph3}, {ph4}, {ph5}, {ph6}, {ph7}, {ph8}, {ph9}, {ph10}, {ph11})"
+    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id) "
+    "VALUES ({ph0}, {ph1}, {ph2}, {ph3}, {ph4}, {ph5}, {ph6}, {ph7}, {ph8}, {ph9}, {ph10}, {ph11}, {ph12})"
 )
 
 
@@ -1030,13 +1096,14 @@ class PostgresControlAuditSink:
         target_kind: str | None,
         outcome: str,
         reason_code: str | None = None,
+        target_id: str | None = None,
         work: _PostgresWork | None = None,
     ) -> None:
         event_id = str(uuid.uuid4())
         occurred_at = datetime.now(timezone.utc)
-        placeholders = {f"ph{i}": sql.Placeholder() for i in range(12)}
+        placeholders = {f"ph{i}": sql.Placeholder() for i in range(13)}
         statement = sql.SQL(_CONTROL_AUDIT_INSERT).format(table=self._table, **placeholders)
-        params = [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code]
+        params = [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id]
         if work is not None:
             # Same connection/transaction as the caller's state change --
             # deliberately no try/except here: a failure must propagate as

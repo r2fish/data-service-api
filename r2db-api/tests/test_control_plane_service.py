@@ -29,7 +29,12 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from r2db_api.audit import ControlAuditSink
 from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore
-from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend, PostgresControlBackend
+from r2db_api.control_plane import (
+    ControlPlaneService,
+    InMemoryControlBackend,
+    PostgresControlBackend,
+    issue_audit_credential_ceremony,
+)
 from r2db_api.credential_store import (
     PostgresApplicationRegistry,
     PostgresControlAuditSink,
@@ -221,9 +226,9 @@ def _memory_harness(limits: ControlPlaneLimits) -> types.SimpleNamespace:
     audit = ControlAuditSink()
     service = ControlPlaneService(backend, audit=audit, limits=limits, clock=lambda: _clock_state["now"])
 
-    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True) -> None:
+    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> None:
         with control_credentials.unit_of_work() as work:
-            control_credentials.add(credential_id, secret, work=work)
+            control_credentials.add(credential_id, secret, role=role, work=work)
         if not must_rotate:
             with control_credentials.unit_of_work() as work:
                 control_credentials.rotate(credential_id, secret, work=work)
@@ -235,6 +240,10 @@ def _memory_harness(limits: ControlPlaneLimits) -> types.SimpleNamespace:
     def disable_control_credential_directly(credential_id: str) -> None:
         with control_credentials.unit_of_work() as work:
             control_credentials.set_state(credential_id, enabled=False, work=work)
+
+    def set_application_issuance_frozen_directly(application_id: str, frozen: bool) -> None:
+        with backend.applications_unit_of_work() as work:
+            backend.set_application_issuance_frozen(application_id, frozen, work=work)
 
     def audit_events() -> list[dict]:
         return [dict(event) for event in audit.events()]
@@ -251,6 +260,7 @@ def _memory_harness(limits: ControlPlaneLimits) -> types.SimpleNamespace:
         seed_control_credential=seed_control_credential,
         revoke_control_credential_directly=revoke_control_credential_directly,
         disable_control_credential_directly=disable_control_credential_directly,
+        set_application_issuance_frozen_directly=set_application_issuance_frozen_directly,
         audit_events=audit_events,
         inject_audit_fault=inject_audit_fault,
         cleanup=cleanup,
@@ -286,9 +296,9 @@ def _postgres_harness(platform: types.SimpleNamespace, limits: ControlPlaneLimit
     seed_store = PostgresControlCredentialStore(platform.control_dsn, pepper=CONTROL_PEPPER, schema=platform.schema)
     read_sink = PostgresControlAuditSink(platform.control_dsn, schema=platform.schema)
 
-    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True) -> None:
+    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> None:
         with seed_store.unit_of_work() as work:
-            seed_store.add(credential_id, secret, work=work)
+            seed_store.add(credential_id, secret, role=role, work=work)
         if not must_rotate:
             with seed_store.unit_of_work() as work:
                 seed_store.rotate(credential_id, secret, work=work)
@@ -301,7 +311,11 @@ def _postgres_harness(platform: types.SimpleNamespace, limits: ControlPlaneLimit
         with seed_store.unit_of_work() as work:
             seed_store.set_state(credential_id, enabled=False, work=work)
 
-    _columns = ("event_id", "event_class", "occurred_at", "request_id", "application_id", "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code")
+    def set_application_issuance_frozen_directly(application_id: str, frozen: bool) -> None:
+        with applications.unit_of_work() as work:
+            applications.set_issuance_frozen(application_id, frozen, work=work)
+
+    _columns = ("event_id", "event_class", "occurred_at", "request_id", "application_id", "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code", "target_id")
 
     def audit_events() -> list[dict]:
         return [dict(zip(_columns, row)) for row in read_sink.events()]
@@ -323,6 +337,7 @@ def _postgres_harness(platform: types.SimpleNamespace, limits: ControlPlaneLimit
         seed_control_credential=seed_control_credential,
         revoke_control_credential_directly=revoke_control_credential_directly,
         disable_control_credential_directly=disable_control_credential_directly,
+        set_application_issuance_frozen_directly=set_application_issuance_frozen_directly,
         audit_events=audit_events,
         inject_audit_fault=inject_audit_fault,
         cleanup=cleanup,
@@ -973,16 +988,31 @@ def test_issued_secret_appears_only_in_the_response(kind, platform):
         for row in listing["credentials"]:
             assert "secret" not in row
             assert "verifier" not in row
+
+        # Phase 3.5 WP-4 (§1-B/§4, P35-D7): application-credential rows never
+        # carry `must_rotate` at all (the concept does not exist for them).
+        # Distinguished by `application_id` presence (design §2: only an
+        # application-credential row carries that key at all) -- not by
+        # `credential_id != cred_id`, which would also catch OTHER control-
+        # table rows the `postgres` harness's module-scoped `platform`
+        # fixture may have accumulated from earlier tests in this same run.
+        app_rows = [row for row in listing["credentials"] if "application_id" in row]
+        assert app_rows
+        for row in app_rows:
             assert "must_rotate" not in row
 
         # MI-3: the control row's own shape -- `role == "control"` and no
         # `application_id` key at all (design §2), distinct from an
         # application-credential row's `role` (`runtime`/`developer`) and
-        # `application_id` presence.
+        # `application_id` presence. Phase 3.5 WP-4 (§1-B/§4, P35-D7
+        # reversal of the original §8 m-9): `must_rotate` IS now exposed on
+        # a control-table row, with its real value -- this credential was
+        # seeded `must_rotate=False`, so the exposed value must be `False`.
         control_rows = [row for row in listing["credentials"] if row["credential_id"] == cred_id]
         assert len(control_rows) == 1
         assert control_rows[0]["role"] == "control"
         assert "application_id" not in control_rows[0]
+        assert control_rows[0]["must_rotate"] is False
 
         for event in h.audit_events():
             for value in event.values():
@@ -993,9 +1023,14 @@ def test_issued_secret_appears_only_in_the_response(kind, platform):
         # role, always "control" for a control-plane operation -- never the
         # *issued* credential's own role (here, "developer"), which earlier
         # code mistakenly wrote into this same field.
+        #
+        # Phase 3.5 WP-4 (§1-C/§4): `target_id` on this same row is the
+        # newly issued credential's own id -- the single target this
+        # `issue_credential` event acted on.
         issue_row = _find_audit_row_by_request_id(h, req_id)
         assert issue_row is not None
         assert issue_row.get("role") == "control"
+        assert issue_row.get("target_id") == issued["credential_id"]
     finally:
         h.cleanup()
 
@@ -1211,8 +1246,13 @@ def _ensure_sole_active_control_credential(h: types.SimpleNamespace, keep_id: st
     """
     if h.kind != "postgres":
         return
-    for credential_id, enabled, revoked in h.control_credentials_store.list_all():
-        if credential_id != keep_id and enabled and not revoked:
+    # Phase 3.5 WP-4: `list_all()` rows now also carry `must_rotate`/`role`
+    # (§1-B/§1-D) -- and the gate itself now counts only `role="control"`
+    # rows as "active" (see `control_plane.py::revoke_credential`'s own
+    # `_body`), so a live `role="audit"` row left behind by another test
+    # does not need sweeping here either.
+    for credential_id, enabled, revoked, _must_rotate, role in h.control_credentials_store.list_all():
+        if credential_id != keep_id and enabled and not revoked and role == "control":
             h.revoke_control_credential_directly(credential_id)
 
 
@@ -1379,7 +1419,7 @@ class _GateOrderProbeBackend:
             "transaction as the state change (design R-3/WP-0 MA-2), never before it opens or after "
             "it closes"
         )
-        return [(self._credential_id, True, False)]
+        return [(self._credential_id, True, False, "control")]
 
     def set_control_credential_state(self, credential_id, *, enabled, revoked, work):
         assert getattr(work, "active", False) is True, (
@@ -1621,11 +1661,19 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         caps = h.service.capabilities(secret)
-        assert caps["contract_version"] == "1.2.0"
+        # Phase 3.5 WP-4 (design §5 WP-4 row, B-3): this WP ships the 1.3.0
+        # obligations for r2db-api, so the flip lands in this same commit.
+        assert caps["contract_version"] == "1.3.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         assert caps["capabilities"]["audit_query"]["status"] == "unavailable"
-        assert caps["limits"] == {"applications": 42, "credentials_per_application": 7, "control_requests_per_minute": 99}
-        assert caps["limit_enforcement"] == {"applications": "enforced", "credentials_per_application": "enforced", "control_requests_per_minute": "enforced"}
+        # Phase 3.5 WP-4 (§4 "L4"): `request_bytes` is now a 4th declared
+        # limit -- defaulted here (not passed to `ControlPlaneLimits(...)`
+        # above), so its value is the field's own default.
+        assert caps["limits"] == {"applications": 42, "credentials_per_application": 7, "control_requests_per_minute": 99, "request_bytes": 1_048_576}
+        # `request_bytes` enforcement is `"unavailable"` at THIS (service)
+        # layer -- there is no HTTP boundary mounted here to enforce it;
+        # `test_control_http.py` pins the HTTP-mounted `"enforced"` override.
+        assert caps["limit_enforcement"] == {"applications": "enforced", "credentials_per_application": "enforced", "control_requests_per_minute": "enforced", "request_bytes": "unavailable"}
         assert caps["authorization_propagation_bound_ms"] == 0
         assert caps["role"] == "control"
 
@@ -1739,3 +1787,398 @@ def test_control_plane_module_importable_and_usable_without_psycopg() -> None:
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     assert "OK" in result.stdout
+
+
+# ===========================================================================
+# Section 11: Phase 3.5 WP-4 control-plane bundle (design docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4) -- audit role
+# authorization (§1-D), per-application issuance freeze (§1-E), and the L4
+# `request_bytes` two-layer declaration (§4 "L4"). must_rotate exposure
+# (§1-B) and target_id (§1-C) are covered above (Section 6's
+# `test_issued_secret_appears_only_in_the_response`); this section adds the
+# remaining target_id call sites plus the audit-role/freeze/L4 bundle.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_audit_role_accepted_on_exactly_the_three_read_endpoints(kind, platform):
+    h = _build_harness(kind, platform)
+    try:
+        audit_id = _fresh_id("ctl_")
+        audit_secret = "audit-read-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+
+        caps = h.service.capabilities(audit_secret)
+        assert caps["role"] == "audit"
+
+        # A plain "does not raise, shape is right" check rather than an
+        # empty-list equality -- the `postgres` harness's own `platform`
+        # fixture is module-scoped and shared with every other test in this
+        # file, so other tests' applications may already be registered here.
+        apps = h.service.list_applications(audit_secret)
+        assert isinstance(apps["applications"], list)
+
+        creds = h.service.list_credentials(audit_secret)
+        assert any(row["credential_id"] == audit_id and row["role"] == "audit" for row in creds["credentials"])
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint(kind, platform):
+    """design §1-D/§4 (contract `control_plane.authority`): every non-read
+    control endpoint must refuse an `audit`-role principal with `FORBIDDEN`,
+    durably audited -- exercised here, at the service layer, against all 8
+    non-read operations, on both backends.
+
+    Round-2 independent review m-3: this loop's own `attempts` dict is a
+    hand-maintained enumeration, NOT structurally complete on its own -- a
+    future 10th service method could be added here without anyone
+    remembering to add a corresponding `attempts` entry, and this test would
+    keep passing regardless. The actual structural-completeness guarantee
+    (§8 risk 3: "書込 endpoint 全数列挙の fail-closed テスト" -- a future
+    operation fails the test until explicitly classified, never silently
+    skipped) lives in `test_control_http.py::
+    test_audit_role_http_authorization_matrix_all_11_endpoints`, which
+    derives its own enumeration from `control_http._ROUTES` (the real wire
+    route table) and asserts set-equality against it, rather than trusting a
+    hand-typed list to stay in sync. This test remains useful alongside that
+    one for its own reason: it exercises the SERVICE layer directly against
+    the real Postgres backend too (`kind == "postgres"`), which the HTTP
+    test (in-memory backend only, `test_control_http.py`'s own module
+    docstring) does not cover.
+    """
+    h = _build_harness(kind, platform)
+    try:
+        audit_id = _fresh_id("ctl_")
+        audit_secret = "audit-write-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+
+        # A pre-existing application/credential (via a separate, ordinary
+        # control credential) so every write attempt below targets a real
+        # id -- makes this test robust to the internal gate-vs-target-
+        # resolution ordering, even though the role gate fires first either
+        # way (design order).
+        owner_id = _fresh_id("ctl_")
+        owner_secret = "owner-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(owner_id, owner_secret, must_rotate=False)
+        app_id = _fresh_id("aw")
+        h.service.register_application(owner_secret, app_id)
+        issued = h.service.issue_credential(owner_secret, app_id, "runtime")
+        cred_id = issued["credential_id"]
+
+        attempts = {
+            "register_application": lambda: h.service.register_application(audit_secret, _fresh_id("aw")),
+            "disable_application": lambda: h.service.set_application_enabled(audit_secret, app_id, False),
+            "enable_application": lambda: h.service.set_application_enabled(audit_secret, app_id, True),
+            "issue_credential": lambda: h.service.issue_credential(audit_secret, app_id, "runtime"),
+            "rotate_credential (other)": lambda: h.service.rotate_credential(audit_secret, cred_id),
+            "rotate_credential (self)": lambda: h.service.rotate_credential(audit_secret, audit_id),
+            "revoke_credential": lambda: h.service.revoke_credential(audit_secret, cred_id),
+            "disable_credential": lambda: h.service.set_credential_enabled(audit_secret, cred_id, False),
+            "enable_credential": lambda: h.service.set_credential_enabled(audit_secret, cred_id, True),
+        }
+        for label, attempt in attempts.items():
+            before = len(h.audit_events())
+            with pytest.raises(FoundationError) as exc:
+                attempt()
+            assert exc.value.code == "FORBIDDEN", f"{label} did not refuse an audit-role principal with FORBIDDEN (got {exc.value.code})"
+            assert exc.value.details.get("audited") is True, f"{label} denial was not durably audited"
+            after = len(h.audit_events())
+            assert after == before + 1, f"{label} denial did not add exactly one durable audit row"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_audit_role_must_rotate_gate_allows_only_capabilities(kind, platform):
+    """design §4 M-1: unlike `role="control"`, self-rotate is NOT in the
+    `must_rotate` allow-list for `role="audit"` -- the out-of-band ceremony
+    is what clears `must_rotate` before a secret is ever distributed, so no
+    in-band audit principal is ever actually stuck here in practice, but the
+    gate itself must still refuse self-rotate for one that IS (somehow)
+    still rotate-pending."""
+    h = _build_harness(kind, platform)
+    try:
+        audit_id = _fresh_id("ctl_")
+        audit_secret = "audit-mr-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(audit_id, audit_secret, must_rotate=True, role="audit")
+
+        caps = h.service.capabilities(audit_secret)
+        assert caps["role"] == "audit"
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.rotate_credential(audit_secret, audit_id)
+        assert exc.value.code == "FORBIDDEN"
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.list_applications(audit_secret)
+        assert exc.value.code == "FORBIDDEN"
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.list_credentials(audit_secret)
+        assert exc.value.code == "FORBIDDEN"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_issuance_freeze_forbids_then_unfreeze_allows_again(kind, platform):
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "freeze-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("fz")
+        h.service.register_application(secret, app_id)
+
+        h.set_application_issuance_frozen_directly(app_id, True)
+        before = len(h.audit_events())
+        with pytest.raises(FoundationError) as exc:
+            h.service.issue_credential(secret, app_id, "runtime")
+        assert exc.value.code == "FORBIDDEN"
+        assert exc.value.details.get("audited") is True
+        assert len(h.audit_events()) == before + 1
+
+        h.set_application_issuance_frozen_directly(app_id, False)
+        issued = h.service.issue_credential(secret, app_id, "runtime")
+        assert issued["application_id"] == app_id
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_issuance_freeze_precedence_role_control_refused_before_freeze_check(kind, platform):
+    """design §1-E/M-8, C-14 vector 3 discipline: the `role="control"`
+    `CAPABILITY_UNSUPPORTED` capability refusal is evaluated BEFORE
+    application-existence/state/limit resolution -- including the freeze
+    check. A frozen application must still yield `CAPABILITY_UNSUPPORTED`
+    (never `FORBIDDEN`) for a `role="control"` issuance request."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "freeze-prec-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("fp")
+        h.service.register_application(secret, app_id)
+        h.set_application_issuance_frozen_directly(app_id, True)
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.issue_credential(secret, app_id, "control")
+        assert exc.value.code == "CAPABILITY_UNSUPPORTED"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_issuance_freeze_does_not_affect_already_issued_credentials(kind, platform):
+    """Freezing an application only refuses NEW issuance -- an already-live
+    credential for that application keeps authenticating on the data plane
+    exactly as before (freeze has no concept of "revoke existing
+    credentials"); `CredentialStore`/`PostgresCredentialStore` have no
+    notion of issuance freeze at all -- it is a control-plane-only concept."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "freeze-live-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("fl")
+        h.service.register_application(secret, app_id)
+        issued = h.service.issue_credential(secret, app_id, "runtime")
+        app_secret = issued["secret"]
+
+        h.set_application_issuance_frozen_directly(app_id, True)
+
+        context = h.credentials_store.authenticate(app_secret)
+        assert context.application_id == app_id
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.issue_credential(secret, app_id, "runtime")
+        assert exc.value.code == "FORBIDDEN"
+
+        # Still live after the freeze-time NEW-issuance refusal above.
+        context_again = h.credentials_store.authenticate(app_secret)
+        assert context_again.application_id == app_id
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_target_id_populated_for_application_and_credential_lifecycle_events(kind, platform):
+    """design §1-C/§4: `target_id` on the durable audit row -- the single
+    target credential_id/application_id a lifecycle event acted on --
+    populated for register/enable/disable-application and
+    rotate/revoke/enable/disable-credential (issue_credential is already
+    covered by Section 6's `test_issued_secret_appears_only_in_the_response`)."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "tid-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("ti")
+
+        req_register = _fresh_id("req")
+        h.service.register_application(secret, app_id, request_id=req_register)
+        row = _find_audit_row_by_request_id(h, req_register)
+        assert row is not None and row.get("target_id") == app_id
+
+        req_disable_app = _fresh_id("req")
+        h.service.set_application_enabled(secret, app_id, False, request_id=req_disable_app)
+        row = _find_audit_row_by_request_id(h, req_disable_app)
+        assert row is not None and row.get("target_id") == app_id
+        h.service.set_application_enabled(secret, app_id, True)
+
+        issued = h.service.issue_credential(secret, app_id, "runtime")
+        app_cred_id = issued["credential_id"]
+
+        req_rotate = _fresh_id("req")
+        h.service.rotate_credential(secret, app_cred_id, request_id=req_rotate)
+        row = _find_audit_row_by_request_id(h, req_rotate)
+        assert row is not None and row.get("target_id") == app_cred_id
+
+        req_disable_cred = _fresh_id("req")
+        h.service.set_credential_enabled(secret, app_cred_id, False, request_id=req_disable_cred)
+        row = _find_audit_row_by_request_id(h, req_disable_cred)
+        assert row is not None and row.get("target_id") == app_cred_id
+
+        req_revoke = _fresh_id("req")
+        h.service.revoke_credential(secret, app_cred_id, request_id=req_revoke)
+        row = _find_audit_row_by_request_id(h, req_revoke)
+        assert row is not None and row.get("target_id") == app_cred_id
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_credential(kind, platform):
+    """Round-2 independent review M-1 (the one self-initiated, previously
+    untested piece of this WP): the last-active-control-credential revoke
+    gate's own "active" count (`revoke_credential`'s `_body`,
+    `control_credentials_locked`) filters to `role == "control"` rows --
+    this WP's own addition. Framing note (for the record, §10.4): this
+    filter prevents a regression THIS WP would otherwise introduce (before
+    this WP, every row in `control_credentials` WAS a control credential, so
+    no filter was needed at all) -- it is not a fix to any pre-existing bug.
+
+    Seeds exactly one active (must_rotate=False) control credential AND one
+    active audit credential, then asserts revoking the control credential
+    still requires confirmation (the audit row must not be counted toward
+    "active", or it would make the control credential look like it is not
+    the last one, letting it be revoked unconfirmed and leaving zero
+    credentials capable of any control-plane management).
+    """
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "gate-role-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        audit_id = _fresh_id("ctl_")
+        audit_secret = "gate-role-audit-secret-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.revoke_credential(secret, cred_id)
+        assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+
+        # Still live -- the unconfirmed probe never executed.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_revoke_gate_revoking_the_audit_credential_itself_is_never_gated(kind, platform):
+    """Round-2 independent review M-1, part (ii): revoking the ACTIVE audit
+    credential itself (with the sole active control credential also present
+    and untouched) succeeds unconfirmed -- an audit credential is excluded
+    from the gate's own "active" count entirely (it can never be the
+    credential `active_ids[0] == credential_id` matches), so this is an
+    ordinary, non-destructive-confirmation-gated revoke, exactly like an
+    application credential's."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "gate-role-secret2-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        _ensure_sole_active_control_credential(h, cred_id)
+
+        audit_id = _fresh_id("ctl_")
+        audit_secret = "gate-role-audit-secret2-" + secrets.token_urlsafe(8)
+        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+
+        result = h.service.revoke_credential(secret, audit_id)
+        assert result == {"credential_id": audit_id, "enabled": True, "revoked": True}
+
+        with pytest.raises(FoundationError) as exc:
+            h.service.capabilities(audit_secret)
+        assert exc.value.code == "AUTH_REVOKED"
+
+        # The control credential (the actual gate target) was untouched by
+        # revoking the audit credential.
+        caps = h.service.capabilities(secret)
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_issue_audit_credential_ceremony_distributes_a_must_rotate_false_audit_credential(kind, platform):
+    """`issue_audit_credential_ceremony` (control_plane.py) -- issues AND
+    rotates in one transaction before returning a secret, so the returned
+    secret's `must_rotate` is already `False` (design §4 M-1: no in-band
+    self-rotate path exists for an audit principal, so the ceremony itself
+    must complete the rotate half)."""
+    h = _build_harness(kind, platform)
+    try:
+        if kind == "memory":
+            store = h.control_credentials_store
+        else:
+            store = PostgresControlCredentialStore(platform.control_dsn, pepper=CONTROL_PEPPER, schema=platform.schema)
+        audit = ControlAuditSink()
+        try:
+            with store.unit_of_work() as work:
+                credential_id, secret = issue_audit_credential_ceremony(store, audit, work=work)
+            context = store.authenticate(secret)
+            assert context.credential_id == credential_id
+            assert context.must_rotate is False
+            assert context.role == "audit"
+
+            events = audit.events()
+            assert len(events) == 1
+            assert events[0]["operation"] == "issue_audit_credential"
+            assert events[0]["outcome"] == "allow"
+            assert events[0].get("target_id") == credential_id
+        finally:
+            if kind == "postgres":
+                store.close()
+    finally:
+        h.cleanup()
+
+
+def test_control_plane_limits_request_bytes_field_default_and_override() -> None:
+    """§4 "L4": `ControlPlaneLimits.request_bytes` defaults to the exact
+    value `ResourceLimits().request_bytes` always had (1 MiB) -- a
+    declaration of an existing fact, not a behavior change -- and is
+    overridable like every other field on this dataclass."""
+    assert ControlPlaneLimits().request_bytes == 1_048_576
+    assert ControlPlaneLimits(request_bytes=4096).request_bytes == 4096
+
+
+def test_control_plane_service_limits_property_is_the_single_source_instance() -> None:
+    """§4 "L4" single-source rule: `ControlPlaneService.limits` returns the
+    EXACT `ControlPlaneLimits` instance passed at construction -- the same
+    object `control_http.create_control_app` reads `.request_bytes` off of,
+    never a copy/reconstruction that could drift from what `capabilities()`
+    itself discovers through."""
+    limits = ControlPlaneLimits(request_bytes=2048)
+    credentials = CredentialStore(pepper=PEPPER)
+    data_service = DataService(credentials)
+    authority = ControlAuthority(data_service)
+    control_credentials = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    backend = InMemoryControlBackend(authority, control_credentials)
+    service = ControlPlaneService(backend, audit=ControlAuditSink(), limits=limits)
+    assert service.limits is limits
+    assert service.limits.request_bytes == 2048

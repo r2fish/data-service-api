@@ -12,7 +12,7 @@ from typing import Iterator, Mapping
 from .errors import FoundationError, fail
 
 
-def _fail_identified(code: str, message: str, *, status: int, credential_id: str) -> None:
+def _fail_identified(code: str, message: str, *, status: int, credential_id: str, role: str | None = None) -> None:
     """Like `errors.fail`, but attaches the store's own identified
     `credential_id` onto the raised `FoundationError` as a plain dynamic
     attribute (`identified_credential_id`) -- never a dataclass field, so
@@ -24,9 +24,17 @@ def _fail_identified(code: str, message: str, *, status: int, credential_id: str
     -- a truthful `attributed` R-11 declaration requires it. Used only for
     the "a matching verifier was found, but the credential is revoked/
     disabled" cases below; "no matching verifier at all" has no credential to
-    identify and keeps using plain `errors.fail`."""
+    identify and keeps using plain `errors.fail`.
+
+    Phase 3.5 WP-4: `role`, when given, is attached the same way
+    (`identified_role`) -- `ControlPlaneService._authenticate`'s denial audit
+    needs the identified credential's actual role (never a hardcoded
+    `"control"`) now that a control-credential-table row may be `"audit"`.
+    """
     exc = FoundationError(code, message, {}, status)
     exc.identified_credential_id = credential_id
+    if role is not None:
+        exc.identified_role = role
     raise exc
 
 
@@ -50,10 +58,20 @@ class AuthContext:
 @dataclass(frozen=True)
 class ControlCredentialRecord:
     """`credentials`/`CredentialRecord`'s counterpart for control
-    credentials (R-2) -- deliberately carries no `application_id`/`role`
-    field at all: a control credential belongs to no Application (design
-    docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md R-2). `must_rotate` (R-5) is
-    the only addition beyond the shape `CredentialRecord` already has.
+    credentials (R-2) -- deliberately carries no `application_id` field at
+    all: a control credential belongs to no Application (design docs/design/
+    R2DB_CCR14_CONTROL_PLANE_V1.md R-2). `must_rotate` (R-5) is one addition
+    beyond the shape `CredentialRecord` already has.
+
+    Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+    §1-D/§4, P35-D12): `role` is a second addition -- `"control"` (the only
+    value that existed before this WP) or `"audit"`. Both kinds share this
+    one table/dataclass (contract `control_plane.authority`: "control
+    credentials are rejected on data/schema endpoints" applies identically to
+    either role -- neither is an application credential). Defaults to
+    `"control"` so every pre-WP-4 caller (`bootstrap_control_credential`/
+    `reset_control_credentials`, this repository's own pre-existing tests)
+    is unaffected.
     """
 
     credential_id: str
@@ -61,19 +79,25 @@ class ControlCredentialRecord:
     enabled: bool = True
     revoked: bool = False
     must_rotate: bool = True
+    role: str = "control"
 
 
 @dataclass(frozen=True)
 class ControlAuthContext:
     """`AuthContext`'s counterpart for control credentials -- `must_rotate`
     is exposed here (R-5: "must_rotate ... authenticate 結果に露出") so a
-    caller (the not-yet-built `ControlPlaneService`, WP-3) can gate every
-    operation except `capabilities`/self-`rotate` on it without a second
-    lookup.
+    caller (`ControlPlaneService`) can gate every operation except
+    `capabilities`/self-`rotate` on it without a second lookup.
+
+    Phase 3.5 WP-4: `role` (`"control"` or `"audit"`) is exposed the same
+    way, so `ControlPlaneService` can authorize per-endpoint (design §1-D:
+    an audit principal is accepted only on the 3 read-only control
+    endpoints) without a second lookup either.
     """
 
     credential_id: str
     must_rotate: bool
+    role: str = "control"
 
 
 class _InMemoryWork:
@@ -317,15 +341,21 @@ class ControlCredentialStore:
                 self._records = snapshot
                 raise
 
-    def add(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> None:
-        """Only the bootstrap/reset ritual (`ops.py`, connected with `R2DB_
-        CONTROL_DSN`) ever calls this -- there is no in-band issuance path
-        for control credentials at all (spec/CCR_DISPOSITION.md "案B"); this
-        method exists on the store because the ritual needs it, not because
-        anything else is meant to reach it. `work` is required (round-2
-        ruling (A) -- see `CredentialStore.add`'s docstring above).
+    def add(self, credential_id: str, secret: str, *, role: str = "control", work: _InMemoryWork) -> None:
+        """Only the out-of-band CLI ceremonies (`ops.py`, connected with
+        `R2DB_CONTROL_DSN`) ever call this -- there is no in-band issuance
+        path for control OR audit credentials at all (spec/CCR_DISPOSITION.md
+        "案B"; Phase 3.5 §1-D extends the same rule to `role="audit"`, P35-
+        D12); this method exists on the store because the ritual needs it,
+        not because anything else is meant to reach it. `work` is required
+        (round-2 ruling (A) -- see `CredentialStore.add`'s docstring above).
+
+        Phase 3.5 WP-4: `role` defaults to `"control"` (every pre-WP-4 caller
+        is unaffected); `"audit"` is the one other accepted value.
         """
-        self._records[credential_id] = ControlCredentialRecord(credential_id, self.verifier(secret))
+        if role not in {"control", "audit"}:
+            fail("VALIDATION_FAILED", "Control-table credentials require control or audit role.")
+        self._records[credential_id] = ControlCredentialRecord(credential_id, self.verifier(secret), role=role)
 
     def set_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: _InMemoryWork) -> None:
         if enabled is not None and not isinstance(enabled, bool):
@@ -348,6 +378,7 @@ class ControlCredentialStore:
             record.enabled if enabled is None else enabled,
             record.revoked if revoked is None else revoked,
             record.must_rotate,
+            record.role,
         )
 
     def rotate(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> None:
@@ -358,13 +389,20 @@ class ControlCredentialStore:
         rotating a terminal-state row would return a "successfully
         rotated" secret that can never actually authenticate, which is a
         disguised failure). `work` is required (round-2 ruling (A)).
+
+        Phase 3.5 WP-4: unchanged for `role="audit"` rows -- the out-of-band
+        audit-credential issuance ceremony (`issue_audit_credential_ceremony`,
+        below) calls this same method to clear `must_rotate` before the
+        secret is ever printed (design §4 M-1: no in-band self-rotate exists
+        for an audit principal, so the ceremony itself must complete the
+        rotate half before distribution).
         """
         record = self._records.get(credential_id)
         if record is None:
             fail("NOT_FOUND", "Control credential was not found.", status=404)
         if record.revoked:
             fail("VALIDATION_FAILED", "A revoked control credential cannot be rotated.")
-        self._records[credential_id] = ControlCredentialRecord(record.credential_id, self.verifier(secret), record.enabled, record.revoked, False)
+        self._records[credential_id] = ControlCredentialRecord(record.credential_id, self.verifier(secret), record.enabled, record.revoked, False, record.role)
 
     def has_any(self, *, include_revoked: bool = True, work: _InMemoryWork | None = None) -> bool:
         """§8 M-6: bootstrap's existence check must count revoked rows too
@@ -398,7 +436,7 @@ class ControlCredentialStore:
         性"). `work` is required (round-2 ruling (A)).
         """
         for credential_id, record in list(self._records.items()):
-            self._records[credential_id] = ControlCredentialRecord(record.credential_id, record.verifier, record.enabled, True, record.must_rotate)
+            self._records[credential_id] = ControlCredentialRecord(record.credential_id, record.verifier, record.enabled, True, record.must_rotate, record.role)
 
     def authenticate(self, secret: str | None) -> ControlAuthContext:
         if not self.available:
@@ -408,10 +446,10 @@ class ControlCredentialStore:
         for record in self._records.values():
             if hmac.compare_digest(record.verifier, self.verifier(secret)):
                 if record.revoked:
-                    _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=record.credential_id)
+                    _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
                 if not record.enabled:
-                    _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=record.credential_id)
-                return ControlAuthContext(record.credential_id, record.must_rotate)
+                    _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
+                return ControlAuthContext(record.credential_id, record.must_rotate, record.role)
         fail("AUTH_INVALID", "Credential is not valid.", status=401)
 
     def assert_active(self, context: ControlAuthContext) -> ControlAuthContext:
@@ -424,7 +462,7 @@ class ControlCredentialStore:
             fail("AUTH_REVOKED", "Credential is not active.", status=401)
         if not record.enabled:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
-        return ControlAuthContext(record.credential_id, record.must_rotate)
+        return ControlAuthContext(record.credential_id, record.must_rotate, record.role)
 
     def get_state(self, credential_id: str) -> tuple[bool, bool] | None:
         """`CredentialStore.get_state`'s control-credential counterpart

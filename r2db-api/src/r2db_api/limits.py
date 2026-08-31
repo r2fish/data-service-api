@@ -115,6 +115,18 @@ class ControlPlaneLimits:
     applications: int = 100
     credentials_per_application: int = 10
     control_requests_per_minute: int = 60
+    # Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4
+    # "L4", DESTRUCTIVE_CONFIRMATION_V1.md §8.1(d)): the control plane's own
+    # `request_bytes` byte bound, discoverable through `GET /control/v1/
+    # capabilities` the same way the 3 fields above already are. Defaults to
+    # the exact value `control_http.py` has enforced since WP-4 (`ResourceLimits().
+    # request_bytes`, 1 MiB) -- this is a declaration of an existing fact, not
+    # a behavior change; `control_http.py` is revised in this same commit to
+    # read this field instead of constructing its own separate `ResourceLimits()`,
+    # so the declared and enforced numbers can never drift apart (single
+    # source, mirroring MitateDB-api's identical `ControlPlaneLimits.
+    # request_bytes` field).
+    request_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

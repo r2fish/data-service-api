@@ -85,6 +85,22 @@ ALTER TABLE r2dbsvc_registry.applications ALTER COLUMN provisioned_at DROP NOT N
 -- point of this two-state change.
 ALTER TABLE r2dbsvc_registry.applications ALTER COLUMN provisioned_at DROP DEFAULT;
 
+-- Phase 3.5 WP-4, 2026-08-31 (design docs/design/
+-- PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4/§1-E, P35-D6): per-
+-- application issuance freeze, an out-of-band (CLI-only) operation --
+-- `ops.py freeze-issuance`/`unfreeze-issuance`. Added here, alongside this
+-- file's other `applications` column additions, via a plain idempotent
+-- `ADD COLUMN IF NOT EXISTS` (no deployed instance of this schema exists
+-- yet -- P35-D5 continues the same in-place-revision precedent this design
+-- already used for `control_credentials.revoked`, phase 3 WP-4). `issue_
+-- credential` refuses with `FORBIDDEN` when the target application's row
+-- has this set (`ControlPlaneService.issue_credential`), evaluated AFTER
+-- the `role=control` capability refusal but as part of the same target-
+-- existence/state/limit resolution block that refusal itself precedes
+-- (contract `issue_credential.semantics`' own precedence sentence).
+ALTER TABLE r2dbsvc_registry.applications
+    ADD COLUMN IF NOT EXISTS issuance_frozen boolean NOT NULL DEFAULT false;
+
 -- "Provisioned" is judged solely by `database_name IS NOT NULL` -- no new
 -- status column is introduced (design's own explicit instruction). This
 -- CHECK is what makes the two representable states ("registered": all four
@@ -356,12 +372,26 @@ $fn$;
 -- migration -- a control credential cannot enter `credentials` and an
 -- application credential cannot enter `control_credentials`, by table shape,
 -- not by application-level discipline alone.
+-- Phase 3.5 WP-4, 2026-08-31 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+-- §4/§1-D, P35-D12): `role` -- in-place revision of this `CREATE TABLE`
+-- statement (P35-D5, the same "no deployed instance" precedent that already
+-- justified the phase 3 in-place `revoked` addition), not a separate `ALTER
+-- TABLE`. `'control'` (the only value this table held before this WP) and
+-- `'audit'` (Phase 3.5's new read-only-role principal, contract `security.
+-- roles`/`control_plane.authority`) share this one table -- neither kind is
+-- an application credential (0005's `credentials` table remains completely
+-- separate, `role IN ('runtime', 'developer')`), and issuance for BOTH
+-- control-table roles stays out-of-band only (contract `control_plane.
+-- issuance`: "Audit credentials, like control credentials, are issued only
+-- via the out-of-band ceremony" -- no `CredentialIssueRequest` enum change,
+-- P35-D12).
 CREATE TABLE IF NOT EXISTS r2dbsvc_registry.control_credentials (
     credential_id text PRIMARY KEY,      -- 'ctl_' + 16 hex
     verifier      text NOT NULL UNIQUE,
     enabled       boolean NOT NULL DEFAULT true,
     revoked       boolean NOT NULL DEFAULT false,
     must_rotate   boolean NOT NULL DEFAULT true,
+    role          text NOT NULL DEFAULT 'control' CHECK (role IN ('control', 'audit')),
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -387,6 +417,16 @@ CREATE TABLE IF NOT EXISTS r2dbsvc_registry.control_credentials (
 -- `gen_random_uuid()` default, so an application-side retry after a failed
 -- INSERT and a later successful one can never collide on two different
 -- server-assigned ids for what the application intended as one event.
+-- Phase 3.5 WP-4, 2026-08-31 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+-- §4/§1-C, B-1 measure): `target_id` -- in-place revision of this `CREATE
+-- TABLE` statement (P35-D5, same "no deployed instance" precedent as
+-- `control_credentials.role` above), the contract's 13th, optional `audit.
+-- fields` member. Nullable (the contract's own optionality note: "set when
+-- the event has a single target credential/application, omitted
+-- otherwise"). Placed last, after `recorded_at`'s own predecessor column
+-- (`reason_code`) -- see this table's column order below, `target_id`
+-- appended as the final column so `recorded_at`'s own position (the DB-side
+-- insertion timestamp, deliberately last) is unchanged.
 CREATE TABLE IF NOT EXISTS r2dbsvc_registry.control_audit (
     event_id       uuid PRIMARY KEY,
     event_class    text NOT NULL,
@@ -400,6 +440,7 @@ CREATE TABLE IF NOT EXISTS r2dbsvc_registry.control_audit (
     target_kind    text,
     outcome        text NOT NULL,
     reason_code    text,
+    target_id      text,
     recorded_at    timestamptz NOT NULL DEFAULT now()
 );
 -- Same closed-by-default reasoning as `control_credentials` above -- no

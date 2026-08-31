@@ -29,8 +29,8 @@ import pytest
 
 from r2db_api.audit import ControlAuditSink
 from r2db_api.auth import ControlCredentialStore, CredentialStore
-from r2db_api.control_http import create_control_app
-from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend
+from r2db_api.control_http import _ROUTES, create_control_app
+from r2db_api.control_plane import _AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneService, InMemoryControlBackend
 from r2db_api.http import create_app
 from r2db_api.limits import ControlPlaneLimits
 from r2db_api.service import ControlAuthority, DataService
@@ -113,7 +113,12 @@ async def test_full_endpoint_roundtrip_through_all_11_routes(control_harness):
         caps_doc = caps.json()
         assert caps_doc["capabilities"]["control_plane"] == {"status": "enabled"}
         assert caps_doc["role"] == "control"
-        assert set(caps_doc["limits"]) == {"applications", "credentials_per_application", "control_requests_per_minute"}
+        assert set(caps_doc["limits"]) == {"applications", "credentials_per_application", "control_requests_per_minute", "request_bytes"}
+        # Phase 3.5 WP-4 (§4 "L4"): the HTTP-mounted two-layer override --
+        # `request_bytes` reads `"enforced"` here (unlike the bare-service
+        # `"unavailable"` `test_control_plane_service.py` pins), because a
+        # real `RequestByteBoundMiddleware` IS mounted in front of this app.
+        assert caps_doc["limit_enforcement"]["request_bytes"] == "enforced"
 
         registered = await client.post("/control/v1/applications", headers=headers, json={"application_id": "app_roundtrip"})
         assert registered.status_code == 200
@@ -276,6 +281,11 @@ async def test_broken_response_shape_from_service_is_service_unavailable():
     exist."""
 
     class _BrokenCapabilitiesService:
+        # Phase 3.5 WP-4 (§4 "L4", single source): `create_control_app` now
+        # reads `.limits.request_bytes` off whatever it is given, at app-
+        # build time -- a minimal stand-in service needs this attribute too.
+        limits = ControlPlaneLimits()
+
         def check_rate(self) -> None:  # MAJOR-1: control_http.py calls this before every method now
             pass
 
@@ -312,6 +322,8 @@ async def test_uncaught_service_exception_is_generic_503_with_no_internal_detail
     _SENTINEL = "raw-postgres-connection-string-should-never-leak-abcdef123456"
 
     class _RaisingService:
+        limits = ControlPlaneLimits()  # Phase 3.5 WP-4: see `_BrokenCapabilitiesService`'s identical comment above
+
         def check_rate(self) -> None:  # MAJOR-1: control_http.py calls this before every method now
             pass
 
@@ -671,3 +683,192 @@ def test_application_plane_still_declares_control_plane_unavailable():
     context = data_service.authenticate("secret-single-commit")
     document = data_service.capabilities(context)
     assert document["capabilities"]["control_plane"] == {"status": "unavailable"}
+
+
+# ===========================================================================
+# 10. Phase 3.5 WP-4 control-plane bundle (design docs/design/
+#     PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §4): audit-role HTTP
+#     authorization matrix (§1-D), issuance freeze over real HTTP (§1-E),
+#     and the L4 `request_bytes` single-source/two-layer form (§4 "L4").
+# ===========================================================================
+
+
+def _seed_audit_credential(harness: types.SimpleNamespace, *, must_rotate: bool = False) -> tuple[str, str]:
+    credential_id = "ctl_" + os.urandom(8).hex()
+    secret = "audit-http-secret-" + os.urandom(8).hex()
+    with harness.control_credentials.unit_of_work() as work:
+        harness.control_credentials.add(credential_id, secret, role="audit", work=work)
+    if not must_rotate:
+        with harness.control_credentials.unit_of_work() as work:
+            harness.control_credentials.rotate(credential_id, secret, work=work)
+    return credential_id, secret
+
+
+# Round-2 independent review m-3: the operation name each route maps to --
+# a second, independent source (alongside `matrix` below) this test cross-
+# checks BOTH against `control_http._ROUTES` (the wire boundary's own route
+# table) AND against `control_plane._AUDIT_ROLE_ALLOWED_OPERATIONS` (the
+# product code's own allow-list), so a future route added to either the
+# route table or the allow-list without a corresponding update here fails
+# the structural-completeness assertion below, rather than silently never
+# being exercised.
+_ROUTE_OPERATION_NAMES: dict[tuple[str, str], str] = {
+    ("GET", "/control/v1/capabilities"): "control_capabilities",
+    ("POST", "/control/v1/applications"): "register_application",
+    ("GET", "/control/v1/applications"): "list_applications",
+    ("POST", "/control/v1/applications/{application_id}/disable"): "disable_application",
+    ("POST", "/control/v1/applications/{application_id}/enable"): "enable_application",
+    ("POST", "/control/v1/credentials"): "issue_credential",
+    ("GET", "/control/v1/credentials"): "list_credentials",
+    ("POST", "/control/v1/credentials/{credential_id}/rotate"): "rotate_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/revoke"): "revoke_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/disable"): "disable_credential",
+    ("POST", "/control/v1/credentials/{credential_id}/enable"): "enable_credential",
+}
+
+
+async def test_audit_role_http_authorization_matrix_all_11_endpoints(control_harness):
+    """Endpoint-by-endpoint audit-role authorization matrix, driven over
+    real HTTP against every one of the 11 routes `_ROUTES` declares (§8
+    risk 3: fail-closed completeness). The 3 read-only routes return 200 for
+    an `audit`-role bearer; every other route returns 403 FORBIDDEN.
+
+    Round-2 independent review m-3: structurally complete, not a hand-
+    maintained list a future 10th route could silently bypass -- the set of
+    (method, route-template) pairs this test exercises is asserted equal to
+    `control_http._ROUTES` itself (a route added there with no entry here
+    fails immediately), and the derived "allowed" subset is asserted equal
+    to `control_plane._AUDIT_ROLE_ALLOWED_OPERATIONS` (the product code's
+    own allow-list, imported directly rather than re-typed as a literal).
+    """
+    transport = httpx.ASGITransport(app=create_control_app(control_harness.service))
+    control_headers = _auth(control_harness.secret)
+    audit_id, audit_secret = _seed_audit_credential(control_harness)
+    audit_headers = _auth(audit_secret)
+
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        registered = await client.post("/control/v1/applications", headers=control_headers, json={"application_id": "app_audit_matrix"})
+        assert registered.status_code == 200
+        issued = await client.post("/control/v1/credentials", headers=control_headers, json={"application_id": "app_audit_matrix", "role": "runtime"})
+        assert issued.status_code == 200
+        credential_id = issued.json()["credential_id"]
+
+        # (method, route-template, body-or-None, expected status) -- one
+        # entry per key in `_ROUTE_OPERATION_NAMES`.
+        matrix = [
+            ("GET", "/control/v1/capabilities", None, 200),
+            ("POST", "/control/v1/applications", {"application_id": "app_audit_matrix_denied"}, 403),
+            ("GET", "/control/v1/applications", None, 200),
+            ("POST", "/control/v1/applications/{application_id}/disable", None, 403),
+            ("POST", "/control/v1/applications/{application_id}/enable", None, 403),
+            ("POST", "/control/v1/credentials", {"application_id": "app_audit_matrix", "role": "runtime"}, 403),
+            ("GET", "/control/v1/credentials", None, 200),
+            ("POST", "/control/v1/credentials/{credential_id}/rotate", None, 403),
+            ("POST", "/control/v1/credentials/{credential_id}/revoke", {}, 403),
+            ("POST", "/control/v1/credentials/{credential_id}/disable", None, 403),
+            ("POST", "/control/v1/credentials/{credential_id}/enable", None, 403),
+        ]
+        matrix_keys = {(method, template) for method, template, _body, _status in matrix}
+
+        # (1) `_ROUTE_OPERATION_NAMES`' own keys must match `_ROUTES` exactly
+        # -- catches drift between this file's static mapping and the real
+        # route table (a route renamed/added/removed in `control_http.py`
+        # without this file being updated).
+        route_keys = {(method, route.path) for route in _ROUTES for method in (route.methods - {"HEAD"})}
+        assert set(_ROUTE_OPERATION_NAMES) == route_keys, (
+            f"_ROUTE_OPERATION_NAMES does not match control_http._ROUTES: "
+            f"missing={route_keys - set(_ROUTE_OPERATION_NAMES)} extra={set(_ROUTE_OPERATION_NAMES) - route_keys}"
+        )
+        # (2) this test's own `matrix` must cover every one of those routes
+        # -- catches a new route added to `_ROUTES`/`_ROUTE_OPERATION_NAMES`
+        # with no corresponding entry in `matrix` (the "future 10th
+        # operation" case m-3 names).
+        assert matrix_keys == route_keys, (
+            f"matrix does not cover control_http._ROUTES exactly: "
+            f"missing={route_keys - matrix_keys} extra={matrix_keys - route_keys}"
+        )
+        # (3) the "allowed" subset this matrix expects (status 200) must
+        # equal the product code's own `_AUDIT_ROLE_ALLOWED_OPERATIONS`
+        # allow-list, translated through `_ROUTE_OPERATION_NAMES` -- catches
+        # the allow-list being edited (in either direction) without this
+        # test's own expectations being updated to match.
+        allowed_keys = {(m, t) for m, t, _b, status in matrix if status == 200}
+        denied_keys = {(m, t) for m, t, _b, status in matrix if status == 403}
+        assert allowed_keys | denied_keys == matrix_keys  # every entry is classified one way or the other
+        allowed_operations = {_ROUTE_OPERATION_NAMES[key] for key in allowed_keys}
+        assert allowed_operations == _AUDIT_ROLE_ALLOWED_OPERATIONS
+
+        for method, template, body, expected_status in matrix:
+            path = template.format(application_id="app_audit_matrix", credential_id=credential_id)
+            if method == "GET":
+                response = await client.get(path, headers=audit_headers)
+            else:
+                response = await client.post(path, headers=audit_headers, json=body)
+            assert response.status_code == expected_status, f"{method} {path}: expected {expected_status}, got {response.status_code} ({response.text})"
+            if expected_status == 403:
+                assert response.json()["code"] == "FORBIDDEN"
+
+        # The audit credential itself was never touched by any of the 8
+        # refused attempts above (still enabled, not revoked) -- confirmed
+        # by it still authenticating for a 4th read afterward.
+        still_alive = await client.get("/control/v1/capabilities", headers=audit_headers)
+        assert still_alive.status_code == 200
+        assert still_alive.json()["role"] == "audit"
+
+
+async def test_issuance_freeze_forbidden_over_http_then_unfreeze_allows_again(control_harness):
+    """Freeze has no in-band HTTP toggle (design §1-E, P35-D6 -- CLI only);
+    this test flips the flag directly at the backend level (as `ops.py
+    freeze-issuance`/`unfreeze-issuance` do out-of-band) and confirms the
+    in-band `issue_credential` endpoint refuses/allows accordingly."""
+    transport = httpx.ASGITransport(app=create_control_app(control_harness.service))
+    headers = _auth(control_harness.secret)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        registered = await client.post("/control/v1/applications", headers=headers, json={"application_id": "app_freeze_http"})
+        assert registered.status_code == 200
+
+        with control_harness.service._backend.applications_unit_of_work() as work:  # noqa: SLF001
+            control_harness.service._backend.set_application_issuance_frozen("app_freeze_http", True, work=work)  # noqa: SLF001
+
+        denied = await client.post("/control/v1/credentials", headers=headers, json={"application_id": "app_freeze_http", "role": "runtime"})
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "FORBIDDEN"
+
+        with control_harness.service._backend.applications_unit_of_work() as work:  # noqa: SLF001
+            control_harness.service._backend.set_application_issuance_frozen("app_freeze_http", False, work=work)  # noqa: SLF001
+
+        allowed = await client.post("/control/v1/credentials", headers=headers, json={"application_id": "app_freeze_http", "role": "runtime"})
+        assert allowed.status_code == 200
+
+
+async def test_l4_request_bytes_single_source_mutating_limit_changes_both_bound_and_discovery():
+    """§4 "L4" single-source rule: a `ControlPlaneService` constructed with a
+    non-default `request_bytes` changes BOTH the real `RequestByteBound
+    Middleware` bound `create_control_app` mounts AND the value `GET .../
+    capabilities` discovers -- from the one place that value lives
+    (`ControlPlaneService.limits`), never two independently-configured
+    numbers that could drift apart."""
+    small_limits = ControlPlaneLimits(applications=1_000, credentials_per_application=1_000, control_requests_per_minute=100_000, request_bytes=2048)
+    harness = _build_control_harness(small_limits)
+    transport = httpx.ASGITransport(app=create_control_app(harness.service))
+    headers = _auth(harness.secret)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        caps = await client.get("/control/v1/capabilities", headers=headers)
+        assert caps.status_code == 200
+        caps_doc = caps.json()
+        assert caps_doc["limits"]["request_bytes"] == 2048
+        assert caps_doc["limit_enforcement"]["request_bytes"] == "enforced"
+
+        # A body comfortably under 2048 measured bytes succeeds.
+        small_ok = await client.post("/control/v1/applications", headers=headers, json={"application_id": "app_l4_small"})
+        assert small_ok.status_code == 200
+
+        # A body that exceeds the CUSTOM 2048-byte bound (but is nowhere
+        # near the data plane's own default 1 MiB bound) is rejected --
+        # proving the middleware is actually using this instance's own
+        # smaller `request_bytes`, not a leftover default.
+        oversized = "x" * 4096
+        over = await client.post("/control/v1/applications", headers=headers, json={"application_id": "app_l4_over", "padding": oversized})
+        assert over.status_code == 413
+        assert over.json()["details"]["resource"] == "request_bytes"
+        assert over.json()["details"]["limit"] == 2048

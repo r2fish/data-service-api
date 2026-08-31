@@ -25,6 +25,17 @@ class AuditEvent:
     target_kind: str | None
     outcome: str
     reason_code: str | None
+    # Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+    # §1-C/§4): contract `audit.fields`' 13th, optional field -- "set when
+    # the event has a single target credential/application, omitted
+    # otherwise" (the contract text's own optionality note; `audit.fields`
+    # is an additive vocabulary, not a fixed column set). Defaulted so every
+    # pre-WP-4 positional `AuditEvent(...)` construction (this file's own
+    # `AuditSink.append` below, and any other 12-positional-arg call site)
+    # keeps working unchanged, with `target_id` simply absent (`as_dict()`'s
+    # own None-filtering already omits it, matching the optional wire
+    # semantics with no special-casing needed here).
+    target_id: str | None = None
 
     def as_dict(self) -> MappingProxyType:
         return MappingProxyType({k: v for k, v in self.__dict__.items() if v is not None})
@@ -118,12 +129,13 @@ class ControlAuditSink:
         target_kind: str | None,
         outcome: str,
         reason_code: str | None = None,
+        target_id: str | None = None,
         work: Any = None,
     ) -> AuditEvent:
         del work  # see class docstring -- accepted for call-surface symmetry only
         if self._fault is not None:
             raise self._fault
-        event = AuditEvent(str(uuid.uuid4()), event_class, datetime.now(timezone.utc).isoformat(), request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code)
+        event = AuditEvent(str(uuid.uuid4()), event_class, datetime.now(timezone.utc).isoformat(), request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id)
         self._events.append(event)
         return event
 
