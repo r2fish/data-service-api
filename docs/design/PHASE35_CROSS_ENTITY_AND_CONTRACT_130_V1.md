@@ -75,7 +75,7 @@
 | WP-3 | 共通 suite: port v1.7 + C-16 新設 + C-12/C-11 拡張 + CONDITIONS.md + adapter 4 ファイル (m-7)。**C-16 PROVIDED 分岐の初実行は本 WP** (MitateDB 2 adapter)。既存 executable 全条件が 4 adapter で緑 | なし (検証範囲拡大のみ) |
 | WP-4 | r2db 制御面束 + L4 + **`contract_version` 1.3.0 flip**: must_rotate 露出・target_id・audit role・発行凍結・request_bytes 宣言・ローカル固定更新 (M-2) | あり (制御面拡張 + 版数宣言) |
 | WP-5 | MitateDB 制御面束 + **`contract_version` 1.3.0 flip**: 同4件 + B-1 テスト復元 (13 フィールド等値) | あり (制御面拡張 + 版数宣言) |
-| WP-6 | 記録整理: CONTROL_MAPPING (SI-08/SI-11/SI-14/SI-06/SI-07 に加え **SI-02/SI-15/SI-10** — レビュー m-5)・CONDITIONS・README・引き継ぎ・完了報告 | なし |
+| WP-6 | 記録整理: CONTROL_MAPPING (SI-08/SI-11/SI-14/SI-06/SI-07 に加え **SI-02/SI-15/SI-10** — レビュー m-5)・CONDITIONS・README・引き継ぎ・完了報告。**WP-1 独立レビュー m-3 の追加スコープ**: 契約 1.3.0 の `target_id` 追加で「12 フィールド」という記述が字面どおりでは古くなった prose 箇所を record-consolidation の対象に含める — `security/CONTROL_MAPPING.md` の「contract-vocabulary gap」該当行 (SI-14 行の r2db/MitateDB 両列、`target_id` 欠落を明記した箇所)、`r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (`target_id` 欠落の記述)、`r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` (`control_audit` 列を「12 named columns」と記す箇所) の計5箇所が、この時点でなお「12 フィールド / target_id 欠落」を未解消のギャップとして記述しており、WP-4/WP-5 の実装反映後に一括更新する対象として WP-6 が引き継ぐ | なし |
 
 完了条件 (全 WP 共通、フェーズ3 §3 継承): テスト追加 + 変異注入 (scratchpad 復元、`git checkout` 不使用)、root suite 完走 (現基準 1161 + 増分)、宣言語彙全数固定の維持 (limit_class AST 件数の同一コミット更新)、独立レビュー往復、commit/push/main merge (`--no-ff`) 1 セット + identity 確認。
 
