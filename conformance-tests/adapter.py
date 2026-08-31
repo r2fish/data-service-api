@@ -636,6 +636,36 @@ class BatchOperation:
     confirmation: Any = None
 
 
+@dataclass(frozen=True)
+class ScopedBatchOperation:
+    """One element of the list `ConformanceAdapter.attempt_cross_entity_
+    batch` presents as a single real atomic mutation unit scoped across
+    MULTIPLE entities (port v1.7, docs/design/
+    PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md section 3): field-for-field
+    `BatchOperation` above, plus `entity` -- a cross-entity batch has no one
+    shared entity for the whole call to name (unlike `attempt_batch_with_
+    addresses`, whose `entity` parameter is shared by every operation in the
+    list), so each operation names its own, mirroring the contract's own
+    `ScopedMutation` (`Mutation` + a required `entity`, contract 1.1.0
+    CCR-15, semantics clarified 1.3.0). `destructive`/`confirmation` follow
+    the identical `VALID_CONFIRMATION` sentinel protocol every other
+    destructive-capable operation on this port already uses -- an adapter
+    presenting a batch-embedded delete's declare-and-echo probe does so
+    against the SAME real cross-entity entry point this whole batch is
+    presented to, never a per-entity substitute.
+    """
+
+    operation: str
+    entity: str
+    values: Mapping[str, Any] | None = None
+    where_field: str | None = None
+    where_value: Any = None
+    expected_revision: str | None = None
+    unique_key: str | None = None
+    destructive: bool = False
+    confirmation: Any = None
+
+
 # ---------------------------------------------------------------------------
 # 4.4 Abstract adapter
 # ---------------------------------------------------------------------------
@@ -1294,6 +1324,57 @@ class ConformanceAdapter(ABC):
         sending multiple operations at once would use -- never split into
         several separate single-operation calls by the adapter itself,
         which would prove nothing about batch-level behavior at all.
+        """
+
+    @abstractmethod
+    def attempt_cross_entity_batch(
+        self, session, operations: Sequence[ScopedBatchOperation]
+    ) -> int:
+        """Present multiple mutation-vocabulary operations, each scoped to
+        its OWN entity (`ScopedBatchOperation.entity`), as ONE real atomic
+        unit to the peer's cross-entity entry point -- the contract's
+        `cross_entity_mutate` (`POST /v1/data/mutations`-equivalent, port
+        v1.7, docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+        section 3) -- and return the whole unit's `affected` count.
+
+        Exists for C-16: `attempt_batch_with_addresses` (above) already
+        proves atomic multi-OPERATION batching within one entity; this
+        method is the cross-ENTITY sibling C-16 needs to observe atomicity,
+        validation ordering, and the `batch_entities` bound when different
+        operations in the same unit target different entities. Deliberately
+        returns a bare `int`, not a tuple: unlike `attempt_batch_with_
+        addresses`, no currently-registered peer that provides this
+        capability also declares `row_addressability` (design M-6), so
+        there is no `assigned_addresses` concept to observe here at all --
+        adding a second return slot this port cannot honestly populate on
+        any registered peer would be exactly the kind of adapter-fabricated
+        capability design principle 4 forbids.
+
+        Availability is governed by the peer's own declared
+        `capability_document()["capabilities"]["cross_entity_mutation"]
+        ["status"]`: a status of `"enabled"` or `"partial"` means this
+        method presents the request for real and returns/raises whatever
+        the peer's real entry point produces (a real `ConformanceDenial`
+        for a genuine per-request refusal -- an unsupported operation
+        member, a `batch_entities`/`batch_items` bound, a destructive
+        delete's declare-and-echo gate, a validation defect on any named
+        entity -- never fabricated by this adapter). Any other status (in
+        practice, `"unavailable"`) means the capability is not provided at
+        all; the adapter then raises `SurfaceAbsent` when no real call on
+        the peer's public surface could even receive a cross-entity request
+        (confirmed by source inspection, carrying `surface`/
+        `forbidden_parameters` per `SurfaceAbsent`'s own docstring), or lets
+        a real, present entry point's genuine `ConformanceDenial(
+        CAPABILITY_UNSUPPORTED)` propagate when one exists but refuses
+        uniformly (the same two-form absence structure `drop_entity`/
+        `create_unique_index` already establish on this port, verified via
+        `absence.py`'s shared `assert_control_operation_absent_or_
+        uniformly_refused`). Every operation in the batch MUST be presented
+        to the SAME real call a genuine client sending a multi-entity
+        atomic unit would use -- never split into several single-entity
+        calls this adapter stitches together itself, which would prove
+        nothing about cross-entity atomicity at all (identical discipline
+        to `attempt_batch_with_addresses`'s own docstring).
         """
 
     @abstractmethod

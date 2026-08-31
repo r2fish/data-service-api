@@ -105,6 +105,8 @@
 - 発行凍結の in-band 化 — 現時点で需要なし
 - in-process adapter の cross_entity unavailable 面の検証限界 (C-12 拡張の wire 限定、§3) — positive-existence check 台帳 (フェーズ3 §7) と同根
 - MitateDB PG backend の `_check_domain` float 分岐: 巨大 int → `real` 列で `OverflowError` が未捕捉 (pass 1 で 503)。SQLite 側は M-7 で同型を閉塞済みだが PG 側は未対応 (WP-2 レビュー n-3 の発見、pre-existing)
+- `ScopedMutation.entity` は attacker-controlled identifier position の新設だが C-03 の `MUST_COVER_IDENTIFIER_POSITIONS` に未列挙 — capability が executable になった今、injection 被覆の対象化を検討 (WP-3 レビュー n-4)
+- r2db conformance-build の `applications` 上限は 115 (WP-3 で 100 から引き上げ)。天井は C-14 の算術で 122 — 次に逼迫したときの正解は再引き上げでなく fixture teardown (`deprovision_application`) の導入 (WP-3 レビュー m-6)
 - 継承分: `DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(a) drop_index C-06 v2 / (c) 受理境界一覧 / フェーズ4 耐久 audit sink / `MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` §7 全項
 
 ## 8. リスクとレビュー重点
@@ -153,3 +155,19 @@ blocker 4 / major 8 / minor 8 / nit 3 — 全数裁定。主要な裁定:
 - m-4 = auth-before-parse のピン (不正 body + 未認証 → AUTH_REQUIRED)、m-5 = CONDITIONS.md C-16 行への 1 行注記 (監督許可の cross-tree 編集、全面書換は WP-3)、m-6 = §2 PG 留意の過大主張を v1.2 で訂正 (指紋は pass 1 のみ・安全は schema 変更の単調性と無条件 rollback が担う)、n-3 = PG `_check_domain` float の OverflowError を §7 台帳へ
 
 発見一覧 (実装者): (1) 旧 insert 分岐の素 KeyError による begin 残骸リスクが二段化で構造的に不活性化 (pass 1 で begin 前に発火)、(2) README の unavailable 記述の陳腐化 → WP-6 へ、(3) HTTP fixture の request_bytes=1024 と境界テストの干渉を実測バイト数で回避。
+
+### 10.3 WP-3 (共通 suite: port v1.7 + C-16)
+
+実装: port v1.7 (`ScopedBatchOperation` + `attempt_cross_entity_batch` — 返値は実 affected 合計、availability = status ∈ {enabled, partial})、adapter 4 ファイル (MitateDB 2 = 実実行、r2db in-process = SurfaceAbsent、r2db http = 実 wire の present-denial)、`test_c16_cross_entity_atomicity.py` (V1〜V5 + vacuity guard 2 本)、C-12 双方向拡張 (負方向は wire 面限定)、C-11 `raw_cross_entity_mutation_result`、CONDITIONS.md C-16 行の executable 化。**C-16 PROVIDED 分岐の初実行は計画どおり本 WP** (MitateDB 2 adapter、V3 の構成可能条件は両者とも実成立 10 < 100)。
+
+独立レビュー **0 blocker / 4 major / 6 minor / 4 nit**、全数裁定・反映:
+
+- **M-2**: V4 の句導出検証は predicate 差で汚染されており entity 寄与を分離できていなかった → 同一 predicate 化。製品コード変異 (句から collection 除去) で赤化を実測してから確定
+- **M-4**: V3 に位置算術の受理半面を追加 (宣言値ちょうどは batch_entities で拒否されない) — 宣言 10・実施 3 の peer が通過できた穴を閉塞。adapter 変異で赤化実測
+- **M-1/m-6**: 実装者の applications 100→115 引き上げ (WP-3 自身の C-12 拡張 +2 が束縛イベント。C-16 消費は C-14/C-15 より後で無関係 — レビュアーが計測プラグインで実測) を維持しつつ、C-14 行の陳腐値を実測値 (vector-5 87/87/73/75、session-end 186/189/134/145、天井 122) へ更新。次の逼迫時の正解は fixture teardown (§7 台帳)
+- **M-3**: C-12 負方向 2 分岐に状態無変化検証を追加
+- m-1 = in-process 返値を実 affected 合計へ / m-3 = maxItems を load_contract() から読む / m-4 = SurfaceAbsent 検証に forbidden_vocabulary ピン / m-5 = enabled-無-operations の全語彙写像 / n-4 = `ScopedMutation.entity` の C-03 identifier position 未列挙を台帳へ
+
+受理境界 (CONDITIONS.md 開示): V5 の form-(b) 捏造 (実 wire 要求を送らず CAPABILITY_UNSUPPORTED を偽装する adapter) は検出不能 — C-06/C-14/C-17 と同クラス、positive-existence check 台帳項目に合流。「検証先行」の黒箱観測は無部分効果のみ (P35-D10、二段パス構造は MitateDB ローカルテストが固定)。
+
+conformance 364 passed / peer 861 passed (レビュアー・実装者の二重実測)。

@@ -311,6 +311,14 @@ def test_find_all_adapters_with_returns_every_provider_not_only_the_first(monkey
 _QUERY_RESULT_PARAMS = _require_params_for("raw_query_result", "QueryResult")
 _MUTATION_RESULT_PARAMS = _require_params_for("raw_mutation_result", "MutationResult")
 _SCHEMA_OPERATION_RESULT_PARAMS = _require_params_for("raw_schema_operation_result", "SchemaOperationResult")
+# phase 3.5 WP-3: the cross-entity counterpart of raw_mutation_result --
+# only MitateDB-api-http provides it today (its own POST /v1/data/mutations
+# is real, executable wire vocabulary as of phase 3.5 WP-2's flip);
+# r2db-api-http does not, since its own cross_entity_mutation stays
+# unavailable (P35-D1) and it has no real document of this shape to offer.
+_CROSS_ENTITY_MUTATION_RESULT_PARAMS = _require_params_for(
+    "raw_cross_entity_mutation_result", "MutationResult (cross-entity)"
+)
 
 
 @pytest.mark.parametrize("name,obj,raw_query_result", _QUERY_RESULT_PARAMS, ids=_ids_for(_QUERY_RESULT_PARAMS))
@@ -335,6 +343,30 @@ def test_mutation_result_conforms_to_closed_schema(name, obj, raw_mutation_resul
     }
     document = raw_mutation_result(fx.runtime_a, fx.a_only_entity, [operation])
     assert_valid(document, schema, contract, label=f"{name} raw_mutation_result()")
+
+
+@pytest.mark.parametrize(
+    "name,obj,raw_cross_entity_mutation_result",
+    _CROSS_ENTITY_MUTATION_RESULT_PARAMS, ids=_ids_for(_CROSS_ENTITY_MUTATION_RESULT_PARAMS),
+)
+def test_cross_entity_mutation_result_conforms_to_closed_schema(name, obj, raw_cross_entity_mutation_result):
+    # phase 3.5 WP-3: reverse-validates a real POST /v1/data/mutations
+    # response -- the SAME closed MutationResult schema as the per-entity
+    # endpoint's own test above, since design R-3 gives the cross-entity
+    # response the identical {"committed", "affected"} shape (no
+    # assigned_addresses -- this peer declares row_addressability
+    # unavailable).
+    _require_real_provider(name, obj, "raw_cross_entity_mutation_result", "MutationResult (cross-entity)")
+    contract = load_contract()
+    schema = contract["schemas"]["MutationResult"]
+    fx = obj.build_fixture()
+    operation = {
+        "operation": "insert",
+        "entity": fx.a_only_entity,
+        "values": {"item_key": 434343, "label": "wp3-ce-probe", "probe_key": "wp3", "probe_value": "wp3-ce-probe"},
+    }
+    document = raw_cross_entity_mutation_result(fx.runtime_a, [operation])
+    assert_valid(document, schema, contract, label=f"{name} raw_cross_entity_mutation_result()")
 
 
 @pytest.mark.parametrize(

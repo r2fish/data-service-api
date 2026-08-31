@@ -85,6 +85,7 @@ from adapter import (  # noqa: E402
     CredentialHandle,
     Fixture,
     PayloadNotExpressible,
+    ScopedBatchOperation,
     ScopeView,
     TamperVector,
     load_contract_error_codes,
@@ -866,8 +867,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # example does not account for every OTHER condition test's
             # `build_fixture()` -> `provision_application()` also writing a
             # real `applications` row on this same, session-scoped platform
-            # database).
-            self._control_limits = ControlPlaneLimits(applications=100, credentials_per_application=5, control_requests_per_minute=200)
+            # database). Phase 3.5 WP-3: `115` (raised from `100`) -- see
+            # `conformance_adapter_r2db.py`'s own constructor comment for
+            # the full, independent-review-corrected causal analysis (m-6):
+            # the binding failure (`test_c15_lifecycle_changes_emit_
+            # canonical_audit_and_denials_are_recorded`) was NOT caused by
+            # `test_c16_cross_entity_atomicity.py` (which runs strictly
+            # AFTER `test_c14`/`test_c15` in file-collection order) -- it
+            # was `test_c12_capability_agreement.py`'s own new
+            # cross_entity_mutation test (`+2` applications, runs BEFORE
+            # `test_c14`/`test_c15`) landing `n_existing` at `99`, with
+            # `test_c15_...`'s own `fx` fixture (`+2` more) then crossing
+            # `100` at its own in-band `register_application_inband` call --
+            # minimum sufficient was `~102`. `115` leaves only a 7-unit
+            # margin under this class's own hard ceiling (`apps_limit <=
+            # 122`, from `rate_limit=200 > (apps_limit+2) + (2*5+1) + 64`,
+            # `rate_limit` already at the port's `_MAX_EXERCISABLE_LIMIT`)
+            # -- the fix once THAT margin is exhausted is fixture teardown,
+            # not another bump (design ledger, §7).
+            self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200)
             # `pool_size=2` per store (8 total across the 4 stores) --
             # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT 10` (0006) is
             # the real, enforced ceiling here; the default `pool_size` (4,
@@ -1927,6 +1945,52 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # over HTTP would do.
         result = self._mutate_request(session, entity, items)
         return result["affected"], result.get("assigned_addresses")
+
+    def attempt_cross_entity_batch(self, session: object, operations: Sequence[ScopedBatchOperation]) -> int:
+        # P35 WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
+        # 130_V1.md section 3, M-5): unlike the in-process plug's
+        # `SurfaceAbsent` claim, `POST /v1/data/mutations` IS a real,
+        # mounted route on this composition (`http.py`'s own
+        # `post_cross_entity_mutate`, R-3's stub) -- it genuinely
+        # authenticates the request and then uniformly refuses with
+        # `CAPABILITY_UNSUPPORTED` via `service.deny_unsupported(...)`,
+        # never a 404/405 that would look like the route does not exist at
+        # all. This is therefore a present-denial claim, not a structural
+        # absence: the real request is built and sent exactly as a genuine
+        # client attempting a cross-entity batch would (each operation
+        # carrying its OWN `entity` field, per `ScopedMutation`'s own
+        # shape, distinct from the per-entity endpoint's URL-scoped body),
+        # and whatever the peer's real denial is is let propagate
+        # unmodified -- never fabricated by this adapter.
+        assert isinstance(session, _Session)
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"operation": op.operation, "entity": op.entity}
+            if op.values is not None:
+                item["values"] = dict(op.values)
+            if op.where_field is not None:
+                item["where"] = [{"field": op.where_field, "operator": "eq", "value": op.where_value}]
+            if op.destructive:
+                item["destructive"] = True
+            if op.confirmation is not None:
+                # No real per-request confirmation phrase exists to declare-
+                # and-echo against on this peer (the stub never executes
+                # anything) -- a caller supplying VALID_CONFIRMATION here
+                # would have no real probe to resolve it against, so this
+                # adapter passes through only a literal string. Every
+                # currently-registered caller of this method against THIS
+                # adapter (C-16 V5) never exercises a destructive delete
+                # against it, since the whole capability is unavailable.
+                item["confirmation"] = (
+                    op.confirmation if op.confirmation is not VALID_CONFIRMATION else "DELETE"
+                )
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            items.append(item)
+        result = self._send("POST", "/v1/data/mutations", session, json_body={"operations": items})
+        return result["affected"]
 
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
         assert isinstance(session, _Session)

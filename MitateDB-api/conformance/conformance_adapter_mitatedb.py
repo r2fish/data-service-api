@@ -54,6 +54,7 @@ from adapter import (  # noqa: E402
     CredentialHandle,
     Fixture,
     PayloadNotExpressible,
+    ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
     TamperVector,
@@ -955,6 +956,83 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return len(results)
         affected = self._call(op)
         return affected, None
+
+    def attempt_cross_entity_batch(self, session, operations: Sequence[ScopedBatchOperation]) -> int:
+        # P35 WP-2/WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_
+        # CONTRACT_130_V1.md section 2/3): `cross_entity_mutation` is now
+        # declared `partial` (`operations: insert/update/delete`,
+        # `unsupported: upsert`), backed by the SAME `transact()` dispatcher
+        # `attempt_batch_with_addresses` above already uses -- the only
+        # difference here is that each operation carries its OWN
+        # `collection`, read from `op.entity`, rather than one shared
+        # `entity` argument for the whole call. `transact()`'s own two-pass
+        # restructuring (R-1) validates every operation across every named
+        # entity before executing any of them, so this single real call is
+        # what gives C-16 its atomicity/validation-ordering observations --
+        # never split into several single-entity calls this adapter
+        # stitches together itself.
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"type": op.operation, "collection": op.entity, "values": dict(op.values or {})}
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            if op.where_field is not None:
+                item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
+            if op.destructive:
+                item["destructive"] = True
+            # Same V2b-wire independence (C-06) as `attempt_batch_with_
+            # addresses` above: `confirmation` is set whenever supplied,
+            # independent of `destructive`.
+            if op.confirmation is not None:
+                if op.confirmation is VALID_CONFIRMATION:
+                    # The probe always presents `destructive: True` and the
+                    # SAME real cross-entity entry point (`session.
+                    # transact`) this outer batch is itself presented to --
+                    # never a per-entity substitute -- so the phrase read
+                    # back is genuinely the one this exact request would
+                    # need.
+                    probe_item = dict(item)
+                    probe_item["destructive"] = True
+
+                    def probe(_probe_item=probe_item) -> None:
+                        self._call(lambda: session.transact([dict(_probe_item)]))
+
+                    peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token=True)
+                    item["confirm"] = peer_confirm
+                else:
+                    item["confirm"] = op.confirmation
+            items.append(item)
+
+        # m-1 (phase 3.5 WP-3 review): the real summed `affected` -- 1 per
+        # insert, plus each update/delete's own real `updated`/`deleted`
+        # row count from `transact()`'s own per-item result -- matching
+        # both the port's own docstring ("return the whole unit's affected
+        # count") and this method's real HTTP sibling
+        # (`conformance_adapter_mitatedb_http.py`'s `_cross_mutate`/
+        # `http.py::post_cross_entity_mutate`'s identical computation).
+        # `len(results)` (this method's own prior revision) undercounts
+        # any update/delete matching more than one row -- it counts
+        # OPERATIONS, not rows affected. Deliberately NOT applied to
+        # `attempt_batch_with_addresses` above: that method's own
+        # `affected`/`assigned_addresses` come from `DataService.mutate_
+        # result`'s real `MutationResult.affected` (r2db-api's own
+        # sibling) or this peer's own pre-existing `len(results)`
+        # convention (C-17's `test_assigned_addresses_membership_holds_
+        # when_mixed_in_one_batch` already depends on that exact
+        # per-operation-affects-exactly-one-row shape) -- changing it
+        # there is out of this review's scope.
+        def op() -> int:
+            results = session.transact(items)
+            affected = 0
+            for item, result in zip(items, results):
+                if item["type"] == "insert":
+                    affected += 1
+                elif isinstance(result, dict):
+                    affected += result.get("updated", result.get("deleted", 0))
+            return affected
+        return self._call(op)
 
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         # `session` is unavailable-regardless of *any* session (the answer
