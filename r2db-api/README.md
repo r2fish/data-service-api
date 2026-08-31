@@ -75,9 +75,10 @@ versus what remains unevidenced.
   and HMAC pepper -- structurally unable to coexist with an application
   credential in either direction), its own least-privilege DB role
   (`r2dbsvc_controlplane`), and its own durable audit sink
-  (`control_audit`, contract `audit.fields`' full 12 columns, state changes
-  and denials alike written in the same transaction as the change they
-  describe). A `role=control` credential can only ever be created by an
+  (`control_audit`, contract `audit.fields`' full 13 columns as of contract
+  1.3.0 (phase 3.5 WP-1 added `target_id`; populated at every emission site
+  since WP-4), state changes and denials alike written in the same
+  transaction as the change they describe). A `role=control` credential can only ever be created by an
   out-of-band operator ritual (`python -m r2db_api.ops bootstrap`/`reset`)
   -- there is no in-band issuance path anywhere, by design ("案B",
   `spec/CCR_DISPOSITION.md`); the ritual's first-issued credential is
@@ -95,8 +96,12 @@ versus what remains unevidenced.
   correlate.
 - **A third conformance adapter, `r2db-api-http`**
   (`conformance/conformance_adapter_r2db_http.py`), running
-  C-01/C-03/C-06/C-08/C-11/C-12/C-14/C-15/C-17/C-18 over this real
-  HTTP+PostgreSQL stack rather than in-process. C-14 (control-plane
+  C-01/C-03/C-06/C-08/C-11/C-12/C-14/C-15/C-16/C-17/C-18 over this real
+  HTTP+PostgreSQL stack rather than in-process. **C-16 (phase 3.5 WP-3)**:
+  this peer's own `cross_entity_mutation` stays `unavailable` (P35-D1, no
+  real client demand on this peer) -- both r2db adapters take C-16's
+  documented ABSENT branch (in-process = surface-absent, http = a real,
+  mounted present-denial stub), never the PROVIDED branch MitateDB takes. C-14 (control-plane
   authority boundary) and C-15 (bootstrap/reset lifecycle) run against a
   real `/control/v1` for this adapter and against a real, in-process
   `ControlPlaneService` for the plain `r2db-api` adapter -- both currently
@@ -162,10 +167,13 @@ production identity/network/database-grant evidence exists yet
   `role=control` credential type (above) -- but that type authenticates
   only against `/control/v1`, a different plane entirely; it is fail-closed
   against every `/v1` data/schema endpoint, `/v1/audit/query` included
-  (condition C-14), and `/control/v1` itself has no audit-reading endpoint
-  of its own yet either (an `audit` role able to read control-plane state
-  is tracked as a contract-additive candidate, not yet implemented -- see
-  `security/CONTROL_MAPPING.md`'s R-11 section).
+  (condition C-14), and `/control/v1` itself has no audit-QUERY endpoint of
+  its own either. **Update, phase 3.5 WP-1/WP-4**: a distributable, weaker
+  `role="audit"` control credential now exists and can read `list_credentials`/
+  `list_applications`/`control_capabilities` -- a read-only view of
+  control-plane STATE (never a query over `control_audit` itself, which
+  remains unread by any in-band path) -- see `security/CONTROL_MAPPING.md`'s
+  SI-02/SI-06 rows.
 
 Application-facing code intentionally has no SQL/native-command execution
 surface and no access to Control or Provisioning authorities.

@@ -191,3 +191,11 @@ r2db 574 passed / conformance 364 passed (レビュアー実測含む)。
 独立レビュー **0 blocker / 1 major / 4 minor / 3 nit**、全数裁定・反映: M-1 = 無関係アサーションの無断削除の復元 / m-1 = freeze CLI の識別子パターンガード (未検証文字列を耐久 audit 行に載せない) / m-2 = 第3 backend の freeze fail-open 閉塞 / m-3 = FORBIDDEN denial 行の PG 耐久読み戻し実測 (denial 専用 unit_of_work の独立 commit の証明) / m-4 = 孤児 audit 行 → bootstrap ConflictError → reset 復旧の両バックエンド実測 / n-2 = `_authorize_role` docstring の allow/deny 二面性の正確化 (role 次元は CHECK 制約が backstop の deny-list)。n-1 (denial target_id 非対称) は r2db と対称に追認。
 
 MitateDB 354 passed / conformance 364 passed。**これで両 peer とも 1.3.0 宣言・束4件実装済み — 契約 1.3.0 の version_binding 義務は全数出荷完了。**
+
+### 10.6 WP-6 (記録整理 — 最終 WP)
+
+実装 (文書のみ): CONTROL_MAPPING 8 行 (SI-02/06/07/08/10/11/14/15) へフェーズ3.5 出荷分の evidence 追記 (引用テスト 137 識別子は全数実在をレビューが機械検証、負荷の高い 14 本は精読で主張一致を確認)、CONDITIONS C-06 版数 prose 訂正 + C-03 への ScopedMutation.entity 未被覆の正直な開示、playbook/provisioning runbook の 12→13 列と target_id ワークフロー現代化 (原文は「closed, kept verbatim for record」で保持)、README 3 冊、設計台帳 4 冊 (DESTRUCTIVE_CONFIRMATION §8.1 (b)(d)(e) / R2DB_CCR14 §14.4 / MITATEDB_PHASE3 §7 D-L / CONFORMANCE_CONDITIONS_V1_1 C-16) へ日付入り RESOLVED/SHIPPED 追記。実装者が一覧外の陳腐化 2 件 (provisioning runbook の「no role column」・issuance_frozen 行欠落) を自発発見・修正。
+
+独立レビュー **0 blocker / 1 major / 2 minor / 4 nit**、全数裁定・反映: M-1 = SI-08 r2db 列の L4「未閉鎖」記述 (この diff 自身が編集した行に残存) へ RESOLVED 追記 + MitateDB 列の非対称 aside 訂正 / m-1 = SI-09 の 1.2.0 現在値主張 / m-2 = CONFORMANCE_CONDITIONS_V1_1 の C-16 追記漏れ / n-2/n-3 反映、n-1/n-4 追認。修正過程で表行を分断する自己退行を実装者自身が表整合検査で検出・修復 (pipe-table 全行検証で確定)。
+
+**運用上の発見 (記録)**: root suite の赤 2 回 (11 failed/82 errors → 1 failed/70 errors) は本 WP の文書変更と無関係の **PG クラスタ並走衝突** (監督 suite × 実装者 conformance × レビュアー conformance が同時刻に走った)。単独化後は 3 連続 364 passed。フェーズ3 教訓 (a) の再演であり、完了ゲートの suite 実測は「他の実行が無いことを確認してから」を規律化する (本 WP の最終実測はその手順で取得)。レビュアーの示唆 = applications margin (115/122) の逼迫も将来の再現要因になりうる — §7 台帳の fixture teardown 項を参照。

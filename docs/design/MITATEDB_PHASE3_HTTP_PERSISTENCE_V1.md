@@ -215,6 +215,7 @@ control plane は契約 `control_endpoints` の 11 本を R-6 のとおり。
 ## 7. 将来課題台帳 (本フェーズ新設分)
 
 - **cross_entity_mutation の採否 (D-L)**: mitate-application の実要求 (本体 + audit の 2 entity atomic 書込)。依頼者判断待ち — 採用ならフェーズ3.5 として設計し C-16 を executable 化
+  > **SHIPPED — 追記 (2026-08-31、フェーズ3.5、house style — 原文は上記のまま保持)**: 依頼者直接承認 (2026-08-31)。フェーズ3.5として設計・実施し (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`)、WP-2 (MitateDB 実装: 二段パス transact + batch_entities + HTTP 実体化 + 宣言 flip)・WP-3 (共通 suite: port v1.7 + C-16 新設・executable 化 + C-11/C-12 拡張) で出荷完了した。契約は 1.3.0 (WP-1、意味論明確化のみ、wire 形状新設なし)。C-16 は4 adapter で executable — MitateDB 2 adapter は PROVIDED 分岐 (V1〜V4)、r2db 2 adapter は ABSENT 分岐 (V5、P35-D1 により r2db 側は採用せず継続 unavailable)。
 - **control rate limit の共有 window / deployment_required 化** (D-K の将来強化。max-instances>1 スケールが必要になったとき)
 - **revision_preconditions** (mitate-application が複数 instance 化したとき必須 — クライアント要求棚卸し C 節)
 - **application-plane の request rate / concurrency / execution time 境界** (SI-08 の残クラス。WP-0 M-1): Cloud Run の concurrency / max-instances / timeout を配備層 enforce として使う場合は `limit_enforcement: deployment_required` の宣言まで含めて別フェーズで設計する (契約 `capability_status.rules` — deployment_required is not an application-code proof)

@@ -498,6 +498,8 @@ WP-6 (記録整理 — Q-1 実効化の最終 WP) を実施した。**本 WP は
 
 **(b) `atomic_mutation` の `operations` 語彙の解釈 (バッチ固有 vs 一般語彙 — 契約質問)** (出典: §7.9 MA-1、§7.8)。MitateDB-api の WP-5 独立レビューが、`capabilities().atomic_mutation.operations` の文言 (`capability_status.defined.atomic_mutation` = "Single-entity atomic mutation batches") が「複数操作をまとめたバッチ実行の可否」を指すのか「一般的な mutation 語彙の実行可否」を指すのか、契約自身が判別しない論点であることを発見した。r2db-api はどちらの解釈でも同一の宣言になる (単一の `mutate()` が単発・バッチを均一に扱うため両解釈が収束する) ため、この論点を顕在化させない。MitateDB-api は現行宣言 (`operations: ["insert","update","delete"]`) を「一般語彙」解釈のもとでは真実、「バッチ限定」解釈のもとでは偽と判定し、依頼者裁定の指示 (独断せず両解釈と影響を報告) に従い**解釈も挙動も変更しなかった** (`cell.py` のコメントに調査全内容を記録)。契約 `capability_status.defined.atomic_mutation` の文言自体を明確化する CCR を将来提起することを推奨する。
 
+> **RESOLVED — 追記 (2026-08-31、フェーズ3.5 WP-1、house style — 原文は上記のまま保持)**: 契約 1.3.0 §1-F (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`、従属判断8) が `capability_status.defined.atomic_mutation` の `operations` を「バッチ実行面が実行する mutation 語彙」であると明記し、この論点を解消した。両 peer とも**フェーズ3の** WP-1.5 収束後は両解釈が一致していたため (レビュー n-1 実測確認)、この明確化は実装影響ゼロの純文言訂正である。
+
 **(c) 受理境界一覧** (ブラックボックス conformance suite が構造的に検出できない、または当実装では観測不能な事項):
 - **V2b の「0 行削除+拒否偽装」は原理的に検出不能** (出典: §7.9 mi-2)。`_batch_delete_capability_absent` のような「要求どおり 0 行を削除しつつ拒否として振る舞う」経路 (実際には受理して実行し、たまたま 0 行だったケース) は、前後の行数検査だけでは構造的に区別できない。ブラックボックス conformance テスト一般の限界として記録する。
 - **句の正規化禁止 (Unicode 正規化・大小文字畳み込みの禁止) は純 ASCII peer では観測不能** (出典: §5.6 nit n-4)。r2db の句が entity/index/credential_id (すべて ASCII 識別子または16進 digest) のみで構成される純 ASCII 文字列であるため、r2db 自身の実装では「正規化により偽陽性一致が起きる」具体的なケースが観測不能。規範自体は契約の一般原則として有効であり、r2db がたまたまこの穴の実例を提供しないという限界。
@@ -506,6 +508,8 @@ WP-6 (記録整理 — Q-1 実効化の最終 WP) を実施した。**本 WP は
 
 **(d) L4 (r2db `request_bytes` の control discovery 宣言) は Q-1 に吸収されず未実施のまま** (出典: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §14.4 L4、監督決定 D-2、§13.3)。CCR-14 WP-6 (D-2) は「宣言面の変更は conformance 証拠を伴うコード WP に載せる規律を優先する」として、`GET /control/v1/capabilities` が `request_bytes` リソースクラスを公開していない既知ギャップ (enforce は実在するが discovery が未宣言) を「Q-1 バッチ、契約 1.2.0 検討時」に繰延べる、と申し送っていた。**本 WP-6 の実施範囲を確認した結果、Q-1 (§1-§7 の全 WP) はこの宣言追加を一度も実施していない** — Q-1 は destructive confirmation の文言化・実効化に閉じたスコープであり、`request_bytes` discovery はそのスコープに含まれる作業項目ではなかった。D-2 が見込んだ「次のコード WP」は Q-1 では実現しなかったことをここに正直に記録し、次のコード WP (契約変更を伴わない宣言 flip のみで完結する) へ改めて繰延べる。
 
+> **RESOLVED — 追記 (2026-08-31、フェーズ3.5 WP-4、house style — 原文は上記のまま保持)**: `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §4「L4」がこの繰延べを引き取った。`ControlPlaneLimits` に `request_bytes` を追加しソースを一本化 (`control_http` の `_BYTE_BOUND_LIMITS` が新設フィールドを読む)、宣言は service 層 `unavailable` / HTTP mount 側 `enforced` の二層形 (MitateDB と対称)。`r2db-api/tests/test_control_http.py`・`test_control_plane_service.py` のローカル固定を同一コミット更新。詳細は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §14.4 の同種追記を参照。
+
 **(e) 契約 additive 候補束 (1.3.0 検討時に一括判断)** (出典: `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` §14.4「契約 additive 候補束」、`security/CONTROL_MAPPING.md` R-11 節、本書 §2 R-1 item 「従属判断7 (A)」の封筒閉鎖注記):
 1. **`CredentialsResult.must_rotate` の露出** (出典: R2DB_CCR14 §2、§8 m-9)。運用者が儀式未完遂の credential を in-band で見分けたくなった場合の additive フィールド。現行は契約に無いフィールドの独自追加を避け、非露出のまま。
 2. **`audit.fields` への対象識別子 (`target_id`) の追加** (出典: R2DB_CCR14 §12.2 MI-6/MI-11、§12.4)。credential lifecycle イベントが対象 credential を識別できず、`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` の「侵害窓中に発行/失効された credential の列挙」が監査行だけでは完結しない (`list-credentials` との突合で補っているが恒久策ではない)。
@@ -513,6 +517,8 @@ WP-6 (記録整理 — Q-1 実効化の最終 WP) を実施した。**本 WP は
 4. **per-application 発行凍結 (CLI 限定トグル)** (出典: R2DB_CCR14 §1 R-11、§14.4)。盗まれた control credential からデータ面への最短経路 (任意 app への credential 発行) を app 単位で閉じる。
 
 これら4件はいずれも独立に判断してよいが、契約バージョンの分散 (小さな additive 変更を都度別バージョンで出す) を避けるため、1.3.0 検討時に一括して依頼者へ諮ることを推奨する (CCR-14 側の台帳の推奨方針を継承)。
+
+> **SHIPPED — 追記 (2026-08-31、フェーズ3.5、house style — 原文は上記のまま保持)**: 依頼者直接承認 (2026-08-31) によりフェーズ3.5として着手し、契約 1.3.0 (WP-1) に4件一括で additive 収載、両 peer の制御面実装 (r2db = WP-4、MitateDB = WP-5) で出荷完了した (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`)。4件それぞれの結末: (1) `must_rotate` 露出 — §1-B、両 peer の `list_credentials` で実値公開。(2) `target_id` — §1-C、両 peer で13番目の `audit.fields` として実装・値設定。(3) `audit` role による読み取り — §1-D、`control_capabilities`/`list_applications`/`list_credentials` の3読み取り endpoint のみ許可、他8件は `FORBIDDEN` fail-closed。in-band 発行は転換せず帯域外儀式限定のまま (B-2 裁定、従属判断1 不変)。(4) per-application 発行凍結 — §1-E、CLI 限定トグル、凍結時 `FORBIDDEN`。詳細な制御/証跡は `security/CONTROL_MAPPING.md` の SI-02/SI-06/SI-07/SI-10/SI-15 各行を参照。
 
 ### 8.2 Q-1 の完了宣言
 

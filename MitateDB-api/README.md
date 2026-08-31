@@ -71,9 +71,18 @@ when PostgreSQL is unreachable, they fail loudly).
   the SAME `FoundationConfig.max_request_bytes` the capability document
   declares. `POST /v1/schema/operations` supports `create_entity`/
   `add_field`; every other schema operation and every endpoint behind an
-  `unavailable` capability (`cross_entity_mutation`, `audit_query`,
-  `application_catalog`) refuses uniformly with `CAPABILITY_UNSUPPORTED`,
-  matching its own declaration exactly.
+  `unavailable` capability (`audit_query`, `application_catalog`) refuses
+  uniformly with `CAPABILITY_UNSUPPORTED`, matching its own declaration
+  exactly. **`cross_entity_mutation`, closed phase 3.5 WP-2/WP-3**
+  (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`): no longer
+  `unavailable` -- `POST /v1/data/mutations` executes a real two-pass
+  (validate-all-then-execute) atomic unit across `insert`/`update`/`delete`
+  spanning multiple entities in one request, declared `partial`
+  (`unsupported: ["upsert"]`, matching this peer's own single-entity
+  `atomic_mutation` declaration exactly), bound by a new `batch_entities`
+  resource class (default 10, distinct-entity counting) alongside the
+  existing `batch_items`. See `security/CONTROL_MAPPING.md`'s SI-08/SI-11
+  rows for the full enforcement/atomicity evidence.
 - **Control plane, `/control/v1`** (`src/mitatedb_api/control_plane.py`,
   `control_http.py`, `control_main.py`): the contract's 11 endpoints
   (capabilities, application register/list/enable/disable, credential
@@ -91,7 +100,14 @@ when PostgreSQL is unreachable, they fail loudly).
   (declare-and-echo gated) -- no in-band path exists anywhere. Whether the
   application-plane process declares `control_plane: enabled` is a
   deployer decision (`MITATEDB_CONTROL_PLANE_STATUS`), not a detected
-  fact -- see `docs/cloud-run-cloud-sql.md` §8 invariant 3.
+  fact -- see `docs/cloud-run-cloud-sql.md` §8 invariant 3. **Control
+  bundle, closed phase 3.5 WP-1/WP-5** (design §1/§4): `must_rotate`
+  exposure on `list_credentials`; a second, narrower `role="audit"`
+  control-credential class (read-only on the 3 read endpoints, ceremony-
+  issued only, fail-closed with durable audit on the other 8); per-
+  application issuance freeze (`freeze-issuance`/`unfreeze-issuance` CLI,
+  `FORBIDDEN` while frozen). See `security/CONTROL_MAPPING.md`'s SI-02/
+  SI-06/SI-07 rows for the full evidence.
 - **Break-glass CLI** (`python -m mitatedb_api.ops`, `src/mitatedb_api/
   ops.py`): beyond `bootstrap`/`reset`, an operator with a live control
   credential and direct Cloud SQL access (no `/control/v1` network path
@@ -115,8 +131,10 @@ when PostgreSQL is unreachable, they fail loudly).
   Both are `required: true` in `../conformance-tests/registry.json`.
   Executable conditions this peer now participates in for real: C-01,
   C-03, C-06, C-08, C-11 (partial, see `conformance-tests/CONDITIONS.md`),
-  C-12, C-13, C-14, C-15, C-17 (structural-evidence branch, since
-  `row_addressability` stays `unavailable`), C-18.
+  C-12, C-13, C-14, C-15, C-16 (PROVIDED branch, phase 3.5 WP-3 --
+  `cross_entity_mutation` is `partial` on both adapters), C-17
+  (structural-evidence branch, since `row_addressability` stays
+  `unavailable`), C-18.
 - **Deployment assets** (`docker/Dockerfile`, `docs/cloud-run-cloud-sql.md`,
   `docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`): one non-root, multi-stage
   image serving either ASGI app (`SERVICE=data`/`SERVICE=control`), a
@@ -140,11 +158,13 @@ real-instance verification procedure for when that changes).
 
 - **Capability envelope frozen this phase** (design v1.2 §0): `upsert`,
   `contains`/`matches`/`is_null`, `row_addressability`,
-  `revision_preconditions`, `idempotency`, `cross_entity_mutation`,
-  `application_catalog`, `audit_query`, and `best_effort_transactions`
-  stay at their current declaration (`unavailable`/`unsupported`/
-  `partial`). `cross_entity_mutation` has a client-requested phase 3.5
-  follow-on pending the requester's own confirmation (design §5 D-L).
+  `revision_preconditions`, `idempotency`, `application_catalog`,
+  `audit_query`, and `best_effort_transactions` stay at their current
+  declaration (`unavailable`/`unsupported`). **`cross_entity_mutation` no
+  longer belongs on this list**: the requester approved phase 3.5
+  (2026-08-31) and it shipped as `partial` in WP-2/WP-3 -- see the "What
+  now exists" section above and
+  `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`.
 - **Application-plane resource bounds beyond `request_bytes`**: request
   rate, concurrency, and execution-time limits are not implemented at the
   application-code layer on this peer (Cloud Run's own concurrency/

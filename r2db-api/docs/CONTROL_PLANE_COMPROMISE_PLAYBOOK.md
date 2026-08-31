@@ -191,7 +191,30 @@ an automated all-clear signal.
 
 ### 3. Revoke every application credential issued during the window
 
-**Honest gap, by design (not a defect introduced this phase):** a
+**RESOLVED, phase 3.5 WP-1/WP-4 (dated addendum, 2026-08-31, house style --
+original text below kept for record):** the contract's `audit.fields` now
+carries a 13th column, `target_id`, an optional field naming the single
+target credential/application a lifecycle event acted on
+(`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §1-C/§4;
+`security/CONTROL_MAPPING.md`'s SI-14 row). Step 2's `audit-report` output
+now includes `target_id` on every `issue_credential`/`rotate_credential`
+row, populated with the affected credential's own id
+(`r2db-api/tests/test_control_plane_service.py::
+test_target_id_populated_for_application_and_credential_lifecycle_events`).
+The mechanical step is now:
+
+```
+jq -r 'select(.operation == "issue_credential" or .operation == "rotate_credential") | .target_id' <audit-report output>
+```
+
+to produce the exact list of credential ids to revoke directly from step
+2's own report -- no cross-referencing against current state is required
+for this step any longer. The `list-credentials` cross-reference below is
+retained as a fallback (useful when investigating an event recorded before
+this phase, or when corroborating `target_id` against current credential
+state), not because it is still load-bearing for a post-phase-3.5 incident.
+
+**Original gap description (now closed, kept verbatim for record):** a
 `control_audit` row for an `issue_credential`/`rotate_credential`/etc. event
 has no `target_id` field at all -- the contract's own `audit.fields` (12
 named columns) has no column that names *which* credential a lifecycle
@@ -203,7 +226,8 @@ to revoke" -- it can only tell you *that* N credential-issuance events
 happened, for which application(s) (`application_id` is present), in what
 order, at what times.
 
-Close the gap by cross-referencing with current state:
+Fallback cross-reference with current state (see the resolution above --
+not required for a normal post-phase-3.5 incident):
 
 ```
 R2DB_CONTROL_DSN=... python -m r2db_api.ops list-credentials
@@ -213,7 +237,7 @@ R2DB_CONTROL_DSN=... python -m r2db_api.ops list-credentials
 listing and computes no verifier.) For each application named in step 2's
 `issue_credential`/`rotate_credential` events during the compromise window,
 find its credential row(s) by `created_at`/`application_slug` proximity to
-the audit event's own `occurred_at`, then:
+the audit event's own `occurred_at` (or, now, directly by `target_id`), then:
 
 ```
 R2DB_CONTROL_DSN=... R2DB_CREDENTIAL_PEPPER=... python -m r2db_api.ops revoke-credential <credential_id>
