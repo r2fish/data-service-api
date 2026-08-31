@@ -104,24 +104,26 @@ from .http import (
     _SCHEMAS,
     _unhandled_exception_handler,
 )
-from .limits import ResourceLimits
 
 # --------------------------------------------------------------------------
 # Byte bound (R-8: "同一のものを装着" -- the same middleware class, wrapped
-# the same way). The control plane has no `ResourceLimits`-shaped profile of
-# its own (`ControlPlaneLimits`, limits.py, carries only the 3 R-7 resource
-# classes -- applications/credentials_per_application/control_requests_per_
-# minute -- none of which is a request-byte bound); `RequestByteBoundMiddleware`
-# only ever reads one attribute (`.request_bytes`) off whatever object it is
-# given, so a plain default `ResourceLimits()` supplies that one field
-# without pulling in any data-plane-specific bound this app does not use.
-# Design v1.6 does not specify a distinct control-plane byte-bound value, so
-# this reuses the data plane's own default (1 MiB) rather than inventing a
-# new one -- noted here for a future reader who wants a smaller bound for
-# this surface's (much smaller) request bodies.
+# the same way). `RequestByteBoundMiddleware` only ever reads one attribute
+# (`.request_bytes`) off whatever object it is given.
+#
+# Phase 3.5 WP-4 (design §4 "L4", review M-2/M-3): this used to be a
+# module-level `ResourceLimits()` constant -- a second, independently
+# defaulted byte bound with no relationship at all to the `ControlPlaneLimits`
+# object `ControlPlaneService.capabilities()` discovers through. Single-
+# sourced now: `create_control_app` below reads `control_service.limits`
+# (the exact `ControlPlaneLimits` instance the service enforces internally,
+# `ControlPlaneService.limits` property) and wraps the middleware with THAT
+# object directly -- `ControlPlaneLimits.request_bytes` defaults to the same
+# numeric value `ResourceLimits().request_bytes` always had (1 MiB), so this
+# is a declaration of an existing fact, not a behavior change; but mutating
+# a service's configured `request_bytes` now changes both the declared limit
+# and the enforced bound from the one place that value lives, which the old
+# two-separate-objects shape could never guarantee.
 # --------------------------------------------------------------------------
-
-_BYTE_BOUND_LIMITS = ResourceLimits()
 
 
 def _check_response_shape(value: dict[str, Any], schema: dict[str, Any], *, label: str) -> None:
@@ -199,6 +201,18 @@ async def get_control_capabilities(request: Request) -> Response:
     service.check_rate()  # MAJOR-1 (round-2 review): charged before anything else, see module header
     secret = _extract_bearer(request)
     document = service.capabilities(secret, request_id=_request_id(request), rate_precharged=True)
+    # Phase 3.5 WP-4 (design §4 "L4", MitateDB-parity two-layer form): the
+    # HTTP-layer enforcement fact, added on top of the service-layer default
+    # (`"unavailable"`) in the same commit as the real enforcement it
+    # declares (`RequestByteBoundMiddleware`, mounted by `create_control_app`
+    # below with this exact same service's own `limits.request_bytes`).
+    # `isinstance`/`.get(...)` guarded rather than a bare `document[...]`
+    # subscript: a malformed response from a broken/stub service (this
+    # module's own `_check_response_shape` backstop below is what is
+    # actually supposed to catch that) must still reach that shape check --
+    # never raise a fresh, unrelated `KeyError` from this override first.
+    if isinstance(document, dict) and isinstance(document.get("limit_enforcement"), dict):
+        document = {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
     _check_response_shape(document, _SCHEMAS["CapabilityDocument"], label="CapabilityDocument")
     return JSONResponse(document, status_code=200)
 
@@ -357,7 +371,11 @@ def create_control_app(control_service: ControlPlaneService, *, lifespan: Callab
         lifespan=lifespan,
     )
     app.state.control_service = control_service
-    return RequestByteBoundMiddleware(app, _BYTE_BOUND_LIMITS)
+    # Phase 3.5 WP-4 (§4 "L4", single source): `control_service.limits` is
+    # the exact `ControlPlaneLimits` instance this service enforces
+    # internally and discovers through `capabilities()` -- never a second,
+    # independently constructed `ResourceLimits()`.
+    return RequestByteBoundMiddleware(app, control_service.limits)
 
 
 __all__ = ["create_control_app"]

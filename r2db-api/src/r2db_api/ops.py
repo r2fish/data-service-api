@@ -86,9 +86,10 @@ from typing import Any, NoReturn, Sequence
 import psycopg
 from psycopg import sql
 
-from .control_plane import bootstrap_control_credential, reset_control_credentials
+from .control_plane import bootstrap_control_credential, issue_audit_credential_ceremony, reset_control_credentials
 from .credential_store import (
     DEFAULT_SCHEMA,
+    PostgresApplicationRegistry,
     PostgresControlAuditSink,
     PostgresControlCredentialStore,
     PostgresCredentialStore,
@@ -134,24 +135,28 @@ _RITUAL_ADVISORY_LOCK_KEY = 1414141
 
 # The exact column order `_write_control_audit` below inserts, matching
 # `0006_control_plane_http.sql`'s `control_audit` table and contract
-# `audit.fields`' 12 named fields (`recorded_at` is the table's own
-# `DEFAULT now()`, never supplied from here).
+# `audit.fields` (`recorded_at` is the table's own `DEFAULT now()`, never
+# supplied from here).
+#
+# Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §1-C/
+# §4): `target_id` -- the contract's 13th, optional `audit.fields` member --
+# appended last, matching `credential_store.py`'s own `_CONTROL_AUDIT_
+# COLUMNS`/`_CONTROL_AUDIT_INSERT` ordering.
 _CONTROL_AUDIT_INSERT = (
     "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
-    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 # R-11 (`audit-report`, added this WP): the exact column order the report's
-# SELECT reads and the JSON Lines output writes -- the contract `audit.
-# fields`' 12 named fields (`_CONTROL_AUDIT_INSERT`'s own column list,
-# above) plus `recorded_at` (0006's DB-side insertion timestamp, distinct
-# from the application-side `occurred_at` this report filters on -- see
-# `cmd_audit_report`'s own docstring).
+# SELECT reads and the JSON Lines output writes -- `_CONTROL_AUDIT_INSERT`'s
+# own column list, above, plus `recorded_at` (0006's DB-side insertion
+# timestamp, distinct from the application-side `occurred_at` this report
+# filters on -- see `cmd_audit_report`'s own docstring).
 _CONTROL_AUDIT_REPORT_COLUMNS = (
     "event_id", "event_class", "occurred_at", "request_id", "application_id",
     "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code",
-    "recorded_at",
+    "target_id", "recorded_at",
 )
 
 
@@ -210,6 +215,15 @@ def _control_store() -> PostgresControlCredentialStore:
     return PostgresControlCredentialStore(dsn, pepper=control_pepper, schema=_schema())
 
 
+def _applications() -> PostgresApplicationRegistry:
+    """Phase 3.5 WP-4 (§4/§1-E, P35-D6): the applications-registry store for
+    `freeze-issuance`/`unfreeze-issuance`. Connects with `R2DB_CONTROL_DSN`
+    (`r2dbsvc_control`), same as every other write-path store this module
+    constructs -- never the control-plane HTTP process' own `r2dbsvc_
+    controlplane` role."""
+    return PostgresApplicationRegistry(_control_dsn(), schema=_schema())
+
+
 def _control_audit_sink() -> PostgresControlAuditSink:
     """CCR-14 WP-5 (ceremony core extraction, work order §2): the bootstrap/
     reset ritual now writes its canonical audit event through the same
@@ -255,6 +269,7 @@ def _write_control_audit(
     application_id: str | None = None,
     role: str | None = None,
     reason_code: str | None = None,
+    target_id: str | None = None,
 ) -> None:
     """Writes one canonical `control_audit` row on `conn` -- the exact same
     connection/transaction the caller's state change just executed on
@@ -297,6 +312,7 @@ def _write_control_audit(
                 target_kind,
                 outcome,
                 reason_code,
+                target_id,
             ],
         )
 
@@ -459,6 +475,7 @@ def cmd_issue_credential(args: argparse.Namespace) -> int:
                 target_kind="credential",
                 application_id=args.slug,
                 role=args.role,
+                target_id=credential_id,
             )
     finally:
         store.close()
@@ -482,6 +499,7 @@ def cmd_rotate_credential(args: argparse.Namespace) -> int:
                 operation="rotate_credential",
                 outcome="allow",
                 target_kind="credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -500,6 +518,7 @@ def cmd_revoke_credential(args: argparse.Namespace) -> int:
                 operation="revoke_credential",
                 outcome="allow",
                 target_kind="credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -518,6 +537,7 @@ def cmd_disable_credential(args: argparse.Namespace) -> int:
                 operation="disable_credential",
                 outcome="allow",
                 target_kind="credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -572,6 +592,7 @@ def cmd_delete_credential(args: argparse.Namespace) -> int:
                 operation="delete_credential",
                 outcome="allow",
                 target_kind="credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -590,6 +611,7 @@ def cmd_enable_credential(args: argparse.Namespace) -> int:
                 operation="enable_credential",
                 outcome="allow",
                 target_kind="credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -637,6 +659,7 @@ def _set_application_enabled(slug: str, enabled: bool) -> None:
             outcome="allow",
             target_kind="application",
             application_id=slug,
+            target_id=slug,
         )
         conn.commit()
 
@@ -650,6 +673,40 @@ def cmd_disable_app(args: argparse.Namespace) -> int:
 def cmd_enable_app(args: argparse.Namespace) -> int:
     _set_application_enabled(args.slug, True)
     print(f"application {args.slug} enabled")
+    return 0
+
+
+def _set_application_issuance_frozen(slug: str, frozen: bool) -> None:
+    """Phase 3.5 WP-4 (design §4/§1-E, P35-D6): CLI-only, non-destructive --
+    same class as `_set_application_enabled` above (no declare-and-echo
+    confirmation gate; unlike `reset`/`delete-credential`, freezing/
+    unfreezing issuance is fully reversible with no data loss)."""
+    store = _applications()
+    try:
+        with store.unit_of_work() as work:
+            store.set_issuance_frozen(slug, frozen, work=work)
+            _write_control_audit(
+                work.connection,
+                event_class="application_lifecycle",
+                operation="freeze_issuance" if frozen else "unfreeze_issuance",
+                outcome="allow",
+                target_kind="application",
+                application_id=slug,
+                target_id=slug,
+            )
+    finally:
+        store.close()
+
+
+def cmd_freeze_issuance(args: argparse.Namespace) -> int:
+    _set_application_issuance_frozen(args.slug, True)
+    print(f"credential issuance for application {args.slug} is now frozen")
+    return 0
+
+
+def cmd_unfreeze_issuance(args: argparse.Namespace) -> int:
+    _set_application_issuance_frozen(args.slug, False)
+    print(f"credential issuance for application {args.slug} is no longer frozen")
     return 0
 
 
@@ -713,13 +770,17 @@ def cmd_audit_report(args: argparse.Namespace) -> int:
     what a playbook's "did I see every event in this window" investigation
     needs.
 
-    R-11's own honest caveat (documented at length in `CONTROL_PLANE_
-    COMPROMISE_PLAYBOOK.md`, not repeated in full here): this report's rows
-    have no `target_id` field (contract `audit.fields` has no such column;
-    §6/§12.4 of the design track it as a contract-additive candidate) --
-    identifying exactly *which* credential a `credential_lifecycle` row
-    changed still requires cross-referencing `list-credentials`' current
-    state by timing/operation/`application_id`, not this report alone.
+    Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+    §1-C/§4): this report's rows now include `target_id` -- the single
+    target credential_id/application_id a lifecycle event acted on, when a
+    single one exists (populated for every real state-changing event this
+    module and `ControlPlaneService` write; `None`/absent for events with no
+    single target, e.g. `bootstrap_control_credential` prior to this WP's
+    own population, or a denial with no attributable target). Identifying a
+    `credential_lifecycle` row's target no longer requires the timing/
+    operation/`application_id` cross-reference against `list-credentials`'
+    current state that earlier revisions of this docstring described as
+    necessary.
     """
     since = _parse_report_timestamp(args.since, "--since")
     until = _parse_report_timestamp(args.until, "--until") if args.until else None
@@ -852,6 +913,47 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_issue_audit_credential(_args: argparse.Namespace) -> int:
+    """Phase 3.5 WP-4 (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+    §4/§1-D, P35-D12): issues a new `role="audit"` control-table credential.
+    Out-of-band ONLY -- there is no in-band issuance path for this role
+    either (`CredentialIssueRequest`'s enum was never extended to accept
+    it, matching the pre-existing `role="control"` rule; contract `control_
+    plane.issuance`: "Audit credentials, like control credentials, are
+    issued only via the out-of-band ceremony").
+
+    Unlike `bootstrap`, this is not a once-only ritual -- any number of
+    audit credentials may exist, issued at any time; there is no "first row"
+    invariant to protect. It STILL takes the same `_lock_ritual` advisory
+    lock `bootstrap`/`reset` use (round-2 independent review m-2): without
+    it, this command's `INSERT` can interleave with a concurrent `reset`'s
+    `revoke_all` -- `revoke_all` only revokes rows its own `WHERE NOT
+    revoked` scan already saw, so an audit-credential row inserted mid-reset
+    (after that scan, before `reset`'s transaction commits) would survive a
+    reset that was supposed to wipe every control-table row. Taking the same
+    lock key serializes this command against a concurrent `bootstrap`/
+    `reset`/another `issue-audit-credential`, closing that window.
+
+    `issue_audit_credential_ceremony` (`control_plane.py`) does the real
+    work -- see that function's own docstring for why it issues AND rotates
+    in the same transaction before ever handing back a secret (no in-band
+    self-rotate exists for an audit principal, design §4 M-1): the secret
+    printed below already has `must_rotate=false`.
+    """
+    store = _control_store()
+    audit = _control_audit_sink()
+    try:
+        with store.unit_of_work() as work:
+            _lock_ritual(work.connection)
+            credential_id, secret = issue_audit_credential_ceremony(store, audit, work=work)
+    finally:
+        store.close()
+        audit.close()
+    _print_issued(credential_id, secret)
+    print("must_rotate: false -- the issuance ceremony already completed rotation before this secret was printed")
+    return 0
+
+
 def cmd_enable_control_credential(args: argparse.Namespace) -> int:
     """R-10 break-glass: recovers from the one lockout `reset` is heavier
     than necessary for -- the sole live control credential having been
@@ -870,6 +972,7 @@ def cmd_enable_control_credential(args: argparse.Namespace) -> int:
                 operation="enable_control_credential",
                 outcome="allow",
                 target_kind="control_credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -900,6 +1003,7 @@ def cmd_rotate_control_credential(args: argparse.Namespace) -> int:
                 operation="rotate_control_credential",
                 outcome="allow",
                 target_kind="control_credential",
+                target_id=args.credential_id,
             )
     finally:
         store.close()
@@ -974,6 +1078,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_list_apps)
 
     p = sub.add_parser(
+        "freeze-issuance",
+        help="freeze credential issuance for an application (out-of-band; issue-credential against it then refuses with FORBIDDEN)",
+    )
+    p.add_argument("slug")
+    p.set_defaults(func=cmd_freeze_issuance)
+
+    p = sub.add_parser(
+        "unfreeze-issuance",
+        help="lift a credential-issuance freeze for an application",
+    )
+    p.add_argument("slug")
+    p.set_defaults(func=cmd_unfreeze_issuance)
+
+    p = sub.add_parser(
         "audit-report",
         help=(
             "R-11 compromise/misuse playbook helper (see r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md): "
@@ -1004,6 +1122,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="echo RESET_CONTROL_CREDENTIALS (from a prior refusal's stderr declaration) to proceed",
     )
     p.set_defaults(func=cmd_reset)
+
+    p = sub.add_parser(
+        "issue-audit-credential",
+        help=(
+            "out-of-band: issue a new role=audit control-table credential (secret printed once). No in-band "
+            "issuance path exists for this role either -- CredentialIssueRequest's enum was not extended. The "
+            "printed secret already has must_rotate=false (the ceremony issues and rotates atomically before "
+            "printing, since an audit principal has no in-band self-rotate path)"
+        ),
+    )
+    p.set_defaults(func=cmd_issue_audit_credential)
 
     p = sub.add_parser(
         "enable-control-credential",

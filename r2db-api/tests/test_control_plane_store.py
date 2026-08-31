@@ -1176,6 +1176,103 @@ def test_break_glass_never_offers_un_revoke(tmp_path_factory: pytest.TempPathFac
         _sweep_prefix(info.admin_dsn, info.prefix)
 
 
+# ===========================================================================
+# Phase 3.5 WP-4: `issue-audit-credential` ceremony, `freeze-issuance`/
+# `unfreeze-issuance` CLI subcommands (design PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
+# §4/§1-D/§1-E).
+# ===========================================================================
+
+
+def test_cli_issue_audit_credential_produces_a_ready_to_use_credential(platform: types.SimpleNamespace) -> None:
+    """Out-of-band audit-credential issuance -- no in-band path exists for
+    `role="audit"` either. The printed secret already has `must_rotate:
+    false` (the ceremony issues AND rotates before ever printing, design §4
+    M-1 -- there is no in-band self-rotate path for an audit principal to
+    otherwise clear it with)."""
+    result = _run_cli(platform, "issue-audit-credential")
+    assert result.returncode == 0, result.stderr
+    credential_id, secret = _parse_issued(result.stdout)
+    assert "must_rotate: false" in result.stdout
+    assert re.fullmatch(r"ctl_[0-9a-f]{16}", credential_id), f"issued id {credential_id!r} does not match ^ctl_[0-9a-f]{{16}}$"
+
+    control = _control_store(platform)
+    try:
+        context = control.authenticate(secret)
+        assert context.credential_id == credential_id
+        assert context.must_rotate is False
+        assert context.role == "audit"
+    finally:
+        control.close()
+
+
+def test_cli_issue_audit_credential_is_not_a_once_only_ritual(platform: types.SimpleNamespace) -> None:
+    """Unlike `bootstrap`, any number of audit credentials may be issued --
+    there is no "first row" invariant to protect here."""
+    first = _run_cli(platform, "issue-audit-credential")
+    second = _run_cli(platform, "issue-audit-credential")
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    first_id, _ = _parse_issued(first.stdout)
+    second_id, _ = _parse_issued(second.stdout)
+    assert first_id != second_id
+
+
+def test_cli_freeze_issuance_then_unfreeze_round_trips(platform: types.SimpleNamespace) -> None:
+    slug = _fresh_slug("fz")
+    _register_application_only(platform, slug)
+
+    def _read_frozen() -> bool:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT issuance_frozen FROM {table} WHERE application_slug = %s").format(table=sql.Identifier(platform.schema, "applications")),
+                    [slug],
+                )
+                row = cur.fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    assert _read_frozen() is False  # NOT NULL DEFAULT false
+
+    frozen = _run_cli(platform, "freeze-issuance", slug)
+    assert frozen.returncode == 0, frozen.stderr
+    assert "frozen" in frozen.stdout
+    assert _read_frozen() is True
+
+    unfrozen = _run_cli(platform, "unfreeze-issuance", slug)
+    assert unfrozen.returncode == 0, unfrozen.stderr
+    assert _read_frozen() is False
+
+
+def test_cli_freeze_issuance_unknown_application_fails_closed(platform: types.SimpleNamespace) -> None:
+    result = _run_cli(platform, "freeze-issuance", "definitely_not_registered_xyz")
+    assert result.returncode != 0
+
+
+def test_cli_freeze_issuance_writes_control_audit_row(platform: types.SimpleNamespace) -> None:
+    slug = _fresh_slug("fa")
+    _register_application_only(platform, slug)
+    result = _run_cli(platform, "freeze-issuance", slug)
+    assert result.returncode == 0, result.stderr
+
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "SELECT operation, target_kind, application_id, target_id, outcome FROM {table} "
+                    "WHERE operation = 'freeze_issuance' AND application_id = %s"
+                ).format(table=sql.Identifier(platform.schema, "control_audit")),
+                [slug],
+            )
+            rows = cur.fetchall()
+    assert len(rows) == 1
+    operation, target_kind, application_id, target_id, outcome = rows[0]
+    assert target_kind == "application"
+    assert application_id == slug
+    assert target_id == slug
+    assert outcome == "allow"
+
+
 def test_control_credential_locked_by_must_rotate_still_authenticates_and_rotate_clears_it(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
@@ -1774,6 +1871,7 @@ def _insert_control_audit_row(
     target_kind: str | None = None,
     reason_code: str | None = None,
     event_id: str | None = None,
+    target_id: str | None = None,
 ) -> str:
     """Inserts one `control_audit` row directly (as `r2dbsvc_control`, this
     schema's owner -- full DML), with an explicit, caller-chosen
@@ -1785,19 +1883,24 @@ def _insert_control_audit_row(
     the caller (WP-6 review MI-3: the `event_id` ASC tiebreaker test needs
     to control which of two identical-`occurred_at` rows sorts first,
     independent of uuid4's own randomness) -- defaults to a fresh `uuid4()`
-    when omitted, as before."""
+    when omitted, as before.
+
+    Phase 3.5 WP-4 (design §1-C/§4): `target_id` -- the contract's 13th,
+    optional `audit.fields` member (0006's own nullable column) -- defaults
+    to `None` (omitted), same as every other optional column here.
+    """
     event_id = event_id or str(uuid.uuid4())
     request_id = str(uuid.uuid4())
     statement = sql.SQL(
         "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
-        "actor_type, actor_id, role, operation, target_kind, outcome, reason_code) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
     ).format(table=sql.Identifier(platform.schema, "control_audit"))
     with psycopg.connect(platform.control_dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 statement,
-                [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code],
+                [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id],
             )
         conn.commit()
     return event_id
@@ -1873,7 +1976,7 @@ def test_audit_report_emits_one_json_object_per_line_with_contract_fields(platfo
     slug = _fresh_slug("ar")
     event_id = _insert_control_audit_row(
         platform, occurred_at=t0, operation=marker, event_class="application_lifecycle",
-        application_id=slug, target_kind="application", outcome="allow",
+        application_id=slug, target_kind="application", outcome="allow", target_id=slug,
     )
     result = _run_audit_report(platform, t0.isoformat(), t0.isoformat())
     assert result.returncode == 0, result.stderr
@@ -1889,6 +1992,10 @@ def test_audit_report_emits_one_json_object_per_line_with_contract_fields(platfo
     assert record["operation"] == marker
     assert record["outcome"] == "allow"
     assert record["target_kind"] == "application"
+    # Phase 3.5 WP-4 (design §1-C/§4): `target_id` now appears in the report
+    # too -- the "no target_id field" caveat this docstring/test used to
+    # carry is resolved.
+    assert record["target_id"] == slug
     # Both timestamps present and ISO-8601-parseable -- `recorded_at` (the
     # table's own DB-side insertion time) is distinct from `occurred_at` and
     # both round-trip through this report.

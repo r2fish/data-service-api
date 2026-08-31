@@ -124,7 +124,7 @@ class DataService:
             # than a new C-12 "declared unavailable, executes anyway" gap.
             schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
             return {
-                "contract_version": "1.2.0",
+                "contract_version": "1.3.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
