@@ -181,6 +181,30 @@ class SQLiteBackend:
         # error hierarchy entirely.
         if isinstance(value, int) and not (_SQLITE_INT64_MIN <= value <= _SQLITE_INT64_MAX):
             raise ValidationError("value is out of range for 64-bit integer storage")
+        # Independent review B-2(ii) (WP-2 follow-up, same precedent as
+        # the out-of-range-integer check immediately above -- both are a
+        # value that would otherwise crash out of this backend's own
+        # error hierarchy entirely, not a preserved-quirk question):
+        # `sqlite3`'s own driver raises a raw `UnicodeEncodeError` (never
+        # a `sqlite3.Error`) when binding a Python `str` that contains a
+        # LONE UTF-16 surrogate code point (U+D800-U+DFFF, not part of a
+        # valid pair -- e.g. a literal `"\ud800"`) -- measured directly
+        # (WP-2 review). Unlike the embedded-NUL case (this backend's own
+        # storage genuinely round-trips a NUL byte, see `cell.py`'s own
+        # `test_sqlite_backend_still_round_trips_an_embedded_nul_byte`),
+        # this is not a case where SQLite is simply more permissive than
+        # PostgreSQL -- the encoding failure happens in the SAME place
+        # (UTF-8 encoding at bind time) on both backends' own drivers, so
+        # this backend needs the identical deterministic, validation-time
+        # rejection `backend_postgres.py::_validate_value_domain` now
+        # applies. Only a plain `str` can carry one through to this point
+        # (a dict/list value already became NUL/surrogate-escaped JSON
+        # text via `json.dumps` in `cell.ApplicationCell._normalize_
+        # value`, before this method is ever called).
+        if isinstance(value, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+            raise ValidationError(
+                "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8"
+            )
         return value
 
     def insert(self, collection, fields, params):

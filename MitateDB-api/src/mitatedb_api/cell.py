@@ -62,10 +62,10 @@ from .identifiers import validate_identifier
 # expansion): `transact()` now executes `update`/`delete` for real,
 # atomically with everything else in the same batch, through the
 # identical backend-independent validation/confirmation logic the
-# dedicated `update`/`delete` methods already use (`_update_in_
-# transaction`/`_delete_in_transaction` below, sharing `_bind_filters`/
-# `_prepare_values`/`_validate_delete_confirmation` with those methods --
-# there is no second, batch-specific copy of any of that logic). Both
+# dedicated `update`/`delete` methods already use (`_validate_update`/
+# `_validate_delete_confirmation`, shared via `_plan_operation` below
+# since P35 WP-2's own two-pass restructuring -- there is no second,
+# batch-specific copy of any of that logic). Both
 # contract readings §8.1(b) considers are therefore simultaneously true
 # for this peer post-WP-1.5 (the batch dispatcher itself executes
 # update/delete, AND the general vocabulary is executed via a real entry
@@ -80,10 +80,10 @@ from .identifiers import validate_identifier
 # as it already was for `insert` alone before this WP.
 _CONTRACT_MUTATION_VOCABULARY = {"insert", "update", "upsert", "delete"}
 
-# The only operation-dict keys `transact()`'s "insert" branch below actually
-# reads. Any other key (`expected_revision`, `idempotency_key`, or any other
-# capability this entry point does not implement) must be rejected before
-# `_insert_in_transaction` ever touches the database -- silently ignoring an
+# The only operation-dict keys `_plan_operation`'s "insert" branch below
+# actually reads. Any other key (`expected_revision`, `idempotency_key`, or
+# any other capability this entry point does not implement) must be rejected
+# before this operation's own row is ever built -- silently ignoring an
 # unrecognized key would let a request carrying a real semantic (a revision
 # precondition, in particular) execute as if that semantic were honored,
 # when it was never even inspected. Contract `versioning.unknown_capability`:
@@ -93,7 +93,7 @@ _TRANSACT_INSERT_KEYS = {"type", "collection", "values"}
 # P3-D2 (WP-1.5): same "reject an unread capability-shaped key before
 # execution" reasoning as `_TRANSACT_INSERT_KEYS` above, for the two
 # newly-converged operation types. `values` is accepted on the "delete"
-# key set even though `_delete_in_transaction` never reads it -- contract
+# key set even though delete execution never reads it -- contract
 # `Mutation` (spec `definitions.Mutation`) declares `values` as a generic
 # property of every mutation operation, delete included (no per-operation
 # `if`/`then` narrows it away for `"operation": "delete"`), so a
@@ -430,8 +430,8 @@ class ApplicationCell:
     def _validate_update(self, collection, values, filters):
         """m-1 (independent review, P3-D2 follow-up): the single choke
         BOTH `ApplicationCell.update` below AND `transact()`'s own
-        batch-embedded update branch (`_update_in_transaction`) pass
-        through -- identical four-step validation (non-empty `filters`
+        batch-embedded update branch (`_plan_operation`, since P35 WP-2's
+        two-pass restructuring) pass through -- identical four-step validation (non-empty `filters`
         shape check -> `_prepare_values` -> non-empty `fields` check ->
         `_bind_filters`), so a batch-embedded update is held to exactly
         the same mass-operation guard as the dedicated method, never a
@@ -462,8 +462,8 @@ class ApplicationCell:
     def _validate_delete_confirmation(self, collection, filters, destructive, confirm):
         """P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
         `ApplicationCell.delete` below AND `transact()`'s own
-        batch-embedded delete branch (`_delete_in_transaction`) pass
-        through -- identical shape checks, identical schema-revision-
+        batch-embedded delete branch (`_plan_operation`, since P35 WP-2's
+        two-pass restructuring) pass through -- identical shape checks, identical schema-revision-
         fingerprinted phrase construction (`_delete_confirmation_phrase`),
         identical exact-match comparison, identical four-key `details`
         shape on failure. A batch-embedded delete is therefore held to
@@ -485,10 +485,22 @@ class ApplicationCell:
         Returns `(collection, bound_filters)` on success; raises
         `DestructiveConfirmationRequired` otherwise. Does not execute the
         delete itself and does not touch `self._lock`/the backend's own
-        transaction state -- callers own both (the dedicated method wraps
-        its own `with self._lock:`/no open batch transaction; `transact()`
-        is already holding `self._lock` and has already called
-        `self._backend.begin()` before this is ever reached).
+        transaction state -- callers own both.
+
+        m-1 correction (independent review, P35 WP-2 follow-up): the
+        dedicated `delete()` method still wraps its own `with self._lock:`
+        AFTER this returns (no open batch transaction at that point).
+        `transact()`'s own batch-embedded call site is DIFFERENT since
+        P35 WP-2's two-pass restructuring (R-1): it now runs from
+        `_plan_operation`, during pass 1 -- OUTSIDE `self._lock` entirely,
+        and BEFORE `self._backend.begin()` is ever called (`self._lock`/
+        `begin()` are only acquired afterward, once the whole batch has
+        planned successfully, at the start of pass 2). This method itself
+        is unaffected by that change (it never touched lock/transaction
+        state either way), but the earlier claim that `transact()` "is
+        already holding `self._lock` and has already called `begin()`
+        before this is ever reached" describes the pre-WP-2, single-pass
+        call site and is no longer true of the current one.
         """
         if not isinstance(destructive, bool):
             raise ValidationError("destructive must be a boolean")
@@ -537,6 +549,123 @@ class ApplicationCell:
                       principal.credential_id, detail="delete_rows")
         return result
 
+    def _plan_operation(self, operation):
+        """P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
+        CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free
+        plan step for a single `transact()` operation-dict -- identical
+        shape/capability checks and identical validation chokes
+        (`_prepare_values`/`_validate_update`/`_validate_delete_
+        confirmation`, the pre-existing `_TRANSACT_*_KEYS` excess-key
+        checks) as before this WP, just no longer interleaved with any
+        OTHER operation's own execution. Never touches the DML
+        (`_runtime`) transaction state (no `begin`/`commit`/`rollback`,
+        no `..._in_transaction` call) -- m-3 correction (independent
+        review, P35 WP-2 follow-up): this is narrower than "never touches
+        `self._backend`'s transaction state" -- on the PostgreSQL backend,
+        the read-only catalog calls this method makes (`field_domains`/
+        `schema_revision`, via `_prepare_values`/`_bind_filters`/
+        `_validate_delete_confirmation`) run on the SEPARATE developer
+        connection (`backend_postgres.PostgresBackend._developer`) and DO
+        commit there (a real, distinct transaction lifecycle from the
+        runtime/DML connection's `begin()`/`commit()`/`rollback()` that
+        pass 2 alone governs) -- exactly the same pre-existing
+        `field_domains`/`schema_revision` behavior every single-operation
+        method (`insert`/`update`/`delete`/`read`) already has outside
+        any lock (module-level "PG 留意" note above `_DELETE_CONSEQUENCE`
+        / design §2's own PG note), not a new side effect this WP
+        introduces.
+
+        Returns `("insert" | "update" | "delete", payload)` on success,
+        `payload` a plain tuple of exactly the arguments the matching
+        backend `..._in_transaction` method needs. Raises the identical
+        `FoundationError` subclass, for the identical reason, that the
+        pre-WP-2 in-loop branch below used to raise for this same
+        operation shape -- this is a relocation of that logic, not a
+        second copy of it (the module's own `_TRANSACT_INSERT_KEYS`/
+        `_TRANSACT_UPDATE_KEYS`/`_TRANSACT_DELETE_KEYS`/
+        `_CONTRACT_MUTATION_VOCABULARY` constants are unchanged, and
+        `_prepare_values`/`_validate_update`/`_validate_delete_
+        confirmation` are the exact same single chokes `insert`/`update`/
+        `delete` above also use)."""
+        if not isinstance(operation, dict):
+            raise ValidationError("unsupported transaction operation")
+        op_type = operation.get("type")
+        if op_type == "insert":
+            if set(operation) - _TRANSACT_INSERT_KEYS:
+                # A well-formed "insert" carrying an extra, unrecognized
+                # key (e.g. `expected_revision`) is a capability gap, not
+                # a malformed request -- same reasoning as the
+                # `update`/`delete` branches below, and the `upsert`
+                # branch further down, which refuse this way for the
+                # operation *type* itself.
+                raise CapabilityError(
+                    "transact does not support additional fields on operation type 'insert'"
+                )
+            collection, fields, params = self._prepare_values(operation["collection"], operation["values"])
+            return ("insert", (collection, fields, params))
+        if op_type == "update":
+            if set(operation) - _TRANSACT_UPDATE_KEYS:
+                raise CapabilityError(
+                    "transact does not support additional fields on operation type 'update'"
+                )
+            collection, fields, values_params, bound_filters = self._validate_update(
+                operation.get("collection"), operation.get("values"), operation.get("filters"))
+            return ("update", (collection, fields, values_params, bound_filters))
+        if op_type == "delete":
+            if set(operation) - _TRANSACT_DELETE_KEYS:
+                raise CapabilityError(
+                    "transact does not support additional fields on operation type 'delete'"
+                )
+            collection, bound_filters = self._validate_delete_confirmation(
+                operation.get("collection"), operation.get("filters"),
+                destructive=operation.get("destructive", False),
+                confirm=operation.get("confirm"))
+            return ("delete", (collection, bound_filters))
+        if op_type in _CONTRACT_MUTATION_VOCABULARY:
+            # Only "upsert" ever reaches here -- P3-D2 (WP-1.5) converged
+            # `update`/`delete` to real execution above. Per
+            # `capability_status.rules` ("optional target operations ...
+            # must fail with CAPABILITY_UNSUPPORTED"), this is a
+            # capability gap, not a malformed request.
+            raise CapabilityError(f"transact does not support operation type {op_type!r}")
+        raise ValidationError("unsupported transaction operation")
+
+    @staticmethod
+    def _distinct_batch_entities(operations):
+        """P35 WP-2 (R-2): the set of DISTINCT `collection` names named
+        across the raw, not-yet-validated operation dicts -- the same
+        entity may repeat across multiple operations without counting
+        twice (contract `endpoints.cross_entity_mutate.semantics`:
+        "batch_entities bounds the number of distinct entity names
+        referenced across operations[] ... the same entity may appear in
+        more than one operation, and total operation count remains
+        bounded by batch_items independently"). Deliberately reads the
+        RAW dicts (a non-dict operation is simply skipped here -- its own
+        malformed shape is a `_plan_operation` concern, reached
+        immediately after this check) rather than the validated plan, so
+        this whole-batch shape bound is evaluated symmetrically with the
+        `batch_items` check immediately above it in `transact()`: both
+        are checked before any single operation's own validation begins.
+
+        Independent review B-1 (WP-2 follow-up): a `collection` value
+        that is present but not itself a string (e.g. `["t"]`, `{}`) must
+        be SKIPPED here too, not added to the set -- adding an unhashable
+        value would raise a bare `TypeError` out of this whole-batch
+        pre-check, before `_plan_operation` ever gets a chance to
+        classify that same malformed operation as an ordinary
+        `ValidationError` (its own proper job). This mirrors the
+        non-dict-operation skip immediately above: a shape defect at
+        THIS layer is deferred to `_plan_operation`, never raised here as
+        an unclassified exception.
+        """
+        names = set()
+        for operation in operations:
+            if isinstance(operation, dict):
+                name = operation.get("collection")
+                if isinstance(name, str):
+                    names.add(name)
+        return names
+
     def transact(self, principal, operations):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
@@ -554,12 +683,53 @@ class ApplicationCell:
         SAME batch, insert included -- `self._backend.rollback()` in the
         `except` clause below is the one and only rollback point for the
         whole batch, reached from every operation type's own failure path.
+
+        P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
+        CONTRACT_130_V1.md §2, P35-D9/P35-D10/P35-D11): two-pass as of
+        this WP -- ALL operations across ALL entities are validated first
+        (`self._plan_operation`, side-effect-free, building a fully-bound
+        execution plan), and `self._backend.begin()` is never called at
+        all until that whole-batch validation pass has succeeded end to
+        end. Only then does the second pass execute the plan inside the
+        begin/commit/rollback envelope below. This entry point is shared
+        by both the single-entity HTTP path (`http.py::post_mutate`) and
+        the cross-entity one (`http.py::post_cross_entity_mutate`) --
+        neither is a second copy of this method, so both are two-pass by
+        construction. Atomicity itself (all-or-nothing) is UNCHANGED by
+        this restructuring; the one externally-observable consequence
+        (P35-D9) is that a batch mixing an operation that would have
+        failed at BACKEND EXECUTION time with a LATER operation that
+        fails VALIDATION now surfaces the validation error (previously,
+        the earlier operation's execution-time error could surface first,
+        after already having reached the backend, since the old single
+        pass validated-then-executed each operation in strict order
+        before ever looking at the next one's own type) -- the validation
+        error winning is the contract-required priority
+        (`transactions.cross_entity`), adopted deliberately (M-7). The
+        internal ordering itself (validate-all, then execute-all) is not
+        black-box observable and is not a conformance-suite concern
+        (P35-D10) -- it is pinned locally, structurally, by this
+        package's own tests (a wrapped/monkeypatched backend proving zero
+        `..._in_transaction`/`begin` calls happen when a later operation
+        fails validation).
         """
         self._require_data(principal)
         if not isinstance(operations, list) or not operations:
             raise ValidationError("operations must be a non-empty list")
         if len(operations) > self.config.max_batch_items:
             raise ResourceLimitError("batch limit exceeded", limit_class="batch_items")
+        if len(self._distinct_batch_entities(operations)) > self.config.max_batch_entities:
+            raise ResourceLimitError("batch entity limit exceeded", limit_class="batch_entities")
+
+        # Pass 1: validate every operation, across every entity, before
+        # any execution begins (P35-D9/P35-D10 above). Nothing below this
+        # line has touched `self._backend`'s own transaction state yet.
+        plan = [self._plan_operation(operation) for operation in operations]
+
+        # Pass 2: execute the fully-bound plan inside the begin/commit/
+        # rollback envelope -- unchanged from before this WP other than
+        # reading its arguments from `plan` instead of re-validating them
+        # from the raw operation dicts inline.
         with self._lock:
             self._backend.begin()
             # A batch-embedded delete's own `destructive_data_operation`
@@ -573,111 +743,89 @@ class ApplicationCell:
             pending_audit = []
             try:
                 results = []
-                for operation in operations:
-                    if not isinstance(operation, dict):
-                        raise ValidationError("unsupported transaction operation")
-                    op_type = operation.get("type")
-                    if op_type == "insert":
-                        if set(operation) - _TRANSACT_INSERT_KEYS:
-                            # A well-formed "insert" carrying an extra,
-                            # unrecognized key (e.g. `expected_revision`) is
-                            # a capability gap, not a malformed request --
-                            # same reasoning as the `update`/`delete`
-                            # branches below, and the `upsert` branch
-                            # further down, which refuse this way for the
-                            # operation *type* itself.
-                            raise CapabilityError(
-                                "transact does not support additional fields on operation type 'insert'"
-                            )
-                        results.append(self._insert_in_transaction(operation["collection"], operation["values"]))
-                        continue
-                    if op_type == "update":
-                        if set(operation) - _TRANSACT_UPDATE_KEYS:
-                            raise CapabilityError(
-                                "transact does not support additional fields on operation type 'update'"
-                            )
-                        results.append(self._update_in_transaction(
-                            operation.get("collection"), operation.get("values"), operation.get("filters")))
-                        continue
-                    if op_type == "delete":
-                        if set(operation) - _TRANSACT_DELETE_KEYS:
-                            raise CapabilityError(
-                                "transact does not support additional fields on operation type 'delete'"
-                            )
-                        results.append(self._delete_in_transaction(
-                            operation.get("collection"), operation.get("filters"),
-                            destructive=operation.get("destructive", False),
-                            confirm=operation.get("confirm")))
+                for kind, payload in plan:
+                    if kind == "insert":
+                        collection, fields, params = payload
+                        results.append(self._backend.insert_in_transaction(collection, fields, params))
+                    elif kind == "update":
+                        collection, fields, values_params, bound_filters = payload
+                        results.append(self._backend.update_in_transaction(
+                            collection, fields, values_params, bound_filters))
+                    else:  # "delete"
+                        collection, bound_filters = payload
+                        results.append(self._backend.delete_in_transaction(collection, bound_filters))
                         # Deferred audit (see `pending_audit`'s own comment
-                        # above): appended only once `_delete_in_transaction`
+                        # above): appended only once `delete_in_transaction`
                         # has returned successfully for THIS operation --
                         # `principal` is this method's own parameter, still
-                        # in scope here, so no extra plumbing into the
-                        # helper itself is needed to capture it.
+                        # in scope here, so no extra plumbing is needed to
+                        # capture it.
                         pending_audit.append(lambda: self.__record(
                             "destructive_data_operation", self.application_id,
                             principal.credential_id, detail="delete_rows"))
-                        continue
-                    if op_type in _CONTRACT_MUTATION_VOCABULARY:
-                        # Only "upsert" ever reaches here now -- P3-D2
-                        # converged `update`/`delete` to real execution
-                        # above. Per `capability_status.rules` ("optional
-                        # target operations ... must fail with
-                        # CAPABILITY_UNSUPPORTED"), this is a capability
-                        # gap, not a malformed request.
-                        raise CapabilityError(f"transact does not support operation type {op_type!r}")
-                    raise ValidationError("unsupported transaction operation")
                 self._backend.commit()
-            except (ValidationError, ResourceLimitError, CapabilityError,
-                     DestructiveConfirmationRequired, ConflictError, NotFoundError):
-                # P3-D2 (WP-1.5): `DestructiveConfirmationRequired` is now a
-                # REAL, reachable outcome of this loop (a batch-embedded
-                # delete missing/mismatching its own confirmation) -- no
-                # longer merely a defensive listing for a hypothetical
-                # future capability, as it was before this WP.
-                # `ConflictError`/`NotFoundError` are raised by the active
-                # backend itself (a unique-constraint conflict / a
-                # collection dropped out from under this transaction) --
-                # R-3: this file no longer names any backend-native
-                # exception type at all, since every backend now translates
-                # its own low-level failures into this shared
-                # `errors.FoundationError` vocabulary before this `except`
-                # clause ever sees them. `pending_audit` is simply
-                # discarded here (never drained) -- correct, since nothing
-                # in it actually committed.
+            except Exception:
+                # Independent review B-2 (WP-2 follow-up -- the
+                # atomicity hole, largest safety fix of that review):
+                # rollback is now UNCONDITIONAL. The pre-fix `except`
+                # tuple listed only `errors.FoundationError` subclasses;
+                # a non-`FoundationError` exception reaching this point
+                # used to skip `self._backend.rollback()` entirely and
+                # escape this method uncaught -- measured concretely: a
+                # lone UTF-16 surrogate code point in a value's own text
+                # (e.g. `"\ud800"`) escapes both backend drivers' own
+                # parameter-binding step as a raw `UnicodeEncodeError`
+                # (neither a `sqlite3.Error` nor a `psycopg.Error`
+                # subclass), on BOTH backends. With the pre-fix narrow
+                # `except`, that left every EARLIER, individually-valid
+                # operation's own write sitting UNCOMMITTED but already
+                # VISIBLE on this same connection (both SQLite and
+                # PostgreSQL give a transaction read-your-own-writes
+                # visibility before `COMMIT`) -- a real partial-effect
+                # breach of the "whole batch commits or rolls back as one
+                # unit" invariant this method's own docstring promises.
+                # B-2(ii) below (`encode_value`, both backends) now closes
+                # THIS specific case deterministically at validation time
+                # (pass 1, before `self._backend.begin()` is ever called),
+                # but the unconditional rollback here is the actual safety
+                # backstop -- it must hold for ANY exception a backend
+                # could ever raise during pass 2, known or not, not only
+                # the one concrete case that happened to be found.
+                #
+                # P3-D2 (WP-1.5) / m-2 (WP-2 review correction):
+                # `DestructiveConfirmationRequired` is not actually
+                # reachable from pass 2 at all -- `_plan_operation` (pass
+                # 1) is the ONLY site that ever evaluates a destructive
+                # confirmation (`_validate_delete_confirmation`), so a
+                # schema change racing pass 1/pass 2 (§2 PG note) surfaces
+                # here as a `NotFoundError`/`ConflictError` from the
+                # backend's own DML instead (the table/column the plan
+                # was bound against no longer matches reality), never as
+                # a re-evaluated confirmation mismatch; it stays listed
+                # here only for defensive symmetry with `_plan_operation`'s
+                # own vocabulary, not because this `except Exception:`
+                # needs it to reach that branch specifically (every
+                # `Exception` already does). `ConflictError`/`NotFoundError`
+                # (a unique-constraint conflict / a collection that
+                # stopped existing between this call's own validation pass
+                # and its execution pass) and `ValidationError`/
+                # `ResourceLimitError`/`CapabilityError` (this file names
+                # no backend-native exception type at all -- every backend
+                # translates its own low-level, EXPECTED failures into
+                # this shared `errors.FoundationError` vocabulary before
+                # this point) remain the classified, expected outcomes;
+                # anything else (like the `UnicodeEncodeError` above, pre
+                # B-2(ii)) rolls back and re-raises unclassified, exactly
+                # as before -- this method itself never reclassifies an
+                # exception type, only guarantees rollback runs first.
+                # `pending_audit` is simply discarded here (never drained)
+                # -- correct, since nothing in it actually committed,
+                # whatever the exception type.
                 self._backend.rollback()
                 raise
             for record in pending_audit:
                 record()
             return results
-
-    def _insert_in_transaction(self, collection, values):
-        collection, fields, params = self._prepare_values(collection, values)
-        return self._backend.insert_in_transaction(collection, fields, params)
-
-    def _update_in_transaction(self, collection, values, filters):
-        """P3-D2 (WP-1.5), m-1 fix: runs the identical validation choke
-        `ApplicationCell.update` uses (`_validate_update`), then executes
-        through the backend's own in-transaction update (no per-operation
-        commit -- `transact()`'s single `commit()`/`rollback()` covers the
-        whole batch). No second definition of update's own validation
-        logic exists anywhere in this file."""
-        collection, fields, values_params, bound_filters = self._validate_update(collection, values, filters)
-        return self._backend.update_in_transaction(collection, fields, values_params, bound_filters)
-
-    def _delete_in_transaction(self, collection, filters, *, destructive, confirm):
-        """P3-D2 (WP-1.5): runs the identical confirmation choke
-        `ApplicationCell.delete` uses (`_validate_delete_confirmation`),
-        then executes through the backend's own in-transaction delete (no
-        per-operation commit -- `transact()`'s single `commit()`/
-        `rollback()` covers the whole batch). Audit recording for this
-        delete is the CALLER's own concern (`transact()` appends to its
-        own `pending_audit` list only after this returns successfully) --
-        see `transact()`'s own comment above that list's declaration for
-        why recording must be deferred past the batch's own commit."""
-        collection, bound_filters = self._validate_delete_confirmation(
-            collection, filters, destructive, confirm)
-        return self._backend.delete_in_transaction(collection, bound_filters)
 
     def _select_fields(self, collection, requested):
         available = self._backend.field_domains(collection)
@@ -923,7 +1071,37 @@ class ApplicationRuntime:
                 "idempotency": {"status": "unavailable"},
                 "revision_preconditions": {"status": "unavailable"},
                 "row_addressability": {"status": "unavailable"},
-                "cross_entity_mutation": {"status": "unavailable"},
+                # P35 WP-2 (R-5, design docs/design/PHASE35_CROSS_ENTITY_
+                # AND_CONTRACT_130_V1.md v1.2 §2/§0): flipped from
+                # "unavailable" -- `transact()` executes real, atomic,
+                # multi-entity batches as of this WP (two-pass,
+                # `_plan_operation`), and the HTTP surface (`http.py::
+                # post_cross_entity_mutate`) now dispatches to it instead
+                # of an unconditional `CapabilityError`. `upsert` remains
+                # a real capability gap here exactly as it is for the
+                # single-entity path (P35-D3), refused by the same
+                # `transact()` choke, not a second one -- declared
+                # truthfully via `unsupported` below (coordinator
+                # adjudication, P35 WP-2 follow-up: an earlier two-key
+                # form omitting `unsupported` was not intended -- `upsert`
+                # is a real member of `ScopedMutation.operation`'s own
+                # enum that this peer refuses, and the sibling capability
+                # already declares that exact refusal).
+                #
+                # Status is `"partial"`, not `"enabled"` (independent
+                # review M-1, WP-2 follow-up): this key set -- same
+                # `operations` vocabulary, same `unsupported: ["upsert"]`
+                # -- is now IDENTICAL to `atomic_mutation`'s own entry
+                # above in every field except its own name, and that
+                # sibling capability declares `"partial"` for this exact
+                # combination (a vocabulary with one real, permanent
+                # capability gap in it). Declaring `"enabled"` here for
+                # the identical situation would have been this peer
+                # contradicting its own declaration convention -- the
+                # v1.1 design text that said `"enabled"` was itself the
+                # self-contradiction the review caught, not a deliberate
+                # distinction from `atomic_mutation`'s own status.
+                "cross_entity_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},
                 # WP-5 (design v1.2 R-7 flip): single source of truth is
                 # `config.control_plane_status`, composition-root-injected
                 # (`FoundationConfig.from_env`'s own `MITATEDB_CONTROL_
@@ -937,6 +1115,12 @@ class ApplicationRuntime:
             },
             "limits": {
                 "batch_items": config.max_batch_items,
+                # P35 WP-2 (R-2): distinct-entity bound for `transact()`
+                # batches -- see `FoundationConfig.max_batch_entities`'s
+                # own comment for why the default (10) is deployment-
+                # declared and unrelated to the contract's own non-
+                # normative `limits.example_profile.batch_entities: 4`.
+                "batch_entities": config.max_batch_entities,
                 "result_items": config.max_result_rows,
                 "query_complexity": config.max_filter_terms,
                 "request_bytes": config.max_request_bytes,
@@ -944,6 +1128,7 @@ class ApplicationRuntime:
             },
             "limit_enforcement": {
                 "batch_items": "enforced",
+                "batch_entities": "enforced",
                 "result_items": "enforced",
                 "query_complexity": "enforced",
                 # `FoundationConfig.validate_request_size` exists but is not

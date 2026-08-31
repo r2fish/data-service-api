@@ -538,6 +538,377 @@ def test_transact_batch_delete_accepts_an_empty_values_key(app_a) -> None:
         close_cell(cell)
 
 
+# --- P35 WP-2 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_
+# V1.md §2): two-pass transact + batch_entities + cross-entity atomicity,
+# on the real PostgreSQL backend. -------------------------------------------
+
+
+def test_transact_two_pass_structure_zero_backend_calls_when_a_later_operation_fails_validation(app_a) -> None:
+    """P35-D10 (structural, white-box), pinned on the real Postgres
+    backend too: a batch whose first operation is individually valid must
+    never reach the backend at all when a LATER operation fails
+    VALIDATION -- not `begin()`, not `insert_in_transaction()`."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("two_pass_probe", {"title": "text"})
+        backend = cell._backend
+        calls = {"begin": 0, "insert_in_transaction": 0}
+        real_begin = backend.begin
+        real_insert = backend.insert_in_transaction
+
+        def counting_begin():
+            calls["begin"] += 1
+            return real_begin()
+
+        def counting_insert(collection, fields, params):
+            calls["insert_in_transaction"] += 1
+            return real_insert(collection, fields, params)
+
+        backend.begin = counting_begin
+        backend.insert_in_transaction = counting_insert
+        try:
+            with pytest.raises(ValidationError):
+                runtime.transact([
+                    {"type": "insert", "collection": "two_pass_probe", "values": {"title": "would-have-executed"}},
+                    {"type": "unsupported", "collection": "two_pass_probe", "values": {"title": "invalid"}},
+                ])
+        finally:
+            backend.begin = real_begin
+            backend.insert_in_transaction = real_insert
+        assert calls["begin"] == 0
+        assert calls["insert_in_transaction"] == 0
+        assert runtime.read("two_pass_probe") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_error_priority_validation_error_wins_over_an_earlier_execution_time_failure(app_a) -> None:
+    """P35-D9, pinned on the real Postgres backend too: a batch mixing an
+    operation that would fail at BACKEND EXECUTION time with a LATER
+    operation that fails VALIDATION now surfaces the validation error --
+    synthesized via a wrapped `insert_in_transaction`.
+
+    M-2 correction (independent review, WP-2 follow-up): the earlier
+    claim here ("no naturally-reachable execution-time failure") was
+    false -- the one known natural execution-time failure (a lone UTF-16
+    surrogate code point in a value, escaping as a raw
+    `UnicodeEncodeError` on both backends) was reclassified to
+    deterministic validation-time rejection by WP-2 review B-2; the
+    synthesized `ConflictError` below remains the exercise vehicle for
+    this test's own subject (error-type priority), now the only way to
+    exercise an execution-time failure at all on either backend."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("priority_probe", {"title": "text"})
+        backend = cell._backend
+        real_insert = backend.insert_in_transaction
+
+        def failing_insert(collection, fields, params):
+            raise ConflictError("synthetic execution-time failure")
+
+        backend.insert_in_transaction = failing_insert
+        try:
+            with pytest.raises(ValidationError):
+                runtime.transact([
+                    {"type": "insert", "collection": "priority_probe", "values": {"title": "would-fail-at-execution"}},
+                    {"type": "unsupported", "collection": "priority_probe", "values": {"title": "invalid"}},
+                ])
+        finally:
+            backend.insert_in_transaction = real_insert
+        assert runtime.read("priority_probe") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_cross_entity_atomic_commit_across_two_entities(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("cross_a", {"title": "text"})
+        developer.create_collection("cross_b", {"title": "text"})
+        results = runtime.transact([
+            {"type": "insert", "collection": "cross_a", "values": {"title": "a-row"}},
+            {"type": "insert", "collection": "cross_b", "values": {"title": "b-row"}},
+        ])
+        assert len(results) == 2
+        assert runtime.read("cross_a")[0]["title"] == "a-row"
+        assert runtime.read("cross_b")[0]["title"] == "b-row"
+    finally:
+        close_cell(cell)
+
+
+def test_transact_cross_entity_rollback_when_later_entity_operation_is_invalid(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("cross_c", {"title": "text"})
+        developer.create_collection("cross_d", {"title": "text"})
+        with pytest.raises(ValidationError):
+            runtime.transact([
+                {"type": "insert", "collection": "cross_c", "values": {"title": "should-not-persist"}},
+                {"type": "update", "collection": "cross_d", "values": {"title": "x"}},  # filters omitted
+            ])
+        assert runtime.read("cross_c") == []
+        assert runtime.read("cross_d") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_batch_entities_boundary_and_distinct_count_ignores_repeats(app_a) -> None:
+    """P35-D2: `batch_entities` bounds DISTINCT collection names, not
+    operation count. Uses a cheap config override (`max_batch_entities=2`)
+    rather than constructing 11 real Postgres tables -- the SQLite-backed
+    equivalent (`test_foundation.py`) separately pins the real declared
+    default (10) directly, unmodified."""
+    from mitatedb_api.errors import ResourceLimitError
+
+    cell = make_cell(app_a, FoundationConfig(max_batch_entities=2))
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        for name in ("ent_one", "ent_two", "ent_three"):
+            developer.create_collection(name, {"title": "text"})
+
+        result = runtime.transact([
+            {"type": "insert", "collection": "ent_one", "values": {"title": "1"}},
+            {"type": "insert", "collection": "ent_two", "values": {"title": "1"}},
+        ])
+        assert len(result) == 2
+
+        with pytest.raises(ResourceLimitError) as ctx:
+            runtime.transact([
+                {"type": "insert", "collection": "ent_one", "values": {"title": "2"}},
+                {"type": "insert", "collection": "ent_two", "values": {"title": "2"}},
+                {"type": "insert", "collection": "ent_three", "values": {"title": "1"}},
+            ])
+        assert ctx.value.details == {"limit_class": "batch_entities"}
+        assert len(runtime.read("ent_one")) == 1
+        assert len(runtime.read("ent_two")) == 1
+        assert runtime.read("ent_three") == []
+
+        many_same_entity = [{"type": "insert", "collection": "ent_one", "values": {"title": f"r{i}"}} for i in range(10)]
+        result = runtime.transact(many_same_entity)
+        assert len(result) == 10
+    finally:
+        close_cell(cell)
+
+
+def test_transact_cross_entity_delete_wrong_entity_phrase_is_refused(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("phrase_a", {"title": "text"})
+        developer.create_collection("phrase_b", {"title": "text"})
+        runtime.insert("phrase_a", {"title": "keep-me"})
+        runtime.insert("phrase_b", {"title": "keep-me"})
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx_a:
+            runtime.transact([
+                {"type": "delete", "collection": "phrase_a", "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase_a = ctx_a.value.details["required_confirmation"]
+        assert "phrase_a" in phrase_a
+
+        with pytest.raises(DestructiveConfirmationRequired):
+            runtime.transact([
+                {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
+                 "destructive": True, "confirm": phrase_a},
+            ])
+        assert runtime.read("phrase_a")[0]["title"] == "keep-me"
+        assert runtime.read("phrase_b")[0]["title"] == "keep-me"
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx_b:
+            runtime.transact([
+                {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")]},
+            ])
+        phrase_b = ctx_b.value.details["required_confirmation"]
+        assert phrase_b != phrase_a
+
+        result = runtime.transact([
+            {"type": "delete", "collection": "phrase_a", "filters": [Filter("title", "eq", "keep-me")],
+             "destructive": True, "confirm": phrase_a},
+            {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
+             "destructive": True, "confirm": phrase_b},
+        ])
+        assert result == [{"deleted": 1}, {"deleted": 1}]
+        assert runtime.read("phrase_a") == []
+        assert runtime.read("phrase_b") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_lone_surrogate_value_is_deterministic_validation_failure_and_earlier_entity_unchanged(app_a) -> None:
+    """B-2 (independent review, WP-2 follow-up -- the atomicity hole,
+    largest safety fix of that review), pinned on the real Postgres
+    backend too: a lone UTF-16 surrogate code point in a LATER
+    operation's own value (`"\\ud800"`) must be rejected deterministically
+    at VALIDATION time (pass 1, `encode_value`, B-2(ii)) -- not escape as
+    a raw `UnicodeEncodeError` from psycopg's own parameter binding during
+    pass 2 execution, which pre-fix left the EARLIER, individually-valid
+    operation's own write sitting uncommitted-but-visible (B-2(i)'s own
+    atomicity hole)."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("surrogate_a", {"title": "text"})
+        developer.create_collection("surrogate_b", {"title": "text"})
+        with pytest.raises(ValidationError):
+            runtime.transact([
+                {"type": "insert", "collection": "surrogate_a", "values": {"title": "should-not-persist"}},
+                {"type": "insert", "collection": "surrogate_b", "values": {"title": "\ud800"}},
+            ])
+        assert runtime.read("surrogate_a") == []
+        assert runtime.read("surrogate_b") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_rollback_is_unconditional_for_a_non_foundation_error_raised_mid_pass_2(app_a) -> None:
+    """B-2(i) (independent review, WP-2 follow-up), pinned on the real
+    Postgres backend too: structural pin of the actual fix itself,
+    independent of B-2(ii)'s currently-known trigger -- ANY exception
+    raised mid pass-2 execution (here, a synthesized `RuntimeError` from
+    a wrapped `insert_in_transaction`) must still trigger `self._backend.
+    rollback()` exactly once before propagating, and must leave no
+    partial effect from any EARLIER, individually-valid operation in the
+    same batch."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("rollback_a", {"title": "text"})
+        developer.create_collection("rollback_b", {"title": "text"})
+        backend = cell._backend
+        rollback_calls = {"count": 0}
+        real_rollback = backend.rollback
+        real_insert = backend.insert_in_transaction
+        call_index = {"n": 0}
+
+        def counting_rollback():
+            rollback_calls["count"] += 1
+            return real_rollback()
+
+        def failing_second_insert(collection, fields, params):
+            call_index["n"] += 1
+            if call_index["n"] == 2:
+                raise RuntimeError("synthetic non-FoundationError failure")
+            return real_insert(collection, fields, params)
+
+        backend.rollback = counting_rollback
+        backend.insert_in_transaction = failing_second_insert
+        try:
+            with pytest.raises(RuntimeError):
+                runtime.transact([
+                    {"type": "insert", "collection": "rollback_a", "values": {"title": "should-not-persist"}},
+                    {"type": "insert", "collection": "rollback_b", "values": {"title": "would-fail-mid-execution"}},
+                ])
+        finally:
+            backend.rollback = real_rollback
+            backend.insert_in_transaction = real_insert
+        assert rollback_calls["count"] == 1, "rollback must fire exactly once for the non-FoundationError failure"
+        assert runtime.read("rollback_a") == []
+        assert runtime.read("rollback_b") == []
+    finally:
+        close_cell(cell)
+
+
+def test_cross_entity_mutation_is_declared_partial_on_postgres_backend(app_a) -> None:
+    """M-1 (independent review, WP-2 follow-up): status is `"partial"`,
+    matching `atomic_mutation`'s own declared shape exactly."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        declared = runtime.capabilities()["capabilities"]["cross_entity_mutation"]
+        assert declared == {
+            "status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"],
+        }
+        assert runtime.capabilities()["limits"]["batch_entities"] == 10
+        assert runtime.capabilities()["limit_enforcement"]["batch_entities"] == "enforced"
+    finally:
+        close_cell(cell)
+
+
+def test_schema_revision_bump_on_one_entity_invalidates_stale_delete_confirmation_in_a_cross_entity_batch(app_a) -> None:
+    """§2 PG note / §8 risk 2 (P35 WP-2): extends `test_schema_revision_
+    bumps_durably_and_invalidates_a_stale_delete_confirmation` above to a
+    two-pass, cross-entity batch -- a delete confirmation phrase probed
+    BEFORE a schema change on its own entity must stay refused by pass 1
+    even when it shares a batch with a well-formed insert on a DIFFERENT
+    entity, and neither entity's own state changes."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("gated_cross", {"title": "text"})
+        developer.create_collection("sibling_cross", {"title": "text"})
+        runtime.insert("gated_cross", {"title": "keep-me"})
+
+        with pytest.raises(DestructiveConfirmationRequired) as ctx:
+            runtime.delete("gated_cross", [Filter("title", "eq", "keep-me")])
+        stale_phrase = ctx.value.details["required_confirmation"]
+
+        before = cell._backend.schema_revision()
+        developer.add_field("gated_cross", "extra", "text")
+        after = cell._backend.schema_revision()
+        assert after == before + 1
+
+        with pytest.raises(DestructiveConfirmationRequired):
+            runtime.transact([
+                {"type": "insert", "collection": "sibling_cross", "values": {"title": "should-not-persist"}},
+                {"type": "delete", "collection": "gated_cross", "filters": [Filter("title", "eq", "keep-me")],
+                 "destructive": True, "confirm": stale_phrase},
+            ])
+        assert runtime.read("gated_cross")[0]["title"] == "keep-me"
+        assert runtime.read("sibling_cross") == []
+    finally:
+        close_cell(cell)
+
+
+def test_transact_pass_boundary_schema_change_window_yields_not_found_and_sibling_entity_unchanged(app_a) -> None:
+    """M-3 (independent review, WP-2 follow-up, §2 PG note v1.2
+    correction): the real window between pass 1 (validation, run OUTSIDE
+    `self._lock`) and pass 2 (execution, under `self._lock`/`begin()`)
+    is measured directly -- a SEPARATE connection (simulating a genuinely
+    concurrent actor, not this same session) drops one planned entity's
+    own table in the instant `backend.begin()` is called, i.e. exactly at
+    the pass 1/pass 2 boundary, after pass 1 already built a plan
+    against the table's PRE-drop existence.
+
+    The resulting failure is `NotFoundError` (`backend_postgres.
+    PostgresBackend.insert_in_transaction`'s own translation of
+    `psycopg.errors.UndefinedTable`) -- never `DestructiveConfirmationRequired`
+    (m-2 correction: that check only ever runs in pass 1, never
+    re-evaluated in pass 2). A sibling entity sharing the same batch is
+    left entirely unchanged: rollback now fires unconditionally
+    (B-2(i)), regardless of which exception type pass 2 raises."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    admin_conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+    try:
+        developer.create_collection("window_target", {"title": "text"})
+        developer.create_collection("window_sibling", {"title": "text"})
+        backend = cell._backend
+        real_begin = backend.begin
+
+        def dropping_begin():
+            with admin_conn.cursor() as cur:
+                cur.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier("window_target")))
+            return real_begin()
+
+        backend.begin = dropping_begin
+        try:
+            with pytest.raises(NotFoundError):
+                runtime.transact([
+                    {"type": "insert", "collection": "window_sibling", "values": {"title": "should-not-persist"}},
+                    {"type": "insert", "collection": "window_target", "values": {"title": "would-fail-mid-window"}},
+                ])
+        finally:
+            backend.begin = real_begin
+        assert runtime.read("window_sibling") == []
+    finally:
+        admin_conn.close()
+        close_cell(cell)
+
+
 def test_in_operator_and_batch_insert_via_transact(app_a) -> None:
     cell = make_cell(app_a)
     developer, runtime = sessions_for(cell, app_a.app_id)

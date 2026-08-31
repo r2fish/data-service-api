@@ -1,6 +1,6 @@
 # フェーズ3.5 実施設計: cross_entity_mutation + 契約 1.3.0 additive 束
 
-- 版数: v1.1 (2026-08-31。WP-0 独立レビュー blocker 4 / major 8 / minor 8 / nit 3 を全数裁定・反映。§9 参照)
+- 版数: v1.2 (2026-08-31。v1.1 = WP-0 独立レビュー全数裁定。v1.2 = WP-1 レビュー m-3 の WP-6 スコープ拡張 + WP-2 レビュー裁定反映: R-5 status=partial への訂正・PG 留意の過大主張訂正・台帳追記。§9 参照)
 - 位置づけ: `docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` §5 D-L の実施設計。**依頼者直接承認 (2026-08-31)**: フェーズ3.5 着手、契約版数は additive 候補束4件 (`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(e)) と**一括で 1.3.0**。クライアント側正式回答 (Mitate repo `docs/work-orders/mitate-application-data-service-client-phase-b-requirements.md` v1.2 §6、v1.3 差分報告 2026-08-31 受領) をスコープ下限とする
 - 体制: Fable 監督/設計/コミット、Sonnet 実装 (コミットしない)、Opus 独立レビュー (各 WP)。完了条件・単一コミット規律・identity 確認はフェーズ3 §3 と同一
 
@@ -45,9 +45,9 @@
 - **R-2 `batch_entities`**: `FoundationConfig.max_batch_entities` (既定 **10** = クライアント要求値) + env var。検証パス冒頭で distinct collection 数を数え、超過は `ResourceLimitError(limit_class="batch_entities")`。`capabilities().limits/limit_enforcement` に `batch_entities: enforced` を追加。`test_limit_class_vocabulary.py` の AST 期待件数を同一コミット更新 (完了条件 2b)。
 - **R-3 HTTP**: `post_cross_entity_mutate` の CapabilityError raise を実体化 — `_check_object_shape(body, _SCHEMAS["ScopedMutationRequest"])` (読み込み済み・未使用の契約 schema をそのまま使用)、各 operation を `_DEFINITIONS["ScopedMutation"]` で shape 検証し per-op `entity` を collection として cell へ。`idempotency_key` は per-entity 経路と同一の CapabilityError (P35-D3)。**応答は per-entity 経路と同一の `{"committed","affected"}` のみ — `assigned_addresses` は返さない** (レビュー M-6: 当 peer は `row_addressability`/`application_catalog` unavailable であり address キー語彙を宣言できる立場に無い。これはスコープ下限の「実行順序観測は不要」とも整合 — `assigned_identifiers` の "one element per insert in operation order" は順序観測面である)。
 - **R-4 delete choke**: `_validate_delete_confirmation` は既に entity 込み句 (`DELETE <collection> @where= @schema_revision=`) の単一 choke であり変更不要。複数 entity の delete は entity ごとに別句。確認不一致の denial は first-mismatch-wins (契約 details_rules が明示的に許容)。
-- **R-5 拒否面**: `ScopedMutation.operation == "upsert"` は CapabilityError (per-entity と同一)。`expected_revision` 等の未対応キーは既存 `_TRANSACT_*_KEYS` 余剰キー拒否で CapabilityError (スコープ下限どおり)。宣言 flip (`cross_entity_mutation: {"status": "enabled", ...}`、atomic_mutation の宣言形に倣う) は実装・テストと単一コミット — これにより §0 の偽宣言状態が解消される。
+- **R-5 拒否面**: `ScopedMutation.operation == "upsert"` は CapabilityError (per-entity と同一)。`expected_revision` 等の未対応キーは既存 `_TRANSACT_*_KEYS` 余剰キー拒否で CapabilityError (スコープ下限どおり)。宣言 flip (`cross_entity_mutation: {"status": "partial", "operations": ["insert","update","delete"], "unsupported": ["upsert"]}` — **WP-2 レビュー M-1 裁定: atomic_mutation と status も含め完全対称**。v1.1 の「"enabled"」記載は同レビューが指摘した本設計自身の自己矛盾であり、同一 peer の同一語彙・同一拒否には同一 status を宣言する) は実装・テストと単一コミット — これにより §0 の偽宣言状態が解消される。WP-3 の C-16/C-12 availability 判定は `status in ("enabled", "partial")` を provided と扱うこと。
 - **R-6 監査**: バッチ内 delete の commit 後発火 (`pending_audit`) 規律を cross-entity にそのまま延長。insert/update の非監査はフェーズ4 (耐久 sink) の既知ギャップのまま — 本フェーズで偽の被覆を作らない。クライアントの「1 状態変更 = 1 audit event」要求は**クライアント自身の audit entity への同一原子単位書込**で満たされる設計であり (本体 entity + audit entity の 2 entity atomic write)、サーバ側 audit sink には依存しない。
-- **PG 留意**: カタログ読取 (`field_domains`/`schema_revision`) は developer 接続で DML tx 外 — 既存 transact と同一の前提であり新規リスクではないが、検証パスと実行パスの間に schema 変更が挟まる窓は delete 句の `@schema_revision` 指紋が既に閉じている (drop→recreate 横断の句失効)。insert/update は entity 存在検証後の drop に対し PG エラー→rollback で全無効 (原子性は保たれる)。レビュー重点。
+- **PG 留意 (v1.2 訂正 — WP-2 レビュー m-6)**: カタログ読取 (`field_domains`/`schema_revision`) は developer 接続で DML tx 外 — 既存 transact と同一の前提であり新規リスクではない。検証パス (pass 1) と実行パス (pass 2) の間に schema 変更が挟まる窓について、v1.1 の「delete 句の `@schema_revision` 指紋が既に閉じている」は過大主張だった: 指紋は pass 1 でのみ検査され pass 2 で再検査されない。実際に安全を保つのは (a) 当 peer の schema 変更は `create_entity`/`add_field` のみで、束縛済み WHERE の一致集合を変えられないこと、(b) pass 2 の PG/SQLite エラーが rollback で全無効になること (WP-2 レビュー B-2 修正後は例外種別によらず無条件)。また二段化により pass 1 は `self._lock` の外で走る (従来は op ごとの検証+実行が単一ロック保持内) — in-process の検証/実行間窓がゼロから「pass 1 残り + ロック取得」へ広がったが、`insert()`/`read()` と同じ形であり帰結は上記 (a)(b) が押さえる。実測固定: begin を wrap して pass 1/pass 2 境界で DROP TABLE を挟む PG テスト (レビュー M-3)。
 
 ## 3. 共通 suite (WP-3 — MitateDB flip 後。C-16 の PROVIDED 分岐は本 WP で全 adapter 一斉に初実行される)
 
@@ -104,6 +104,7 @@
 - r2db cross_entity_mutation の実装採否 (実需要待ち、P35-D1)
 - 発行凍結の in-band 化 — 現時点で需要なし
 - in-process adapter の cross_entity unavailable 面の検証限界 (C-12 拡張の wire 限定、§3) — positive-existence check 台帳 (フェーズ3 §7) と同根
+- MitateDB PG backend の `_check_domain` float 分岐: 巨大 int → `real` 列で `OverflowError` が未捕捉 (pass 1 で 503)。SQLite 側は M-7 で同型を閉塞済みだが PG 側は未対応 (WP-2 レビュー n-3 の発見、pre-existing)
 - 継承分: `DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(a) drop_index C-06 v2 / (c) 受理境界一覧 / フェーズ4 耐久 audit sink / `MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` §7 全項
 
 ## 8. リスクとレビュー重点
@@ -131,3 +132,24 @@ blocker 4 / major 8 / minor 8 / nit 3 — 全数裁定。主要な裁定:
 - **M-7** (「外部挙動不変」は不正確 — エラー優先順位が変わる) → P35-D9 改訂 + 影響テスト列挙を WP-2 成果物へ
 - **M-8** (揃える先の application-disabled 拒否経路は存在しない) → `FORBIDDEN` を設計段階で確定 (P35-D13、§1-E)
 - **m-1** (逆向き検証は additive では構成不能) → positive control へ訂正 / **m-2** (test_contract に版数固定は無い) → B-3 の peer 側 2 箇所に訂正 / **m-3** (V3 は一般に構成不能) → 構成可能条件ガード / **m-4** (must_rotate の可視性拡大) → CONTROL_MAPPING に意図記録 / **m-5** (SI-02/SI-15/SI-10 欠落) → WP-6 列挙へ追加 / **m-6** (role ハードコード 3 箇所) → §4 作業項目 / **m-7** (port 拡張は peer ツリー 4 ファイル編集) → §3/§5 明記 / **m-8** → B-2 で消滅 / **n-1** (WP-1.5 の修飾) → 「フェーズ3の WP-1.5」 / **n-2** (契約現状の実測は全項正確) → 記録として保持 / **n-3** → M-6 で moot、スコープ整合を §2 R-3 に一文
+
+## 10. WP 実装記録
+
+### 10.1 WP-1 (契約 1.3.0)
+
+独立レビュー 0 blocker / 3 major / 5 minor / 3 nit、全数裁定・反映。M-1 = `versioning.version_binding` へ 1.3.0 導入義務の列挙を追記 (audit role 受理 + FORBIDDEN fail-closed、凍結拒否、optional 2 フィールドの「emit したときの意味論」拘束)。M-2 = A/D/E/F への回帰ピン (auth 等値 4 本 + 文言 substring 4 本、`test_contract.py`)。M-3 = 凍結 FORBIDDEN は role=control capability 拒否の後に評価 (C-14 vector 3 の規範読みと整合)。m-1 (§1-D 列挙外の `control_plane.authority` 追記) は監督追認。root suite 1166 passed / 0 failed / 0 skipped。main マージ `e2093c5`。**1.3.0 は公開済み — 以後の契約変更は 1.4.0 以上。**
+
+### 10.2 WP-2 (MitateDB cross_entity)
+
+実装: 二段パス `transact()` (`_plan_operation` + 実行パス、`_*_in_transaction` 3 メソッドは統合)、`batch_entities` (config 既定 10、AST 件数 10→11)、HTTP 実体化 (`ScopedMutationRequest`/`ScopedMutation` shape 検証、`{"committed","affected"}` のみ)、宣言 flip。P35-D9 列挙: 既存 suite に「先行実行時失敗+後続検証失敗」の混在テストは存在せず (全既存 rollback テストは検証 choke で落ちる)、合成 ConflictError で優先順位変更を実測固定。
+
+独立レビュー **2 blocker / 3 major / 6 minor / 3 nit**、全数裁定・反映:
+
+- **B-2 (本 WP 最大の安全発見)**: pass-2 の except tuple が FoundationError 系に限定されており、孤立 UTF-16 サロゲート (`"\ud800"`、合法 JSON) がパラメータ適応の `UnicodeEncodeError` として素通り → **rollback 不発・先行 op の行が永続 (部分効果)** を両バックエンドで実測。pre-existing だが、`cross_entity_mutation` を宣言する本コミットが SI-11 主張を load-bearing にする。修正は二重: rollback の無条件化 (`except Exception` → rollback → 再送出) + `encode_value` の孤立サロゲート決定的拒否 (NUL 拒否と同前例、両バックエンド)。変異 3 本 (except 縮退・両バックエンドのサロゲート検査除去) 全赤化・復元確認
+- **B-1**: 非文字列 entity が `_distinct_batch_entities` の set.add で TypeError → 503。isinstance ガードで VALIDATION_FAILED へ
+- **M-1**: 宣言 status は `partial` (atomic_mutation と完全対称)。v1.1 設計の「enabled」は自己矛盾として v1.2 で訂正
+- **M-2**: 「自然な実行時失敗は無い」という docstring 前提が偽 (サロゲートが該当) — B-2(ii) で検証時へ再分類したことを明記する形へ訂正
+- **M-3**: pass 境界の schema 変更窓を begin wrap + DROP TABLE で実測固定 (NotFoundError + 兄弟 entity 無変化)
+- m-4 = auth-before-parse のピン (不正 body + 未認証 → AUTH_REQUIRED)、m-5 = CONDITIONS.md C-16 行への 1 行注記 (監督許可の cross-tree 編集、全面書換は WP-3)、m-6 = §2 PG 留意の過大主張を v1.2 で訂正 (指紋は pass 1 のみ・安全は schema 変更の単調性と無条件 rollback が担う)、n-3 = PG `_check_domain` float の OverflowError を §7 台帳へ
+
+発見一覧 (実装者): (1) 旧 insert 分岐の素 KeyError による begin 残骸リスクが二段化で構造的に不活性化 (pass 1 で begin 前に発火)、(2) README の unavailable 記述の陳腐化 → WP-6 へ、(3) HTTP fixture の request_bytes=1024 と境界テストの干渉を実測バイト数で回避。
