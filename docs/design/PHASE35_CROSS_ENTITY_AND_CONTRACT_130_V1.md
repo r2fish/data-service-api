@@ -112,6 +112,8 @@
   2. **予約 collection 名の未文書化**: `audit_events` が両 backend で防御的予約 (backend_sqlite `_RESERVED` / backend_postgres `_RESERVED_EXACT`) だが契約・README に記載なし。クライアント向け予約名リストの文書化
   3. **json 列の write/read 非対称 (要実測確認)**: 書込は native object/array 受理、読出は JSON text の string で返る (json→TEXT 格納の帰結と整合)。文書化または decode-on-read の裁定 — 対応 WP で実測から入ること
 - 継承分: `DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(a) drop_index C-06 v2 / (c) 受理境界一覧 / フェーズ4 耐久 audit sink / `MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` §7 全項
+- **配備実機ゼロ前提の失効 (2026-09-01)**: MitateDB-api の最初の実配備 (Cloud SQL PostgreSQL 16.14 + Cloud Run) が 2026-09-01 に実施され、`migrations/0001_bootstrap_platform.sql`/`docker/Dockerfile`/`docs/cloud-run-cloud-sql.md` の3件の配備資産不具合が発見された (運用者報告、監督が実コードで裏取り済み)。この migration set がこれまで in-place 編集の正当化に使ってきた「配備実機ゼロ」前提 (例: `0002_registry_and_functions.sql` の `control_credentials.revoked`/`.role` 列追加コメント) は、この配備インスタンスに関しては FALSE になった -- 今後この migration set への変更は、対象インスタンスへの互換性理由をエディットごとに明示すること (in-place 編集が自動的に安全とはもう見なさない)。`0001` 自身の GRANT/REVOKE ブラケット追加は、この日 idempotence-safe であることを検証済み (同ファイル自身のコメント参照)。
+- **packaged contract copy (root fix candidate)**: `docker/Dockerfile` は現時点で `http.py` の `_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "spec" / ...` が要求する厳密なファイルシステム階層 (`/opt/venv/lib/spec/data-service-api.v1.json`) に一致する場所へ `spec/data-service-api.v1.json` を COPY する応急修正 (2026-09-01) で運用中。根本対応候補: r2db-api の `r2db_api.http` が既に採用している `importlib.resources` 経由のパッケージ同梱コピー (`r2db_api/contract/data-service-api.v1.json`、`pyproject.toml` package-data 経由、`r2db-api/tests/test_http.py::test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth` が同一性を保証) と同じ形を MitateDB-api 側にも導入し、イメージがファイルシステム階層の偶然の一致に依存しないようにする。需要/優先度は未定 -- この応急修正が動作する限り緊急ではない。
 
 ## 8. リスクとレビュー重点
 

@@ -1,0 +1,19 @@
+# Repository-root .dockerignore (2026-09-01, added alongside the
+# MitateDB-api/docker/Dockerfile build-context fix, m-1 review finding).
+#
+# MitateDB-api/docker/Dockerfile now builds with the REPOSITORY ROOT as
+# build context (needed to reach `spec/data-service-api.v1.json`, which
+# lives outside `MitateDB-api/` -- see that Dockerfile's own BUILD CONTEXT
+# comment). Without this file, `docker build` sends the entire repo root to
+# the daemon on every build, including `.venv/` (~64MB) and `.git/`
+# (~17MB) -- neither of which any COPY instruction in the Dockerfile ever
+# references.
+
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+node_modules/
+.claude/

@@ -63,6 +63,42 @@
 -- here to the migrations set too). Re-running this file is a no-op if
 -- 0001 already succeeded.
 --
+-- MIGRATION-EDIT DISCIPLINE (2026-09-01): a real Cloud SQL deployment now
+-- exists -- the "配備実機ゼロ" premise this migration set's own prior
+-- in-place-edit precedents relied on (e.g. 0002's `control_credentials.
+-- revoked`/`.role` column additions, each justified by "no real deployment
+-- has ever run this migration set against a persistent Cloud SQL instance
+-- yet") is FALSE as of this date for THIS deployment (docs/design/
+-- PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §7 ledger records the
+-- premise flip; future migration edits need their own explicit
+-- compatibility reasoning, not an automatic "no instance exists" pass).
+-- The GRANT/REVOKE bracket added below this header (around `CREATE
+-- DATABASE`) is verified idempotence-safe for that existing deployment,
+-- not merely assumed so:
+--   - 0001 already ran there once, via the operator's manual recovery
+--     ceremony (this file's own comment above the `GRANT ... WITH SET
+--     TRUE` statement below, and `cloud-run-cloud-sql.md` §3.1's "Fallback
+--     for an older checkout" note, describe the exact sequence) -- so the
+--     deployed `mitatedb_platform` database/`mitatedbsvc_provision` role
+--     already exist with the SAME end state this edit now produces
+--     automatically, on the first run, with no manual recovery step.
+--   - No operational path re-runs 0001 against an already-bootstrapped
+--     instance: `cloud-run-cloud-sql.md` §3's own heading ("Platform
+--     bootstrap (run once)") sequences 0001 as a one-time step, then 0002
+--     (also "run once", that file's own header), then per-application
+--     0003/0004 -- neither that runbook, the break-glass CLI (`ops.py`,
+--     §7), nor this migration set's own `\gexec` idempotency guards ever
+--     re-invoke 0001 as part of onboarding, rotation, or deprovisioning
+--     any application. Verified by reading `cloud-run-cloud-sql.md` §3 end
+--     to end and `ops.py`'s subcommand list (§7): neither names 0001
+--     outside the one-time bootstrap step.
+--   - Even if 0001 WERE re-run by hand against the existing deployment:
+--     every statement in it is already idempotent by design (the `\gexec`
+--     guards skip `CREATE ROLE`/`CREATE DATABASE` when the role/database
+--     already exist), and the new GRANT/REVOKE bracket is idempotent too
+--     -- granting then immediately re-revoking a membership that already
+--     ended in the revoked state changes nothing observable.
+--
 -- Run with, e.g.:
 --   psql "$MITATEDBSVC_BOOTSTRAP_ADMIN_DSN" \
 --     -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
@@ -95,12 +131,54 @@ SELECT format(
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mitatedbsvc_provision')
 \gexec
 
+-- FIRST-DEPLOYMENT FIX (2026-09-01, real Cloud SQL PostgreSQL 16.14, WP-6
+-- runbook execution): PostgreSQL 16 hardened ownership assignment so that
+-- naming a role in an `OWNER`/`OWNER TO` clause requires the executing role
+-- to already be able to `SET ROLE` to it, not merely to hold `ADMIN OPTION`
+-- (this file's own R-1 allowlist comment above already names `GRANT <role>
+-- TO CURRENT_USER WITH SET TRUE` as exactly this PG16+ construct). `CREATE
+-- ROLE mitatedbsvc_provision` above grants its creator `ADMIN OPTION`
+-- automatically, but -- confirmed empirically against real Cloud SQL --
+-- NOT the `SET` option, because Cloud SQL's own bootstrap `postgres` role
+-- is a `cloudsqlsuperuser` member, not a genuine PostgreSQL superuser (only
+-- a true superuser gets the SET option on a role it creates for free).
+-- Without the bracket below, `CREATE DATABASE ... OWNER mitatedbsvc_
+-- provision` fails with `must be able to SET ROLE "mitatedbsvc_provision"`.
+--
+-- 0003 already needed and already has this exact bracket around its own
+-- `ALTER SCHEMA public OWNER TO :"developer_role"` (see that file's own
+-- comment immediately above that statement) -- which is why 0003 succeeded
+-- on the first real deployment while this file, missing the same bracket
+-- around ITS OWN owner-assigning statement (`CREATE DATABASE ... OWNER`,
+-- a second, distinct place PG16 applies the identical rule), did not. This
+-- fix makes 0001 match 0003's own established pattern rather than
+-- inventing a new one.
+--
+-- Recovery ceremony for an older checkout (this bracket not yet in file):
+-- the `GRANT` cannot run BEFORE this file, because the role it names does
+-- not exist yet -- it is this same file's own preceding `CREATE ROLE`
+-- statement that creates it. The real, executable recovery sequence is:
+-- run this file once (`CREATE ROLE` succeeds, `CREATE DATABASE` then fails
+-- under `ON_ERROR_STOP`) -> `GRANT mitatedbsvc_provision TO postgres WITH
+-- SET TRUE` by hand -> re-run this file (idempotent: `CREATE ROLE` is
+-- skipped since the role now exists, `CREATE DATABASE` now succeeds) ->
+-- `REVOKE mitatedbsvc_provision FROM postgres` by hand. `cloud-run-
+-- cloud-sql.md` §3.1's own "Fallback for an older checkout" note spells
+-- this out in full.
+GRANT mitatedbsvc_provision TO CURRENT_USER WITH SET TRUE;
+
 -- `CREATE DATABASE` cannot run inside a transaction block/DO block, so its
 -- idempotency check is a plain conditional `\gexec` this file emits SQL
 -- text for and immediately executes.
 SELECT format('CREATE DATABASE mitatedb_platform OWNER mitatedbsvc_provision TEMPLATE template0 ENCODING ''UTF8''')
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'mitatedb_platform')
 \gexec
+
+-- Revoke the temporary membership immediately -- the same discipline 0003
+-- already uses (`REVOKE :"developer_role" FROM CURRENT_USER` there): the
+-- bootstrap admin never holds standing membership in `mitatedbsvc_
+-- provision` between runs of this file.
+REVOKE mitatedbsvc_provision FROM CURRENT_USER;
 
 -- No other role may connect to the platform database by default; access
 -- is granted explicitly, per process role, by 0002.

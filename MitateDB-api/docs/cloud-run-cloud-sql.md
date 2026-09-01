@@ -60,6 +60,48 @@ with disjoint grants (`mitatedbsvc_api` read-only on `applications`/
 `control_credentials`, INSERT-only on `control_audit` -- migration `0002`,
 design R-4's own process-role separation).
 
+### 0.1 Operational deviation record -- current deployment (2026-09-01)
+
+This is a legitimate configuration this architecture permits, not a
+violation of it -- the control plane is optional per contract/design
+(`FoundationConfig.control_plane_status` defaults to `"unavailable"`,
+`config.py`: "an operator who does not explicitly opt in...sees no behavior
+change at all"), and this runbook's §2 instance sizing/networking values are
+this document's own defaults, not hard requirements. The first real
+deployment (2026-09-01) intentionally runs a configuration narrower than
+the full two-service topology above, recorded here honestly rather than
+left as an undocumented drift from this runbook's own diagram:
+
+- **No standing control Cloud Run service (`mitatedb-ctrl`) deployed.**
+  Application onboarding (§3.4, `0003`/`0004`) is performed via the
+  break-glass CLI (§7) run locally through the Cloud SQL Auth Proxy
+  ceremony (§2's own `cloud-sql-proxy` step), not over `/control/v1` HTTP.
+  The data service's own `MITATEDB_CONTROL_PLANE_STATUS` is set to
+  `unavailable` (not `enabled`, unlike §6.1's own example
+  `--set-env-vars`) -- matching **invariant 3** (§8 above) even though no
+  control service was ever stood up to begin with, not only when one is
+  torn down: the data service's own capability declaration must never claim
+  a control plane that is not actually reachable.
+- **`db-f1-micro` tier**, narrower than §2's own `db-custom-2-7680`
+  example -- a capacity choice for this deployment's current scale, not a
+  security property; revisit sizing independently of everything else in
+  this record.
+- **Public IP, empty authorized networks, connector-only access** --
+  narrower than §2's own `--no-assign-ip` default. The instance has a
+  public IP assigned, but its authorized-networks list is empty (no CIDR
+  admitted), so the only reachable path is still Cloud Run's own Cloud SQL
+  connector (§6's own `--add-cloudsql-instances`, now also gated by
+  `roles/cloudsql.client` above) and the operator's own Cloud SQL Auth
+  Proxy (§2) -- not a bare TCP path open to the internet. VPC peering
+  (`--no-assign-ip`, §2's own documented default) is tracked as future work
+  for this deployment, not yet applied.
+
+None of the three deviations above changes any Security Invariant control
+mapping (`security/CONTROL_MAPPING.md`) -- they are deployment-scale and
+network-topology choices the architecture already treats as configurable,
+recorded here so a later operator does not mistake this deployment's
+current shape for this runbook's own required defaults.
+
 ## 1. Prerequisites
 
 - A GCP project with the Cloud SQL Admin API and Cloud Run API enabled.
@@ -137,6 +179,52 @@ psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
 
 Record `MITATEDBSVC_PROVISION_PASSWORD` in Secret Manager immediately (§4)
 -- nothing in this flow re-displays it.
+
+**SET-ROLE behavior on real Cloud SQL (2026-09-01 fix)**: `0001` now
+brackets its own `CREATE DATABASE mitatedb_platform OWNER mitatedbsvc_
+provision` with `GRANT mitatedbsvc_provision TO CURRENT_USER WITH SET
+TRUE` / `REVOKE ... FROM CURRENT_USER` (self-contained, no separate
+operator step needed). This exists because PostgreSQL 16 requires the
+executing role to already be able to `SET ROLE` to a role before naming it
+in an `OWNER`/`OWNER TO` clause, and Cloud SQL's own bootstrap `postgres`
+role -- a `cloudsqlsuperuser` member, not a genuine PostgreSQL superuser --
+does NOT get the `SET` option for free on a role it just created via
+`CREATE ROLE` (only `ADMIN OPTION`), unlike a true superuser. Without the
+bracket, this step fails with `must be able to SET ROLE
+"mitatedbsvc_provision"`.
+
+**Fallback for an older checkout** (a `MitateDB-api/migrations/0001_
+bootstrap_platform.sql` from before this fix, lacking the bracket above):
+the `GRANT` cannot be run BEFORE `0001` on a fresh instance -- it names a
+role (`mitatedbsvc_provision`) that does not exist yet until `0001`'s own
+`CREATE ROLE` step creates it. The real, executable recovery sequence
+instead runs `0001` first (its `CREATE ROLE` step succeeds; `CREATE
+DATABASE` then fails under `ON_ERROR_STOP`, since the pre-fix file has no
+bracket), grants the missing `SET` option by hand, then **re-runs** `0001`
+-- which is safe because every step in it is already idempotent (`CREATE
+ROLE` is a no-op the second time; `CREATE DATABASE` now succeeds):
+```sh
+# 1. Run 0001 as above -- CREATE ROLE succeeds, CREATE DATABASE fails
+#    under ON_ERROR_STOP ("must be able to SET ROLE ...").
+psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+  -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0001_bootstrap_platform.sql
+# 2. Grant the missing SET option by hand -- the role now exists, so this
+#    resolves.
+psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+  -c "GRANT mitatedbsvc_provision TO postgres WITH SET TRUE"
+# 3. Re-run 0001 -- CREATE ROLE is a no-op (role already exists), CREATE
+#    DATABASE now succeeds.
+psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+  -v provision_password="$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0001_bootstrap_platform.sql
+# 4. Revoke the temporary membership.
+psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" \
+  -c "REVOKE mitatedbsvc_provision FROM postgres"
+```
+Keep this only as a fallback for a checkout that predates the in-file fix,
+not as the normal procedure -- a checkout with the fix needs only the
+single `psql -f 0001_...` command above.
 
 ### 3.2 Registry schema + process roles (migration `0002`)
 
@@ -260,6 +348,53 @@ the design doc, tracks IAM DB auth as a later strengthening, not this
 WP's scope).
 
 ## 6. Two Cloud Run services
+
+**Build the image first, from the repository root** (2026-09-01 fix, first
+deployment finding): `docker/Dockerfile`'s runtime stage now packages a copy
+of the common contract (`spec/data-service-api.v1.json`) into the image at
+the exact filesystem path `mitatedb_api.http`'s own `_CONTRACT_PATH`
+resolves to inside a `pip install .` venv layout
+(`/opt/venv/lib/spec/data-service-api.v1.json` -- see that Dockerfile's own
+comment for the `.parents[3]` arithmetic). `spec/` lives one level above
+`MitateDB-api/`, at the common repository root, so this image must be built
+with the REPOSITORY ROOT as build context, naming the Dockerfile
+explicitly, not from inside `MitateDB-api/` the way a package-local
+Dockerfile normally would be:
+
+```sh
+docker build -f MitateDB-api/docker/Dockerfile \
+  --build-arg SERVICE=data \
+  -t us-central1-docker.pkg.dev/example-project/mitatedb/mitatedb-api:SERVICE_data \
+  .
+docker push us-central1-docker.pkg.dev/example-project/mitatedb/mitatedb-api:SERVICE_data
+```
+
+Repeat with `--build-arg SERVICE=control` and a `SERVICE_control` tag for
+the control service's own image (§6.2). Both `gcloud run deploy` commands
+below then reference the tag already pushed here via `--image=`.
+
+**Grant each runtime service account `roles/cloudsql.client` before
+deploying** (2026-09-01, operator-measured first-deployment finding):
+`--add-cloudsql-instances` wires up Cloud Run's built-in Cloud SQL
+connector, but the connector itself calls the Cloud SQL Admin API
+(`cloudsql.instances.get`) as the service account named by
+`--service-account` to resolve the instance's connection metadata --
+without `roles/cloudsql.client` on that service account, the connector
+fails closed with a `403` on `cloudsql.instances.get` before the container
+ever gets a chance to open a DSN connection at all (a distinct failure from
+any PostgreSQL-level auth/grant problem, and one that surfaces as a
+container startup/connector error, not an application error). Grant it to
+BOTH runtime service accounts (data and control) before running either
+`gcloud run deploy` below:
+
+```sh
+gcloud projects add-iam-policy-binding example-project \
+  --member=serviceAccount:mitatedb-data-runtime@example-project.iam.gserviceaccount.com \
+  --role=roles/cloudsql.client
+gcloud projects add-iam-policy-binding example-project \
+  --member=serviceAccount:mitatedb-ctrl-runtime@example-project.iam.gserviceaccount.com \
+  --role=roles/cloudsql.client
+```
 
 ### 6.1 Data service (`mitatedb-data`)
 
@@ -457,3 +592,37 @@ Record the date, Cloud SQL version string (`SELECT version()`), and a
 pass/fail per numbered item above in `security/CONTROL_MAPPING.md` once
 this section has actually been run -- until then, every claim in this
 runbook remains procedure, not evidence.
+
+### 9.1 First-execution record (2026-09-01, operator-reported)
+
+This runbook was executed against a real Cloud SQL instance for the first
+time on 2026-09-01. Outcome per item above, as reported by the operator and
+verified by the supervisor (surfaced, in turn, the three defects this
+document/`docker/Dockerfile`/`migrations/0001_bootstrap_platform.sql`
+record fixes for, dated the same day) -- recorded honestly, including what
+is still unexercised:
+
+- **Cloud SQL version**: PostgreSQL 16.14.
+- **Item 1 (role/database DDL)**: PASS -- ceremony-assisted (the
+  pre-fix manual `GRANT ... WITH SET TRUE` / `REVOKE` ceremony around
+  `0001`, §3.1's own fallback note above; the in-file self-contained fix
+  postdates this run).
+- **Item 2 (`GRANT <role> TO CURRENT_USER WITH SET TRUE`, exercised inside
+  `0003_provision_application.sql:105`, before `ALTER SCHEMA public OWNER
+  TO`)**: PASS -- `0003_provision_application.sql` completed with no syntax
+  error on this construct.
+- **Item 3 (`pg_terminate_backend`/`pg_signal_backend`)**: the `GRANT
+  pg_signal_backend TO mitatedbsvc_provision` catalog grant was applied;
+  deprovision (the step that actually exercises `pg_terminate_backend`) has
+  **not yet been exercised** against this instance -- open.
+- **Item 4 (`assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed
+  probe)**: **not yet exercised** against this instance -- open.
+- **Item 5 (`log_statement` suppression)**: PASS -- `SHOW log_statement`
+  confirmed `none` for the §3 connection profile before any password
+  literal was bound.
+
+Mirrored in `security/CONTROL_MAPPING.md`'s own SI-00/SI-01 rows (MitateDB
+column) as a dated operator-reported note, without removing the honest
+remaining gaps those rows already record (deprovision/item 4 unexercised,
+`platform_evidence_required_before_production` items beyond the above still
+absent).

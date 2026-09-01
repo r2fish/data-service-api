@@ -21,6 +21,20 @@
 # No secret is ever baked into this image: every credential/DSN/pepper is
 # supplied at container-start time via environment variables (Secret
 # Manager references at the Cloud Run layer, `cloud-run-cloud-sql.md`).
+#
+# BUILD CONTEXT (2026-09-01 fix, part of the same first-deployment fix as
+# the runtime-stage `COPY spec/...` below): this image now needs a file
+# (`spec/data-service-api.v1.json`) that lives at the common repository
+# root, one level above `MitateDB-api/` -- outside a build context scoped
+# to `MitateDB-api/` alone, which every `COPY` source below used to assume
+# (`COPY pyproject.toml ./` only resolves because `pyproject.toml` sits at
+# `MitateDB-api/pyproject.toml`). Build this image from the REPOSITORY
+# ROOT, naming this file explicitly, e.g.:
+#   docker build -f MitateDB-api/docker/Dockerfile -t mitatedb-api:SERVICE_data .
+# every `COPY` source in this file is written relative to that root
+# accordingly (`MitateDB-api/...` for this package's own files, `spec/...`
+# for the common contract) -- see `cloud-run-cloud-sql.md` §6's own build
+# step for the full command this runbook now documents.
 
 # ---------------------------------------------------------------------------
 # Stage 1: build a wheel + resolve dependencies into an isolated venv, so
@@ -38,9 +52,10 @@ WORKDIR /build
 # deliberately NOT copied into the image (see this file's own footer note):
 # provisioning SQL is operator/deploy-tooling material, run against
 # Cloud SQL directly, never executed by a running application-plane/
-# control-plane container.
-COPY pyproject.toml ./
-COPY src ./src
+# control-plane container. Paths are repo-root-relative (see the BUILD
+# CONTEXT note above this stage).
+COPY MitateDB-api/pyproject.toml ./
+COPY MitateDB-api/src ./src
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -67,6 +82,50 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# FIRST-DEPLOYMENT FIX (2026-09-01, operator finding, "§9級" per the
+# operator's own report): `http.py`'s `_CONTRACT_PATH = Path(__file__).
+# resolve().parents[3] / "spec" / "data-service-api.v1.json"` is coupled to
+# how many directory hops separate the installed module from the repo root
+# it assumes it is still sitting inside. In a source checkout (`pip install
+# -e .`) that path is `.../MitateDB-api/src/mitatedb_api/http.py`, and
+# `parents[3]` from there IS the repo root (`data-service-api/`), where
+# `spec/` really lives -- so local dev/test never notices this coupling.
+# `pip install .` (this image's own builder stage, no `-e`) instead installs
+# the package flat into the venv's site-packages, so the SAME module lands
+# at `/opt/venv/lib/python3.11/site-packages/mitatedb_api/http.py` in the
+# runtime image (`python:3.11-slim`, this Dockerfile's own `FROM` line is
+# the actual version pin; this package's own `pyproject.toml`
+# `requires-python = ">=3.11"` is only a floor, not what fixes "3.11"
+# specifically here) --
+# `parents[3]` from THAT path is `/opt/venv/lib` (parents[0]=`.../site-
+# packages/mitatedb_api`, [1]=`.../site-packages`, [2]=`.../python3.11`,
+# [3]=`/opt/venv/lib`), two hops shallower than the repo-root case above
+# (the installed layout has no `src/`/`MitateDB-api/` hops to climb). So
+# the runtime image needs its own copy of the contract at
+# `/opt/venv/lib/spec/data-service-api.v1.json` -- confirmed working by the
+# operator against the real first deployment -- computed here, not merely
+# copied from that report, by walking the same four `.parents[]` hops
+# against this stage's own actual installed module path. Path is
+# repo-root-relative (see the BUILD CONTEXT note above the builder stage).
+COPY spec/data-service-api.v1.json /opt/venv/lib/spec/data-service-api.v1.json
+
+# ROOT FIX CANDIDATE (not this fix's scope, logged docs/design/
+# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §7 ledger): this COPY still
+# couples the image to the exact `parents[3]` arithmetic above. The Python
+# minor version itself is NOT the fragile part -- `.../site-packages/
+# mitatedb_api` is always exactly 3 `.parents[]` hops below `<venv>/lib`
+# regardless of which `python3.X` directory name sits in between -- but any
+# change to the INSTALL LAYOUT (a different venv path/prefix than
+# `/opt/venv`, a build tool that installs into a `.dist-info`-relative
+# layout instead of plain `site-packages`, etc.) still breaks it silently.
+# r2db-api's own `http.py` avoids this entirely with a packaged contract
+# copy loaded via `importlib.resources` (`r2db_api/contract/data-service-
+# api.v1.json`, wired in as package data, `test_http.py::
+# test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`)
+# with a filesystem-path fallback for editable-install dev -- the same
+# shape this peer could adopt so this image no longer depends on
+# filesystem layout coupling at all.
 
 # `SERVICE` selects which of the two ASGI apps this container runs --
 # `data` (default) for `mitatedb_api.main:app`, `control` for
@@ -106,9 +165,21 @@ CMD ["sh", "-c", "if [ \"$SERVICE\" = \"control\" ]; then exec uvicorn mitatedb_
 # THIS" header), and `ops.py`'s bootstrap/reset/break-glass subcommands are
 # out-of-band by design (R-6: "bootstrap / reset は out-of-band CLI...
 # in-band に置かない"). An operator invokes `python -m mitatedb_api.ops
-# ...` from a checked-out source tree (this package installed with
-# `pip install -e .`, `PYTHONPATH` pointed at `src/`) or from a one-off
-# `docker run --entrypoint python <image> -m mitatedb_api.ops ...`
-# invocation with the relevant DSN/pepper env vars supplied -- never as
-# this image's own default `CMD`. `cloud-run-cloud-sql.md` §5 documents
-# both invocation forms.
+# ...` ONLY from a checked-out source tree (this package installed with
+# `pip install -e .`, `PYTHONPATH=MitateDB-api/src`) -- **never from inside
+# a running container built from this image** (`cloud-run-cloud-sql.md` §7
+# states this rule; this file is that rule's own citation). This is not
+# merely a convention: `ops.py`'s own `_DEFAULT_MIGRATIONS_DIR = Path(
+# __file__).resolve().parents[2] / "migrations"` has the SAME
+# install-layout coupling this file's own runtime-stage `_CONTRACT_PATH`
+# fix (above) exists to work around for `http.py` -- inside this image's
+# `pip install .` venv layout, `parents[2]` from the installed `ops.py`
+# lands at `/opt/venv/lib/python3.11`, where no `migrations/` directory
+# exists at all (and none is ever copied into this image -- see this
+# file's own footer note above on why). A `docker run --entrypoint python
+# <image> -m mitatedb_api.ops ...` invocation of any subcommand that
+# touches `_DEFAULT_MIGRATIONS_DIR` (`deprovision`, and any future
+# subcommand relying on the same default) fails for exactly this reason,
+# not only for the out-of-band-design reason above. `cloud-run-
+# cloud-sql.md` §5/§7 documents the one correct invocation form (source
+# checkout only).
