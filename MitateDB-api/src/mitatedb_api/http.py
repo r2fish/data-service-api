@@ -35,10 +35,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import Role
 from .cell import ApplicationDeveloper, ApplicationRuntime, Filter
-from .errors import (AuthenticationError, AuthorizationError,
-                     AuthorizationStateUnavailable, CapabilityError,
-                     ConflictError, DestructiveConfirmationRequired,
-                     FoundationError, NotFoundError, ResourceLimitError,
+from .errors import (AuditSinkUnavailable, AuthenticationError,
+                     AuthorizationError, AuthorizationStateUnavailable,
+                     CapabilityError, ConflictError,
+                     DestructiveConfirmationRequired, FoundationError,
+                     NotFoundError, ResourceLimitError,
                      StorageConfigurationError, ValidationError)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -85,10 +86,19 @@ _STATUS_BY_CODE: dict[str, int] = {
 # with `StorageConfigurationError` -- unreachable on the in-process
 # adapter's own SQLite backend, real on this HTTP composition's PostgreSQL
 # backend/credential store -- mapped to `SERVICE_UNAVAILABLE` per that
-# class' own documented proposal, `errors.py`).
+# class' own documented proposal, `errors.py`). Phase 4 (design PHASE4_
+# DURABLE_AUDIT_SINK_V1.md D-2/D-3): `AuditSinkUnavailable` is likewise
+# mapped to `SERVICE_UNAVAILABLE` -- a durable-audit-sink failure on a
+# fail-closed-class operation or denial, distinct from both
+# `StorageConfigurationError` (a permanent DATA-backend privilege defect)
+# and `AuthorizationStateUnavailable` (the credential store's own
+# unreachability). Listed explicitly here (not left to the exhaustive-by-
+# construction fallback in `_classify` below) so that fallback's own
+# "pragma: no cover" comment stays true.
 _CLASSIFY_ORDER: tuple[tuple[type[FoundationError], str], ...] = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
     (StorageConfigurationError, "SERVICE_UNAVAILABLE"),
+    (AuditSinkUnavailable, "SERVICE_UNAVAILABLE"),
     (AuthenticationError, "AUTH_INVALID"),
     (AuthorizationError, "FORBIDDEN"),
     (CapabilityError, "CAPABILITY_UNSUPPORTED"),
@@ -375,20 +385,49 @@ class HttpService:
     session types `cell.py` already defines, unchanged.
     """
 
-    def __init__(self, credential_store: Any, cell_factory: Callable[[str], Any]) -> None:
+    def __init__(self, credential_store: Any, cell_factory: Callable[[str], Any], *, audit_router: Any = None) -> None:
         self._credentials = credential_store
         self._cell_factory = cell_factory
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-3;
+        # review m-1, folded into M-3, supervisor ruling 2026-09-03):
+        # `AUTH_REQUIRED` is in `audit_dispatch.DURABLE_DENIAL_CODES` (D-3's
+        # own inclusion table -- "認証系 2 コード相当"), but this peer only
+        # ever constructs it HERE (`_CredentialMissing`, below) -- strictly
+        # before any credential store is ever consulted (no bearer token
+        # at all was presented). Without a router here, a durable-range
+        # code declared in the vocabulary would have no emit site ever
+        # reachable in this peer's real deployment topology at all.
+        # `None` (the default) keeps every pre-Phase-4 caller of this
+        # constructor (this repository's own tests, the in-process
+        # conformance adapter, which has no HTTP surface at all) working
+        # unchanged -- a missing router simply means this ONE denial class
+        # stays undurable, exactly like every OTHER call site before this
+        # WP wired a router in.
+        self._audit_router = audit_router
 
-    def authenticate(self, bearer_token: str | None) -> ApplicationRuntime:
+    def authenticate(self, bearer_token: str | None, *, request_id: str | None = None) -> ApplicationRuntime:
         if bearer_token is None:
+            if self._audit_router is not None:
+                # Review m-1/M-3: no bearer token was presented at all --
+                # there is no credential_id to record (unlike B-1's
+                # concern, there is no client-CLAIMED id here either), so
+                # `actor_id`/`target_id` are `None` and the coalescing key
+                # collapses to `(None, "unknown", "authenticate",
+                # "AUTH_REQUIRED")`, mirroring the pre-auth treatment B-1
+                # already established for a present-but-wrong credential.
+                self._audit_router.route_denial(
+                    reason_code="AUTH_REQUIRED", event_class="authentication_denied", request_id=request_id,
+                    application_id=None, actor_type="unknown", actor_id=None, role=None,
+                    operation="authenticate", target_kind="credential", target_id=None,
+                )
             raise _CredentialMissing()
         credential_id, secret = _split_bearer(bearer_token)
-        principal = self._credentials.authenticate(credential_id, secret)
+        principal = self._credentials.authenticate(credential_id, secret, request_id=request_id)
         cell = self._cell_factory(principal.application_id)
         guard = self._credentials.assert_active
         if principal.role == Role.DEVELOPER:
-            return ApplicationDeveloper(cell, principal, guard)
-        return ApplicationRuntime(cell, principal, guard)
+            return ApplicationDeveloper(cell, principal, guard, request_id=request_id)
+        return ApplicationRuntime(cell, principal, guard, request_id=request_id)
 
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -422,8 +461,17 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> Resp
 
 
 def _authenticate(request: Request) -> ApplicationRuntime:
+    # Review M-2 (major, supervisor ruling 2026-09-03, "完全案"): threads
+    # this same request's own `request_id` (`_request_id`, already
+    # generated by the byte-limiting ASGI middleware and returned as the
+    # `x-request-id` response header) into the credential-store
+    # authenticate call -- every call site below reaches `_request_id
+    # (request)` independently too, for its own subsequent session
+    # operation, so a single request's own durable rows (an `AUTH_
+    # INVALID`/`AUTH_REQUIRED` denial here, or an `allow` row from the
+    # operation that follows) all carry the identical value.
     service: HttpService = request.app.state.service
-    return service.authenticate(_extract_bearer(request))
+    return service.authenticate(_extract_bearer(request), request_id=_request_id(request))
 
 
 # --------------------------------------------------------------------------
@@ -476,7 +524,7 @@ async def get_capabilities(request: Request) -> Response:
     # separation), so there is structurally no way to accept a control
     # credential here even as a co-hosting convenience.
     session = _authenticate(request)
-    document = dict(session.capabilities())
+    document = dict(session.capabilities(request_id=_request_id(request)))
     # R-7: the enforcement side of `request_bytes` is a fact about THIS
     # HTTP composition (the middleware below genuinely measures and
     # enforces it), not about `cell.py`'s own backend-independent
@@ -526,7 +574,8 @@ async def post_query(request: Request) -> Response:
         if "size" in page:
             page_size = page["size"]
 
-    rows = session.read(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size)
+    rows = session.read(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size,
+                        request_id=_request_id(request))
     return JSONResponse({"items": rows, "next_page": None}, status_code=200)
 
 
@@ -580,7 +629,7 @@ async def post_mutate(request: Request) -> Response:
         raise ValidationError("operations must be a non-empty array")
     items = [_mutation_item(entity, op) for op in operations]
 
-    results = session.transact(items)
+    results = session.transact(items, request_id=_request_id(request))
     affected = 0
     for item, result in zip(items, results):
         if item["type"] == "insert":
@@ -655,7 +704,7 @@ async def post_cross_entity_mutate(request: Request) -> Response:
         raise ValidationError("operations must be a non-empty array")
     items = [_scoped_mutation_item(op) for op in operations]
 
-    results = session.transact(items)
+    results = session.transact(items, request_id=_request_id(request))
     affected = 0
     for item, result in zip(items, results):
         if item["type"] == "insert":
@@ -754,21 +803,21 @@ async def post_schema(request: Request) -> Response:
             fields = {name: "text" for name in fields_raw}
         else:
             fields = None
-        session.create_entity(entity, fields)
+        session.create_entity(entity, fields, request_id=_request_id(request))
         # m-2 (independent review): the peer's REAL current schema-revision
         # counter (`ApplicationRuntime.schema_revision()`, the same value
         # `cell.py`'s own delete-confirmation fingerprint reads) -- never a
         # hardcoded placeholder that would falsely claim the same "revision"
         # after every schema change.
-        return JSONResponse({"committed": True, "revision": str(session.schema_revision())}, status_code=200)
+        return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
 
     if operation == "add_field":
         field = body.get("field")
         field_type = body.get("field_type")
         if not isinstance(field, str) or field_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
             raise ValidationError("add_field requires field and a supported field_type")
-        session.add_field(entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type])
-        return JSONResponse({"committed": True, "revision": str(session.schema_revision())}, status_code=200)
+        session.add_field(entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type], request_id=_request_id(request))
+        return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
 
     # C-17 present-denial form (design R-8 item 1): `alter_field`/
     # `create_index`/`drop_index`/`drop_entity` are all real, contract-

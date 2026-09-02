@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Optional
 
 from .audit import AuditSink
+from .audit_dispatch import AuditRouter
 from .errors import AuthenticationError, AuthorizationStateUnavailable, NotFoundError
 
 
@@ -73,7 +74,7 @@ class CredentialStore:
     fail-closed behavior.
     """
 
-    def __init__(self, pepper, audit=None):
+    def __init__(self, pepper, audit=None, *, audit_router=None):
         if not isinstance(pepper, str) or len(pepper) < 16:
             raise ValueError("credential pepper must be supplied externally")
         self._pepper = pepper.encode("utf-8")
@@ -81,6 +82,12 @@ class CredentialStore:
         self._applications = {}
         self._lock = RLock()
         self.audit = audit or AuditSink()
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        # D-3): the shared durable-audit dispatch router (see `cell.
+        # ApplicationCell.__init__`'s identical parameter for the full
+        # rationale) -- defaults to a private, unshared one so every
+        # pre-Phase-4 caller of this constructor keeps working unchanged.
+        self._audit_router = audit_router if audit_router is not None else AuditRouter()
         self.authorization_state_available = True
 
     def provision_application(self, application_id):
@@ -349,7 +356,7 @@ class CredentialStore:
                 return True
             return False
 
-    def authenticate(self, credential_id, secret):
+    def authenticate(self, credential_id, secret, *, request_id=None):
         with self._lock:
             if not self.authorization_state_available:
                 self.audit.record("authorization_state_failure",
@@ -363,7 +370,18 @@ class CredentialStore:
             # this call on a cheaper early-exit path.
             stored_digest = item.digest if item is not None else _DUMMY_DIGEST
             digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
-            valid = item is not None and digest_matches
+            # Review B-1 (supervisor ruling 2026-09-03): tracked
+            # SEPARATELY from the final `valid` flag below -- `authenticated`
+            # is `True` only once the secret has matched a REAL, known
+            # credential's stored digest. This is what the durable-audit
+            # dispatch below keys its actor identity on: a subsequent
+            # state check (disabled/revoked/app-disabled/expired) failing
+            # is a REAL, known credential being refused (D-3's own
+            # "credential の revoked" table entry, safe to record); an
+            # unknown `credential_id` or a mismatched secret never reaches
+            # `authenticated = True` at all, however `valid` itself is computed.
+            authenticated = item is not None and digest_matches
+            valid = authenticated
             if valid:
                 # WP-2 (design v1.2 R-4): `enabled` and `revoked` are
                 # checked independently -- `revoked` is terminal and is
@@ -377,12 +395,64 @@ class CredentialStore:
             if not valid:
                 self.audit.record("authentication_denied", outcome="denied",
                                   detail="invalid_or_disabled")
+                # Phase 4 (design D-3): `AUTH_INVALID` is a durable-range
+                # denial code (`http.py::_CLASSIFY_ORDER` maps every
+                # `AuthenticationError` this class raises to it) -- routed
+                # (coalesced) alongside the pre-existing 6-field-sink
+                # record above, unconditionally (D-10).
+                #
+                # Review B-1 (blocker, supervisor ruling 2026-09-03): a
+                # PRE-AUTH failure (`authenticated` is `False` -- unknown
+                # `credential_id`, or a secret that did not match any
+                # stored digest) must NEVER record the client-claimed id
+                # as `actor_id`/`target_id`, and must NEVER let it into the
+                # D-3 coalescing key -- `credential_id` here is untrusted,
+                # unvalidated (no length/charset check anywhere upstream)
+                # input. Doing so lets an attacker (a) defeat coalescing
+                # entirely by varying the claimed id per attempt (id
+                # rotation: N distinct ids -> N distinct durable rows, not
+                # one coalesced window) and (b) flip the response from
+                # `AUTH_INVALID` to `SERVICE_UNAVAILABLE` at will, once the
+                # claimed id exceeds the `application_audit` length CHECK
+                # (migration 0005) and the first-occurrence INSERT itself
+                # starts failing. Only once `authenticated` is `True` (the
+                # secret matched a real row, and ONLY its state refused it)
+                # is the real, resolved `item.credential_id`/`item.
+                # application_id` recorded -- matching r2db-api's own
+                # identical pre-auth treatment (`actor_id=None`).
+                if authenticated:
+                    self._audit_router.route_denial(
+                        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=request_id,
+                        application_id=item.application_id, actor_type="application_credential",
+                        actor_id=item.credential_id, role=None, operation="authenticate",
+                        target_kind="credential", target_id=item.credential_id,
+                    )
+                else:
+                    self._audit_router.route_denial(
+                        reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=request_id,
+                        application_id=None, actor_type="unknown", actor_id=None, role=None,
+                        operation="authenticate", target_kind="credential", target_id=None,
+                    )
                 raise AuthenticationError("authentication failed")
             self.audit.record("authentication_succeeded", item.application_id,
                               item.credential_id, detail="role=" + item.role.value)
             return Principal(item.application_id, item.credential_id, item.role)
 
-    def assert_active(self, principal):
+    def _route_reauth_denial(self, application_id, credential_id, *, request_id=None):
+        """Phase 4 (design D-3): `assert_active`'s own re-check failure is
+        `AUTH_INVALID` too (`http.py::_CLASSIFY_ORDER`) -- routed
+        (coalesced) alongside the pre-existing 6-field-sink record, from
+        each of `assert_active`'s four call sites below (a distinct
+        `operation` value, `"assert_active"`, from `authenticate`'s own
+        `"authenticate"` -- these coalesce separately, one window per call
+        site, since D-3's key includes `operation`)."""
+        self._audit_router.route_denial(
+            reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=request_id,
+            application_id=application_id, actor_type="application_credential", actor_id=credential_id,
+            role=None, operation="assert_active", target_kind="credential", target_id=credential_id,
+        )
+
+    def assert_active(self, principal, *, request_id=None):
         """Re-check authorization state for every session operation.
 
         This closes the window where an already-open session could continue
@@ -394,6 +464,13 @@ class CredentialStore:
                                   getattr(principal, "application_id", None),
                                   getattr(principal, "credential_id", None),
                                   outcome="denied", detail="state_unavailable")
+                # Phase 4 (design D-3): `AUTH_STATE_UNAVAILABLE` is
+                # explicitly OUTSIDE the durable-range inclusion set (D-3's
+                # own confirmation text names it among the non-durable
+                # codes) -- no durable/coalesced routing here, matching
+                # `authenticate`'s own identical `authorization_state_
+                # available` branch (which raises the same exception with
+                # no durable routing either).
                 raise AuthorizationStateUnavailable("authorization unavailable")
             item = self._credentials.get(getattr(principal, "credential_id", None))
             if item is None or item.application_id != getattr(principal, "application_id", None):
@@ -401,6 +478,9 @@ class CredentialStore:
                                   getattr(principal, "application_id", None),
                                   getattr(principal, "credential_id", None),
                                   outcome="denied", detail="invalid_or_disabled")
+                self._route_reauth_denial(
+                    getattr(principal, "application_id", None), getattr(principal, "credential_id", None),
+                    request_id=request_id)
                 raise AuthenticationError("authentication failed")
             # WP-2 (design v1.2 R-4): `revoked` gates independently of
             # `enabled`, same reasoning as `authenticate` above -- an
@@ -410,16 +490,19 @@ class CredentialStore:
                 self.audit.record("authentication_denied", item.application_id,
                                   item.credential_id, outcome="denied",
                                   detail="invalid_or_disabled")
+                self._route_reauth_denial(item.application_id, item.credential_id, request_id=request_id)
                 raise AuthenticationError("authentication failed")
             if not self._applications.get(item.application_id, False):
                 self.audit.record("authentication_denied", item.application_id,
                                   item.credential_id, outcome="denied",
                                   detail="invalid_or_disabled")
+                self._route_reauth_denial(item.application_id, item.credential_id, request_id=request_id)
                 raise AuthenticationError("authentication failed")
             if item.expires_at is not None and item.expires_at <= datetime.now(timezone.utc):
                 self.audit.record("authentication_denied", item.application_id,
                                   item.credential_id, outcome="denied",
                                   detail="invalid_or_disabled")
+                self._route_reauth_denial(item.application_id, item.credential_id, request_id=request_id)
                 raise AuthenticationError("authentication failed")
 
     def _digest(self, secret):

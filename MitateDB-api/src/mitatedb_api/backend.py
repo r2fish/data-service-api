@@ -104,17 +104,26 @@ class StorageBackend:
         exists)."""
         raise NotImplementedError
 
-    def create_collection(self, name, fields):
+    def create_collection(self, name, fields, audit_hook=None):
         """``fields``: ``{field_name: declared_type}`` using this
         foundation's own vocabulary (``cell._TYPES``). Raises
         ``errors.ConflictError`` if ``name`` already exists. Bumps the
-        schema revision atomically with the DDL."""
+        schema revision atomically with the DDL.
+
+        Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        D-2/D-10): ``audit_hook``, when given, is called (``pre_commit()``)
+        as the LAST thing this method does before its own commit point --
+        every schema operation is unconditionally fail-closed class (D-2
+        item 2). See ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
-    def add_field(self, collection, field, field_type):
+    def add_field(self, collection, field, field_type, audit_hook=None):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
-        Bumps the schema revision atomically with the DDL."""
+        Bumps the schema revision atomically with the DDL.
+
+        Phase 4: same ``audit_hook`` contract as ``create_collection``
+        above."""
         raise NotImplementedError
 
     def encode_value(self, value, domain=None):
@@ -152,8 +161,15 @@ class StorageBackend:
         """Returns ``{"updated": <row count>}``."""
         raise NotImplementedError
 
-    def delete(self, collection, filters):
-        """Returns ``{"deleted": <row count>}``."""
+    def delete(self, collection, filters, audit_hook=None):
+        """Returns ``{"deleted": <row count>}``.
+
+        Phase 4 (design D-2/D-10): ``cell.ApplicationCell`` has already
+        run this request through the confirmation choke
+        (``_validate_delete_confirmation``) before this is ever called --
+        ``audit_hook``, when given, is called (``pre_commit()``) as the
+        LAST thing this method does before its own commit point. See
+        ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
     def begin(self):
