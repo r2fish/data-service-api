@@ -345,31 +345,99 @@ class _AuditBuffer:
         batch write leaves the events in place for the next attempt
         (retained, not counted as dropped -- N-1) rather than discarding
         them or alerting on its own.
+
+        WP-3(a) review B-2 (reentrancy): the periodic-flush thread
+        (composition root) and a request-path threshold flush (`push()`,
+        M-2 above) can call this method concurrently on the SAME buffer.
+        `pending` is therefore SWAPPED OUT of `self._events` under a
+        single lock acquisition (not merely copied) -- this, not a
+        separate "flush in progress" flag, is what makes two concurrent
+        `flush()` calls durably write disjoint (usually one full, one
+        empty) sets of events instead of both durably writing the SAME
+        events (the double-row bug this review found, reproduced verbatim
+        by `test_concurrent_periodic_and_threshold_flush_never_double_
+        writes_pending_events`). A concurrent call that finds `self.
+        _events` already emptied by the swap simply has nothing to flush
+        and returns without ever touching the sink -- it is not blocked or
+        serialized behind the in-flight I/O, so this stays lock-free
+        across the network round trip exactly as before.
+
+        A failed `append_many` puts `pending` BACK -- prepended, so it
+        precedes (in flush order) anything pushed while this I/O was in
+        flight -- preserving N-1's retain discipline (retained events are
+        never counted as dropped) and `_dropped_total`'s accuracy (a
+        retained batch is not itself a loss) exactly as the prior
+        read-then-delete version did.
+
+        WP-3(a) review B-1 (blocker, on the B-2 fix above): while this
+        method holds `pending` outside `self._events`, `push()` sees an
+        empty (or merely in-flight-refilled) buffer and does not evict --
+        capacity is enforced only against whatever is currently sitting in
+        `self._events`. A naive unconditional `pending + self._events`
+        restore on failure can therefore exceed `_capacity` (up to
+        `len(pending)` extra), and because the surviving overflow is never
+        itself re-evicted by a later `push()` (each `push()` only ever
+        evicts ONE item, the one IT just added), a sink outage would let
+        the buffer grow WITHOUT BOUND across repeated failed flushes --
+        breaking D-4's "bounded in-memory buffer" and D-1 review M-5's
+        capacity-side availability argument, and doing so *silently*: no
+        `push()` eviction fires during this growth, so `_dropped_total`
+        never increments and the overflow alert (D-4) never appears even
+        though evidence is unboundedly accumulating in memory. So the
+        restore truncates back down to `_capacity`, dropping from the
+        FRONT (oldest first, matching `push()`'s own `pop(0)` FIFO
+        discipline) -- and, exactly like a genuine `push()`-path eviction,
+        counts only what was ACTUALLY, irrevocably discarded here (never
+        the merely-retried remainder) in `_dropped_total`, sets
+        `_alert_pending`, and logs the same fixed overflow message.
         """
         with self._lock:
-            pending = list(self._events)
+            pending = self._events
+            self._events = []
         if pending:
             try:
                 self._sink.append_many(pending)
             except Exception:
+                truncated = 0
                 with self._lock:
                     self._flush_currently_failing = True
-                # N-1/N-2: deliberately NOT incrementing `_dropped_total`,
-                # NOT setting `_alert_pending`, and NOT logging here --
-                # `pending` is still sitting in `self._events`, retried by
-                # the next flush; it has not been lost, so there is
-                # nothing new to alert or log about on this path alone.
-                # `push()`'s own eviction branch is the only source of
-                # genuine, irrevocable loss.
+                    # N-1/N-2: put the un-written batch back rather than
+                    # discarding it -- it is retried by the next flush, not
+                    # counted in `_dropped_total` (nothing has actually been
+                    # lost) and nothing new to alert or log about on this
+                    # path alone. Prepended ahead of anything a concurrent
+                    # `push()` added to `self._events` while this I/O was in
+                    # flight, so flush order still matches arrival order.
+                    self._events = pending + self._events
+                    # B-1: re-impose the capacity bound `push()` could not
+                    # enforce while this batch was held outside
+                    # `self._events` -- drop the oldest overflow, exactly
+                    # the FIFO discipline `push()`'s own eviction branch
+                    # uses, and count ONLY this genuine, irrevocable loss
+                    # (the rest is still a retained retry, not a drop).
+                    overflow = len(self._events) - self._capacity
+                    if overflow > 0:
+                        del self._events[:overflow]
+                        truncated = overflow
+                        self._dropped_total += truncated
+                        self._alert_pending = True
+                if truncated:
+                    _logger.error(_BUFFER_OVERFLOW_LOG_MESSAGE)
+                # `push()`'s own eviction branch is the only OTHER source
+                # of genuine, irrevocable loss.
             else:
                 with self._lock:
-                    # Remove exactly the prefix this flush actually
-                    # covered -- more events may have been pushed (or even
-                    # evicted) while this I/O was in flight; `del ...[:n]`
-                    # never touches anything appended after `pending` was
-                    # captured above.
-                    del self._events[: len(pending)]
-                    self._flush_currently_failing = False
+                    # WP-3(a) review m-1: a concurrent flush() covering a
+                    # DIFFERENT (disjoint) batch may be failing right now --
+                    # this call's own success says nothing about that. Only
+                    # clear the failing flag once the buffer this call can
+                    # actually observe is empty (nothing left retained,
+                    # nothing new sitting unflushed); otherwise leave the
+                    # flag as it already is rather than blindly forcing it
+                    # to False and letting a genuinely-failing concurrent
+                    # flush's backoff get reset to the floor by a race.
+                    if not self._events:
+                        self._flush_currently_failing = False
         self._retry_alert()
 
     def _retry_alert(self) -> None:

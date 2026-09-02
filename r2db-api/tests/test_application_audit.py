@@ -1718,6 +1718,210 @@ def test_healthy_sink_threshold_flush_prevents_reaching_capacity_eviction() -> N
     assert len(durable_events(durable)) + service._audit_buffer.pending_count() == 50
 
 
+def test_concurrent_periodic_and_threshold_flush_never_double_writes_pending_events() -> None:
+    """WP-3(a) review B-2 (both peers): `_AuditBuffer.flush()` had no
+    reentrancy guard. `push()`'s own synchronous threshold-flush (M-2,
+    above) and the composition root's periodic flush thread
+    (`main.py`'s `_audit_flush_loop` -> `service.flush_audit_buffer()`) can
+    both call `flush()` on the SAME buffer instance concurrently. The old
+    body only ever held `self._lock` for the brief snapshot
+    (`pending = list(self._events)`) and, on success, for the brief
+    deletion (`del self._events[:len(pending)]`) -- the durable
+    `append_many` I/O itself ran with the lock released. A second,
+    concurrent `flush()` call could take an IDENTICAL snapshot of
+    `self._events` before the first one's `append_many` returned and
+    deleted that prefix, so BOTH durably wrote the same pending events --
+    D-10's "1 operation = at most 1 durable row" broken by duplication
+    (observed verbatim on the MitateDB peer as `['e1','e2','e3','e1',
+    'e2','e3']`; r2db is the same shape).
+
+    Reproduced deterministically (not as a rare timing accident): a fake
+    sink blocks the FIRST `append_many` call it receives (signalling once
+    it has been entered) and lets any OTHER concurrent call through
+    immediately. The test starts one `flush()` thread, waits until it is
+    confirmed blocked inside `append_many` (i.e. it has already taken its
+    snapshot but not yet deleted it), THEN starts a second `flush()` call
+    for the very same buffer and lets it run to completion, and only then
+    releases the first call. This is exactly the interleaving a real
+    periodic-thread/threshold-flush race can hit, made certain instead of
+    probabilistic -- and it stays deterministic under the fix too: a
+    correct swap-under-lock leaves the second call nothing to flush (it
+    returns immediately without ever calling the sink), so this test can
+    never deadlock waiting for a second sink call that a correct
+    implementation would not make.
+    """
+    from r2db_api.service import _AuditBuffer
+
+    class _BlockFirstCallSink:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+            self._state_lock = threading.Lock()
+            self.first_call_started = threading.Event()
+            self.release_first_call = threading.Event()
+            self._first_call_claimed = False
+
+        def append(self, **kwargs: Any) -> None:  # pragma: no cover - unused by this test
+            raise AssertionError("append() (single-event) is not used by this reentrancy test")
+
+        def append_many(self, events: "list[AuditEvent]") -> None:
+            with self._state_lock:
+                is_first = not self._first_call_claimed
+                self._first_call_claimed = True
+            if is_first:
+                self.first_call_started.set()
+                assert self.release_first_call.wait(timeout=5), "test never released the blocked first append_many() call"
+            with self._state_lock:
+                self.calls.append([e.request_id for e in events])
+
+    sink = _BlockFirstCallSink()
+    buffer = _AuditBuffer(sink, capacity=1000, clock=lambda: 0.0)
+    # Seed a pre-existing backlog directly -- this is the SAME backlog both
+    # flush() calls below race over, mirroring "the periodic timer fires
+    # while a request-path threshold flush is already in flight for it".
+    for i in range(3):
+        buffer._events.append(
+            AuditEvent(
+                str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
+                f"e{i + 1}", "app-a", "application_credential", "cred-a", "runtime",
+                "query", "entity", "allow", None, None, None,
+            )
+        )
+
+    thread_a = threading.Thread(target=buffer.flush, name="periodic-flush")
+    thread_a.start()
+    assert sink.first_call_started.wait(timeout=5), "thread A's flush() never reached append_many()"
+
+    # Thread A is now blocked inside append_many, holding no lock -- pre-fix,
+    # its snapshot is still sitting un-deleted in `self._events`; post-fix,
+    # it has already been swapped out and `self._events` is empty.
+    thread_b = threading.Thread(target=buffer.flush, name="threshold-flush")
+    thread_b.start()
+    thread_b.join(timeout=5)
+    assert not thread_b.is_alive(), "thread B's flush() did not complete promptly"
+
+    sink.release_first_call.set()
+    thread_a.join(timeout=5)
+    assert not thread_a.is_alive(), "thread A's flush() deadlocked after being released"
+
+    all_written = [rid for call in sink.calls for rid in call]
+    assert sorted(all_written) == ["e1", "e2", "e3"], (
+        "the same pending backlog must be durably written EXACTLY ONCE across both concurrent "
+        f"flush() calls (periodic + threshold), never duplicated -- got {all_written!r} from calls {sink.calls!r}"
+    )
+    assert buffer.pending_count() == 0, f"both events must have left the buffer after a successful flush, got {buffer.pending_count()} left"
+
+
+def test_concurrent_push_during_a_failing_flush_never_grows_the_buffer_past_capacity() -> None:
+    """WP-3(a) review B-1 (blocker, on the B-2 swap-out fix above): while
+    `flush()` holds `pending` outside `self._events` (the swap that fixed
+    B-2's double-write), `push()` sees an (transiently empty) buffer and
+    does not evict against `pending`'s size -- only against whatever
+    `push()` itself is concurrently adding. A naive unconditional
+    restore-on-failure (`self._events = pending + self._events`) could
+    therefore let the buffer grow WITHOUT BOUND across repeated failed
+    flushes, breaking D-4's "bounded in-memory buffer (既定 1000)" -- and
+    silently: no `push()` eviction fires during that growth, so neither
+    `_dropped_total` nor the overflow alert ever reflects it (a sink
+    outage would accumulate unbounded evidence in memory with no in-band
+    signal at all).
+
+    Reproduces the exact scenario deterministically: a `capacity`-sized
+    backlog is already held by an in-flight, durably-failing `flush()`
+    call (blocked inside `append_many` via a `threading.Event`, not a
+    timing guess) when MORE events are concurrently `push()`-ed. Asserts
+    (i) the buffer never exceeds `capacity` once the failed flush's
+    restore completes, (ii) `_dropped_total` equals EXACTLY the number of
+    events actually, irrevocably truncated by that restore (never the
+    retained remainder -- N-1's own discipline), and (iii) the truncation
+    drops the OLDEST events first (FIFO, matching `push()`'s own `pop(0)`
+    eviction), never the newly-pushed ones.
+    """
+    from r2db_api.service import _AuditBuffer
+
+    class _BlockThenAlwaysFailSink:
+        def __init__(self) -> None:
+            self.first_call_started = threading.Event()
+            self.release_first_call = threading.Event()
+            self.append_calls: list[dict[str, Any]] = []
+
+        def append(self, **kwargs: Any) -> None:
+            # The overflow-alert row (`_retry_alert()`, called at the tail
+            # of `flush()`) -- recorded (not just accepted) so this test can
+            # assert on its `count` directly, since `flush()`'s own success
+            # here immediately resolves `_dropped_total` back towards 0
+            # (by design -- the alert row having been durably written IS
+            # what the drop count is for), so `_dropped_total` itself is not
+            # observable post-flush.
+            self.append_calls.append(dict(kwargs))
+
+        def append_many(self, events: "list[AuditEvent]") -> None:
+            self.first_call_started.set()
+            assert self.release_first_call.wait(timeout=5), "test never released the blocked flush() call"
+            raise RuntimeError("simulated durably-failing sink")
+
+    def _event(request_id: str) -> AuditEvent:
+        return AuditEvent(
+            str(uuid.uuid4()), "data_operation", "2026-09-03T00:00:00+00:00",
+            request_id, "app-a", "application_credential", "cred-a", "runtime",
+            "query", "entity", "allow", None, None, None,
+        )
+
+    sink = _BlockThenAlwaysFailSink()
+    capacity = 5
+    buffer = _AuditBuffer(sink, capacity=capacity, clock=lambda: 0.0)
+    for i in range(capacity):
+        buffer._events.append(_event(f"seed{i + 1}"))
+
+    flush_thread = threading.Thread(target=buffer.flush, name="in-flight-flush")
+    flush_thread.start()
+    assert sink.first_call_started.wait(timeout=5), "flush() never reached append_many()"
+
+    # The flush is now blocked inside append_many, holding no lock, with
+    # `capacity` events swapped OUT of `self._events` -- push() below sees
+    # an empty buffer and will not evict any of these new pushes, exactly
+    # the B-1 window. Stays below the flush threshold (0.8 * capacity ==
+    # 4) so this does not itself trigger a nested threshold-flush.
+    new_event_count = 3
+    assert new_event_count < buffer._flush_threshold
+
+    def _push_more() -> None:
+        for i in range(new_event_count):
+            buffer.push(_event(f"new{i + 1}"))
+
+    push_thread = threading.Thread(target=_push_more, name="concurrent-push")
+    push_thread.start()
+    push_thread.join(timeout=5)
+    assert not push_thread.is_alive(), "concurrent push() did not complete promptly"
+    assert buffer.pending_count() == new_event_count, "push() must not evict while the buffer is transiently empty mid-flush"
+
+    sink.release_first_call.set()
+    flush_thread.join(timeout=5)
+    assert not flush_thread.is_alive(), "flush() deadlocked after being released"
+
+    total_pushed = capacity + new_event_count
+    expected_dropped = total_pushed - capacity  # combined restore length minus capacity
+    assert buffer.pending_count() <= capacity, (
+        f"buffer must never exceed its configured capacity ({capacity}) after a failed flush's "
+        f"restore, got {buffer.pending_count()}"
+    )
+    alert_rows = [c for c in sink.append_calls if c.get("event_class") == "security_control_failure"]
+    assert alert_rows, "a genuine truncation must produce an overflow alert row, same as a push()-path eviction"
+    for row in alert_rows:
+        assert row["reason_code"] == "audit_buffer_overflow"
+    assert sum(row.get("count", 1) for row in alert_rows) == expected_dropped, (
+        f"the alert row(s)' count must equal exactly the truncated overflow ({expected_dropped}), never the "
+        f"retained remainder -- got {alert_rows!r}"
+    )
+    assert buffer._dropped_total == 0 and not buffer._alert_pending, (
+        "the alert row above must have fully resolved the drop count (this fake sink's append() always "
+        "succeeds), leaving nothing pending"
+    )
+    remaining_ids = [e.request_id for e in buffer._events]
+    assert remaining_ids == [f"seed{i + 1}" for i in range(expected_dropped, capacity)] + [f"new{i + 1}" for i in range(new_event_count)], (
+        f"truncation must drop the OLDEST events first (FIFO) and keep the newly-pushed ones -- got {remaining_ids!r}"
+    )
+
+
 def test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row(caplog: pytest.LogCaptureFixture) -> None:
     """WP-2(a) fix round 2 review N-1: reproduces the audit's own probe
     (capacity=2, 5 pushes, `append_many` durably failing throughout,
