@@ -75,13 +75,19 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_3_0():
-    # Phase 3.5 WP-1 (docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md
-    # §1-G, CCR_DISPOSITION.md subordinate ruling 8): the version bump itself,
+def test_contract_declares_1_4_0():
+    # Phase 4 WP-1 (docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §5 P4-D4,
+    # CCR_DISPOSITION.md subordinate ruling 9): the version bump itself,
     # pinned so a future revert of just this one line is caught here rather
     # than only by whichever other test happens to touch contract_version.
+    # Supersedes the 1.3.0 pin (phase 3.5 WP-1, subordinate ruling 8) this
+    # test itself carried before -- 1.3.0 is already published, so this file
+    # never re-adds a standalone "declares 1.3.0" test: any implementation
+    # still declaring 1.3.0 or earlier is exercised by version_binding's own
+    # retroactivity rule, not by a dedicated pin here for a version this
+    # document no longer declares.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.3.0"
+    assert contract["contract_version"] == "1.4.0"
 
 
 def test_contract_audit_fields_include_optional_target_id_and_it_is_not_forbidden():
@@ -185,3 +191,215 @@ def test_contract_1_3_0_prose_pins():
     # other than the three read-only ones.
     authority = contract["control_plane"]["authority"]
     assert "fails it closed with FORBIDDEN" in authority
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 WP-1 (docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §5 P4-D4,
+# CCR_DISPOSITION.md subordinate ruling 9): positive controls for each of
+# the 8 contract 1.4.0 items, per this WP's own completion condition 3 --
+# "8件の各項目に対応する契約文言が存在することを、契約文書を読む positive
+# control で固定する". Each test below pins the SPECIFIC prose/shape a
+# future accidental revert of just that one item would otherwise leave
+# undetected by any other test in this suite (mirrors this file's own
+# existing style, e.g. test_contract_1_3_0_prose_pins above).
+# ---------------------------------------------------------------------------
+
+
+def test_audit_query_after_is_an_opaque_cursor():
+    # item 1: AuditQueryRequest.after's opaque-cursor semantics.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    cursor_note = contract["audit"]["query_cursor"]
+    assert "opaque cursor" in cursor_note
+    assert "VALIDATION_FAILED" in cursor_note
+    # The schema shape itself is unchanged by this item (after was already
+    # a bare string) -- the opaque-cursor reading is a semantics
+    # clarification, not a new property, so AuditQueryRequest.after stays a
+    # plain string in the schema.
+    after_schema = contract["schemas"]["AuditQueryRequest"]["properties"]["after"]
+    assert after_schema == {"type": "string"}
+
+
+def test_audit_result_event_carries_plane_and_cursor():
+    # items 2 and 3: total order (recorded_at, plane, event_id) and the
+    # plane field addition -- both documented in audit.query_ordering /
+    # audit.query_event_fields_note. AuditResult.events[] itself needs no
+    # schema edit (subordinate ruling 7(A) already left it open), which
+    # this test also pins: adding plane/recorded_at/cursor/count to a real
+    # event must not need, and must not have received, a property list.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    ordering_note = contract["audit"]["query_ordering"]
+    assert "(recorded_at, plane, event_id)" in ordering_note
+    fields_note = contract["audit"]["query_event_fields_note"]
+    for token in ("plane", "recorded_at", "cursor", "count"):
+        assert token in fields_note, f"audit.query_event_fields_note does not mention {token!r}"
+    event_item_schema = contract["schemas"]["AuditResult"]["properties"]["events"]["items"]
+    assert "properties" not in event_item_schema, (
+        "AuditResult.events[] item schema gained a fixed properties list -- subordinate ruling 7(A) "
+        "deliberately left this shape open (audit.fields is itself an additive vocabulary); plane/"
+        "recorded_at/cursor/count must remain documented prose, not a schema-enforced property set"
+    )
+
+
+def test_event_class_is_a_declared_vocabulary():
+    # item 4: event_class is a per-implementation declared vocabulary, not
+    # a fixed contract enum -- and no schema in this document defines one.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    vocabulary_note = contract["audit"]["query_event_class_vocabulary"]
+    assert "does not enumerate a fixed event_class enum" in vocabulary_note
+    assert "audit_query.event_classes" in vocabulary_note
+    # AuditQueryRequest.event_classes stays a bare, unconstrained array (no
+    # enum) -- this item is a documentation clarification, never a schema
+    # closure against a fixed value set.
+    event_classes_schema = contract["schemas"]["AuditQueryRequest"]["properties"]["event_classes"]
+    assert "enum" not in json.dumps(event_classes_schema)
+
+
+def test_audit_role_is_accepted_on_audit_query():
+    # item 5: audit-role acceptance on audit_query, integrated into the
+    # same control_plane.authority sentence subordinate ruling 8 already
+    # extended for the three read-only endpoints -- so this pin exercises
+    # the UPDATED sentence, not a new, separate one.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    authority = contract["control_plane"]["authority"]
+    assert "audit_query" in authority
+    assert "control_capabilities, list_applications, list_credentials, and" in authority
+    # control_endpoints.audit_query itself also declares the widened auth.
+    assert contract["control_endpoints"]["audit_query"]["auth"] == "control or audit"
+
+
+def test_audit_events_is_a_documented_reserved_name():
+    # item 6: the audit_events reserved collection/entity name, previously
+    # an undocumented implementation-only reservation (both MitateDB
+    # backends), now documented in structured_operations.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    assert "audit_events" in contract["structured_operations"]["reserved_entity_names"]
+    note = contract["structured_operations"]["reserved_entity_names_note"]
+    assert "audit_events" in note
+
+
+def test_audit_query_endpoint_classification_moved_to_control_endpoints_with_an_alias():
+    # item 7: audit_query's canonical home is now control_endpoints, at
+    # /control/v1/audit/query, with endpoints.audit_query (/v1/audit/query)
+    # explicitly RETAINED (never deleted -- this contract's own additive-
+    # only discipline) as a one-minor-version alias of the identical
+    # operation.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    control_audit_query = contract["control_endpoints"]["audit_query"]
+    assert control_audit_query["method"] == "POST"
+    assert control_audit_query["path"] == "/control/v1/audit/query"
+    assert control_audit_query["auth"] == "control or audit"
+    assert control_audit_query["request"] == "AuditQueryRequest"
+    assert control_audit_query["response"] == "AuditResult"
+
+    # The pre-1.4.0 application-surface entry is untouched in shape and
+    # still present -- only a deprecation_note is added, never a removal.
+    legacy_audit_query = contract["endpoints"]["audit_query"]
+    assert legacy_audit_query["path"] == "/v1/audit/query"
+    assert legacy_audit_query["method"] == "POST"
+    assert legacy_audit_query["request"] == "AuditQueryRequest"
+    assert legacy_audit_query["response"] == "AuditResult"
+    assert "alias" in legacy_audit_query["deprecation_note"]
+    assert "one further minor version" in legacy_audit_query["deprecation_note"]
+
+
+def test_audit_requests_per_minute_is_a_declared_limit_class():
+    # item 8: a new, separate limits.classes member for audit_query's own
+    # pre-auth window, distinct from control_requests_per_minute.
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    assert "audit_requests_per_minute" in contract["limits"]["classes"]
+    # Every pre-existing class member is still present -- this item only
+    # adds a member, it never narrows the vocabulary (additive-only).
+    assert "control_requests_per_minute" in contract["limits"]["classes"]
+    note = contract["limits"]["audit_requests_per_minute_note"]
+    assert "control_requests_per_minute" in note
+    assert "separate" in note or "does not also charge" in note
+
+
+def test_version_binding_1_4_0_obligations_are_conditional_on_providing_audit_query():
+    # Completion condition 5: the 1.4.0 version_binding section must read as
+    # a CONDITIONAL obligation set for the audit_query-specific items (only
+    # binding when that implementation's own audit_query capability is
+    # enabled/partial), with an explicit statement that an implementation
+    # may declare 1.4.0 while audit_query stays unavailable and remain
+    # fully conformant -- never as an unconditional provision requirement
+    # (monitor ruling 8: an unconditional reading would mean a deployment
+    # with no AUDIT_DSN configured could not honestly declare 1.4.0 at
+    # all).
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+    assert "1.4.0" in version_binding
+    assert "subordinate ruling 9" in version_binding
+    assert "conditional" in version_binding
+    assert "audit_query as something other than unavailable" in version_binding
+    assert "remains fully conformant to 1.4.0" in version_binding
+    # The unconditional half is present too -- item 6 (reserved name) and
+    # the audit-role/route-registration half of item 5 bind regardless of
+    # audit_query's own status.
+    assert "unconditional" in version_binding
+    assert "audit_events is a reserved entity/collection name" in version_binding
+
+
+def test_version_binding_1_4_0_unconditional_and_conditional_counts_agree():
+    """Review F-2: `version_binding`'s own stated COUNT of unconditional
+    1.4.0 obligations ("Two"/"Three"/...) must match how many lettered
+    items it actually enumerates immediately after that sentence, and
+    `CCR_DISPOSITION.md`'s subordinate ruling 9(b) restatement of the same
+    split must agree with the contract, not drift from it independently.
+
+    This is a REGRESSION guard, not merely a positive control: the review
+    found this exact drift once already (item 7 was split into an
+    unconditional half (c) -- the contract-level classification fact --
+    and a conditional half (5) -- the peer actually answering both paths
+    -- growing 8 candidate items into 9 markers without the summary count
+    word being updated), and `test_version_binding_1_4_0_obligations_are_
+    conditional_on_providing_audit_query` above only checks SUBSTRINGS, so
+    it could not have caught a count mismatch like this on its own.
+    """
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+
+    count_words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+    unconditional_match = re.search(r"(\w+) of those obligations are unconditional", version_binding)
+    assert unconditional_match, "version_binding's 1.4.0 unconditional-count sentence was not found verbatim"
+    stated_word = unconditional_match.group(1).lower()
+    assert stated_word in count_words, f"unrecognized count word {stated_word!r} in version_binding"
+    stated_unconditional = count_words[stated_word]
+
+    conditional_marker = "The remaining 1.4.0 obligations are conditional"
+    assert conditional_marker in version_binding, f"expected marker sentence {conditional_marker!r} not found"
+    unconditional_section = version_binding[unconditional_match.start():version_binding.index(conditional_marker)]
+    # Only top-level lettered markers immediately preceded by "; " or ": "
+    # or "and " count as list items -- a bare "(a)" appearing inside some
+    # OTHER sentence should not inflate the count, though none currently do.
+    unconditional_markers = re.findall(r"\((?:a|b|c|d|e|f|g|h|i|j)\)", unconditional_section)
+    assert len(unconditional_markers) == len(set(unconditional_markers)), (
+        f"unconditional 1.4.0 obligation markers are not each unique: {unconditional_markers!r}"
+    )
+    assert len(unconditional_markers) == stated_unconditional, (
+        f"version_binding says {unconditional_match.group(1)!r} ({stated_unconditional}) unconditional 1.4.0 "
+        f"obligations but its own list enumerates {len(unconditional_markers)}: {unconditional_markers!r}"
+    )
+
+    requires_marker = "1.4.0 additionally requires"
+    assert requires_marker in version_binding, f"expected marker phrase {requires_marker!r} not found"
+    conditional_section = version_binding[version_binding.index(requires_marker):]
+    # Only a "(N)" immediately preceded by a list separator (": ", "; ", or
+    # "and ") counts as a real list-item marker -- item (1)'s own body text
+    # contains a forward cross-reference ("the ordering in (2)") that is a
+    # bare "(2)" NOT preceded by any of these separators, which a naive
+    # `\(\d\)` scan would double-count as a second "(2)" marker.
+    conditional_markers = re.findall(r"(?:: |; |and )\((\d)\)", conditional_section)
+    assert len(conditional_markers) == len(set(conditional_markers)) and conditional_markers, (
+        f"conditional 1.4.0 obligation markers are not unique/non-empty: {conditional_markers!r}"
+    )
+    stated_conditional = len(conditional_markers)
+
+    disposition_text = (ROOT / "spec" / "CCR_DISPOSITION.md").read_text().replace("**", "")
+    assert f"{stated_unconditional}件は無条件" in disposition_text, (
+        f"CCR_DISPOSITION.md subordinate ruling 9(b) does not restate {stated_unconditional}件は無条件, "
+        "matching versioning.version_binding's own unconditional count"
+    )
+    assert f"{stated_conditional}件は" in disposition_text and "条件付き義務である" in disposition_text, (
+        f"CCR_DISPOSITION.md subordinate ruling 9(b) does not restate {stated_conditional}件, matching "
+        "versioning.version_binding's own conditional count"
+    )

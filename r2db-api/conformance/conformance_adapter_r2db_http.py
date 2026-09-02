@@ -87,6 +87,7 @@ from adapter import (  # noqa: E402
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
+    SurfaceAbsent,
     TamperVector,
     load_contract_error_codes,
     resolve_valid_confirmation,
@@ -1637,6 +1638,95 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             "actor_type", "actor_id", "role", "operation", "target_kind", "outcome", "reason_code", "recorded_at",
         )
         return [{col: value for col, value in zip(columns, row) if value is not None} for row in rows]
+
+    # ------------------------------------------------------------------
+    # audit_query surface (port v1.8, phase 4 WP-1). Real HTTP POST /v1/
+    # audit/query -- against the CONTROL client (`self._control_client`),
+    # never the data-plane client -- once a peer declares audit_query
+    # enabled/partial (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+    # §8.3/D-5: the contract's application-surface path string is served
+    # by the control host as an alias of control_endpoints.audit_query,
+    # not by the data-plane host at all -- data-plane's own POST /v1/
+    # audit/query stays the pre-existing CAPABILITY_UNSUPPORTED stub,
+    # unreached by this method). Every one of the three methods below
+    # always takes the `SurfaceAbsent` declare-first branch as of this WP
+    # (r2db-api's `capabilities()` always declares `audit_query:
+    # {"status": "unavailable"}` until WP-2's flip) -- written against the
+    # real, eventual dispatch shape so WP-2 needs no further restructuring
+    # here.
+    # ------------------------------------------------------------------
+
+    def _audit_query_status(self) -> str:
+        # Reads via this adapter's OWN privileged control credential
+        # (`control_credential()`), never via the `actor` a caller of
+        # `audit_query` supplies -- `control_plane.authority` fails an
+        # APPLICATION credential closed on `control_capabilities` itself,
+        # so gating on `actor`'s own authority would make C-09 vector 3
+        # (application credential -> FORBIDDEN on `audit_query` once
+        # enabled) unreachable.
+        control_actor = self.control_credential()
+        document = self.control_capabilities(control_actor)
+        return document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
+
+    def _audit_surface_absent(self, operation: str, reason: str) -> SurfaceAbsent:
+        return SurfaceAbsent(
+            self.name, operation, reason,
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["audit"],
+        )
+
+    # port v1.8
+    def audit_query(self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_query",
+                "control_capabilities().capabilities.audit_query.status is not enabled/partial -- WP-1 "
+                "declare-first discipline does not send an HTTP request to the real /v1/audit/query alias "
+                "(design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.4's extended SurfaceAbsent meaning)",
+            )
+        # design R1 / work order WP-1 §"変更対象": the CONTROL base URL
+        # serves this application-surface path string as an alias
+        # (control_endpoints.audit_query's own real handler) -- not the
+        # data-plane client, which stays the pre-existing unavailable
+        # stub. `/v1/audit/query`, not `/control/v1/audit/query`: this
+        # adapter deliberately exercises the alias path, matching the
+        # work order's own explicit instruction for this WP; both paths
+        # resolve to the identical handler once a peer implements D-5.
+        return self._control_send("POST", "/v1/audit/query", actor, json_body=dict(request))
+
+    # port v1.8
+    def flush_audit_buffer(self) -> None:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "flush_audit_buffer",
+                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "deployment's own declared posture",
+            )
+        # Unreachable as of phase 4 WP-1 -- see conformance_adapter_r2db.py's
+        # identical method for why this deliberately does not presume a
+        # specific WP-2 buffer-flush mechanism shape.
+        raise NotImplementedError(
+            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
+            "has no real implementation yet (WP-2 scope) -- unreachable as of phase 4 WP-1"
+        )
+
+    # port v1.8
+    def audit_visibility_lag_ms(self) -> int:
+        control_actor = self.control_credential()
+        document = self.control_capabilities(control_actor)
+        audit_query_capability = document.get("capabilities", {}).get("audit_query", {})
+        if audit_query_capability.get("status") not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_visibility_lag_ms",
+                "audit_query is not declared enabled/partial -- there is no real declared visibility_lag_ms "
+                "to read on this deployment's own declared posture",
+            )
+        lag_ms = audit_query_capability.get("visibility_lag_ms")
+        assert isinstance(lag_ms, int) and lag_ms >= 0, (
+            f"{self.name}: audit_query is declared enabled/partial but visibility_lag_ms is not a real "
+            f"non-negative int -- got {lag_ms!r}"
+        )
+        return lag_ms
 
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.

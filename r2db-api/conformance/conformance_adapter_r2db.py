@@ -421,6 +421,102 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # which is not the R-6 durable audit this port operation observes.
         return list(self._control_audit.events())
 
+    # ------------------------------------------------------------------
+    # audit_query surface (port v1.8, phase 4 WP-1). This WP does not
+    # implement a real audit_query on `ControlPlaneService` (that is WP-2's
+    # own scope) -- `capabilities()` (L607 as of this WP) always declares
+    # `audit_query: {"status": "unavailable"}`, so `_audit_query_status()`
+    # below always reads `"unavailable"` here, and every one of the three
+    # methods below always takes the `SurfaceAbsent` declare-first branch
+    # for now. They are written against the REAL, eventual dispatch shape
+    # (reading the live declaration, then presenting a real request) so
+    # that WP-2's flip needs no further port-adapter restructuring here --
+    # only `ControlPlaneService.capabilities()`/`.audit_query()` need to
+    # start telling a different, real story.
+    # ------------------------------------------------------------------
+
+    def _audit_query_status(self) -> str:
+        """Reads this deployment's own `audit_query` capability status via
+        this adapter's OWN privileged control credential (`control_
+        credential()`, the same privileged-setup category as `control_
+        audit_events()`) -- never via the `actor` a caller of `audit_query`
+        supplies. `control_plane.authority` fails an APPLICATION credential
+        closed on `control_capabilities` itself, so gating the declare-first
+        check on `actor`'s own authority would make C-09 vector 3
+        (application credential -> FORBIDDEN on `audit_query` once enabled)
+        unreachable: this read is about the DEPLOYMENT's own posture, not
+        about whichever `actor` is about to be presented to the real
+        `audit_query` call below.
+        """
+        control_actor = self.control_credential()
+        document = self._call(lambda: self._control_service.capabilities(self._actor_secret(control_actor)))
+        return document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
+
+    def _audit_surface_absent(self, operation: str, reason: str) -> SurfaceAbsent:
+        # Same convention every other `SurfaceAbsent` raise on this adapter
+        # follows (e.g. `attempt_cross_entity_batch` above): `surface` is
+        # this adapter's own declared public evidence surface, so a
+        # consumer can independently confirm none of it accepts an
+        # audit-shaped parameter (`signature_forbids_parameters`), rather
+        # than take the claim on faith.
+        return SurfaceAbsent(
+            self.name, operation, reason,
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["audit"],
+        )
+
+    # port v1.8
+    def audit_query(self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_query",
+                "control_capabilities().capabilities.audit_query.status is not enabled/partial -- WP-1 "
+                "declare-first discipline does not present a request to ControlPlaneService.audit_query "
+                "(design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.4's extended SurfaceAbsent meaning)",
+            )
+        return self._call(lambda: self._control_service.audit_query(self._actor_secret(actor), dict(request)))
+
+    # port v1.8
+    def flush_audit_buffer(self) -> None:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "flush_audit_buffer",
+                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "deployment's own declared posture",
+            )
+        # Unreachable as of phase 4 WP-1: every currently-registered
+        # adapter's audit_query status is "unavailable" (this WP does not
+        # implement a durable buffer -- that is WP-2's own scope), so this
+        # branch is never exercised yet. Deliberately NOT a guessed call
+        # into `ControlPlaneService` here (unlike `audit_query` above,
+        # `flush_audit_buffer` names no contract endpoint at all -- it is
+        # an adapter-privileged test hook, design docs/design/
+        # PHASE4_DURABLE_AUDIT_SINK_V1.md §8.3 -- so this adapter does not
+        # presume a specific WP-2 buffer-flush mechanism shape it cannot
+        # yet see).
+        raise NotImplementedError(
+            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
+            "has no real implementation yet (WP-2 scope) -- unreachable as of phase 4 WP-1"
+        )
+
+    # port v1.8
+    def audit_visibility_lag_ms(self) -> int:
+        control_actor = self.control_credential()
+        document = self._call(lambda: self._control_service.capabilities(self._actor_secret(control_actor)))
+        audit_query_capability = document.get("capabilities", {}).get("audit_query", {})
+        if audit_query_capability.get("status") not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_visibility_lag_ms",
+                "audit_query is not declared enabled/partial -- there is no real declared visibility_lag_ms "
+                "to read on this deployment's own declared posture",
+            )
+        lag_ms = audit_query_capability.get("visibility_lag_ms")
+        assert isinstance(lag_ms, int) and lag_ms >= 0, (
+            f"{self.name}: audit_query is declared enabled/partial but visibility_lag_ms is not a real "
+            f"non-negative int -- got {lag_ms!r}"
+        )
+        return lag_ms
+
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.
     # Design §12.5(iii): "port deprovision_application は service に対応物
