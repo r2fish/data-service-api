@@ -229,6 +229,34 @@ class SurfaceAbsent(Exception):
     content, only that the mechanism exists for a consumer to hold the
     claim to account. Empty by default: most `SurfaceAbsent` claims need
     no exemption at all.
+
+    **Meaning extended for `audit_query` (port v1.8, phase 4 WP-1, design
+    docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.4, work order supplementary
+    ruling 1 item 1):** every use of this exception above this note means
+    "no Python callable on this peer's public surface could structurally
+    receive this request at all", proven by source inspection, never
+    assumed. `ConformanceAdapter.audit_query`/`flush_audit_buffer`/
+    `audit_visibility_lag_ms` (below) ALSO raise this exception for a
+    second, narrower reason: "this deployment's own capability declaration
+    says it does not provide the audit surface" (undeclared, or declared
+    anything other than `enabled`/`partial`) -- a claim about the peer's
+    DECLARED posture, checked by this port's own dispatch before any
+    request is presented (declare-first, mirroring C-14's "capability
+    refusal precedes every other check"), not only about whether a Python
+    callable structurally exists. As of this port revision, before any
+    peer implements a real `audit_query` entry point, both readings
+    coincide for every currently-registered adapter (there genuinely is no
+    callable either way) -- but a future peer that implements a real
+    entry point internally while leaving it declared `unavailable` (e.g.
+    AUDIT DSN unset, design D-5/M-4's dual posture: the route is still
+    registered and would itself answer a directly-issued request with
+    `CAPABILITY_UNSUPPORTED`, never a bare 404) still raises this
+    exception under the extended reading, even though a real callable now
+    exists somewhere on that peer. `absence.py`'s own module docstring
+    documents this same extension from the shared-assertion-helper side;
+    `conftest`/test code consuming an `audit_query`-shaped `SurfaceAbsent`
+    must not assume the classic "genuinely no callable anywhere" reading
+    is the only one in play.
     """
 
     def __init__(
@@ -1022,6 +1050,113 @@ class ConformanceAdapter(ABC):
         durably recorded; not itself gated behind any `actor`, since audit
         observation in a conformance build is adapter-privileged the same
         way `provision_application` is.
+        """
+
+    # ------------------------------------------------------------------
+    # audit_query surface (port v1.8, phase 4 WP-1, design docs/design/
+    # PHASE4_DURABLE_AUDIT_SINK_V1.md §8.3, work order docs/work-orders/
+    # PHASE4_DURABLE_AUDIT_SINK_WORK_ORDER.md WP-1 supplementary ruling 1)
+    # ------------------------------------------------------------------
+    #
+    # `audit_query` is a declare-first operation: unlike every other
+    # in-band control-plane method above (which presents a request to a
+    # real peer entry point and lets the peer's own authorization/
+    # capability checks decide the outcome), this method reads the peer's
+    # OWN `audit_query` capability declaration FIRST, before ever
+    # presenting a request -- the same "capability refusal precedes every
+    # other check" discipline C-14 already established for `role="control"`
+    # in-band issuance (design section 8 M-1), applied here one layer
+    # earlier: at the PORT's own dispatch, not inside the peer.
+    #
+    #   - `audit_query` undeclared, or declared anything other than
+    #     `enabled`/`partial` (most commonly `unavailable`) -> raises
+    #     `SurfaceAbsent`, WITHOUT presenting any request to the peer at
+    #     all. AUDIT DSN unset is design D-5/M-4's own dual posture: the
+    #     peer's real HTTP route is still registered and would itself
+    #     answer a directly-issued request with `CAPABILITY_UNSUPPORTED`
+    #     (never a bare 404) -- but this port method never reaches that
+    #     route in the first place when the declaration itself already
+    #     says the surface is not provided.
+    #   - `audit_query` declared `enabled`/`partial` -> presents the real
+    #     request with `actor` exactly as given (this method never
+    #     pre-filters by credential kind, the same "authorization is the
+    #     peer's own decision" convention every other in-band method above
+    #     follows). Returns the peer's raw `AuditResult` document on
+    #     success (`PROVIDED`), or raises `ConformanceDenial` with a code
+    #     that is a genuine member of the contract's `errors.codes` on the
+    #     peer's own real refusal (e.g. `FORBIDDEN` for an application
+    #     credential, `VALIDATION_FAILED` for a malformed cursor). Any
+    #     other outcome -- a 404, a 405, an unclassified/UNCLASSIFIED
+    #     response -- is a suite failure, not a denial: see
+    #     `test_c09_declared_enabled_audit_query_actually_answers`.
+    #
+    # `SurfaceAbsent`'s own meaning is EXTENDED by this method (design
+    # section 8.4 / WP-1 supplementary ruling 1 item 1): before this port
+    # revision, `SurfaceAbsent` meant only "no Python callable on this
+    # peer's public surface could structurally receive this request at
+    # all" (see that exception's own class docstring above). For
+    # `audit_query` specifically, it ALSO covers "this deployment declares
+    # it does not provide the audit surface" -- a claim about the peer's
+    # own DECLARED posture, not only about the literal absence of a
+    # callable, even though (as of this port revision, before any peer
+    # implements a real audit_query entry point at all) both readings
+    # happen to coincide for every currently-registered adapter. A future
+    # peer that implements a real `audit_query` entry point internally but
+    # leaves it declared `unavailable` (AUDIT DSN unset) still raises
+    # `SurfaceAbsent` here, under this extended meaning, even though a
+    # real callable now exists somewhere on that peer -- `absence.py`'s
+    # own module docstring documents this same extension from the
+    # assertion-helper side.
+    @abstractmethod
+    def audit_query(self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """`POST /control/v1/audit/query`-equivalent (design D-5's `/v1/
+        audit/query` alias also resolves to the identical operation, but
+        this port method reaches it via the CONTROL base URL, never the
+        data-plane one -- see the HTTP adapters' own implementations for
+        the "why control host, not data-plane host" rationale design
+        section 8.3 requires them to carry as a comment). `request` is a
+        raw mapping matching the contract's `AuditQueryRequest` shape
+        (`event_classes`/`after`/`limit`, all optional) -- never a typed
+        port object, since `AuditResult`/`AuditQueryRequest` are
+        deliberately observed as raw documents (mirrors `capability_
+        document()`'s own "never a value the adapter invents" discipline).
+        Follows this method group's own declare-first dispatch documented
+        above.
+        """
+
+    @abstractmethod
+    def flush_audit_buffer(self) -> None:
+        """Adapter-privileged hook (peer-side, same category as `control_
+        audit_events()` above) that forces the peer's own bounded
+        data-operation-event buffer (design D-4) to flush synchronously,
+        so a test can observe a just-buffered event through `audit_query`
+        without waiting on the buffer's own real flush timer. Follows the
+        same declare-first dispatch `audit_query` documents above --
+        `SurfaceAbsent` under the same extended meaning when the audit
+        surface is not provided at all (there is nothing to flush into
+        anywhere the peer has declared it will answer for), never a
+        `ConformanceDenial` for that case. A peer with a real, `enabled`
+        audit surface but no separate buffer-flush mechanism of its own
+        (buffer-class events become visible on their own after `audit_
+        visibility_lag_ms()` regardless) may implement this as a real no-op
+        rather than raising -- this method's contract is "make buffered
+        events visible now if that is not already true", not "a buffer
+        must exist as a distinct mechanism".
+        """
+
+    @abstractmethod
+    def audit_visibility_lag_ms(self) -> int:
+        """Reads the peer's own declared `visibility_lag_ms` (design D-6:
+        derived from the two durable-write connection timeouts, never a
+        bare implementation-chosen constant) off its real `audit_query`
+        capability declaration. Exists specifically so a test never writes
+        a fixed `sleep` of its own to wait for visibility -- it waits this
+        many milliseconds, read from the peer's own declaration, instead
+        (design section 8.3: fixed sleeps in this suite are a structural
+        source of flaky reds under real-PostgreSQL load). Follows the same
+        declare-first dispatch `audit_query` documents above -- `Surface
+        Absent` when the audit surface is not declared provided at all,
+        since there is then no real declared lag value to read.
         """
 
     # --- application plane ---

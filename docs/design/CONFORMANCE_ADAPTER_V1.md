@@ -2,9 +2,9 @@
 
 ## 文書情報
 
-- 版数: 1.6 (§16 を新設。port v1.6: `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` work package WP-2 由来の coordinated revision -- `ConformanceDenial.details` (additive)、`VALID_CONFIRMATION` の declare-and-echo 化 (`parse_semver`/`contract_version_at_least`/`resolve_valid_confirmation`)、15番目の abstract method `drop_entity`、C-14 由来の absence 機構の共有モジュール抽出 (`conformance-tests/absence.py`)、C-06 (destructive confirmation) の test file 実装・実行可能化 (baseline/strict 分岐)。全 registered adapter は本 WP 時点で `contract_version: 1.1.0` のままのため、strict 分岐は本 WP では実行されない (r2db は WP-3、MitateDB は WP-5 で初実行) -- CONDITIONS.md C-06 行にこの限界を明記)
-- 発行日: 2026-08-30
-- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
+- 版数: 1.8 (§18 を新設。port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02
+- 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
 ## 1. 解決する問題
@@ -1839,3 +1839,245 @@ own capability-agreement context.
 - `conformance-tests/absence.py`'s extraction preserves every existing
   call site's observable behavior for C-14 (§16.4); no C-14 test assertion
   changed.
+
+## 17. v1.7 port revision (coordinated with docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md work package WP-3)
+
+**Backfilled 2026-09-02** (phase 4 WP-1 review finding, this document's own
+§18 header note before this backfill): `conformance-tests/adapter.py`
+already names its `ScopedBatchOperation`/`attempt_cross_entity_batch`
+addition "port v1.7" in its own source comments, but this document never
+carried a corresponding numbered section for it. This section states only
+the facts already recorded elsewhere (`adapter.py`'s own comments,
+`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §3/§10.3) --
+it is a record backfill, not a new design decision, and changes no code.
+
+Port v1.7 (phase 3.5 WP-3, contract 1.3.0's CCR-15 cross-entity semantics)
+added:
+
+- **`ScopedBatchOperation`**: `BatchOperation` (§14) plus a required
+  `entity` field -- one element of a cross-entity batch has no single
+  shared entity for the whole call to name the way `attempt_batch_with_
+  addresses`'s own `entity` parameter does, so each operation names its
+  own (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §3).
+- **`ConformanceAdapter.attempt_cross_entity_batch(session, operations:
+  Sequence[ScopedBatchOperation])`**: presents one atomic unit across
+  multiple entities to the peer's real `POST /v1/data/mutations`-
+  equivalent entry point (contract `cross_entity_mutate`). Availability is
+  `capability_document()["capabilities"]["cross_entity_mutation"]["status"]
+  in ("enabled", "partial")`. `destructive`/`confirmation` on any
+  `delete`-class element within the batch reuse the existing C-06
+  probe/echo machinery, unchanged.
+- **`conformance-tests/test_c16_cross_entity_atomicity.py`** (new file,
+  C-16 registered and made executable): vectors V1-V5 plus two vacuity
+  guards (`test_at_least_one_available_adapter_can_construct_the_v3_
+  boundary_vector`, and V5's own per-adapter absence-form pin).
+- **C-12/C-11 extensions**: C-12 gained a `cross_entity_mutation`
+  declared-vs-executed direction; C-11 gained the `raw_cross_entity_
+  mutation_result` optional raw-accessor family (reverse-validated
+  against the same closed `MutationResult` schema the per-entity endpoint
+  already uses).
+- **`CONDITIONS.md`**: C-16's row moved to executable (four adapters) --
+  as of that WP, both `MitateDB-api` adapters took the PROVIDED branch
+  (`cross_entity_mutation: partial`) and both `r2db-api` adapters took the
+  ABSENT branch (`unavailable`, P35-D1).
+- Four plug files edited (both `r2db-api` and both `MitateDB-api`
+  adapters), mirroring phase 3 WP-2.5's own "4-file commit" shape
+  (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` review m-7).
+
+### 17.1 Compatibility impact
+
+- `attempt_cross_entity_batch` is a new abstract method; a plug that does
+  not implement it fails to instantiate (Python's own `ABC` enforcement)
+  -- all four registered plugs implemented it as of this revision.
+- `ScopedBatchOperation` is additive (a new dataclass); no existing
+  `BatchOperation` caller is affected.
+
+## 18. v1.8 port revision (coordinated with docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md phase 4 WP-1)
+
+`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §8.3 (port への追加) requires
+three new port-level operations plus an extended meaning for `SurfaceAbsent`,
+so that the common suite can observe `audit_query` at all -- this WP does
+not implement a durable audit sink or a real `audit_query` on any peer
+(phase 4 WP-2/WP-3's own scope); it only builds the port-side observation
+path and wires all four currently-registered plugs to it, honestly taking
+the `SurfaceAbsent` branch throughout (§18.4).
+
+### 18.1 Three new abstract methods
+
+Added to `ConformanceAdapter` immediately after `control_audit_events()`
+(port v1.5, §15), before the `# --- application plane ---` group:
+
+- `audit_query(self, actor: CredentialHandle | ControlCredentialHandle, request: Mapping[str, Any]) -> Mapping[str, Any]`
+  -- presents a real `AuditQueryRequest`-shaped mapping to the peer's
+  control-host `audit_query`-equivalent entry point and returns the raw
+  `AuditResult` document on success. `request` is a raw mapping, not a
+  typed port object (mirrors `capability_document()`'s own "never a value
+  the adapter invents" discipline; `AuditResult`/`AuditQueryRequest` stay
+  observed as raw JSON-shaped documents, exactly as the design's own §8.2
+  reverse-validation approach needs).
+- `flush_audit_buffer(self) -> None` -- adapter-privileged hook (same
+  category as `control_audit_events()`) forcing the peer's own bounded
+  data-operation-event buffer (design D-4) to flush synchronously, so a
+  test can observe a buffered event without depending on the buffer's own
+  real flush timer.
+- `audit_visibility_lag_ms(self) -> int` -- reads the peer's own declared
+  `visibility_lag_ms` (design D-6: derived from the two durable-write
+  connection timeouts) off its real `audit_query` capability declaration.
+  Exists specifically so a condition test never writes a fixed `sleep` of
+  its own (design principle 4 applied to timing: a hardcoded wait is
+  exactly the kind of assumption-not-proof this design already forbids
+  elsewhere, and is additionally a structural source of flaky reds under
+  real-PostgreSQL load, per the work order's own testing discipline).
+
+All three are written against the REAL, eventual dispatch shape (read the
+live capability declaration, then present a real request) rather than a
+stub -- see §18.4.
+
+### 18.2 Declare-first dispatch (work order WP-1 supplementary ruling 1)
+
+Unlike every other in-band port operation (§15), which presents a request
+and lets the PEER's own authorization/capability checks decide the
+outcome, `audit_query` (and, by the same rule, `flush_audit_buffer`/
+`audit_visibility_lag_ms`) reads the peer's OWN `audit_query` capability
+declaration FIRST, before presenting any request at all -- the same
+"capability refusal precedes every other check" discipline §15 already
+established for in-band `role="control"` issuance (C-14 vector 3), applied
+one layer earlier: at the port's own dispatch, not inside the peer.
+
+- `audit_query` undeclared, or declared anything other than
+  `enabled`/`partial` (most commonly `unavailable`) -> `SurfaceAbsent`,
+  without presenting any request. This holds even though a real,
+  routed HTTP entry point may exist that would itself answer
+  `CAPABILITY_UNSUPPORTED` if reached directly (design D-5/M-4's dual
+  posture: AUDIT DSN unset still registers the route) -- this port method
+  never reaches that route in the first place once the declaration itself
+  says the surface is not provided.
+- `audit_query` declared `enabled`/`partial` -> a real request is
+  presented with `actor` exactly as given (no pre-filtering by credential
+  kind, the same convention every other in-band method already follows).
+  Returns the peer's raw `AuditResult` document on success (PROVIDED), or
+  raises `ConformanceDenial` with a genuine contract-code (design's own
+  §8.1 vector 3: `FORBIDDEN` for an application credential, `VALIDATION_
+  FAILED` for a malformed cursor, etc.). A 404, a 405, or an
+  unclassified/`UNCLASSIFIED` response in this branch is a suite failure,
+  not a denial (sink truthfulness -- `test_c09_declared_enabled_audit_
+  query_actually_answers`, `conformance-tests/test_c09_audit_evidence.py`).
+
+### 18.3 `SurfaceAbsent`'s extended meaning
+
+Before this revision, `SurfaceAbsent` meant only "no Python callable on
+this peer's public surface could structurally receive this request at
+all" (§4.3's `structurally_absent` mechanism; every pre-v1.8 raise site
+proves this by source inspection). `audit_query`/`flush_audit_buffer`/
+`audit_visibility_lag_ms` extend this meaning for themselves specifically:
+they ALSO raise `SurfaceAbsent` for a second, narrower reason -- "this
+deployment's own capability declaration says it does not provide the
+audit surface" -- a claim about the peer's DECLARED posture (§18.2),
+checked before any request is presented, not only about whether a Python
+callable structurally exists.
+
+As of this WP, before any peer implements a real `audit_query` entry
+point at all, both readings coincide for every currently-registered
+plug -- there genuinely is no callable either way. A future peer that
+implements a real entry point internally (phase 4 WP-2/WP-3) but leaves
+it declared `unavailable` (AUDIT DSN unset) still raises `SurfaceAbsent`
+under the extended reading, even though a real callable now exists
+somewhere on that peer. `conformance-tests/absence.py`'s own module
+docstring documents this same extension from the shared-assertion-helper
+side, and explicitly excludes `audit_query` from its general two-form
+("surface-absent" XOR "declared-unavailable", `assert_control_operation_
+absent_or_uniformly_refused`) mechanism -- `audit_query` collapses form
+(b) into form (a) for itself, rather than participating in the ordinary
+split every other control-plane capability still uses unchanged.
+
+### 18.4 The four plugs, as of this WP
+
+All four currently-registered plugs (`r2db-api`, `r2db-api-http`,
+`MitateDB-api`, `MitateDB-api-http`) implement all three new methods
+against the real, eventual dispatch shape:
+
+- A shared per-plug `_audit_query_status()` helper reads `audit_query`'s
+  declared `status` via that plug's OWN privileged `control_credential()`
+  -- never via the `actor` a caller of `audit_query` supplies, since
+  `control_plane.authority` fails an APPLICATION credential closed on
+  `control_capabilities` itself; gating the declare-first check on
+  `actor`'s own authority would make C-09 vector 3 (application
+  credential -> `FORBIDDEN` on `audit_query` once enabled) structurally
+  unreachable.
+- `audit_query`'s PROVIDED branch calls a well-grounded forward reference
+  to each peer's own eventual real entry point -- `ControlPlaneService.
+  audit_query(secret, request)` (in-process plugs, following that
+  service's own existing per-endpoint method-naming convention) or a real
+  HTTP `POST /v1/audit/query` against the CONTROL client, never the
+  data-plane one (HTTP plugs, design R1: the contract path string is
+  served by the control host as `control_endpoints.audit_query`'s own
+  alias, design D-5; each HTTP plug's own `audit_query` method carries
+  this rationale as an in-line comment, per the work order's own
+  instruction).
+- `flush_audit_buffer`'s PROVIDED branch deliberately raises
+  `NotImplementedError` on all four plugs instead of guessing a specific
+  WP-2/WP-3 buffer-flush mechanism shape: unlike `audit_query`,
+  `flush_audit_buffer` names no contract endpoint at all (it is an
+  adapter-privileged test hook), so no naming convention exists yet to
+  extrapolate from. This branch is unreachable as of this WP (every
+  plug's own `audit_query` status is `unavailable`), so this is honest
+  dead code, not a functional gap.
+- As of this WP, `_audit_query_status()` always returns `"unavailable"`
+  for all four plugs (`capabilities()`/`control_capabilities()` always
+  publish `audit_query: {"status": "unavailable"}` until WP-2(b)/WP-3(b)'s
+  own flip), so `audit_query`/`flush_audit_buffer`/`audit_visibility_
+  lag_ms` always take the `SurfaceAbsent` branch today, each raised with
+  `forbidden_parameters=["audit"]` and `surface=self.public_operation_
+  callables()` (this port's own existing convention for every
+  `SurfaceAbsent` raise site, e.g. `attempt_cross_entity_batch`/`create_
+  unique_index`/`drop_entity`) -- never the C-14-specific `{"credential",
+  "control"}` vocabulary, which is a different capability's own claim.
+
+### 18.5 `conformance-tests/test_c09_audit_evidence.py` (new file)
+
+Makes C-09 executable for the first time (`CONDITIONS.md`'s prior status:
+"not yet executable (common suite) -- peer-local evidence only"). Four
+vectors (design §8.1) plus a declaration-truthfulness test plus two
+vacuity guards -- see that file's own module docstring for the full
+rationale; not duplicated here. All 21 non-`xfail` cases pass as of this
+WP (every vector's "provided" half is unreachable and therefore untested
+by real execution, same disclosure as this document's own §16.5-style
+"written to spec but not yet exercised" pattern), and the whole-registry
+vacuity guard is registered `xfail(strict=True)`, removed only by the
+last flip WP (WP-3(b), same commit as that flip).
+
+### 18.6 `conformance-tests/test_c11_response_schema_conformance.py`
+
+Two additions, closing part of that file's own previously-documented
+`AuditResult`/`AuditQueryRequest` zero-coverage gap (subordinate ruling
+7(A)'s reverse-validation requirement): `test_c11_audit_result_reverse_
+validates_against_the_closed_schema` (real-document reverse-validation via
+`audit_query`, declare-first, `SurfaceAbsent` for all four plugs as of
+this WP -- honestly still zero real-document coverage, but now a live
+path that starts validating automatically the moment a peer flips) and
+`test_audit_query_request_closed_schema_rejects_an_excess_key` (a
+schema-only positive control needing no adapter at all, closing that half
+of the gap outright today).
+
+### 18.7 Compatibility impact (mirrors §12.7/§13.8/§14.3/§15.8/§16.7)
+
+- The three new abstract methods are additive to the ABC; a plug that
+  does not implement them fails to instantiate (Python's own `ABC`
+  enforcement) -- all four registered plugs implement them as of this
+  revision, so this is not a live compatibility break for any
+  currently-registered adapter.
+- `SurfaceAbsent`'s constructor signature is unchanged; only its
+  documented MEANING is extended for these three methods specifically
+  (§18.3). No existing `SurfaceAbsent` raise site or consumer changes
+  behavior.
+- `conformance-tests/absence.py`'s shared two-form mechanism
+  (`assert_control_operation_absent_or_uniformly_refused`/`assert_
+  uniform_absence_form`) is unchanged in code; only its module docstring
+  gained a disclosure that `audit_query` does not participate in the
+  two-form split. No existing caller of that mechanism (C-06/C-14/C-16)
+  is affected.
+- The contract's own `versioning.version_binding` conditional-obligation
+  discipline for 1.4.0 (`spec/CCR_DISPOSITION.md` subordinate ruling 9)
+  is what makes `_audit_query_status()` always reading `"unavailable"`
+  today, not a limitation of the port -- port v1.8 itself imposes no new
+  requirement on a peer that has not yet flipped.

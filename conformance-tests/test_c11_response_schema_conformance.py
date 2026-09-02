@@ -97,20 +97,29 @@ reporting requirement):
   first. Each provider is its own separate, individually-identified test
   case (`pytest.mark.parametrize`, id = adapter name), so a schema defect
   in a second provider's real document fails distinctly from the first's.
-- `AuditResult` has NO reverse-validation coverage anywhere in this suite:
-  every registered implementation currently declares `audit_query`
-  unavailable (`capability_status.defined.audit_query`), and no adapter (any
-  peer, in-process or HTTP) presents any request to the contract's
-  `POST /v1/audit/query` endpoint at all today -- `control_audit_events()`
-  on this port reads each peer's durable sink directly, never through that
-  endpoint, and no other method exists that could. There is consequently no
-  real document of this shape for any registered peer to produce yet; this
-  is reported as a genuine, currently-unfillable gap, not a peer-specific
-  exclusion the WP-1 design's own "in-process adapter が契約形状の文書を作ら
-  ない箇所は対象外で良い" carve-out covers. Closing it is deferred to
-  whichever future phase actually implements an audit sink/query surface
-  (tracked informally as "phase 4" in the handover material) -- there is
-  nothing for this WP to validate against before that lands.
+- `AuditResult` / `AuditQueryRequest` (phase 4 WP-1 update, docs/design/
+  PHASE4_DURABLE_AUDIT_SINK_V1.md §8.2): port v1.8 adds `ConformanceAdapter.
+  audit_query(actor, request)`, a real client-side entry point to the
+  contract's `POST /v1/audit/query`-equivalent operation (control host,
+  design D-5) -- so this file's own reverse-validation/positive-control
+  machinery now has a real path to exercise, closing the "no other method
+  exists that could" gap this section used to record. `test_c11_audit_
+  result_reverse_validates_against_the_closed_schema` (below) runs `audit_
+  query` for EVERY registered adapter (declare-first, per `audit_query`'s
+  own docstring): as of this WP every registered peer still declares
+  `audit_query` `unavailable` (WP-1 does not implement a durable sink or a
+  real `audit_query` on any peer -- that is WP-2/WP-3's own scope), so all
+  four currently take the `SurfaceAbsent` branch, independently
+  re-verified rather than skipped -- this is honestly still ZERO real
+  `AuditResult` document coverage as of WP-1, not a claimed fix; what
+  changed is that a real, adapter-independent path to close the gap now
+  exists and will start validating a genuine document automatically the
+  moment WP-2(b)/WP-3(b) flips a peer to `enabled`/`partial`, with no
+  further change to this file. `test_audit_query_request_closed_schema_
+  rejects_an_excess_key` (below) is a schema-only positive control,
+  independent of any adapter (same style as `test_nested_row_schemas_
+  reject_an_excess_key` below), and needs no real document at all --
+  closing that half of the gap outright, today.
 """
 from __future__ import annotations
 
@@ -476,6 +485,122 @@ def test_application_state_and_credential_lifecycle_responses_conform_to_closed_
     assert_valid(
         revoked_cred, contract["schemas"]["CredentialStateResult"], contract,
         label=f"{adapter.name} revoke_credential_inband()",
+    )
+
+
+# --- AuditResult / AuditQueryRequest (phase 4 WP-1) ------------------------
+# See this module's own docstring "Coverage decisions" section above for
+# why this is honestly still zero real AuditResult document coverage as of
+# this WP, and what closes automatically once a peer flips.
+
+
+def test_c11_audit_result_reverse_validates_against_the_closed_schema(adapter, fx):
+    """Runs `adapter.audit_query(...)` for every registered adapter
+    (declare-first dispatch, `ConformanceAdapter.audit_query`'s own
+    docstring): `SurfaceAbsent` is independently re-verified (mirrors
+    `test_application_state_and_credential_lifecycle_responses_conform_
+    to_closed_schema`'s own identical `except SurfaceAbsent` handling
+    immediately above), never silently skipped. A `ConformanceDenial` from
+    a genuine control credential is a hard failure here -- a real control
+    credential must never be refused its own read-only audit surface. The
+    PROVIDED branch (unreachable as of this WP -- see module docstring)
+    reverse-validates the real `AuditResult` document against the closed
+    schema, exactly as every other schema in this file does.
+    """
+    contract = load_contract()
+    control_actor = adapter.control_credential()
+    try:
+        result = adapter.audit_query(control_actor, {"limit": 1})
+    except SurfaceAbsent as exc:
+        # NOT `_assert_surface_absent_claim` above -- that helper hardcodes
+        # C-14's own `{"credential", "control"}` control-plane vocabulary,
+        # which `audit_query`'s SurfaceAbsent does not use (it declares
+        # `forbidden_parameters=["audit"]`, per `conformance_adapter_*.py`'s
+        # own `_audit_surface_absent` helper). Re-verified inline instead,
+        # mirroring `test_c09_audit_evidence.py`'s own identical check.
+        violations = set(signature_forbids_parameters(exc.surface, exc.forbidden_parameters))
+        exempt = set(exc.exempt_parameters)
+        assert violations == exempt, (
+            f"{adapter.name}: SurfaceAbsent's signature_forbids_parameters violations {sorted(violations)!r} "
+            f"do not exactly equal its declared exempt_parameters {sorted(exempt)!r}"
+        )
+        assert "audit" in {f.lower() for f in exc.forbidden_parameters}, (
+            f"{adapter.name}: SurfaceAbsent's forbidden_parameters {exc.forbidden_parameters!r} does not "
+            "include 'audit'"
+        )
+        assert set(exc.surface) >= set(adapter.public_operation_callables()), (
+            f"{adapter.name}: SurfaceAbsent's declared surface omits part of the peer's own real "
+            "public_operation_callables()"
+        )
+        return
+    except ConformanceDenial as exc:
+        raise AssertionError(
+            f"{adapter.name}: control_credential() was refused on audit_query with {exc.code!r} -- a "
+            "genuine control credential must never be denied its own read-only audit surface"
+        ) from exc
+    assert_valid(result, contract["schemas"]["AuditResult"], contract, label=f"{adapter.name} audit_query()")
+
+
+def test_audit_query_request_closed_schema_rejects_an_excess_key():
+    """Positive control (completion condition 4): `AuditQueryRequest`'s
+    closed schema (`additionalProperties: false` since contract 1.2.0,
+    subordinate ruling 7(A)) genuinely rejects an excess key -- independent
+    of any adapter, schema-only, same style as `test_nested_row_schemas_
+    reject_an_excess_key` below."""
+    contract = load_contract()
+    audit_query_request = contract["schemas"]["AuditQueryRequest"]
+    tampered = {"limit": 10, "bogus_extra_key": "x"}
+    assert validate(tampered, audit_query_request, contract), (
+        "AuditQueryRequest must reject an excess key"
+    )
+    # A well-formed request (every documented property, none extra) must
+    # still be accepted -- the closure narrows what is accepted, it does
+    # not also reject legitimate shapes.
+    well_formed = {"event_classes": ["security_control_failure"], "after": "opaque-cursor-token", "limit": 100}
+    assert not validate(well_formed, audit_query_request, contract), (
+        f"a well-formed AuditQueryRequest must be accepted -- got violations: "
+        f"{validate(well_formed, audit_query_request, contract)}"
+    )
+
+
+def test_audit_result_closed_envelope_rejects_an_excess_key():
+    """Review F-4: `AuditResult`'s own envelope closure
+    (`additionalProperties: false` since contract 1.2.0, subordinate
+    ruling 7(A)) had NO positive control anywhere in this suite -- unlike
+    every other closed response schema. Measured directly (review's own
+    mutation 5): removing `additionalProperties: false` from `AuditResult`
+    left the WHOLE suite green, because `test_c11_audit_result_reverse_
+    validates_against_the_closed_schema` (above) is real-document
+    reverse-validation, vacuous as of this WP (every adapter takes the
+    `SurfaceAbsent` branch -- module docstring). This test needs no real
+    document and closes that gap TODAY, independent of any peer flip --
+    same style as `test_audit_query_request_closed_schema_rejects_an_
+    excess_key` immediately above and `test_nested_row_schemas_reject_an_
+    excess_key` below.
+
+    Scoped to the ENVELOPE only (`events`/excess-key at the top level):
+    `AuditResult.events[]`'s own per-event item shape is deliberately left
+    open (subordinate ruling 7(A) -- `audit.fields` is itself an additive
+    vocabulary), so an excess key WITHIN one event is not a schema
+    violation and is out of scope for this positive control, exactly as
+    `test_audit_result_event_carries_plane_and_cursor` (test_contract.py)
+    already pins for the contract side of that same openness.
+    """
+    contract = load_contract()
+    audit_result = contract["schemas"]["AuditResult"]
+    tampered = {"events": [], "bogus_extra_key": "x"}
+    assert validate(tampered, audit_result, contract), (
+        "AuditResult must reject an excess key at the envelope level"
+    )
+    well_formed = {"events": [{"event_id": "e1", "operation": "delete", "plane": "application"}]}
+    assert not validate(well_formed, audit_result, contract), (
+        f"a well-formed AuditResult must be accepted -- got violations: "
+        f"{validate(well_formed, audit_result, contract)}"
+    )
+    # required: ["events"] -- an envelope missing it entirely is also
+    # rejected (not merely an excess key elsewhere).
+    assert validate({"bogus_extra_key": "x"}, audit_result, contract), (
+        "AuditResult must reject a document missing the required 'events' key"
     )
 
 

@@ -124,6 +124,27 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
    **B-1 措置 (単一 peer コミット規律の明示的例外、テストのみ、P35-D14)**: MitateDB-api の `CONTROL_AUDIT_FIELDS` 契約突合テストは、当時 12 フィールドだった契約 `audit.fields` に対する set 等値で固定されていた。`target_id` 追加 (契約側が 13 フィールド化) がこの等値を直接赤化させるため、WP-1 で「12 コア ⊆ CONTROL_AUDIT_FIELDS ⊆ 契約 fields」の包含形へ緩めた (挙動変更なし・テストのみ)。WP-5 で 13 フィールド等値へ復元する。r2db 側の同型ハードコード (`_CONTROL_AUDIT_COLUMNS`) は契約突合テストが無いため本 WP では赤化せず、WP-4 で列追加と同時に更新する。
 
+9. **フェーズ4 契約 1.4.0 additive 束 (候補 8 件) への裁定 (2026-09-02、依頼者裁定 P4-D4)。** 新規 CCR ではなく、既存の意味論 (CCR-06 canonical audit、CCR-12 audit query 分離、CCR-14 制御プレーン) を明確化・実効化する additive 変更として一括採用する。実施設計は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (v1.4) §5 P4-D4 (依頼者直接回答は同節冒頭に記録)。契約への反映は WP-1 単一コミットで完了。前例は従属判断8 (1.3.0 の束 A〜F 一括)。
+
+   **(a) 8 件それぞれの内容と根拠**:
+   1. `AuditQueryRequest.after` の意味論 = **不透明 cursor**。`(recorded_at, plane, event_id)` を encode し、各 event の `cursor` フィールドで受け渡す。decode 不能・不正な cursor は `VALIDATION_FAILED`。根拠: `event_id` の一意性は各耐久表の PK でしか保証されず、`control_audit`/`application_audit` の UNION 全体では一意でない (MitateDB は `text` 型のため型でも防げない) — `after` を生の `event_id` にすると跨表衝突で cursor が進まなくなる無限ループが起きうる。不透明化はサーバに位置づけの再計算を要求せず、行が既に消えていても位置づけ可能にする。
+   2. 順序 = `(recorded_at, plane, event_id)` の全順序。根拠: `plane` を第 2 キーに入れないと、上記の跨表 `event_id` 衝突で全順序が壊れる。
+   3. `plane` フィールド (`"control"` | `"application"`) の追加。根拠: `AuditResult.events[]` は従属判断7(A)により既に開放スキーマであるため、フィールド追加はスキーマ変更を要さない純 additive。
+   4. 「`event_class` は各実装が宣言する語彙である」旨の文言化。契約に enum は作らない (設計 D-7)。根拠: 契約に固定 enum を作ると、両 peer の既存 class 名と `control_audit` に既に入っている行が「契約不適合な過去の証拠」になり証拠の連続性が切れる。
+   5. audit role の `audit_query` 許可を `control_plane.authority` の記述に追記し、既存の「3 endpoint 限定」記述との文言整合を取る。根拠: 従属判断8(D)で `audit` role は `control_capabilities`/`list_applications`/`list_credentials` の3読み取り専用endpointにのみ許可されると裁定済みであり、`audit_query` はその素性 (読み取り専用、audit 権限が意味を持つ) からして同じ許可集合に加わるのが自然な拡張である。
+   6. `audit_events` 予約 collection 名の文書化。台帳の既存項目 (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §7 由来、`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §11 で RESOLVED)。根拠: 両 MitateDB backend (`backend_sqlite.py` `_RESERVED`、`backend_postgres.py` `_RESERVED_EXACT`) が既に防御的に予約している実装事実を契約に文書化するのみで、新しい挙動を導入しない。
+   7. `audit_query` の endpoint 分類の整理 — `control_endpoints` に正本を追加し (`POST /control/v1/audit/query`)、`endpoints.audit_query` は `POST /v1/audit/query` を **1 minor の間の alias** として明示的に残す (削除しない)。根拠: 設計 D-5 が実装側で既に両パスを両建てする構造 (単一 ingress のパス前置詞ルーティングと `/control/v1` 限定エッジポリシーの両方に対応するため) を持つため、契約側の分類がそれに追いつく形。
+   8. `audit_requests_per_minute` limit class の新設。根拠: 既存の `control_requests_per_minute` は単一の global window であり、`audit_query` の高頻度ポーリングがその窓を食い潰すと、同じ窓に依存する break-glass 操作 (`revoke_credential` 等) が `LIMIT_EXCEEDED` で締め出されうる (設計 M-8)。専用窓の新設によりこの相互作用が構造的に解消される。実体は WP-2(b)/WP-3(b) で `audit_query` 両パス専用の pre-auth 固定窓として実装・宣言される (監督裁定3)。
+
+   **(b) すべて additive である根拠**: 8 件のいずれも既存キーの削除・意味変更・enum 縮小を伴わない。項目1・2・4は元々未定義だった意味論の確定注記であり、既に受理されていた値集合を狭めない後方互換の明確化である。項目3は`AuditResult.events[]`が従属判断7(A)により既に開放スキーマであるための追加フィールドであり、閉鎖スキーマの変更を要さない。項目5は`audit`roleの許可集合を広げる(狭めない)。項目6は実装が既に行っている防御的予約の文書化のみで新しい拒否経路を導入しない。項目7は`endpoints.audit_query`を削除せず、`control_endpoints.audit_query`という新規キーの追加として実施した — 「分類の移動」は正本の所在が変わる契約上の主張であって、旧キー自体は1 minorの間alias として実在し続けるため、既存キー削除には当たらない。項目8は`limits.classes`への新規メンバー追加であり、既存メンバーを変更しない。`versioning.version_binding`への1.4.0節追記も、既存の1.1.0/1.2.0/1.3.0節をいずれも変更せず末尾に追記する形を取った。
+   **義務の条件付き性 (監督裁定8。WP-1 コードレビュー指摘 F-2 反映 — 項目7が無条件(c)と条件付き(5)に分割されたことに伴い、本節の個数表記を実際の`versioning.version_binding`本文 (a)(b)(c) / (1)〜(6) に一致させた)**: 1.4.0 が導入する義務のうち、(1)不透明cursor・(2)全順序・(3)`plane`・(4)宣言される`event_class`語彙・(5)正本パスとaliasパスの両方が実際に応答すること (2パス両建ての実効側)・(6)`audit_requests_per_minute`の**6件**は、**`audit_query`をその実装が`enabled`または`partial`と宣言する場合にのみ**適用される条件付き義務である。(a)`audit_events`予約名の文書化・(b)audit roleの`audit_query`許可(ルート常時登録済みのため`control_plane`さえ提供されていれば`audit_query`自体の可否によらず真)・(c)`audit_query`の正本分類が`control_endpoints`である旨と`endpoints.audit_query`が1 minorの間aliasとして残る旨 (契約文書自体の記述事実であり、`audit_query`の提供可否に依存しない) の**3件**は無条件の1.4.0義務である。この条件付き性は`versioning.version_binding`本文に逐条で明記した — **AUDIT DSN未設定の配備(`audit_query`を`unavailable`と宣言したまま)は1.4.0を宣言できる**。
+
+   **(c) 版数の扱い**: 1.3.0 は既に main へマージ・公開済み (従属判断8実施記録参照) であるため、従属判断4/5のような個別版数据え置きの余地はなく、8件を単一の1.4.0束として出荷する (依頼者裁定P4-D4)。
+
+   **(d) 依頼者裁定の参照**: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §5 P4-D4 (旧 U-4(a))。判断根拠は同文書§2末尾の依頼者設計原則(1. 今やれることは今のうちにやる、2. シンプルに、3. 制約・制限で回避しない、4. 誇れる成果物であること)。却下した側 (次の束まで繰延べ) とその理由は同節に記録済み — 原則1に反すること、項目7を繰延べると「契約上application endpointなのにcontrolホストにある」という説明しづらい状態が続くこと、項目8を繰延べると監査ポーリングとbreak-glassの相互作用がrunbookの注意書きだけで運用されること (原則3に抵触) の3点。
+
+   **再検討条件**: 項目6は特になし (実装事実の文書化のみ)。項目7の alias は1 minor経過後 (1.5.0以降) に`endpoints.audit_query`を除去するかどうかを別途裁定する。項目8の窓サイズ設計はWP-4のrunbookが監査エージェント数×ポーリング頻度を根拠に定める。その他は本記録(a)に記した根拠が覆らない限り再検討しない。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

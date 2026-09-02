@@ -39,6 +39,29 @@ R2DB_CCR14_CONTROL_PLANE_V1.md section 4):
 
 Both forms are genuinely verified here, never accepted on an adapter's bare
 word (design principle 4: uncertainty must not silently become permission).
+
+**`audit_query`'s declare-first form is NOT the two-form model above (port
+v1.8, phase 4 WP-1, design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+§8.4, work order supplementary ruling 1)**: `ConformanceAdapter.
+audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms` collapse form
+(b) into form (a) for this one capability specifically -- an `audit_query`
+declared anything other than `enabled`/`partial` (most commonly
+`unavailable`) raises `SurfaceAbsent`, WITHOUT presenting any request to
+the peer, even when a real, routed HTTP entry point exists that would
+itself answer `CAPABILITY_UNSUPPORTED` if reached directly (design D-5/
+M-4's dual posture: AUDIT DSN unset still registers the route). This is a
+genuine, deliberate extension of what `SurfaceAbsent` means for this one
+port method group -- see `SurfaceAbsent`'s own class docstring in
+`adapter.py` for the full rationale -- not a bug in this module's general
+mechanism. `assert_control_operation_absent_or_uniformly_refused` (below)
+still applies unmodified to every OTHER control-plane capability, which
+keep the ordinary two-form split; a caller checking `audit_query`'s own
+absence must not run it through this shared helper expecting form (b) to
+be a legitimate alternative outcome there -- only `SurfaceAbsent` is
+ever correct for an undeclared/unavailable `audit_query`
+(`test_c09_audit_evidence.py` implements this narrower, `audit_query`-
+specific check directly, rather than reusing this module's two-form
+assertion for it).
 """
 from __future__ import annotations
 

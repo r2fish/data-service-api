@@ -1,0 +1,639 @@
+"""C-09 -- security-relevant auditability, observed through audit_query
+(SI-10, SI-14).
+
+design: docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.1 (the 4 vectors),
+§8.4 (SurfaceAbsent's extended meaning), work order docs/work-orders/
+PHASE4_DURABLE_AUDIT_SINK_WORK_ORDER.md WP-1 (supplementary rulings 1 and
+2). Registered here via `@pytest.mark.condition("C-09")` (module-level
+`pytestmark`).
+
+This is phase 4 WP-1's own new file: it makes C-09 executable through the
+common conformance port for the first time (`CONDITIONS.md`'s prior status
+for C-09 was "not yet executable (common suite) -- peer-local evidence
+only"). **This WP does not implement a durable audit sink or a real
+`audit_query` on any peer** (that is WP-2/WP-3's own scope) -- every one of
+the 4 vectors below, plus the two guards, dispatches correctly today, and
+the dispatch it takes for all 4 currently-registered adapters is
+`SurfaceAbsent` (design §8.4's own declare-first extension), because every
+adapter's own `capabilities().audit_query.status` is currently
+`"unavailable"`. The PROVIDED branches below are exercised for the first
+time only once a peer flips its own `contract_version` to 1.4.0 and
+declares `audit_query` `enabled`/`partial` (WP-2(b)/WP-3(b)) -- they are
+written now, against the real eventual dispatch shape, so that flip needs
+no further changes to this file.
+
+Declare-first dispatch (work order WP-1 supplementary ruling 1, mirrored on
+`ConformanceAdapter.audit_query`'s own docstring and `SurfaceAbsent`'s):
+`audit_query` is undeclared or declared anything other than `enabled`/
+`partial` -> the port raises `SurfaceAbsent` WITHOUT presenting any request
+at all (an extension of `SurfaceAbsent`'s classic "no callable exists"
+meaning to also cover "this deployment declares it does not provide the
+audit surface" -- see `adapter.SurfaceAbsent`'s own docstring). `audit_query`
+declared `enabled`/`partial` -> the port presents a real request and
+returns either `PROVIDED` (the raw `AuditResult` document) or
+`ConformanceDenial` (a genuine contract-code denial, e.g. `FORBIDDEN` for
+an application credential) -- never `SurfaceAbsent` in that branch.
+
+The 4 vectors (design §8.1 / §9.2 property 4):
+
+1. **Observability**: a destructive operation performed through the
+   ordinary application plane becomes visible through `audit_query`.
+   Scoped to fail-closed-class events only (design §8.1 vector 1's own
+   scoping) -- these are never buffered (D-2/D-3), so visibility lag alone
+   (`audit_visibility_lag_ms()`, never a fixed `sleep`) makes them
+   observable, with no `flush_audit_buffer()` needed.
+2. **Secret absence**: no `audit.forbidden_fields` member appears as an
+   event KEY, and no reusable secret/verifier value appears as an event
+   VALUE. `actor_id`/`target_id`/`application_id`/`request_id`/`event_id`
+   are never themselves treated as forbidden -- they are attribution
+   identifiers SI-14 requires, not secrets (design §8.1 vector 2 / review
+   m-1).
+3. **Authority separation**: an application credential is refused
+   `FORBIDDEN` on the control host's `audit_query`. The common port has no
+   distinct "present this same request against the data-plane host"
+   operation (port v1.8 adds exactly the 3 methods the work order names,
+   `audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`, none of
+   which parametrize over host) -- the data-plane host's own
+   `CAPABILITY_UNSUPPORTED` reply to the identical path string (design
+   §7.5/§8.1 vector 3: two hosts answering differently is not a
+   contradiction, since each is stating a true fact about itself) is
+   peer-local evidence (`r2db-api`'s/`MitateDB-api`'s own `test_data_plane_
+   host_audit_query_still_refuses_with_capability_unsupported`, WP-2/WP-3
+   scope), disclosed here as a known boundary of what this common-suite
+   vector can mechanically check, not silently assumed proven.
+4. **No mutation/deletion surface**: no application-authority-reachable
+   operation can author, override, update, or delete audit evidence
+   (contract `audit.immutability`). Two layers, neither alone sufficient
+   (audit packet finding: a port-ABC-only check can never see a mutating
+   surface the port simply never exposed a method for): (i) the port ABC
+   itself declares `audit_query` as the only audit-shaped operation, and
+   it is read-only by construction (no `destructive`/`confirmation`
+   parameter); (ii) each REAL, registered peer is additionally observed
+   -- an HTTP-shaped adapter is probed with real `DELETE`/`PUT`/`PATCH`
+   requests against both the canonical and alias audit-query paths on the
+   control host (never 2xx), an in-process adapter has the real Python
+   object(s) `control_audit_events()` itself reads introspected for any
+   public callable shaped like `delete`/`purge`/`truncate`/`clear`/
+   `remove`. No new port method is added for this -- both peer-observing
+   forms reach through each concrete adapter's own existing private
+   internals (`_control_send`, `_control_audit`/`_control_service`),
+   never through the abstract port.
+
+Two vacuity guards (work order WP-1 supplementary ruling 2), following
+`test_c16_cross_entity_atomicity.py`'s own vacuity-guard style (a
+registry-wide loop collecting each adapter's own reason, never a bare
+`assert False`):
+
+- `test_c09_declared_capability_implies_provided_branch` -- the INDIVIDUAL
+  guard. Always active (no `xfail`): an adapter declaring `contract_version
+  >= 1.4.0` (semver-tuple compared, never string-compared) AND `audit_query:
+  enabled`/`partial` MUST take the PROVIDED branch. Vacuously green as of
+  this WP (no adapter yet declares 1.4.0), and load-bearing the instant one
+  does (WP-2(b)).
+- `test_c09_every_control_surface_adapter_takes_the_provided_branch` -- the
+  WHOLE-REGISTRY guard. Registered here with `@pytest.mark.xfail(strict=
+  True, ...)`: it requires EVERY registered adapter with a control surface
+  (`control_plane` status `enabled`/`partial` -- currently all 4) to take
+  the PROVIDED branch, which is false until the LAST flip WP (WP-3(b)) --
+  `strict=True` means an unexpected green (a premature partial flip, or a
+  weakened guard) fails loudly rather than passing silently. Removing the
+  `xfail` is WP-3(b)'s own responsibility, in the same commit as that
+  flip (work order §2.1 / §6 item 8b).
+"""
+from __future__ import annotations
+
+import inspect
+import time
+from typing import Any, Mapping
+
+import pytest
+
+from adapter import (
+    UNCLASSIFIED,
+    VALID_CONFIRMATION,
+    ConformanceAdapter,
+    ConformanceDenial,
+    SurfaceAbsent,
+    fresh_identifier,
+    load_contract,
+    signature_forbids_parameters,
+)
+from conftest import registered_adapters
+
+pytestmark = pytest.mark.condition("C-09")
+
+# Review F-1: a small, EXPLICITLY DISCLOSED-UNCERTAIN candidate set for
+# vector 1's `operation` correlation, never a single hardcoded `"delete"`
+# literal -- WP-2/WP-3 own the real emitted vocabulary and may spell a
+# destructive data-operation event's `operation` field either way (r2db's
+# own CURRENT application-plane emit site for mutate-class operations
+# already uses the bare `"mutate"` spelling, `service.py`'s `_event` call,
+# not `"delete"`). This set is the WEAKER of vector 1's two correlation
+# conditions (`application_id`/`target_kind` are the contract-stable ones)
+# and is expected to need revisiting once a real emitter exists.
+_LIKELY_DESTRUCTIVE_OPERATIONS = frozenset({"delete", "mutate"})
+
+
+# --- shared helpers ----------------------------------------------------
+
+
+def _semver_tuple(version: str) -> tuple[int, int, int]:
+    """Parses a `"X.Y.Z"` string into a comparable tuple of ints -- NEVER a
+    string comparison (work order WP-1 review point 4: `"1.10.0" < "1.4.0"`
+    under string ordering, a genuine bug class this parsing avoids).
+
+    Review F-6: a component that does not parse as a plain int (e.g. a
+    pre-release suffix like `"1.4.0-rc1"`) makes the WHOLE version compare
+    BELOW any real 1.4.0 release, rather than raising `ValueError` out of
+    this helper. Both guards that call this gate an OBLIGATION ("this
+    adapter must take the PROVIDED branch") on the version meeting a
+    floor -- an unparseable version must never be silently coerced into
+    satisfying that floor (this would be the wrong, fail-OPEN direction
+    for a gate that ADDS a requirement); comparing below the floor is the
+    fail-closed direction and is also simply correct, since a version this
+    helper cannot even parse has not affirmatively demonstrated it meets
+    1.4.0's own obligations.
+    """
+    parts = (version.split(".") + ["0", "0", "0"])[:3]
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def _control_plane_status(adapter) -> str:
+    """The peer's own declared `control_plane` capability status, read from
+    its real, application-plane `capability_document()` -- mirrors
+    `test_c14_authority_boundary.py`'s own identically-named helper
+    (each test module owns its own copy, this suite's existing convention,
+    e.g. `test_c11_response_schema_conformance.py`'s own `_assert_surface_
+    absent_claim`)."""
+    document = adapter.capability_document()
+    capabilities = document.get("capabilities")
+    assert isinstance(capabilities, dict), (
+        f"{adapter.name}: capability_document() has no 'capabilities' mapping -- {document!r}"
+    )
+    control_plane = capabilities.get("control_plane")
+    assert isinstance(control_plane, dict) and "status" in control_plane, (
+        f"{adapter.name}: capability_document()['capabilities'] has no 'control_plane' entry carrying a "
+        f"'status' key -- got {control_plane!r}"
+    )
+    return control_plane["status"]
+
+
+def _audit_query_declaration(adapter) -> tuple[str, str]:
+    """Reads `(contract_version, audit_query_status)` off the peer's own
+    real `control_capabilities()` document, via this adapter's own
+    privileged `control_credential()` -- never via an application
+    credential, which `control_plane.authority` fails closed on
+    `control_capabilities` itself (the same reasoning each adapter's own
+    `_audit_query_status()` helper documents)."""
+    control_actor = adapter.control_credential()
+    document = adapter.control_capabilities(control_actor)
+    status = document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
+    return document.get("contract_version", "0.0.0"), status
+
+
+def _assert_audit_surface_absent_claim(adapter, exc: SurfaceAbsent) -> None:
+    """Independently re-verifies an `audit_query`-shaped `SurfaceAbsent`
+    claim (design §8.4's extended meaning) the same 3-part way every other
+    `SurfaceAbsent` claim on this port is re-verified (mirrors
+    `test_c11_response_schema_conformance.py`'s own `_assert_surface_
+    absent_claim` / `test_c14_authority_boundary.py`'s own helper of the
+    same shape) -- never taken on an adapter's bare word."""
+    violations = set(signature_forbids_parameters(exc.surface, exc.forbidden_parameters))
+    exempt = set(exc.exempt_parameters)
+    assert violations == exempt, (
+        f"{adapter.name}: SurfaceAbsent's signature_forbids_parameters violations {sorted(violations)!r} "
+        f"do not exactly equal its declared exempt_parameters {sorted(exempt)!r}"
+    )
+    declared = {f.lower() for f in exc.forbidden_parameters}
+    assert "audit" in declared, (
+        f"{adapter.name}: SurfaceAbsent's forbidden_parameters {exc.forbidden_parameters!r} does not "
+        "include 'audit' -- a narrower fragment set could pass signature_forbids_parameters vacuously"
+    )
+    declared_surface = set(exc.surface)
+    public_surface = set(adapter.public_operation_callables())
+    assert declared_surface >= public_surface, (
+        f"{adapter.name}: SurfaceAbsent's declared surface omits "
+        f"{[c for c in public_surface if c not in declared_surface]!r} of the peer's own real "
+        "public_operation_callables()"
+    )
+
+
+def _dispatch_audit_query(adapter, actor, request: Mapping[str, Any]):
+    """Runs `adapter.audit_query(actor, request)` and classifies the
+    outcome as one of `"surface_absent"` (independently re-verified) /
+    `"provided"` (a real `AuditResult`-shaped mapping) / `"denied"` (a
+    `ConformanceDenial`). Raises `AssertionError` on anything else (a
+    successful call returning a non-mapping, or a mapping missing
+    `events`) -- never silently accepted."""
+    try:
+        result = adapter.audit_query(actor, request)
+    except SurfaceAbsent as exc:
+        _assert_audit_surface_absent_claim(adapter, exc)
+        return "surface_absent", exc
+    except ConformanceDenial as exc:
+        return "denied", exc
+    assert isinstance(result, Mapping) and "events" in result, (
+        f"{adapter.name}: audit_query(actor, {request!r}) succeeded but did not return an AuditResult-shaped "
+        f"mapping (missing 'events') -- got {result!r}"
+    )
+    return "provided", result
+
+
+def _event_identity(event: Mapping[str, Any]) -> Any:
+    """A per-event identity suitable for baseline set-difference (audit
+    packet §6.3): `event_id` ALONE is not a safe identity key across the
+    `audit_query` UNION -- the contract itself states so
+    (`audit.query_ordering`, CCR_DISPOSITION.md subordinate ruling 9(a)
+    item 2: "`event_id` の一意性は各耐久表の PK でしか保証されず...`plane`
+    を第2キーに入れないと...跨表衝突で全順序が壊れる"), so vector 1's own
+    baseline-diff below must not rely on `event_id` alone either -- an
+    application-plane event that happens to collide with a PRE-EXISTING
+    control-plane event's `event_id` would otherwise be silently absorbed
+    into the baseline (a false negative). Prefers the opaque `cursor`
+    field when present (design D-6: each event's own unique position) --
+    falls back to `(plane, event_id)`, the SAME compound key the contract
+    itself defines as sufficient, when a peer's real `AuditResult` does
+    not (yet) carry `cursor` on every event.
+    """
+    cursor = event.get("cursor")
+    if cursor is not None:
+        return ("cursor", cursor)
+    return ("plane_event_id", event.get("plane"), event.get("event_id"))
+
+
+def _require_provided(adapter, actor, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Dispatches `audit_query` and requires the PROVIDED branch, raising a
+    clear, diagnostic `AssertionError` for `denied`/`surface_absent`
+    instead of silently discarding the form (review F-6): a caller that
+    already confirmed a PROVIDED branch is reachable earlier in the SAME
+    test (via an initial `_dispatch_audit_query` probe) must never let a
+    LATER call's non-PROVIDED outcome degrade into an opaque `TypeError`
+    on `result["events"]` -- e.g. `_, result = _dispatch_audit_query(...)`
+    blindly unpacking a `(form, exception)` pair as if it were always
+    `(form, document)`.
+    """
+    form, outcome = _dispatch_audit_query(adapter, actor, request)
+    assert form == "provided", (
+        f"{adapter.name}: expected the PROVIDED audit_query branch (already confirmed reachable earlier in "
+        f"this test), got {form!r} instead: {outcome!r}"
+    )
+    return outcome
+
+
+# --- vector 1: observability --------------------------------------------
+
+
+def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, fx):
+    control_actor = adapter.control_credential()
+    form, outcome = _dispatch_audit_query(adapter, control_actor, {"limit": 1})
+    if form == "surface_absent":
+        return
+    if form == "denied":
+        raise AssertionError(
+            f"{adapter.name}: control_credential() was refused on audit_query with {outcome.code!r} -- a "
+            "genuine control credential must never be denied its own read-only audit surface"
+        )
+
+    # PROVIDED (unreachable as of WP-1). Review F-1: the row inserted below
+    # is set up BEFORE the baseline snapshot, so the insert's own event (a
+    # buffer-class, non-fail-closed event, design §7.3) is never counted as
+    # "new" below -- only the DESTRUCTIVE DELETE that follows the baseline
+    # snapshot can be. The new event is identified by EVENT_ID SET
+    # DIFFERENCE against that baseline (the "time window" the review's own
+    # "あるべき形" names), never by a value this test injected into row
+    # data riding along as `target_id` -- `target_id` is contract-reserved
+    # for a single target CREDENTIAL/APPLICATION id (`audit.fields_note`),
+    # never a data row key (design docs/design/PHASE4_DURABLE_AUDIT_SINK_
+    # V1.md:438 "target_id は当面すべて NULL になる"), and r2db's own
+    # current application-plane emitter does not even pass `operation=
+    # "delete"` for its mutate-class emit site (`service.py`'s `_event`
+    # call there uses `operation="mutate"`) -- so neither `target_id` nor
+    # a hardcoded `"delete"` literal is a safe correlation key here.
+    # Correlated instead on `application_id` + `target_kind` (both
+    # contract-stable identifiers, never row values) within the baseline
+    # diff window, with `operation` checked against a small, disclosed-
+    # uncertain candidate set rather than a single hardcoded literal.
+    session = fx.runtime_a
+    entity = fx.shared_entity
+    marker = fresh_identifier("c09v1")
+    adapter.insert(session, entity, {"item_key": 1, "label": "c09v1", "probe_key": marker, "probe_value": marker})
+
+    baseline = _require_provided(adapter, control_actor, {"limit": 1000})
+    baseline_ids = {_event_identity(event) for event in baseline["events"] if isinstance(event, Mapping)}
+
+    adapter.delete(session, entity, "probe_key", marker, destructive=True, confirmation=VALID_CONFIRMATION)
+
+    # Fail-closed events are written durably before commit and are never
+    # buffered (design D-2/D-3), so visibility lag alone -- never a fixed
+    # sleep -- makes the delete above observable.
+    time.sleep(adapter.audit_visibility_lag_ms() / 1000)
+    result = _require_provided(adapter, control_actor, {"limit": 1000})
+    events = result["events"]
+    new_events = [
+        event for event in events
+        if isinstance(event, Mapping) and _event_identity(event) not in baseline_ids
+    ]
+    assert new_events, (
+        f"{adapter.name}: no new audit_query event appeared after the destructive delete "
+        f"(baseline had {len(baseline_ids)} event(s))"
+    )
+    assert any(
+        event.get("application_id") == fx.app_a
+        and event.get("target_kind") == "entity"
+        and event.get("operation") in _LIKELY_DESTRUCTIVE_OPERATIONS
+        for event in new_events
+    ), (
+        f"{adapter.name}: none of the {len(new_events)} new event(s) after the destructive delete correlate on "
+        f"application_id={fx.app_a!r} / target_kind='entity' / operation in "
+        f"{sorted(_LIKELY_DESTRUCTIVE_OPERATIONS)!r} -- new events: {new_events!r}"
+    )
+
+
+# --- vector 2: secret absence --------------------------------------------
+
+
+def test_c09_v2_no_forbidden_field_key_or_reusable_secret_value_appears(adapter, fx):
+    contract = load_contract()
+    forbidden_fields = set(contract["audit"]["forbidden_fields"])
+    # Identifiers SI-14 itself requires as attribution -- never forbidden,
+    # even though some (actor_id) are literally credential ids (design
+    # §8.1 vector 2 / review m-1).
+    identifier_fields = {"actor_id", "target_id", "application_id", "request_id", "event_id"}
+
+    control_actor = adapter.control_credential()
+    form, outcome = _dispatch_audit_query(adapter, control_actor, {"limit": 1})
+    if form == "surface_absent":
+        return
+    if form == "denied":
+        raise AssertionError(
+            f"{adapter.name}: control_credential() was refused on audit_query with {outcome.code!r}"
+        )
+
+    # PROVIDED. Issue the application credential AFTER the branch probe
+    # (never before -- issuing one on every SurfaceAbsent adapter would be
+    # wasted setup) and wait `audit_visibility_lag_ms()` (never a fixed
+    # sleep) before querying again: review F-5 -- without this wait, the
+    # issuance event this test's own strongest assertion depends on (a
+    # just-issued REAL secret never appears verbatim) could still be
+    # sitting outside visibility, silently degrading that assertion to
+    # scanning only pre-existing events.
+    application_credential = adapter.issue_credential(fx.app_a, "runtime")
+    time.sleep(adapter.audit_visibility_lag_ms() / 1000)
+    result = _require_provided(adapter, control_actor, {"limit": 1000})
+
+    events = result["events"]
+    for event in events:
+        assert isinstance(event, Mapping), f"{adapter.name}: audit_query event is not a mapping: {event!r}"
+        for key, value in event.items():
+            assert key not in forbidden_fields, (
+                f"{adapter.name}: audit_query event carries forbidden_fields key {key!r} (SI-10) -- {event!r}"
+            )
+            if key in identifier_fields or not isinstance(value, str):
+                continue
+            assert value != control_actor.secret, (
+                f"{adapter.name}: audit_query event field {key!r} carries the control actor's own credential "
+                "secret verbatim"
+            )
+            assert value != application_credential.secret, (
+                f"{adapter.name}: audit_query event field {key!r} carries a real application credential "
+                "secret verbatim"
+            )
+            lowered = value.lower()
+            for sql_fragment in ("select ", "insert into", "drop table", "delete from", "update "):
+                assert sql_fragment not in lowered, (
+                    f"{adapter.name}: audit_query event field {key!r} looks like SQL text: {value!r}"
+                )
+
+
+# --- vector 3: authority separation --------------------------------------
+
+
+def test_c09_v3_application_credential_is_forbidden_on_the_control_host_audit_query(adapter, fx):
+    application_credential = adapter.issue_credential(fx.app_a, "runtime")
+    form, outcome = _dispatch_audit_query(adapter, application_credential, {"limit": 1})
+    if form == "surface_absent":
+        # Declare-first: audit_query is not provided at all, so no actor
+        # -- application credential included -- ever reaches a real
+        # authority check here. This is the only reachable branch as of
+        # WP-1 for every currently-registered adapter.
+        return
+    assert form == "denied", (
+        f"{adapter.name}: an application credential's audit_query request unexpectedly succeeded "
+        f"(PROVIDED) -- application credentials must be denied per contract endpoints.audit_query."
+        f"semantics / control_endpoints.audit_query.semantics"
+    )
+    assert outcome.code == "FORBIDDEN", (
+        f"{adapter.name}: an application credential's audit_query request was denied with "
+        f"{outcome.code!r}, expected FORBIDDEN"
+    )
+
+
+# --- vector 4: no mutation/deletion surface ------------------------------
+
+
+def _assert_port_abc_has_no_audit_mutation_surface() -> None:
+    """Structural, port-wide check (adapter-independent): `audit_query` is
+    the ONLY audit-shaped operation the `ConformanceAdapter` ABC declares
+    at all, and it is read-only by construction. Necessary but NOT
+    sufficient on its own (audit packet finding, completion condition 8):
+    a mutating surface the PORT never exposes could still exist on the
+    real PEER underneath it, unreachable through this port and therefore
+    invisible to this check alone -- `test_c09_v4_no_audit_mutation_or_
+    deletion_surface_exists` (below) additionally observes each real,
+    registered peer, per adapter, and this structural check is never the
+    sole basis for that test's own green.
+    """
+    audit_shaped_methods = [name for name in vars(ConformanceAdapter) if "audit" in name.lower()]
+    assert audit_shaped_methods, "introspection found zero audit-shaped methods on ConformanceAdapter -- scanner assumption changed"
+    mutating_fragments = ("delete", "mutate", "update", "author", "revise", "edit", "write", "insert")
+    offending = [
+        name for name in audit_shaped_methods
+        if any(fragment in name.lower() for fragment in mutating_fragments)
+    ]
+    assert not offending, (
+        f"ConformanceAdapter declares audit-shaped method(s) with a mutating-looking name: {offending!r} -- "
+        "the common port itself must never expose an authoring/deletion surface for audit evidence "
+        "(contract audit.immutability)"
+    )
+    params = set(inspect.signature(ConformanceAdapter.audit_query).parameters)
+    assert "destructive" not in params and "confirmation" not in params, (
+        f"ConformanceAdapter.audit_query carries a destructive/confirmation parameter ({params!r}) -- "
+        "audit_query is a read-only operation and must never grow the destructive-confirmation vocabulary"
+    )
+
+
+# Fragments a real audit-mutation surface's name would plausibly contain
+# (audit packet's own instruction) -- checked against BOTH the wire (HTTP
+# adapters, as HTTP verbs) and real Python objects (in-process adapters,
+# as public method names), never against the port ABC alone.
+_MUTATING_HTTP_METHODS = ("DELETE", "PUT", "PATCH")
+_MUTATING_NAME_FRAGMENTS = ("delete", "purge", "truncate", "clear", "remove")
+
+
+def _assert_wire_verb_rejected(adapter, control_actor, method: str, path: str) -> None:
+    """Sends a REAL `method` request to `path` against the CONTROL host
+    (never the data-plane host), using this adapter's own private
+    `_control_send` (the same helper every in-band port method on this
+    concrete HTTP adapter already uses -- reused here, not reimplemented,
+    so this probe's auth-header construction never drifts from the
+    adapter's own real one). This is NOT gated behind `audit_query`'s own
+    declare-first check (audit packet instruction): declare-first governs
+    the `audit_query` POST specifically (port v1.8 §18.2); the absence of
+    a MUTATING verb on this path is a structural fact independent of
+    whether `audit_query` itself is declared available, and remains
+    observable either way.
+
+    `_control_send` raises `ConformanceDenial` for ANY non-2xx response
+    (a genuine classified contract code, or `UNCLASSIFIED` for a bare
+    404/405 Starlette routing rejection -- both are an honest "this verb/
+    route does not exist or is refused" answer here, unlike `audit_query`
+    POST's OWN truthfulness test, which rejects `UNCLASSIFIED` because
+    THAT path declares itself `enabled`). A 2xx success is the only
+    disqualifying outcome.
+    """
+    try:
+        result = adapter._control_send(method, path, control_actor)  # noqa: SLF001
+    except ConformanceDenial:
+        return
+    raise AssertionError(
+        f"{adapter.name}: {method} {path} against the control host succeeded ({result!r}) instead of being "
+        "rejected -- a mutating verb against the audit surface must never succeed (contract audit.immutability)"
+    )
+
+
+def test_c09_v4_no_audit_mutation_or_deletion_surface_exists(adapter):
+    _assert_port_abc_has_no_audit_mutation_surface()
+
+    if hasattr(adapter, "_control_send"):
+        # HTTP-shaped adapter (`r2db-api-http`/`MitateDB-api-http`): real
+        # wire probes against BOTH the canonical control_endpoints path
+        # and the endpoints.audit_query alias (contract 1.4.0 item 7),
+        # both against the control host.
+        control_actor = adapter.control_credential()
+        for path in ("/v1/audit/query", "/control/v1/audit/query"):
+            for method in _MUTATING_HTTP_METHODS:
+                _assert_wire_verb_rejected(adapter, control_actor, method, path)
+        return
+
+    # In-process adapter (`r2db-api`/`MitateDB-api`): introspects the REAL
+    # objects `control_audit_events()` itself reads (the durable-sink
+    # facade and the control-plane service facade `audit_query`'s own
+    # PROVIDED branch would delegate to) -- never the port ABC again.
+    audit_objects = [
+        obj for obj in (getattr(adapter, "_control_audit", None), getattr(adapter, "_control_service", None))
+        if obj is not None
+    ]
+    assert audit_objects, (
+        f"{adapter.name}: neither _control_audit nor _control_service is reachable on this adapter -- "
+        "the introspection target list is stale (this adapter's own internal attribute names changed)"
+    )
+    offending = []
+    for obj in audit_objects:
+        cls = type(obj)
+        for name, member in vars(cls).items():
+            if name.startswith("_") or not inspect.isfunction(member):
+                continue
+            if any(fragment in name.lower() for fragment in _MUTATING_NAME_FRAGMENTS):
+                offending.append(f"{cls.__qualname__}.{name}")
+    assert not offending, (
+        f"{adapter.name}: a real audit-relevant object reachable from this adapter (the same sink/service "
+        f"control_audit_events() itself reads) exposes mutating-looking public callable(s): {offending!r} -- "
+        "contract audit.immutability"
+    )
+
+
+# --- declaration truthfulness --------------------------------------------
+
+
+def test_c09_declared_enabled_audit_query_actually_answers(adapter):
+    """WP-1 supplementary ruling 1 item 2's own truthfulness requirement:
+    an `enabled`/`partial` declaration must mean a real request gets a
+    real, classified answer -- a 404/405/unclassified response is exactly
+    as much a defect as a `SurfaceAbsent` claim from an adapter that never
+    presented the request (design §8.4). Vacuously green as of WP-1: no
+    adapter yet declares `audit_query` enabled/partial."""
+    _, status = _audit_query_declaration(adapter)
+    if status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    try:
+        result = adapter.audit_query(control_actor, {"limit": 1})
+    except ConformanceDenial as exc:
+        assert exc.code != UNCLASSIFIED, (
+            f"{adapter.name}: declares audit_query {status!r} but a real request answered UNCLASSIFIED "
+            "(a 404/405/unrecognized response) instead of a genuine contract-code denial"
+        )
+        return
+    assert isinstance(result, Mapping) and "events" in result
+
+
+# --- vacuity guards -------------------------------------------------------
+
+
+def test_c09_declared_capability_implies_provided_branch(adapter):
+    """Individual guard (work order WP-1 supplementary ruling 2). Always
+    active -- no `xfail`. Vacuously green as of WP-1 (no adapter declares
+    `contract_version >= 1.4.0` yet); load-bearing the instant one does."""
+    contract_version, status = _audit_query_declaration(adapter)
+    if _semver_tuple(contract_version) < (1, 4, 0) or status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    form, outcome = _dispatch_audit_query(adapter, control_actor, {"limit": 1})
+    assert form == "provided", (
+        f"{adapter.name}: declares contract_version {contract_version!r} (>= 1.4.0) and audit_query "
+        f"status {status!r}, but a real control-credential audit_query request did not take the PROVIDED "
+        f"branch (got {form!r}: {outcome!r})"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="no peer declares 1.4.0 yet; un-xfailed by the last flip WP",
+)
+def test_c09_every_control_surface_adapter_takes_the_provided_branch():
+    """Whole-registry guard (work order WP-1 supplementary ruling 2 /
+    supervisor ruling v1.2-1): EVERY registered adapter with a control
+    surface (`control_plane` status `enabled`/`partial`) must take the
+    PROVIDED audit_query branch -- not "at least one", not "one per
+    form". Registered `xfail(strict=True)` in this WP because it is false
+    today (every adapter's `audit_query` is unavailable); `strict=True`
+    means an unexpected green here fails loudly instead of passing
+    silently, so a premature partial flip (or a weakened guard) cannot
+    hide. Removing this `xfail` is WP-3(b)'s own responsibility, in the
+    SAME commit as that flip (work order §2.1 / §6 item 8b) -- never
+    earlier, never a separate later commit.
+
+    The target set is derived mechanically from the live registry
+    (`registered_adapters()` + each adapter's own real `control_plane`
+    status), never a hardcoded adapter-name list -- a future peer joining
+    the registry with a control surface is picked up automatically rather
+    than silently exempted.
+    """
+    control_surface_adapters: list[str] = []
+    non_provided_reasons: list[str] = []
+    for name, adapter_obj in registered_adapters().items():
+        if _control_plane_status(adapter_obj) not in ("enabled", "partial"):
+            continue
+        control_surface_adapters.append(name)
+        control_actor = adapter_obj.control_credential()
+        form, outcome = None, None
+        try:
+            form, outcome = _dispatch_audit_query(adapter_obj, control_actor, {"limit": 1})
+        except AssertionError as exc:
+            non_provided_reasons.append(f"{name}: {exc}")
+            continue
+        if form != "provided":
+            non_provided_reasons.append(f"{name}: took the {form!r} branch ({outcome!r})")
+
+    assert control_surface_adapters, (
+        "no registered adapter has a control surface at all -- this guard is vacuous by construction, "
+        "which is itself a finding (every currently-registered adapter is expected to declare "
+        "control_plane enabled as of phase 3.5)"
+    )
+    assert not non_provided_reasons, (
+        "not every control-surface-bearing registered adapter took the PROVIDED audit_query branch: "
+        f"{non_provided_reasons!r} (control-surface adapters checked: {control_surface_adapters!r})"
+    )

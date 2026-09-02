@@ -719,7 +719,7 @@ control HTTP app (_ROUTES: r2db control_http.py L337-347 / MitateDB control_http
 
 `conformance-tests/adapter.py` に以下を加える (port 版数の繰り上げを伴う。番号は実装裁量):
 
-- `attempt_audit_query(actor, request) -> Mapping` — control/audit credential で `audit_query` に到達し、生の `AuditResult` 文書を返す。到達面が無い peer は `SurfaceAbsent` を送出する。
+- `audit_query(actor, request) -> Mapping` — 正本名は `audit_query` (監督裁定4。旧稿の `attempt_audit_query` は誤記であり本節で訂正する)。control/audit credential で `audit_query` に到達し、生の `AuditResult` 文書を返す。到達面が無い peer、または宣言が unavailable の peer (WP-1 補則1の declare-first) は `SurfaceAbsent` を送出する。
 - application credential での `audit_query` 拒否を観測する経路 (既存の denial 表現 `ConformanceDenial` を使う)。
 - `audit_visibility_lag_ms()` (レビュー M-11) — peer が宣言している visibility lag を port から読む。テストはこの値を待つ。**固定 sleep をテストに書かせないための port である** — 実 PG 環境の負荷で sleep が足りずに時々赤くなる (完了ゲート suite の偽の赤を悪化させる) 事態を構造的に防ぐ。
 - `flush_audit_buffer()` (レビュー M-11) — buffer の同期 flush を peer 自身に実行させる adapter 特権 hook。`control_audit_events()` と同格の位置づけ (adapter が組み立てるのではなく peer に実行させる) であり、これが無いとバッファ類 event の可視性が時間依存になる。
@@ -730,10 +730,13 @@ control HTTP app (_ROUTES: r2db control_http.py L337-347 / MitateDB control_http
 
 ### 8.4 SurfaceAbsent 分岐
 
-**`SurfaceAbsent` は control surface そのものが無い adapter に限定する** (レビュー M-4)。`SurfaceAbsent` を送出する adapter は C-14 が確立した形式に従い、`surface` と `forbidden_parameters` を伴わせる — `conformance-tests/absence.py` の `assert_control_operation_absent_or_uniformly_refused` が主張の真偽を検査する。**「control surface はあるが AUDIT DSN 未設定」は `SurfaceAbsent` ではなく `ConformanceDenial` (`CAPABILITY_UNSUPPORTED`) 側に落ちる** — ルートは常に登録されており、実際にリクエストを受けて一様に拒否するからである (D-5)。MitateDB の in-process adapter は control surface が無ければ `SurfaceAbsent` のままでよい。
+**`SurfaceAbsent` は control surface そのものが無い adapter に限定する** (レビュー M-4)。`SurfaceAbsent` を送出する adapter は C-14 が確立した形式に従い、`surface` と `forbidden_parameters` を伴わせる — `conformance-tests/absence.py` の `assert_control_operation_absent_or_uniformly_refused` が主張の真偽を検査する。~~**「control surface はあるが AUDIT DSN 未設定」は `SurfaceAbsent` ではなく `ConformanceDenial` (`CAPABILITY_UNSUPPORTED`) 側に落ちる** — ルートは常に登録されており、実際にリクエストを受けて一様に拒否するからである (D-5)。~~ MitateDB の in-process adapter は control surface が無ければ `SurfaceAbsent` のままでよい。
+
+**訂正 (2026-09-02、WP-1 実装時の監督裁定により上書き — 作業指示書補則1 = 監督裁定2)**: 上記取消線の文は本節の v1.4 起草時点の記述であり、**出荷された挙動と反対である**。実際に出荷された declare-first 規律では、`audit_query` が未宣言または `unavailable` (AUDIT DSN 未設定を含む) の場合、port の `audit_query()`/`flush_audit_buffer()`/`audit_visibility_lag_ms()` は要求を送らずに **`SurfaceAbsent`** を送出する — 「control surface はあるが AUDIT DSN 未設定」であってもポート層は宣言のみを見て判断し、実際のルートには到達しない。ルートが常に登録されており実際にリクエストを受ければ一様に `CAPABILITY_UNSUPPORTED` で拒否する、という D-5 の主張自体は実装として真のままだが、それは port を介さず直接 HTTP を叩いた場合の話であり、**共通 conformance port からの観測としては到達しない** (`SurfaceAbsent` の意味拡張、本節末尾および `docs/design/CONFORMANCE_ADAPTER_V1.md` §18.3)。`conformance-tests/absence.py` の `assert_control_operation_absent_or_uniformly_refused` (2形式モデル) は `audit_query` には適用されない — 同モジュールの docstring に明記済み。
 
 注意点 2 つ:
-- **vacuity guard を強化する (レビュー M-9)**。「1 本でも PROVIDED なら緑」では、in-process 2 本が恒久的に absent へ落ちても検出できない。guard は **in-process 形態から 1 本以上、HTTP 形態から 1 本以上**が PROVIDED 分岐を取ることを要求する。これが D-10 の「in-memory 側にも読み手を必須化する」判断と対になっている (in-memory reader が無ければ in-process は絶対に PROVIDED になれない)。`test_c16_cross_entity_atomicity.py` の `test_at_least_one_available_adapter_can_construct_the_v3_boundary_vector` を形態別に分けた形。
+- **vacuity guard を強化する (レビュー M-9)**。~~「1 本でも PROVIDED なら緑」では、in-process 2 本が恒久的に absent へ落ちても検出できない。guard は **in-process 形態から 1 本以上、HTTP 形態から 1 本以上**が PROVIDED 分岐を取ることを要求する。これが D-10 の「in-memory 側にも読み手を必須化する」判断と対になっている (in-memory reader が無ければ in-process は絶対に PROVIDED になれない)。`test_c16_cross_entity_atomicity.py` の `test_at_least_one_available_adapter_can_construct_the_v3_boundary_vector` を形態別に分けた形。~~
+  **訂正 (2026-09-02、WP-1 実装時の監督裁定により上書き — 作業指示書補則2 = 監督裁定 v1.2-1)**: 上記取消線の「形態ごとに1本以上」案は、実際に出荷された guard 要求よりも弱い。出荷された全体 guard `test_c09_every_control_surface_adapter_takes_the_provided_branch` (`conformance-tests/test_c09_audit_evidence.py`) は「control surface を持つ登録済み adapter の**全数**が PROVIDED 分岐を取ること」を要求する (`registered_adapters()` と各 adapter 自身の実 `control_plane` status から機械導出、ハードコード列挙なし)。WP-1 時点では全 adapter が `audit_query: unavailable` のため常に赤であり、`@pytest.mark.xfail(strict=True, reason="no peer declares 1.4.0 yet; un-xfailed by the last flip WP")` を付けて登録済み — xfail 解除は最後の flip WP (WP-3(b)) の責務。個別 guard `test_c09_declared_capability_implies_provided_branch` は xfail なしで常時有効。
 - **form-(b) の真正性限界は本条件にも及ぶ**。`ConformanceDenial` は `SurfaceAbsent` と違って provenance の証拠を持たないため、present-denial 分岐は「adapter が実際にリクエストを送ったか」を port レベルで判別できない。これは C-06/C-14/C-16/C-17 で既に開示済みの同一の限界であり、本フェーズで新たな検出ハックを発明しない (既存の wire-level positive-existence check の台帳項目が本件も覆う)。
 
 ---

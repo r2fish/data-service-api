@@ -91,6 +91,7 @@ from adapter import (  # noqa: E402
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
+    SurfaceAbsent,
     TamperVector,
     resolve_valid_confirmation,
 )
@@ -1102,6 +1103,82 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # (R-4) -- reads with `provision_dsn` (the schema owner), the same
         # separate reader R-8 calls for.
         return read_control_audit_events(self._platform.provision_dsn, self._platform.schema)
+
+    # ------------------------------------------------------------------
+    # audit_query surface (port v1.8, phase 4 WP-1). Real HTTP POST /v1/
+    # audit/query -- against the CONTROL client (`self._control_client`),
+    # never the data-plane client -- once a peer declares audit_query
+    # enabled/partial. Every one of the three methods below always takes
+    # the `SurfaceAbsent` declare-first branch as of this WP (this peer's
+    # `control_capabilities()` always declares `audit_query: {"status":
+    # "unavailable"}` until WP-3's flip) -- written against the real,
+    # eventual dispatch shape so WP-3's flip needs no further port-adapter
+    # restructuring here.
+    # ------------------------------------------------------------------
+
+    def _audit_query_status(self) -> str:
+        # Reads via this adapter's OWN privileged control credential
+        # (`control_credential()`), never via the `actor` a caller of
+        # `audit_query` supplies -- see conformance_adapter_r2db_http.py's
+        # identical method for the full C-09-vector-3 rationale.
+        control_actor = self.control_credential()
+        document = self.control_capabilities(control_actor)
+        return document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
+
+    def _audit_surface_absent(self, operation: str, reason: str) -> SurfaceAbsent:
+        return SurfaceAbsent(
+            self.name, operation, reason,
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["audit"],
+        )
+
+    # port v1.8
+    def audit_query(self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_query",
+                "control_capabilities().capabilities.audit_query.status is not enabled/partial -- WP-1 "
+                "declare-first discipline does not send an HTTP request to the real /v1/audit/query alias "
+                "(design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.4's extended SurfaceAbsent meaning)",
+            )
+        # design R1 / work order WP-1 §"変更対象": exercises the /v1/
+        # audit/query alias against the control base URL, matching
+        # conformance_adapter_r2db_http.py's own identical choice.
+        return self._control_send("POST", "/v1/audit/query", actor, json_body=dict(request))
+
+    # port v1.8
+    def flush_audit_buffer(self) -> None:
+        if self._audit_query_status() not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "flush_audit_buffer",
+                "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
+                "deployment's own declared posture",
+            )
+        # Unreachable as of phase 4 WP-1 -- see conformance_adapter_r2db.py's
+        # identical method for why this deliberately does not presume a
+        # specific WP-3 buffer-flush mechanism shape.
+        raise NotImplementedError(
+            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
+            "has no real implementation yet (WP-3 scope) -- unreachable as of phase 4 WP-1"
+        )
+
+    # port v1.8
+    def audit_visibility_lag_ms(self) -> int:
+        control_actor = self.control_credential()
+        document = self.control_capabilities(control_actor)
+        audit_query_capability = document.get("capabilities", {}).get("audit_query", {})
+        if audit_query_capability.get("status") not in ("enabled", "partial"):
+            raise self._audit_surface_absent(
+                "audit_visibility_lag_ms",
+                "audit_query is not declared enabled/partial -- there is no real declared visibility_lag_ms "
+                "to read on this deployment's own declared posture",
+            )
+        lag_ms = audit_query_capability.get("visibility_lag_ms")
+        assert isinstance(lag_ms, int) and lag_ms >= 0, (
+            f"{self.name}: audit_query is declared enabled/partial but visibility_lag_ms is not a real "
+            f"non-negative int -- got {lag_ms!r}"
+        )
+        return lag_ms
 
     # ------------------------------------------------------------------
     # application plane
