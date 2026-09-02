@@ -52,6 +52,7 @@ import uuid
 import psycopg
 from psycopg import sql
 
+from .application_audit import _apply_session_timeouts
 from .control_audit import ControlAuditSink, insert_control_audit_row
 from .control_auth import ControlCredentialStore, ControlPrincipal, _InMemoryWork
 from .errors import (AuthenticationError, AuthenticationRequiredError,
@@ -771,13 +772,28 @@ class InMemoryControlBackend:
 
 class PostgresControlBackend:
     def __init__(self, *, applications: PostgresApplicationRegistry, credentials: PostgresCredentialRegistry,
-                 control_credentials, audit_schema: str, dsn: str, connect_timeout: int = 5) -> None:
+                 control_credentials, audit_schema: str, dsn: str, connect_timeout: int = 5,
+                 audit_statement_timeout_ms: "Optional[int]" = None,
+                 audit_idle_in_transaction_session_timeout_ms: "Optional[int]" = None) -> None:
         self._applications = applications
         self._credentials = credentials
         self._control_credentials = control_credentials
         self._audit_schema = audit_schema
         self._dsn = dsn
         self._connect_timeout = connect_timeout
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        # D-6/N-3, work order WP-3(a)): the SAME two SESSION-level
+        # timeouts `application_audit.PostgresApplicationAuditSink`'s own
+        # writer connections carry -- this connection is the ONE that
+        # writes `control_audit` (`insert_control_audit_row`, called
+        # inside `unit_of_work` below, in the SAME transaction as every
+        # control-plane state change). D-6's derived `visibility_lag_ms`
+        # (a WP-3(b) declaration concern) depends on BOTH processes
+        # agreeing on these two values -- `None` (the default) leaves the
+        # server's own default untouched, matching every pre-Phase-4
+        # caller of this constructor.
+        self._audit_statement_timeout_ms = audit_statement_timeout_ms
+        self._audit_idle_in_transaction_session_timeout_ms = audit_idle_in_transaction_session_timeout_ms
 
     @property
     def control_credential_store(self):
@@ -787,6 +803,9 @@ class PostgresControlBackend:
     def unit_of_work(self):
         try:
             conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
+            _apply_session_timeouts(
+                conn, self._audit_statement_timeout_ms, self._audit_idle_in_transaction_session_timeout_ms,
+            )
         except psycopg.Error as exc:
             raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         try:

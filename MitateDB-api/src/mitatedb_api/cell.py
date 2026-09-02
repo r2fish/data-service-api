@@ -26,12 +26,13 @@ import json
 from threading import RLock
 
 from .audit import AuditSink
+from .audit_dispatch import AuditRouter
 from .auth import Principal, Role
 from .backend import SQL_OPERATOR_TOKENS
 from .backend_sqlite import SQLiteBackend
 from .config import FoundationConfig
-from .errors import (AuthorizationError, CapabilityError, ConflictError,
-                     DestructiveConfirmationRequired, NotFoundError,
+from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
+                     ConflictError, DestructiveConfirmationRequired, NotFoundError,
                      ResourceLimitError, ValidationError)
 from .identifiers import validate_identifier
 
@@ -282,13 +283,25 @@ class ApplicationCell:
     raw database connection to Application code.
     """
 
-    def __init__(self, application_id, config=None, audit=None, guard=None, backend=None):
+    def __init__(self, application_id, config=None, audit=None, guard=None, backend=None,
+                 audit_router=None):
         validate_identifier(application_id, "application_id")
         self.application_id = application_id
         self.config = config or FoundationConfig()
         self.__record = (audit or AuditSink()).record
         self.__guard = guard
         self._backend = backend if backend is not None else SQLiteBackend()
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        # D-1/D-10): the durable-audit dispatch router -- a caller-shared
+        # `audit_dispatch.AuditRouter` (`main.build_app` constructs exactly
+        # ONE per process and hands it to every `ApplicationCell` AND
+        # every credential store it builds, so denial coalescing and the
+        # buffer are shared process-wide, not duplicated per cell) or a
+        # private default (in-memory, unshared -- every pre-Phase-4 caller
+        # of this constructor that does not pass this parameter gets a
+        # working, isolated durable trail nobody else observes, exactly
+        # like `audit=None` already defaults to a private `AuditSink()`).
+        self.__audit_router = audit_router if audit_router is not None else AuditRouter()
         # Back-compat surface for `conformance/conformance_adapter_
         # mitatedb.py::entities()`'s own pre-existing direct `cell._db.
         # execute(...)` reach-around (predates this WP's seam refactor;
@@ -300,6 +313,49 @@ class ApplicationCell:
         # backend.
         self._db = getattr(self._backend, "raw_connection", None)
         self._lock = RLock()
+
+    def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
+        """Phase 4 (design D-2): builds the `audit_hook.ApplicationAuditHook`
+        a backend method (or `transact` below) calls itself, immediately
+        before its own commit point. Every field the durable row needs is
+        already resolved here -- the backend/batch loop supplies none of
+        it, only the fail-closed/buffer-class decision itself."""
+        return self.__audit_router.make_pre_commit_hook(
+            event_class=event_class, request_id=request_id, application_id=self.application_id,
+            actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
+            role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
+            target_kind=target_kind, target_id=target_id,
+        )
+
+    def _route_delete_confirmation_denial(self, principal, collection, *, request_id=None):
+        """Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
+        one of D-3's own durable-range denial codes -- routed (coalesced)
+        through the same `audit_dispatch.AuditRouter` every other durable
+        denial uses. Called from both `delete`'s own dedicated call site
+        and `transact`'s pass-1 planning loop (`_plan_operation`'s delete
+        branch raises the identical `errors.DestructiveConfirmationRequired`
+        through the SAME `_validate_delete_confirmation` choke -- there is
+        no second copy of this dispatch)."""
+        self.__audit_router.route_denial(
+            reason_code="DESTRUCTIVE_CONFIRMATION_REQUIRED", event_class="destructive_data_operation",
+            request_id=request_id, application_id=self.application_id, actor_type="application_credential",
+            actor_id=getattr(principal, "credential_id", None),
+            role=getattr(getattr(principal, "role", None), "value", None), operation="delete",
+            target_kind="collection", target_id=collection,
+        )
+
+    def _push_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
+        """Phase 4 (design D-4/P4-D5): buffer-class emit for an ordinary
+        (successful) data operation -- query/insert/update. Unlike
+        r2db-api, this peer recorded NONE of these before Phase 4 (design
+        §7.3: "現状は未記録"); this is the new emit site P4-D5 requires so
+        both peers record the identical event stream."""
+        self.__audit_router.push_buffer_event(
+            event_class="data_operation", request_id=request_id, application_id=self.application_id,
+            actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
+            role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
+            target_kind="collection", target_id=target_id,
+        )
 
     def _identifier(self, value, label="identifier"):
         """The one place BOTH stages of identifier validation are always
@@ -313,8 +369,8 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
-    def create_collection(self, principal, name, fields, destructive=False):
-        self._require_developer(principal)
+    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None):
+        self._require_developer(principal, request_id=request_id)
         name = self._identifier(name, "collection")
         if not isinstance(fields, dict) or not fields:
             raise ValidationError("fields must be a non-empty object")
@@ -333,12 +389,20 @@ class ApplicationCell:
             if field_type not in _FIELD_TYPE_VOCABULARY:
                 raise ValidationError("unsupported field type")
             validated_fields[field] = field_type
+        # Phase 4 (design D-2 item 2): every schema operation is
+        # unconditionally fail-closed class -- the hook's own `pre_commit()`
+        # is called by `self._backend.create_collection` itself, as the
+        # last thing it does before its own commit point.
+        hook = self._make_audit_hook(
+            principal, event_class="schema_change", operation="create_collection",
+            target_kind="collection", target_id=name, request_id=request_id,
+        )
         with self._lock:
-            self._backend.create_collection(name, validated_fields)
+            self._backend.create_collection(name, validated_fields, audit_hook=hook)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="create_collection")
 
-    def create_entity(self, principal, name, fields=None):
+    def create_entity(self, principal, name, fields=None, *, request_id=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -359,9 +423,9 @@ class ApplicationCell:
         """
         if fields is None:
             fields = {"id": "integer"}
-        return self.create_collection(principal, name, fields)
+        return self.create_collection(principal, name, fields, request_id=request_id)
 
-    def add_field(self, principal, collection, field, field_type):
+    def add_field(self, principal, collection, field, field_type, *, request_id=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -370,7 +434,7 @@ class ApplicationCell:
         CONSEQUENCE` for why this is also what makes a schema-revision
         fingerprint necessary in the `delete` confirmation phrase.
         """
-        self._require_developer(principal)
+        self._require_developer(principal, request_id=request_id)
         collection = self._identifier(collection, "collection")
         field = self._identifier(field, "field")
         if field_type not in _FIELD_TYPE_VOCABULARY:
@@ -386,12 +450,18 @@ class ApplicationCell:
         current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
         if len(current) >= self.config.max_fields:
             raise ValidationError("field limit exceeded")
+        # Phase 4 (design D-2 item 2): same unconditional fail-closed
+        # pre-commit hook as `create_collection` above.
+        hook = self._make_audit_hook(
+            principal, event_class="schema_change", operation="add_field",
+            target_kind="collection", target_id=collection, request_id=request_id,
+        )
         with self._lock:
-            self._backend.add_field(collection, field, field_type)  # ConflictError if `field` already exists
+            self._backend.add_field(collection, field, field_type, audit_hook=hook)  # ConflictError if `field` already exists
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
 
-    def schema_revision(self, principal):
+    def schema_revision(self, principal, *, request_id=None):
         """m-2 (independent WP-3 review): the SAME monotonically-increasing
         counter `_validate_delete_confirmation` already reads to fingerprint
         a delete confirmation phrase (`_delete_confirmation_phrase`), now
@@ -403,19 +473,24 @@ class ApplicationCell:
         `SchemaOperationResult.revision` field implies a real, observable
         value, and always returning the same literal after every schema
         change is not honest about what the peer just did)."""
-        self._require_data(principal)
+        self._require_data(principal, request_id=request_id)
         with self._lock:
             return self._backend.schema_revision()
 
-    def insert(self, principal, collection, values):
-        self._require_data(principal)
+    def insert(self, principal, collection, values, *, request_id=None):
+        self._require_data(principal, request_id=request_id)
         collection, fields, params = self._prepare_values(collection, values)
         with self._lock:
-            return self._backend.insert(collection, fields, params)
+            result = self._backend.insert(collection, fields, params)
+        # Phase 4 (design D-4/P4-D5): buffer-class success emit -- a NEW
+        # emit site (this peer recorded no query/insert/update success
+        # before Phase 4).
+        self._push_data_operation_event(principal, operation="insert", target_id=collection, request_id=request_id)
+        return result
 
     def read(self, principal, collection, fields=None, filters=None,
-             order_by=None, limit=None):
-        self._require_data(principal)
+             order_by=None, limit=None, *, request_id=None):
+        self._require_data(principal, request_id=request_id)
         collection = self._identifier(collection, "collection")
         selected = self._select_fields(collection, fields)
         bound_filters = self._bind_filters(collection, filters)
@@ -425,7 +500,14 @@ class ApplicationCell:
         if not isinstance(limit, int) or limit <= 0 or limit > self.config.max_result_rows:
             raise ResourceLimitError("result limit exceeded", limit_class="result_items")
         with self._lock:
-            return self._backend.read(collection, selected, bound_filters, order, limit)
+            rows = self._backend.read(collection, selected, bound_filters, order, limit)
+        # Phase 4 (design D-4/P4-D5): buffer-class success emit -- "query"
+        # is this peer's own contract-vocabulary operation name for this
+        # method (`read`, internally), matching r2db-api's identical
+        # `operation="query"` durable-row value for the same conceptual
+        # event.
+        self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
+        return rows
 
     def _validate_update(self, collection, values, filters):
         """m-1 (independent review, P3-D2 follow-up): the single choke
@@ -453,11 +535,14 @@ class ApplicationCell:
         bound_filters = self._bind_filters(collection, filters)
         return collection, fields, values_params, bound_filters
 
-    def update(self, principal, collection, values, filters):
-        self._require_data(principal)
+    def update(self, principal, collection, values, filters, *, request_id=None):
+        self._require_data(principal, request_id=request_id)
         collection, fields, values_params, bound_filters = self._validate_update(collection, values, filters)
         with self._lock:
-            return self._backend.update(collection, fields, values_params, bound_filters)
+            result = self._backend.update(collection, fields, values_params, bound_filters)
+        # Phase 4 (design D-4/P4-D5): buffer-class success emit.
+        self._push_data_operation_event(principal, operation="update", target_id=collection, request_id=request_id)
+        return result
 
     def _validate_delete_confirmation(self, collection, filters, destructive, confirm):
         """P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
@@ -531,7 +616,7 @@ class ApplicationCell:
             )
         return collection, bound_filters
 
-    def delete(self, principal, collection, filters, *, destructive=False, confirm=None):
+    def delete(self, principal, collection, filters, *, destructive=False, confirm=None, request_id=None):
         """Contract `destructive_confirmation`: `delete` is this peer's
         only destructive operation (see the module-level comment above
         `_DELETE_CONSEQUENCE` for why `drop_entity`/`drop_index`/the
@@ -540,11 +625,26 @@ class ApplicationCell:
         for the actual confirmation semantics -- shared verbatim with
         `transact()`'s own batch-embedded delete (P3-D2, WP-1.5).
         """
-        self._require_data(principal)
-        collection, bound_filters = self._validate_delete_confirmation(
-            collection, filters, destructive, confirm)
+        self._require_data(principal, request_id=request_id)
+        try:
+            collection, bound_filters = self._validate_delete_confirmation(
+                collection, filters, destructive, confirm)
+        except DestructiveConfirmationRequired:
+            # Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
+            # a durable-range denial code -- routed (coalesced) before
+            # re-raising, unchanged, to the caller.
+            self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+            raise
+        # Phase 4 (design D-2 item 1): delete is fail-closed class only
+        # once it has passed the confirmation choke (this point) -- the
+        # hook's own `pre_commit()` is called by `self._backend.delete`
+        # itself, as the last thing it does before its own commit point.
+        hook = self._make_audit_hook(
+            principal, event_class="destructive_data_operation", operation="delete",
+            target_kind="collection", target_id=collection, request_id=request_id,
+        )
         with self._lock:
-            result = self._backend.delete(collection, bound_filters)
+            result = self._backend.delete(collection, bound_filters, audit_hook=hook)
         self.__record("destructive_data_operation", self.application_id,
                       principal.credential_id, detail="delete_rows")
         return result
@@ -666,7 +766,7 @@ class ApplicationCell:
                     names.add(name)
         return names
 
-    def transact(self, principal, operations):
+    def transact(self, principal, operations, *, request_id=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
         same batch -- converging this entry point's real behavior onto
@@ -713,7 +813,7 @@ class ApplicationCell:
         `..._in_transaction`/`begin` calls happen when a later operation
         fails validation).
         """
-        self._require_data(principal)
+        self._require_data(principal, request_id=request_id)
         if not isinstance(operations, list) or not operations:
             raise ValidationError("operations must be a non-empty list")
         if len(operations) > self.config.max_batch_items:
@@ -724,7 +824,34 @@ class ApplicationCell:
         # Pass 1: validate every operation, across every entity, before
         # any execution begins (P35-D9/P35-D10 above). Nothing below this
         # line has touched `self._backend`'s own transaction state yet.
-        plan = [self._plan_operation(operation) for operation in operations]
+        # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
+        # raise `DestructiveConfirmationRequired` (via `_validate_delete_
+        # confirmation`, the same choke `delete()` uses) -- routed
+        # (coalesced) here, at the one call site with `principal` in
+        # scope, mirroring `delete()`'s own identical wrapping.
+        plan = []
+        for operation in operations:
+            try:
+                plan.append(self._plan_operation(operation))
+            except DestructiveConfirmationRequired:
+                collection = operation.get("collection") if isinstance(operation, dict) else None
+                self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+                raise
+
+        # Phase 4 (design D-2's normative rule): the confirmation choke,
+        # not `event_class`, is the fail-closed/buffer-class dispatch
+        # point -- a batch containing at least one "delete" kind is
+        # fail-closed class for the WHOLE batch (D-10: at most one durable
+        # row per operation, so the batch gets exactly one pre-commit row,
+        # never one per individual delete inside it); a batch with none is
+        # buffer-class (P4-D5's new emit site).
+        destructive = any(kind == "delete" for kind, _ in plan)
+        hook = None
+        if destructive:
+            hook = self._make_audit_hook(
+                principal, event_class="destructive_data_operation", operation="transact",
+                target_kind="collection", target_id=None, request_id=request_id,
+            )
 
         # Pass 2: execute the fully-bound plan inside the begin/commit/
         # rollback envelope -- unchanged from before this WP other than
@@ -732,15 +859,16 @@ class ApplicationCell:
         # from the raw operation dicts inline.
         with self._lock:
             self._backend.begin()
-            # A batch-embedded delete's own `destructive_data_operation`
-            # audit record must never claim a write that a LATER operation
-            # in the same batch caused to roll back -- so recording is
-            # deferred to these no-argument callables, drained only after
-            # `self._backend.commit()` below has actually succeeded (the
-            # dedicated `delete()` method above has no such concern: it
-            # owns its own, single-operation transaction end-to-end, so it
-            # records immediately after its own successful backend call).
-            pending_audit = []
+            # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
+            # "the durable pre-commit write itself failed" (nothing was
+            # committed to correct -- the batch is simply refused) from
+            # "the durable write succeeded but this backend's own commit
+            # then failed" (D-2's error-row case) -- mirrors `backend_
+            # postgres.PostgresBackend`'s identical single-operation
+            # pattern, here at the batch level since `transact`'s own
+            # begin/commit/rollback envelope lives in `cell.py`, not
+            # either backend module.
+            hook_fired = False
             try:
                 results = []
                 for kind, payload in plan:
@@ -754,17 +882,20 @@ class ApplicationCell:
                     else:  # "delete"
                         collection, bound_filters = payload
                         results.append(self._backend.delete_in_transaction(collection, bound_filters))
-                        # Deferred audit (see `pending_audit`'s own comment
-                        # above): appended only once `delete_in_transaction`
-                        # has returned successfully for THIS operation --
-                        # `principal` is this method's own parameter, still
-                        # in scope here, so no extra plumbing is needed to
-                        # capture it.
-                        pending_audit.append(lambda: self.__record(
-                            "destructive_data_operation", self.application_id,
-                            principal.credential_id, detail="delete_rows"))
+                # Phase 4 (design D-2/D-10): the pre-commit hook is the
+                # LAST thing this method does before its own commit point
+                # -- a raise here (an `errors.AuditSinkUnavailable`) is
+                # caught by the `except Exception` below, which rolls
+                # back exactly like any other mid-batch failure (fail-
+                # closed by construction). The pre-existing 6-field-sink
+                # `destructive_data_operation` record (below, post-commit)
+                # is unaffected either way (D-10: that sink's own
+                # behaviour is completely unchanged by this WP).
+                if destructive and hook is not None:
+                    hook.pre_commit()
+                    hook_fired = True
                 self._backend.commit()
-            except Exception:
+            except Exception as exc:
                 # Independent review B-2 (WP-2 follow-up -- the
                 # atomicity hole, largest safety fix of that review):
                 # rollback is now UNCONDITIONAL. The pre-fix `except`
@@ -818,13 +949,44 @@ class ApplicationCell:
                 # B-2(ii)) rolls back and re-raises unclassified, exactly
                 # as before -- this method itself never reclassifies an
                 # exception type, only guarantees rollback runs first.
-                # `pending_audit` is simply discarded here (never drained)
-                # -- correct, since nothing in it actually committed,
-                # whatever the exception type.
                 self._backend.rollback()
+                # Phase 4 (design D-2, error-row rule): `hook_fired` is
+                # only `True` once the durable pre-commit row has already
+                # committed on its own (separate) connection -- so an
+                # exception reaching here after that point can only be
+                # this method's own `self._backend.commit()` failing.
+                # Record the durable `outcome="error"` row for the same
+                # operation's fields (still fail-closed: `commit_failed()`
+                # never raises -- see `audit_hook.py` -- but the response
+                # is `AuditSinkUnavailable` regardless of whether that
+                # write itself succeeds).
+                if hook_fired:
+                    hook.commit_failed()
+                    raise AuditSinkUnavailable(
+                        "the durable audit sink recorded this batch but the data commit failed"
+                    ) from exc
                 raise
-            for record in pending_audit:
-                record()
+            # Phase 4 (design D-10): the pre-existing 6-field-sink record
+            # is unconditional and unchanged -- it fires for a
+            # batch-embedded delete exactly as it did before this WP,
+            # now safely AFTER `self._backend.commit()` has actually
+            # succeeded (no `pending_audit` deferral needed any more: the
+            # hook above already gave the durable trail its own, separate,
+            # PRE-commit guarantee, so this post-commit legacy record
+            # never needs to claim a write a later operation rolled back
+            # -- if we are here at all, `self._backend.commit()` already
+            # succeeded for the whole batch).
+            if destructive:
+                self.__record("destructive_data_operation", self.application_id,
+                              principal.credential_id, detail="delete_rows")
+            else:
+                # Phase 4 (design D-4/P4-D5): a non-destructive batch
+                # (insert/update only) is buffer-class -- exactly ONE
+                # `data_operation` event for the whole batch (D-10: at
+                # most one durable row per operation), mirroring
+                # r2db-api's own identical "one row per mutate batch"
+                # rule.
+                self._push_data_operation_event(principal, operation="transact", target_id=None, request_id=request_id)
             return results
 
     def _select_fields(self, collection, requested):
@@ -977,20 +1139,68 @@ class ApplicationCell:
             return value
         raise ValidationError("unsupported value")
 
-    def _require_data(self, principal):
+    def _require_data(self, principal, *, request_id=None):
         if self.__guard is not None:
-            self.__guard(principal)
+            # Review M-2 (major, supervisor ruling 2026-09-03, "完全案"):
+            # `guard` is always `auth.CredentialStore.assert_active` or
+            # `credential_store_postgres.PostgresCredentialStore.
+            # assert_active` in every real construction of this class
+            # (`main.py`/`service.py` -- the only two call sites that ever
+            # pass a non-`None` guard, verified by source inspection),
+            # both of which accept this same `request_id` keyword after
+            # this WP's changes -- so a session re-check failure's own
+            # durable denial row carries the SAME request_id as the
+            # operation that triggered the re-check.
+            self.__guard(principal, request_id=request_id)
         if not isinstance(principal, Principal) or principal.application_id != self.application_id:
+            # Review M-3 (major, supervisor ruling 2026-09-03): this is
+            # SI-00's own application-boundary check ("this credential's
+            # own `application_id` does not match the cell it is being
+            # used against") -- the single most evidence-worthy `FORBIDDEN`
+            # this peer can produce, and previously recorded on NO audit
+            # surface at all (neither the 6-field sink nor the durable
+            # one). `FORBIDDEN` is in D-3's own inclusion table
+            # unconditionally; routed (coalesced) here, the one choke
+            # point every public data-operation method (`insert`/`read`/
+            # `update`/`delete`/`transact`/`schema_revision`, and `_require_
+            # developer` itself) already passes through. (Scoped to the
+            # durable D-3 path only, per review M-3's own literal
+            # instruction -- the pre-existing 6-field sink's own
+            # `_SAFE_DETAILS` vocabulary has no accurate label for a
+            # generic access denial, so this does not invent one there.)
+            self.__audit_router.route_denial(
+                reason_code="FORBIDDEN", event_class="authorization_denied", request_id=request_id,
+                application_id=self.application_id, actor_type="application_credential",
+                actor_id=getattr(principal, "credential_id", None), role=None, operation="access",
+                target_kind="collection", target_id=None,
+            )
             raise AuthorizationError("application scope denied")
         if principal.role not in (Role.RUNTIME, Role.DEVELOPER):
+            self.__audit_router.route_denial(
+                reason_code="FORBIDDEN", event_class="authorization_denied", request_id=request_id,
+                application_id=self.application_id, actor_type="application_credential",
+                actor_id=principal.credential_id, role=None, operation="access",
+                target_kind="collection", target_id=None,
+            )
             raise AuthorizationError("role denied")
 
-    def _require_developer(self, principal):
-        self._require_data(principal)
+    def _require_developer(self, principal, *, request_id=None):
+        self._require_data(principal, request_id=request_id)
         if principal.role != Role.DEVELOPER:
             self.__record("authorization_denied", self.application_id,
                           getattr(principal, "credential_id", None),
                           outcome="denied", detail="schema_change")
+            # Phase 4 (design D-3): `FORBIDDEN` is a durable-range denial
+            # code -- routed (coalesced) alongside the pre-existing
+            # 6-field sink append above, unconditionally (D-10: this
+            # sink's own behaviour is completely unaffected).
+            self.__audit_router.route_denial(
+                reason_code="FORBIDDEN", event_class="authorization_denied", request_id=request_id,
+                application_id=self.application_id, actor_type="application_credential",
+                actor_id=getattr(principal, "credential_id", None),
+                role=getattr(getattr(principal, "role", None), "value", None),
+                operation="schema", target_kind="collection", target_id=None,
+            )
             raise AuthorizationError("developer authority required")
 
 
@@ -999,44 +1209,44 @@ class ApplicationRuntime:
 
     __slots__ = ("__cell", "__principal", "__guard")
 
-    def __init__(self, cell, principal, guard=None):
-        cell._require_data(principal)
+    def __init__(self, cell, principal, guard=None, *, request_id=None):
+        cell._require_data(principal, request_id=request_id)
         self.__cell, self.__principal, self.__guard = cell, principal, guard
 
     @property
     def principal(self):
         return self.__principal
 
-    def __authorize(self):
+    def __authorize(self, *, request_id=None):
         if self.__guard is not None:
-            self.__guard(self.__principal)
+            self.__guard(self.__principal, request_id=request_id)
 
-    def schema_revision(self):
-        self.__authorize()
-        return self.__cell.schema_revision(self.__principal)
+    def schema_revision(self, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.schema_revision(self.__principal, request_id=request_id)
 
-    def insert(self, collection, values):
-        self.__authorize()
-        return self.__cell.insert(self.__principal, collection, values)
+    def insert(self, collection, values, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.insert(self.__principal, collection, values, request_id=request_id)
 
-    def read(self, collection, fields=None, filters=None, order_by=None, limit=None):
-        self.__authorize()
-        return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit)
+    def read(self, collection, fields=None, filters=None, order_by=None, limit=None, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit, request_id=request_id)
 
-    def update(self, collection, values, filters):
-        self.__authorize()
-        return self.__cell.update(self.__principal, collection, values, filters)
+    def update(self, collection, values, filters, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.update(self.__principal, collection, values, filters, request_id=request_id)
 
-    def delete(self, collection, filters, *, destructive=False, confirm=None):
-        self.__authorize()
+    def delete(self, collection, filters, *, destructive=False, confirm=None, request_id=None):
+        self.__authorize(request_id=request_id)
         return self.__cell.delete(self.__principal, collection, filters,
-                                  destructive=destructive, confirm=confirm)
+                                  destructive=destructive, confirm=confirm, request_id=request_id)
 
-    def transact(self, operations):
-        self.__authorize()
-        return self.__cell.transact(self.__principal, operations)
+    def transact(self, operations, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.transact(self.__principal, operations, request_id=request_id)
 
-    def capabilities(self):
+    def capabilities(self, *, request_id=None):
         """Minimal capability/discovery document, per this session's own
         server-bound scope. Statuses reflect what this foundation actually
         executes today, not the common contract's peer-target surface: an
@@ -1049,7 +1259,7 @@ class ApplicationRuntime:
         (`tests/test_postgres.py`) share this exact method -- there is no
         second copy anywhere that could drift out of agreement with it.
         """
-        self.__authorize()
+        self.__authorize(request_id=request_id)
         principal = self.__principal
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
@@ -1156,17 +1366,17 @@ class ApplicationRuntime:
 class ApplicationDeveloper(ApplicationRuntime):
     """Developer authority adds structured schema operations only."""
 
-    def create_collection(self, name, fields):
-        self._ApplicationRuntime__authorize()
+    def create_collection(self, name, fields, *, request_id=None):
+        self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.create_collection(
-            self._ApplicationRuntime__principal, name, fields)
+            self._ApplicationRuntime__principal, name, fields, request_id=request_id)
 
-    def create_entity(self, name, fields=None):
-        self._ApplicationRuntime__authorize()
+    def create_entity(self, name, fields=None, *, request_id=None):
+        self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.create_entity(
-            self._ApplicationRuntime__principal, name, fields)
+            self._ApplicationRuntime__principal, name, fields, request_id=request_id)
 
-    def add_field(self, collection, field, field_type):
-        self._ApplicationRuntime__authorize()
+    def add_field(self, collection, field, field_type, *, request_id=None):
+        self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.add_field(
-            self._ApplicationRuntime__principal, collection, field, field_type)
+            self._ApplicationRuntime__principal, collection, field, field_type, request_id=request_id)

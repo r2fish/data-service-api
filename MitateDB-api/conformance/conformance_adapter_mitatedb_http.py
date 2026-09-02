@@ -469,15 +469,15 @@ class _AuthGate:
         self._store = store
         self.available = True
 
-    def authenticate(self, credential_id: str, secret: str):
+    def authenticate(self, credential_id: str, secret: str, *, request_id=None):
         if not self.available:
             raise AuthorizationStateUnavailable("authorization unavailable")
-        return self._store.authenticate(credential_id, secret)
+        return self._store.authenticate(credential_id, secret, request_id=request_id)
 
-    def assert_active(self, principal) -> None:
+    def assert_active(self, principal, *, request_id=None) -> None:
         if not self.available:
             raise AuthorizationStateUnavailable("authorization unavailable")
-        self._store.assert_active(principal)
+        self._store.assert_active(principal, request_id=request_id)
 
 
 class MitateDBHttpConformanceAdapter(ConformanceAdapter):

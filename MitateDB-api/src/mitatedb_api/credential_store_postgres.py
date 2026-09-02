@@ -118,6 +118,7 @@ from typing import Optional
 import psycopg
 from psycopg import sql
 
+from .audit_dispatch import AuditRouter
 from .auth import Principal, Role
 from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
@@ -226,7 +227,8 @@ class PostgresCredentialStore:
 
     def __init__(self, dsn: str, *, pepper: Optional[str] = None,
                  schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5,
-                 pool: Optional[BoundedConnectionPool] = None) -> None:
+                 pool: Optional[BoundedConnectionPool] = None,
+                 audit_router: Optional[AuditRouter] = None) -> None:
         pepper = pepper if pepper is not None else os.environ.get(_CREDENTIAL_PEPPER_ENV)
         # Fail-closed store construction (WP-2 instruction #4): an
         # application-plane process that somehow started without a real
@@ -252,6 +254,32 @@ class PostgresCredentialStore:
         # incoming HTTP request against `mitatedbsvc_api`'s own bounded
         # `CONNECTION LIMIT`.
         self._pool = pool
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        # D-3, WP-3(a); extended beyond the work order's own literal
+        # `auth.py`-only file list -- see this WP's own report for the
+        # justification): this is the credential store `mitatedb_api.
+        # main`'s REAL, production HTTP composition actually wires
+        # (`auth.CredentialStore` is the in-memory sibling used by tests
+        # and the in-process conformance adapter) -- durable denial
+        # coalescing must reach THIS class too, or the durable sink is
+        # unreachable from every real authentication denial the deployed
+        # system ever produces. Same D-3 dispatch, same default (a
+        # private, unshared router) as `auth.CredentialStore`'s identical
+        # parameter.
+        self._audit_router = audit_router if audit_router is not None else AuditRouter()
+
+    def _route_denial(self, *, application_id, credential_id, operation, request_id=None):
+        """Phase 4 (design D-3): `AUTH_INVALID` is this store's own only
+        reachable durable-range denial code (mirrors `auth.CredentialStore.
+        _route_reauth_denial`'s identical reasoning -- this store folds
+        every invalid/disabled/revoked/missing-application case into the
+        same `AuthenticationError`, per this peer's own documented `http.
+        py::_CLASSIFY_ORDER` divergence from r2db-api)."""
+        self._audit_router.route_denial(
+            reason_code="AUTH_INVALID", event_class="authentication_denied", request_id=request_id,
+            application_id=application_id, actor_type="application_credential", actor_id=credential_id,
+            role=None, operation=operation, target_kind="credential", target_id=credential_id,
+        )
 
     def _digest(self, secret) -> bytes:
         if not isinstance(secret, str):
@@ -335,7 +363,7 @@ class PostgresCredentialStore:
 
     # ---- read path ----------------------------------------------------
 
-    def authenticate(self, credential_id, secret) -> Principal:
+    def authenticate(self, credential_id, secret, *, request_id=None) -> Principal:
         """Same shape as `auth.CredentialStore.authenticate`: looks up BY
         `credential_id`, then compares digests with `hmac.compare_digest`
         (never a bare `==`, matching the in-memory store's own choice --
@@ -371,6 +399,28 @@ class PostgresCredentialStore:
         stored_digest = bytes(row[0]) if row is not None else _DUMMY_DIGEST
         digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
         if row is None or not digest_matches:
+            # Phase 4 (design D-3; review B-1, supervisor ruling
+            # 2026-09-03): this is a PRE-AUTH branch -- the credential is
+            # not resolved to a real, known row at all (unknown id, or a
+            # known id whose secret did not match). `credential_id` here
+            # is an UNAUTHENTICATED, client-claimed value with no length/
+            # charset validation (`http.py::_split_bearer` just splits a
+            # bearer token on "."). Recording it as `actor_id`/`target_id`
+            # -- and, worse, folding it into the D-3 coalescing KEY -- lets
+            # an attacker who merely varies the claimed id defeat
+            # coalescing entirely (id rotation: N distinct ids -> N
+            # distinct durable rows, not one coalesced window) and, past
+            # the `application_audit` length CHECK (migration 0005), makes
+            # the durable write itself fail deterministically -- flipping
+            # the RESPONSE from `AUTH_INVALID` to `SERVICE_UNAVAILABLE`
+            # under attacker control. `application_id=None` AND
+            # `credential_id=None` here (never the claimed value) --
+            # matching r2db-api's own identical pre-auth treatment
+            # (`r2db_api/service.py`'s `authenticate` except-clause:
+            # `actor_id=None`) -- so the coalescing key always collapses to
+            # `(None, "unknown", "authenticate", "AUTH_INVALID")` regardless
+            # of what the client claims.
+            self._route_denial(application_id=None, credential_id=None, operation="authenticate", request_id=request_id)
             raise AuthenticationError("authentication failed")
         _digest, role, application_id, enabled, revoked, expires_at, app_enabled = row
         # WP-2 (design v1.2 R-4): `enabled` and `revoked` are checked
@@ -383,10 +433,20 @@ class PostgresCredentialStore:
         valid = valid and bool(app_enabled)
         valid = valid and (expires_at is None or expires_at > datetime.now(timezone.utc))
         if not valid:
+            # Review B-1: unlike the pre-auth branch above, `credential_id`
+            # here HAS been authenticated -- `digest_matches` is already
+            # `True` at this point (the secret matched this exact row's
+            # stored digest), so this is a real, known credential refused
+            # only by its own STATE (disabled/revoked/its application
+            # disabled/expired). Recording the real `application_id`/
+            # `credential_id` here is correct and intended (D-3's own
+            # "credential の revoked" table entry) -- this is not the
+            # spoofable, unauthenticated case B-1 closes above.
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="authenticate", request_id=request_id)
             raise AuthenticationError("authentication failed")
         return Principal(application_id, credential_id, _role_or_state_unavailable(role))
 
-    def assert_active(self, principal: Principal) -> None:
+    def assert_active(self, principal: Principal, *, request_id=None) -> None:
         """Same re-check role as `auth.CredentialStore.assert_active`:
         re-validates an already-open session's credential/application/role
         on every call, so a session cannot outlive a revoke/disable that
@@ -415,17 +475,23 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
         if row is None:
+            self._route_denial(application_id=None, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
         application_id, role, enabled, revoked, expires_at, app_enabled = row
         if application_id != getattr(principal, "application_id", None):
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
         if _role_or_state_unavailable(role) != getattr(principal, "role", None):
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
         if not enabled or revoked:
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
         if not app_enabled:
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
         if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            self._route_denial(application_id=application_id, credential_id=credential_id, operation="assert_active", request_id=request_id)
             raise AuthenticationError("authentication failed")
 
     def get_state(self, credential_id):

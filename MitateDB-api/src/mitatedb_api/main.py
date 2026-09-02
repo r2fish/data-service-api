@@ -61,6 +61,39 @@ Environment variable contract:
                                            from_env` (batch/result/field/
                                            filter/request-byte/schema-
                                            object bounds)
+    MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS   optional, default 5000 (Phase 4,
+                                           design docs/design/
+                                           PHASE4_DURABLE_AUDIT_SINK_V1.md
+                                           D-6/N-3) -- SESSION-level
+                                           `statement_timeout` on the
+                                           connection that writes
+                                           `application_audit`. Changing
+                                           this changes the derived
+                                           `visibility_lag_ms` a future
+                                           WP-3(b) `audit_query`
+                                           declaration would publish
+                                           (`control_composition.
+                                           build_control_service` reads
+                                           the IDENTICAL env-var name for
+                                           the `control_audit` writer
+                                           connection -- both must agree).
+    MITATEDB_AUDIT_IDLE_TIMEOUT_MS        optional, default 5000 --
+                                           SESSION-level `idle_in_
+                                           transaction_session_timeout` on
+                                           the same connection; see the
+                                           note above.
+    MITATEDB_AUDIT_BUFFER_CAPACITY        optional, default 1000 -- D-4's
+                                           bounded in-memory buffer
+                                           capacity for ordinary
+                                           (buffer-class) data-operation
+                                           success events, per process.
+    MITATEDB_AUDIT_FLUSH_INTERVAL_S       optional, default 2.0 -- how
+                                           often this process' own
+                                           background thread calls
+                                           `audit_dispatch.AuditRouter.
+                                           flush()` (D-4's periodic flush
+                                           trigger); a latency knob only,
+                                           never a correctness one.
 
 Startup failure policy: every `RuntimeError` below is an intentional,
 loud "refuse to start" -- there is no partial-startup mode.
@@ -68,6 +101,7 @@ loud "refuse to start" -- there is no partial-startup mode.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
 
@@ -75,7 +109,13 @@ import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
+from .application_audit import (DEFAULT_AUDIT_BUFFER_CAPACITY,
+                                DEFAULT_AUDIT_FLUSH_INTERVAL_S,
+                                DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+                                DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
+                                PostgresApplicationAuditSink)
 from .audit import AuditSink
+from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
 from .cell import ApplicationCell
 from .config import FoundationConfig
@@ -92,6 +132,32 @@ def _require(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required to start mitatedb_api.main:app")
     return value
+
+
+def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
+    """Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/
+    N-3): same lenient-degrade discipline as `config.FoundationConfig.
+    from_env`'s OTHER tuning knobs -- an unset/empty/unparsable value
+    silently falls back to `default` rather than raising."""
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
+    """`_optional_int`'s `float` counterpart, for the audit-buffer flush
+    interval (Phase 4) -- identical degrade-to-default discipline."""
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _parse_served_apps(raw: str) -> list[str]:
@@ -177,7 +243,34 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 
     pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"))
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
-    credentials = PostgresCredentialStore(platform_dsn, pepper=app_pepper, schema=schema, pool=platform_pool)
+
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6, work order
+    # WP-3(a)): the durable application-plane audit sink -- writes to the
+    # SAME `MITATEDB_PLATFORM_DSN` (already `mitatedbsvc_api`, which
+    # migration `0005_application_audit.sql` grants INSERT-only on
+    # `application_audit`) `PostgresCredentialStore` above also connects
+    # with (D-1(c): "書き手 = data-plane プロセスが既に保持している
+    # platform 接続"). The two SESSION-level timeouts are set on every
+    # connection this sink ever opens (D-6/N-3's visibility-lag basis).
+    audit_statement_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
+    audit_idle_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
+    durable_audit = PostgresApplicationAuditSink(
+        platform_dsn, schema=schema, statement_timeout_ms=audit_statement_timeout_ms,
+        idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
+    )
+    audit_buffer_capacity = _optional_int(env, "MITATEDB_AUDIT_BUFFER_CAPACITY", DEFAULT_AUDIT_BUFFER_CAPACITY)
+    audit_flush_interval_s = _optional_float(env, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", DEFAULT_AUDIT_FLUSH_INTERVAL_S)
+    # ONE shared router (design D-3/D-4's own "process-local" scoping) --
+    # handed to `credentials` below AND to every `ApplicationCell` this
+    # process builds, so denial coalescing and the buffer are shared
+    # process-wide, not duplicated per credential store/cell.
+    audit_router = AuditRouter(
+        durable_audit, buffer_capacity=audit_buffer_capacity, alert_min_interval_s=audit_flush_interval_s,
+    )
+
+    credentials = PostgresCredentialStore(
+        platform_dsn, pepper=app_pepper, schema=schema, pool=platform_pool, audit_router=audit_router,
+    )
 
     config = FoundationConfig.from_env(env)
     audit = AuditSink()
@@ -195,7 +288,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         runtime_dsn, developer_dsn = app_dsns[application_id]
         backend = PostgresBackend(runtime_dsn, developer_dsn)
         cells[application_id] = ApplicationCell(
-            application_id, config, audit, guard=credentials.assert_active, backend=backend
+            application_id, config, audit, guard=credentials.assert_active, backend=backend,
+            audit_router=audit_router,
         )
 
     def _cell_factory(application_id: str) -> ApplicationCell:
@@ -214,16 +308,74 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             raise NotFoundError("application is not served by this process")
         return cell
 
-    service = HttpService(credentials, _cell_factory)
+    # Review m-1/M-3 (supervisor ruling 2026-09-03): the same shared
+    # `audit_router` every `ApplicationCell`/`PostgresCredentialStore`
+    # already receives -- `HttpService.authenticate` is the ONLY call
+    # site that can ever durably record `AUTH_REQUIRED` (no bearer token
+    # presented at all).
+    service = HttpService(credentials, _cell_factory, audit_router=audit_router)
 
+    # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
+    # thread that calls `audit_router.flush()` on a fixed interval for
+    # the lifetime of this process, so buffered/coalesced evidence does
+    # not sit un-durable indefinitely on a served application that
+    # happens to receive no further traffic. Purely a latency knob --
+    # correctness of D-3/D-4's own bounds does not depend on this thread
+    # running at all. The stop `Event` and `Thread` are created FRESH
+    # inside `_lifespan` on every entry (mirroring r2db-api's own
+    # `main.py::_lifespan` identical reasoning, independently arrived at
+    # here): `threading.Thread.start()` may only be called once per
+    # object, so constructing them once outside `_lifespan` would raise
+    # on a second ASGI startup against the same built app (this
+    # repository's own tests re-entering lifespan on the same app object).
     @asynccontextmanager
     async def _lifespan(_app: Any):
+        audit_flush_stop = threading.Event()
+
+        def _audit_flush_loop() -> None:
+            while not audit_flush_stop.wait(audit_flush_interval_s):
+                try:
+                    audit_router.flush()
+                except Exception:
+                    # A flush failure must never kill this thread (there
+                    # would then be nothing left to retry the next
+                    # interval) -- D-4's own sticky/backoff retry logic
+                    # already lives inside `AuditRouter.flush()`; this is
+                    # only a defensive backstop against a truly
+                    # unexpected exception escaping it.
+                    pass
+
+        audit_flush_thread = threading.Thread(target=_audit_flush_loop, name="mitatedb-audit-flush", daemon=True)
+        audit_flush_thread.start()
         try:
             yield
         finally:
+            audit_flush_stop.set()
+            audit_flush_thread.join(timeout=5.0)
+            # One final synchronous flush before this process stops --
+            # without this, up to `buffer_capacity` buffered events and
+            # every still-open denial-coalescing window's accumulated
+            # repeat count are silently discarded on a graceful shutdown
+            # (the periodic thread has just stopped, and nothing else
+            # will ever call this again for this process).
+            # `force_expire_denial_windows=True`: a window that has not
+            # YET reached its own window_s at this exact moment still
+            # gets its repeat-summary row written here -- shutdown is not
+            # a crash, so D-3 only sanctions losing counts to an actual
+            # crash, never to an orderly stop.
+            try:
+                audit_router.flush(force_expire_denial_windows=True)
+            except Exception:
+                # Best-effort, like every other flush attempt -- shutdown
+                # must still complete and release connections below even
+                # if the sink happens to be down at this exact moment.
+                pass
             # Release every connection this process holds on shutdown: the
             # platform registry's bounded pool, and every served
             # application's own two persistent PostgreSQL connections.
+            # `durable_audit` opens a fresh connection per call (no pool
+            # of its own -- `application_audit.PostgresApplicationAuditSink`'s
+            # own docstring) and so needs no explicit close here.
             credentials.close()
             for cell in cells.values():
                 cell._backend.close()

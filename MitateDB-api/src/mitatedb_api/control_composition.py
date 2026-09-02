@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from typing import Mapping
 
+from .application_audit import DEFAULT_AUDIT_IDLE_TIMEOUT_MS, DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
 from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
                             PostgresControlBackend, PostgresCredentialRegistry)
@@ -35,6 +36,24 @@ def _require(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required to start mitatedb_api's control-plane composition")
     return value
+
+
+def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
+    """Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/
+    N-3): same lenient-degrade discipline as `main.py`'s own identical
+    helper (an unset/empty/unparsable value silently falls back to
+    `default`) -- kept as a SEPARATE, small local copy rather than an
+    import from `main.py`, since importing `main.py` here would
+    transitively require every APPLICATION-plane env var at import time
+    (this module's own docstring explains why `control_main.py` must
+    never import `main.py`)."""
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneService:
@@ -88,9 +107,20 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
     applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema)
     credentials_registry = PostgresCredentialRegistry(controlplane_dsn, pepper=app_pepper, schema=schema)
     control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema)
+    # Phase 4 (design D-6/N-3, work order WP-3(a)): the SAME two env-var
+    # names -- and the SAME shared defaults, `application_audit.
+    # DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`DEFAULT_AUDIT_IDLE_TIMEOUT_MS`
+    # -- `main.build_app` reads for the connection that writes
+    # `application_audit`. Both processes must agree, or the visibility-
+    # lag basis a future `audit_query` declaration (WP-3(b)) derives from
+    # these two values no longer holds for BOTH planes.
+    audit_statement_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
+    audit_idle_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
     backend = PostgresControlBackend(
         applications=applications, credentials=credentials_registry, control_credentials=control_credentials,
         audit_schema=schema, dsn=controlplane_dsn,
+        audit_statement_timeout_ms=audit_statement_timeout_ms,
+        audit_idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
     )
     return ControlPlaneService(backend, limits=limits)
 

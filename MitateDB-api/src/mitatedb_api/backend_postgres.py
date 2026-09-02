@@ -84,7 +84,7 @@ import psycopg
 from psycopg import sql
 
 from .backend import SQL_OPERATOR_TOKENS
-from .errors import ConflictError, NotFoundError, ValidationError
+from .errors import AuditSinkUnavailable, ConflictError, NotFoundError, ValidationError
 from .identifiers import validate_identifier
 
 # R-3 (design v1.1 §0/R-4 WP-0 m-7): backend-specific reserved names.
@@ -399,7 +399,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
-    def create_collection(self, name, fields):
+    def create_collection(self, name, fields, audit_hook=None):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -408,29 +408,68 @@ class PostgresBackend:
         statement = sql.SQL("CREATE TABLE {} ({})").format(
             sql.Identifier(name), sql.SQL(", ").join(definitions)
         )
+        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2, review M-6):
+        # `commit()` moved INSIDE this `try` (it used to run in an `else:`
+        # clause, OUTSIDE the try/except -- a raise from `commit()` itself
+        # used to propagate as a raw, unclassified exception, never
+        # reaching this method's own `except psycopg.Error` translation at
+        # all). `audit_hook.pre_commit()` -- when this schema op is
+        # dispatched through `cell.py` -- runs as the LAST statement before
+        # `self._developer.commit()`, still inside this same try: a raise
+        # from it (an `AuditSinkUnavailable`, not a `psycopg.Error`) is
+        # caught by the final `except Exception` below, which rolls back
+        # the still-uncommitted DDL before propagating (fail-closed by
+        # construction, D-2 item 2: schema operations are unconditionally
+        # fail-closed). `hook_fired` distinguishes "the durable pre-commit
+        # write itself failed" (no error row needed -- nothing was
+        # committed to correct) from "the durable write succeeded but
+        # THIS backend's own commit then failed" (D-2's error-row case).
+        hook_fired = False
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+                hook_fired = True
+            self._developer.commit()
         except psycopg.errors.DuplicateTable:
             self._developer.rollback()
             raise ConflictError("collection already exists")
         except psycopg.Error as exc:
             self._developer.rollback()
+            if hook_fired:
+                audit_hook.commit_failed()
+                raise AuditSinkUnavailable(
+                    "the durable audit sink recorded this operation but the data commit failed"
+                ) from exc
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
+        except Exception:
+            # Covers `audit_hook.pre_commit()` itself raising
+            # `AuditSinkUnavailable` (never a `psycopg.Error`, so the
+            # branch above does not catch it) -- the DDL above already ran
+            # on this connection but was never committed; roll it back
+            # before letting the failure propagate.
+            self._developer.rollback()
+            raise
 
-    def add_field(self, collection, field, field_type):
+    def add_field(self, collection, field, field_type, audit_hook=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
             sql.Identifier(collection), sql.Identifier(field), _TYPE_SQL[field_type]
         )
+        # Phase 4: same `commit()`-inside-`try` + pre-commit-hook structure
+        # as `create_collection` above -- see that method's own comment.
+        hook_fired = False
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+                hook_fired = True
+            self._developer.commit()
         except psycopg.errors.DuplicateColumn:
             self._developer.rollback()
             raise ConflictError("field already exists")
@@ -439,9 +478,15 @@ class PostgresBackend:
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
             self._developer.rollback()
+            if hook_fired:
+                audit_hook.commit_failed()
+                raise AuditSinkUnavailable(
+                    "the durable audit sink recorded this operation but the data commit failed"
+                ) from exc
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._developer.commit()
+        except Exception:
+            self._developer.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # values (R-2/B-1 value-domain gate) -- see the module-level
@@ -666,22 +711,39 @@ class PostgresBackend:
             self._runtime.commit()
         return {"updated": updated}
 
-    def delete(self, collection, filters):
+    def delete(self, collection, filters, audit_hook=None):
         statement = sql.SQL("DELETE FROM {}").format(sql.Identifier(collection))
         where, params = self._where_sql(filters)
         statement = statement + where
+        # Phase 4 (design D-2, review M-6): same `commit()`-inside-`try` +
+        # pre-commit-hook structure as `create_collection`/`add_field`
+        # above -- `cell.ApplicationCell.delete` has already run this
+        # request through `_validate_delete_confirmation` before this is
+        # ever called, so every call here is confirmed-destructive and
+        # therefore unconditionally fail-closed class (D-2 item 1).
+        hook_fired = False
         try:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, params)
                 deleted = cur.rowcount
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+                hook_fired = True
+            self._runtime.commit()
         except psycopg.errors.UndefinedTable:
             self._runtime.rollback()
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
             self._runtime.rollback()
+            if hook_fired:
+                audit_hook.commit_failed()
+                raise AuditSinkUnavailable(
+                    "the durable audit sink recorded this operation but the data commit failed"
+                ) from exc
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
+        except Exception:
+            self._runtime.rollback()
+            raise
         return {"deleted": deleted}
 
     def begin(self):

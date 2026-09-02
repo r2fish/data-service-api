@@ -132,6 +132,32 @@ class StorageConfigurationError(FoundationError):
     """
 
 
+class AuditSinkUnavailable(FoundationError):
+    """Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-3,
+    work order WP-3(a)): raised when the durable application-plane audit
+    sink (`application_audit.PostgresApplicationAuditSink` in production,
+    `application_audit.ApplicationAuditSink` for the in-memory/test
+    configuration) could not durably record a fail-closed-class event --
+    a pre-commit write ahead of a schema change or a confirmed-destructive
+    delete, a coalesced denial's first-occurrence write, or the
+    commit-failure `outcome="error"` row D-2 requires. The operation or
+    denial this event would have accompanied is refused rather than
+    proceeding (or being reported as denied) un-audited -- fail-closed by
+    construction, mirroring r2db-api's own `fail("SERVICE_UNAVAILABLE",
+    ...)` call sites for the identical failure class.
+
+    Deliberately a distinct class from :class:`StorageConfigurationError`
+    (reserved for a PERMANENT PostgreSQL privilege/grant misconfiguration
+    on the DATA backend, not the audit sink) and from
+    :class:`AuthorizationStateUnavailable` (the credential-store's own
+    "cannot safely establish authorization state" condition) -- this is
+    the generic "a dependency this request needed is not answering right
+    now" bucket, specific to the audit-sink dependency Phase 4 introduces.
+    Maps to the common contract's `SERVICE_UNAVAILABLE` code
+    (`http.py::_CLASSIFY_ORDER`).
+    """
+
+
 class CapabilityError(FoundationError):
     """Raised for a name that is part of the common contract's own
     vocabulary -- a mutation operation (``structured_operations.

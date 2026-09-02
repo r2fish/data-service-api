@@ -119,27 +119,73 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {row["name"]: None for row in rows}
 
-    def create_collection(self, name, fields):
+    def _begin_pseudo_tx(self) -> None:
+        """Phase 4 (design D-2/D-10, "擬似 tx"): SQLite's own `sqlite3`
+        driver, in this connection's default (legacy) isolation mode,
+        auto-commits a DDL statement (`CREATE TABLE`/`ALTER TABLE`)
+        IMMEDIATELY -- a subsequent `self._db.rollback()` does NOT undo it
+        (measured empirically: `db.execute("CREATE TABLE t (id INTEGER)");
+        db.rollback()` still leaves `t` in `sqlite_master`). An EXPLICIT
+        `BEGIN` issued first, however, makes the driver honour a following
+        `rollback()`/`commit()` for DDL exactly like it already does for
+        DML -- the identical mechanism `begin()` below already uses for
+        the batch (`transact()`) path, applied here to the three
+        single-operation DDL/DML methods that need real pre-commit-hook
+        rollback semantics (D-2's fail-closed guarantee: a raised
+        `errors.AuditSinkUnavailable` from `audit_hook.pre_commit()` must
+        leave NO trace of the DDL/DML that already ran). Defensive
+        rollback-if-already-open first, mirroring `begin()`'s own
+        identical guard."""
+        if self._db.in_transaction:
+            self._db.rollback()
+        self._db.execute("BEGIN")
+
+    def create_collection(self, name, fields, audit_hook=None):
         definitions = []
         for field, field_type in fields.items():
             definitions.append(quote_identifier(field) + " " + _TYPES[field_type])
         statement = "CREATE TABLE " + quote_identifier(name) + " (" + \
             ", ".join(definitions) + ")"
+        self._begin_pseudo_tx()
         try:
             self._db.execute(statement)
-            self._db.commit()
         except sqlite3.DatabaseError:
+            self._db.rollback()
             raise ConflictError("collection already exists")
+        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+        # D-2/D-10): `audit_hook.pre_commit()` runs as the LAST thing
+        # before this backend's own commit -- mirrored, "pseudo-tx"
+        # parity counterpart to `backend_postgres.PostgresBackend`'s real
+        # commit-inside-try structure (D-10's own parity-test target),
+        # made real by `_begin_pseudo_tx` above (see that method's own
+        # comment for why a bare `commit()`/`rollback()` alone is not
+        # enough for DDL on this backend). This connection's `commit()`
+        # realistically never fails once the statement above already
+        # succeeded -- so there is no `commit_failed()` counterpart call
+        # anywhere in this file, mirroring r2db-api's own in-memory
+        # `ApplicationCell.transact`'s identical, documented absence of
+        # one. A raise from `pre_commit()` itself (an `AuditSinkUnavailable`,
+        # never a `sqlite3.Error`) is caught by the bare `except Exception`
+        # below, which rolls back the still-uncommitted DDL before
+        # propagating.
+        try:
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
         self._schema_revision += 1
 
-    def add_field(self, collection, field, field_type):
+    def add_field(self, collection, field, field_type, audit_hook=None):
         table = quote_identifier(collection)
         statement = "ALTER TABLE " + table + " ADD COLUMN " + \
             quote_identifier(field) + " " + _TYPES[field_type]
+        self._begin_pseudo_tx()
         try:
             self._db.execute(statement)
-            self._db.commit()
         except sqlite3.OperationalError as exc:
+            self._db.rollback()
             # sqlite3 reports both "no such table" and "duplicate column
             # name" as OperationalError with no separate exception class
             # to distinguish them by type -- the caller (`cell.py`) has
@@ -149,7 +195,17 @@ class SQLiteBackend:
             # duplicate column name.
             raise ConflictError("field already exists") from exc
         except sqlite3.DatabaseError:
+            self._db.rollback()
             raise NotFoundError("collection not found")
+        # Phase 4: same pre-commit-hook structure as `create_collection`
+        # above -- see that method's own comment.
+        try:
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
         self._schema_revision += 1
 
     def encode_value(self, value, domain=None):
@@ -329,15 +385,25 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {"updated": cursor.rowcount}
 
-    def delete(self, collection, filters):
+    def delete(self, collection, filters, audit_hook=None):
         table = quote_identifier(collection)
         where, params = self._where_sql(filters)
         statement = "DELETE FROM " + table + where
         try:
             cursor = self._db.execute(statement, params)
-            self._db.commit()
         except sqlite3.DatabaseError:
             raise NotFoundError("collection not found")
+        # Phase 4: same pre-commit-hook structure as `create_collection`
+        # above -- `cell.ApplicationCell.delete` has already run this
+        # request through `_validate_delete_confirmation` before this is
+        # ever called.
+        try:
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
         return {"deleted": cursor.rowcount}
 
     def begin(self):
