@@ -186,3 +186,44 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(control_
     response = _run(_apost(app, "/control/v1/applications", headers=auth_header, json_body=oversized))
     assert response.status_code == 413
     assert response.json()["code"] == "LIMIT_EXCEEDED"
+
+
+def test_build_control_service_declares_audit_query_unavailable_without_audit_dsn(control_platform) -> None:
+    """WP-3(b) review round 2 instruction 3 (supervisor-forwarded fix): no
+    peer-local test previously pinned `build_control_service`'s own
+    `MITATEDB_AUDIT_DSN`-absent path -- `_env()` never sets it, so the
+    resulting service must declare `audit_query: {"status":
+    "unavailable"}` (D-5 M-4), never `enabled`."""
+    env = _env(control_platform)
+    assert "MITATEDB_AUDIT_DSN" not in env
+    service = build_control_service(env)
+    backend = service._backend  # test-only reach-in, mirrors this file's own existing convention
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    rotated = service.rotate_credential(credential_id, secret, credential_id)
+    document = service.control_capabilities(credential_id, rotated["secret"])
+    assert document["capabilities"]["audit_query"] == {"status": "unavailable"}
+
+
+def test_build_control_service_declares_audit_query_enabled_with_audit_dsn(control_platform) -> None:
+    """WP-3(b) review round 2 instruction 3 (supervisor-forwarded fix):
+    the twin of the test immediately above -- setting `MITATEDB_AUDIT_DSN`
+    (here, the real `mitatedbsvc_auditreader` DSN migration 0005
+    provisions, `control_platform.auditreader_dsn`) must flip the
+    composition root's own declaration to `enabled`, with a real,
+    non-zero `visibility_lag_ms` (never a bare presence check)."""
+    env = _env(control_platform, MITATEDB_AUDIT_DSN=control_platform.auditreader_dsn)
+    service = build_control_service(env)
+    backend = service._backend
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    rotated = service.rotate_credential(credential_id, secret, credential_id)
+    document = service.control_capabilities(credential_id, rotated["secret"])
+    audit_query = document["capabilities"]["audit_query"]
+    assert audit_query["status"] == "enabled"
+    assert isinstance(audit_query["visibility_lag_ms"], int) and audit_query["visibility_lag_ms"] > 0
+    # The route itself genuinely answers, not merely the declaration --
+    # confirms `build_control_service`'s own `audit_reader` wiring is a
+    # real, working `PostgresAuditQueryStore`, not merely a truthy stub.
+    result = service.audit_query(credential_id, rotated["secret"], {"limit": 1})
+    assert "events" in result

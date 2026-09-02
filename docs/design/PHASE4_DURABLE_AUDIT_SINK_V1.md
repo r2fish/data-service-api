@@ -807,6 +807,29 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
 
 - **`visibility_lag_ms` は control プロセスの env のみから導出され、application-plane 書き手は別プロセスである** (WP-2(b) レビュー §4-D、記録のみ)。`control_main.assemble_control_stack` は自プロセスの `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` から lag を導出するが、`application_audit` の書き手接続は `r2db_api.main` という別プロセスで、同名の env 変数を独立に読む。両プロセスが同じ env 名・同じ既定定数 (両方 5000ms) を読む構造で運用上は一致するが、機構的な強制も宣言側での検証も無い。runbook §15 に前提として明記済み。CONTROL_MAPPING への正式反映は WP-4 スコープ。
 
+- **`auth.CredentialStore.peek()` は「認証はするが監査を出さない」公開メソッドである** (WP-3(b)
+  レビュー指摘 G、供覧裁定 2026-09-03、台帳記録)。MitateDB の in-process conformance adapter
+  (`_ReconciledControlBackend.authenticate_application`) は control-plane 専用の
+  `InMemoryCredentialRegistry`/`PostgresCredentialRegistry` を持たず、application-plane の実
+  `auth.CredentialStore` を再利用する既存アーキテクチャのため、`audit_query` の application
+  credential probe をここに実装するには非監査の読み取り専用メソッドが必要だった (`authenticate()`
+  を再利用すると、control credential で `audit_query` を呼ぶたびに application-plane 側へ
+  スプリアスな `AUTH_INVALID` denial 行が durably 記録される — 実測済み、
+  `test_inprocess_audit_query_control_credential_probe_never_durably_records_a_spurious_denial`)。
+  副作用点検: 監査を一切書かない・`_lock` 内読み取りのみ・戻り値は `Principal` か `None` の 2 値の
+  み・例外を投げない・タイミング差を `_DUMMY_DIGEST` で潰している。SI-10 のオラクル性は
+  `authenticate()` を超えて増えていない (成否 2 値のみを返す点は同じ、WP-2(b) 台帳が既に記録済みの
+  application credential probe オラクルより強いものは足していない)。懸念として残るのは、
+  製品コード `auth.py` に「非監査の認証面」が増えたこと自体であり、現在の呼び出し元は
+  conformance adapter 1 箇所のみ (grep 確認済み) だが、将来の誤用が SI-14 の「denial は必ず
+  耐久記録」を静かに破りうる。**監督裁定 (2026-09-03)**: 非監査の認証面は adapter 専用に限定し、
+  呼び出し元をテストで固定する — `src/mitatedb_api` パッケージ自身 (`peek()` の定義箇所である
+  `auth.py` 自体を含む) の内部から `.peek(` を呼ぶ箇所が一切無いことを AST 走査で固定する
+  (`test_credential_store_peek_has_no_caller_inside_src_mitatedb_api`,
+  `MitateDB-api/tests/test_control_plane_credential_store_reconciliation.py`) — 唯一の正当な
+  呼び出し元は conformance adapter (`src/mitatedb_api` の外) のみである、という設計上の境界を
+  機械的に強制する。
+
 WP 実施中に発生した項目をここへ追記する。
 
 継承分は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §7 を参照 (`audit_events` 予約名の未文書化、識別子受理域の開示ギャップ、json 列の write/read 非対称、wire-level positive-existence check、ほか)。このうち **`audit_events` 予約名の文書化**は P4-D4 の項目 6 として本フェーズで解消される。

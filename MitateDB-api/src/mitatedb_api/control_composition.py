@@ -22,13 +22,19 @@ source).
 from __future__ import annotations
 
 import os
-from typing import Mapping
+from typing import Mapping, Optional
 
 from .application_audit import DEFAULT_AUDIT_IDLE_TIMEOUT_MS, DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
+from .audit_query import DEFAULT_COALESCING_WINDOW_MS, PostgresAuditQueryStore
 from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
                             PostgresControlBackend, PostgresCredentialRegistry)
 from .credential_store_postgres import DEFAULT_SCHEMA, assert_pepper_separation
+
+# Phase 4 WP-3(b) (design D-6): "clock-skew margin" -- the third term
+# `visibility_lag_ms` sums beyond the two writer-connection timeouts
+# (`statement_timeout_ms + idle_in_transaction_session_timeout_ms + this`).
+_VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -80,6 +86,24 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
                                              optional -- see `control_plane.
                                              ControlPlaneLimits`'s own
                                              defaults when unset.
+        MITATEDB_CONTROL_AUDIT_REQUESTS_PER_MINUTE_LIMIT
+                                             optional (Phase 4 WP-3(b),
+                                             design D-5) -- `audit_query`'s
+                                             OWN pre-auth window, never
+                                             shared with `MITATEDB_CONTROL_
+                                             REQUESTS_PER_MINUTE_LIMIT`.
+        MITATEDB_AUDIT_DSN                  optional (Phase 4 WP-3(b),
+                                             design D-5) -- the
+                                             `mitatedbsvc_auditreader` role
+                                             DSN (migration `0005_
+                                             application_audit.sql` §1.3),
+                                             read-only over BOTH `control_
+                                             audit` and `application_audit`.
+                                             Unset means `audit_query` stays
+                                             declared `unavailable` (the
+                                             route still exists and still
+                                             authenticates, answering
+                                             `CAPABILITY_UNSUPPORTED`).
     """
     env = env if env is not None else os.environ
 
@@ -102,6 +126,11 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         control_requests_per_minute=_limit(
             "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT", defaults.control_requests_per_minute),
         request_bytes=_limit("MITATEDB_CONTROL_REQUEST_BYTES_LIMIT", defaults.request_bytes),
+        # Phase 4 WP-3(b) (design D-5, P4-D4 item 8): `audit_query`'s OWN
+        # window -- a separate env var, mirroring the 4 lines above, never
+        # sharing `MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT`.
+        audit_requests_per_minute=_limit(
+            "MITATEDB_CONTROL_AUDIT_REQUESTS_PER_MINUTE_LIMIT", defaults.audit_requests_per_minute),
     )
 
     applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema)
@@ -112,8 +141,8 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
     # DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`DEFAULT_AUDIT_IDLE_TIMEOUT_MS`
     # -- `main.build_app` reads for the connection that writes
     # `application_audit`. Both processes must agree, or the visibility-
-    # lag basis a future `audit_query` declaration (WP-3(b)) derives from
-    # these two values no longer holds for BOTH planes.
+    # lag basis this WP's own `audit_query` declaration derives from these
+    # two values no longer holds for BOTH planes.
     audit_statement_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
     audit_idle_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
     backend = PostgresControlBackend(
@@ -122,7 +151,47 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         audit_statement_timeout_ms=audit_statement_timeout_ms,
         audit_idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
     )
-    return ControlPlaneService(backend, limits=limits)
+
+    # Phase 4 WP-3(b) (design D-5): the `mitatedbsvc_auditreader` read
+    # surface -- a genuinely SEPARATE DSN/role from `controlplane_dsn`
+    # above (never `mitatedbsvc_controlplane`, which migration 0005 grants
+    # no access to either audit table at all) and from `credentials`/
+    # `applications`'s own roles. `audit_reader`/`audit_visibility_lag_ms`
+    # stay at their `ControlPlaneService` defaults (`None`/`0`, i.e.
+    # `audit_query` declares `unavailable`) whenever `MITATEDB_AUDIT_DSN`
+    # is not given -- the route still exists (`control_http.py`'s own
+    # unconditional registration), it just answers `CAPABILITY_UNSUPPORTED`
+    # (D-5 M-4). `PostgresAuditQueryStore` opens one connection per call
+    # (no pool, no persistent handle to close at shutdown -- mirrors this
+    # peer's own established `PostgresApplicationAuditSink`/`Postgres
+    # ControlBackend` per-call-connection convention, not r2db-api's own
+    # pooled reader).
+    audit_dsn = env.get("MITATEDB_AUDIT_DSN") or None
+    audit_reader: Optional[PostgresAuditQueryStore] = None
+    audit_visibility_lag_ms = 0
+    if audit_dsn:
+        audit_reader = PostgresAuditQueryStore(audit_dsn, schema=schema)
+        # D-6 point 3: DERIVED, never a bare constant -- the SAME two
+        # timeouts the writer connections above (and `main.build_app`'s own
+        # `application_audit` writer) actually carry, plus a fixed 1s
+        # clock-skew margin. Changing either timeout changes this value.
+        audit_visibility_lag_ms = audit_statement_timeout_ms + audit_idle_timeout_ms + _VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
+
+    return ControlPlaneService(
+        backend, limits=limits,
+        audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
+        # Phase 4 WP-3(b) (r2db-api WP-2(b) review item H): derived from the
+        # SAME single-source constant `audit_query.DEFAULT_COALESCING_
+        # WINDOW_MS` (itself derived from `application_audit.DEFAULT_
+        # DENIAL_COALESCE_WINDOW_S`) that a data-plane composition root
+        # falls back to when it does not override `AuditRouter`'s own
+        # `denial_coalesce_window_s` -- see `docs/cloud-run-cloud-sql.md`
+        # for the operational note that overriding the data-plane's window
+        # requires updating this declaration too (this process cannot read
+        # the data-plane process' own live `AuditRouter` -- separate
+        # processes).
+        audit_coalescing_window_ms=DEFAULT_COALESCING_WINDOW_MS,
+    )
 
 
 __all__ = ["build_control_service"]

@@ -67,6 +67,66 @@ def test_inprocess_inband_issued_credential_authenticates_for_real() -> None:
         adapter.close()
 
 
+def test_inprocess_audit_query_control_credential_probe_never_durably_records_a_spurious_denial() -> None:
+    """WP-3(b) review finding G (supervisor-forwarded fix): `_Reconciled
+    ControlBackend.authenticate_application` (`conformance_adapter_
+    mitatedb.py`) calls `auth.CredentialStore.peek()`, deliberately NEVER
+    `.authenticate()` -- `peek()`'s own justification (its docstring) is
+    that `authenticate()` would durably record a spurious denial for
+    every `audit_query` call made with a genuine control credential
+    (whose id is always unknown in the application-credential store, so
+    `authenticate()` treats it as an unauthenticated probe and durably
+    routes a coalesced `AUTH_INVALID` row). No test pinned this before:
+    replacing `peek()` with `authenticate()` in the adapter passed the
+    full 45-test conformance C-09/C-11 suite undetected. Calls `audit_
+    query` several times with a real control credential and asserts the
+    application-plane durable sink gains no new rows at all."""
+    adapter = _inprocess_module.build_adapter()
+    try:
+        control_actor = adapter.control_credential()
+        before = len(adapter._application_durable_audit.events())  # noqa: SLF001 -- adapter-internal reach-in, test-only
+        for _ in range(5):
+            adapter.audit_query(control_actor, {"limit": 1})
+        after = len(adapter._application_durable_audit.events())  # noqa: SLF001
+        assert after == before, (
+            f"5 audit_query() calls with a genuine control credential durably recorded "
+            f"{after - before} new application-plane event(s) -- the application-credential probe must "
+            "never write a denial for an id that is unknown to the application-credential store"
+        )
+    finally:
+        adapter.close()
+
+
+def test_credential_store_peek_has_no_caller_inside_src_mitatedb_api() -> None:
+    """WP-3(b) review round 2 instruction 1 (supervisor-forwarded fix,
+    design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §11 ledger,
+    supervisor ruling 2026-09-03): `auth.CredentialStore.peek()` is a
+    non-audited authentication surface DELIBERATELY scoped to the
+    in-process conformance adapter only (`peek()`'s own docstring). This
+    scope was previously enforced only by convention (a `grep` at review
+    time) -- this AST scan makes it structural: no file inside `src/
+    mitatedb_api` itself (product code, including `auth.py` where `peek`
+    is DEFINED -- a method definition is a `FunctionDef` node, never a
+    `Call` node, so scanning for `.peek(` CALLS never flags the
+    definition site itself) may call `.peek(`. The one legitimate caller,
+    `conformance/conformance_adapter_mitatedb.py`, lives OUTSIDE this
+    scanned directory entirely."""
+    import ast
+    from pathlib import Path
+
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
+    callers: list[str] = []
+    for path in sorted(src_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(), filename=path.name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "peek":
+                callers.append(f"{path.name}:{node.lineno}")
+    assert not callers, (
+        f"CredentialStore.peek() must never be called from inside src/mitatedb_api itself -- "
+        f"its one legitimate caller is the conformance adapter, outside this directory: {callers!r}"
+    )
+
+
 def test_http_inband_issued_credential_authenticates_for_real() -> None:
     if not _http_reachable():
         raise AssertionError(

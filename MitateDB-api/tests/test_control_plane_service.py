@@ -494,10 +494,10 @@ def test_control_capabilities_result_matches_schema_exactly_and_declares_request
     assert "request_bytes" in result["limits"]
     assert result["limit_enforcement"]["request_bytes"] == "unavailable"
     assert result["limit_enforcement"]["applications"] == "enforced"
-    # Phase 3.5 WP-5 (design §5 WP-5 row, B-3): this WP ships the 1.3.0
-    # obligations for this peer's control plane, so the flip lands in this
-    # same commit as the bundle it accompanies.
-    assert result["contract_version"] == "1.3.0"
+    # Phase 4 WP-3(b): this WP ships the 1.4.0 obligations for this peer's
+    # control plane, so the flip lands in this same commit as the audit_
+    # query bundle it accompanies.
+    assert result["contract_version"] == "1.4.0"
     assert result["role"] == "control"
 
 

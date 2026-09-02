@@ -96,6 +96,10 @@ from adapter import (  # noqa: E402
     resolve_valid_confirmation,
 )
 
+from mitatedb_api.application_audit import (DEFAULT_AUDIT_IDLE_TIMEOUT_MS,  # noqa: E402
+                                             DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
+                                             PostgresApplicationAuditSink)
+from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime  # noqa: E402
@@ -182,6 +186,10 @@ class _Platform:
     platform_db: str
     provision_script: Path
     deprovision_script: Path
+    # Phase 4 WP-3(b) (design D-5): the `<prefix>svc_auditreader` role's
+    # own DSN -- migration `0005_application_audit.sql`'s reader, SELECT-
+    # only over `control_audit` + `application_audit`.
+    auditreader_dsn: str
 
 
 @dataclass(frozen=True)
@@ -206,9 +214,16 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     temp dir) since `provision_application`/`deprovision_application` run
     the rewritten 0003/0004 scripts repeatedly, long after this returns.
     """
+    # WP-3(b) review finding F (supervisor-forwarded fix): a duplicate
+    # generation of these same 3 passwords was accidentally introduced
+    # here during WP-3(b) (dead code -- the first 3 lines were
+    # unconditionally shadowed by the next 3). Removed back to one block.
     provision_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
     controlplane_password = secrets.token_urlsafe(24)
+    # Phase 4 WP-3(b) (design D-5): the reader role's own throwaway
+    # password -- mirrors the 3 above, never a real credential.
+    auditreader_password = secrets.token_urlsafe(24)
 
     rewritten: dict[str, Path] = {}
     for name in (
@@ -216,6 +231,10 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0002_registry_and_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        # Phase 4 WP-3(b): application_audit table + mitatedbsvc_
+        # auditreader role -- `_run_psql` below runs this AFTER 0002,
+        # exactly the order the file's own header requires.
+        "0005_application_audit.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -226,11 +245,16 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     platform_db = f"{prefix}_platform"
     api_role = f"{prefix}svc_api"
     controlplane_role = f"{prefix}svc_controlplane"
+    auditreader_role = f"{prefix}svc_auditreader"
     schema = f"{prefix}_registry"
 
     _run_psql(admin_dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
     provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
     _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+    # Phase 4 WP-3(b): 0005 creates `application_audit` + the reader role
+    # (`WHO RUNS THIS: mitatedbsvc_provision`, migration 0005's own
+    # header) -- runs as the SAME `provision_dsn` 0002 already ran as.
+    _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
@@ -241,6 +265,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         with admin.cursor() as cur:
             cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(api_role), sql.Literal(api_password)))
             cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
+            cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(auditreader_role), sql.Literal(auditreader_password)))
     finally:
         admin.close()
 
@@ -254,6 +279,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         platform_db=platform_db,
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
+        auditreader_dsn=_dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db),
     )
 
 
@@ -573,9 +599,26 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # it. `pool.BoundedConnectionPool` remains genuinely used and
             # exercised by `main.py`'s own composition root, where the
             # concurrency it is actually for exists.
+            # Phase 4 WP-3(b) (design D-1/D-6, work order "http adapter は
+            # migration 0005 を bootstrap、application 側書き手にも timeout
+            # 指定"): a real Postgres `application_audit` writer -- the SAME
+            # `<prefix>svc_api` role/DSN `self._read_store` above already
+            # connects with (migration 0005 grants it INSERT-only on this
+            # table). Carries the SAME two SESSION-level timeouts the real
+            # composition root (`main.build_app`) sets on this exact writer
+            # connection -- without them, `visibility_lag_ms` (the control
+            # side, below) would declare a lag this adapter's own writer
+            # transactions have no relationship to.
+            self._application_durable_audit = PostgresApplicationAuditSink(
+                self._platform.api_dsn, schema=self._platform.schema,
+                statement_timeout_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
+                idle_in_transaction_session_timeout_ms=DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+            )
+            self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
+
             self._read_store = PostgresCredentialStore(
                 self._platform.api_dsn, pepper="synthetic-conformance-pepper-mitatedb-http-0000",
-                schema=self._platform.schema,
+                schema=self._platform.schema, audit_router=self._audit_router,
             )
             self._write_store = PostgresCredentialStore(
                 self._platform.controlplane_dsn, pepper="synthetic-conformance-pepper-mitatedb-http-0000",
@@ -590,7 +633,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 self._cells.move_to_end(application_id)
                 return cell
 
-            self._service = HttpService(self._gate, _cell_factory)
+            self._service = HttpService(self._gate, _cell_factory, audit_router=self._audit_router)
             app = create_app(self._service, request_bytes_limit=1_048_576)
             self._app = app
             self._loop_owner = True
@@ -626,6 +669,15 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 "MITATEDB_CONTROL_APPLICATIONS_LIMIT": "100",
                 "MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT": "5",
                 "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT": "200",
+                # Phase 4 WP-3(b) (design D-5): the real `<prefix>svc_
+                # auditreader` DSN -- `visibility_lag_ms` is derived (D-6
+                # point 3) from the two writer-connection timeout defaults
+                # `build_control_service` itself falls back to (neither is
+                # overridden here, same as the real composition root's own
+                # defaults -- matching the explicit `statement_timeout_ms`/
+                # `idle_in_transaction_session_timeout_ms` passed to
+                # `PostgresApplicationAuditSink` above, both DEFAULT_*).
+                "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
             }
             self._control_service = build_control_service(control_env)
             self._control_app = create_control_app(
@@ -754,6 +806,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         self._cells[application_id] = ApplicationCell(
             application_id, FoundationConfig(control_plane_status="enabled"),
             backend=PostgresBackend(info.runtime_dsn, info.developer_dsn),
+            audit_router=self._audit_router,
         )
         self._evict_cells_over_cap()
         # Registry row: written by `mitatedb_registry.begin_provision_
@@ -868,7 +921,25 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         self, method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        headers = {"authorization": f"Bearer {actor.credential_ref}.{actor.secret}"}
+        # Phase 4 WP-3(b) (design D-5, C-09 vector 3): `audit_query` is the
+        # FIRST control-plane port operation this adapter ever presents a
+        # plain application `CredentialHandle` to (every other `_control_
+        # send` caller only ever passes a `ControlCredentialHandle`, whose
+        # own `.secret` is bare -- `issue_credential`/`bootstrap`/`reset`'s
+        # own `secret=` field, never prefixed). `CredentialHandle.secret`
+        # on THIS adapter is already the FULL composite bearer form
+        # (`"<credential_id>.<secret>"`, `issue_credential`'s own docstring
+        # and `_Session.bearer`'s identical convention -- what `/v1/*`
+        # data-plane routes expect verbatim) -- re-prepending `credential_
+        # ref` again here would double it (`"id.id.secret"`), corrupting
+        # the secret half and turning a genuine FORBIDDEN probe into a
+        # false AUTH_INVALID. Composing a NEW bearer from `credential_ref`
+        # + `secret` is only correct for a `ControlCredentialHandle`.
+        if isinstance(actor, CredentialHandle):
+            bearer = actor.secret
+        else:
+            bearer = f"{actor.credential_ref}.{actor.secret}"
+        headers = {"authorization": f"Bearer {bearer}"}
         request = self._control_client.build_request(method, path, json=json_body, headers=headers)
         response = self._run(self._control_client.send(request))
         if response.status_code >= 400:
@@ -1105,15 +1176,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return read_control_audit_events(self._platform.provision_dsn, self._platform.schema)
 
     # ------------------------------------------------------------------
-    # audit_query surface (port v1.8, phase 4 WP-1). Real HTTP POST /v1/
-    # audit/query -- against the CONTROL client (`self._control_client`),
-    # never the data-plane client -- once a peer declares audit_query
-    # enabled/partial. Every one of the three methods below always takes
-    # the `SurfaceAbsent` declare-first branch as of this WP (this peer's
-    # `control_capabilities()` always declares `audit_query: {"status":
-    # "unavailable"}` until WP-3's flip) -- written against the real,
-    # eventual dispatch shape so WP-3's flip needs no further port-adapter
-    # restructuring here.
+    # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
+    # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
+    # _control_client`), never the data-plane client (design R1 / work
+    # order instruction: exercises the alias path, never `/control/v1/
+    # audit/query`).
     # ------------------------------------------------------------------
 
     def _audit_query_status(self) -> str:
@@ -1154,13 +1221,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
                 "deployment's own declared posture",
             )
-        # Unreachable as of phase 4 WP-1 -- see conformance_adapter_r2db.py's
-        # identical method for why this deliberately does not presume a
-        # specific WP-3 buffer-flush mechanism shape.
-        raise NotImplementedError(
-            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
-            "has no real implementation yet (WP-3 scope) -- unreachable as of phase 4 WP-1"
-        )
+        # Privileged, out-of-band hook -- calls the real, shared `Audit
+        # Router` DIRECTLY (never a wire call: there is no HTTP endpoint
+        # for this on either host, by design). `force_expire_denial_
+        # windows=True`: flushes every currently-open denial-coalescing
+        # window too, not only expired ones.
+        self._audit_router.flush(force_expire_denial_windows=True)
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:

@@ -24,10 +24,20 @@ class ProvisioningFacade:
     `ProvisioningFacade`.
     """
 
-    def __init__(self, pepper, config=None, audit=None):
+    def __init__(self, pepper, config=None, audit=None, *, audit_router=None):
         self.audit = audit or AuditSink()
         self.config = config or FoundationConfig()
-        self.credentials = CredentialStore(pepper, self.audit)
+        # Phase 4 WP-3(b): propagates the SAME shared `audit_dispatch.
+        # AuditRouter` instance (when the caller provides one) into both
+        # `self.credentials` and every cell this facade provisions --
+        # mirrors `main.build_app`'s own identical wiring (`audit_router`
+        # passed to `PostgresCredentialStore`/`ApplicationCell` alike, one
+        # instance for the whole process). `audit_router=None` (every
+        # pre-Phase-4 caller) leaves `CredentialStore`/`ApplicationCell`
+        # to build their own private, unshared default router each --
+        # unchanged behavior for every caller that does not opt in.
+        self._audit_router = audit_router
+        self.credentials = CredentialStore(pepper, self.audit, audit_router=audit_router)
         self.cells = {}
 
     def provision_application(self, application_id):
@@ -43,7 +53,7 @@ class ProvisioningFacade:
         self.credentials.provision_application(application_id)
         self.cells[application_id] = ApplicationCell(
             application_id, self.config, self.audit,
-            guard=self.credentials.assert_active)
+            guard=self.credentials.assert_active, audit_router=self._audit_router)
 
     def issue_credential(self, application_id, role, expires_at=None):
         return self.credentials.issue(application_id, role, expires_at)

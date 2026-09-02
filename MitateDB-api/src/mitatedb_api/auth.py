@@ -438,6 +438,40 @@ class CredentialStore:
                               item.credential_id, detail="role=" + item.role.value)
             return Principal(item.application_id, item.credential_id, item.role)
 
+    def peek(self, credential_id, secret):
+        """Phase 4 WP-3(b) (design D-5): a READ-ONLY probe, deliberately
+        NEVER auditing anything (unlike `authenticate` above, which durably
+        routes a coalesced denial on every failed attempt, known or
+        unknown id alike) -- returns a `Principal` when `credential_id`/
+        `secret` genuinely authenticates a currently active (enabled, not
+        revoked, application enabled, not expired) application credential;
+        `None` for an unknown id, wrong secret, disabled/revoked
+        credential, disabled application, or expiry -- never raises.
+        Timing-safe (a digest comparison always runs, against a real or
+        dummy value). Used only by the in-process conformance adapter's own
+        `_ReconciledControlBackend.authenticate_application` (`control_
+        plane.ControlPlaneService.audit_query`'s "application credentials
+        are FORBIDDEN" probe, D-5) -- calling `authenticate()` there
+        instead would durably record a spurious `authentication_denied`
+        row on every `audit_query` call made with a control/audit
+        credential (whose id is always unknown in THIS store), which is an
+        adapter-only artifact this peer's own real product code
+        (`control_plane.InMemoryCredentialRegistry`/`PostgresCredential
+        Registry.authenticate`, genuinely separate registries with no such
+        side effect) never has."""
+        with self._lock:
+            item = self._credentials.get(credential_id)
+            stored_digest = item.digest if item is not None else _DUMMY_DIGEST
+            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+            if item is None or not digest_matches:
+                return None
+            valid = item.enabled and not item.revoked
+            valid = valid and self._applications.get(item.application_id, False)
+            valid = valid and (item.expires_at is None or item.expires_at > datetime.now(timezone.utc))
+            if not valid:
+                return None
+            return Principal(item.application_id, item.credential_id, item.role)
+
     def _route_reauth_denial(self, application_id, credential_id, *, request_id=None):
         """Phase 4 (design D-3): `assert_active`'s own re-check failure is
         `AUTH_INVALID` too (`http.py::_CLASSIFY_ORDER`) -- routed

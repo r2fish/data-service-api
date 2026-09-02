@@ -62,6 +62,9 @@ from adapter import (  # noqa: E402
 )
 
 from mitatedb_api import ControlPlane, Filter, MitateDataService, Role  # noqa: E402
+from mitatedb_api.application_audit import ApplicationAuditSink  # noqa: E402
+from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
+from mitatedb_api.audit_query import InMemoryAuditQueryStore  # noqa: E402
 from mitatedb_api.cell import ApplicationDeveloper, ApplicationRuntime  # noqa: E402
 from mitatedb_api.config import FoundationConfig  # noqa: E402
 from mitatedb_api.control_audit import ControlAuditSink  # noqa: E402
@@ -273,6 +276,18 @@ class _ReconciledControlBackend:
     def authenticate_control(self, credential_id, secret):
         return self._control_credentials.authenticate(credential_id, secret)
 
+    def authenticate_application(self, credential_id, secret):
+        """Phase 4 WP-3(b) (design D-5): `self._control.credentials` is
+        this adapter's own `auth.CredentialStore` (2ストア突合, this
+        module's own header) -- `peek()` (not `authenticate()`) is used
+        deliberately: see `CredentialStore.peek`'s own docstring for why
+        `authenticate()` would durably record a spurious denial row on
+        every `audit_query` call made with a control/audit credential."""
+        principal = self._control.credentials.peek(credential_id, secret)
+        if principal is None:
+            return None
+        return principal.application_id, principal.role.value
+
     def append_audit(self, *, work=None, **fields):
         return self._audit.append(work=work, **fields)
 
@@ -296,9 +311,24 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # every provisioned cell shares (R-3: single source of truth) --
         # not a value this adapter fabricates only inside
         # `capability_document()`.
+        # Phase 4 WP-3(b) (design D-5/D-10, work order "in-process adapter
+        # は... WP-1 で r2db in-process がどう PROVIDED になっているかを参照
+        # して同型に実現する"): a real, shared `AuditRouter` -- an in-memory
+        # durable sink (`ApplicationAuditSink`) -- wired into BOTH `self.
+        # _control.credentials` and every cell `self._control.provision_
+        # application` builds (`ControlPlane.__init__`/`provision_
+        # application`'s own WP-3(b) propagation, `service.py`). Without
+        # this, this adapter's application-plane durable audit events would
+        # never exist at all (each component would build its own private,
+        # unshared default router), and this control surface could never
+        # take the PROVIDED `audit_query` branch -- it would stay
+        # `SurfaceAbsent` forever, unlike r2db-api's own in-process adapter.
+        self._application_durable_audit = ApplicationAuditSink()
+        self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
         self._control = ControlPlane(
             "synthetic-conformance-pepper-mitatedb-0000000",
             config=FoundationConfig(control_plane_status="enabled"),
+            audit_router=self._audit_router,
         )
         self._service = MitateDataService(self._control)
         self._counter = 0
@@ -346,7 +376,19 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self._control_backend = _ReconciledControlBackend(self._control, self._control_credentials, self._control_audit)
         self._control_limits = ControlPlaneLimits(
             applications=100, credentials_per_application=5, control_requests_per_minute=200)
-        self._control_service = ControlPlaneService(self._control_backend, limits=self._control_limits)
+        # Phase 4 WP-3(b) (design D-5/D-10): the in-memory `audit_query`
+        # reader -- UNIONs `self._control_audit` (control plane) with
+        # `self._application_durable_audit` (application plane, the SAME
+        # sink `self._audit_router` above writes through) -- `visibility_
+        # lag_ms=0` (in-memory writes are synchronous; no real writer-
+        # connection timeout basis exists to derive a lag from, mirrors
+        # r2db-api's own in-process adapter).
+        self._audit_reader = InMemoryAuditQueryStore(self._control_audit, self._application_durable_audit)
+        self._control_service = ControlPlaneService(
+            self._control_backend, limits=self._control_limits,
+            audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+            audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
+        )
         # `control_credential()`'s own maintained handle (memoize + call-
         # time validity check -- port v1.5 WP-1 independent review major
         # M-4: "MUST return a handle that is genuinely valid AT CALL
@@ -629,15 +671,11 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         return [event.as_dict() for event in self._control_audit.snapshot()]
 
     # ------------------------------------------------------------------
-    # audit_query surface (port v1.8, phase 4 WP-1). Mirrors r2db-api's
-    # own identical WP-1 addition (`conformance_adapter_r2db.py`): this WP
-    # does not implement a real `audit_query` on `ControlPlaneService`
-    # (WP-3's own scope) -- `control_capabilities()` (L1159 as of this WP)
-    # always declares `audit_query: {"status": "unavailable"}`, so every
-    # one of the three methods below always takes the `SurfaceAbsent`
-    # declare-first branch for now. Written against the real, eventual
-    # dispatch shape so WP-3's flip needs no further port-adapter
-    # restructuring here.
+    # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
+    # `ControlPlaneService.control_capabilities()` now declares `audit_
+    # query: {"status": "enabled", ...}` (the real reader wired in
+    # `__init__` above), so every one of the three methods below takes the
+    # PROVIDED branch.
     # ------------------------------------------------------------------
 
     def _audit_query_status(self) -> str:
@@ -681,13 +719,11 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
                 "deployment's own declared posture",
             )
-        # Unreachable as of phase 4 WP-1 -- see conformance_adapter_r2db.py's
-        # identical method for why this deliberately does not presume a
-        # specific WP-3 buffer-flush mechanism shape.
-        raise NotImplementedError(
-            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
-            "has no real implementation yet (WP-3 scope) -- unreachable as of phase 4 WP-1"
-        )
+        # `force_expire_denial_windows=True`: flushes EVERY currently-open
+        # denial-coalescing window, not only expired ones -- a conformance
+        # test that needs a repeat-count summary row visible right after
+        # calling this must not have to wait out the real 60s window too.
+        self._audit_router.flush(force_expire_denial_windows=True)
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
