@@ -127,6 +127,15 @@ class ControlPlaneLimits:
     # source, mirroring MitateDB-api's identical `ControlPlaneLimits.
     # request_bytes` field).
     request_bytes: int = 1_048_576
+    # Phase 4 WP-2(b) (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-5, work
+    # order WP-2(b) / P4-D4 item 8): `audit_query`'s own pre-auth fixed
+    # window -- a SEPARATE counter from `control_requests_per_minute`
+    # above, never sharing its bucket (`ControlPlaneService.
+    # check_audit_rate`/`_check_audit_rate`, `control_plane.py`). Default
+    # matches `control_requests_per_minute`'s own default (60) -- both are
+    # deployer-tunable via the identical env-var convention
+    # (`R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE`, `control_main.py`).
+    audit_requests_per_minute: int = 60
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

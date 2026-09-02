@@ -65,6 +65,26 @@ def _reject_reserved_prefix(name: str) -> None:
         fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
 
 
+# WP-2(b) review B-2 (major, supervisor ruling 2026-09-03 -- "義務として
+# 実装する"): contract 1.4.0 `structured_operations.reserved_entity_names_
+# note` (unconditional item 6) states "audit_events is reserved across
+# implementations as an entity/collection name ... both peers already
+# refuse this exact name defensively". That was true for MitateDB
+# (`backend_sqlite._RESERVED` / `backend_postgres._RESERVED_EXACT`) but NOT
+# for r2db-api before this fix -- `_reject_reserved_prefix` above only ever
+# rejected the `_r2db` PREFIX, never this one exact name, so `create_entity`
+# with `entity="audit_events"` was silently ACCEPTED. EXACT match only
+# (never a prefix) -- an application legitimately owning e.g.
+# "audit_events_archive" must not be blocked; the contract's own text names
+# this one literal string, not a namespace.
+_RESERVED_ENTITY_NAMES = frozenset({"audit_events"})
+
+
+def _reject_reserved_entity_name(name: str) -> None:
+    if name in _RESERVED_ENTITY_NAMES:
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+
+
 def _mapping(value: Any, message: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail("VALIDATION_FAILED", message)
@@ -555,6 +575,13 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         fail("VALIDATION_FAILED", "Schema operation shape is not supported.")
     name = operation.get("operation")
     entity = validate_identifier(operation.get("entity", ""))
+    # WP-2(b) fix round 2 (coordinator item C): reserved by EXACT match at
+    # this ONE shared choke point -- every schema operation (create_entity/
+    # add_field/drop_entity/create_index/drop_index) binds `entity` here,
+    # so this single check covers all of them uniformly, matching
+    # MitateDB's own `cell._identifier()` "reject at every identifier
+    # position" line rather than only the `create_entity` creation path.
+    _reject_reserved_entity_name(entity)
     if "revision" in operation:
         # WP-2 review minor (e): `revision` was previously an accepted-but-
         # unused key (schema-level optimistic locking has no implementation
@@ -1053,6 +1080,13 @@ class ApplicationCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
+        # WP-2(b) fix round 2 (coordinator item C): reserved at every
+        # identifier position, not only at creation time -- a query
+        # against `entity="audit_events"` is refused as reserved, never
+        # merely NOT_FOUND (no real entity of that name can ever exist,
+        # since create_entity already refuses it, but the refusal reason
+        # should say so directly rather than via a generic 404).
+        _reject_reserved_entity_name(entity)
         validate_page_size(page_size, limits)
         if entity not in self.entities:
             fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1118,6 +1152,7 @@ class ApplicationCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
+        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
         if not operations:
             fail("VALIDATION_FAILED", "At least one mutation is required.")
         limits.check("batch_items", len(operations))

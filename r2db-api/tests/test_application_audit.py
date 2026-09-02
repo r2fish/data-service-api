@@ -1538,6 +1538,33 @@ def test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n() -
     assert summary["reason_code"] == "AUTH_INVALID"
 
 
+def test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one() -> None:
+    """WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): a window
+    with exactly ONE repeat (2 total occurrences: the first-occurrence row
+    plus one more) must still write its summary row with `count` ABSENT
+    (NULL) -- never the literal `1` (contract `audit.query_event_fields_
+    note`: "never zero or one"). The general-N test just above uses
+    `n_repeats=7` and never exercises this boundary; this test exercises
+    it directly with `repeat_count == 1` at flush time.
+    """
+    durable = ApplicationAuditSink()
+    clock = _FakeClock()
+    service, _control = build_service(durable_audit=durable, clock=clock)
+
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-boundary")
+    with pytest.raises(FoundationError):
+        service.authenticate("bogus-secret-boundary")
+
+    clock.advance(61.0)
+    service.flush_audit_buffer()
+
+    events = durable_events(durable)
+    assert len(events) == 2, f"expected exactly the first-occurrence row + one summary row, got {events!r}"
+    summary = events[1]
+    assert "count" not in summary, f"a window representing exactly 2 total occurrences must never write count=1 -- got {summary!r}"
+
+
 def test_different_denial_keys_do_not_coalesce_together() -> None:
     durable = ApplicationAuditSink()
     clock = _FakeClock()
@@ -1617,13 +1644,18 @@ def test_force_expire_denial_windows_flushes_an_unexpired_window_too() -> None:
     assert durable_events(durable) == events_before
 
     # The shutdown-shaped flush forces it out anyway, with the repeat
-    # count (1 repeat) it had accumulated so far.
+    # count (1 repeat) it had accumulated so far. WP-2(b) review B-1
+    # (supervisor ruling 2026-09-03): a summary row representing exactly
+    # 1 repeat (2 total occurrences) writes `count` ABSENT (NULL), never
+    # the literal `1` -- see `test_coalesced_summary_row_with_exactly_
+    # one_repeat_writes_no_literal_count_of_one` for the dedicated
+    # boundary test; this assertion is updated to match, not weakened.
     service.flush_audit_buffer(force_expire_denial_windows=True)
     events_after = durable_events(durable)
     assert len(events_after) == 2
     summary_row = events_after[1]
     assert summary_row["reason_code"] == "AUTH_INVALID"
-    assert summary_row["count"] == 1
+    assert "count" not in summary_row
 
 
 # ===========================================================================
@@ -1735,10 +1767,47 @@ def test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_fa
         assert row["reason_code"] == "audit_buffer_overflow"
         assert row["operation"] == "audit_buffer"
         assert row["target_kind"] == "audit_sink"
-    assert sum(row["count"] for row in alert_rows) == expected_evictions, (
+    # WP-2(b) review B-1 (supervisor ruling 2026-09-03): an alert row
+    # representing exactly ONE drop writes `count` ABSENT (NULL), not the
+    # literal `1` -- `row.get("count", 1)` reads that correctly (absence
+    # means one occurrence), never `row["count"]` (which would now raise
+    # `KeyError` on any single-drop alert row).
+    assert sum(row.get("count", 1) for row in alert_rows) == expected_evictions, (
         f"alert rows' counts must sum to the independently-computed eviction count "
         f"({expected_evictions}), got rows {alert_rows!r}"
     )
+
+
+def test_buffer_overflow_alert_row_with_exactly_one_drop_writes_no_literal_count_of_one() -> None:
+    """WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): the
+    overflow-alert row follows the identical `count` rule as the denial-
+    coalescer's summary row (design D-4, one sentence added alongside D-3's)
+    -- exactly ONE genuine eviction must still produce an alert row with
+    `count` ABSENT, never the literal `1`.
+    """
+    inner = ApplicationAuditSink()
+    faulty = _SelectiveFaultSink(inner)
+    faulty.fail_event_classes.add("__buffer__")
+    clock = _FakeClock()
+    capacity = 2
+    push_count = 3  # exactly one genuine eviction: push_count - capacity == 1
+    service, _control = build_service(durable_audit=faulty, clock=clock, audit_buffer_capacity=capacity)
+    ctx = runtime_context(service)
+
+    for _ in range(push_count):
+        service.query(ctx, "notes", select=["id"])
+
+    clock.advance(service._audit_buffer._alert_backoff_s + 1.0)
+    service.flush_audit_buffer()
+
+    events = durable_events(inner)
+    alert_rows = [e for e in events if e["event_class"] == "security_control_failure"]
+    assert alert_rows, "expected at least one alert row"
+    assert sum(row.get("count", 1) for row in alert_rows) == 1, (
+        f"expected exactly one genuine eviction total, got rows {alert_rows!r}"
+    )
+    for row in alert_rows:
+        assert "count" not in row, f"an alert row representing exactly one drop must never write count=1 -- got {row!r}"
 
 
 def test_alert_row_rate_is_bounded_to_at_most_one_per_flush_interval() -> None:

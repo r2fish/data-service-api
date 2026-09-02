@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from r2db_api.audit import ControlAuditSink
+from r2db_api.audit_query import InMemoryAuditQueryStore
 from r2db_api.auth import ControlCredentialStore, CredentialStore
 from r2db_api.control_http import _ROUTES, create_control_app
 from r2db_api.control_plane import _AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneService, InMemoryControlBackend
@@ -73,7 +74,13 @@ def _build_control_harness(limits: ControlPlaneLimits | None = None) -> types.Si
     control_credentials = ControlCredentialStore(pepper=CONTROL_PEPPER)
     backend = InMemoryControlBackend(authority, control_credentials)
     audit = ControlAuditSink()
-    service = ControlPlaneService(backend, audit=audit, limits=limits or _GENEROUS_LIMITS)
+    # Phase 4 WP-2(b): `audit_query` declared `enabled` for this harness --
+    # an in-memory reader over this SAME `audit` sink and `data_service`'s
+    # own in-memory `application_audit` half (D-10), so this file's route-
+    # table/authorization-matrix tests exercise the real PROVIDED branch
+    # rather than a permanently-`unavailable` stub.
+    audit_reader = InMemoryAuditQueryStore(audit, data_service._durable_audit)  # noqa: SLF001
+    service = ControlPlaneService(backend, audit=audit, limits=limits or _GENEROUS_LIMITS, audit_reader=audit_reader, audit_visibility_lag_ms=0)
     with control_credentials.unit_of_work() as work:
         control_credentials.add(_SEED_CREDENTIAL_ID, _SEED_SECRET, work=work)
     with control_credentials.unit_of_work() as work:
@@ -113,7 +120,10 @@ async def test_full_endpoint_roundtrip_through_all_11_routes(control_harness):
         caps_doc = caps.json()
         assert caps_doc["capabilities"]["control_plane"] == {"status": "enabled"}
         assert caps_doc["role"] == "control"
-        assert set(caps_doc["limits"]) == {"applications", "credentials_per_application", "control_requests_per_minute", "request_bytes"}
+        # Phase 4 WP-2(b): `audit_requests_per_minute` joins the declared
+        # set -- a real `ControlPlaneLimits` field now (its own separate
+        # pre-auth window, `test_audit_query.py`).
+        assert set(caps_doc["limits"]) == {"applications", "credentials_per_application", "control_requests_per_minute", "request_bytes", "audit_requests_per_minute"}
         # Phase 3.5 WP-4 (§4 "L4"): the HTTP-mounted two-layer override --
         # `request_bytes` reads `"enforced"` here (unlike the bare-service
         # `"unavailable"` `test_control_plane_service.py` pins), because a
@@ -438,7 +448,99 @@ async def test_valid_requests_consume_exactly_one_token_each_no_double_charge():
         fourth = await client.get("/control/v1/capabilities", headers=headers)
     assert [r.status_code for r in responses] == [200, 200, 200]
     assert fourth.status_code == 429
-    assert fourth.json()["code"] == "LIMIT_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# WP-2(b) review M-4/M-5 (major, supervisor ruling 2026-09-03): the ONLY
+# wire path `audit_query` has is `post_audit_query` (control_http.py) --
+# the peer-local `test_audit_query.py` suite calls `ControlPlaneService.
+# audit_query` directly, which never proves the HTTP HANDLER charges the
+# right window at the right time. Mutation M7 (HTTP handler ALSO calls
+# `service.check_rate()`) and M8b (the audit window moved to run AFTER
+# `_authenticate`) both left every pre-existing test green -- these two
+# tests close that gap by driving the real ASGI app.
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_query_rate_limit_is_pre_auth_and_reaches_http_as_429():
+    """M-5: `audit_requests_per_minute` is charged BEFORE authentication,
+    on both wire paths -- mirrors `test_rate_limit_reaches_http_as_429_
+    before_auth`'s own exact structure/assertions, but for `audit_query`'s
+    own window (never `control_requests_per_minute`, which stays generous
+    here so a regression collapsing the two windows together would not
+    hide behind it)."""
+    limits = ControlPlaneLimits(applications=1_000, credentials_per_application=1_000, control_requests_per_minute=1_000, audit_requests_per_minute=2)
+    harness = _build_control_harness(limits)
+    transport = httpx.ASGITransport(app=create_control_app(harness.service))
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        first = await client.post("/control/v1/audit/query")  # no Authorization header at all
+        second = await client.post("/control/v1/audit/query")
+        third = await client.post("/control/v1/audit/query")
+    assert first.status_code == 401
+    assert second.status_code == 401
+    assert third.status_code == 429
+    body = third.json()
+    assert body["code"] == "LIMIT_EXCEEDED"
+    assert body["details"]["resource"] == "audit_requests_per_minute"
+    assert "audited" not in body["details"]
+
+
+async def test_audit_query_wire_calls_never_consume_the_control_requests_per_minute_window():
+    """M-4: driving `audit_query` over real HTTP, past `control_requests_
+    per_minute`'s own (tight) ceiling, must never trip it -- and an
+    ordinary control-window-charging endpoint must still have its full,
+    untouched budget available afterward. Both paths (canonical + alias)
+    exercised."""
+    limits = ControlPlaneLimits(applications=1_000, credentials_per_application=1_000, control_requests_per_minute=2, audit_requests_per_minute=1_000)
+    harness = _build_control_harness(limits)
+    transport = httpx.ASGITransport(app=create_control_app(harness.service))
+    headers = _auth(harness.secret)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        for path in ("/control/v1/audit/query", "/v1/audit/query"):
+            for _ in range(10):
+                response = await client.post(path, headers=headers, json={"limit": 1})
+                assert response.status_code == 200, response.json()
+        # `control_requests_per_minute` is still fresh (limit=2): exactly
+        # 2 ordinary control calls succeed, the 3rd is refused -- proving
+        # the 20 audit_query calls above spent nothing from this window.
+        first = await client.get("/control/v1/capabilities", headers=headers)
+        second = await client.get("/control/v1/capabilities", headers=headers)
+        third = await client.get("/control/v1/capabilities", headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert third.json()["code"] == "LIMIT_EXCEEDED"
+    assert third.json()["details"]["resource"] == "control_requests_per_minute"
+
+
+async def test_audit_query_without_reader_answers_an_audit_role_credential_with_capability_unsupported_over_http():
+    """WP-2(b) fix round 2 (coordinator item G), HTTP-level counterpart to
+    `test_audit_query.py::test_audit_query_without_audit_dsn_refuses_with_
+    capability_unsupported_not_404`'s own audit-role case: contract 1.4.0
+    unconditional obligation (b)'s literal combination -- unavailable
+    `audit_query` still answers an AUTHORIZED audit-role caller with
+    `CAPABILITY_UNSUPPORTED` over the real wire, never `FORBIDDEN` (the
+    role IS authorized) and never a bare 404 (the route is always
+    registered)."""
+    credentials = CredentialStore(pepper=PEPPER)
+    data_service = DataService(credentials)
+    authority = ControlAuthority(data_service)
+    control_credentials = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    backend = InMemoryControlBackend(authority, control_credentials)
+    audit = ControlAuditSink()
+    service = ControlPlaneService(backend, audit=audit, limits=_GENEROUS_LIMITS)  # no audit_reader at all
+    audit_credential_id = "ctl_" + os.urandom(8).hex()
+    audit_secret = "no-reader-http-audit-role-" + os.urandom(8).hex()
+    with control_credentials.unit_of_work() as work:
+        control_credentials.add(audit_credential_id, audit_secret, role="audit", work=work)
+        control_credentials.rotate(audit_credential_id, audit_secret, work=work)
+
+    transport = httpx.ASGITransport(app=create_control_app(service))
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        response = await client.post("/control/v1/audit/query", headers=_auth(audit_secret), json={"limit": 1})
+    assert response.status_code != 404
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.json()["code"] not in ("FORBIDDEN", "NOT_FOUND")
 
 
 # ===========================================================================
@@ -450,9 +552,15 @@ async def test_valid_requests_consume_exactly_one_token_each_no_double_charge():
 def test_control_and_data_plane_route_tables_are_disjoint(control_harness):
     control_app = create_control_app(control_harness.service)
     control_routes = control_app.app.routes  # RequestByteBoundMiddleware.app is the wrapped Starlette app
-    assert len(control_routes) == 11
+    # Phase 4 WP-2(b) (design D-5): 11 pre-existing control_endpoints + 2
+    # audit_query paths (`/control/v1/audit/query` and its pre-1.4.0 alias).
+    assert len(control_routes) == 13
     control_paths = {route.path for route in control_routes}
-    assert all(path.startswith("/control/v1") for path in control_paths)
+    # D-5's own ONE deliberate exception: `/v1/audit/query` is the pre-1.4.0
+    # `endpoints.audit_query` path, aliased onto this control host too (see
+    # `control_http.py`'s own module-level comment on `_ROUTES` for why) --
+    # every other control-host path still starts with `/control/v1`.
+    assert all(path.startswith("/control/v1") or path == "/v1/audit/query" for path in control_paths)
 
     data_credentials = CredentialStore(pepper="disjoint-check-pepper-0000")
     data_service = DataService(data_credentials)
@@ -460,7 +568,15 @@ def test_control_and_data_plane_route_tables_are_disjoint(control_harness):
     data_paths = {route.path for route in data_app.app.routes}
 
     assert not any(path.startswith("/control") for path in data_paths)
-    assert not any(path.startswith("/v1") for path in control_paths)
+    # Both hosts legitimately serve the identical `/v1/audit/query` path
+    # string (D-5) -- the data-plane's own copy stays its pre-existing
+    # `CAPABILITY_UNSUPPORTED` stub (§8.1 vector 3: two hosts answering
+    # differently for the same path is not a contradiction). Disjointness
+    # therefore excludes this ONE shared path explicitly, rather than
+    # silently weakening the general "no /v1/... path on the control host"
+    # rule for anything else.
+    assert not any(path.startswith("/v1") and path != "/v1/audit/query" for path in control_paths)
+    assert "/v1/audit/query" in data_paths
 
 
 async def test_unknown_control_path_is_404(control_harness):
@@ -636,7 +752,7 @@ def test_build_control_app_returns_asgi_app_without_connecting(control_main_modu
     app = control_main_module.build_control_app(_VALID_ENV)
     assert app is not None
     assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
-    assert len(app.app.routes) == 11
+    assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
 
 
 def test_control_main_module_level_app_exists_and_is_asgi(control_main_module):
@@ -648,7 +764,7 @@ def test_control_main_module_level_app_exists_and_is_asgi(control_main_module):
     app = control_main_module.app
     assert app is not None
     assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
-    assert len(app.app.routes) == 11
+    assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
 
 
 def test_import_r2db_api_control_main_module_succeeds_with_valid_environment():
@@ -724,14 +840,20 @@ _ROUTE_OPERATION_NAMES: dict[tuple[str, str], str] = {
     ("POST", "/control/v1/credentials/{credential_id}/revoke"): "revoke_credential",
     ("POST", "/control/v1/credentials/{credential_id}/disable"): "disable_credential",
     ("POST", "/control/v1/credentials/{credential_id}/enable"): "enable_credential",
+    # Phase 4 WP-2(b) (design D-5): `audit_query` joins `_AUDIT_ROLE_
+    # ALLOWED_OPERATIONS` -- both paths map to the SAME operation name.
+    ("POST", "/control/v1/audit/query"): "audit_query",
+    ("POST", "/v1/audit/query"): "audit_query",
 }
 
 
-async def test_audit_role_http_authorization_matrix_all_11_endpoints(control_harness):
+async def test_audit_role_http_authorization_matrix_all_13_endpoints(control_harness):
     """Endpoint-by-endpoint audit-role authorization matrix, driven over
-    real HTTP against every one of the 11 routes `_ROUTES` declares (§8
-    risk 3: fail-closed completeness). The 3 read-only routes return 200 for
-    an `audit`-role bearer; every other route returns 403 FORBIDDEN.
+    real HTTP against every one of the 13 routes `_ROUTES` declares (§8
+    risk 3: fail-closed completeness; Phase 4 WP-2(b) added `audit_query`'s
+    own 2 paths to the original 11). The 3 pre-existing read-only routes
+    PLUS `audit_query` (both its paths, m-4 rename) return 200 for an
+    `audit`-role bearer; every other route returns 403 FORBIDDEN.
 
     Round-2 independent review m-3: structurally complete, not a hand-
     maintained list a future 10th route could silently bypass -- the set of
@@ -767,6 +889,12 @@ async def test_audit_role_http_authorization_matrix_all_11_endpoints(control_har
             ("POST", "/control/v1/credentials/{credential_id}/revoke", {}, 403),
             ("POST", "/control/v1/credentials/{credential_id}/disable", None, 403),
             ("POST", "/control/v1/credentials/{credential_id}/enable", None, 403),
+            # Phase 4 WP-2(b): `audit_query` is read-only and now in the
+            # allow-list -- 200 for BOTH paths (`control_harness` wires a
+            # real in-memory `audit_reader`, so this is the genuine
+            # PROVIDED branch, not a `CAPABILITY_UNSUPPORTED` stand-in).
+            ("POST", "/control/v1/audit/query", {"limit": 1}, 200),
+            ("POST", "/v1/audit/query", {"limit": 1}, 200),
         ]
         matrix_keys = {(method, template) for method, template, _body, _status in matrix}
 

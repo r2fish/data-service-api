@@ -79,6 +79,20 @@ _DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
 # thread uses (imports this name directly rather than defining its own).
 _DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
+# Phase 4 WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): the
+# durable `count` column's own semantics -- "the number of occurrences this
+# ONE row represents; when that number is 1, the column is absent (NULL)"
+# (contract `audit.query_event_fields_note`: "present only on an event
+# representing more than one coalesced occurrence, absent -- never zero or
+# one -- otherwise"). Both call sites that can ever pass a real integer here
+# -- `_DenialCoalescer`'s aggregate (repeat-count) row and `_AuditBuffer`'s
+# overflow-alert row -- route the raw tally through this one function
+# instead of writing it verbatim, so "exactly one repeat/one drop" always
+# renders as an ordinary NULL-count row, never a literal `count=1` a reader
+# would have to special-case.
+def _coalesced_count(occurrences: int) -> int | None:
+    return occurrences if occurrences >= 2 else None
+
 # Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
 # design's own instruction ("可変部に実データを載せない"). A fixed string
 # also means these two call sites can never accidentally leak a client-
@@ -380,7 +394,7 @@ class _AuditBuffer:
                 outcome="deny",
                 reason_code="audit_buffer_overflow",
                 target_id=None,
-                count=count,
+                count=_coalesced_count(count),
             )
         except Exception:
             with self._lock:
@@ -590,7 +604,7 @@ class _DenialCoalescer:
                     # routed it since) -- flush its repeat-summary row
                     # first, still under this key's own lock.
                     try:
-                        self._sink.append(count=expired_state["repeat_count"], **expired_state["fields"])
+                        self._sink.append(count=_coalesced_count(expired_state["repeat_count"]), **expired_state["fields"])
                     except Exception:
                         self._requeue_failed_aggregate(key, expired_state)
                         self._note_aggregate_write_result(False)
@@ -662,7 +676,7 @@ class _DenialCoalescer:
             try:
                 with key_lock:
                     try:
-                        self._sink.append(count=state["repeat_count"], **state["fields"])
+                        self._sink.append(count=_coalesced_count(state["repeat_count"]), **state["fields"])
                     except Exception:
                         # Review D-1: never silently drop this repeat count
                         # -- put it back where a future attempt (this same
@@ -762,7 +776,14 @@ class DataService:
             # than a new C-12 "declared unavailable, executes anyway" gap.
             schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
             return {
-                "contract_version": "1.3.0",
+                # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
+                # version_binding`): unconditional -- every deployment of
+                # this data-plane host declares 1.4.0 now, whether or not
+                # the CONTROL host alongside it has AUDIT DSN configured
+                # (`audit_query` stays `unavailable` right below,
+                # unchanged: this host never provides it, D-5's own
+                # "declaration = real behavior" rule).
+                "contract_version": "1.4.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.

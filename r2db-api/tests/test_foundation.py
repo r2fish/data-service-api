@@ -688,6 +688,57 @@ def test_reserved_identifier_names_are_rejected_for_entities_and_fields(service)
     assert exc.value.code == "IDENTIFIER_INVALID"
 
 
+def test_audit_events_entity_name_is_reserved_by_exact_match_only(service):
+    """WP-2(b) review B-2 (major, supervisor ruling 2026-09-03): contract
+    1.4.0 `structured_operations.reserved_entity_names_note` (unconditional
+    item 6) requires `audit_events` to be refused as an entity name. EXACT
+    match only -- `audit_events_archive` (a superstring, not the reserved
+    name itself) must still be accepted, proving this is not accidentally a
+    prefix rule."""
+    developer = service.authenticate("dev-secret-a")
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "create_entity", "entity": "audit_events"})
+    assert exc.value.code == "IDENTIFIER_INVALID"
+    # Accepted: not the reserved name itself, only a superstring of it.
+    service.schema(developer, {"operation": "create_entity", "entity": "audit_events_archive"})
+
+
+def test_audit_events_is_reserved_at_every_entity_identifier_position(service):
+    """WP-2(b) fix round 2 (coordinator item C): the reservation must fire
+    at EVERY entity-identifier position -- add_field/drop_entity/
+    create_index/drop_index/query/mutate -- not only at create_entity,
+    matching MitateDB's own `cell._identifier()` "reject at every
+    identifier position" line. Each of these previously fell through to a
+    generic NOT_FOUND (no real entity of that name can ever exist) instead
+    of the reserved-name refusal itself."""
+    developer = service.authenticate("dev-secret-a")
+    runtime = service.authenticate("secret-a")
+
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "add_field", "entity": "audit_events", "field": "x"})
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "drop_entity", "entity": "audit_events", "destructive": True, "confirmation": "whatever"})
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "create_index", "entity": "audit_events", "index": "ix1", "fields": ["x"]})
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "drop_index", "entity": "audit_events", "index": "ix1"})
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        service.query(runtime, "audit_events", select=["id"])
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "audit_events", [{"operation": "insert", "values": {"body": "x"}}])
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+
 # ==========================================================================
 # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md, work package WP-2, plus its
 # review corrigenda in §9): typed columns, reserved names, indexes/

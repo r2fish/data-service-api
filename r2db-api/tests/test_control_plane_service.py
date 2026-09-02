@@ -1661,19 +1661,33 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         caps = h.service.capabilities(secret)
-        # Phase 3.5 WP-4 (design §5 WP-4 row, B-3): this WP ships the 1.3.0
-        # obligations for r2db-api, so the flip lands in this same commit.
-        assert caps["contract_version"] == "1.3.0"
+        # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
+        # version_binding`): the flip lands in this same commit as
+        # `audit_query`'s own real behavior.
+        assert caps["contract_version"] == "1.4.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
-        assert caps["capabilities"]["audit_query"]["status"] == "unavailable"
+        # This harness's `ControlPlaneService` is built with no `audit_
+        # reader` (AUDIT DSN unconfigured) -- `audit_query` stays declared
+        # `unavailable` (D-5 M-4).
+        assert caps["capabilities"]["audit_query"] == {"status": "unavailable"}
         # Phase 3.5 WP-4 (§4 "L4"): `request_bytes` is now a 4th declared
         # limit -- defaulted here (not passed to `ControlPlaneLimits(...)`
-        # above), so its value is the field's own default.
-        assert caps["limits"] == {"applications": 42, "credentials_per_application": 7, "control_requests_per_minute": 99, "request_bytes": 1_048_576}
+        # above), so its value is the field's own default. Phase 4 WP-2(b):
+        # `audit_requests_per_minute` is a 5th, likewise defaulted.
+        assert caps["limits"] == {
+            "applications": 42, "credentials_per_application": 7, "control_requests_per_minute": 99,
+            "request_bytes": 1_048_576, "audit_requests_per_minute": 60,
+        }
         # `request_bytes` enforcement is `"unavailable"` at THIS (service)
         # layer -- there is no HTTP boundary mounted here to enforce it;
         # `test_control_http.py` pins the HTTP-mounted `"enforced"` override.
-        assert caps["limit_enforcement"] == {"applications": "enforced", "credentials_per_application": "enforced", "control_requests_per_minute": "enforced", "request_bytes": "unavailable"}
+        # `audit_requests_per_minute` is "enforced" unconditionally (this
+        # window is pre-auth and always active once the process is running,
+        # independent of whether `audit_query` itself is `enabled`).
+        assert caps["limit_enforcement"] == {
+            "applications": "enforced", "credentials_per_application": "enforced", "control_requests_per_minute": "enforced",
+            "request_bytes": "unavailable", "audit_requests_per_minute": "enforced",
+        }
         assert caps["authorization_propagation_bound_ms"] == 0
         assert caps["role"] == "control"
 
@@ -1839,7 +1853,7 @@ def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint(kind, 
     (§8 risk 3: "書込 endpoint 全数列挙の fail-closed テスト" -- a future
     operation fails the test until explicitly classified, never silently
     skipped) lives in `test_control_http.py::
-    test_audit_role_http_authorization_matrix_all_11_endpoints`, which
+    test_audit_role_http_authorization_matrix_all_13_endpoints`, which
     derives its own enumeration from `control_http._ROUTES` (the real wire
     route table) and asserts set-equality against it, rather than trusting a
     hand-typed list to stay in sync. This test remains useful alongside that

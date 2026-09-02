@@ -53,6 +53,26 @@ Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
                                                         `ControlPlaneLimits.
                                                         control_requests_
                                                         per_minute`
+    R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE       optional, default
+                                                        `ControlPlaneLimits.
+                                                        audit_requests_
+                                                        per_minute` (Phase 4
+                                                        WP-2(b), design D-5)
+                                                        -- `audit_query`'s
+                                                        OWN pre-auth window,
+                                                        never shared with
+                                                        the class above.
+    R2DB_AUDIT_DSN                        optional (Phase 4 WP-2(b), design
+                                           D-5) -- the `r2dbsvc_auditreader`
+                                           role DSN (migration `0007_
+                                           application_audit.sql` §1.3),
+                                           read-only over BOTH `control_
+                                           audit` and `application_audit`.
+                                           Unset means `audit_query` stays
+                                           declared `unavailable` (the
+                                           route still exists and still
+                                           authenticates, answering
+                                           `CAPABILITY_UNSUPPORTED`).
     R2DB_PLATFORM_SCHEMA                  optional, default `r2dbsvc_
                                            registry` -- identical escape
                                            hatch to `r2db_api.main`'s own
@@ -136,6 +156,7 @@ from .credential_store import (
     DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
     DEFAULT_SCHEMA,
     PostgresApplicationRegistry,
+    PostgresAuditQueryStore,
     PostgresControlAuditSink,
     PostgresControlCredentialStore,
     PostgresCredentialStore,
@@ -144,6 +165,11 @@ from .credential_store import (
 from .limits import ControlPlaneLimits
 
 _DEFAULT_LIMITS = ControlPlaneLimits()
+
+# Phase 4 WP-2(b) (design D-6): "clock-skew margin" -- the third term
+# `visibility_lag_ms` sums beyond the two writer-connection timeouts
+# (`statement_timeout_ms + idle_in_transaction_session_timeout_ms + this`).
+_VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -178,7 +204,9 @@ def assemble_control_stack(
     limits: ControlPlaneLimits | None = None,
     audit_statement_timeout_ms: int | None = None,
     audit_idle_timeout_ms: int | None = None,
-) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink]]:
+    audit_dsn: str | None = None,
+    audit_reader_pool_size: int | None = None,
+) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink, PostgresAuditQueryStore | None]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
     conformance HTTP adapter (`conformance_adapter_r2db_http.py`) -- the
@@ -201,13 +229,15 @@ def assemble_control_stack(
     it does not merely skip the check.
 
     Returns `(service, stores)` -- `stores` is `(applications, credentials,
-    control_credentials, audit)`, in the exact order each caller's own
-    shutdown/rebuild logic closes them. Building the ASGI app itself
-    (`create_control_app(service, ...)`) is left to the caller: `build_
-    control_app` below wraps it with a real ASGI `lifespan` hook; the
-    conformance adapter does not drive ASGI lifespan at all (see that
-    adapter's own docstring) and calls `create_control_app(service)` with
-    no `lifespan` argument, closing `stores` directly instead.
+    control_credentials, audit, audit_reader)`, in the exact order each
+    caller's own shutdown/rebuild logic closes them. `audit_reader` is
+    `None` whenever `audit_dsn` is not given (D-5 M-4: AUDIT DSN
+    unconfigured) -- callers must guard its `close()` accordingly. Building
+    the ASGI app itself (`create_control_app(service, ...)`) is left to the
+    caller: `build_control_app` below wraps it with a real ASGI `lifespan`
+    hook; the conformance adapter does not drive ASGI lifespan at all (see
+    that adapter's own docstring) and calls `create_control_app(service)`
+    with no `lifespan` argument, closing `stores` directly instead.
     """
     try:
         validate_control_pepper_separation(app_pepper, control_pepper)
@@ -230,9 +260,33 @@ def assemble_control_stack(
         statement_timeout_ms=audit_statement_timeout_ms, idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
     )
 
+    # Phase 4 WP-2(b) (design D-5): the `r2dbsvc_auditreader` read surface
+    # -- a genuinely SEPARATE DSN/role from `controlplane_dsn` above (never
+    # `r2dbsvc_controlplane`, which migration 0007 grants no access to
+    # either audit table at all) and from `credentials`/`applications`'s
+    # own roles. `audit_reader`/`audit_visibility_lag_ms` stay at their
+    # `ControlPlaneService` defaults (`None`/`0`, i.e. `audit_query`
+    # declares `unavailable`) whenever `audit_dsn` is not given -- the
+    # route still exists (`control_http.py`'s own unconditional
+    # registration), it just answers `CAPABILITY_UNSUPPORTED` (D-5 M-4).
+    audit_reader: PostgresAuditQueryStore | None = None
+    audit_visibility_lag_ms = 0
+    if audit_dsn:
+        audit_reader = PostgresAuditQueryStore(audit_dsn, schema=schema, pool_size=audit_reader_pool_size)
+        # D-6 point 3: DERIVED, never a bare constant -- the SAME two
+        # timeouts the writer connections above (and `r2db_api.main`'s own
+        # `application_audit` writer) actually carry, plus a fixed 1s
+        # clock-skew margin. Changing either timeout changes this value.
+        statement_ms = audit_statement_timeout_ms if audit_statement_timeout_ms is not None else DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
+        idle_ms = audit_idle_timeout_ms if audit_idle_timeout_ms is not None else DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+        audit_visibility_lag_ms = statement_ms + idle_ms + _VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
+
     backend = PostgresControlBackend(applications=applications, credentials=credentials, control_credentials=control_credentials)
-    service = ControlPlaneService(backend, audit=audit, limits=limits or _DEFAULT_LIMITS)
-    return service, (applications, credentials, control_credentials, audit)
+    service = ControlPlaneService(
+        backend, audit=audit, limits=limits or _DEFAULT_LIMITS,
+        audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
+    )
+    return service, (applications, credentials, control_credentials, audit, audit_reader)
 
 
 def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
@@ -262,6 +316,10 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         applications=_optional_int(env, "R2DB_CONTROL_LIMIT_APPLICATIONS", _DEFAULT_LIMITS.applications),
         credentials_per_application=_optional_int(env, "R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION", _DEFAULT_LIMITS.credentials_per_application),
         control_requests_per_minute=_optional_int(env, "R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE", _DEFAULT_LIMITS.control_requests_per_minute),
+        # Phase 4 WP-2(b) (design D-5, P4-D4 item 8): `audit_query`'s OWN
+        # window -- a separate env var, mirroring the 3 lines above, never
+        # sharing `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`.
+        audit_requests_per_minute=_optional_int(env, "R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE", _DEFAULT_LIMITS.audit_requests_per_minute),
     )
     # Phase 4 (design D-6/N-3): read from the SAME env-var names
     # `r2db_api.main.build_app` reads for the `application_audit` writer
@@ -273,11 +331,17 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # drift from the other composition root's own default.
     audit_statement_timeout_ms = _optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
     audit_idle_timeout_ms = _optional_int(env, "R2DB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
+    # Phase 4 WP-2(b) (design D-5): the `r2dbsvc_auditreader` DSN -- OPTIONAL.
+    # Unset means `audit_query` stays declared `unavailable` (D-5 M-4); the
+    # route is still registered and still authenticates, answering
+    # `CAPABILITY_UNSUPPORTED` for a genuinely authorized caller.
+    audit_dsn = env.get("R2DB_AUDIT_DSN") or None
 
-    service, (applications, credentials, control_credentials, audit) = assemble_control_stack(
+    service, (applications, credentials, control_credentials, audit, audit_reader) = assemble_control_stack(
         controlplane_dsn=controlplane_dsn, app_pepper=app_pepper, control_pepper=control_pepper,
         schema=schema, pool_size=pool_size, limits=limits,
         audit_statement_timeout_ms=audit_statement_timeout_ms, audit_idle_timeout_ms=audit_idle_timeout_ms,
+        audit_dsn=audit_dsn,
     )
 
     @asynccontextmanager
@@ -287,7 +351,7 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         finally:
             # Mirrors `r2db_api.main.build_app`'s own shutdown lifespan:
             # release every pooled connection this process holds. None of
-            # these 4 stores registers with `postgres.default_pool_manager`
+            # these stores registers with `postgres.default_pool_manager`
             # (each owns its own dedicated `_RolePool`, like `PostgresCredentialStore`
             # already does for the application plane) -- so each needs its
             # own explicit `close()`, not a single shared-manager `dispose_all()`.
@@ -295,6 +359,8 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             credentials.close()
             control_credentials.close()
             audit.close()
+            if audit_reader is not None:
+                audit_reader.close()
 
     return create_control_app(service, lifespan=_lifespan)
 

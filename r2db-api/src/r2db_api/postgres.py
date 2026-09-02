@@ -123,6 +123,7 @@ from .structured import (
     _resolve_order_by,
     _shape_hash,
     _validate_predicate_types,
+    _reject_reserved_entity_name,
     bind_mutation,
     bind_schema_operation,
     delete_confirmation_phrase,
@@ -932,6 +933,7 @@ class PostgresCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
+        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
         validate_page_size(page_size, limits)
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
@@ -1043,6 +1045,7 @@ class PostgresCell:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
+        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
         if not operations:
             fail("VALIDATION_FAILED", "At least one mutation is required.")
         limits.check("batch_items", len(operations))
@@ -1561,6 +1564,16 @@ class PostgresCell:
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
                     if bound.operation == "create_entity":
+                        # WP-2(b) review B-2 (supervisor ruling): defense-
+                        # in-depth -- `bind_schema_operation` above already
+                        # rejects this exact name (structured.py's own
+                        # `_reject_reserved_entity_name`, the real, load-
+                        # bearing check for BOTH cell implementations), but
+                        # this backend's own physical-DDL layer re-checks
+                        # it directly too, mirroring MitateDB's per-backend
+                        # `check_reserved` redundancy rather than relying
+                        # solely on the shared caller never being bypassed.
+                        _reject_reserved_entity_name(bound.entity)
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
                         self._create_entity(conn, bound.entity, bound.fields)

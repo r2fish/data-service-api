@@ -185,7 +185,7 @@ data-plane の denial 語彙は広い — 両 peer とも `except FoundationErro
 - **合体キー**: `(application_id, actor_id または "unknown", operation, reason_code)`
 - **窓 W**: 60 秒 (実装裁量で可変。宣言で公開する)
 - **窓内の初回**: 同期の耐久 INSERT + commit。失敗すれば当該応答を `SERVICE_UNAVAILABLE` (fail-closed)。
-- **窓内の 2 回目以降**: メモリで計数のみ。窓終了時に、2 回目以降が 1 件でもあれば**別の 1 行**として flush し、その繰り返し回数 (初回を含まない) を 14 列目 `count` に載せる。2 回目以降が無かった窓は、この flush 行自体を出さない。
+- **窓内の 2 回目以降**: メモリで計数のみ。窓終了時に、2 回目以降が 1 件でもあれば**別の 1 行**として flush し、その繰り返し回数 (初回を含まない) を 14 列目 `count` に載せる。2 回目以降が無かった窓は、この flush 行自体を出さない。 **窓内で 2 回目がちょうど 1 回だけ起きた場合 (繰り返し回数 = 1) は、この flush 行の `count` を NULL のまま書く** (WP-2(b) レビュー B-1、監督裁定 2026-09-03) — `count` は「この 1 行が代表する発生回数」であり、1 のときは他の通常行と同じく列を省略する (契約 `audit.query_event_fields_note` の "never zero or one")。
 - **窓あたり最大 2 行/プロセス (監督裁定 2026-09-02、レビュー J-1)**: 初回の同期行と、窓末の集約行 (2 回目以降が存在する場合のみ) の**合計 2 行**が、1 プロセス・1 窓の実効上限である。「1 行」という記述は窓末 flush が書く行数を指すのであって、窓全体の総行数ではない — `application_audit` の api role 権限が INSERT のみ (UPDATE 不可、§6.1/§9.2 性質 2) である以上、初回行の `count` を後から改訂して単一行に集約することはできない。この 2 行という上限は §9.3 の runbook 容量算出 (窓数 × 最大インスタンス数 M) に「2 ×」として織り込むこと。
 - **クラッシュ時に失うのは窓内の計数のみ**で、初回行は既に耐久化されている。
 - **合体カウンタはプロセスローカルである (レビュー N-4)**。共有ストアを介さないため、同一の合体キーでも**プロセス (インスタンス) ごとに** 初回行 + (該当すれば) 集約行が出る。
@@ -207,7 +207,7 @@ overflow 時は最古から捨て、同時に:
 1. stdlib `logging.error` の**固定メッセージ**を発火する (可変部に application 識別子等の実データを載せない)。
 2. `security_control_failure` event (`reason_code="audit_buffer_overflow"`, `operation="audit_buffer"`, `target_kind="audit_sink"`) を**耐久 INSERT** する。
 
-この 2 番目が契約の言う「explicit operational alert」の in-band 実現である。運用側の logs-based alert 設定は runbook の管轄とする。捨てられた件数は、新設する 14 番目の列 **`count`** (「この行が代表する発生回数。NULL = 1」) に載せる (契約 `audit.fields_note` が `audit.fields` を additive 語彙と明記しているため適合)。`count` は overflow alert 行と D-3 の合体 denial 行の 2 用途が共有し、それ以外の event では NULL である。
+この 2 番目が契約の言う「explicit operational alert」の in-band 実現である。運用側の logs-based alert 設定は runbook の管轄とする。捨てられた件数は、新設する 14 番目の列 **`count`** (「この行が代表する発生回数。NULL = 1」) に載せる (契約 `audit.fields_note` が `audit.fields` を additive 語彙と明記しているため適合)。 **累積の欠落数がちょうど 1 件だった alert 行も同じ規則に従い、`count` は NULL のまま書く** (WP-2(b) レビュー B-1、監督裁定 2026-09-03)。`count` は overflow alert 行と D-3 の合体 denial 行の 2 用途が共有し、それ以外の event では NULL である。
 
 - **壊れるシナリオ**: overflow を黙って捨てると、契約 `sink_failure_policy` 後段の「alert なしの silent discard」に不適合となり、監査に穴があること自体が観測不能になる。
 - **検証方法**: buffer 容量を小さく設定して意図的に溢れさせ、`logging.error` の発火と `security_control_failure` 行がちょうど 1 件耐久記録されることを実測する。
@@ -802,6 +802,11 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
 
 ## 11. 将来課題台帳 (本フェーズ新設分)
 
-本設計時点で新設項目なし。WP 実施中に発生した項目をここへ追記する。
+- **`audit_query` の application credential probe が既存/失効済みの識別 oracle になっている** (WP-2(b) レビュー m-3、供覧裁定 2026-09-03、台帳記録)。`ControlPlaneService.audit_query` は D-5 の要求どおり application credential を FORBIDDEN で拒否するため、secret を先に `authenticate_application` で照合する (D-5 実装ノート参照)。この照合自体は SI-00 の分離を壊さない (control プロセスは元々 `ControlAuthority` 経由でアプリ credential store を保持している) が、control ホストに新しい pre-auth の検証面ができたことは事実である: 「この secret は実在する有効な application credential か」を 403 (FORBIDDEN・実在) と 401 (AUTH_INVALID・不在または失効) の応答差で答えられるようになり、`audit_requests_per_minute` の枠内 (既定 60/min) で連打可能。失敗側 (401) は `control_audit` に `AUTH_INVALID` 行が残るため沈黙はしない。加えて、**失効済み/無効化済みの application credential は FORBIDDEN ではなく AUTH_INVALID (401) になる** — `authenticate_application` は `FoundationError` (revoked/disabled 含む) を一律 `None` に潰して通常の control 認証へフォールスルーするため、「application credential は FORBIDDEN」という宣言は有効な credential にしか成り立たない。契約上はどちらも denial であり違反ではないが、運用上の含意 (secret 存在の外部可観測性がわずかに増える) を記録する。対応不要 (WP-2(b) レビューの結論)、次回見直し時の参照用。
+- **in-memory 読み手と Postgres 読み手の全順序は collation 依存である** (WP-2(b) レビュー m-6、記録のみ)。`InMemoryAuditQueryStore` は Python の codepoint 順、`PostgresAuditQueryStore` は DB の collation 順で `plane`/`event_id::text` を比較する。`plane` の 2 値 (`"application"`/`"control"`) と uuid hex 表記の `event_id` の範囲では両者は一致するが、この一致は本フェーズで明示的に検証・記録されたものであり、将来 `event_id` の文字種が広がった場合は再検証を要する。
+
+- **`visibility_lag_ms` は control プロセスの env のみから導出され、application-plane 書き手は別プロセスである** (WP-2(b) レビュー §4-D、記録のみ)。`control_main.assemble_control_stack` は自プロセスの `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` から lag を導出するが、`application_audit` の書き手接続は `r2db_api.main` という別プロセスで、同名の env 変数を独立に読む。両プロセスが同じ env 名・同じ既定定数 (両方 5000ms) を読む構造で運用上は一致するが、機構的な強制も宣言側での検証も無い。runbook §15 に前提として明記済み。CONTROL_MAPPING への正式反映は WP-4 スコープ。
+
+WP 実施中に発生した項目をここへ追記する。
 
 継承分は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §7 を参照 (`audit_events` 予約名の未文書化、識別子受理域の開示ギャップ、json 列の write/read 非対称、wire-level positive-existence check、ほか)。このうち **`audit_events` 予約名の文書化**は P4-D4 の項目 6 として本フェーズで解消される。

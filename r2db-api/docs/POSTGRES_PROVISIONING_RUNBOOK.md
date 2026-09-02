@@ -928,3 +928,100 @@ anywhere in the cluster once it is gone:
 3. Re-run `0003_provision_application.sql` for the slug (§5 above) as
    normal, with freshly generated passwords -- identical to branch (A)'s
    own step 3, now that both the roles and the database are gone.
+
+## 15. Application-plane durable audit sink (`0007_application_audit.sql`) and `audit_query`
+
+Companion to `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (D-1/D-5/D-6).
+This section covers the minimal operational steps for WP-2(b): applying
+`0007`, configuring the reader DSN, and the relationship between the two
+audit-writer timeouts and the `audit_query` visibility lag. Full runbook
+integration (capacity monitoring, retention/pruning operations, the
+`audit_requests_per_minute` sizing worksheet) is phase-4 WP-4 scope.
+
+**Apply `0007`, once, after `0006`** (order matters only in that `0007`
+assumes `r2dbsvc_registry.control_audit` already exists), connected as
+`r2dbsvc_control`:
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -v auditreader_password="$R2DBSVC_AUDITREADER_PASSWORD" \
+  -f r2db-api/migrations/0007_application_audit.sql
+```
+
+`R2DBSVC_AUDITREADER_PASSWORD` is a new environment-variable *name*,
+generated the same way every other `psql -v ..._password` variable in this
+runbook is (§5's note on `psql`'s password variables). Like every other
+migration in this directory, `0007` is safe to re-run (`CREATE TABLE IF NOT
+EXISTS`, the conditional `CREATE ROLE ... \gexec` idiom, naturally
+idempotent `GRANT`s).
+
+**What it adds** (full rationale: the migration file's own header, and
+design D-1/D-5/§6.1): the `application_audit` table (`r2dbsvc_api`
+INSERT-only), and the new `r2dbsvc_auditreader` role -- SELECT-only on
+*both* `control_audit` and `application_audit`, held by nothing else in
+this cluster.
+
+**Reader DSN (`R2DB_AUDIT_DSN`)**: the control-plane HTTP process
+(`r2db_api.control_main`) reads this env var, OPTIONALLY. Set it to a DSN
+authenticating as `r2dbsvc_auditreader` against `r2dbsvc_platform`, and
+`audit_query` (`POST /control/v1/audit/query`, aliased at `POST /v1/audit/
+query` on the same control host) becomes `enabled` -- both paths answer
+real requests, control/audit credential only. **Leave it unset** and
+`audit_query` stays declared `unavailable`: the two routes are still
+registered (never a bare 404) and still authenticate the caller, but answer
+`CAPABILITY_UNSUPPORTED` for anyone who successfully authenticates. This is
+a real, honest capability toggle, not a "coming soon" placeholder -- a
+deployment can run indefinitely with `application_audit`/`control_audit`
+durably filling and `R2DB_AUDIT_DSN` unset; evidence keeps accumulating,
+only the in-band read surface is off.
+
+**The two writer timeouts and `visibility_lag_ms`**: `R2DB_AUDIT_STATEMENT_
+TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS` (both default `5000`, read
+identically by `r2db_api.main` for the `application_audit` writer
+connection and by `r2db_api.control_main` for the `control_audit` writer
+connection -- the SAME two env-var names, both processes must agree) are
+what `audit_query`'s own declared `visibility_lag_ms` is *derived* from:
+`statement_timeout_ms + idle_in_transaction_session_timeout_ms + 1000`
+(1s fixed clock-skew margin) -- `11000` at the defaults. Changing either
+timeout on either writer connection changes the value `control_capabilities`
+publishes; the two composition roots are never independently tunable to
+different values in practice (both read the same env-var names), and both
+connections must actually be running under this bound for the derivation to
+be true -- confirm with:
+
+```sql
+SHOW statement_timeout;
+SHOW idle_in_transaction_session_timeout;
+```
+**Structural assumption (WP-2(b) fix round 2, item D, record only)**: the
+declared `visibility_lag_ms` is COMPUTED by the control process alone
+(`r2db_api.control_main.assemble_control_stack`, from its OWN `R2DB_AUDIT_
+STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS`) but is a claim about
+BOTH writer connections -- `application_audit`'s writer runs in the
+SEPARATE `r2db_api.main` process, which reads the identically-NAMED env
+vars independently. Nothing enforces the two processes agreeing at deploy
+time beyond both reading the same env-var names off (ideally) the same
+configuration source; a deployment that sets them differently per process
+makes the published `visibility_lag_ms` untrue for `application_audit`
+without either process detecting it. Keep both processes' env identical
+for these two variables. (Full CONTROL_MAPPING evidence for this is WP-4
+scope.)
+
+run against a connection each writer role (`r2dbsvc_api` for `application_
+audit`, `r2dbsvc_controlplane` for `control_audit`) actually holds open (a
+fresh `psql` session as those roles does not carry this SESSION-level
+setting -- only a connection opened by the running `r2db_api.main`/
+`r2db_api.control_main` process itself does).
+
+**`audit_requests_per_minute`**: a separate, dedicated env var,
+`R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` (default `60`, same
+convention as `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`) -- this
+window governs `audit_query` alone (both its canonical and alias paths) and
+is never shared with `control_requests_per_minute`. This separation is what
+lets a break-glass `revoke_credential` succeed even while an audit tool is
+polling `audit_query` at its own, independent rate. Recommended polling
+interval for an audit consumer: no faster than the declared
+`visibility_lag_ms` (polling faster than the lag a deployment has actually
+configured cannot surface events any sooner, it only spends more of this
+window). Full window-sizing guidance (operator count x poll frequency,
+platform-DB capacity thresholds informed by row-length CHECKs x row-count
+bounds) is WP-4 scope.

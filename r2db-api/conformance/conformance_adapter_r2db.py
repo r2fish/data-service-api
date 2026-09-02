@@ -58,6 +58,7 @@ from adapter import (  # noqa: E402
 
 from r2db_api import ControlAuthority, CredentialStore, DataService  # noqa: E402
 from r2db_api.audit import ControlAuditSink  # noqa: E402
+from r2db_api.audit_query import InMemoryAuditQueryStore  # noqa: E402
 from r2db_api.auth import ControlCredentialStore  # noqa: E402
 from r2db_api.control_plane import (  # noqa: E402
     ControlPlaneService,
@@ -191,8 +192,28 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         self._control_credentials = ControlCredentialStore(pepper="synthetic-conformance-pepper-r2db-ctl-0000")
         self._control_backend = InMemoryControlBackend(self._control, self._control_credentials)
         self._control_audit = ControlAuditSink()
-        self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200)
-        self._control_service = ControlPlaneService(self._control_backend, audit=self._control_audit, limits=self._control_limits)
+        # Phase 4 WP-2(b) (design D-5): `audit_requests_per_minute`
+        # generously headroomed too (same reasoning as `control_requests_
+        # per_minute` above) -- C-09's own vectors call `audit_query` a
+        # handful of times per test, but this is a SESSION-scoped adapter
+        # shared across the whole conformance run.
+        self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200, audit_requests_per_minute=200)
+        # Phase 4 WP-2(b) (design D-5/D-6, D-10): the in-process `audit_
+        # query` reader -- UNIONs THIS SAME `self._control_audit` (control
+        # plane) and `self._service`'s own in-memory `application_audit`
+        # half (`DataService.__init__`'s default `ApplicationAuditSink()`,
+        # reached the same `# noqa: SLF001` way `InMemoryControlBackend`
+        # itself already reaches into `DataService` private state). Real
+        # writes go through this exact `DataService`/`ControlPlaneService`
+        # pair -- there is no separate "conformance-only" audit path.
+        # `visibility_lag_ms=0`: in-memory writes are synchronous, so there
+        # is no real transaction-lag hazard to model (`audit_query.py`'s
+        # own module docstring).
+        self._audit_reader = InMemoryAuditQueryStore(self._control_audit, self._service._durable_audit)  # noqa: SLF001
+        self._control_service = ControlPlaneService(
+            self._control_backend, audit=self._control_audit, limits=self._control_limits,
+            audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+        )
         # `control_credential()`'s own maintained handle (memoize +
         # call-time validity check -- see that method's docstring below;
         # WP-1 M-4's "never memoized, must be valid AT CALL TIME"
@@ -484,20 +505,17 @@ class R2DBConformanceAdapter(ConformanceAdapter):
                 "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
                 "deployment's own declared posture",
             )
-        # Unreachable as of phase 4 WP-1: every currently-registered
-        # adapter's audit_query status is "unavailable" (this WP does not
-        # implement a durable buffer -- that is WP-2's own scope), so this
-        # branch is never exercised yet. Deliberately NOT a guessed call
-        # into `ControlPlaneService` here (unlike `audit_query` above,
-        # `flush_audit_buffer` names no contract endpoint at all -- it is
-        # an adapter-privileged test hook, design docs/design/
-        # PHASE4_DURABLE_AUDIT_SINK_V1.md §8.3 -- so this adapter does not
-        # presume a specific WP-2 buffer-flush mechanism shape it cannot
-        # yet see).
-        raise NotImplementedError(
-            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
-            "has no real implementation yet (WP-2 scope) -- unreachable as of phase 4 WP-1"
-        )
+        # Phase 4 WP-2(b): D-4's bounded buffer (ordinary data-operation
+        # success events) and D-3's denial-coalescing windows both live on
+        # `self._service` (`DataService.flush_audit_buffer`, service.py) --
+        # the SAME method the real composition root's periodic background
+        # thread calls (`r2db_api.main.build_app`'s own `_audit_flush_loop`).
+        # `force_expire_denial_windows` stays at its own default (False):
+        # this hook exists so a test can make a just-buffered/just-
+        # coalesced event visible without waiting, not to force-flush an
+        # UNEXPIRED denial window early (a different, narrower concern that
+        # default already serves correctly).
+        self._call(lambda: self._service.flush_audit_buffer())
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
