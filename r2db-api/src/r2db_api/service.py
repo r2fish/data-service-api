@@ -3,18 +3,116 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import logging
 import threading
 import time
 from typing import Any, Callable, Iterator
 import uuid
 
-from .audit import AuditSink
+from .audit import ApplicationAuditSink, AuditEvent, AuditSink
+from .audit_hook import ApplicationAuditHook
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
 from .errors import FoundationError, fail
 from .limits import ResourceLimits
 from .structured import ApplicationCell, parse_predicate
 from .topology import AuthorityTopology
+
+_logger = logging.getLogger(__name__)
+
+# Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-3; WP-2(a) review J-2,
+# supervisor ruling 2026-09-02): an INCLUSION set -- only a denial whose
+# reason_code is one of these 6 (D-3's own range table, SI-14's minimal
+# event class: authentication/authorization denial) is fail-closed/
+# coalesced-durable. Every other reason_code -- D-3's originally-named 4
+# non-durable codes (`VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_
+# UNSUPPORTED`/`NOT_FOUND`) AND everything else this facade can raise
+# (`CONFLICT`, `PRECONDITION_FAILED`, `SERVICE_UNAVAILABLE`, `AUTH_STATE_
+# UNAVAILABLE`, ...) -- is out of scope for durable/buffered recording
+# (review N-2: buffering them would just let the flow problem D-3 exists to
+# bound come back through the buffer instead). An exclusion-list reading
+# (only the named 4 are non-durable, everything else durable) was this
+# module's first implementation; the review's B-1 finding showed it lets a
+# `SERVICE_UNAVAILABLE` produced by the audit pipeline's OWN failure re-enter
+# as a "new" denial, writing a THIRD durable row for one operation (D-10's
+# own prohibited case (ii)) -- switching to inclusion closes that path
+# structurally (`SERVICE_UNAVAILABLE` was never in D-3's fail-closed list to
+# begin with). `test_durable_denial_codes_match_the_design_d3_table`
+# (`tests/test_application_audit.py`) fixes this set against D-3's table by
+# name.
+_DURABLE_DENIAL_CODES = frozenset({
+    "AUTH_REQUIRED",       # 認証系 (AUTH_REQUIRED/AUTH_INVALID相当)
+    "AUTH_INVALID",        # 認証系, and also covers this codebase's "credential disabled" case
+    "AUTH_REVOKED",        # credential の revoked
+    "FORBIDDEN",           # FORBIDDEN, and also this facade's "privilege denial" (schema())
+    "APPLICATION_DISABLED",  # APPLICATION_DISABLED
+    "DESTRUCTIVE_CONFIRMATION_REQUIRED",  # DESTRUCTIVE_CONFIRMATION_REQUIRED
+})
+
+# Phase 4 (design D-2/D-10): a `FoundationError.details` marker this
+# module's own audit-hook/denial-routing code sets on a `SERVICE_UNAVAILABLE`
+# it raises BECAUSE the durable audit pipeline itself just failed (a
+# pre-commit sink failure, a post-commit `error`-row write, a coalesced-
+# denial first-insert failure). `_event`'s own deny-dispatch checks this
+# marker and skips routing such a denial through `_route_denial` again --
+# without it, the generic `except FoundationError` handler every public
+# method already has would treat this SERVICE_UNAVAILABLE as a brand-new
+# denial needing its own durable write, producing a second (or third)
+# durable row for what D-10 requires stays at most one (+ the D-2 error-row
+# exception).
+_AUDIT_SINK_ORIGIN = "audit_sink"
+
+# Phase 4 (design D-3): the coalescing window (D-3/P4-D3, confirmed value).
+_DENIAL_COALESCE_WINDOW_S = 60.0
+
+# Phase 4 (design D-4): the bounded buffer's default capacity (implementation
+# discretion per the design -- "既定 1000、実装裁量で設定可").
+_DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
+
+# Phase 4 (design §7.3/§7.4; WP-2(a) fix round 2 review N-2, N-6): ONE
+# constant serving two roles by construction, not by coincidence of two
+# independently-set literals agreeing -- (i) `_AuditBuffer`'s own default
+# minimum interval between overflow-alert-row attempts (N-2: "1 alert row
+# per flush interval per process"), and (ii) the default periodic
+# buffer-flush interval `r2db_api.main`'s composition-root background
+# thread uses (imports this name directly rather than defining its own).
+_DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
+
+# Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
+# design's own instruction ("可変部に実データを載せない"). A fixed string
+# also means these two call sites can never accidentally leak a client-
+# supplied value (application_id, secret fragment, filter content) into
+# process logs.
+_BUFFER_OVERFLOW_LOG_MESSAGE = "application_audit buffer overflow: events were dropped"
+_ALERT_WRITE_FAILED_LOG_MESSAGE = "application_audit overflow-alert row could not be written; retrying with backoff"
+_ALERT_WRITE_RECOVERED_LOG_MESSAGE = "application_audit overflow-alert row recorded; pending overflow cleared"
+
+# Phase 4 (WP-2(a) fix round 3, review D-1): fixed, no-interpolation log
+# messages for the denial-coalescer's own aggregate (repeat-count summary)
+# row write path -- mirrors `_ALERT_WRITE_FAILED_LOG_MESSAGE`/`_ALERT_
+# WRITE_RECOVERED_LOG_MESSAGE`'s identical state-transition-only discipline
+# (N-2), applied to `_DenialCoalescer._note_aggregate_write_result`.
+_COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE = "application_audit coalesced-denial summary row could not be written; retrying"
+_COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE = "application_audit coalesced-denial summary row recorded; retry cleared"
+
+# Phase 4 (design §7.4, review m-4): exponential backoff for the sticky
+# overflow-alert retry, capped at 60s -- an unbounded equal-interval retry
+# against a durably-failing sink would itself become a logging DoS (the
+# same flow problem D-3 bounds for denials, recurring on the alert path).
+# The FLOOR for this backoff is `_DEFAULT_AUDIT_FLUSH_INTERVAL_S`
+# (`_AuditBuffer`'s own `alert_min_interval_s`, WP-2(a) fix round 2 review
+# N-2), not a separate, smaller initial value -- no alert attempt is ever
+# spaced closer together than the composition root's own flush cadence.
+_ALERT_BACKOFF_CAP_S = 60.0
+
+
+def _now_iso() -> str:
+    """The same `occurred_at` construction `audit.AuditSink.append`/
+    `audit.ControlAuditSink.append` already use -- factored out here so
+    `_event`'s own buffer-class `AuditEvent` construction (below) matches
+    it exactly, byte for byte."""
+    return datetime.now(timezone.utc).isoformat()
 
 # Default cell factory (design D-1 step 2): builds the existing in-memory
 # `ApplicationCell`, unchanged, so every caller that does not pass
@@ -67,10 +165,524 @@ class MutationResult:
     assigned_addresses: list[dict[str, Any]]
 
 
+class _PreCommitHook:
+    """Phase 4 (design D-2/D-10): the concrete `ApplicationAuditHook`
+    `DataService` builds per fail-closed-class request and hands to
+    `StorageBackend.transact`/`apply_schema` as `audit_hook`. Every field
+    the durable row needs (`event_class`/`request_id`/`application_id`/
+    `actor_type`/`actor_id`/`role`/`operation`/`target_kind`/`target_id`)
+    is already bound here at construction time -- the backend itself
+    supplies none of it, only the fail-closed/buffer-class decision (D-2's
+    normative rule: the confirmation choke for `transact`, unconditional
+    for `apply_schema`).
+    """
+
+    __slots__ = ("_sink", "_fields")
+
+    def __init__(self, sink: Any, fields: dict[str, Any]) -> None:
+        self._sink = sink
+        self._fields = fields
+
+    def pre_commit(self) -> None:
+        try:
+            self._sink.append(outcome="allow", count=None, **self._fields)
+        except Exception:
+            fail(
+                "SERVICE_UNAVAILABLE",
+                "The durable audit sink could not record this operation; it was not submitted.",
+                status=503,
+                details={"origin": _AUDIT_SINK_ORIGIN},
+            )
+
+    def commit_failed(self) -> None:
+        # D-2's error-row rule: best-effort from the response's point of
+        # view (the caller fails SERVICE_UNAVAILABLE regardless of whether
+        # this succeeds -- the data commit already failed either way) --
+        # any exception here is swallowed, never re-raised, so a backend's
+        # own `except psycopg.Error` clause always reaches its own `fail()`
+        # call next, not this method's failure.
+        try:
+            self._sink.append(outcome="error", reason_code="commit_failed", count=None, **self._fields)
+        except Exception:
+            pass
+
+
+class _AuditBuffer:
+    """Phase 4 (design D-4/§7.3/§7.4): the bounded in-memory buffer for
+    ordinary (buffer-class) data-operation success events, plus the
+    overflow-alert sticky-retry state. Owns its own lock; the durable I/O
+    `flush()` performs happens on the calling thread using `sink.append`/
+    `append_many`, each of which opens its own connection/transaction (D-1's
+    `PostgresApplicationAuditSink` docstring) -- this is what makes "a
+    flush never shares a transaction with a fail-closed write" (D-4)
+    automatic rather than something this class has to arrange.
+
+    Process-local (review N-4): capacity is per-process, not per-deployment
+    -- a multi-instance deployment's real bound is `capacity * <max
+    instances>`, which is runbook (§9.3), not code, territory.
+
+    WP-2(a) review M-2: §7.3 names TWO flush triggers, "periodic" and
+    "threshold" -- a prior revision implemented only the periodic one (the
+    composition root's background timer). `push()` now also triggers a
+    flush, synchronously, in the caller's own thread, the moment the buffer
+    reaches `_FLUSH_THRESHOLD_FRACTION` of capacity -- "その場で" (right
+    there), the simpler of the two options §7.3's own review text
+    sanctioned. Under a healthy sink this keeps the buffer far below
+    capacity, so overflow becomes a genuine signal that the sink cannot
+    keep up, not an artifact of the periodic timer's own interval.
+
+    `flush()` does not unconditionally empty `self._events` before
+    attempting the write -- a FAILED `append_many` leaves those events in
+    place (retried by the next flush) instead of discarding them outright,
+    so a transient I/O failure does not permanently destroy buffered
+    evidence a later retry might still durably record.
+
+    WP-2(a) fix round 2 review (N-1/N-2): a RETAINED event is, by
+    definition, NOT lost -- it is still sitting in `self._events`, waiting
+    for the next flush attempt. Counting it in `_dropped_total` (a prior
+    revision did, via `+= len(pending)` on every failed `append_many`) both
+    mislabels "not yet flushed" as "dropped" (N-1: the same event, retried
+    and failing repeatedly, gets counted again and again) AND -- combined
+    with a failed flush marking the alert pending -- lets a single
+    threshold-triggered flush failure emit its own alert-row *attempt* on
+    every subsequent buffer-class request (N-2: a `push()` on every
+    request, no bound on request rate). `_dropped_total` now increments
+    ONLY where an event is actually, irrevocably discarded: `push()`'s own
+    eviction branch (capacity reached, oldest event evicted to make room).
+    A failed `append_many` retains its batch and adjusts NEITHER
+    `_dropped_total` NOR `_alert_pending` on its own -- there is nothing
+    new to alert about merely because a retry is still pending, and the
+    ALREADY-pending alert (if any, from a genuine eviction) is independently
+    rate-limited below regardless of how often `flush()` itself is retried.
+
+    Alert-row EMISSION RATE is bounded independently of eviction/flush-retry
+    rate (N-2): `_alert_min_interval_s` (constructor parameter, matching the
+    composition root's own periodic-flush interval, default 2.0s) is a
+    hard floor under `_alert_backoff_s` -- no two alert attempts are ever
+    less than `_alert_min_interval_s` apart, "1 alert row attempt per flush
+    interval per process" even while eviction is ongoing. The backoff is
+    keyed to whether the underlying buffer FLUSH is currently succeeding
+    (`_flush_currently_failing`, updated by every `flush()` call), not to
+    whether the alert row's own INSERT succeeded: an alert row can itself
+    write successfully while the buffer flush keeps failing (evidence keeps
+    being evicted) -- in that case the backoff still grows, so a healthy
+    alert-write path does not let a broken buffer-flush path re-trigger a
+    fresh alert attempt every `_alert_min_interval_s` forever at the
+    fastest allowed rate; it backs off further, same as an outright alert
+    failure. The backoff only resets to the floor once the buffer flush
+    itself is observed healthy again.
+    """
+
+    # Review M-2's own suggested value ("k は 0.8 等").
+    _FLUSH_THRESHOLD_FRACTION = 0.8
+
+    def __init__(self, sink: Any, *, capacity: int, clock: Callable[[], float], alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S) -> None:
+        self._sink = sink
+        self._capacity = max(1, capacity)
+        self._flush_threshold = max(1, int(self._capacity * self._FLUSH_THRESHOLD_FRACTION))
+        self._clock = clock
+        self._alert_min_interval_s = max(0.0, alert_min_interval_s)
+        self._lock = threading.Lock()
+        self._events: list[AuditEvent] = []
+        self._dropped_total = 0
+        self._alert_pending = False
+        self._alert_next_retry_at = 0.0
+        self._alert_backoff_s = self._alert_min_interval_s
+        self._alert_failure_logged = False
+        # N-2: tracks whether the most recent `flush()` attempt's own
+        # `append_many` succeeded or failed -- independent of the alert
+        # row's own write outcome, and read by `_retry_alert` to decide
+        # whether the backoff may reset.
+        self._flush_currently_failing = False
+
+    def push(self, event: AuditEvent) -> None:
+        overflowed = False
+        trigger_flush = False
+        with self._lock:
+            if len(self._events) >= self._capacity:
+                self._events.pop(0)
+                self._dropped_total += 1
+                self._alert_pending = True
+                overflowed = True
+            self._events.append(event)
+            if len(self._events) >= self._flush_threshold:
+                trigger_flush = True
+        if overflowed:
+            # §7.4: fixed message, no interpolation -- logged every time an
+            # event is actually, irrevocably evicted (N-1: not merely
+            # retained-for-retry), since each eviction is itself a new,
+            # permanent loss.
+            _logger.error(_BUFFER_OVERFLOW_LOG_MESSAGE)
+        if trigger_flush:
+            # M-2: threshold flush -- see class docstring. Outside the lock
+            # (already released above), on the calling thread.
+            self.flush()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+    def flush(self) -> None:
+        """D-4/§7.3: called on demand (tests, the adapter privilege hook),
+        periodically (composition root), and now also from `push()` at the
+        threshold (M-2). Writes the current buffer contents as one batch,
+        then attempts the sticky overflow-alert retry -- always in that
+        order, always on a connection/transaction of its own. A failed
+        batch write leaves the events in place for the next attempt
+        (retained, not counted as dropped -- N-1) rather than discarding
+        them or alerting on its own.
+        """
+        with self._lock:
+            pending = list(self._events)
+        if pending:
+            try:
+                self._sink.append_many(pending)
+            except Exception:
+                with self._lock:
+                    self._flush_currently_failing = True
+                # N-1/N-2: deliberately NOT incrementing `_dropped_total`,
+                # NOT setting `_alert_pending`, and NOT logging here --
+                # `pending` is still sitting in `self._events`, retried by
+                # the next flush; it has not been lost, so there is
+                # nothing new to alert or log about on this path alone.
+                # `push()`'s own eviction branch is the only source of
+                # genuine, irrevocable loss.
+            else:
+                with self._lock:
+                    # Remove exactly the prefix this flush actually
+                    # covered -- more events may have been pushed (or even
+                    # evicted) while this I/O was in flight; `del ...[:n]`
+                    # never touches anything appended after `pending` was
+                    # captured above.
+                    del self._events[: len(pending)]
+                    self._flush_currently_failing = False
+        self._retry_alert()
+
+    def _retry_alert(self) -> None:
+        with self._lock:
+            if not self._alert_pending:
+                return
+            now = self._clock()
+            if now < self._alert_next_retry_at:
+                return
+            count = self._dropped_total
+            flush_failing = self._flush_currently_failing
+        try:
+            self._sink.append(
+                event_class="security_control_failure",
+                request_id=str(uuid.uuid4()),
+                application_id=None,
+                actor_type="system",
+                actor_id=None,
+                role=None,
+                operation="audit_buffer",
+                target_kind="audit_sink",
+                outcome="deny",
+                reason_code="audit_buffer_overflow",
+                target_id=None,
+                count=count,
+            )
+        except Exception:
+            with self._lock:
+                self._alert_backoff_s = min(_ALERT_BACKOFF_CAP_S, max(self._alert_min_interval_s, self._alert_backoff_s * 2))
+                self._alert_next_retry_at = self._clock() + self._alert_backoff_s
+                self._alert_failure_logged = True
+            # §7.4/review m-4: this branch is only ever reached once the
+            # backoff interval has already elapsed (the early return above
+            # enforces that), so logging unconditionally here already
+            # matches "first attempt, then once per backoff interval" --
+            # no separate first-attempt bookkeeping is needed.
+            _logger.error(_ALERT_WRITE_FAILED_LOG_MESSAGE)
+            return
+        with self._lock:
+            # Review m-1: SUBTRACT exactly the `count` this alert row just
+            # reported, never blindly reset to 0 -- more drops can have
+            # accumulated (a concurrent eviction) between reading `count`
+            # above and this INSERT completing; resetting to 0
+            # unconditionally would silently lose track of those,
+            # understating a later alert row's own `count`. If drops
+            # remain, the alert stays pending (and will fire again once
+            # the backoff/rate-limit conditions allow) for the remainder.
+            self._dropped_total -= count
+            if self._dropped_total <= 0:
+                self._dropped_total = 0
+                self._alert_pending = False
+            # N-2: the backoff is keyed to whether the BUFFER FLUSH is
+            # currently failing, not to whether this alert row's own
+            # INSERT just succeeded. If the flush is still failing (more
+            # evictions can still be coming), keep backing off -- exactly
+            # like an alert-write failure would -- so a healthy alert path
+            # cannot be used to re-trigger a fresh attempt every single
+            # `_alert_min_interval_s` for as long as the underlying sink
+            # stays broken. Only reset to the floor once the flush itself
+            # is observed healthy.
+            if flush_failing:
+                self._alert_backoff_s = min(_ALERT_BACKOFF_CAP_S, max(self._alert_min_interval_s, self._alert_backoff_s * 2))
+            else:
+                self._alert_backoff_s = self._alert_min_interval_s
+            self._alert_next_retry_at = self._clock() + self._alert_backoff_s
+            was_logged = self._alert_failure_logged
+            self._alert_failure_logged = False
+        if was_logged:
+            _logger.error(_ALERT_WRITE_RECOVERED_LOG_MESSAGE)
+
+class _DenialCoalescer:
+    """Phase 4 (design D-3/P4-D3): the coalescing state for fail-closed-
+    class denials. Process-local (review N-4: a shared store is never
+    consulted, so the same key can legitimately produce one row per
+    process/instance, not one row per deployment).
+
+    Keyed by `(application_id, actor_id or "unknown", operation,
+    reason_code)`, window `W` seconds: the first occurrence of a new key
+    writes a durable row synchronously (fail-closed -- `route()` raises
+    `SERVICE_UNAVAILABLE` if that write fails); every occurrence after that,
+    within the same window, only increments an in-memory counter. When the
+    window is later found expired (lazily, on the next `route()` call for
+    THAT key, or explicitly via `flush_expired()`/`flush_all()`), a second
+    row -- carrying the repeat count in `count` -- is written for that key,
+    if there were any repeats at all; zero-repeat windows are simply
+    dropped with no second write.
+
+    WP-2(a) review B-2 (fail-closed correctness): a same-key concurrent
+    `route()` call must never observe "a window already exists" (and take
+    the fast `repeat_count += 1` path) before the FIRST occurrence's own
+    durable INSERT has actually resolved -- otherwise a fail-closed denial
+    flood racing a sink outage could return an ordinary-looking denial
+    response, never even attempting its own durable write, while the
+    window's supposed first row was never actually recorded (§9.2 property
+    1's fail-closed guarantee would then hold only single-threaded).
+
+    WP-2(a) fix round 2, supervisor ruling on review m-2: PER-KEY locking,
+    not a single process-wide lock held across I/O. `self._lock` (process-
+    wide) protects ONLY `self._windows`/`self._key_locks`/`self._key_lock_
+    refcount` dict structure -- it is acquired only for brief, non-blocking
+    dict reads/writes, NEVER across a durable INSERT. Each coalescing key
+    gets its own `threading.Lock` (`self._key_locks`, created on first use),
+    held across that ONE key's own first-occurrence INSERT (and its own
+    expired-window aggregate flush, if one is due) -- this is what still
+    gives B-2 its correctness guarantee (a same-key concurrent caller
+    blocks on that key's own lock until the in-flight attempt resolves)
+    WITHOUT serializing unrelated keys against each other. The periodic
+    sweep (`flush_expired()`/`flush_all()`) collects expired keys/state
+    under the process lock and performs each one's INSERT under that SAME
+    key's own per-key lock (never the process lock) -- this is what lets a
+    concurrent `route()` call for that key correctly serialize against the
+    sweep too (WP-2(a) fix round 3, review D-1 -- see `_requeue_failed_
+    aggregate`'s own docstring for why this matters).
+
+    WP-2(a) fix round 3, review D-1 (major): a failed aggregate-row write
+    (the repeat-count summary row for an expired window) must never
+    silently discard that repeat count -- see `_requeue_failed_aggregate`.
+    A round-2 revision deleted the due window from `self._windows` before
+    attempting its write and simply dropped it on failure (`except:
+    continue`/`pass`), reasoning that re-inserting after releasing the
+    process lock would race a concurrent `route()` for the same key; that
+    race is real, but per-key locking (already required for B-2/m-2) is
+    exactly what closes it -- the requeue now happens under the SAME key's
+    lock the write attempt itself ran under, so no concurrent `route()`
+    call for that key can be in flight at that moment.
+
+    Review D-2 (minor): `self._key_locks` entries are pruned via reference
+    counting (`_acquire_key_lock`/`_release_key_lock_ref`) once a key has
+    no outstanding lock user AND no window left for it -- never while a
+    lock might still be in use (which would let a fresh `route()` call
+    silently start using a NEW, different `Lock` object for the same key,
+    defeating serialization entirely).
+    """
+
+    def __init__(self, sink: Any, *, window_s: float, clock: Callable[[], float]) -> None:
+        self._sink = sink
+        self._window_s = window_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._windows: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._key_locks: dict[tuple[Any, ...], threading.Lock] = {}
+        self._key_lock_refcount: dict[tuple[Any, ...], int] = {}
+        # Review D-1: tracks whether the MOST RECENT aggregate-row write
+        # attempt (from any key) failed -- a single, process-wide flag,
+        # deliberately mirroring `_AuditBuffer`'s own N-2 state-transition
+        # logging discipline (log only on failing<->healthy transitions,
+        # never once per attempt).
+        self._aggregate_write_failing = False
+
+    def _acquire_key_lock(self, key: tuple[Any, ...]) -> threading.Lock:
+        with self._lock:
+            lock = self._key_locks.setdefault(key, threading.Lock())
+            self._key_lock_refcount[key] = self._key_lock_refcount.get(key, 0) + 1
+            return lock
+
+    def _release_key_lock_ref(self, key: tuple[Any, ...]) -> None:
+        """Review D-2: only prunes `self._key_locks[key]` when this is the
+        LAST outstanding reference (refcount reaches 0) AND no window
+        remains for the key -- see class docstring for why both conditions
+        are required for this to be safe."""
+        with self._lock:
+            remaining = self._key_lock_refcount.get(key, 1) - 1
+            if remaining <= 0:
+                self._key_lock_refcount.pop(key, None)
+                if key not in self._windows:
+                    self._key_locks.pop(key, None)
+            else:
+                self._key_lock_refcount[key] = remaining
+
+    def _requeue_failed_aggregate(self, key: tuple[Any, ...], state: dict[str, Any]) -> None:
+        """WP-2(a) fix round 3, review D-1: called only while holding this
+        KEY's OWN `key_lock` (both call sites below), right after its
+        aggregate-row write attempt raised -- puts `state["repeat_count"]`
+        back where a future flush (periodic, explicit, shutdown, or the
+        very next `route()` call for this same key) will retry it, instead
+        of discarding it. Two cases, both safe specifically BECAUSE the
+        caller holds this key's lock (no concurrent `route()`/sweep call
+        for the SAME key can be observing or mutating `self._windows[key]`
+        at this exact moment -- see class docstring):
+
+        - A fresh window has already been opened for this key by a
+          concurrent `route()` call in the meantime (its own first-
+          occurrence row is already durable) -- merge the failed repeat
+          count into it rather than overwriting.
+        - No window exists for this key right now -- re-register one
+          carrying just the failed repeat count, with the SAME (already
+          past) `window_start` it had, so it reads as immediately "due"
+          again for both a future sweep and the next `route()` call for
+          this key (which flushes an expired window inline before opening
+          a fresh one, the same code path that calls this method).
+        """
+        with self._lock:
+            existing = self._windows.get(key)
+            if existing is not None:
+                existing["repeat_count"] += state["repeat_count"]
+            else:
+                self._windows[key] = state
+
+    def _note_aggregate_write_result(self, succeeded: bool) -> None:
+        """Review D-1: fixed-message `logging.error`, only on a failing<->
+        healthy state TRANSITION (N-2's own established discipline) -- not
+        once per attempt, which would reproduce the exact logging-DoS risk
+        N-2 already closed for the buffer-overflow alert path."""
+        log_message: str | None = None
+        with self._lock:
+            if succeeded:
+                if self._aggregate_write_failing:
+                    self._aggregate_write_failing = False
+                    log_message = _COALESCE_AGGREGATE_WRITE_RECOVERED_LOG_MESSAGE
+            else:
+                if not self._aggregate_write_failing:
+                    self._aggregate_write_failing = True
+                    log_message = _COALESCE_AGGREGATE_WRITE_FAILED_LOG_MESSAGE
+        if log_message is not None:
+            _logger.error(log_message)
+
+    def route(self, *, key: tuple[Any, ...], fields: dict[str, Any]) -> None:
+        now = self._clock()
+        key_lock = self._acquire_key_lock(key)
+        try:
+            with key_lock:
+                with self._lock:
+                    state = self._windows.get(key)
+                    if state is not None and now - state["window_start"] < self._window_s:
+                        state["repeat_count"] += 1
+                        return
+                    expired_state = state
+                    if expired_state is not None:
+                        del self._windows[key]
+                if expired_state is not None and expired_state["repeat_count"] > 0:
+                    # This key's own window had already expired (nobody had
+                    # routed it since) -- flush its repeat-summary row
+                    # first, still under this key's own lock.
+                    try:
+                        self._sink.append(count=expired_state["repeat_count"], **expired_state["fields"])
+                    except Exception:
+                        self._requeue_failed_aggregate(key, expired_state)
+                        self._note_aggregate_write_result(False)
+                    else:
+                        self._note_aggregate_write_result(True)
+                # New (or freshly-expired-and-reopened) window: the
+                # synchronous, fail-closed first-occurrence INSERT.
+                try:
+                    self._sink.append(count=None, **fields)
+                except Exception:
+                    fail(
+                        "SERVICE_UNAVAILABLE",
+                        "The durable audit sink could not record this denial; it was refused.",
+                        status=503,
+                        details={"origin": _AUDIT_SINK_ORIGIN},
+                    )
+                with self._lock:
+                    # WP-2(a) fix round 4 (spot-check, major): if the
+                    # inline expired-window flush just above failed, it
+                    # already requeued the still-unwritten repeat count
+                    # into `self._windows[key]` (via `_requeue_failed_
+                    # aggregate`, under this SAME key_lock -- no other
+                    # thread can have touched this key's entry since). A
+                    # prior revision overwrote that unconditionally here,
+                    # silently discarding the requeued count the moment the
+                    # aggregate write failed but the very next first-
+                    # occurrence write succeeded. Merge instead: carry the
+                    # requeued `repeat_count` forward into the fresh
+                    # window rather than resetting it to 0.
+                    requeued = self._windows.get(key)
+                    carried_repeat_count = requeued["repeat_count"] if requeued is not None else 0
+                    self._windows[key] = {"window_start": now, "repeat_count": carried_repeat_count, "fields": fields}
+        finally:
+            self._release_key_lock_ref(key)
+
+    def flush_expired(self) -> None:
+        """Periodic/explicit sweep: only windows whose `window_s` has
+        actually elapsed. Collects them under the process lock (a brief,
+        non-blocking dict operation), then performs each key's own INSERT
+        under that SAME key's own per-key lock (m-2/D-1) -- never the
+        process lock, and never unprotected against a concurrent `route()`
+        call for the same key."""
+        now = self._clock()
+        self._flush_keys(lambda key, state: now - state["window_start"] >= self._window_s)
+
+    def flush_all(self) -> None:
+        """WP-2(a) fix round 2, review N-4: force EVERY currently-open
+        window to be flushed, expired or not -- used only at graceful
+        shutdown. Once this process is about to stop, there is no "wait
+        for the window to naturally expire" future left; treating every
+        window as due now is what keeps a shutdown from silently
+        discarding an in-progress window's accumulated repeat count (D-3
+        only ever sanctions losing counts to an actual crash, never to an
+        orderly stop)."""
+        self._flush_keys(lambda key, state: True)
+
+    def _flush_keys(self, is_due: "Callable[[tuple[Any, ...], dict[str, Any]], bool]") -> None:
+        due: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        with self._lock:
+            for key in list(self._windows.keys()):
+                state = self._windows[key]
+                if is_due(key, state):
+                    due.append((key, state))
+                    del self._windows[key]
+        for key, state in due:
+            if state["repeat_count"] <= 0:
+                continue
+            key_lock = self._acquire_key_lock(key)
+            try:
+                with key_lock:
+                    try:
+                        self._sink.append(count=state["repeat_count"], **state["fields"])
+                    except Exception:
+                        # Review D-1: never silently drop this repeat count
+                        # -- put it back where a future attempt (this same
+                        # sweep's own next pass, a later explicit/periodic
+                        # flush, or the next `route()` call for this key)
+                        # will retry it. Safe specifically because this
+                        # happens under THIS key's own lock (no concurrent
+                        # `route()`/sweep call for the SAME key can be
+                        # touching `self._windows[key]` right now).
+                        self._requeue_failed_aggregate(key, state)
+                        self._note_aggregate_write_result(False)
+                    else:
+                        self._note_aggregate_write_result(True)
+            finally:
+                self._release_key_lock_ref(key)
+
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable") -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S) -> None:
         # R-9 (CCR-14 WP-5, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
         # §1: "capability 申告は環境変数由来で composition root 注入"):
         # whether this application-plane process' own `capabilities()`
@@ -94,6 +706,18 @@ class DataService:
         self.limits = limits or ResourceLimits()
         self.topology = topology or AuthorityTopology()
         self._audit = audit or AuditSink()
+        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-10): the
+        # durable-designated sink -- `ApplicationAuditSink` (in-memory,
+        # fault-injectable) by default, or a caller-supplied
+        # `PostgresApplicationAuditSink` (`credential_store.py`, wired by
+        # `main.py`'s composition root). `self._audit` above is untouched
+        # and stays the sole recorder for D-3's non-durable denial classes
+        # (everything outside `_DURABLE_DENIAL_CODES`'s inclusion list,
+        # J-2 -- D-10's own instruction) -- this is a SEPARATE sink, not a
+        # replacement.
+        self._durable_audit = durable_audit if durable_audit is not None else ApplicationAuditSink()
+        self._audit_buffer = _AuditBuffer(self._durable_audit, capacity=audit_buffer_capacity, clock=clock or time.monotonic, alert_min_interval_s=audit_alert_min_interval_s)
+        self._denial_coalescer = _DenialCoalescer(self._durable_audit, window_s=denial_coalesce_window_s, clock=clock or time.monotonic)
         self._cell_factory: CellFactory = cell_factory or _default_cell_factory
         self._cells: dict[str, StorageBackend] = dict(initial_cells or {})
         self._disabled_apps: set[str] = set()
@@ -105,14 +729,28 @@ class DataService:
         self.topology.validate()
 
     def authenticate(self, secret: str | None, *, request_id: str | None = None) -> AuthContext:
+        rid = request_id or str(uuid.uuid4())
         try:
             context = self._credentials.authenticate(secret)
             if context.application_id in self._disabled_apps:
                 fail("APPLICATION_DISABLED", "Application is disabled.", status=403)
-            self._event(context, "authentication", "authenticate", "allow", "application", request_id=request_id)
+            self._event(context, "authentication", "authenticate", "allow", "application", request_id=rid)
             return context
         except FoundationError as exc:
-            self._audit.append(event_class="authentication_denial", request_id=request_id or str(uuid.uuid4()), application_id=None, actor_type="unknown", actor_id=None, role=None, operation="authenticate", target_kind="application", outcome="deny", reason_code=exc.code)
+            # Phase 4 (design D-2/D-3): the legacy in-memory `self._audit`
+            # append is unchanged (pre-Phase-4 behaviour, this repository's
+            # own tests read it back via `ControlAuthority.audit_events()`)
+            # -- `_denial_event` below ADDS the durable/coalesced dispatch
+            # every other public method's `except FoundationError` reaches
+            # through `_event`'s own deny branch; this call site cannot use
+            # `_event` itself because authentication has not yet resolved a
+            # `canonical`/`AuthContext` to build one from.
+            self._audit.append(event_class="authentication_denial", request_id=rid, application_id=None, actor_type="unknown", actor_id=None, role=None, operation="authenticate", target_kind="application", outcome="deny", reason_code=exc.code)
+            self._denial_event(
+                event_class="authentication_denial", request_id=rid, application_id=None,
+                actor_type="unknown", actor_id=None, role=None, operation="authenticate",
+                target_kind="application", reason_code=exc.code, target_id=None, details=exc.details,
+            )
             raise
 
     def capabilities(self, context: AuthContext) -> dict[str, Any]:
@@ -201,6 +839,7 @@ class DataService:
         return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []))
 
     def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None):
+        rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
@@ -219,10 +858,12 @@ class DataService:
                 outcome = self._cells[canonical.application_id].query(
                     entity, select=select, where=predicates, page_size=page_size, order_by=order_by, cursor=cursor, limits=self.limits, deadline=deadline, clock=self._clock
                 )
-                self._event(canonical, "data_operation", "query", "allow", "entity", request_id=request_id)
+                # Phase 4 (design D-2 §7.3): `query` never passes through
+                # the confirmation choke -- always buffer-class.
+                self._event(canonical, "data_operation", "query", "allow", "entity", request_id=rid)
                 return outcome
         except FoundationError as exc:
-            self._event(context, "authorization_denial", "query", "deny", "entity", exc.code, request_id=request_id)
+            self._event(context, "authorization_denial", "query", "deny", "entity", exc.code, request_id=rid, details=exc.details)
             raise
 
     def mutate(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None) -> int:
@@ -243,6 +884,7 @@ class DataService:
         return MutationResult(affected=outcome.affected, assigned_addresses=list(outcome.assigned_addresses or []))
 
     def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str, request_id: str | None):
+        rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
                 if transaction != "atomic":
@@ -253,14 +895,28 @@ class DataService:
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                outcome = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock)
-                self._event(canonical, "data_operation", "mutate", "allow", "entity", request_id=request_id)
+                # Phase 4 (design D-2/D-10): the hook is only ever USED by
+                # the backend when this batch turns out to pass through the
+                # confirmation choke (a confirmed `delete`) -- building it
+                # unconditionally here is cheap (no I/O happens until/unless
+                # `pre_commit()` is actually called) and keeps this call
+                # site identical regardless of what the batch turns out to
+                # contain, matching `schema`'s own unconditional hook below.
+                hook = self._make_audit_hook(canonical, event_class="data_operation", operation="mutate", target_kind="entity", request_id=rid)
+                outcome = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock, audit_hook=hook)
+                # D-10: `outcome.destructive` reports whether the backend's
+                # pre-commit hook already durably recorded this batch --
+                # `already_durable` tells `_event` to skip the buffer-class
+                # enqueue in that case (at most one durable row per
+                # operation).
+                self._event(canonical, "data_operation", "mutate", "allow", "entity", request_id=rid, already_durable=outcome.destructive)
                 return outcome
         except FoundationError as exc:
-            self._event(context, "operation_denial", "mutate", "deny", "entity", exc.code, request_id=request_id)
+            self._event(context, "operation_denial", "mutate", "deny", "entity", exc.code, request_id=rid, details=exc.details)
             raise
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
+        rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
@@ -274,14 +930,19 @@ class DataService:
                 self.limits.check_request(operation)
                 self.limits.check_depth(operation)
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                revision = self._cells[canonical.application_id].apply_schema(operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline, clock=self._clock)
-                self._event(canonical, "privilege_sensitive", "schema", "allow", "entity", request_id=request_id)
+                # Phase 4 (design D-2, item 2): unconditionally fail-closed
+                # -- every schema operation, not only a confirmed destructive
+                # one (unlike `mutate` above).
+                hook = self._make_audit_hook(canonical, event_class="privilege_sensitive", operation="schema", target_kind="entity", request_id=rid)
+                revision = self._cells[canonical.application_id].apply_schema(operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline, clock=self._clock, audit_hook=hook)
+                self._event(canonical, "privilege_sensitive", "schema", "allow", "entity", request_id=rid, already_durable=True)
                 return revision
         except FoundationError as exc:
-            self._event(context, "privilege_denial", "schema", "deny", "entity", exc.code, request_id=request_id)
+            self._event(context, "privilege_denial", "schema", "deny", "entity", exc.code, request_id=rid, details=exc.details)
             raise
 
     def catalog(self, context: AuthContext, *, request_id: str | None = None) -> dict[str, Any]:
+        rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
                 # The full CCR-13 `EntityDescriptor` shape (mutation_class/
@@ -290,10 +951,12 @@ class DataService:
                 # publishes exactly what the cell itself already computes,
                 # with no narrowing.
                 entities = self._cells[canonical.application_id].catalog()
-                self._event(canonical, "data_operation", "catalog", "allow", "entity", request_id=request_id)
+                # Phase 4 (design D-2 §7.3): `catalog` never passes through
+                # the confirmation choke -- always buffer-class.
+                self._event(canonical, "data_operation", "catalog", "allow", "entity", request_id=rid)
                 return {"application_scope": canonical.application_id, "entities": entities}
         except FoundationError as exc:
-            self._event(context, "authorization_denial", "catalog", "deny", "entity", exc.code, request_id=request_id)
+            self._event(context, "authorization_denial", "catalog", "deny", "entity", exc.code, request_id=rid, details=exc.details)
             raise
 
     def deny_unsupported(self, context: AuthContext, operation: str, message: str, *, request_id: str | None = None) -> None:
@@ -309,12 +972,19 @@ class DataService:
         declares `unavailable`/has no execution path for at all
         (`audit_query`, `cross_entity_mutation`); this always raises
         `CAPABILITY_UNSUPPORTED`, it never returns.
+
+        Phase 4 (design D-3): this denial's `reason_code` is always
+        `CAPABILITY_UNSUPPORTED` -- not in D-3's durable-code inclusion list, so
+        `_event`'s deny dispatch never routes it through the durable/
+        coalesced path (unchanged from pre-Phase-4 behaviour: this method
+        never wrote a durable row before this WP either).
         """
+        rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context):
                 fail("CAPABILITY_UNSUPPORTED", message)
         except FoundationError as exc:
-            self._event(context, "operation_denial", operation, "deny", "entity", exc.code, request_id=request_id)
+            self._event(context, "operation_denial", operation, "deny", "entity", exc.code, request_id=rid, details=exc.details)
             raise
 
     @contextmanager
@@ -350,9 +1020,139 @@ class DataService:
                 fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit_class": "requests_per_minute", "limit": self.limits.requests_per_minute})
             window.append(now)
 
-    def _event(self, context: AuthContext, event_class: str, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, *, request_id: str | None = None) -> None:
+    def _event(self, context: AuthContext, event_class: str, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, *, request_id: str | None = None, target_id: str | None = None, already_durable: bool = False, details: dict[str, Any] | None = None) -> None:
+        """The single dispatch point every public method above calls,
+        both on success (`outcome="allow"`) and on denial
+        (`outcome="deny"`). Always appends to the pre-existing legacy
+        in-memory `self._audit` first, unconditionally (D-10: this sink's
+        behaviour is completely unaffected by anything below) -- then
+        applies Phase 4's durable-recording dispatch (design D-2/D-3/D-4):
+
+        - `already_durable=True` (only ever passed by `mutate`/`schema`
+          above, when the backend's own pre-commit hook already durably
+          recorded this exact event): return immediately. D-10's "at most
+          one durable row per operation" rule.
+        - `outcome == "deny"`: `details["origin"] == "audit_sink"` (D-2)
+          means this denial's `SERVICE_UNAVAILABLE` was produced by the
+          audit pipeline itself already failing to record this very
+          operation (a pre-commit sink failure, a commit-failure error-row
+          write, a coalesced-denial first-insert failure) -- routing it
+          through `_route_denial` again would be a second (or third)
+          durable write for what is still logically one operation, so this
+          returns without doing anything further. Otherwise, any reason
+          code outside D-3's durable-code inclusion list (`_DURABLE_
+          DENIAL_CODES`, J-2 -- not merely the 4 originally named) returns
+          without any durable/buffered
+          record at all; every other reason code is fail-closed-class and
+          goes through the coalescing denial router (which may itself
+          raise `SERVICE_UNAVAILABLE`).
+        - `outcome == "allow"`: buffer-class (D-4) -- `query`/`catalog`
+          always reach here (they never pass through the confirmation
+          choke), and `mutate` reaches here only when its batch did NOT
+          (`already_durable=False`).
+        """
         canonical = self._credentials.canonical_context(context)
-        self._audit.append(event_class=event_class, request_id=request_id or str(uuid.uuid4()), application_id=canonical.application_id if canonical else None, actor_type="application_credential" if canonical else "unknown", actor_id=canonical.credential_id if canonical else None, role=canonical.role if canonical else None, operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code)
+        application_id = canonical.application_id if canonical else None
+        actor_type = "application_credential" if canonical else "unknown"
+        actor_id = canonical.credential_id if canonical else None
+        role = canonical.role if canonical else None
+        rid = request_id or str(uuid.uuid4())
+        self._audit.append(event_class=event_class, request_id=rid, application_id=application_id, actor_type=actor_type, actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code, target_id=target_id)
+        if already_durable:
+            return
+        if outcome == "deny":
+            if details and details.get("origin") == _AUDIT_SINK_ORIGIN:
+                return
+            if reason_code not in _DURABLE_DENIAL_CODES:
+                return
+            self._denial_event(
+                event_class=event_class, request_id=rid, application_id=application_id, actor_type=actor_type,
+                actor_id=actor_id, role=role, operation=operation, target_kind=target_kind, reason_code=reason_code,
+                target_id=target_id, details=None,
+            )
+            return
+        # outcome == "allow": D-4's buffer is scoped to `data_operation`
+        # successes only (§7.3's own text: "通常のdata-operation成功event
+        # のみ") -- `query`/`catalog` always land here as `data_operation`,
+        # and `mutate` lands here only when it was NOT destructive
+        # (`already_durable=False`, checked above). `authenticate`'s own
+        # success (`event_class="authentication"`) is a distinct event
+        # class outside that scope: it is not a data operation, and D-2's
+        # rule never names it as fail-closed either, so it stays exactly
+        # where it already was pre-Phase-4 -- the legacy in-memory sink
+        # only (already appended above), no durable/buffered record at all.
+        if event_class != "data_operation":
+            return
+        self._audit_buffer.push(
+            AuditEvent(
+                event_id=str(uuid.uuid4()), event_class=event_class, occurred_at=_now_iso(), request_id=rid,
+                application_id=application_id, actor_type=actor_type, actor_id=actor_id, role=role,
+                operation=operation, target_kind=target_kind, outcome=outcome, reason_code=reason_code,
+                target_id=target_id,
+            )
+        )
+
+    def _denial_event(self, *, event_class: str, request_id: str, application_id: str | None, actor_type: str, actor_id: str | None, role: str | None, operation: str, target_kind: str | None, reason_code: str | None, target_id: str | None, details: dict[str, Any] | None) -> None:
+        """The shared fail-closed/coalesced-denial dispatch (design D-3),
+        used both by `_event`'s own deny branch and by `authenticate`'s
+        except clause (which has no `canonical`/`AuthContext` to route
+        through `_event` at all -- authentication itself is what failed).
+        `details` mirrors `_event`'s own audit-sink-origin short-circuit.
+        """
+        if details and details.get("origin") == _AUDIT_SINK_ORIGIN:
+            return
+        if reason_code not in _DURABLE_DENIAL_CODES:
+            return
+        key = (application_id, actor_id or "unknown", operation, reason_code)
+        fields = {
+            "event_class": event_class, "request_id": request_id, "application_id": application_id,
+            "actor_type": actor_type, "actor_id": actor_id, "role": role, "operation": operation,
+            "target_kind": target_kind, "outcome": "deny", "reason_code": reason_code, "target_id": target_id,
+        }
+        self._denial_coalescer.route(key=key, fields=fields)
+
+    def _make_audit_hook(self, canonical: AuthContext, *, event_class: str, operation: str, target_kind: str, request_id: str) -> ApplicationAuditHook:
+        """Phase 4 (design D-2): builds the `ApplicationAuditHook` passed
+        to `StorageBackend.transact`/`apply_schema` as `audit_hook` --
+        every field the durable row needs is already resolved here (this
+        is `DataService`'s own job; the backend has no identity/request
+        context of its own beyond what it is given).
+        """
+        fields = {
+            "event_class": event_class, "request_id": request_id, "application_id": canonical.application_id,
+            "actor_type": "application_credential", "actor_id": canonical.credential_id, "role": canonical.role,
+            "operation": operation, "target_kind": target_kind, "target_id": None,
+        }
+        return _PreCommitHook(self._durable_audit, fields)
+
+    def flush_audit_buffer(self, *, force_expire_denial_windows: bool = False) -> None:
+        """Phase 4 (design D-4/§7.3/§7.4): synchronously drains the
+        bounded buffer (writing it as one batch), retries the sticky
+        overflow-alert row if one is pending and due, and sweeps
+        denial-coalescing windows (writing their repeat-count summary row,
+        D-3). Called on demand by this repository's own tests and by a
+        composition root's periodic timer alike -- there is nothing
+        time-sensitive about calling this more or less often beyond how
+        promptly buffered/coalesced evidence becomes durable (D-4's own
+        "periodic or threshold" flush-trigger latitude).
+
+        `force_expire_denial_windows=True` (WP-2(a) fix round 2, review
+        N-4): flushes EVERY currently-open denial-coalescing window,
+        expired or not, instead of only expired ones -- used exactly once,
+        by a composition root's graceful-shutdown path. Without this, a
+        window still short of its own `window_s` at the moment the process
+        stops loses its accumulated repeat count entirely (D-3 only
+        sanctions losing counts to an actual crash, not to an orderly
+        stop); the default (periodic timer, explicit test calls) stays
+        `False` -- an in-progress window still has a legitimate future to
+        expire into naturally and must not be cut short just because
+        something else happened to call this method.
+        """
+        self._audit_buffer.flush()
+        if force_expire_denial_windows:
+            self._denial_coalescer.flush_all()
+        else:
+            self._denial_coalescer.flush_expired()
 
     def _register_application(self, application_id: str, entities: dict[str, list[dict[str, Any]]] | None = None) -> None:
         if application_id in self._cells:

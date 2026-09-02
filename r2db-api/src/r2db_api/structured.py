@@ -11,6 +11,7 @@ from decimal import Decimal
 import re
 from typing import Any, Callable
 
+from .audit_hook import ApplicationAuditHook
 from .errors import fail
 from .limits import ResourceLimits
 
@@ -710,6 +711,14 @@ class MutationOutcome:
 
     affected: int
     assigned_addresses: list[dict[str, Any]] | None = None
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-10): whether
+    # this batch passed through the `DESTRUCTIVE_CONFIRMATION_V1` choke
+    # (a confirmed `delete`) -- the fail-closed/buffer-class dispatch
+    # point. `True` means the backend already durably recorded this batch
+    # via its `audit_hook` pre-commit call; `DataService` must not also
+    # enqueue it on the bounded buffer (D-10: at most one durable row per
+    # operation).
+    destructive: bool = False
 
 
 # --- value type validation (R-7) -------------------------------------------
@@ -1105,7 +1114,7 @@ class ApplicationCell:
             )
         return result
 
-    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None) -> MutationOutcome:
+    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> MutationOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
@@ -1118,6 +1127,14 @@ class ApplicationCell:
         try:
             affected = 0
             assigned_addresses: list[dict[str, Any]] = []
+            # Phase 4 (design D-2): whether this batch passed through the
+            # DESTRUCTIVE_CONFIRMATION_V1 choke -- the fail-closed/
+            # buffer-class dispatch point. Tracked here (not re-derived
+            # from `operations` after the fact) because it is `_apply`'s
+            # own successful pass through `require_destructive_
+            # confirmation` that establishes it, not merely the presence
+            # of a `delete` key in the request.
+            destructive = False
             for operation in operations:
                 if deadline is not None and clock is not None:
                     # WP-2 review M-2: per-operation deadline check, not
@@ -1127,19 +1144,31 @@ class ApplicationCell:
                     # indexed entity) could otherwise run well past the
                     # execution budget before the next checkpoint.
                     limits.check_deadline(deadline, clock)
-                count, address = self._apply(entity, operation)
+                count, address, op_destructive = self._apply(entity, operation)
                 affected += count
+                destructive = destructive or op_destructive
                 if address is not None:
                     assigned_addresses.append(address)
                 limits.check("result_items", affected)
             if deadline is not None and clock is not None:
                 limits.check_deadline(deadline, clock)
-            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses)
+            # Phase 4 (design D-2/D-10): the pre-commit hook is the LAST
+            # thing this method does before its own commit point (here:
+            # returning normally -- this in-memory backend has no separate
+            # commit step that could itself fail once this call returns,
+            # unlike `PostgresCell`, so there is no `commit_failed()`
+            # counterpart call anywhere in this class). A raise here is
+            # caught by the `except Exception` below, exactly like any
+            # other mid-batch failure -- restoring `before` and propagating
+            # (fail-closed by construction, no special-casing needed).
+            if destructive and audit_hook is not None:
+                audit_hook.pre_commit()
+            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive)
         except Exception:
             self.entities[entity] = before
             raise
 
-    def _apply(self, entity: str, operation: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+    def _apply(self, entity: str, operation: dict[str, Any]) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = self.schema.get(entity, {})
         known_fields = set(field_types.keys())
         bound = bind_mutation(operation, known_fields)
@@ -1149,10 +1178,11 @@ class ApplicationCell:
                 _check_type(value, field_types.get(key), key)
             self._check_unique_conflict(entity, bound.values, exclude_id=None)
             row = self._insert_row(entity, bound.values)
-            return 1, {"address": {"id": row["id"]}}
+            return 1, {"address": {"id": row["id"]}}, False
 
         if bound.operation == "upsert":
-            return self._apply_upsert(entity, bound, field_types)
+            count, address = self._apply_upsert(entity, bound, field_types)
+            return count, address, False
 
         # update / delete: R-7, corrigendum M-9 -- validate every value's
         # type (predicate values, and for `update` the write values too)
@@ -1180,15 +1210,19 @@ class ApplicationCell:
                 reversible_alternative=None,
                 recovery=None,
             )
+            # Phase 4 (design D-2): reaching this point means `require_
+            # destructive_confirmation` above did not raise -- this
+            # operation is confirmed-destructive, the fail-closed dispatch
+            # signal `transact` aggregates across the whole batch.
             if bound.expected_revision is not None:
                 target = [row for row in matches if row["_r2db_revision"] == bound.expected_revision]
                 if not target:
                     self._fail_precondition(matches)
                 self.entities[entity].remove(target[0])
-                return 1, None
+                return 1, None, True
             for row in matches:
                 self.entities[entity].remove(row)
-            return len(matches), None
+            return len(matches), None, True
 
         # update
         if bound.expected_revision is not None:
@@ -1199,14 +1233,14 @@ class ApplicationCell:
             self._check_unique_conflict(entity, {**row, **bound.values}, exclude_id=row["id"])
             row.update(bound.values)
             row["_r2db_revision"] = str(uuid.uuid4())
-            return 1, None
+            return 1, None, False
         if not bound.values:
-            return len(matches), None
+            return len(matches), None, False
         for row in matches:
             self._check_unique_conflict(entity, {**row, **bound.values}, exclude_id=row["id"])
             row.update(bound.values)
             row["_r2db_revision"] = str(uuid.uuid4())
-        return len(matches), None
+        return len(matches), None, False
 
     def _apply_upsert(self, entity: str, bound: BoundMutation, field_types: dict[str, str | None]) -> tuple[int, dict[str, Any] | None]:
         declared = {name: info for name, info in self.indexes.get(entity, {}).items() if info["unique"]}
@@ -1304,7 +1338,7 @@ class ApplicationCell:
             seen.add(key)
         return False
 
-    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None) -> int:
+    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> int:
         bound = bind_schema_operation(operation, developer=developer)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like
         # entities/fields already did (SI-08: an index is a real resource,
@@ -1396,6 +1430,25 @@ class ApplicationCell:
         if deadline is not None and clock is not None:
             try:
                 limits.check_deadline(deadline, clock)
+            except Exception:
+                self.entities = before_entities
+                self.schema = before_schema
+                self.indexes = before_indexes
+                self._next_id = before_next_id
+                self.schema_revision = before_revision
+                raise
+        # Phase 4 (design D-2, item 2): every schema operation is
+        # fail-closed class, unconditionally (unlike `transact`, there is
+        # no non-destructive schema operation) -- the pre-commit hook is
+        # called as the last thing this method does before its own commit
+        # point (here: `schema_revision += 1` and returning). A raise here
+        # restores every piece of state this method may have mutated,
+        # using the same `before_*` snapshots the deadline-check branch
+        # above already relies on, and propagates -- fail-closed by
+        # construction, no separate rollback path needed.
+        if audit_hook is not None:
+            try:
+                audit_hook.pre_commit()
             except Exception:
                 self.entities = before_entities
                 self.schema = before_schema

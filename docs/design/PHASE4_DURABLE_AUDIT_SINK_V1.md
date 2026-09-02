@@ -111,7 +111,7 @@ MitateDB-api: 記録対象は `create_collection` (`cell.py` L336-339)・`add_fi
 **容量側の新規露出とその有界化 (レビュー M-5)**: 本フェーズは data-plane の api role に platform DB への **INSERT 権限を新設する**。現状この role は `applications`/`credentials` の SELECT のみであり (§1.4)、書き込み経路そのものが存在しない。侵害された (あるいは暴走した) application-plane プロセスは、platform DB — **全 application の credential store と同居する DB** — のストレージを消費できるようになる。ディスク枯渇は全 application の認証停止に直結するため、これは SI-00 の "Application A compromise ≠ Application B compromise" の**可用性側**の露出である。有界化は 3 段構えで行う:
 
 1. **1 行のサイズを有界化する** — 全 text 列に `CHECK (length(col) <= N)` を課す (§6.1/§6.2)。
-2. **1 操作あたりの行数を有界化する** — 1 利用者操作 = 最大 1 行 (D-10)、denial は合体で窓あたり 1 行 (D-3)、通常 event は bounded buffer (D-4)。
+2. **1 操作あたりの行数を有界化する** — 1 利用者操作 = 最大 1 行 (D-10)、denial は合体で窓あたり最大 2 行 (初回行 + 集約行、D-3、監督裁定 J-1)、通常 event は bounded buffer (D-4、overflow alert 行は N-2 によりさらに flush 間隔あたり最大 1 行に律速される)。
 3. **運用で監視する** — platform DB の容量監視を runbook 項目にする (§9.3)。
 
 **可用性の依存関係 (レビュー m-6)**: platform DB は**既に** data-plane の認証の単一依存である (両 peer とも credential store がここにある。r2db `main.py` L242、MitateDB `credential_store_postgres.py`)。platform DB が落ちれば data-plane は認証段階で全面停止するため、本フェーズはその依存を耐久監査へ広げるだけで、**新たな単一障害点を作るわけではない**。ただし `audit_query` も同じ DB に依存するため、障害時の独立した読み取り路は帯域外 CLI (r2db `ops.py cmd_audit_report` L747-816 / MitateDB の対応コマンド) のみである。この点を runbook に書く (§9.3)。
@@ -148,7 +148,7 @@ fail-closed 類 (destructive / privilege-sensitive) の data-plane event は、�
 query / catalog / **delete を含まない** mutate — すなわち通常の data-operation 成功 event のみ。
 
 **非耐久** (耐久面にも buffer にも載せない、レビュー N-2)
-D-3 が非耐久と定める 4 種の denial (`VALIDATION_FAILED` / `LIMIT_EXCEEDED` / `CAPABILITY_UNSUPPORTED` / `NOT_FOUND`)。既存の in-memory sink にのみ残る。
+D-3 が非耐久と定める denial (耐久対象は D-3 表の 6 項目のみの包含列挙であり、それ以外は `VALIDATION_FAILED` / `LIMIT_EXCEEDED` / `CAPABILITY_UNSUPPORTED` / `NOT_FOUND` に限らず全て非耐久 — 監督裁定 2026-09-02、WP-2(a) レビュー J-2)。既存の in-memory sink にのみ残る。
 
 両 peer で**判定点が同じ関数である**ことをテストで固定する (§9.2 の検証可能性質)。D-7 の宣言語彙は、この振り分けを表現できる粒度を持たねばならない (destructive を非 destructive と同じ class に畳む宣言は不可)。
 
@@ -172,9 +172,11 @@ data-plane の denial 語彙は広い — 両 peer とも `except FoundationErro
 | **fail-closed 類** | **耐久記録する** (合体つき) | 認証系 (`AUTH_REQUIRED` / `AUTH_INVALID` 相当)、`FORBIDDEN`、`APPLICATION_DISABLED`、credential の disabled / revoked / must_rotate、`DESTRUCTIVE_CONFIRMATION_REQUIRED`、privilege denial |
 | **非耐久** | **耐久面に載せない** | `VALIDATION_FAILED`、`LIMIT_EXCEEDED` (rate / concurrency)、`CAPABILITY_UNSUPPORTED`、`NOT_FOUND` |
 
-**非耐久の 4 種は bounded buffer にも載せない (レビュー N-2)**。これらは既存の in-memory sink にのみ残り、`application_audit` には一切現れない。bounded buffer (D-4) は**通常の data-operation 成功 event 専用**である — buffer に入れてしまうと結局は耐久 INSERT されることになり、「耐久面に載せない」という判断が実現しない (かつ D-3 が防ごうとしている流量問題が buffer 経由で戻ってくる)。
+**耐久対象は包含列挙であり、表にないコードは全て非耐久 (監督裁定 2026-09-02、WP-2(a) レビュー J-2)。** 上表の「fail-closed 類」欄に列挙した 6 項目 (認証系 2 コード相当、`FORBIDDEN`、`APPLICATION_DISABLED`、credential の revoked 相当、`DESTRUCTIVE_CONFIRMATION_REQUIRED`) だけが耐久記録の対象であり、それ以外の denial reason_code は、この表が明示的に挙げる `VALIDATION_FAILED`/`LIMIT_EXCEEDED`/`CAPABILITY_UNSUPPORTED`/`NOT_FOUND` の 4 種に限らず**すべて**非耐久として扱う (`SERVICE_UNAVAILABLE`/`AUTH_STATE_UNAVAILABLE`、`CONFLICT`、`PRECONDITION_FAILED` を含む)。除外列挙 (この 4 種だけが非耐久で、それ以外は耐久) の読みは WP-2(a) 実装レビューで、監査パイプライン自身の失敗が生む `SERVICE_UNAVAILABLE` を新規の denial として再度耐久ルートへ通してしまい、1 操作が耐久 3 行を生む (D-10 禁止条件 (ii) の破れ) ことが確認されたため、この一言で確定する。
 
-この 4 種は SI-14 の最小 event class の外にある。契約 `sink_failure_policy` をより広く読むことも可能だが、**決めた線を `security/CONTROL_MAPPING.md` の SI-14 行に理由つきで書く** (§9.3)。なお **CCR-14 との関係は「非対称の解消」ではない** — control 面は rate 拒否を記録せず、data 面はこの 4 種を非耐久とする。**線引きは異なるが、いずれも SI-14 の最小 class の外**という同じ根拠に立つ。この点も SI-14 行への記載事項に含める。
+**非耐久の全コードは bounded buffer にも載せない (レビュー N-2)**。これらは既存の in-memory sink にのみ残り、`application_audit` には一切現れない。bounded buffer (D-4) は**通常の data-operation 成功 event 専用**である — buffer に入れてしまうと結局は耐久 INSERT されることになり、「耐久面に載せない」という判断が実現しない (かつ D-3 が防ごうとしている流量問題が buffer 経由で戻ってくる)。
+
+これら非耐久のコード (この 4 種に限らず、D-3 表の 6 項目に含まれない全て) は SI-14 の最小 event class の外にある。契約 `sink_failure_policy` をより広く読むことも可能だが、**決めた線を `security/CONTROL_MAPPING.md` の SI-14 行に理由つきで書く** (§9.3)。なお **CCR-14 との関係は「非対称の解消」ではない** — control 面は rate 拒否を記録せず、data 面はこれらのコードを非耐久とする。**線引きは異なるが、いずれも SI-14 の最小 class の外**という同じ根拠に立つ。この点も SI-14 行への記載事項に含める。
 
 #### (2) 合体 (coalescing) による流量の有界化
 
@@ -183,18 +185,19 @@ data-plane の denial 語彙は広い — 両 peer とも `except FoundationErro
 - **合体キー**: `(application_id, actor_id または "unknown", operation, reason_code)`
 - **窓 W**: 60 秒 (実装裁量で可変。宣言で公開する)
 - **窓内の初回**: 同期の耐久 INSERT + commit。失敗すれば当該応答を `SERVICE_UNAVAILABLE` (fail-closed)。
-- **窓内の 2 回目以降**: メモリで計数のみ。窓終了時に **1 行**として flush し、発生回数を 14 列目 `count` に載せる。
+- **窓内の 2 回目以降**: メモリで計数のみ。窓終了時に、2 回目以降が 1 件でもあれば**別の 1 行**として flush し、その繰り返し回数 (初回を含まない) を 14 列目 `count` に載せる。2 回目以降が無かった窓は、この flush 行自体を出さない。
+- **窓あたり最大 2 行/プロセス (監督裁定 2026-09-02、レビュー J-1)**: 初回の同期行と、窓末の集約行 (2 回目以降が存在する場合のみ) の**合計 2 行**が、1 プロセス・1 窓の実効上限である。「1 行」という記述は窓末 flush が書く行数を指すのであって、窓全体の総行数ではない — `application_audit` の api role 権限が INSERT のみ (UPDATE 不可、§6.1/§9.2 性質 2) である以上、初回行の `count` を後から改訂して単一行に集約することはできない。この 2 行という上限は §9.3 の runbook 容量算出 (窓数 × 最大インスタンス数 M) に「2 ×」として織り込むこと。
 - **クラッシュ時に失うのは窓内の計数のみ**で、初回行は既に耐久化されている。
-- **合体カウンタはプロセスローカルである (レビュー N-4)**。共有ストアを介さないため、同一の合体キーでも**プロセス (インスタンス) ごとに 1 行**が出る。
+- **合体カウンタはプロセスローカルである (レビュー N-4)**。共有ストアを介さないため、同一の合体キーでも**プロセス (インスタンス) ごとに** 初回行 + (該当すれば) 集約行が出る。
 
-これにより、未知 secret の連打も revoke 済み secret の連打も **プロセスあたり 1 行/窓**に有界化される。配備全体の実効上限は **窓数 × 最大インスタンス数 M** であり、「1 行/分」ではない — M は水平スケール設定 (Cloud Run の最大インスタンス数等) で決まるので、runbook の容量閾値算出にこの M を織り込む (§9.3)。新しい拒否経路 (= 正規テナントへの巻き添え面) を作らずに増幅を止められる点が、pre-auth rate window の追加より優れている。この形は依頼者裁定 **P4-D3** で確定した (§5 に却下した 3 案とその理由を記録)。
+これにより、未知 secret の連打も revoke 済み secret の連打も **プロセスあたり窓あたり最大 2 行 (初回行 + 集約行)** に有界化される。配備全体の実効上限は **窓数 × 最大インスタンス数 M** であり、「1 行/分」ではない — M は水平スケール設定 (Cloud Run の最大インスタンス数等) で決まるので、runbook の容量閾値算出にこの M を織り込む (§9.3)。新しい拒否経路 (= 正規テナントへの巻き添え面) を作らずに増幅を止められる点が、pre-auth rate window の追加より優れている。この形は依頼者裁定 **P4-D3** で確定した (§5 に却下した 3 案とその理由を記録)。
 
 - **壊れるシナリオ**: 合体も範囲限定もしないと、(i) 漏洩済み secret 1 本の連打で監査テーブルが無制限に膨張し、platform DB 同居の credential store ごと全 application の認証を止められる (SI-00 の可用性側の破れ)、(ii) 壊れたクライアントの `VALIDATION_FAILED` 連発が、データ DB に触らない検証エラーを platform DB への同期ラウンドトリップに化けさせ、データ面のレイテンシに恒常的に上乗せされる。
-- **検証方法**: 同一の無効 secret を N 回 (N ≫ 1) 提示し、窓内に増える耐久行がちょうど 1 行で `count = N` になることを実測する。`VALIDATION_FAILED` の連発では耐久行が増えないことを実測する。初回 INSERT に故障を注入すると応答が `SERVICE_UNAVAILABLE` になることを実測する。
+- **検証方法**: 同一の無効 secret を N 回 (N ≫ 1) 提示し、窓内に増える耐久行が (初回の同期行を除いて) ちょうど 1 行の**集約行**として追加され、その `count` が繰り返し回数 (N − 1) になることを実測する (上記「窓あたり最大 2 行/プロセス」参照)。`VALIDATION_FAILED` の連発では耐久行が増えないことを実測する。初回 INSERT に故障を注入すると応答が `SERVICE_UNAVAILABLE` になることを実測する。
 
 ### D-4 通常 data-operation event = bounded buffer + overflow の in-band alert
 
-query/mutate の成功、catalog といった**通常の data-operation 成功 event** は、**bounded in-memory buffer (既定 1000、実装裁量で設定可)** に積み、定期または閾値でバッチ INSERT する。buffer の対象はこれのみである — D-3 が非耐久と定めた 4 種の denial は buffer にも載せない (レビュー N-2)。
+query/mutate の成功、catalog といった**通常の data-operation 成功 event** は、**bounded in-memory buffer (既定 1000、実装裁量で設定可)** に積み、定期または閾値でバッチ INSERT する。buffer の対象はこれのみである — D-3 が非耐久と定めた denial (4 種に限らず耐久対象外の全て) は buffer にも載せない (レビュー N-2)。overflow alert 行自体の emit 頻度も **flush 間隔あたり最大 1 行** に律速される (WP-2(a) fix round 2 review N-2 — eviction/flush 失敗の頻度から独立に有界)。
 
 **buffer はプロセスローカルである (レビュー N-4)**: 容量 1000 は**1 プロセスあたり**であり、配備全体では **1000 × 最大インスタンス数 M** の未 flush event が同時に存在し得る。同様に overflow alert も**プロセスごとに**発生する。runbook の容量閾値算出にこの M を織り込む (§9.3)。
 
@@ -300,7 +303,7 @@ SI-14 由来の共通最小集合は本文書 §9 の表で示すが、両 peer 
 
 **1 操作 = 最大 1 耐久行 (レビュー M-7、禁止条件)**: 1 つの利用者操作が生む耐久監査行は**最大 1 行**である (D-2 の commit 失敗時の `error` 行は、その 1 行に対する後続の別行として例外的に許される)。pre-commit で耐久記録した event については、**post-commit 側の発火を抑止する** — in-memory sink へ反映する場合も、耐久面へは二度書かない。control 面には `test_each_state_change_adds_exactly_one_audit_row` という対応する固定があるが、application 面には無いので新設する。
 
-既存の in-memory `AuditSink` (r2db 13 フィールド、MitateDB 6 フィールド) は、**D-3 が非耐久と定めた 4 種の denial の唯一の記録先**になるため、単純撤去はできない (レビュー N-2)。耐久 sink の前段 (buffer) に統合するか併存させるかは実装裁量だが、以下 2 つは**禁止条件**である: (i) 記録先が二重になって片方が黙って落ちる構造、(ii) 1 操作が 2 行の耐久行を生む構造。
+既存の in-memory `AuditSink` (r2db 13 フィールド、MitateDB 6 フィールド) は、**D-3 の耐久対象外の全コード (包含列挙の外側すべて) の denial の唯一の記録先**になるため、単純撤去はできない (レビュー N-2)。耐久 sink の前段 (buffer) に統合するか併存させるかは実装裁量だが、以下 2 つは**禁止条件**である: (i) 記録先が二重になって片方が黙って落ちる構造、(ii) 1 操作が 2 行の耐久行を生む構造。
 
 - **壊れるシナリオ**: (i) 記録先が 2 つあり片方が沈黙すると、片方だけを読むテストや運用が「記録されている」と誤認し、耐久化したはずの穴に気付けない。(ii) pre-commit hook を足したまま既存の post-commit `_event` を残すと、destructive mutate 1 回で耐久行が 2 行入り、`audit_query` の消費者 (AI エージェント) が同一操作を 2 回として数える。
 - **検証方法**: in-memory と Postgres の両実装に同一の parity テストを流し、耐久 sink に故障を注入したときに in-memory 側だけが成功して操作が通る経路が存在しないことを実測する。destructive mutate 1 回で `application_audit` の行数がちょうど +1 になることを実測する。
@@ -347,7 +350,7 @@ SI-14 由来の共通最小集合は本文書 §9 の表で示すが、両 peer 
 
 ### P4-D3 denial の耐久記録 = 合体 (coalescing) 方式 (旧 U-3(c'))
 
-**確定**: D-3 のとおり。耐久対象の denial を範囲限定した上で `(application_id, actor_id または "unknown", operation, reason_code)` を鍵に窓 W=60s で合体し、**プロセスあたり窓あたり 1 行** (`count` 列に発生回数) に有界化する。data-plane に新しい pre-auth 拒否経路は追加しない。
+**確定**: D-3 のとおり。耐久対象の denial を範囲限定した上で `(application_id, actor_id または "unknown", operation, reason_code)` を鍵に窓 W=60s で合体し、**プロセスあたり窓あたり最大 2 行 (初回行 + 集約行)** (`count` 列に発生回数) に有界化する。data-plane に新しい pre-auth 拒否経路は追加しない。
 
 **前提事実 (監督実測)**: **両 peer とも data-plane に pre-auth rate limit は存在しない** — r2db の rate limit は post-auth の credential 単位のみで (`service.py` L345-350 `_acquire_rate`)、無効 credential は `_authenticate` (`http.py` L268-269 → `service.py` L106-115) で即座に raise され window に触れない。MitateDB は data-plane の `requests_per_minute` 自体が未実装・未宣言 (`cell.py` L1122-1134)。一方 control-plane には pre-auth の global window が両 peer に存在する (r2db `control_plane.py` L1192-1252 + `control_http.py` L44-70、MitateDB `control_plane.py` L951-974)。
 
@@ -621,7 +624,7 @@ cell.transact (cell.py L669-828)
 
 denial には状態変更が無いため、独立 tx で INSERT し、失敗したら当該応答を `SERVICE_UNAVAILABLE` にする。既存の `PostgresControlAuditSink.append(work=None)` (`credential_store.py` L1116-1123) が control 面で採っているのと同じ形である。
 
-**まず D-3 の範囲判定を行う** — `VALIDATION_FAILED` / `LIMIT_EXCEEDED` / `CAPABILITY_UNSUPPORTED` / `NOT_FOUND` は**非耐久**であり、耐久経路にも buffer にも入れない (既存の in-memory sink にのみ残る、レビュー N-2)。両 peer とも `except FoundationError` を丸ごと denial event に変換しているため (r2db `service.py` L219-225 / L258-260 / L280-281 / L295-296)、**この分岐を except 節の中に明示的に置く**必要がある。
+**まず D-3 の範囲判定を行う** — D-3 の表が挙げる 6 項目 (認証系相当、`FORBIDDEN`、`APPLICATION_DISABLED`、credential の revoked 相当、`DESTRUCTIVE_CONFIRMATION_REQUIRED`) だけが**耐久**であり、それ以外の reason_code (`VALIDATION_FAILED` / `LIMIT_EXCEEDED` / `CAPABILITY_UNSUPPORTED` / `NOT_FOUND` に限らず、**耐久対象外の全コード**) は非耐久として耐久経路にも buffer にも入れない (既存の in-memory sink にのみ残る、レビュー N-2)。両 peer とも `except FoundationError` を丸ごと denial event に変換しているため (r2db `service.py` L219-225 / L258-260 / L280-281 / L295-296)、**この分岐を except 節の中に明示的に置く**必要がある。
 
 次に **D-3 の合体**を適用する: 合体キーが窓 W 内で既出なら計数のみ (同期 INSERT なし)、初出なら同期 INSERT + commit、失敗時は `SERVICE_UNAVAILABLE`。窓終了時に合体行を `count` つきで flush する。
 
@@ -636,7 +639,7 @@ denial には状態変更が無いため、独立 tx で INSERT し、失敗し�
 
 振り分けは **D-2 の規範的規則**による — `event_class` では判定しない。判定点は `DESTRUCTIVE_CONFIRMATION_V1` の確認 choke (両 peer の `_validate_delete_confirmation` 相当) であり、両 peer で同じ関数がこの役目を負うことをテストで固定する (§9.2)。
 
-buffer に載るのは**通常の data-operation 成功 event のみ**である (D-3 の非耐久 4 種はここにも来ない)。
+buffer に載るのは**通常の data-operation 成功 event のみ**である (D-3 の非耐久コード — 4 種に限らず耐久対象外の全て — はここにも来ない)。
 
 - r2db-api: `service.py` L222 (`query` allow) / L293 (`catalog` allow) はバッファ類。L257 (`mutate` allow) は**確認 choke を通ったかどうかで分岐する** — delete を含むバッチは §7.1 の pre-commit 経路、含まないバッチはバッファ類。
 - MitateDB-api: **P4-D5 により query / insert / update の成功を記録する emit サイトを新設する** (現状 `cell.py` の read 経路 L416 / L1022 および insert/update 経路には `__record` 呼び出しが無い)。これらはバッファ類として buffer に積む。delete と schema 変更は従来どおり §7.1 の pre-commit 経路。
@@ -767,7 +770,7 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
 7. **buffer 行の書込み失敗が fail-closed 操作を止めない** (レビュー M-1) — buffer 行に故障を注入しても destructive 操作は成功し、その fail-closed 行は耐久化されている。
 8. **1 操作 = 耐久 1 行** (レビュー M-7) — destructive mutate 1 回で `application_audit` の行数がちょうど +1 になる (control 面の `test_each_state_change_adds_exactly_one_audit_row` と同型)。
 9. **データ commit 失敗が耐久 `error` 行を生む** (レビュー M-6) — データ commit に故障を注入すると、同一 `request_id` の `allow` 行の後に `outcome="error"` 行が耐久記録される。error 行の書込みにも故障を注入すると応答が `SERVICE_UNAVAILABLE` になる。**但し書き (レビュー N-1)**: この性質が覆うのは**プロセス生存下のクリーンな commit 失敗**のみである。プロセス消失を模擬した場合 (`error` 行を書く主体が居ない場合) に `allow` 行が単独で残るのは**仕様どおり**であり、テストはそれを失敗として扱わない — 逆に「プロセス消失模擬では allow 単独が残る」ことを明示的に固定する。
-10. **1 application の侵害が platform DB を無制限に肥大させられない** (レビュー M-5) — (i) api role が長さ制約を超える値を INSERT できない (生の接続で実測)、(ii) 同一の無効 secret の N 連打で増える耐久行が**プロセスあたり**窓あたり 1 行に留まる (D-3 の合体。配備全体の上限は窓数 × 最大インスタンス数 M であり、テストは単一プロセスでこの性質を固定した上で、M の織り込みを runbook 側の責務とする — レビュー N-4)、(iii) buffer が上限を超えて成長しない (これも 1 プロセスあたり)。行サイズ × 行数の両方が有界であることをもって、SI-00 の可用性側の露出が閉じていることを示す。
+10. **1 application の侵害が platform DB を無制限に肥大させられない** (レビュー M-5) — (i) api role が長さ制約を超える値を INSERT できない (生の接続で実測)、(ii) 同一の無効 secret の N 連打で増える耐久行が**プロセスあたり**窓あたり最大 2 行 (初回行 + 集約行) に留まる (D-3 の合体。配備全体の上限は窓数 × 最大インスタンス数 M であり、テストは単一プロセスでこの性質を固定した上で、M の織り込みを runbook 側の責務とする — レビュー N-4)、(iii) buffer が上限を超えて成長しない (これも 1 プロセスあたり)、(iv) buffer overflow alert 行自体の emit 頻度が flush 間隔あたり最大 1 行に律速され、eviction/flush 失敗の発生頻度に比例して増えない (WP-2(a) fix round 2 review N-2)。行サイズ × 行数の両方が有界であることをもって、SI-00 の可用性側の露出が閉じていることを示す。
 11. **`plane` は書き手が指定できない** (レビュー m-2) — api role が `application_audit` に INSERT した行は、どのような値を書こうとしても `audit_query` からは必ず `plane="application"` として読み出される (`plane` は行の出所テーブルからの導出値であり、実列ではない)。
 
 ### 9.3 更新対象の既存記録 (スコープ内、監督裁定 R7)

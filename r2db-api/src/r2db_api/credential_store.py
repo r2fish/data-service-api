@@ -83,6 +83,18 @@ from .structured import validate_identifier
 
 DEFAULT_SCHEMA = "r2dbsvc_registry"
 
+# Phase 4 (design D-6/N-3; WP-2(a) fix round 2 review N-6): the two
+# writer-connection SESSION-level timeout defaults, shared by BOTH
+# composition roots (`r2db_api.main.build_app` / `r2db_api.control_main.
+# build_control_app`) as ONE definition -- a WP-2(b) `visibility_lag_ms`
+# declaration is derived from these two values under the assumption that
+# BOTH processes' writer connections carry the identical policy; two
+# independently-maintained literals (one per composition root) could
+# silently drift apart with no test catching it. Both composition roots
+# import these names directly rather than defining their own.
+DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS = 5000
+DEFAULT_AUDIT_IDLE_TIMEOUT_MS = 5000
+
 # Opus review minor m-5: the control plane's own last-active-control-
 # credential gate (design docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-3)
 # takes a real `FOR UPDATE` lock across every control-credential row for
@@ -1068,6 +1080,8 @@ class PostgresControlAuditSink:
         pool_size: int | None = None,
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
+        statement_timeout_ms: int | None = None,
+        idle_in_transaction_session_timeout_ms: int | None = None,
     ) -> None:
         validate_identifier(schema)
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
@@ -1076,6 +1090,29 @@ class PostgresControlAuditSink:
             pool_kwargs["connect_timeout"] = connect_timeout
         if acquire_timeout is not None:
             pool_kwargs["acquire_timeout"] = acquire_timeout
+        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): the
+        # connection that writes `control_audit` gets the SAME two SESSION-
+        # level timeouts as the one that writes `application_audit`
+        # (`PostgresApplicationAuditSink`, below) -- D-6's visibility-lag
+        # derivation depends on BOTH being enforced, not just the
+        # application-plane side; a long-held control-plane state-change
+        # transaction would otherwise let a `control_audit` row slip past a
+        # cursor the same way an unbounded application-plane one would.
+        # `None` (the default) keeps every pre-Phase-4 caller of this class
+        # (this repository's own tests that build a bare `PostgresControl
+        # AuditSink` for reasons unrelated to timeout behaviour) unchanged;
+        # `control_main.assemble_control_stack` is the only caller that
+        # passes concrete values, read by `control_main.build_control_app`
+        # from `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS`
+        # -- review n-1: this comment previously named a `R2DB_CONTROL_
+        # AUDIT_*` prefix that `control_main.py` has never actually read;
+        # the real names are identical to `r2db_api.main`'s own (deliberate
+        # -- both processes share one timeout policy, see `control_main.
+        # assemble_control_stack`'s own comment at its call site).
+        if statement_timeout_ms is not None:
+            pool_kwargs["statement_timeout_ms"] = statement_timeout_ms
+        if idle_in_transaction_session_timeout_ms is not None:
+            pool_kwargs["idle_in_transaction_session_timeout_ms"] = idle_in_transaction_session_timeout_ms
         self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
         self._schema = schema
         self._table = sql.Identifier(schema, "control_audit")
@@ -1164,11 +1201,192 @@ class PostgresControlAuditSink:
             raise  # unreachable; fail() always raises
 
 
+# Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/§6.1): the same 13
+# contract `audit.fields` columns `_CONTROL_AUDIT_INSERT` writes, plus the
+# 14th column `count` (D-3's coalesced-denial summary row / D-4's
+# buffer-overflow alert row -- every other event leaves it `NULL`).
+# `audit_seq`/`recorded_at` are never named here -- both are server-side
+# defaults (`bigserial`/`DEFAULT clock_timestamp()`, migration `0007_
+# application_audit.sql`), exactly like `control_audit.recorded_at` is
+# never named in `_CONTROL_AUDIT_INSERT` above.
+_APPLICATION_AUDIT_COLUMNS = _CONTROL_AUDIT_COLUMNS + ("count",)
+_APPLICATION_AUDIT_INSERT = (
+    "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
+    "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id, count) "
+    "VALUES ({ph0}, {ph1}, {ph2}, {ph3}, {ph4}, {ph5}, {ph6}, {ph7}, {ph8}, {ph9}, {ph10}, {ph11}, {ph12}, {ph13})"
+)
+
+
+class PostgresApplicationAuditSink:
+    """Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-10): the
+    durable application-plane audit trail's Postgres half -- writes to
+    `r2dbsvc_registry.application_audit` (migration `0007_application_
+    audit.sql`), the `application_audit` counterpart to `PostgresControl
+    AuditSink` above. Lives here (not in `audit.py`) for the identical
+    reason `PostgresControlAuditSink` does -- see that class's own
+    docstring; `audit.py`'s `ApplicationAuditSink` is this class's
+    in-memory pair (D-10 parity).
+
+    Unlike `PostgresControlAuditSink.append`, this class's `append` never
+    accepts a `work` handle -- there is no cross-database unit-of-work to
+    join (design §1.3/D-1: application data lives in a *different*
+    database entirely, one per application; `application_audit` lives in
+    the platform database alongside `control_audit`). Every call -- the
+    D-2 pre-commit fail-closed write, the D-3 coalesced-denial first-
+    occurrence write, the D-2 commit-failure `error` row, the D-4 buffer
+    flush -- opens (and commits, or rolls back on failure) its own single
+    connection/transaction from this sink's own pool, which is exactly
+    what makes D-4's "buffer flush never shares a transaction with a
+    fail-closed write" requirement automatic rather than something a
+    caller has to arrange: two calls to this class are, structurally,
+    always two different connections (or the same pooled connection reused
+    only after the first call's transaction has already ended).
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = DEFAULT_SCHEMA,
+        pool_size: int | None = None,
+        connect_timeout: int | None = None,
+        acquire_timeout: float | None = None,
+        statement_timeout_ms: int | None = None,
+        idle_in_transaction_session_timeout_ms: int | None = None,
+    ) -> None:
+        validate_identifier(schema)
+        maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
+        pool_kwargs: dict[str, Any] = {}
+        if connect_timeout is not None:
+            pool_kwargs["connect_timeout"] = connect_timeout
+        if acquire_timeout is not None:
+            pool_kwargs["acquire_timeout"] = acquire_timeout
+        # Phase 4 (design D-6/N-3): see `PostgresControlAuditSink.__init__`'s
+        # identical comment -- `r2db_api.main.build_app` is the only caller
+        # that passes concrete values, read from `R2DB_AUDIT_STATEMENT_
+        # TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` (both default 5000).
+        if statement_timeout_ms is not None:
+            pool_kwargs["statement_timeout_ms"] = statement_timeout_ms
+        if idle_in_transaction_session_timeout_ms is not None:
+            pool_kwargs["idle_in_transaction_session_timeout_ms"] = idle_in_transaction_session_timeout_ms
+        self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
+        self._schema = schema
+        self._table = sql.Identifier(schema, "application_audit")
+
+    def close(self) -> None:
+        self._pool.close_all()
+
+    def append(
+        self,
+        *,
+        event_class: str,
+        request_id: str,
+        application_id: str | None,
+        actor_type: str,
+        actor_id: str | None,
+        role: str | None,
+        operation: str,
+        target_kind: str | None,
+        outcome: str,
+        reason_code: str | None = None,
+        target_id: str | None = None,
+        count: int | None = None,
+    ) -> None:
+        """Synchronous durable INSERT + commit, on this sink's own
+        connection/transaction (never a caller-supplied `work` -- see this
+        class's own docstring). A `psycopg.Error` here propagates to the
+        caller unchanged (never mapped to `FoundationError` at this layer,
+        matching `PostgresControlAuditSink.append`'s identical denial-path
+        behaviour) -- `service.py`'s pre-commit-hook/denial/alert closures
+        are the layer that decides how a failure here becomes `SERVICE_
+        UNAVAILABLE`.
+        """
+        event_id = str(uuid.uuid4())
+        occurred_at = datetime.now(timezone.utc)
+        placeholders = {f"ph{i}": sql.Placeholder() for i in range(14)}
+        statement = sql.SQL(_APPLICATION_AUDIT_INSERT).format(table=self._table, **placeholders)
+        params = [event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id, count]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                _execute(cur, statement, params)
+            conn.commit()
+
+    def append_many(self, events: "list[Any]") -> None:
+        """D-4's buffer flush: every buffered `audit.AuditEvent` in
+        `events` is written as one multi-row `INSERT` on one connection/
+        transaction -- either the whole batch commits or (on failure) none
+        of it does, exactly like `audit.ApplicationAuditSink.append_many`'s
+        in-memory all-or-nothing behaviour (D-10 parity). A `psycopg.Error`
+        propagates to the caller unchanged; `service.py`'s buffer-flush
+        logic treats a failed flush as lost events (D-4: buffer content is
+        a best-effort channel, the overflow-alert mechanism -- not a
+        per-batch retry queue -- is SI-14's "explicit operational alert"
+        answer to that loss).
+        """
+        if not events:
+            return
+        placeholders = {f"ph{i}": sql.Placeholder() for i in range(14)}
+        row_sql = sql.SQL("({})").format(sql.SQL(", ").join(placeholders[f"ph{i}"] for i in range(14)))
+        statement = sql.SQL(
+            "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
+            "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id, count) VALUES {rows}"
+        ).format(table=self._table, rows=sql.SQL(", ").join(row_sql for _ in events))
+        params: list[Any] = []
+        for event in events:
+            # `AuditEvent.occurred_at` is an ISO-8601 `str` (`audit.py`'s
+            # `.isoformat()` construction, matching every JSON-serializing
+            # reader of this dataclass) -- parsed back to a `datetime` here
+            # so psycopg adapts it as `timestamptz`, not `text` (a bare
+            # `str` parameter has no implicit cast to `timestamptz` in
+            # PostgreSQL; `PostgresControlAuditSink.append`/this class's
+            # own `append` above never hit this because they construct
+            # `occurred_at` as a `datetime` directly, never round-tripping
+            # through `AuditEvent`).
+            occurred_at = datetime.fromisoformat(event.occurred_at) if isinstance(event.occurred_at, str) else event.occurred_at
+            params.extend(
+                [
+                    event.event_id, event.event_class, occurred_at, event.request_id, event.application_id,
+                    event.actor_type, event.actor_id, event.role, event.operation, event.target_kind,
+                    event.outcome, event.reason_code, event.target_id, event.count,
+                ]
+            )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                _execute(cur, statement, params)
+            conn.commit()
+
+    def events(self) -> list[tuple[Any, ...]]:
+        """Read surface for tests/tooling connected with sufficient
+        privilege (`r2dbsvc_control`, or the dedicated `r2dbsvc_
+        auditreader` role -- never the data-plane process' own `r2dbsvc_
+        api` role, which has no SELECT on this table at all -- D-1/§6.1).
+        Mirrors `PostgresControlAuditSink.events`'s identical ordering
+        rationale (`recorded_at, event_id` is not a total order on its own
+        -- `audit_query`'s own richer `(recorded_at, plane, event_id)`
+        total order, D-6, is WP-2(b)'s concern; this method exists for
+        this repository's own tests, not for `audit_query`).
+        """
+        statement = sql.SQL("SELECT {columns} FROM {table} ORDER BY recorded_at, event_id").format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _APPLICATION_AUDIT_COLUMNS), table=self._table
+        )
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, [])
+                    return cur.fetchall()
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
+
 __all__ = [
     "PostgresCredentialStore",
     "PostgresControlCredentialStore",
     "PostgresApplicationRegistry",
     "PostgresControlAuditSink",
+    "PostgresApplicationAuditSink",
     "validate_control_pepper_separation",
     "DEFAULT_SCHEMA",
+    "DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS",
+    "DEFAULT_AUDIT_IDLE_TIMEOUT_MS",
 ]

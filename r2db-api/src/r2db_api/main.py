@@ -67,6 +67,35 @@ Environment variable contract (P2-D5):
                                           a control plane is reachable, this
                                           declaration is only ever the
                                           deployer's stated intent).
+    R2DB_AUDIT_STATEMENT_TIMEOUT_MS       optional, default 5000 (Phase 4,
+                                          design PHASE4_DURABLE_AUDIT_SINK_
+                                          V1.md D-6/N-3) -- SESSION-level
+                                          `statement_timeout` on the
+                                          connection that writes
+                                          `application_audit`. Changing this
+                                          changes the derived `visibility_
+                                          lag_ms` a WP-2(b) `audit_query`
+                                          declaration would publish
+                                          (`r2db_api.control_main` reads the
+                                          identical env-var name for the
+                                          `control_audit` writer connection
+                                          -- both must agree).
+    R2DB_AUDIT_IDLE_TIMEOUT_MS            optional, default 5000 -- SESSION-
+                                          level `idle_in_transaction_
+                                          session_timeout` on the same
+                                          connection; see the note above.
+    R2DB_AUDIT_BUFFER_CAPACITY            optional, default 1000 -- D-4's
+                                          bounded in-memory buffer capacity
+                                          for ordinary (buffer-class)
+                                          data-operation success events,
+                                          per process.
+    R2DB_AUDIT_FLUSH_INTERVAL_S           optional, default 2.0 -- how
+                                          often the composition root's own
+                                          background thread calls
+                                          `DataService.flush_audit_buffer()`
+                                          (D-4's periodic flush trigger); a
+                                          latency knob only, never a
+                                          correctness one.
 
 Startup failure policy (P2-D5): missing configuration, an application slug
 named in `R2DB_SERVE_APPS` that is not registered in the platform registry,
@@ -77,6 +106,7 @@ silently serving a subset. There is no partial-startup mode.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
 
@@ -84,12 +114,38 @@ import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
-from .credential_store import DEFAULT_SCHEMA, PostgresCredentialStore
+from .credential_store import (
+    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
+    DEFAULT_SCHEMA,
+    PostgresApplicationAuditSink,
+    PostgresCredentialStore,
+)
 from .http import create_app
 from .postgres import PostgresCell, default_pool_manager
-from .service import ControlAuthority, DataService
+from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
+
+# Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3; WP-2(a) fix
+# round 2 review N-6): the two SESSION-level timeout defaults the
+# connection that writes `application_audit` carries for its entire
+# lifetime are now `credential_store.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/
+# `DEFAULT_AUDIT_IDLE_TIMEOUT_MS` -- ONE shared definition,
+# `r2db_api.control_main` imports the SAME names for its own
+# `control_audit` writer connection, rather than each composition root
+# maintaining its own `5000` literal that could silently drift apart.
+# `visibility_lag_ms` (a WP-2(b) `audit_query` declaration concern) is
+# derived from these two plus 1s of clock-skew margin; changing either
+# default changes that derived value for BOTH processes at once (5s/5s ->
+# an 11s derived lag, design §6.1's own stated defaults).
+#
+# The periodic buffer-flush interval below is likewise imported from
+# `r2db_api.service` (`_DEFAULT_AUDIT_FLUSH_INTERVAL_S`) rather than
+# defined here -- it doubles as `_AuditBuffer`'s own default minimum
+# overflow-alert interval (review N-2), so it has to be the SAME value the
+# `DataService` this composition root builds actually uses, not a second,
+# independently-set literal.
 
 # R-9 (CCR-14 WP-5): the only two values `DataService.__init__`'s own
 # `control_plane_status` parameter accepts -- kept in sync deliberately
@@ -137,6 +193,18 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
+    """`_optional_int`'s `float` counterpart, for the audit-buffer flush
+    interval (Phase 4) -- identical degrade-to-default discipline."""
+    raw = env.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 
@@ -240,6 +308,23 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # of being fully driven by its argument for testability.
     platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
     credentials = PostgresCredentialStore(platform_dsn, pepper=pepper, schema=schema, pool_size=platform_pool_size)
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6): the durable
+    # application-plane audit sink -- the SAME `R2DB_PLATFORM_DSN` (already
+    # `r2dbsvc_api`, which migration `0007_application_audit.sql` grants
+    # INSERT-only on `application_audit`) `PostgresCredentialStore` above
+    # already connects with; this is a second, independent pool against
+    # that same role/database, not a shared connection (D-1(c): "書き手 =
+    # data-plane プロセスが既に保持している platform 接続"). The two
+    # SESSION-level timeouts are set once, at connect time, on every
+    # connection this pool ever opens (D-6/N-3's visibility-lag basis).
+    audit_statement_timeout_ms = _optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
+    audit_idle_timeout_ms = _optional_int(env, "R2DB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
+    durable_audit = PostgresApplicationAuditSink(
+        platform_dsn, schema=schema, pool_size=platform_pool_size,
+        statement_timeout_ms=audit_statement_timeout_ms, idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
+    )
+    audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
+    audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
 
     def _cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell:
         if entities:
@@ -260,24 +345,90 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             developer_role=row["developer_role"],
         )
 
-    service = DataService(credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status)
+    service = DataService(
+        credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status,
+        durable_audit=durable_audit, audit_buffer_capacity=audit_buffer_capacity,
+        # WP-2(a) fix round 2 review N-2: the alert-row rate floor tracks
+        # the ACTUAL configured flush interval (which `R2DB_AUDIT_FLUSH_
+        # INTERVAL_S` may have overridden away from the default), not a
+        # second, independently-defaulted value that could silently stop
+        # matching it.
+        audit_alert_min_interval_s=audit_flush_interval_s,
+    )
     control = ControlAuthority(service)
     for slug in slugs:
         control.register_application(slug)
 
+    # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
+    # thread that calls `service.flush_audit_buffer()` on a fixed interval
+    # for the lifetime of this process, so buffered/coalesced evidence does
+    # not sit un-durable indefinitely on a served application that happens
+    # to receive no further traffic. Purely a latency knob (see this
+    # module's own `_DEFAULT_AUDIT_FLUSH_INTERVAL_S` comment) -- correctness
+    # of D-3/D-4's own bounds does not depend on this thread running at all.
+    #
+    # WP-2(a) review M-3: both the stop `Event` and the `Thread` are now
+    # created FRESH inside `_lifespan`, on every entry, rather than once at
+    # `build_app()` call time -- `threading.Thread.start()` may only be
+    # called once per `Thread` object ("threads can only be started once");
+    # constructing them once outside `_lifespan` meant a second ASGI
+    # startup against the same built app (this repository's own tests, or
+    # any host that re-enters lifespan on the same app object) would raise
+    # on the second `start()`. A fresh pair per entry has no such limit.
     @asynccontextmanager
     async def _lifespan(_app: Any):
+        audit_flush_stop = threading.Event()
+
+        def _audit_flush_loop() -> None:
+            while not audit_flush_stop.wait(audit_flush_interval_s):
+                try:
+                    service.flush_audit_buffer()
+                except Exception:
+                    # A flush failure must never kill this thread (there
+                    # would then be nothing left to retry the next
+                    # interval) -- D-4's own sticky/backoff retry logic
+                    # already lives inside `flush_audit_buffer()`; this is
+                    # only a defensive backstop against a truly unexpected
+                    # exception escaping it.
+                    pass
+
+        audit_flush_thread = threading.Thread(target=_audit_flush_loop, name="r2db-audit-flush", daemon=True)
+        audit_flush_thread.start()
         try:
             yield
         finally:
+            audit_flush_stop.set()
+            audit_flush_thread.join(timeout=5.0)
+            # WP-2(a) review M-3/N-4: one final synchronous flush before
+            # the sink's pool closes below -- without this, up to
+            # `capacity` buffered events and every still-open denial-
+            # coalescing window's accumulated repeat count are silently
+            # discarded on a graceful shutdown (the periodic thread has
+            # just stopped, and nothing else will ever call this again for
+            # this process). `force_expire_denial_windows=True` (N-4): a
+            # window that has not YET reached its own `window_s` at this
+            # exact moment still gets its repeat-summary row written here
+            # -- shutdown is not a crash, so D-3's "crash loses only the
+            # in-progress window's count" allowance does not apply; an
+            # orderly stop must not discard it.
+            try:
+                service.flush_audit_buffer(force_expire_denial_windows=True)
+            except Exception:
+                # Best-effort, like every other flush attempt -- shutdown
+                # must still complete and release connections below even
+                # if the sink happens to be down at this exact moment.
+                pass
             # P2-D5: release every PostgreSQL connection this process holds
             # on shutdown -- the per-application pools shared through
             # `default_pool_manager` (`PostgresCell`'s own pooling) and the
             # platform credential store's dedicated pool (P2-D4), which is
             # never registered with `default_pool_manager` in the first
-            # place and so needs its own explicit close.
+            # place and so needs its own explicit close. Phase 4:
+            # `durable_audit` is the same kind of dedicated pool and needs
+            # the same explicit close.
             default_pool_manager.dispose_all()
             credentials.close()
+            durable_audit.close()
 
     return create_app(service, lifespan=_lifespan)
 

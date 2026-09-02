@@ -152,6 +152,12 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
     control_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
     controlplane_password = secrets.token_urlsafe(24)
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-9): the
+    # `auditreader` role's password -- unused directly by this file's own
+    # tests (none of them read `application_audit`/`control_audit` through
+    # that role), but `0007_application_audit.sql` still requires the
+    # `-v auditreader_password=...` variable to run at all.
+    auditreader_password = secrets.token_urlsafe(24)
 
     rewritten_dir = tmp_path_factory.mktemp("r2db_cred_migrations")
     rewritten: dict[str, Path] = {}
@@ -162,6 +168,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0004_deprovision_application.sql",
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
+        "0007_application_audit.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = rewritten_dir / name
@@ -174,6 +181,14 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
+        # Phase 4: `r2db_api.main.build_app`/`r2db_api.control_main.
+        # build_control_app` now unconditionally construct a Postgres-
+        # backed durable application/control audit sink against this same
+        # platform database -- every fixture that exercises either
+        # composition root against a real server needs `application_audit`
+        # (and the `auditreader` role) to exist, exactly as it already
+        # needed `0006`'s `control_audit`/`r2dbsvc_controlplane`.
+        _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -194,9 +209,11 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         deprovision_script=rewritten["0004_deprovision_application.sql"],
         credential_store_sql=rewritten["0005_credential_store.sql"],
         control_plane_sql=rewritten["0006_control_plane_http.sql"],
+        application_audit_sql=rewritten["0007_application_audit.sql"],
         api_password=api_password,
         controlplane_dsn=controlplane_dsn,
         controlplane_password=controlplane_password,
+        auditreader_password=auditreader_password,
     )
     try:
         yield info
