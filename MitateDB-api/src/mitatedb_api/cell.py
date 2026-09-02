@@ -1264,13 +1264,15 @@ class ApplicationRuntime:
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
         return {
-            # Phase 3.5 WP-5 (design docs/design/PHASE35_CROSS_ENTITY_AND_
-            # CONTRACT_130_V1.md §5 WP-5 row, B-3): this WP ships the 1.3.0
-            # obligations for this peer's control plane (§4 bundle); the
-            # data-plane declaration flips in this same commit
-            # (`versioning.version_binding`: declaration and behavior land
-            # together).
-            "contract_version": "1.3.0",
+            # Phase 4 WP-3(b) (P4-D4, contract 1.4.0 `versioning.version_
+            # binding`): unconditional -- every deployment of this
+            # data-plane host declares 1.4.0 now, whether or not the
+            # CONTROL host alongside it has AUDIT DSN configured (`audit_
+            # query` stays `unavailable` right below, unchanged: this host
+            # never provides it, D-5's own "declaration = real behavior"
+            # rule -- design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+            # §7.5 "data-plane ホスト (不変)").
+            "contract_version": "1.4.0",
             "capabilities": {
                 "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
                 "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

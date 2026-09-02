@@ -244,6 +244,82 @@ psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
   "ALTER ROLE mitatedbsvc_controlplane PASSWORD '$(openssl rand -base64 32)'"
 ```
 
+### 3.2b Application-plane durable audit sink + `audit_query` reader (migration `0005`, Phase 4 WP-3(a)/WP-3(b))
+
+**Minimal note -- full runbook integration (capacity monitoring, retention,
+`audit_requests_per_minute` sizing worksheet) is WP-4 scope, not this
+section.**
+
+Run once, after `0002`, as the SAME `mitatedbsvc_provision` role/connection:
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0005_application_audit.sql
+```
+
+This creates `mitatedb_registry.application_audit` (`mitatedbsvc_api`
+gains INSERT-only on it -- no new privilege on any other object) and the
+new `mitatedbsvc_auditreader` role (`LOGIN`, `SELECT`-only on BOTH
+`control_audit` and `application_audit`, no password yet):
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
+  "ALTER ROLE mitatedbsvc_auditreader PASSWORD '$(openssl rand -base64 32)'"
+```
+
+Record the reader's DSN in Secret Manager under `mitatedb-audit-dsn` (same
+convention as `mitatedb-controlplane-dsn`), and configure it on the
+CONTROL service (`mitatedb-ctrl`, §6.2) via the `MITATEDB_AUDIT_DSN`
+environment variable -- **optional**: unset, `audit_query` stays declared
+`unavailable` (the two HTTP routes `/control/v1/audit/query` and `/v1/
+audit/query` still exist and still authenticate, answering `CAPABILITY_
+UNSUPPORTED` rather than a bare 404).
+
+The declared `visibility_lag_ms` is derived from `MITATEDB_AUDIT_
+STATEMENT_TIMEOUT_MS` + `MITATEDB_AUDIT_IDLE_TIMEOUT_MS` (both default
+`5000`, read by BOTH the data service and the control service -- they
+must agree) plus a fixed 1000ms clock-skew margin (11000ms at defaults).
+
+**Verify the two timeouts are genuinely applied** (WP-3(b) review finding
+H) -- from a session authenticated as the writer role each service
+actually connects as (`mitatedbsvc_api` for the data service's own
+`application_audit` writer, `mitatedbsvc_controlplane` for the control
+service's own `control_audit` writer), confirm both SESSION-level values
+match the configured/default env vars:
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_api password=$MITATEDBSVC_API_PASSWORD" -c \
+  "SHOW statement_timeout; SHOW idle_in_transaction_session_timeout;"
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_controlplane password=$MITATEDBSVC_CONTROLPLANE_PASSWORD" -c \
+  "SHOW statement_timeout; SHOW idle_in_transaction_session_timeout;"
+```
+
+Both must report the SAME two values (the default `5s`/`5s`, or whatever
+`MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS`/`MITATEDB_AUDIT_IDLE_TIMEOUT_MS` are
+set to on both Cloud Run services) -- a mismatch between the two
+processes silently invalidates the derived `visibility_lag_ms` this
+section declares (the declaration is computed once, by the control
+service alone, from ITS OWN env; nothing enforces the data service
+agreeing with it).
+The `audit_requests_per_minute` window is a SEPARATE pre-auth counter from
+`control_requests_per_minute` (`MITATEDB_CONTROL_AUDIT_REQUESTS_PER_
+MINUTE_LIMIT`, default 60) -- never shared, so a high-frequency audit
+poller cannot exhaust the window a break-glass `revoke_credential` depends
+on. Like `control_requests_per_minute` (Invariant 1, §6.2), this window is
+an in-process counter too, so it inherits the SAME `--max-instances=1`
+requirement on `mitatedb-ctrl`.
+
+`coalescing_window_ms` (the declared denial-coalescing window, part of the
+`audit_query` capability entry) is derived from the SAME single source
+constant the data-plane's own `AuditRouter` falls back to
+(`application_audit.DEFAULT_DENIAL_COALESCE_WINDOW_S`, 60s) -- the control
+service (a separate process) cannot read the data-plane process' own live
+`AuditRouter` instance. If a future deployment ever constructs `AuditRouter
+(denial_coalesce_window_s=...)` with a non-default value on the data-plane
+side, this declaration must be updated to match by hand (there is no
+env-var knob for it today) -- exactly the same "both processes must agree"
+caveat this section's own `visibility_lag_ms` note above already carries.
+
 ### 3.3 Invariant 2 -- application roles are NEVER created via the Users API/Console
 
 **Invariant 2 (design R-1 second-round M-8): every application role
@@ -431,8 +507,12 @@ gcloud run deploy mitatedb-ctrl \
   --service-account=mitatedb-ctrl-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --max-instances=1 \
-  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest
+  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest
 ```
+
+`MITATEDB_AUDIT_DSN` (Phase 4 WP-3(b), §3.2b above) is optional -- omit the
+`--set-secrets` entry entirely to leave `audit_query` declared
+`unavailable` on this deployment.
 
 **Invariant 1 (design R-6 second-round M-7, D-K): `--max-instances=1` is
 not a scaling convenience, it is a correctness requirement.**

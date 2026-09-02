@@ -128,10 +128,37 @@ pytestmark = pytest.mark.condition("C-09")
 # destructive data-operation event's `operation` field either way (r2db's
 # own CURRENT application-plane emit site for mutate-class operations
 # already uses the bare `"mutate"` spelling, `service.py`'s `_event` call,
-# not `"delete"`). This set is the WEAKER of vector 1's two correlation
-# conditions (`application_id`/`target_kind` are the contract-stable ones)
-# and is expected to need revisiting once a real emitter exists.
+# not `"delete"`). This set is expected to need revisiting once a real
+# emitter exists -- both real emitters now do.
+#
+# WP-3(b) review finding D (supervisor-forwarded fix): `"transact"` was
+# added here alongside the `target_kind` widening below during WP-3(b),
+# but MitateDB-api's own destructive-delete DENY event already carries
+# `operation="delete"` (`cell.ApplicationCell`'s confirmation-choke denial
+# path) -- confirmed by mutation: removing `"transact"` from this set
+# leaves every C-09/C-11 test green. Adding it loosened this common
+# test's own correlation condition with no adapter that needed it, so it
+# is removed again (`operation` stays a 2-member set, matching r2db's own
+# real vocabulary plus MitateDB's `"delete"`).
 _LIKELY_DESTRUCTIVE_OPERATIONS = frozenset({"delete", "mutate"})
+
+# WP-3(b) (flip-time finding, mirrors F-1's own rationale immediately
+# above): `target_kind` was originally treated as the STRONGER, "contract-
+# stable" half of vector 1's two correlation conditions -- true only
+# because r2db-api was the only real emitter known at the time this test
+# was written (`target_kind="entity"`, `service.py`'s own mutate/schema
+# emit sites). MitateDB-api's own real emitter (`cell.py`) spells the
+# identical concept -- "the schema-level container this destructive
+# operation targets" -- as `target_kind="collection"` (this peer's own
+# established vocabulary for what r2db calls an "entity"; contract `audit.
+# fields` places no enum on this field at all, `spec/data-service-api.v1.
+# json`). Both values name the SAME concept for the SAME real event (a
+# destructive delete's own durable row) -- downgraded to a disclosed-
+# uncertain candidate set for the identical reason `_LIKELY_DESTRUCTIVE_
+# OPERATIONS` above already is one, not a weakening of what this vector
+# actually verifies (an application_id-scoped, target_kind-typed,
+# destructive-operation-shaped event is still required to exist).
+_LIKELY_DESTRUCTIVE_TARGET_KINDS = frozenset({"entity", "collection"})
 
 
 # --- shared helpers ----------------------------------------------------
@@ -342,12 +369,12 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
     )
     assert any(
         event.get("application_id") == fx.app_a
-        and event.get("target_kind") == "entity"
+        and event.get("target_kind") in _LIKELY_DESTRUCTIVE_TARGET_KINDS
         and event.get("operation") in _LIKELY_DESTRUCTIVE_OPERATIONS
         for event in new_events
     ), (
         f"{adapter.name}: none of the {len(new_events)} new event(s) after the destructive delete correlate on "
-        f"application_id={fx.app_a!r} / target_kind='entity' / operation in "
+        f"application_id={fx.app_a!r} / target_kind in {sorted(_LIKELY_DESTRUCTIVE_TARGET_KINDS)!r} / operation in "
         f"{sorted(_LIKELY_DESTRUCTIVE_OPERATIONS)!r} -- new events: {new_events!r}"
     )
 
@@ -589,22 +616,17 @@ def test_c09_declared_capability_implies_provided_branch(adapter):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="no peer declares 1.4.0 yet; un-xfailed by the last flip WP",
-)
 def test_c09_every_control_surface_adapter_takes_the_provided_branch():
     """Whole-registry guard (work order WP-1 supplementary ruling 2 /
     supervisor ruling v1.2-1): EVERY registered adapter with a control
     surface (`control_plane` status `enabled`/`partial`) must take the
     PROVIDED audit_query branch -- not "at least one", not "one per
-    form". Registered `xfail(strict=True)` in this WP because it is false
-    today (every adapter's `audit_query` is unavailable); `strict=True`
-    means an unexpected green here fails loudly instead of passing
-    silently, so a premature partial flip (or a weakened guard) cannot
-    hide. Removing this `xfail` is WP-3(b)'s own responsibility, in the
-    SAME commit as that flip (work order §2.1 / §6 item 8b) -- never
-    earlier, never a separate later commit.
+    form". Carried `xfail(strict=True)` from WP-1 through WP-2(b) (false
+    until every peer declared 1.4.0 `audit_query: enabled`); WP-3(b) is
+    the LAST flip (MitateDB-api's own `contract_version`/`audit_query`
+    flip lands in the SAME commit as this `xfail` removal, work order
+    §2.1 / §6 item 8b) -- this test now runs un-xfailed and must be
+    genuinely green, not merely un-skipped.
 
     The target set is derived mechanically from the live registry
     (`registered_adapters()` + each adapter's own real `control_plane`

@@ -18,15 +18,24 @@ happens to exercise that exact call site at runtime.
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
+_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "spec" / "data-service-api.v1.json"
 
 # Mirrors `spec/data-service-api.v1.json`'s own `limits.classes` array
 # verbatim (this package has no runtime dependency on `spec/`, so this is a
 # static, hand-mirrored copy -- any future contract addition to that
 # vocabulary must be mirrored here too, or a legitimate new `limit_class`
-# value would be rejected by this test as if it were a typo).
+# value would be rejected by this test as if it were a typo). Phase 4
+# WP-3(b) (scratchpad/wp2-extra-requirements.md item 4: "手写しミラーの
+# drift を構造的に防ぐ"): `test_hand_maintained_mirror_equals_the_real_
+# contract_limits_classes_vocabulary` below fixes this set against the
+# REAL, packaged contract file directly (an equality test, not a one-way
+# membership check), so a future contract addition/removal that this
+# mirror is not updated to match is caught here rather than silently
+# under- or over-accepting.
 _CONTRACT_LIMIT_CLASSES = {
     "request_bytes",
     "batch_items",
@@ -43,7 +52,20 @@ _CONTRACT_LIMIT_CLASSES = {
     "applications",
     "credentials_per_application",
     "control_requests_per_minute",
+    # Phase 4 WP-3(b) (design D-5, P4-D4 item 8): `audit_query`'s own
+    # dedicated pre-auth window (`ControlPlaneService.check_audit_rate`/
+    # `_check_audit_rate`).
+    "audit_requests_per_minute",
 }
+
+
+def test_hand_maintained_mirror_equals_the_real_contract_limits_classes_vocabulary() -> None:
+    contract = json.loads(_CONTRACT_PATH.read_text())
+    real = set(contract["limits"]["classes"])
+    assert _CONTRACT_LIMIT_CLASSES == real, (
+        f"_CONTRACT_LIMIT_CLASSES has drifted from spec/data-service-api.v1.json's own limits.classes: "
+        f"missing={real - _CONTRACT_LIMIT_CLASSES!r} extra={_CONTRACT_LIMIT_CLASSES - real!r}"
+    )
 
 
 class _Finding:
@@ -94,15 +116,16 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 11, (
-        f"expected exactly 11 ResourceLimitError(...) call sites (Q1-D11 count, design v1.5 §7: cell.py x5, "
+    assert len(findings) == 12, (
+        f"expected exactly 12 ResourceLimitError(...) call sites (Q1-D11 count, design v1.5 §7: cell.py x5, "
         f"config.py x1 -- down from WP-5's original 9 after Q1-D11 reclassified 3 shape-boundary checks in "
         f"cell.py to ValidationError -- plus WP-3's own http.py x1, the ASGI request-byte-bound middleware's "
         f"real `request_bytes` enforcement, design v1.2 R-5 -- plus WP-4's own control_plane.py x3 (design v1.2 "
         f"R-6's three finite resource classes: `control_requests_per_minute`'s rate-limiter, `applications`'s "
         f"registration bound, `credentials_per_application`'s issuance bound) -- plus P35 WP-2's own cell.py x1 "
         f"(design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2 R-2, `ApplicationCell.transact`'s "
-        f"new `batch_entities` distinct-collection-count bound)), found {len(findings)}: "
+        f"new `batch_entities` distinct-collection-count bound) -- plus Phase 4 WP-3(b)'s own control_plane.py x1 "
+        f"(`_check_audit_rate`'s `audit_requests_per_minute` window, design D-5)), found {len(findings)}: "
         f"{findings!r} -- if a new call site was added or removed intentionally, update this count in the same commit"
     )
 

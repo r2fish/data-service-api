@@ -320,8 +320,50 @@ async def post_enable_credential(request: Request) -> Response:
 
 
 # --------------------------------------------------------------------------
-# App assembly. NEVER called from `main.py` in this WP -- see module
-# docstring.
+# Phase 4 WP-3(b) (design D-5): `audit_query` -- two paths, ONE handler.
+# `/control/v1/audit/query` is the canonical location (contract 1.4.0
+# `control_endpoints.audit_query`); `/v1/audit/query` is the pre-1.4.0
+# `endpoints.audit_query` path, retained here as an alias of the identical
+# operation for one further minor version (contract `endpoints.audit_query.
+# deprecation_note`) -- D-5's own rationale for serving it from the CONTROL
+# host, not the data-plane one: a single-ingress deployment that routes by
+# path prefix (`/v1/*` -> data-plane, `/control/v1/*` -> control-plane)
+# would otherwise never be able to reach `audit_query` through the alias at
+# all, and a deployment that firewalls `/control/v1/*` to a management
+# network only would otherwise leave `/v1/audit/query` outside that
+# boundary. Registering both here, pointed at the identical handler, makes
+# `/control/v1/audit/query` the correct path under EITHER convention.
+# --------------------------------------------------------------------------
+
+
+def _precharge_audit(request: Request) -> None:
+    """`audit_requests_per_minute` -- its OWN window, charged before
+    ANYTHING else (D-5: "両パス専用の pre-auth 固定窓"), never `_precharge`
+    (`control_requests_per_minute` is a DIFFERENT counter this handler must
+    never touch -- design M-8 / P4-D4 item 8: a high-frequency audit
+    poller must not be able to exhaust the window a break-glass `revoke_
+    credential` depends on)."""
+    _service(request).check_audit_rate()
+
+
+@_endpoint
+async def post_audit_query(request: Request) -> Response:
+    _precharge_audit(request)
+    credential_id, secret = _bearer_pair(request)
+    # `AuditQueryRequest`'s own contract schema has no `required` entries
+    # at all (every field optional) -- read the same way `post_revoke_
+    # credential` reads its own optional body above.
+    raw_body = await request.body()
+    body: dict[str, Any] = {}
+    if raw_body:
+        body = await _read_json_object(request)
+        _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
+    result = _service(request).audit_query(credential_id, secret, body, rate_precharged=True)
+    return JSONResponse(result, status_code=200)
+
+
+# --------------------------------------------------------------------------
+# App assembly (WP-5 flip: mounted by `control_main.build_control_app`).
 # --------------------------------------------------------------------------
 
 _ROUTES = [
@@ -336,6 +378,18 @@ _ROUTES = [
     Route("/control/v1/credentials/{credential_id}/revoke", post_revoke_credential, methods=["POST"]),
     Route("/control/v1/credentials/{credential_id}/disable", post_disable_credential, methods=["POST"]),
     Route("/control/v1/credentials/{credential_id}/enable", post_enable_credential, methods=["POST"]),
+    # Phase 4 WP-3(b) (design D-5): registered unconditionally -- even when
+    # AUDIT DSN is unset, so an unprovided `audit_query` answers `CAPABILITY_
+    # UNSUPPORTED` after authenticating, never a bare 404 (D-5 M-4). Both
+    # resolve to the SAME handler, `post_audit_query` (this module's own
+    # comment above explains the two-path rationale). This is the ONE
+    # deliberate `/v1/...`-shaped path in this route table (`tests/test_
+    # audit_query.py::test_control_and_data_plane_route_tables_are_
+    # disjoint_except_the_audit_query_alias` asserts it by name);
+    # `http.py`'s own `_ROUTES` still contains no `/control` path at all,
+    # unchanged.
+    Route("/control/v1/audit/query", post_audit_query, methods=["POST"]),
+    Route("/v1/audit/query", post_audit_query, methods=["POST"]),
 ]
 
 

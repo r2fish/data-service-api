@@ -110,10 +110,20 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
     provision_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
     controlplane_password = secrets.token_urlsafe(24)
+    # Phase 4 WP-3(b) (design D-5): the `<prefix>svc_auditreader` role's own
+    # throwaway password -- mirrors the 3 above.
+    auditreader_password = secrets.token_urlsafe(24)
 
     rewritten_dir = tmp_path_factory.mktemp("mitatedb_control_migrations_" + prefix)
     rewritten: dict[str, Path] = {}
-    for name in ("0001_bootstrap_platform.sql", "0002_registry_and_functions.sql"):
+    for name in (
+        "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
+        # Phase 4 WP-3(b): application_audit table + mitatedbsvc_auditreader
+        # role -- run AFTER 0002, exactly the order the file's own header
+        # requires. This harness never provisions a per-application database
+        # (this module's own docstring), so `0003`/`0004` stay unneeded here.
+        "0005_application_audit.sql",
+    ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
         out.write_text(text)
@@ -123,18 +133,22 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
     platform_db = f"{prefix}_platform"
     api_role = f"{prefix}svc_api"
     controlplane_role = f"{prefix}svc_controlplane"
+    auditreader_role = f"{prefix}svc_auditreader"
     registry_schema = f"{prefix}_registry"
 
     try:
         _run_psql(dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
         provision_dsn = _dsn_with(dsn, user=provision_role, password=provision_password, dbname=platform_db)
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
+        _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         admin = psycopg.connect(dsn, autocommit=True)
         try:
             with admin.cursor() as cur:
                 cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(api_role), sql.Literal(api_password)))
                 cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(
                     sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
+                cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                    sql.Identifier(auditreader_role), sql.Literal(auditreader_password)))
         finally:
             admin.close()
     except Exception:
@@ -148,6 +162,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         registry_schema=registry_schema,
         api_dsn=_dsn_with(dsn, user=api_role, password=api_password, dbname=platform_db),
         controlplane_dsn=_dsn_with(dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db),
+        auditreader_dsn=_dsn_with(dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db),
     )
 
 

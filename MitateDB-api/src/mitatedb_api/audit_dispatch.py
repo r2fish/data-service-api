@@ -545,10 +545,24 @@ class AuditRouter:
         clock = clock or time.monotonic
         self._buffer = _AuditBuffer(self._durable_sink, capacity=buffer_capacity, clock=clock, alert_min_interval_s=alert_min_interval_s)
         self._coalescer = _DenialCoalescer(self._durable_sink, window_s=denial_coalesce_window_s, clock=clock)
+        # Phase 4 WP-3(b) (design D-5, r2db-api WP-2(b) review item H: avoid
+        # the "coalescing_window_ms declared as a bare literal, never bound
+        # to the REAL configured window" gap from the start): the actual
+        # window this instance enforces, readable by a composition root that
+        # wants to declare the value it is TRULY running with (this WP's own
+        # `audit_query.py` derives its default from `DEFAULT_DENIAL_COALESCE_
+        # WINDOW_S`, but a caller that overrides `denial_coalesce_window_s`
+        # here must be able to derive a matching declaration too, not fall
+        # back to the module default).
+        self._denial_coalesce_window_s = denial_coalesce_window_s
 
     @property
     def durable_sink(self) -> Any:
         return self._durable_sink
+
+    @property
+    def denial_coalesce_window_s(self) -> float:
+        return self._denial_coalesce_window_s
 
     def make_pre_commit_hook(
         self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],

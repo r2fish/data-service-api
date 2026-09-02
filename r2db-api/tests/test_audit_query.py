@@ -29,6 +29,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from starlette.testclient import TestClient
 
 from r2db_api.audit import ApplicationAuditSink, AuditEvent, ControlAuditSink
 from r2db_api.audit_query import DECLARED_AUDIT_EVENT_CLASSES, DECLARED_COALESCING_WINDOW_MS, InMemoryAuditQueryStore
@@ -44,6 +45,7 @@ os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_aud
 os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-ctl-pepper")
 os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-app-pepper")
 
+import r2db_api.control_main as control_main  # noqa: E402 -- module object itself (not just `assemble_control_stack`), see `test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env` below
 from r2db_api.control_http import _ROUTES, create_control_app  # noqa: E402
 from r2db_api.control_main import assemble_control_stack  # noqa: E402
 from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend  # noqa: E402
@@ -813,27 +815,66 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
 # extracts the real literal from EVERY known emission call site, positional
 # or keyword, the same way `test_limit_class_vocabulary.py`'s own AST scan
 # fixes `limit_class` against real call sites rather than trusting a regex.
+#
+# [MitateDB WP-3(b) 対称 evidence-hardening item 1] the scan used to walk
+# ONLY service.py/control_plane.py's own source text -- a hand-picked file
+# enumeration, not structural coverage. `ops.py`'s `_write_control_audit`
+# (a plain module-level function, called positionally-as-`Name`, e.g.
+# `_write_control_audit(work.connection, event_class="credential_lifecycle",
+# ...)`, never as `something.attr(...)`) is a REAL durable `control_audit`
+# emission site that lived entirely outside that two-file enumeration --
+# its own literals happen to already be a subset of `DECLARED_AUDIT_EVENT_
+# CLASSES` today, so the old scan's blind spot was silent (see this file's
+# own `test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed`
+# below, which mutates one of `ops.py`'s literals to prove the point). Both
+# `_scan_event_class_literals` (now also matching plain-`Name` calls, not
+# only `Attribute` calls) and `test_declared_event_classes_cover_every_
+# emittable_class` below now walk EVERY `*.py` file directly under `src/
+# r2db_api/` (`_iter_src_files()`) instead of a hardcoded two-file list, so
+# a future new file with its own emission call site can never silently
+# fall outside this guard's coverage again.
 import ast as _ast  # noqa: E402 -- kept local to this test-support block, mirrors this file's own late-import style
 
-# (method name) -> ("positional", arg_index) | ("keyword", None). Every
-# real, DURABLE-ELIGIBLE `event_class`-carrying call site in service.py/
-# control_plane.py is named here -- `test_every_known_emission_method_
-# name_is_still_called` below is this list's own vacuity guard (a renamed/
-# removed method would otherwise silently shrink coverage to zero for that
-# site). `_control_event` (service.py, `ControlAuthority`'s own PRE-PHASE-4
-# legacy trail) is deliberately NOT here -- its `self._service._audit.
-# append(...)` call writes only to the non-durable legacy `AuditSink`
-# (`DataService._audit`), never to the durable `application_audit`/
-# `control_audit` tables `audit_query` reads, so its own literals
-# (`"control_failure"`/`"control_state"`, confirmed by direct AST probe
-# during WP-2(b) review M-3's fix) are correctly OUTSIDE the declared
-# vocabulary's scope -- same category as `_event`'s own excluded
-# `"authentication"` literal, not an omission.
+_SRC_DIR = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
+
+
+def _iter_src_files() -> list[Path]:
+    """Every top-level `*.py` module in `src/r2db_api/` (never recursive --
+    the `contract/` subpackage is data/schema, not emission-call-bearing
+    code, and this scan's own job is `r2db_api/*.py`, not a package-wide
+    walk). Sorted for deterministic iteration order."""
+    return sorted(_SRC_DIR.glob("*.py"))
+
+
+# (method/function name) -> ("positional", arg_index) | ("keyword", None) |
+# ("keyword_optional", None). Every real, DURABLE-ELIGIBLE `event_class`-
+# carrying call site anywhere under `src/r2db_api/*.py` is named here --
+# `test_every_known_emission_method_name_is_still_called` below is this
+# list's own vacuity guard (a renamed/removed method would otherwise
+# silently shrink coverage to zero for that site). `_control_event`
+# (service.py, `ControlAuthority`'s own PRE-PHASE-4 legacy trail) is
+# deliberately NOT here -- its `self._service._audit.append(...)` call
+# writes only to the non-durable legacy `AuditSink` (`DataService._audit`),
+# never to the durable `application_audit`/`control_audit` tables
+# `audit_query` reads, so its own literals (`"control_failure"`/
+# `"control_state"`, confirmed by direct AST probe during WP-2(b) review
+# M-3's fix) are correctly OUTSIDE the declared vocabulary's scope -- same
+# category as `_event`'s own excluded `"authentication"` literal, not an
+# omission.
 _EVENT_CLASS_CALL_SPECS: dict[str, tuple[str, int | None]] = {
-    "_event": ("positional", 1),  # def _event(self, context, event_class, ...)
-    "_denial_event": ("keyword", None),  # def _denial_event(self, *, event_class, ...)
+    "_event": ("positional", 1),  # service.py: def _event(self, context, event_class, ...)
+    "_denial_event": ("keyword", None),  # service.py: def _denial_event(self, *, event_class, ...)
     "_write_state_audit": ("keyword", None),  # control_plane.py: def _write_state_audit(self, work, *, event_class, ...)
     "_deny": ("keyword", None),  # control_plane.py: def _deny(self, *, ..., event_class, ...)
+    # ops.py: def _write_control_audit(conn, *, event_class, ...) -- a
+    # plain module-level function (called as `_write_control_audit(...)`,
+    # an `ast.Name`, never `something._write_control_audit(...)`, an
+    # `ast.Attribute`), the CLI's own direct `control_audit` INSERT for
+    # every `python -m r2db_api.ops <cmd>` state-changing command
+    # (issue/rotate/revoke-credential, register/enable/disable-application,
+    # issue/rotate/revoke-control-credential). This is the file-enumeration
+    # gap this test file's own evidence-hardening item 1 closes.
+    "_write_control_audit": ("keyword", None),
     # WP-2(b) fix round 2 (audit finding §4-B): sink-DIRECT writes --
     # `self._sink.append(event_class="security_control_failure", ...)`
     # (service.py's overflow-alert path) bypass every method above
@@ -879,14 +920,31 @@ def _scan_event_class_literals(source: str, filename: str) -> tuple[set[str], li
     `unresolved` describes any matched call site whose `event_class` is
     NOT a plain string literal and not in `_KNOWN_DYNAMIC_EVENT_CLASS_
     FORWARDS` (a future dynamic emission this scanner cannot statically
-    resolve -- treated as a finding, not silently skipped)."""
+    resolve -- treated as a finding, not silently skipped).
+
+    Matches BOTH method calls (`node.func` an `ast.Attribute`, e.g.
+    `self._sink.append(...)`) AND plain function calls (`node.func` an
+    `ast.Name`, e.g. `ops.py`'s own `_write_control_audit(conn, ...)`) --
+    the file-enumeration gap this scanner's own evidence-hardening item 1
+    closed (see `_EVENT_CLASS_CALL_SPECS`'s header comment) turned out to
+    be paired with a call-shape gap too: the pre-existing `Attribute`-only
+    check would have kept missing `_write_control_audit`'s own call sites
+    even after `ops.py` was added to the scanned file set, since every one
+    of them is a bare-name call, never a `.method(...)` one.
+    """
     tree = _ast.parse(source, filename=filename)
     literals: set[str] = set()
     unresolved: list[str] = []
     for node in _ast.walk(tree):
-        if not isinstance(node, _ast.Call) or not isinstance(node.func, _ast.Attribute):
+        if not isinstance(node, _ast.Call):
             continue
-        spec = _EVENT_CLASS_CALL_SPECS.get(node.func.attr)
+        if isinstance(node.func, _ast.Attribute):
+            call_name = node.func.attr
+        elif isinstance(node.func, _ast.Name):
+            call_name = node.func.id
+        else:
+            continue
+        spec = _EVENT_CLASS_CALL_SPECS.get(call_name)
         if spec is None:
             continue
         kind, index = spec
@@ -899,14 +957,14 @@ def _scan_event_class_literals(source: str, filename: str) -> tuple[set[str], li
         if value_node is None:
             if kind == "keyword_optional":
                 continue  # an ordinary, unrelated .append(...) call -- not a match at all
-            unresolved.append(f"{filename}:{node.lineno}: {node.func.attr}(...) call has no resolvable event_class argument at all")
+            unresolved.append(f"{filename}:{node.lineno}: {call_name}(...) call has no resolvable event_class argument at all")
             continue
         if isinstance(value_node, _ast.Constant) and isinstance(value_node.value, str):
             literals.add(value_node.value)
-        elif isinstance(value_node, _ast.Name) and (filename, node.func.attr, value_node.id) in _KNOWN_DYNAMIC_EVENT_CLASS_FORWARDS:
+        elif isinstance(value_node, _ast.Name) and (filename, call_name, value_node.id) in _KNOWN_DYNAMIC_EVENT_CLASS_FORWARDS:
             continue
         else:
-            unresolved.append(f"{filename}:{node.lineno}: {node.func.attr}(...)'s event_class is not a string literal ({_ast.dump(value_node)})")
+            unresolved.append(f"{filename}:{node.lineno}: {call_name}(...)'s event_class is not a string literal ({_ast.dump(value_node)})")
     return literals, unresolved
 
 
@@ -914,28 +972,35 @@ def test_every_known_emission_method_name_is_still_called():
     """Vacuity guard for `_EVENT_CLASS_CALL_SPECS` itself -- if a method
     named there is renamed/removed, `_scan_event_class_literals` would
     silently stop finding it and this whole regression guard would degrade
-    back to under-coverage without anyone noticing."""
-    service_py = (Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "service.py").read_text()
-    control_plane_py = (Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "control_plane.py").read_text()
+    back to under-coverage without anyone noticing. Checked against every
+    file `_iter_src_files()` itself scans (not a hardcoded two-file list
+    any more), so a name whose only real definition moved to a THIRD file
+    (e.g. `ops.py`'s `_write_control_audit`) is still found."""
+    sources = {path.name: path.read_text() for path in _iter_src_files()}
     for name in _EVENT_CLASS_CALL_SPECS:
         if name == "append":
             # Not a locally-defined method (it is called ON sink objects
             # defined elsewhere) -- checked as a literal call-site
             # substring instead of a `def` line.
-            assert ".append(" in service_py or ".append(" in control_plane_py, "no .append( call site found in either file at all"
+            assert any(".append(" in text for text in sources.values()), "no .append( call site found in any src/r2db_api/*.py file"
             continue
-        assert f"def {name}(" in service_py or f"def {name}(" in control_plane_py, (
-            f"{name!r} is in _EVENT_CLASS_CALL_SPECS but no longer defined in service.py or control_plane.py"
+        assert any(f"def {name}(" in text for text in sources.values()), (
+            f"{name!r} is in _EVENT_CLASS_CALL_SPECS but no longer defined anywhere in src/r2db_api/*.py"
         )
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
 def test_declared_event_classes_cover_every_emittable_class(kind, platform):
     """§9.2 property 5. `DECLARED_AUDIT_EVENT_CLASSES` (audit_query.py) is
-    fixed against every REAL `event_class` literal in service.py/
-    control_plane.py, positional or keyword (`_scan_event_class_literals`
+    fixed against every REAL `event_class` literal anywhere in `src/
+    r2db_api/*.py`, positional or keyword (`_scan_event_class_literals`
     above) -- a regression guard against a future new emission call site
-    with no corresponding declared-vocabulary entry.
+    with no corresponding declared-vocabulary entry. [MitateDB WP-3(b)
+    対称 evidence-hardening item 1] this now walks EVERY file `_iter_src_
+    files()` returns, not a hardcoded `service.py`/`control_plane.py`
+    enumeration -- see that helper's own header comment and `test_ast_
+    scan_now_covers_files_the_old_hardcoded_enumeration_missed` below for
+    the mutation proof that this structurally closes the old blind spot.
     """
     h = _build_harness(kind, platform)
     try:
@@ -943,14 +1008,13 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
         declared = set(document["capabilities"]["audit_query"]["event_classes"])
         assert declared == DECLARED_AUDIT_EVENT_CLASSES
 
-        service_py = (Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "service.py").read_text()
-        control_plane_py = (Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "control_plane.py").read_text()
-        service_literals, service_unresolved = _scan_event_class_literals(service_py, "service.py")
-        control_literals, control_unresolved = _scan_event_class_literals(control_plane_py, "control_plane.py")
-        assert not service_unresolved and not control_unresolved, (
-            f"unresolvable event_class call site(s), investigate manually: {service_unresolved + control_unresolved!r}"
-        )
-        emitted = service_literals | control_literals
+        emitted: set[str] = set()
+        unresolved: list[str] = []
+        for path in _iter_src_files():
+            literals, file_unresolved = _scan_event_class_literals(path.read_text(), path.name)
+            emitted |= literals
+            unresolved += file_unresolved
+        assert not unresolved, f"unresolvable event_class call site(s), investigate manually: {unresolved!r}"
         assert emitted, "the AST scanner found zero event_class literals -- it is itself broken"
         # "authentication" (service.py) is the one real literal deliberately
         # excluded -- it never reaches the durable/buffered sink at all
@@ -958,6 +1022,82 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
         # must be a subset of the declared vocabulary.
         durable_eligible = emitted - {"authentication"}
         assert durable_eligible <= declared, f"emittable but undeclared: {durable_eligible - declared!r}"
+    finally:
+        h.cleanup()
+
+
+def test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed():
+    """[MitateDB WP-3(b) 対称 evidence-hardening item 1] structural proof,
+    not merely an assertion, that `_iter_src_files()` + `_scan_event_class_
+    literals`'s plain-`Name`-call support together actually reach `ops.py`'s
+    `_write_control_audit(...)` call sites -- the OLD scan (hardcoded
+    `service.py`/`control_plane.py` file list) would never have found these
+    at all, regardless of the `Attribute`-vs-`Name` call-shape fix, simply
+    because `ops.py` itself was never read.
+    """
+    ops_py = _SRC_DIR / "ops.py"
+    assert ops_py in _iter_src_files(), "ops.py must be part of the scanned file set for this proof to be meaningful"
+    literals, unresolved = _scan_event_class_literals(ops_py.read_text(), "ops.py")
+    assert not unresolved
+    # The three real literals `ops.py`'s own `_write_control_audit(...)`
+    # call sites carry (confirmed by direct source inspection during this
+    # hardening work) -- all three already happen to be members of
+    # `DECLARED_AUDIT_EVENT_CLASSES` today (why the old, narrower scan's
+    # blind spot was silent rather than red), which is exactly why the
+    # broader mutation test below is the one that actually proves the new
+    # coverage is load-bearing.
+    assert literals == {"credential_lifecycle", "application_lifecycle", "control_credential_lifecycle"}
+
+
+def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the_declared_vocabulary_check_red(platform):
+    """[MitateDB WP-3(b) 対称 evidence-hardening item 1] the actual mutation
+    proof: writes a throwaway copy of `ops.py` (never the real source file
+    -- this process never mutates its own checked-out tree) with ONE
+    `_write_control_audit(..., event_class="credential_lifecycle", ...)`
+    literal changed to a value that is NOT in `DECLARED_AUDIT_EVENT_
+    CLASSES`, then re-runs the exact same emittable-vs-declared comparison
+    `test_declared_event_classes_cover_every_emittable_class` performs, this
+    time against `_iter_src_files()` with the mutated copy substituted in
+    for the real `ops.py`. Before this file's own evidence-hardening item 1
+    (a hardcoded `service.py`/`control_plane.py` file list, `Attribute`-
+    call-only), this exact mutation would have stayed invisible to the old
+    scan -- `ops.py` was never read at all -- and this assertion would have
+    failed to fail. `platform` (module-scoped, real PostgreSQL) is needed
+    only for a real `DECLARED_AUDIT_EVENT_CLASSES` capabilities-document
+    round trip via the in-memory harness below, mirroring every other test
+    in this section.
+    """
+    real_source = (_SRC_DIR / "ops.py").read_text()
+    assert 'event_class="credential_lifecycle"' in real_source, (
+        "test's own fixture assumption about ops.py's literal text no longer holds -- update this test"
+    )
+    mutated_source = real_source.replace('event_class="credential_lifecycle"', 'event_class="undeclared_mutant_event_class"', 1)
+    assert mutated_source != real_source
+
+    h = _memory_harness()
+    try:
+        document = h.service.capabilities(h.control_credential_secret)
+        declared = set(document["capabilities"]["audit_query"]["event_classes"])
+        assert declared == DECLARED_AUDIT_EVENT_CLASSES
+
+        emitted: set[str] = set()
+        unresolved: list[str] = []
+        for path in _iter_src_files():
+            source = mutated_source if path.name == "ops.py" else path.read_text()
+            literals, file_unresolved = _scan_event_class_literals(source, path.name)
+            emitted |= literals
+            unresolved += file_unresolved
+        assert not unresolved
+        durable_eligible = emitted - {"authentication"}
+
+        assert "undeclared_mutant_event_class" in durable_eligible, (
+            "the mutated literal must actually be found by the scan -- if not, this test is not exercising what it claims to"
+        )
+        assert not (durable_eligible <= declared), (
+            "MUTATION SHOULD HAVE BEEN CAUGHT: an event_class literal mutated in ops.py (a file the pre-hardening "
+            "scan never read at all) is undeclared, yet the emittable-vs-declared comparison did not go red -- the "
+            "file-enumeration widening in this test file did not actually close the coverage gap"
+        )
     finally:
         h.cleanup()
 
@@ -1242,3 +1382,63 @@ def test_data_plane_composition_root_does_not_import_the_control_credential_stor
     assert "control_credential" not in source.lower()
     assert "ControlCredentialStore" not in source
     assert "ControlPlaneService" not in source
+
+
+# ===========================================================================
+# [MitateDB WP-3(b) 対称 evidence-hardening item 2] `control_main.build_
+# control_app` -- the composition root's own `R2DB_AUDIT_DSN` env-var
+# wiring, pinned down through the REAL `build_control_app(env)` entry
+# point (never `assemble_control_stack` directly, which every harness
+# above already exercises via its own explicit `audit_dsn=` argument --
+# that is a DIFFERENT claim, "the service layer respects an audit_dsn it
+# is given", not "the composition root's own env-var reading reaches it").
+# ===========================================================================
+
+
+def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(platform):
+    """`control_main.py`'s own `audit_dsn = env.get("R2DB_AUDIT_DSN") or
+    None` (composition-root env-var read, not the `assemble_control_stack`
+    parameter test coverage above already provides) must reach a real
+    `GET /control/v1/capabilities` response two ways: `R2DB_AUDIT_DSN`
+    unset -> `audit_query: {"status": "unavailable"}` (D-5 M-4's declared
+    default), and set to this module's own real `auditreader` DSN ->
+    `audit_query.status == "enabled"`. Built through `build_control_app`
+    itself (the literal uvicorn/systemd entry point's own factory), not a
+    lower-level helper, mirroring `test_credential_persistence.py`'s own
+    `test_build_app_serves_capabilities_over_real_http_and_shuts_down_
+    cleanly` pattern for `r2db_api.main`'s composition root.
+    """
+    seed_store = PostgresControlCredentialStore(platform.control_dsn, pepper=CONTROL_PEPPER, schema=platform.schema)
+    credential_id = "ctl_" + secrets.token_hex(8)
+    secret = "audit-dsn-env-" + secrets.token_urlsafe(8)
+    try:
+        with seed_store.unit_of_work() as work:
+            seed_store.add(credential_id, secret, work=work)
+            seed_store.rotate(credential_id, secret, work=work)  # clears must_rotate (R-5)
+
+        base_env = {
+            "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+            "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
+            "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
+            "R2DB_PLATFORM_SCHEMA": platform.schema,
+        }
+        headers = {"authorization": f"Bearer {secret}"}
+
+        # R2DB_AUDIT_DSN unset entirely -- the D-5 M-4 default.
+        unavailable_app = control_main.build_control_app(dict(base_env))
+        with TestClient(unavailable_app) as client:
+            response = client.get("/control/v1/capabilities", headers=headers)
+            assert response.status_code == 200
+            assert response.json()["capabilities"]["audit_query"] == {"status": "unavailable"}
+
+        # R2DB_AUDIT_DSN set to the real r2dbsvc_auditreader DSN this
+        # module's own `platform` fixture provisions.
+        enabled_env = dict(base_env)
+        enabled_env["R2DB_AUDIT_DSN"] = platform.auditreader_dsn
+        enabled_app = control_main.build_control_app(enabled_env)
+        with TestClient(enabled_app) as client:
+            response = client.get("/control/v1/capabilities", headers=headers)
+            assert response.status_code == 200
+            assert response.json()["capabilities"]["audit_query"]["status"] == "enabled"
+    finally:
+        seed_store.close()

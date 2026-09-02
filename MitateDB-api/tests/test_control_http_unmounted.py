@@ -19,6 +19,8 @@ import json
 import httpx
 import pytest
 
+from mitatedb_api.application_audit import ApplicationAuditSink
+from mitatedb_api.audit_query import InMemoryAuditQueryStore
 from mitatedb_api.control_http import _ROUTES, create_control_app
 from mitatedb_api.control_plane import (_AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneLimits,
                                         ControlPlaneService, InMemoryControlBackend,
@@ -33,8 +35,15 @@ def _service_with_bootstrapped_credential():
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
         credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    service = ControlPlaneService(backend, limits=ControlPlaneLimits(
-        applications=5, credentials_per_application=2, control_requests_per_minute=90))
+    # Phase 4 WP-3(b) (design D-5): a real in-memory `audit_query` reader --
+    # this file's own audit-role matrix test needs `audit_query` to
+    # genuinely be `enabled` (not `unavailable`) so an authorized audit-role
+    # request reaches 200, not `CAPABILITY_UNSUPPORTED`.
+    audit_reader = InMemoryAuditQueryStore(backend.audit_sink, ApplicationAuditSink())
+    service = ControlPlaneService(
+        backend, limits=ControlPlaneLimits(applications=5, credentials_per_application=2, control_requests_per_minute=90),
+        audit_reader=audit_reader, audit_visibility_lag_ms=0,
+    )
     return service, credential_id, secret
 
 
@@ -214,14 +223,21 @@ _ROUTE_OPERATION_NAMES: dict[tuple[str, str], str] = {
     ("POST", "/control/v1/credentials/{credential_id}/revoke"): "revoke_credential",
     ("POST", "/control/v1/credentials/{credential_id}/disable"): "disable_credential",
     ("POST", "/control/v1/credentials/{credential_id}/enable"): "enable_credential",
+    # Phase 4 WP-3(b) (design D-5): `audit_query`'s own 2 paths -- both
+    # resolve to the SAME handler and the SAME operation name, so an
+    # `audit`-role bearer is accepted on either.
+    ("POST", "/control/v1/audit/query"): "audit_query",
+    ("POST", "/v1/audit/query"): "audit_query",
 }
 
 
-def test_audit_role_http_authorization_matrix_all_11_routes(control_app) -> None:
+def test_audit_role_http_authorization_matrix_all_13_routes(control_app) -> None:
     """Endpoint-by-endpoint audit-role authorization matrix, driven over
-    real HTTP against every one of the 11 routes `_ROUTES` declares (fail-
-    closed completeness). The 3 read-only routes return 200 for an
-    `audit`-role bearer; every other route returns 403 FORBIDDEN.
+    real HTTP against every one of the 13 routes `_ROUTES` declares (fail-
+    closed completeness; Phase 4 WP-3(b) added `audit_query`'s own 2 paths
+    to the original 11). The 5 read-only routes (the original 3 plus
+    `audit_query`'s 2 paths) return 200 for an `audit`-role bearer; every
+    other route returns 403 FORBIDDEN.
 
     Structurally complete, not a hand-maintained list a future 10th route
     could silently bypass -- the set of (method, route-template) pairs this
@@ -261,6 +277,8 @@ def test_audit_role_http_authorization_matrix_all_11_routes(control_app) -> None
         ("POST", "/control/v1/credentials/{credential_id}/revoke", {}, 403),
         ("POST", "/control/v1/credentials/{credential_id}/disable", None, 403),
         ("POST", "/control/v1/credentials/{credential_id}/enable", None, 403),
+        ("POST", "/control/v1/audit/query", {"limit": 1}, 200),
+        ("POST", "/v1/audit/query", {"limit": 1}, 200),
     ]
     matrix_keys = {(method, template) for method, template, _body, _status in matrix}
 
