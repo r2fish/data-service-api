@@ -73,6 +73,7 @@ MIGRATION_NAMES = (
     "0004_deprovision_application.sql",
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
+    "0007_application_audit.sql",
 )
 
 
@@ -162,6 +163,12 @@ def _provision_platform(tmp_path_factory: pytest.TempPathFactory) -> types.Simpl
     control_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
     controlplane_password = secrets.token_urlsafe(24)
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-5/D-9): the
+    # `auditreader` role's own password -- this file's own GRANT-realized
+    # tests (`test_auditreader_role_can_select_both_audit_tables_and_
+    # nothing_else` and friends) connect AS this role directly.
+    auditreader_password = secrets.token_urlsafe(24)
+    auditreader_role = f"{prefix}_auditreader"
 
     rewritten_dir = tmp_path_factory.mktemp("r2db_cp_migrations")
     rewritten: dict[str, Path] = {}
@@ -177,12 +184,14 @@ def _provision_platform(tmp_path_factory: pytest.TempPathFactory) -> types.Simpl
         _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
+        _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
 
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
+    auditreader_dsn = _dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db)
 
     return types.SimpleNamespace(
         prefix=prefix,
@@ -193,13 +202,17 @@ def _provision_platform(tmp_path_factory: pytest.TempPathFactory) -> types.Simpl
         api_role=api_role,
         controlplane_dsn=controlplane_dsn,
         controlplane_role=controlplane_role,
+        auditreader_dsn=auditreader_dsn,
+        auditreader_role=auditreader_role,
         platform_db=platform_db,
         schema=schema,
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
         control_plane_sql=rewritten["0006_control_plane_http.sql"],
+        application_audit_sql=rewritten["0007_application_audit.sql"],
         api_password=api_password,
         controlplane_password=controlplane_password,
+        auditreader_password=auditreader_password,
     )
 
 

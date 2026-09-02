@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from .audit_hook import ApplicationAuditHook
 from .limits import ResourceLimits
 from .structured import ApplicationCell, MutationOutcome, Predicate, QueryOutcome
 
@@ -77,11 +78,26 @@ class StorageBackend(Protocol):
         *,
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
     ) -> MutationOutcome:
         """Apply a batch of mutation operations as one atomic unit (D-5:
         one request maps to one transaction) and return the affected row
         count, plus (CCR-13) any addresses resolved for insert. Any
         operation failing rolls back the whole batch.
+
+        Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-10):
+        `audit_hook`, when given, is called exactly once -- as the LAST
+        thing this method does before its own commit point -- IF AND ONLY
+        IF this batch passed through the `DESTRUCTIVE_CONFIRMATION_V1`
+        choke (i.e. a `delete` operation's `require_destructive_
+        confirmation` call did not raise): the confirmation choke, not
+        `event_class`, is the fail-closed/buffer-class dispatch point
+        (D-2's normative rule). `MutationOutcome.destructive` reports which
+        branch this call took, so the caller (`DataService`) can skip the
+        buffer-class enqueue for a batch this method already durably
+        recorded (D-10: at most one durable row per operation). See
+        `audit_hook.py` for the full call contract (`pre_commit`/`commit_
+        failed`, rollback-on-raise, error-row rule).
         """
         ...
 
@@ -93,11 +109,19 @@ class StorageBackend(Protocol):
         limits: ResourceLimits,
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
     ) -> int:
         """Apply one schema-changing operation and return the new schema
         revision. `developer` is the caller's already-authenticated
         authority (SI-03); a backend must reject when it is False even if
         every other input is well-formed.
+
+        Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2): every schema
+        operation is fail-closed class (D-2's normative rule, item 2 --
+        unconditional, unlike `transact`'s confirmation-choke gate), so
+        `audit_hook`, when given, is always called as the last thing this
+        method does before its own commit point. See `audit_hook.py` for
+        the full call contract.
         """
         ...
 

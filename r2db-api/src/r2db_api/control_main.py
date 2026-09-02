@@ -132,6 +132,8 @@ from starlette.types import ASGIApp
 from .control_http import create_control_app
 from .control_plane import ControlPlaneService, PostgresControlBackend
 from .credential_store import (
+    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
     DEFAULT_SCHEMA,
     PostgresApplicationRegistry,
     PostgresControlAuditSink,
@@ -174,6 +176,8 @@ def assemble_control_stack(
     schema: str = DEFAULT_SCHEMA,
     pool_size: int | None = None,
     limits: ControlPlaneLimits | None = None,
+    audit_statement_timeout_ms: int | None = None,
+    audit_idle_timeout_ms: int | None = None,
 ) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
@@ -213,7 +217,18 @@ def assemble_control_stack(
     applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema, pool_size=pool_size)
     credentials = PostgresCredentialStore(controlplane_dsn, pepper=app_pepper, schema=schema, pool_size=pool_size)
     control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema, pool_size=pool_size)
-    audit = PostgresControlAuditSink(controlplane_dsn, schema=schema, pool_size=pool_size)
+    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): the SAME two
+    # SESSION-level timeouts `r2db_api.main.build_app` sets on the
+    # `application_audit` writer connection, applied here to the
+    # `control_audit` writer connection too -- D-6's visibility-lag
+    # derivation is only valid if BOTH connections carry them; a long-held
+    # control-plane state-change transaction would otherwise let a
+    # `control_audit` row slip past an `audit_query` cursor the same way an
+    # unbounded application-plane one would (design D-6 point 4).
+    audit = PostgresControlAuditSink(
+        controlplane_dsn, schema=schema, pool_size=pool_size,
+        statement_timeout_ms=audit_statement_timeout_ms, idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
+    )
 
     backend = PostgresControlBackend(applications=applications, credentials=credentials, control_credentials=control_credentials)
     service = ControlPlaneService(backend, audit=audit, limits=limits or _DEFAULT_LIMITS)
@@ -248,10 +263,21 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         credentials_per_application=_optional_int(env, "R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION", _DEFAULT_LIMITS.credentials_per_application),
         control_requests_per_minute=_optional_int(env, "R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE", _DEFAULT_LIMITS.control_requests_per_minute),
     )
+    # Phase 4 (design D-6/N-3): read from the SAME env-var names
+    # `r2db_api.main.build_app` reads for the `application_audit` writer
+    # connection -- both processes' composition roots agree on one naming
+    # scheme for what is, by design, one shared timeout policy.
+    # WP-2(a) fix round 2 review N-6: shared defaults with `r2db_api.main`
+    # (`credential_store.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_MS`),
+    # not an independently-maintained `5000` literal that could silently
+    # drift from the other composition root's own default.
+    audit_statement_timeout_ms = _optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
+    audit_idle_timeout_ms = _optional_int(env, "R2DB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
 
     service, (applications, credentials, control_credentials, audit) = assemble_control_stack(
         controlplane_dsn=controlplane_dsn, app_pepper=app_pepper, control_pepper=control_pepper,
         schema=schema, pool_size=pool_size, limits=limits,
+        audit_statement_timeout_ms=audit_statement_timeout_ms, audit_idle_timeout_ms=audit_idle_timeout_ms,
     )
 
     @asynccontextmanager

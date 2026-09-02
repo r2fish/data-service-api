@@ -108,6 +108,7 @@ from psycopg import sql
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
+from .audit_hook import ApplicationAuditHook
 from .backend import StorageBackend as _StorageBackend
 from .errors import fail
 from .limits import ResourceLimits
@@ -282,7 +283,7 @@ class _RolePool:
     from either one reports its own fixed role/schema, never the other's.
     """
 
-    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4, connect_timeout: int = _DEFAULT_CONNECT_TIMEOUT_S, acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_S) -> None:
+    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4, connect_timeout: int = _DEFAULT_CONNECT_TIMEOUT_S, acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_S, statement_timeout_ms: int | None = None, idle_in_transaction_session_timeout_ms: int | None = None) -> None:
         self._dsn = dsn
         self._schema = schema
         self._maxconn = max(1, maxconn)
@@ -291,6 +292,25 @@ class _RolePool:
         self._created = 0
         self._connect_timeout = connect_timeout
         self._acquire_timeout = acquire_timeout
+        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): SESSION-
+        # level (not `SET LOCAL` -- these must survive for this connection's
+        # entire lifetime, not just one transaction, unlike `PostgresCell.
+        # _set_timeouts`'s per-request `SET LOCAL`) `statement_timeout`/
+        # `idle_in_transaction_session_timeout`, set once at connect time
+        # (below) and never touched again. `None` (the default -- every
+        # `_RolePool` caller except the two audit-writer sinks) means "do
+        # not set either" -- this pool is otherwise used for ordinary
+        # application data-plane connections, which must not silently
+        # acquire a new timeout policy as a side effect of this WP. Only
+        # `PostgresApplicationAuditSink`/`PostgresControlAuditSink`
+        # (`credential_store.py`) pass a concrete value here: D-6's
+        # visibility-lag derivation (`statement_timeout +
+        # idle_in_transaction_session_timeout + 1s`) depends on both being
+        # enforced on the connection that writes `application_audit`/
+        # `control_audit`, never on an unrelated pool silently inheriting
+        # them.
+        self._statement_timeout_ms = statement_timeout_ms
+        self._idle_in_transaction_session_timeout_ms = idle_in_transaction_session_timeout_ms
         # Set by `retire()` (called only by `SharedPoolManager`, below, when
         # this pool is evicted -- idle timeout or LRU cap). A retired pool
         # keeps serving any connection a caller already checked out (see
@@ -313,6 +333,21 @@ class _RolePool:
         conn = psycopg.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SET search_path TO {}").format(sql.Identifier(self._schema)))
+            # Phase 4 (design D-6/N-3): SESSION-level, set once here (never
+            # `SET LOCAL` -- unlike `PostgresCell._set_timeouts`'s
+            # per-request `SET LOCAL statement_timeout`, this must survive
+            # every transaction this pooled connection is ever reused for,
+            # for its entire lifetime -- this connection is never reused by
+            # a different role/purpose, `_RolePool`'s own class docstring).
+            # `SHOW statement_timeout`/`SHOW idle_in_transaction_session_
+            # timeout` against a connection from this pool is the executable
+            # check (`r2db-api/tests/test_application_audit.py::test_audit_
+            # write_connections_have_statement_and_idle_in_transaction_
+            # timeouts_set`).
+            if self._statement_timeout_ms is not None:
+                _run(cur, sql.SQL("SET SESSION statement_timeout = {t}").format(t=sql.Literal(f"{self._statement_timeout_ms}ms")))
+            if self._idle_in_transaction_session_timeout_ms is not None:
+                _run(cur, sql.SQL("SET SESSION idle_in_transaction_session_timeout = {t}").format(t=sql.Literal(f"{self._idle_in_transaction_session_timeout_ms}ms")))
         conn.commit()
         return conn
 
@@ -1004,7 +1039,7 @@ class PostgresCell:
 
     # ---- mutations -------------------------------------------------------
 
-    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None) -> MutationOutcome:
+    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> MutationOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
@@ -1013,6 +1048,18 @@ class PostgresCell:
         limits.check("batch_items", len(operations))
         affected = 0
         assigned_addresses: list[dict[str, Any]] = []
+        # Phase 4 (design D-2/D-10): whether this batch passed through the
+        # DESTRUCTIVE_CONFIRMATION_V1 choke -- see `ApplicationCell.
+        # transact`'s identical comment (D-10 parity).
+        destructive = False
+        # Set the instant `audit_hook.pre_commit()` returns successfully --
+        # everything that can still fail after that point is this method's
+        # OWN data commit (the implicit `conn.commit()` `conn.transaction()`
+        # issues on normal `with`-block exit), never the audit write again.
+        # This is what lets the `except psycopg.Error` clause below tell
+        # "the durable audit row committed but the data commit then failed"
+        # (D-2's error-row case) apart from every other psycopg failure.
+        hook_fired = False
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
@@ -1027,13 +1074,24 @@ class PostgresCell:
                             # WP-2 review M-2 parity: per-operation deadline
                             # check, not only before/after the whole batch.
                             limits.check_deadline(deadline, clock)
-                        count, address = self._apply(conn, entity, operation, table_info)
+                        count, address, op_destructive = self._apply(conn, entity, operation, table_info)
                         affected += count
+                        destructive = destructive or op_destructive
                         if address is not None:
                             assigned_addresses.append(address)
                         limits.check("result_items", affected)
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
+                    # Phase 4 (design D-2): the pre-commit hook is the LAST
+                    # statement inside this `with conn.transaction():`
+                    # block -- a raise here propagates straight through the
+                    # block's own `__exit__`, which rolls the data
+                    # transaction back exactly like any other exception
+                    # raised inside it (no special-casing needed at this
+                    # call site: fail-closed by construction).
+                    if destructive and audit_hook is not None:
+                        audit_hook.pre_commit()
+                        hook_fired = True
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
@@ -1043,6 +1101,17 @@ class PostgresCell:
             except psycopg.errors.DataError:
                 self._fail_client_value()
             except psycopg.Error:
+                # Phase 4 (design D-2, error-row rule): `hook_fired` is only
+                # `True` once the durable pre-commit row has already
+                # committed on its own (separate) connection -- so an
+                # exception reaching here after that point can only be this
+                # method's own data commit failing. Record the durable
+                # `outcome="error"` row for the same `request_id` (still
+                # fail-closed: this call may itself raise `FoundationError`
+                # SERVICE_UNAVAILABLE, which is exactly what happens next
+                # regardless of whether it does).
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         # `conn.transaction()` rolls back the *entire* batch on any
         # exception (including a `FoundationError` raised by a later
@@ -1053,7 +1122,7 @@ class PostgresCell:
         # `insert`, or an `upsert` whose declared key found no existing
         # row) -- an `upsert` that resolved to an update contributes
         # nothing here, exactly like `ApplicationCell.transact`.
-        return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses)
+        return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive)
 
     def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
         """R-5, corrigendum M-5: map a real PostgreSQL `UniqueViolation`
@@ -1119,7 +1188,7 @@ class PostgresCell:
             return Jsonb(value)
         return value
 
-    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None]:
+    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None, bool]:
         field_types = table_info.columns
         known_fields = set(field_types)
         bound = bind_mutation(operation, known_fields)
@@ -1130,10 +1199,11 @@ class PostgresCell:
             for key, value in bound.values.items():
                 _check_type(value, field_types.get(key), key)
             row_id = self._insert(conn, entity, bound.values, field_types)
-            return 1, {"address": {"id": row_id}}
+            return 1, {"address": {"id": row_id}}, False
 
         if bound.operation == "upsert":
-            return self._apply_upsert(conn, entity, bound, table_info)
+            count, address = self._apply_upsert(conn, entity, bound, table_info)
+            return count, address, False
 
         # update / delete: R-7, corrigendum M-9 -- validate every value's
         # type (predicate values, and for `update` the write values too)
@@ -1158,11 +1228,14 @@ class PostgresCell:
                 reversible_alternative=None,
                 recovery=None,
             )
+            # Phase 4 (design D-2): reaching this point means the
+            # confirmation choke above did not raise -- confirmed-
+            # destructive, same signal `ApplicationCell._apply` returns.
             affected = self._delete(conn, entity, where_sql, where_params, bound.expected_revision)
-            return affected, None
+            return affected, None, True
 
         affected = self._update(conn, entity, bound.values, where_sql, where_params, field_types, bound.expected_revision)
-        return affected, None
+        return affected, None, False
 
     def _append_revision_predicate(self, where_sql: sql.Composed | None, where_params: list[Any], expected_revision: str | None) -> tuple[sql.Composed | None, list[Any]]:
         """R-4: an `expected_revision` precondition is folded into the same
@@ -1449,8 +1522,14 @@ class PostgresCell:
 
     # ---- schema ----------------------------------------------------------
 
-    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None) -> int:
+    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> int:
         bound = bind_schema_operation(operation, developer=developer)
+        # Phase 4 (design D-2/D-10): see `transact`'s identical `hook_fired`
+        # comment -- `True` only once the durable pre-commit row has
+        # already committed on its own connection, which is what lets the
+        # `except psycopg.Error` clause below tell a post-hook data-commit
+        # failure apart from every other failure.
+        hook_fired = False
         with self._developer.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
@@ -1533,6 +1612,13 @@ class PostgresCell:
                         )
                         self._drop_index(conn, table_info.indexes[bound.index]["physical"])
                     revision = self._bump_revision(conn)
+                    # Phase 4 (design D-2, item 2): unconditional -- every
+                    # schema operation is fail-closed class. Last statement
+                    # inside this `with conn.transaction():` block, same
+                    # reasoning as `transact`'s identical comment.
+                    if audit_hook is not None:
+                        audit_hook.pre_commit()
+                        hook_fired = True
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
@@ -1544,6 +1630,10 @@ class PostgresCell:
             except psycopg.errors.DataError:
                 self._fail_client_value()
             except psycopg.Error:
+                # Phase 4 (design D-2, error-row rule): see `transact`'s
+                # identical comment.
+                if hook_fired and audit_hook is not None:
+                    audit_hook.commit_failed()
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         return revision
 
