@@ -212,6 +212,8 @@ control plane は契約 `control_endpoints` の 11 本を R-6 のとおり。
 - 閉じる: `CONTROL_MAPPING.md` MitateDB 列の「TBD during implementation」のうち、control plane 分離・credential 永続化・propagation bound・HTTP 面 SI-10 系、および SI-08 の**部分** (`request_bytes` と control 面 rate のみ。application-plane の request rate / concurrency / execution time は本フェーズでも未実装のまま — §7 台帳へ。WP-0 M-1) (いずれもローカル実測 evidence として)
 - 閉じない (明示継続): Cloud SQL/Cloud Run の production platform evidence (`foundation.json` の platform_evidence_required_before_production 3項目は配備時)、application-plane 耐久 audit sink (フェーズ4)、`audit_query` の C-11 zero-coverage (フェーズ4)、**C-16 (cross_entity_mutation 両 peer unavailable のため本フェーズ後も非 executable — 第2ラウンド n-2。D-L の依頼者判断で変わりうる)**、契約 additive 候補束 (`DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(e)、1.3.0 検討時一括)
 
+> **RESOLVED 追記 (2026-09-03、フェーズ4 WP-4 記録整理。上記「閉じない」列挙の原文は記録として保存)**: 上の 3 項目のうち 2 項目が閉じた。**application-plane 耐久 audit sink** は `mitatedb_registry.application_audit` (migration `0005`) として出荷され、**`audit_query` の C-11 zero-coverage** も解消した (`AuditResult` の逆向き検証が登録済み 4 adapter すべてで実文書に対して走る)。あわせて本書 §0 スコープ外節・§4 の endpoint 表 (`POST /v1/audit/query` の行)・§5 D-E が述べる「`audit_query` unavailable 継続」は、**data-plane ホストについては現在も真** (このホストは当該 capability を提供しないので `CAPABILITY_UNSUPPORTED` を返す) だが、**control ホストでは `enabled` であり `contract_version` は 1.4.0** である。**C-16** はフェーズ3.5 で executable 化済み。正本は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (v1.5) と `security/CONTROL_MAPPING.md` の SI-14 行。
+
 ## 7. 将来課題台帳 (本フェーズ新設分)
 
 - **cross_entity_mutation の採否 (D-L)**: mitate-application の実要求 (本体 + audit の 2 entity atomic 書込)。依頼者判断待ち — 採用ならフェーズ3.5 として設計し C-16 を executable 化

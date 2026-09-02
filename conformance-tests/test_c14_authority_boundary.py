@@ -147,9 +147,11 @@ def _control_plane_status(adapter) -> str:
     its real, application-plane `capability_document()` -- never a value
     this suite infers or caches. `service.py`'s `DataService.capabilities()`
     (`r2db-api`, both adapters -- constructor-injected via `control_plane_
-    status`, WP-5 R-9) and `cell.py:468` (`MitateDB-api`) are where each
-    peer publishes this; as of WP-5 the two r2db-api adapters declare
-    `"enabled"` and `MitateDB-api` still declares `"unavailable"`.
+    status`, WP-5 R-9) and `cell.py` (`MitateDB-api`, likewise
+    composition-root-injected) are where each peer publishes this. The
+    r2db-api pair has declared `"enabled"` since CCR-14 WP-5; the
+    MitateDB-api pair has since that peer's own design-v1.2 WP-5, so all
+    four registered adapters declare `"enabled"` today.
 
     Raises an explicit, actionable `AssertionError` naming whichever key is
     missing rather than letting a bare `KeyError` propagate (design

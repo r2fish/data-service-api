@@ -932,11 +932,12 @@ anywhere in the cluster once it is gone:
 ## 15. Application-plane durable audit sink (`0007_application_audit.sql`) and `audit_query`
 
 Companion to `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (D-1/D-5/D-6).
-This section covers the minimal operational steps for WP-2(b): applying
-`0007`, configuring the reader DSN, and the relationship between the two
-audit-writer timeouts and the `audit_query` visibility lag. Full runbook
-integration (capacity monitoring, retention/pruning operations, the
-`audit_requests_per_minute` sizing worksheet) is phase-4 WP-4 scope.
+Applying `0007`, configuring the reader DSN, the relationship between the two
+audit-writer timeouts and the `audit_query` visibility lag, and then, in
+§15.1-§15.5, the operational parts: platform-DB capacity thresholds, the
+five fixed alert messages, manual retention/pruning, reading evidence during
+a platform-DB outage, and the paths the control host's edge policy must
+cover.
 
 **Apply `0007`, once, after `0006`** (order matters only in that `0007`
 assumes `r2dbsvc_registry.control_audit` already exists), connected as
@@ -992,6 +993,13 @@ be true -- confirm with:
 SHOW statement_timeout;
 SHOW idle_in_transaction_session_timeout;
 ```
+
+run against a connection each writer role (`r2dbsvc_api` for `application_
+audit`, `r2dbsvc_controlplane` for `control_audit`) actually holds open (a
+fresh `psql` session as those roles does not carry this SESSION-level
+setting -- only a connection opened by the running `r2db_api.main`/
+`r2db_api.control_main` process itself does).
+
 **Structural assumption (WP-2(b) fix round 2, item D, record only)**: the
 declared `visibility_lag_ms` is COMPUTED by the control process alone
 (`r2db_api.control_main.assemble_control_stack`, from its OWN `R2DB_AUDIT_
@@ -1003,14 +1011,20 @@ time beyond both reading the same env-var names off (ideally) the same
 configuration source; a deployment that sets them differently per process
 makes the published `visibility_lag_ms` untrue for `application_audit`
 without either process detecting it. Keep both processes' env identical
-for these two variables. (Full CONTROL_MAPPING evidence for this is WP-4
-scope.)
+for these two variables. (This premise is now recorded as evidence in
+`security/CONTROL_MAPPING.md`'s SI-14 row, point 12.)
 
-run against a connection each writer role (`r2dbsvc_api` for `application_
-audit`, `r2dbsvc_controlplane` for `control_audit`) actually holds open (a
-fresh `psql` session as those roles does not carry this SESSION-level
-setting -- only a connection opened by the running `r2db_api.main`/
-`r2db_api.control_main` process itself does).
+**Anything that changes either timeout changes a published declaration.**
+The same is true of the denial-coalescing window: `control_capabilities.
+audit_query.coalescing_window_ms` is published by the CONTROL process from
+the single shared default constant, while the window that actually
+coalesces denials lives in the DATA-plane process (`DataService(denial_
+coalesce_window_s=...)`). There is no env-var knob for the latter today, so
+a deployment that constructs `DataService` with a non-default window makes
+the published `coalescing_window_ms` untrue, exactly as a per-process
+timeout mismatch makes `visibility_lag_ms` untrue. Treat both the same way:
+**if you change the value, you have changed the declaration, and the
+declaration must be changed with it.**
 
 **`audit_requests_per_minute`**: a separate, dedicated env var,
 `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` (default `60`, same
@@ -1022,6 +1036,253 @@ polling `audit_query` at its own, independent rate. Recommended polling
 interval for an audit consumer: no faster than the declared
 `visibility_lag_ms` (polling faster than the lag a deployment has actually
 configured cannot surface events any sooner, it only spends more of this
-window). Full window-sizing guidance (operator count x poll frequency,
-platform-DB capacity thresholds informed by row-length CHECKs x row-count
-bounds) is WP-4 scope.
+window).
+
+**Sizing the `audit_requests_per_minute` window.** One `audit_query` call
+is one page, so a consumer's steady-state cost is
+`60000 / <declared visibility_lag_ms>` requests per minute -- about **5.5
+req/min per consumer** at the default 11000 ms lag. The default of `60`
+therefore supports roughly **ten** concurrently polling audit consumers
+with headroom. Size it as:
+
+```
+audit_requests_per_minute  >=  ceil(<concurrent audit consumers>
+                                    * 60000 / <visibility_lag_ms>)
+                               + headroom for catch-up
+```
+
+One thing makes the naive product too small in practice: **catch-up is
+paging, not polling**. A consumer resuming after an outage walks the cursor
+one page per request until a page comes back empty, so draining a backlog
+of N events at `limit` per page costs `N/limit` requests as fast as the
+consumer can issue them -- far above the steady-state rate. Size for the
+catch-up case, or accept refusals during catch-up.
+
+**Raising the window on this peer is a configuration change, with no upper
+bound.** `ControlPlaneLimits.__post_init__` (`src/r2db_api/limits.py`)
+validates only that each limit is a positive integer -- there is no ceiling
+on `audit_requests_per_minute` here, and the peer's own test suite really
+does construct and publish `audit_requests_per_minute=100_000`. So a
+deployment that outgrows the default sets
+`R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` to whatever its audit-agent
+population needs and nothing else has to change. Widening this window does
+not weaken the property the window exists for: it is checked **before**
+authentication and before any durable write, so no window size lets an
+unauthenticated flood generate audit rows. **Peer difference worth knowing
+if you operate both**: `MitateDB-api` bounds the same class to `[1, 200]`
+in its own `ControlPlaneLimits.__post_init__`, so an equivalent change there
+is a code change, not a configuration change (`MitateDB-api/docs/cloud-run-
+cloud-sql.md` §3.2c). The contract declares no range for this class, so
+both peers conform; the asymmetry is recorded in `security/CONTROL_MAPPING.
+md`'s SI-08 row.
+
+Hitting the window is a plain `LIMIT_EXCEEDED`
+refusal and costs nothing but time: the consumer's cursor is still valid, so
+it resumes exactly where it stopped. In every case a break-glass
+`revoke_credential` is unaffected, because `audit_query` never touches
+`control_requests_per_minute` (`r2db-api/tests/test_audit_query.py::test_
+audit_query_does_not_consume_the_control_requests_per_minute_window`).
+
+### 15.1 Platform-DB capacity thresholds (row size x row count x M)
+
+The design bounds audit growth in three layers (D-1's own capacity
+argument): bounded row SIZE, bounded row COUNT per operation, and this
+runbook's monitoring. The third layer is only meaningful with the first two
+quantified, so:
+
+**Row size.** `0007`'s per-column `length` CHECKs cap the eleven bounded text
+columns at `64 + 256 + 256 + 64 + 256 + 64 + 64 + 64 + 32 + 128 + 256 =
+1504` characters in total. Adding `event_id` (a uuid string), the two
+timestamps, `count`, `audit_seq` and PostgreSQL's own per-tuple overhead,
+**budget 2 KiB as a hard per-row upper bound**. No application input can
+exceed it -- the CHECK rejects the INSERT, which is itself verified
+(`test_application_audit.py::test_api_role_cannot_insert_a_value_longer_
+than_the_length_check`).
+
+**Row count per process.** Per interval, one instance can add at most:
+
+| source | bound per instance |
+|---|---|
+| fail-closed operations | 1 row per user operation (+1 `error` row if the data commit fails) |
+| coalesced denials | **2** rows per coalescing key per 60s window -- the first synchronous row plus the window-end aggregate row (supervisor ruling J-1); never 1 |
+| buffered ordinary successes | at most `R2DB_AUDIT_BUFFER_CAPACITY` (default 1000) in flight, flushed on threshold/interval |
+| buffer-overflow alerts | at most 1 row per flush interval (`R2DB_AUDIT_FLUSH_INTERVAL_S`) |
+
+**Multiply by M.** Coalescing counters and the buffer are **process-local**;
+nothing is shared between instances. So the deployment-wide ceilings are
+`2 x <keys> x <windows> x M` and `<buffer capacity> x M`, where **M is the
+maximum number of concurrent `r2db_api.main` instances** your deployment can
+run. On the VPS M is normally 1; on any autoscaled shape M is the scaler's
+own configured maximum, and that number -- not the per-process default -- is
+what belongs in the threshold arithmetic.
+
+A serviceable rate model for alerting:
+
+```
+bytes/hour  ~=  2 KiB * M * ( <ops/hour>
+                            + 2 * <distinct denial keys> * 60
+                            + 3600 / <flush interval seconds> )
+```
+
+Alert on the **growth rate** of the table, not an absolute size (an absolute
+size is a retention decision, §15.3):
+
+```sql
+-- as r2dbsvc_control (schema owner); sample periodically and alert on delta
+SELECT pg_total_relation_size('r2dbsvc_registry.application_audit') AS application_audit_bytes,
+       pg_total_relation_size('r2dbsvc_registry.control_audit')     AS control_audit_bytes;
+```
+
+Why this matters beyond housekeeping: the platform database also holds the
+credential store for **every** application, so filling its disk stops
+authentication platform-wide. That is the availability side of SI-00, and it
+is the reason the row-size and row-count bounds above exist at all.
+
+### 15.2 Logs-based alerting: the five fixed messages
+
+The audit pipeline emits exactly five `logging.error` messages, all fixed
+strings with **no interpolation** (deliberate -- no client-supplied value can
+ever reach the process log through them). They are defined in one place,
+`src/r2db_api/service.py` (the three buffer/alert messages at L101-103, the
+two coalescing messages at L110-111, emitted from `_DenialCoalescer._note_
+aggregate_write_result`, L655). Configure a logs-based alert on exact-string
+match for **each of the five** -- they are two independent evidence-loss
+channels, and alerting on only the first three leaves the coalescing channel
+silent:
+
+| message (exact) | meaning |
+|---|---|
+| `application_audit buffer overflow: events were dropped` | evidence loss has ALREADY happened: the bounded buffer evicted its oldest events |
+| `application_audit overflow-alert row could not be written; retrying with backoff` | the in-band alert row itself cannot be written -- both the durable channel and the in-band alert are failing at once; retry is sticky with exponential backoff to a 60s ceiling |
+| `application_audit overflow-alert row recorded; pending overflow cleared` | recovery of the pair above: the alert row landed and the accumulated drop count was reported in its `count` |
+| `application_audit coalesced-denial summary row could not be written; retrying` | the window-end aggregate row of a coalesced denial is not landing. The first, synchronous row of that window IS durable, but the **repeat count is stranded in memory** -- and because the writer holds INSERT only, that first row's `count` can never be amended later (§15.1, design P4-D6). This is the only carrier of "how many times", so a stuck aggregate row is evidence loss even though nothing is refused |
+| `application_audit coalesced-denial summary row recorded; retry cleared` | recovery of the pair above: the aggregate row landed and the stranded repeat count is now in its `count` |
+
+Both retrying/recovered pairs fire only on a failing<->healthy **state
+transition** (never once per attempt), the same logging-DoS discipline the
+overflow alert uses.
+
+**Known sharpness, both peers (WP-2(a)/WP-3(a) review, minor)**: the flush
+"failing" flag is cleared only when the buffer fully drains, so under
+continuous load it can stay set after the sink has actually recovered,
+holding the alert re-fire interval at the 60s backoff ceiling. No evidence is
+lost by this -- the drop counter keeps accumulating and is reported in the
+eventual alert row's `count` -- but **do not read a gap between messages as
+recovery**; read the recovery message of the pair concerned (the third
+message for the buffer/overflow channel, the fifth for the coalescing one).
+
+### 15.3 Retention and pruning (manual, external, deliberately unautomated)
+
+Nothing in `r2db_api` ever deletes an audit row, and no process role can:
+`r2dbsvc_api` has INSERT only, `r2dbsvc_controlplane` has INSERT on
+`control_audit` only, and `r2dbsvc_auditreader` has SELECT only. Pruning is a
+**schema-owner (`r2dbsvc_control`) operation performed by an operator**,
+which is precisely the contract's `audit.immutability` "externally governed
+where required by the deployment" shape (design D-11/§10 -- automatic pruning
+is explicitly out of scope, not merely unimplemented).
+
+Procedure, in order:
+
+Step 1 -- **EXPORT the window first; step 3 is irreversible.** There is no
+CLI reader for `application_audit` (§15.4: `python -m r2db_api.ops
+audit-report` reads `control_audit` ONLY), so export this table directly, as
+`r2dbsvc_auditreader` (`R2DB_AUDIT_DSN`) or as the schema owner:
+
+```
+psql "$R2DB_AUDIT_DSN" -c "\copy (SELECT * FROM r2dbsvc_registry.application_audit \
+  WHERE recorded_at < now() - interval '365 days' ORDER BY recorded_at, event_id) \
+  TO '<export path>' WITH (FORMAT csv, HEADER)"
+```
+
+Store the export wherever the retention policy says evidence lives, and
+verify it is readable before continuing. When the table being pruned is
+`control_audit` instead, `python -m r2db_api.ops audit-report --since ...
+--until ...` (over `R2DB_CONTROL_DSN`) is the supported export for that one.
+
+```sql
+-- 2. As r2dbsvc_control: confirm the blast radius before deleting.
+SELECT count(*), min(recorded_at), max(recorded_at)
+  FROM r2dbsvc_registry.application_audit
+ WHERE recorded_at < now() - interval '365 days';
+
+-- 3. As r2dbsvc_control: delete that same window.
+DELETE FROM r2dbsvc_registry.application_audit
+ WHERE recorded_at < now() - interval '365 days';
+```
+
+The identical three steps apply to `r2dbsvc_registry.control_audit` with its
+own retention period. Record what was pruned, when, and by whom: after the
+DELETE the table itself no longer evidences it.
+
+### 15.4 Reading evidence while the platform database is unavailable
+
+`audit_query`, the credential store, and both audit tables share ONE
+database. If it is unreachable, the data plane already fails at
+authentication (this was true before phase 4 -- the durable sink adds no new
+single point of failure), and `audit_query` cannot answer either. **Evidence
+is unreadable at exactly the moment it is most wanted.**
+
+The one read path that does not depend on the control HTTP app, the reader
+role, or `audit_query` is the out-of-band CLI, `python -m r2db_api.ops
+audit-report`, which SELECTs directly over `R2DB_CONTROL_DSN`. Keep it and
+its credentials available to operators: it is not made redundant by
+`audit_query` and must not be retired in its favour. **Be precise about its
+scope, though: `audit-report` reads `control_audit` only.** There is no CLI
+reader for `application_audit`; the equivalent out-of-band access is a direct
+`psql` session as `r2dbsvc_auditreader` (or as the schema owner
+`r2dbsvc_control`) against `r2dbsvc_platform`:
+
+```sql
+SELECT recorded_at, event_class, request_id, application_id, actor_id,
+       operation, target_kind, outcome, reason_code, count
+  FROM r2dbsvc_registry.application_audit
+ WHERE recorded_at >= now() - interval '1 hour'
+ ORDER BY recorded_at, event_id;
+```
+
+All of these -- the CLI included -- still need the platform database itself
+to be reachable. What they remove is the dependency on the control HTTP
+process and on `audit_query` being declared `enabled`, not the dependency on
+the database. There is deliberately no second copy of the evidence anywhere
+(external SIEM forwarding is out of scope for this phase, design §10); if a
+deployment needs evidence to survive the database being down, that is an
+export/retention decision it must make for itself under §15.3.
+
+### 15.5 The control host now serves a path outside the `/control/v1/*` prefix
+
+Before phase 4, the control HTTP app (`r2db_api.control_main`) served
+`/control/v1/*` and nothing else, so an edge policy expressed as a path
+prefix -- "`/control/v1/*` is reachable only from the management network",
+an LB path matcher, an ingress rule, an nginx `location` block -- covered the
+whole control surface by construction. **That is no longer true.** The
+control app now serves BOTH:
+
+| path on the control host | note |
+|---|---|
+| `POST /control/v1/audit/query` | the canonical path; contract 1.4.0 classifies `audit_query` under `control_endpoints` |
+| `POST /v1/audit/query` | the SAME handler, kept as an alias for one minor because the contract's previous classification put `audit_query` on the application surface |
+
+Both are registered whether or not `R2DB_AUDIT_DSN` is set (unset means an
+authenticated caller gets `CAPABILITY_UNSUPPORTED`, never a bare 404).
+
+The alias exists so that a deployment routing by path prefix
+(`/v1/*` to the data plane, `/control/v1/*` to the control plane) still has
+`/control/v1/audit/query` as a correct route. But it means the reverse
+mistake is now possible: **an edge policy that restricts only
+`/control/v1/*` leaves the control host's `/v1/audit/query` outside that
+restriction**, and that path reads `control_audit` as well as
+`application_audit` -- SI-02 data reachable through a route the existing
+operational boundary does not describe. When reviewing the deployment:
+
+1. The control host's own network/IAM restriction must be expressed over the
+   HOST (or over both prefixes), not over `/control/v1/*` alone.
+2. `/v1/audit/query` on the **data** host is a different endpoint entirely and
+   is unchanged: it authenticates an application credential and answers
+   `CAPABILITY_UNSUPPORTED`. Two hosts answering the same path differently is
+   deliberate -- each is making a true statement about itself -- and is
+   pinned by `r2db-api/tests/test_audit_query.py::test_data_plane_host_audit_
+   query_still_refuses_with_capability_unsupported`.
+3. Do not "fix" the asymmetry by routing the data host's `/v1/audit/query` to
+   the control app. That would put a control/audit credential's traffic on the
+   application-facing host, which is the separation the SI-00/SI-02 rows of
+   `security/CONTROL_MAPPING.md` exist to keep.
