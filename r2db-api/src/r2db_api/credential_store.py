@@ -66,11 +66,11 @@ It is never derived from client/request input.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import os
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
 import psycopg
@@ -140,15 +140,24 @@ _SELECT_BY_VERIFIER = "SELECT {columns}, a.enabled FROM {credentials} c JOIN {ap
 _SELECT_BY_ID = "SELECT {columns}, a.enabled FROM {credentials} c JOIN {applications} a ON a.application_slug = c.application_slug WHERE c.credential_id = {ph}"
 
 
-def _execute(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
+def _execute(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] | Mapping[str, Any] = ()) -> None:
     """The single execution choke point for this file -- mirrors `postgres.
     py::_run`'s identical role there. Typed to accept only a composed
     psycopg SQL object, never `str`, so a raw string cannot reach the
     database from anywhere in this module (D-4).
+
+    Phase 4 WP-2(b): `params` now also accepts a `Mapping` (psycopg3's own
+    `%(name)s`-style binding) -- `PostgresAuditQueryStore.query`'s own
+    `audit_query` UNION statement below reuses several parameters (the
+    visibility-lag threshold, the cursor triple, the class filter) at
+    multiple positions in the composed SQL text, which named binding
+    expresses far more directly than repeating the same positional
+    placeholder object many times. Every pre-existing caller in this file
+    still passes a `Sequence`, unaffected.
     """
     if not isinstance(statement, (sql.Composed, sql.SQL)):
         raise TypeError("credential_store.py only executes psycopg.sql.Composed/SQL objects, never str")
-    cursor.execute(statement, list(params))
+    cursor.execute(statement, params if isinstance(params, Mapping) else list(params))
 
 
 class PostgresCredentialStore:
@@ -1379,12 +1388,150 @@ class PostgresApplicationAuditSink:
             raise  # unreachable; fail() always raises
 
 
+# Phase 4 WP-2(b) (design D-5/D-6): the `audit_query` UNION -- shared column
+# list (both tables carry the identical 13 contract `audit.fields` columns
+# plus `recorded_at`; only `application_audit` has `count`, so the
+# `control_audit` half selects a literal `NULL::integer`). `event_id` is
+# cast to `text` in both halves (r2db's `event_id` columns are `uuid`,
+# D-6's cursor triple is compared/encoded as plain strings, and MitateDB's
+# own `event_id` is natively `text` -- casting here keeps this reader's own
+# row shape peer-shape-agnostic beyond this one file). `ROW(...) > ROW(...)`
+# is PostgreSQL's native lexicographic tuple comparison -- it expresses
+# exclusive keyset paging against the full `(recorded_at, plane, event_id)`
+# order directly, without hand-splitting the boundary cases a manual
+# per-column `OR` chain would need (the `plane` literal differs -- `'control'`
+# sorts below `'application'`... no: `'application' < 'control'` -- for each
+# half, so a manual split would need to special-case which half is "before"
+# vs "at or after" the cursor's own plane; `ROW()` comparison does not need
+# that case analysis at all). Each half repeats the SAME named parameters
+# (`%(...)s`) rather than one shared filter fragment interpolated twice,
+# because `sql.SQL(...).format()`'s own `{...}` templating and psycopg's
+# `%(...)s` execute-time binding are two independent substitution passes
+# (see `_execute`'s own Phase-4 comment) -- reusing one named parameter at
+# several `%(...)s` occurrences is exactly what psycopg's mapping-style
+# binding is for.
+_AUDIT_QUERY_UNION_SQL = """
+WITH filtered AS (
+    SELECT event_id::text AS event_id, event_class, occurred_at, request_id, application_id,
+           actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id,
+           NULL::integer AS count, recorded_at, 'control'::text AS plane
+    FROM {control_table}
+    WHERE recorded_at < %(threshold)s
+      AND (%(classes)s::text[] IS NULL OR event_class = ANY(%(classes)s::text[]))
+      AND (
+        %(after_recorded_at)s::timestamptz IS NULL
+        OR ROW(recorded_at, 'control'::text, event_id::text)
+           > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
+      )
+    UNION ALL
+    SELECT event_id::text AS event_id, event_class, occurred_at, request_id, application_id,
+           actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id,
+           count, recorded_at, 'application'::text AS plane
+    FROM {application_table}
+    WHERE recorded_at < %(threshold)s
+      AND (%(classes)s::text[] IS NULL OR event_class = ANY(%(classes)s::text[]))
+      AND (
+        %(after_recorded_at)s::timestamptz IS NULL
+        OR ROW(recorded_at, 'application'::text, event_id::text)
+           > ROW(%(after_recorded_at)s::timestamptz, %(after_plane)s::text, %(after_event_id)s::text)
+      )
+)
+SELECT event_id, event_class, occurred_at, request_id, application_id, actor_type, actor_id, role,
+       operation, target_kind, outcome, reason_code, target_id, count, recorded_at, plane
+FROM filtered
+ORDER BY recorded_at, plane, event_id
+LIMIT %(row_limit)s
+"""
+
+_AUDIT_QUERY_ROW_COLUMNS = (
+    "event_id", "event_class", "occurred_at", "request_id", "application_id", "actor_type", "actor_id",
+    "role", "operation", "target_kind", "outcome", "reason_code", "target_id", "count", "recorded_at", "plane",
+)
+
+
+class PostgresAuditQueryStore:
+    """Phase 4 WP-2(b) (design D-5/D-6): `audit_query`'s Postgres reader --
+    the dedicated, SELECT-only `r2dbsvc_auditreader` role (migration
+    `0007_application_audit.sql` §1.3), reading BOTH `control_audit` and
+    `application_audit` over one connection (D-1(b): a single platform DB
+    is what makes this possible without an N-database fan-out). Never
+    shares a pool/DSN with any writer role or with `r2dbsvc_controlplane`
+    (D-5's own "別 DSN" requirement -- `r2dbsvc_controlplane` receives no
+    grant on either audit table at all, migration 0007 §1.3 note 5).
+
+    `InMemoryAuditQueryStore` (`audit_query.py`) is this class's in-memory
+    pair (D-10) -- both implement the same `AuditQueryReader` call surface
+    and are exercised by the identical parity test
+    (`test_in_memory_and_postgres_audit_query_semantics_have_parity`).
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = DEFAULT_SCHEMA,
+        pool_size: int | None = None,
+        connect_timeout: int | None = None,
+        acquire_timeout: float | None = None,
+    ) -> None:
+        validate_identifier(schema)
+        maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
+        pool_kwargs: dict[str, Any] = {}
+        if connect_timeout is not None:
+            pool_kwargs["connect_timeout"] = connect_timeout
+        if acquire_timeout is not None:
+            pool_kwargs["acquire_timeout"] = acquire_timeout
+        self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
+        self._control_table = sql.Identifier(schema, "control_audit")
+        self._application_table = sql.Identifier(schema, "application_audit")
+
+    def close(self) -> None:
+        self._pool.close_all()
+
+    def query(
+        self,
+        *,
+        event_classes: "Sequence[str] | None",
+        after: "tuple[datetime, str, str] | None",
+        limit: int,
+        visibility_lag_ms: int,
+    ) -> list[dict[str, Any]]:
+        threshold = datetime.now(timezone.utc) - timedelta(milliseconds=visibility_lag_ms)
+        params: dict[str, Any] = {
+            "threshold": threshold,
+            "classes": list(event_classes) if event_classes is not None else None,
+            "after_recorded_at": after[0] if after is not None else None,
+            "after_plane": after[1] if after is not None else None,
+            "after_event_id": after[2] if after is not None else None,
+            "row_limit": limit,
+        }
+        statement = sql.SQL(_AUDIT_QUERY_UNION_SQL).format(control_table=self._control_table, application_table=self._application_table)
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    _execute(cur, statement, params)
+                    raw_rows = cur.fetchall()
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+        rows: list[dict[str, Any]] = []
+        for raw in raw_rows:
+            row = dict(zip(_AUDIT_QUERY_ROW_COLUMNS, raw))
+            rec = row["recorded_at"]
+            row["recorded_at"] = rec if rec.tzinfo is not None else rec.replace(tzinfo=timezone.utc)
+            occurred = row["occurred_at"]
+            row["occurred_at"] = occurred.isoformat() if hasattr(occurred, "isoformat") else occurred
+            rows.append(row)
+        return rows
+
+
 __all__ = [
     "PostgresCredentialStore",
     "PostgresControlCredentialStore",
     "PostgresApplicationRegistry",
     "PostgresControlAuditSink",
     "PostgresApplicationAuditSink",
+    "PostgresAuditQueryStore",
     "validate_control_pepper_separation",
     "DEFAULT_SCHEMA",
     "DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS",

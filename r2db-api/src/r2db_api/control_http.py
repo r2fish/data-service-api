@@ -328,9 +328,54 @@ async def post_enable_credential(request: Request) -> Response:
 
 
 # --------------------------------------------------------------------------
-# App assembly -- the contract's 11 `control_endpoints`, and nothing else
-# (WP-4 test item 7: this route table must contain no data-plane `/v1/...`
-# path, and `http.py`'s own `_ROUTES` must contain no `/control` path).
+# Phase 4 WP-2(b) (design D-5): `audit_query` -- two paths, ONE handler.
+# `/control/v1/audit/query` is the canonical location (contract 1.4.0
+# `control_endpoints.audit_query`); `/v1/audit/query` is the pre-1.4.0
+# `endpoints.audit_query` path, retained here as an alias of the identical
+# operation for one further minor version (contract `endpoints.audit_query.
+# deprecation_note`) -- D-5's own rationale for serving it from the CONTROL
+# host, not the data-plane one: a single-ingress deployment that routes by
+# path prefix (`/v1/*` -> data-plane, `/control/v1/*` -> control-plane)
+# would otherwise never be able to reach `audit_query` through the alias at
+# all, and a deployment that firewalls `/control/v1/*` to a management
+# network only would otherwise leave `/v1/audit/query` outside that
+# boundary. Registering both here, pointed at the identical handler, makes
+# `/control/v1/audit/query` the correct path under EITHER convention.
+# --------------------------------------------------------------------------
+
+
+@_endpoint
+async def post_audit_query(request: Request) -> Response:
+    service: ControlPlaneService = request.app.state.control_service
+    # `audit_requests_per_minute` -- its OWN window, charged before ANYTHING
+    # else (D-5: "両パス専用の pre-auth 固定窓"), never `check_rate()`
+    # (`control_requests_per_minute` is a DIFFERENT counter this handler
+    # must never touch -- design M-8 / P4-D4 item 8: a high-frequency
+    # audit poller must not be able to exhaust the window a break-glass
+    # `revoke_credential` depends on).
+    service.check_audit_rate()
+    secret = _extract_bearer(request)
+    # `AuditQueryRequest`'s own contract schema has no `required` entries
+    # at all (every field optional) -- the same all-optional shape
+    # `CredentialRevokeRequest` has, so an absent body is read the same way
+    # (`_read_json_object_or_empty`, this module's own helper above).
+    body = await _read_json_object_or_empty(request)
+    _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
+    result = service.audit_query(secret, body, request_id=_request_id(request), rate_precharged=True)
+    _check_response_shape(result, _SCHEMAS["AuditResult"], label="AuditResult")
+    return JSONResponse(result, status_code=200)
+
+
+# --------------------------------------------------------------------------
+# App assembly -- the contract's 11 `control_endpoints` plus `audit_query`'s
+# own 2 paths (`/control/v1/audit/query` and its pre-1.4.0 alias `/v1/
+# audit/query`, D-5), 13 routes total. `/v1/audit/query` is this route
+# table's ONE deliberate `/v1/...`-shaped path (WP-4 test item 7's original
+# "no data-plane path" rule now has this one named exception, not a
+# silently weakened check -- `test_control_http.py::
+# test_control_and_data_plane_route_tables_are_disjoint` asserts it by
+# name); `http.py`'s own `_ROUTES` still contains no `/control` path at
+# all, unchanged.
 # --------------------------------------------------------------------------
 
 _ROUTES = [
@@ -345,6 +390,13 @@ _ROUTES = [
     Route("/control/v1/credentials/{credential_id}/revoke", post_revoke_credential, methods=["POST"]),
     Route("/control/v1/credentials/{credential_id}/disable", post_disable_credential, methods=["POST"]),
     Route("/control/v1/credentials/{credential_id}/enable", post_enable_credential, methods=["POST"]),
+    # Phase 4 WP-2(b) (design D-5): registered unconditionally -- even when
+    # AUDIT DSN is unset, so an unprovided `audit_query` answers `CAPABILITY_
+    # UNSUPPORTED` after authenticating, never a bare 404 (D-5 M-4). Both
+    # resolve to the SAME handler, `post_audit_query` (this module's own
+    # docstring above explains the two-path rationale).
+    Route("/control/v1/audit/query", post_audit_query, methods=["POST"]),
+    Route("/v1/audit/query", post_audit_query, methods=["POST"]),
 ]
 
 

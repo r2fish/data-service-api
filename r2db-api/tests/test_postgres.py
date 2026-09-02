@@ -724,6 +724,59 @@ def test_injection_payloads_in_identifier_positions_are_rejected(app_a: types.Si
         cell.close()
 
 
+def test_create_entity_rejects_audit_events_by_exact_match_only(app_a: types.SimpleNamespace) -> None:
+    """WP-2(b) review B-2 (supervisor ruling): the Postgres backend's own
+    defense-in-depth check (`postgres.py`'s `apply_schema`, alongside the
+    shared, load-bearing `structured.bind_schema_operation` check both
+    cell implementations already go through)."""
+    cell = make_cell(app_a)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "create_entity", "entity": "audit_events"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+        # Exact match only -- a superstring is accepted.
+        cell.apply_schema({"operation": "create_entity", "entity": "audit_events_archive"}, developer=True, limits=LIMITS)
+        assert any(item["entity"] == "audit_events_archive" for item in cell.catalog())
+    finally:
+        cell.close()
+
+
+def test_audit_events_is_reserved_at_every_entity_identifier_position_postgres(app_a: types.SimpleNamespace) -> None:
+    """WP-2(b) fix round 2 (coordinator item C), `PostgresCell`'s own
+    counterpart to `test_foundation.py`'s identically-named test: add_field/
+    drop_entity/create_index/drop_index (via the shared `structured.
+    bind_schema_operation` choke) and query/mutate (via `PostgresCell`'s
+    own direct checks) all refuse `audit_events` before ever reaching a
+    NOT_FOUND/catalog lookup."""
+    cell = make_cell(app_a)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "add_field", "entity": "audit_events", "field": "x"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "drop_entity", "entity": "audit_events", "destructive": True, "confirmation": "whatever"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "create_index", "entity": "audit_events", "index": "ix1", "fields": ["x"]}, developer=True, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "drop_index", "entity": "audit_events", "index": "ix1"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+
+        with pytest.raises(FoundationError) as exc:
+            cell.query("audit_events", select=["id"], where=[], page_size=10, limits=LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("audit_events", [{"operation": "insert", "values": {"label": "x"}}], LIMITS)
+        assert exc.value.code == "IDENTIFIER_INVALID"
+    finally:
+        cell.close()
+
+
 def test_syntactically_valid_but_nonexistent_identifier_is_not_found(app_a: types.SimpleNamespace) -> None:
     """The counterpart to the tightened assertion above: a name that *is* a
     syntactically valid identifier under the contract's pattern, but simply

@@ -64,7 +64,8 @@ from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator, Proto
 import uuid
 
 from .audit import ControlAuditSink
-from .auth import ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork
+from .audit_query import DECLARED_AUDIT_EVENT_CLASSES, DECLARED_COALESCING_WINDOW_MS, AuditQueryReader, decode_cursor, encode_cursor
+from .auth import AuthContext, ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork
 from .errors import FoundationError, fail
 from .limits import ControlPlaneLimits
 from .service import ControlAuthority
@@ -179,7 +180,21 @@ _AUDITED_AUTH_FAILURE_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_R
 # reason `_gate_must_rotate` below is one: a deny-list silently fails open
 # the moment a new control endpoint is added and nobody remembers to list it
 # (design's own explicit warning, carried over from R-5's must_rotate gate).
-_AUDIT_ROLE_ALLOWED_OPERATIONS = frozenset({"control_capabilities", "list_applications", "list_credentials"})
+#
+# Phase 4 WP-2(b) (design D-5, work order P4-D4 item 5, contract 1.4.0
+# subordinate ruling 9(b)): `audit_query` joins this allow-list -- an
+# `audit`-role principal may now read audit evidence too, alongside the
+# three pre-existing read-only endpoints. Every other control endpoint
+# remains fail-closed FORBIDDEN for this role, unchanged.
+_AUDIT_ROLE_ALLOWED_OPERATIONS = frozenset({"control_capabilities", "list_applications", "list_credentials", "audit_query"})
+
+# Phase 4 WP-2(b) (design D-5): `audit_query`'s own default/maximum page
+# size -- contract `AuditQueryRequest.limit` bounds the wire value to
+# `[1, 1000]`; `_DEFAULT_AUDIT_QUERY_LIMIT` is what an omitted `limit`
+# defaults to.
+_DEFAULT_AUDIT_QUERY_LIMIT = 100
+_MAX_AUDIT_QUERY_LIMIT = 1000
+_MAX_AUDIT_QUERY_EVENT_CLASSES = 20
 
 
 def _new_credential_id() -> str:
@@ -203,6 +218,21 @@ class ControlBackend(Protocol):
     """
 
     def authenticate(self, secret: str | None) -> ControlAuthContext: ...
+
+    # Phase 4 WP-2(b) (design D-5): a SEPARATE probe against the
+    # APPLICATION-credential universe (`credentials`, never `control_
+    # credentials`) -- `audit_query`'s own authority check needs to
+    # recognize "this secret genuinely belongs to a real, active
+    # application credential" BEFORE ever presenting it to `authenticate`
+    # above, so it can answer an identified, attributed `FORBIDDEN` rather
+    # than let it fall through as an ordinary, unattributed `AUTH_INVALID`
+    # against the control-credential store it was never issued against
+    # (contract `control_endpoints.audit_query.semantics`: "Application
+    # credentials are denied"). Returns `None` for every failure mode
+    # (missing/unknown/revoked/disabled secret) -- never raises -- so the
+    # caller can use it as a pure probe without a `try/except` at every
+    # call site.
+    def authenticate_application(self, secret: str | None) -> AuthContext | None: ...
 
     # -- applications --
     def applications_unit_of_work(self) -> ContextManager[Any]: ...
@@ -287,6 +317,22 @@ class InMemoryControlBackend:
 
     def authenticate(self, secret: str | None) -> ControlAuthContext:
         return self._control_credentials.authenticate(secret)
+
+    def authenticate_application(self, secret: str | None) -> AuthContext | None:
+        # Phase 4 WP-2(b): `self._credentials` (the SAME application-
+        # credential store `issue_credential`/`rotate_credential`/`set_
+        # credential_state` already reach via `ControlAuthority`, see
+        # __init__'s own docstring) -- reused for a READ-only probe here,
+        # never mutated. `FoundationError` (AUTH_REQUIRED/AUTH_INVALID/
+        # AUTH_REVOKED/AUTH_STATE_UNAVAILABLE) collapses to `None`
+        # uniformly -- this probe only ever answers "yes, this is a real,
+        # currently-usable application credential" or "no".
+        if not secret:
+            return None
+        try:
+            return self._credentials.authenticate(secret)
+        except FoundationError:
+            return None
 
     # ---- applications --------------------------------------------------
 
@@ -458,6 +504,18 @@ class PostgresControlBackend:
     def authenticate(self, secret: str | None) -> ControlAuthContext:
         return self._control_credentials.authenticate(secret)
 
+    def authenticate_application(self, secret: str | None) -> AuthContext | None:
+        # Phase 4 WP-2(b): identical rationale to `InMemoryControlBackend.
+        # authenticate_application` above -- `self._credentials` is the
+        # SAME `PostgresCredentialStore` `issue_credential`/`rotate_
+        # credential`/`set_credential_state` already use.
+        if not secret:
+            return None
+        try:
+            return self._credentials.authenticate(secret)
+        except FoundationError:
+            return None
+
     # ---- applications --------------------------------------------------
 
     def applications_unit_of_work(self) -> ContextManager[Any]:
@@ -560,6 +618,12 @@ class ControlPlaneService:
         audit: ControlAuditSink | PostgresControlAuditSink,
         limits: ControlPlaneLimits | None = None,
         clock: Callable[[], float] | None = None,
+        audit_reader: AuditQueryReader | None = None,
+        audit_visibility_lag_ms: int = 0,
+        audit_event_classes: frozenset[str] = DECLARED_AUDIT_EVENT_CLASSES,
+        audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
+        audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
+        audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
     ) -> None:
         self._backend = backend
         self._audit = audit
@@ -567,6 +631,26 @@ class ControlPlaneService:
         self._clock = clock or time.monotonic
         self._rate_lock = threading.Lock()
         self._rate_window: list[float] = []
+        # Phase 4 WP-2(b) (design D-5/D-6): `audit_query`'s own state.
+        # `audit_reader is None` is this instance's true, complete posture
+        # for "AUDIT DSN not configured" (D-5 M-4) -- `capabilities()`
+        # below declares `audit_query: {"status": "unavailable"}` exactly
+        # when this holds, and `audit_query()` refuses with `CAPABILITY_
+        # UNSUPPORTED` (never a bare 404/`AttributeError`) on that same
+        # condition. A SEPARATE pre-auth rate window from `_rate_window`
+        # above (`_audit_rate_window`) -- `audit_query`'s own window must
+        # never share a counter with `control_requests_per_minute`
+        # (design M-8 / P4-D4 item 8): a high-frequency audit poller must
+        # never be able to exhaust the window a break-glass `revoke_
+        # credential` depends on.
+        self._audit_reader = audit_reader
+        self._audit_visibility_lag_ms = audit_visibility_lag_ms
+        self._audit_event_classes = frozenset(audit_event_classes)
+        self._audit_default_limit = audit_default_limit
+        self._audit_max_limit = audit_max_limit
+        self._audit_coalescing_window_ms = audit_coalescing_window_ms
+        self._audit_rate_lock = threading.Lock()
+        self._audit_rate_window: list[float] = []
 
     @property
     def limits(self) -> ControlPlaneLimits:
@@ -600,16 +684,107 @@ class ControlPlaneService:
         # actually mounted in front of it (same single-source instance, see
         # the `limits` property above).
         limit_enforcement["request_bytes"] = "unavailable"
+        # Phase 4 WP-2(b) (design D-5, contract 1.4.0 subordinate ruling 9):
+        # `audit_requests_per_minute` is a pre-auth fixed window that always
+        # exists once this process is running (the route is always
+        # registered, D-5 M-4) -- "enforced" regardless of whether
+        # `audit_query` itself is `enabled`, exactly like every other
+        # `ControlPlaneLimits` field the generic comprehension above already
+        # marks "enforced".
         return {
-            "contract_version": "1.3.0",
+            # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
+            # version_binding`): the flip lands in the SAME commit as the
+            # real `audit_query` behavior below -- unconditional (every
+            # instance of this service declares 1.4.0 now, whether or not
+            # `audit_query` itself is `enabled` on this deployment; the
+            # 1.4.0 obligations that are conditional on `audit_query` being
+            # provided stay conditional per version_binding's own text).
+            "contract_version": "1.4.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
-                "audit_query": {"status": "unavailable"},
+                "audit_query": self._audit_capability_declaration(),
             },
             "limits": limits,
             "limit_enforcement": limit_enforcement,
             "authorization_propagation_bound_ms": 0,
             "role": context.role,
+        }
+
+    def _audit_capability_declaration(self) -> dict[str, Any]:
+        """Phase 4 WP-2(b) (design D-5's own JSON shape). `status`'s
+        vocabulary is the contract's own `capability_status.status_enum` (4
+        values) -- never the word `"available"`, which is not a member.
+        AUDIT DSN unconfigured (`self._audit_reader is None`) keeps the
+        declaration at exactly `{"status": "unavailable"}` (D-5 M-4) --
+        every other key below is published only once there is a real
+        reader to back it, so a client never reads a `visibility_lag_ms`/
+        `event_classes` for a capability that cannot actually answer a
+        request.
+        """
+        if self._audit_reader is None:
+            return {"status": "unavailable"}
+        return {
+            "status": "enabled",
+            "authority": "control_or_audit",
+            "event_classes": sorted(self._audit_event_classes),
+            "default_limit": self._audit_default_limit,
+            "max_limit": self._audit_max_limit,
+            # D-6 point 3: a DERIVED value (composition root's own two
+            # writer-connection timeouts + 1s clock-skew margin), never a
+            # bare constant this class invents on its own -- `control_main.
+            # build_control_app` computes it from `statement_timeout_ms` +
+            # `idle_in_transaction_session_timeout_ms` and passes the sum
+            # in via `audit_visibility_lag_ms` (this class's own
+            # constructor parameter).
+            "visibility_lag_ms": self._audit_visibility_lag_ms,
+            "coalescing_window_ms": self._audit_coalescing_window_ms,
+            "completeness_note": (
+                "A page shorter than limit does not mean the log is exhausted -- rows within "
+                "visibility_lag_ms of the current time are not yet returned. Keep polling with the "
+                "cursor of the last event received (the opaque per-event 'cursor' field, passed back "
+                "as the next request's 'after') until a page comes back empty."
+            ),
+            "outcome_note": (
+                "outcome=allow means the operation was authorized and submitted; a later outcome=error "
+                "row sharing the same request_id means it did not commit. An allow row with no "
+                "corresponding error row usually means the operation committed, but -- if the process "
+                "was lost between recording allow and committing -- can also mean it did not; the audit "
+                "trail alone cannot distinguish the two in that one case."
+            ),
+            # WP-2(b) review B-1 (supervisor ruling): the durable `count`
+            # column's real semantics, matching contract `audit.
+            # query_event_fields_note` verbatim ("present only on an event
+            # representing more than one coalesced occurrence, absent --
+            # never zero or one -- otherwise"). A denial-coalescing window
+            # or a buffer-overflow drop that ends up representing exactly
+            # one occurrence is written as an ordinary row with count
+            # absent, not count=1 -- a consumer must never read "count is
+            # present" as "this row alone represents 2+ occurrences" being
+            # the ONLY way to represent 2+; it is, but the converse
+            # (absent implies exactly 1) is what this note pins down.
+            "count_note": (
+                "count is the number of occurrences the ONE row represents; a row representing exactly "
+                "one occurrence never carries it (never 0, never 1) -- absence means one occurrence, "
+                "same as an ordinary uncoalesced event."
+            ),
+            # WP-2(b) fix round 2 (coordinator ruling, item E): this
+            # implementation's cursor is a pure KEYSET position
+            # (`(recorded_at, plane, event_id)`, opaque-encoded) -- it
+            # always resolves to a real position in the total order
+            # regardless of which `event_classes` filter accompanies it,
+            # so a cursor obtained under one filter is accepted under a
+            # DIFFERENT filter too. Contract `AuditQueryRequest.after`'s
+            # own text ("valid only under the request's own filters") is
+            # an UPPER bound on what an implementation must guarantee, not
+            # a floor an implementation may not exceed -- a MORE permissive
+            # cursor (valid under any filter) is conformant, and the
+            # contract's own next sentence explicitly leaves reuse across
+            # filters undefined by that version rather than forbidding it.
+            "cursor_note": (
+                "cursor is a filter-independent position token (a keyset position in the total order, "
+                "opaque-encoded) -- it always resolves, and may be reused as 'after' under a different "
+                "event_classes filter than the one that produced it."
+            ),
         }
 
     def register_application(self, secret: str | None, application_id: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
@@ -896,6 +1071,132 @@ class ControlPlaneService:
         self._authorize_role(context, operation, request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
         self._gate_must_rotate(context, operation, request_id=request_id)
         return self._set_credential_state(context, credential_id, enabled=enabled, operation=operation, request_id=request_id)
+
+    def audit_query(self, secret: str | None, request: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
+        """Phase 4 WP-2(b) (design D-5/D-6). Processing order: `audit_
+        requests_per_minute` (its OWN window, never `control_requests_
+        per_minute`) -> application-credential probe (identified FORBIDDEN,
+        BEFORE the control-credential store ever sees this secret -- see
+        `_deny_application_credential_on_audit_query`'s own docstring for
+        why the ordering matters) -> ordinary control/audit authentication
+        -> role authorization (`_AUDIT_ROLE_ALLOWED_OPERATIONS` now
+        includes `audit_query`) -> must_rotate gate -> `CAPABILITY_
+        UNSUPPORTED` when no reader is configured (D-5 M-4: the route
+        answers this AFTER authenticating, never a bare 404) -> request
+        shape/semantic validation -> the real read.
+        """
+        request_id = request_id or _uuid()
+        if not rate_precharged:
+            self._check_audit_rate()
+        # D-5's own authority-separation requirement: probe the
+        # APPLICATION-credential universe first. If this secret genuinely
+        # authenticates there, deny it here -- attributed, `FORBIDDEN` --
+        # without ever presenting it to `self._authenticate` below (which
+        # would otherwise durably record an unattributed `AUTH_INVALID`
+        # denial for a secret that, in fact, belongs to a real credential,
+        # a confusing and duplicative record for one request).
+        app_context = self._backend.authenticate_application(secret)
+        if app_context is not None:
+            self._deny_application_credential_on_audit_query(app_context, request_id=request_id)
+        context = self._authenticate(secret, request_id)
+        self._authorize_role(context, "audit_query", request_id=request_id)
+        self._gate_must_rotate(context, "audit_query", request_id=request_id)
+        if self._audit_reader is None:
+            self._deny_audit_capability_unsupported(context, request_id=request_id)
+        if not isinstance(request, dict):
+            fail("VALIDATION_FAILED", "AuditQueryRequest must be an object.")
+        event_classes = self._validate_audit_event_classes(request.get("event_classes"))
+        after = self._validate_audit_after(request.get("after"))
+        limit = self._validate_audit_limit(request.get("limit"))
+        rows = self._audit_reader.query(event_classes=event_classes, after=after, limit=limit, visibility_lag_ms=self._audit_visibility_lag_ms)
+        return {"events": [self._shape_audit_query_row(row) for row in rows]}
+
+    def _validate_audit_event_classes(self, value: Any) -> list[str] | None:
+        # D-6: `event_classes` is a FILTER, not a vocabulary check -- an
+        # unknown class is never `VALIDATION_FAILED`, it simply matches no
+        # row (D-7: the vocabulary is declared, not contract-enumerated).
+        if value is None:
+            return None
+        if not isinstance(value, list) or len(value) > _MAX_AUDIT_QUERY_EVENT_CLASSES or not all(isinstance(item, str) for item in value):
+            fail("VALIDATION_FAILED", f"event_classes must be an array of at most {_MAX_AUDIT_QUERY_EVENT_CLASSES} strings.")
+        return value
+
+    def _validate_audit_after(self, value: Any) -> tuple[Any, str, str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            fail("VALIDATION_FAILED", "after must be a string.")
+        try:
+            return decode_cursor(value)
+        except ValueError:
+            fail("VALIDATION_FAILED", "after is not a valid opaque cursor.")
+            raise  # unreachable; fail() always raises
+
+    def _validate_audit_limit(self, value: Any) -> int:
+        if value is None:
+            return self._audit_default_limit
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > self._audit_max_limit:
+            fail("VALIDATION_FAILED", f"limit must be an integer between 1 and {self._audit_max_limit}.")
+        return value
+
+    def _shape_audit_query_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Turns one reader row (`AuditQueryReader.query`'s own dict shape
+        -- 13 contract `audit.fields` + `count` + `recorded_at` + `plane`)
+        into one `AuditResult.events[]` element: adds the opaque `cursor`
+        (D-6), formats `recorded_at` as ISO-8601, and omits every optional
+        field that is `None` (mirrors `audit.AuditEvent.as_dict()`'s own
+        None-filtering convention -- `events[]` is contract-open, but a
+        `null`-valued key is still needless noise no existing reader emits
+        elsewhere in this codebase)."""
+        recorded_at = row["recorded_at"]
+        cursor = encode_cursor(recorded_at, row["plane"], row["event_id"])
+        out: dict[str, Any] = {
+            "event_id": row["event_id"],
+            "event_class": row["event_class"],
+            "occurred_at": row["occurred_at"],
+            "request_id": row["request_id"],
+            "actor_type": row["actor_type"],
+            "operation": row["operation"],
+            "outcome": row["outcome"],
+            # D-6: `plane` is the read surface's own derived value (which
+            # UNION half a row came from) -- never a stored column a writer
+            # could have set (m-2's own "書き手が指定できてはならない").
+            "plane": row["plane"],
+            "recorded_at": recorded_at.isoformat() if hasattr(recorded_at, "isoformat") else recorded_at,
+            "cursor": cursor,
+        }
+        for key in ("application_id", "actor_id", "role", "target_kind", "reason_code", "target_id", "count"):
+            value = row.get(key)
+            if value is not None:
+                out[key] = value
+        return out
+
+    def _deny_application_credential_on_audit_query(self, app_context: AuthContext, *, request_id: str) -> None:
+        """Contract `control_endpoints.audit_query.semantics`: "Application
+        credentials are denied." Always attributed (`app_context` names a
+        real, currently-active application credential this call already
+        confirmed) -- see `audit_query`'s own docstring for why this must
+        run BEFORE `self._authenticate` ever sees the same secret."""
+        self._deny(
+            code="FORBIDDEN", status=403,
+            message="Application credentials are denied on audit_query; audit evidence requires control or audit authority.",
+            event_class="authorization_denial", operation="audit_query", target_kind="credential",
+            actor_id=app_context.credential_id, actor_type="application_credential", role=app_context.role,
+            application_id=app_context.application_id, request_id=request_id,
+        )
+
+    def _deny_audit_capability_unsupported(self, context: ControlAuthContext, *, request_id: str) -> None:
+        """D-5 M-4: AUDIT DSN not configured -- the route is always
+        registered and always authenticates first (never a bare 404), and
+        this refusal is durably recorded like every other control-plane
+        capability denial (`_deny_role_control`'s identical `CAPABILITY_
+        UNSUPPORTED` precedent)."""
+        self._deny(
+            code="CAPABILITY_UNSUPPORTED", status=400,
+            message="Audit evidence query is not available on this deployment.",
+            event_class="capability_denial", operation="audit_query", target_kind="control_credential",
+            actor_id=context.credential_id, actor_type="control_credential", role=context.role, request_id=request_id,
+        )
 
     # =====================================================================
     # Shared machinery
@@ -1251,6 +1552,40 @@ class ControlPlaneService:
             if len(self._rate_window) >= self._limits.control_requests_per_minute:
                 fail("LIMIT_EXCEEDED", "Control-plane request rate limit exceeded.", status=429, details={"resource": "control_requests_per_minute", "limit_class": "control_requests_per_minute", "limit": self._limits.control_requests_per_minute})
             self._rate_window.append(now)
+
+    def check_audit_rate(self) -> None:
+        """Phase 4 WP-2(b) (design D-5, `check_rate`'s own public-wrapper
+        precedent above): lets `control_http.py` charge `audit_query`'s own
+        window before it even reads a request body, for the SAME
+        `rate_precharged=True` reason `check_rate` documents. A caller that
+        calls this itself and then `audit_query(..., rate_precharged=True)`
+        must not also call `check_rate()` for the same request -- `audit_
+        query` never touches `control_requests_per_minute` at all, by
+        design (M-8 / P4-D4 item 8)."""
+        self._check_audit_rate()
+
+    def _check_audit_rate(self) -> None:
+        """`audit_requests_per_minute` -- a SEPARATE global window from
+        `_check_rate`'s `control_requests_per_minute` above (own lock, own
+        list, own limit field), reusing the identical sliding-window
+        mechanism (never a new one -- work order §6 item 5: "制約・制限の
+        追加で問題を回避しない...新機構を発明しない"). Pre-auth, exactly
+        like `_check_rate` (this window governs BOTH `/control/v1/audit/
+        query` and its `/v1/audit/query` alias, before either path even
+        extracts a bearer token) -- and, identically, never durably
+        audited (rate-limit refusals carry no attributable actor yet; the
+        same "監査増幅の防止" reasoning `_check_rate` documents applies
+        unchanged to this second window).
+        """
+        now = self._clock()
+        with self._audit_rate_lock:
+            self._audit_rate_window[:] = [stamp for stamp in self._audit_rate_window if now - stamp < 60]
+            if len(self._audit_rate_window) >= self._limits.audit_requests_per_minute:
+                fail(
+                    "LIMIT_EXCEEDED", "Audit query request rate limit exceeded.", status=429,
+                    details={"resource": "audit_requests_per_minute", "limit_class": "audit_requests_per_minute", "limit": self._limits.audit_requests_per_minute},
+                )
+            self._audit_rate_window.append(now)
 
 
 def _uuid() -> str:

@@ -17,6 +17,8 @@ counterpart lives in `test_control_plane_service.py`/`test_foundation.py`
 from __future__ import annotations
 
 import ast
+import json
+from importlib import resources
 from pathlib import Path
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
@@ -44,6 +46,9 @@ _CONTRACT_LIMIT_CLASSES = {
     "applications",
     "credentials_per_application",
     "control_requests_per_minute",
+    # Phase 4 WP-2(b) (design D-5, P4-D4 item 8, contract 1.4.0 subordinate
+    # ruling 9): `audit_query`'s own separate pre-auth window.
+    "audit_requests_per_minute",
 }
 
 # `ResourceLimits.check(self, kind: str, actual: int)` (limits.py) is the
@@ -174,3 +179,25 @@ def test_every_limit_exceeded_call_site_declares_a_contract_limit_class() -> Non
         violations.append(f"{finding!r}: limit_class value is neither a string literal nor a known dynamic name ({ast.dump(value_node)})")
 
     assert not violations, "LIMIT_EXCEEDED call site(s) missing/invalid limit_class:\n" + "\n".join(violations)
+
+
+def test_hand_maintained_mirror_equals_the_real_contract_limits_classes_vocabulary() -> None:
+    """WP-1 review supplementary requirement (scratchpad wp2-extra-
+    requirements.md item 3): `_CONTRACT_LIMIT_CLASSES` is a HAND-MAINTAINED
+    mirror of the contract's own `limits.classes` array (this file's own
+    header explains why it is not read live) -- a mirror with no equality
+    check against its source can silently drift the moment the contract
+    gains or renames a class and nobody updates this file's own literal.
+    Reads the PACKAGED contract copy (`r2db_api.contract`, not `spec/`
+    directly) -- the same source `test_http.py::
+    test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`
+    already pins as byte-identical to `spec/`, so either source answers the
+    same question here.
+    """
+    packaged = resources.files("r2db_api.contract").joinpath("data-service-api.v1.json").read_text()
+    contract = json.loads(packaged)
+    real_classes = set(contract["limits"]["classes"])
+    assert _CONTRACT_LIMIT_CLASSES == real_classes, (
+        f"_CONTRACT_LIMIT_CLASSES has drifted from the real contract's limits.classes: "
+        f"missing={real_classes - _CONTRACT_LIMIT_CLASSES!r} extra={_CONTRACT_LIMIT_CLASSES - real_classes!r}"
+    )

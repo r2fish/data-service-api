@@ -115,7 +115,13 @@ os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-http-conformance-import-pl
 from r2db_api import ControlAuthority, DataService  # noqa: E402
 from r2db_api.control_http import create_control_app  # noqa: E402
 from r2db_api.control_main import assemble_control_stack  # noqa: E402
-from r2db_api.credential_store import PostgresControlAuditSink, PostgresCredentialStore  # noqa: E402
+from r2db_api.credential_store import (  # noqa: E402
+    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
+    PostgresApplicationAuditSink,
+    PostgresControlAuditSink,
+    PostgresCredentialStore,
+)
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits  # noqa: E402
@@ -226,6 +232,9 @@ class _Platform:
     control_dsn: str
     api_dsn: str
     controlplane_dsn: str
+    # Phase 4 WP-2(b) (design D-5): the `<prefix>_auditreader` role DSN --
+    # migration `0007_application_audit.sql`'s own read-only surface.
+    auditreader_dsn: str
     schema: str
     platform_db: str
     provision_script: Path
@@ -272,6 +281,9 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     control_role = f"{prefix}_control"
     api_role = f"{prefix}_api"
     controlplane_role = f"{prefix}_controlplane"
+    # Phase 4 WP-2(b) (design D-5): the `auditreader` role migration 0007
+    # creates -- SELECT-only on BOTH `control_audit` and `application_audit`.
+    auditreader_role = f"{prefix}_auditreader"
     platform_db = f"{prefix}_platform"
     schema = f"{prefix}_registry"
     control_password = secrets.token_urlsafe(24)
@@ -287,6 +299,12 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     # role the WP-5 control-plane ASGI app connects as (`control_main.
     # build_control_app`, `__init__` below), never `<prefix>_control`.
     controlplane_password = secrets.token_urlsafe(24)
+    # Phase 4 WP-2(b) (design D-5): `0007_application_audit.sql` needs an
+    # `auditreader_password` to create the SELECT-only `<prefix>_
+    # auditreader` role -- this adapter's own `audit_query` reader
+    # (`__init__` below) connects as exactly this role, never `<prefix>_
+    # control`/`<prefix>_controlplane` (D-5's own "別 DSN" requirement).
+    auditreader_password = secrets.token_urlsafe(24)
 
     rewritten: dict[str, Path] = {}
     for name in (
@@ -296,6 +314,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0004_deprovision_application.sql",
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
+        "0007_application_audit.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -306,8 +325,10 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
     _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
+    _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
+    auditreader_dsn = _dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db)
 
     return _Platform(
         prefix=prefix,
@@ -315,6 +336,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         control_dsn=control_dsn,
         api_dsn=api_dsn,
         controlplane_dsn=controlplane_dsn,
+        auditreader_dsn=auditreader_dsn,
         schema=schema,
         platform_db=platform_db,
         provision_script=rewritten["0003_provision_application.sql"],
@@ -820,7 +842,31 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 pepper="synthetic-conformance-pepper-r2db-http-0000",
                 schema=f"{prefix}_registry",
             )
-            self._service = DataService(self._credentials, cell_factory=self._make_cell, control_plane_status="enabled")
+            # Phase 4 WP-2(b) (design D-1/D-6): a REAL Postgres `application_
+            # audit` writer -- the SAME `<prefix>_api` role/DSN `self.
+            # _credentials` above already connects with (migration 0007
+            # grants it INSERT-only on this table). Without this, this
+            # adapter's own fail-closed/buffer-class application-plane
+            # events would stay in-memory only, and C-09 vector 1
+            # (observing a destructive delete through `audit_query`) could
+            # never see them for THIS (HTTP) adapter -- only for the in-
+            # process one.
+            # WP-2(b) review M-7 (major, supervisor ruling 2026-09-03): the
+            # SAME two SESSION-level timeouts the real composition root
+            # (`r2db_api.main.build_app`) sets on this exact writer
+            # connection -- without them, this adapter's own application-
+            # plane writer transactions can stay open unboundedly, which
+            # has no relationship at all to the `visibility_lag_ms` the
+            # control side (`_build_control_stack`, default timeouts too)
+            # declares. Both sides now share the identical default pair.
+            self._application_durable_audit = PostgresApplicationAuditSink(
+                self._platform.api_dsn, schema=self._platform.schema, pool_size=2,
+                statement_timeout_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS, idle_in_transaction_session_timeout_ms=DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
+            )
+            self._service = DataService(
+                self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
+                durable_audit=self._application_durable_audit,
+            )
             self._control = ControlAuthority(self._service)
 
             app = create_app(self._service)
@@ -886,7 +932,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # `rate_limit` already at the port's `_MAX_EXERCISABLE_LIMIT`)
             # -- the fix once THAT margin is exhausted is fixture teardown,
             # not another bump (design ledger, §7).
-            self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200)
+            # Phase 4 WP-2(b): `audit_requests_per_minute` generously
+            # headroomed too -- mirrors `conformance_adapter_r2db.py`'s
+            # identical constant.
+            self._control_limits = ControlPlaneLimits(applications=115, credentials_per_application=5, control_requests_per_minute=200, audit_requests_per_minute=200)
             # `pool_size=2` per store (8 total across the 4 stores) --
             # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT 10` (0006) is
             # the real, enforced ceiling here; the default `pool_size` (4,
@@ -972,6 +1021,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             schema=self._platform.schema,
             pool_size=self._control_pool_size,
             limits=self._control_limits,
+            # Phase 4 WP-2(b) (design D-5): the real `<prefix>_auditreader`
+            # DSN -- `visibility_lag_ms` is derived (D-6 point 3) from the
+            # two writer-connection timeout defaults `assemble_control_
+            # stack` itself falls back to (neither is overridden here, same
+            # as the real composition root's own defaults).
+            audit_dsn=self._platform.auditreader_dsn,
+            audit_reader_pool_size=self._control_pool_size,
         )
         app = create_control_app(service)
         return app, stores
@@ -1261,7 +1317,17 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # UNAVAILABLE` after only a couple of rebuilds.
             self._run(old_client.aclose())
             for store in old_stores:
-                store.close()
+                # WP-2(b) fix round 2 (audit finding m-7): `assemble_
+                # control_stack`'s 5th tuple element (`audit_reader`) is
+                # `None` whenever `audit_dsn` is not given -- this adapter
+                # always passes one (`self._build_control_stack`), so this
+                # guard is currently unreachable here, but `control_main.
+                # build_control_app`'s own identical loop already guards it
+                # this way; matching that discipline here removes the
+                # asymmetry rather than leaving it to rely on this
+                # adapter's own construction-time invariant alone.
+                if store is not None:
+                    store.close()
         actor = self._ensure_control_actor()
         try:
             return self._control_send(method, path, actor, json_body=json_body)
@@ -1702,13 +1768,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 "audit_query is not declared enabled/partial -- there is no bounded buffer to flush on this "
                 "deployment's own declared posture",
             )
-        # Unreachable as of phase 4 WP-1 -- see conformance_adapter_r2db.py's
-        # identical method for why this deliberately does not presume a
-        # specific WP-2 buffer-flush mechanism shape.
-        raise NotImplementedError(
-            f"{self.name}: audit_query is declared enabled/partial but this adapter's flush_audit_buffer() "
-            "has no real implementation yet (WP-2 scope) -- unreachable as of phase 4 WP-1"
-        )
+        # Phase 4 WP-2(b): identical rationale to `conformance_adapter_
+        # r2db.py`'s own `flush_audit_buffer` -- `self._service` (this
+        # adapter's own real, Postgres-backed `DataService`) owns D-4's
+        # bounded buffer and D-3's denial-coalescing windows; there is no
+        # separate HTTP endpoint for this (an adapter-privileged test
+        # hook, not a contract operation, design §8.3).
+        self._service.flush_audit_buffer()
 
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
@@ -2668,8 +2734,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 cell.close()
             self._credentials.close()
             self._write_credentials.close()
+            self._application_durable_audit.close()
             for store in self._control_stores:
-                store.close()
+                if store is not None:  # WP-2(b) fix round 2, m-7 -- see `_privileged_control_send`'s identical guard
+                    store.close()
             self._control_audit_reader.close()
             self._loop.close()
             try:
