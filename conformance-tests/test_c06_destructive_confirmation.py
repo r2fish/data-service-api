@@ -1145,10 +1145,11 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # CURRENT expectation -- stale since WP-5 flipped it (the code below
 # already reflected the flip; only this prose lagged, exactly the kind of
 # drift this vacuity guard exists to catch in the DECLARATION, not to
-# accumulate in its own commentary). As of WP-5, all three registered
-# adapters (`r2db-api`, `r2db-api-http` since WP-3; `MitateDB-api` since
-# WP-5) declare `contract_version: 1.2.0` and take the strict branch; no
-# adapter currently takes the baseline branch. This is deliberately a
+# accumulate in its own commentary). All four registered adapters
+# (`r2db-api`, `r2db-api-http` since WP-3; `MitateDB-api` since WP-5;
+# `MitateDB-api-http` since its own registration) declare a
+# `contract_version` >= 1.2.0 and take the strict branch; no adapter takes
+# the baseline branch. This is deliberately a
 # literal, hardcoded expectation, not derived from anything computed below:
 # a future <1.2.0 peer's registration, or any peer's own version flip, MUST
 # update these two sets in the SAME commit as that change, or this test

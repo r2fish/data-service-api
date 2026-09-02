@@ -443,17 +443,18 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         return list(self._control_audit.events())
 
     # ------------------------------------------------------------------
-    # audit_query surface (port v1.8, phase 4 WP-1). This WP does not
-    # implement a real audit_query on `ControlPlaneService` (that is WP-2's
-    # own scope) -- `capabilities()` (L607 as of this WP) always declares
-    # `audit_query: {"status": "unavailable"}`, so `_audit_query_status()`
-    # below always reads `"unavailable"` here, and every one of the three
-    # methods below always takes the `SurfaceAbsent` declare-first branch
-    # for now. They are written against the REAL, eventual dispatch shape
-    # (reading the live declaration, then presenting a real request) so
-    # that WP-2's flip needs no further port-adapter restructuring here --
-    # only `ControlPlaneService.capabilities()`/`.audit_query()` need to
-    # start telling a different, real story.
+    # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
+    # `ControlPlaneService` now declares `audit_query: {"status":
+    # "enabled", ...}` (the real in-memory reader wired in `__init__`
+    # above), so `_audit_query_status()` reads `"enabled"` and every one of
+    # the three methods below takes the PROVIDED branch. They were written
+    # in WP-1 against the REAL, eventual dispatch shape (read the live
+    # declaration, then present a real request), so WP-2(b)'s flip needed
+    # no port-adapter restructuring here -- only `ControlPlaneService.
+    # capabilities()`/`.audit_query()` began telling a different, real
+    # story. The `SurfaceAbsent` declare-first branch is retained and is
+    # still the correct dispatch for a deployment that declares no audit
+    # surface.
     # ------------------------------------------------------------------
 
     def _audit_query_status(self) -> str:

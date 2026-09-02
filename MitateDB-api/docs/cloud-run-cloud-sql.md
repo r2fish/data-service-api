@@ -38,27 +38,71 @@ value (`docs/security/public-repository-policy.md`).
 ## 0. Topology this runbook builds
 
 ```
-                         ┌─────────────────────────┐
-  mitate-application ──▶ │ Cloud Run: mitatedb-data │──▶ Cloud SQL
-  (its own service       │ mitatedb_api.main:app    │    (mitatedb_platform +
-   account only)         │ /v1/*                    │     one DB per app)
-                         └─────────────────────────┘
-                         ┌─────────────────────────┐
-  operator (IAM-gated,   │ Cloud Run: mitatedb-ctrl │──▶ Cloud SQL
-  --no-allow-unauth.) ──▶│ mitatedb_api.control_    │    (mitatedb_platform
-                         │ main:app  /control/v1/*  │     registry only)
-                         └─────────────────────────┘
+                        ┌──────────────────────────┐
+  mitate-application ──▶│ Cloud Run: mitatedb-data │──▶ Cloud SQL
+  (its own service      │ mitatedb_api.main:app    │    as mitatedbsvc_api:
+   account only)        │ /v1/*                    │    - one DB per app
+                        │  incl. /v1/audit/query   │    - registry SELECT
+                        │  -> CAPABILITY_UNSUPP.   │    - application_audit
+                        └──────────────────────────┘      INSERT-only
+                        ┌──────────────────────────┐
+  operator (IAM-gated,  │ Cloud Run: mitatedb-ctrl │──▶ Cloud SQL
+  --no-allow-unauth.) ─▶│ mitatedb_api.control_    │    as mitatedbsvc_
+                        │ main:app                 │    controlplane:
+                        │ /control/v1/*            │    - registry r/w
+                        │  + /control/v1/audit/    │    - control_audit
+                        │      query               │      INSERT-only
+                        │  + /v1/audit/query       │
+                        │      (alias, SAME        │──▶ Cloud SQL
+                        │       handler)           │    as mitatedbsvc_
+                        └──────────────────────────┘    auditreader
+                                                        (MITATEDB_AUDIT_DSN,
+                                                         optional):
+                                                        - SELECT-only on
+                                                          control_audit +
+                                                          application_audit
 ```
 
 Two separate Cloud Run services from the SAME container image (`docker/
 Dockerfile`, `SERVICE=data` / `SERVICE=control`) -- design R-6/R-9's own
 "独立 ASGI app...既定は分離" default. Both connect to the SAME Cloud SQL
-instance's `mitatedb_platform` database, as two DIFFERENT PostgreSQL roles
+instance's `mitatedb_platform` database, as DIFFERENT PostgreSQL roles
 with disjoint grants (`mitatedbsvc_api` read-only on `applications`/
-`credentials`, nothing on `control_credentials`/`control_audit`;
+`credentials`, nothing on `control_credentials`/`control_audit`, and since
+migration `0005` INSERT-only on `application_audit`;
 `mitatedbsvc_controlplane` read/write on `applications`/`credentials`/
-`control_credentials`, INSERT-only on `control_audit` -- migration `0002`,
-design R-4's own process-role separation).
+`control_credentials`, INSERT-only on `control_audit`, nothing at all on
+`application_audit` -- migrations `0002`/`0005`, design R-4's own
+process-role separation). The control service additionally holds a THIRD,
+optional connection as `mitatedbsvc_auditreader` (SELECT-only on both audit
+tables, `MITATEDB_AUDIT_DSN`, §3.2b) -- that is the only role in this
+topology that can read an audit table back over the network, and neither
+process role can.
+
+**The control service now serves a path outside the `/control/v1/*`
+prefix.** `POST /v1/audit/query` on `mitatedb-ctrl` is an ALIAS of
+`POST /control/v1/audit/query` -- the same handler, kept for one minor
+because contract 1.4.0 moved `audit_query`'s canonical classification to
+`control_endpoints` (item 7). It is registered whether or not
+`MITATEDB_AUDIT_DSN` is set. Consequence for deployment policy: **an edge
+rule, LB path matcher, or ingress restriction expressed over
+`/control/v1/*` alone no longer covers the whole control surface** -- it
+leaves `/v1/audit/query` on the control host outside the boundary, and that
+path reads `control_audit`. Express the restriction over the SERVICE (which
+`--no-allow-unauthenticated` plus the operator-only invoker binding of §6.2
+already does here) or over both prefixes. The identically-spelled path on
+`mitatedb-data` is a DIFFERENT endpoint and is unchanged: it authenticates
+an application credential and answers `CAPABILITY_UNSUPPORTED`, a true
+statement about a host that does not provide the audit surface -- pinned by
+`MitateDB-api/tests/test_http.py::test_declared_unavailable_endpoints_deny_
+uniformly_after_auth`, which parametrizes over `POST /v1/audit/query` among
+the data service's other declared-unavailable endpoints and fixes both the
+post-authentication `CAPABILITY_UNSUPPORTED` and the unauthenticated
+`AUTH_*`-first ordering. Do not
+"unify" them by routing the data service's `/v1/audit/query` to the control
+service -- that would put control/audit credential traffic onto the
+application-facing service, which is exactly the separation this topology
+exists to keep.
 
 ### 0.1 Operational deviation record -- current deployment (2026-09-01)
 
@@ -246,9 +290,10 @@ psql "host=127.0.0.1 port=5432 dbname=postgres user=postgres" -c \
 
 ### 3.2b Application-plane durable audit sink + `audit_query` reader (migration `0005`, Phase 4 WP-3(a)/WP-3(b))
 
-**Minimal note -- full runbook integration (capacity monitoring, retention,
-`audit_requests_per_minute` sizing worksheet) is WP-4 scope, not this
-section.**
+Migration and wiring below; the operational parts -- capacity thresholds,
+the five fixed alert messages, `audit_requests_per_minute` sizing, manual
+retention, and reading evidence during a Cloud SQL outage -- are §3.2c-§3.2f
+immediately after it.
 
 Run once, after `0002`, as the SAME `mitatedbsvc_provision` role/connection:
 
@@ -319,6 +364,210 @@ service (a separate process) cannot read the data-plane process' own live
 side, this declaration must be updated to match by hand (there is no
 env-var knob for it today) -- exactly the same "both processes must agree"
 caveat this section's own `visibility_lag_ms` note above already carries.
+State the rule for both values as one rule: **if you change the value, you
+have changed the declaration, and the declaration must be changed with it.**
+
+### 3.2c Sizing the `audit_requests_per_minute` window
+
+One `audit_query` call returns one page, so a consumer's steady-state cost
+is `60000 / <declared visibility_lag_ms>` requests per minute -- about
+**5.5 req/min per consumer** at the default 11000 ms lag, since polling
+faster than the lag cannot surface anything sooner. The default of `60`
+therefore supports roughly **ten** concurrently polling audit consumers.
+
+```
+audit_requests_per_minute  >=  ceil(<concurrent audit consumers>
+                                    * 60000 / <visibility_lag_ms>)
+                               + headroom for catch-up
+```
+
+Two corrections to that naive product. (i) **Catch-up is paging, not
+polling**: a consumer resuming after an outage walks the cursor one page per
+request until a page comes back empty, so draining N backlogged events at
+`limit` per page costs `N/limit` requests issued as fast as it can -- far
+above steady state. (ii) **The accepted range is `[1, 200]`**
+(`ControlPlaneLimits.__post_init__`, shared with the other request-count
+classes), so past roughly 36 steady-state consumers, or on any catch-up
+burst wanting more than 200 requests in a minute, the **range ceiling binds
+before the default does**. That ceiling follows from folding the new class
+into the existing range instead of inventing a second mechanism; raising it
+is a design change, not a configuration change. **That ceiling is specific
+to this peer** -- `r2db-api`'s own `ControlPlaneLimits.__post_init__`
+validates only "positive integer" and has no upper bound, so the equivalent
+change there is a single env var. The contract declares no range for this
+class, so both peers conform; the asymmetry is recorded in
+`security/CONTROL_MAPPING.md`'s SI-08 row. Exceeding the window is a
+plain `LIMIT_EXCEEDED` refusal that costs only time -- the consumer's cursor
+stays valid and it resumes exactly where it stopped. In every case a
+break-glass `revoke_credential` is unaffected: `audit_query` never touches
+`control_requests_per_minute` (`MitateDB-api/tests/test_audit_query.py::
+test_audit_query_wire_calls_never_consume_the_control_requests_per_minute_
+window`).
+
+**Invariant 1 applies here too**: this window, like
+`control_requests_per_minute`, is an in-process counter, so
+`--max-instances=1` on `mitatedb-ctrl` (§6.2) is what keeps its declared
+`enforced` status true.
+
+### 3.2d Cloud SQL capacity thresholds (row size x row count x M)
+
+**Row size.** `0005`'s per-column `length` CHECKs cap the eleven bounded text
+columns at `64 + 256 + 256 + 64 + 256 + 64 + 64 + 64 + 32 + 128 + 256 =
+1504` characters in total; adding `event_id`, the two timestamps, `count`,
+`audit_seq` and per-tuple overhead, **budget 2 KiB as a hard per-row upper
+bound**. No application input can exceed it -- the CHECK rejects the INSERT
+(`MitateDB-api/tests/test_application_audit.py::test_api_role_cannot_insert_
+a_value_longer_than_the_length_check`).
+
+**Row count per instance.**
+
+| source | bound per instance |
+|---|---|
+| fail-closed operations | 1 row per user operation (+1 `error` row if the data commit fails) |
+| coalesced denials | **2** rows per coalescing key per 60s window -- first synchronous row + window-end aggregate row; never 1 |
+| buffered ordinary successes | at most `MITATEDB_AUDIT_BUFFER_CAPACITY` (default 1000) in flight |
+| buffer-overflow alerts | at most 1 row per flush interval (`MITATEDB_AUDIT_FLUSH_INTERVAL_S`) |
+
+**Multiply by M.** Coalescing counters and the buffer are **process-local**,
+so deployment-wide the ceilings are `2 x <keys> x <windows> x M` and
+`<buffer capacity> x M`, where **M is `mitatedb-data`'s own
+`--max-instances`**. Note the asymmetry with the control service: `mitatedb-
+ctrl` is pinned to `--max-instances=1` by Invariant 1, but `mitatedb-data`
+is not, so **M here is the data service's scaler maximum**, and that number,
+not the per-process default, belongs in the arithmetic.
+
+```
+bytes/hour  ~=  2 KiB * M * ( <ops/hour>
+                            + 2 * <distinct denial keys> * 60
+                            + 3600 / <flush interval seconds> )
+```
+
+Alert on **growth rate**, not absolute size (absolute size is a retention
+decision, §3.2e):
+
+```sql
+-- as mitatedbsvc_provision (schema owner); sample periodically, alert on delta
+SELECT pg_total_relation_size('mitatedb_registry.application_audit') AS application_audit_bytes,
+       pg_total_relation_size('mitatedb_registry.control_audit')     AS control_audit_bytes;
+```
+
+This matters beyond housekeeping: `mitatedb_platform` also holds the
+credential store for **every** application, so filling the instance's disk
+stops authentication platform-wide -- the availability side of SI-00, and the
+reason the row-size and row-count bounds exist at all. On Cloud SQL, pair the
+query above with the instance's own storage-utilization metric and keep
+automatic storage increase enabled.
+
+**The five fixed alert messages.** The audit pipeline emits exactly five
+`logging.error` messages, all fixed strings with **no interpolation** (no
+client-supplied value can reach Cloud Logging through them). They are
+defined in one place, `src/mitatedb_api/audit_dispatch.py` (the three
+buffer/alert messages at L82-84, the two coalescing messages at L85-86,
+emitted from `_note_aggregate_write_result`, L438). Build a logs-based
+metric/alert on exact-string match for **each of the five** -- they are two
+independent evidence-loss channels, and alerting on only the first three
+leaves the coalescing channel silent:
+
+| message (exact) | meaning |
+|---|---|
+| `application_audit buffer overflow: events were dropped` | evidence loss has ALREADY happened: the bounded buffer evicted its oldest events |
+| `application_audit overflow-alert row could not be written; retrying with backoff` | the in-band alert row itself cannot be written -- both channels failing at once; retry is sticky with exponential backoff to a 60s ceiling |
+| `application_audit overflow-alert row recorded; pending overflow cleared` | recovery of the pair above: the alert row landed and the accumulated drop count is in its `count` |
+| `application_audit coalesced-denial summary row could not be written; retrying` | the window-end aggregate row of a coalesced denial is not landing. The first, synchronous row of that window IS durable, but the **repeat count is stranded in memory** -- and because the writer holds INSERT only, that first row's `count` can never be amended later (§3.2d, design P4-D6). That row is the only carrier of "how many times", so a stuck aggregate row is evidence loss even though nothing is refused |
+| `application_audit coalesced-denial summary row recorded; retry cleared` | recovery of the pair above: the aggregate row landed and the stranded repeat count is now in its `count` |
+
+Both retrying/recovered pairs fire only on a failing<->healthy **state
+transition** (never once per attempt), the same logging-DoS discipline the
+overflow alert uses.
+
+**Known sharpness, both peers**: the flush "failing" flag clears only when
+the buffer fully drains, so under continuous load it can stay set after the
+sink has actually recovered, holding the alert re-fire interval at the 60s
+backoff ceiling. No evidence is lost (the drop counter keeps accumulating and
+is reported in the eventual alert row's `count`), but **do not read a gap
+between messages as recovery** -- read the recovery message of the pair
+concerned (the third message for the buffer/overflow channel, the fifth for
+the coalescing one).
+
+### 3.2e Retention and pruning (manual, external, deliberately unautomated)
+
+Nothing in `mitatedb_api` ever deletes an audit row, and no process role can:
+`mitatedbsvc_api` has INSERT only, `mitatedbsvc_controlplane` has INSERT on
+`control_audit` only, `mitatedbsvc_auditreader` has SELECT only. Pruning is a
+**schema-owner (`mitatedbsvc_provision`) operation performed by an
+operator** -- the contract's `audit.immutability` "externally governed where
+required by the deployment" shape (design D-11/§10: automatic pruning is
+explicitly out of scope, not merely unimplemented).
+
+Step 1 -- **EXPORT the window first; step 3 is irreversible.** There is no
+CLI reader for `application_audit` (§3.2f: `python -m mitatedb_api.ops
+audit-report` reads `control_audit` ONLY, and needs `MITATEDB_PROVISION_DSN`
+-- the schema owner, not `mitatedbsvc_auditreader` and not the control-plane
+role, which is INSERT-only on that table). Export this table directly, as
+`mitatedbsvc_auditreader` (`MITATEDB_AUDIT_DSN`) or as the schema owner:
+
+```
+psql "$MITATEDB_AUDIT_DSN" -c "\copy (SELECT * FROM mitatedb_registry.application_audit \
+  WHERE recorded_at < now() - interval '365 days' ORDER BY recorded_at, event_id) \
+  TO '<export path>' WITH (FORMAT csv, HEADER)"
+```
+
+Store the export wherever the retention policy says evidence lives, and
+verify it is readable before continuing. When the table being pruned is
+`control_audit` instead, `python -m mitatedb_api.ops audit-report --since ...
+--until ...` (over `MITATEDB_PROVISION_DSN`) is the supported export for that
+one.
+
+```sql
+-- 2. As mitatedbsvc_provision: confirm the blast radius.
+SELECT count(*), min(recorded_at), max(recorded_at)
+  FROM mitatedb_registry.application_audit
+ WHERE recorded_at < now() - interval '365 days';
+
+-- 3. As mitatedbsvc_provision: delete that same window.
+DELETE FROM mitatedb_registry.application_audit
+ WHERE recorded_at < now() - interval '365 days';
+```
+
+The identical three steps apply to `mitatedb_registry.control_audit` with its
+own period. Record what was pruned, when, and by whom -- after the DELETE the
+table no longer evidences it.
+
+### 3.2f Reading evidence while Cloud SQL is unavailable
+
+`audit_query`, the credential store, and both audit tables live in ONE
+database. If `mitatedb_platform` is unreachable, `mitatedb-data` already
+fails at authentication (true before phase 4 -- the durable sink adds no new
+single point of failure) and `audit_query` cannot answer either: **evidence
+is unreadable at exactly the moment it is most wanted.**
+
+The one read path that does not depend on the control HTTP app, the reader
+role, or `audit_query` is the out-of-band CLI, `python -m mitatedb_api.ops
+audit-report` (§7), which SELECTs directly over **`MITATEDB_PROVISION_DSN`**
+(the schema owner -- `mitatedbsvc_controlplane` is INSERT-only on that table
+and cannot read it back, and `mitatedbsvc_auditreader` is not what this
+command uses). Keep it and its credentials available to operators; it is not
+made redundant by `audit_query`. **Be precise about its scope: `audit-report`
+reads `control_audit` only.** There
+is no CLI reader for `application_audit`; the equivalent out-of-band access
+is a direct `psql` session as `mitatedbsvc_auditreader` (or as the schema
+owner `mitatedbsvc_provision`):
+
+```sql
+SELECT recorded_at, event_class, request_id, application_id, actor_id,
+       operation, target_kind, outcome, reason_code, count
+  FROM mitatedb_registry.application_audit
+ WHERE recorded_at >= now() - interval '1 hour'
+ ORDER BY recorded_at, event_id;
+```
+
+All of these -- the CLI included -- still require the Cloud SQL instance
+itself to be reachable. What they remove is the dependency on `mitatedb-ctrl`
+being up and on `audit_query` being declared `enabled`, not the dependency on
+the database. There is deliberately no second copy of the evidence anywhere
+(external SIEM forwarding is out of scope for this phase, design §10); if a
+deployment needs evidence to survive the database being down, that is an
+export decision it must make for itself under §3.2e.
 
 ### 3.3 Invariant 2 -- application roles are NEVER created via the Users API/Console
 

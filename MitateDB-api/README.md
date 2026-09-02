@@ -73,7 +73,14 @@ when PostgreSQL is unreachable, they fail loudly).
   `add_field`; every other schema operation and every endpoint behind an
   `unavailable` capability (`audit_query`, `application_catalog`) refuses
   uniformly with `CAPABILITY_UNSUPPORTED`, matching its own declaration
-  exactly. **`cross_entity_mutation`, closed phase 3.5 WP-2/WP-3**
+  exactly -- `MitateDB-api/tests/test_http.py::test_declared_unavailable_
+  endpoints_deny_uniformly_after_auth` parametrizes `POST /v1/audit/query`
+  among them and pins both the post-authentication `CAPABILITY_UNSUPPORTED`
+  and the unauthenticated `AUTH_*`-first ordering. (`audit_query` is
+  `unavailable` **on this host**: since phase 4 WP-3(b) it is `enabled` on
+  the control service, which is a different deployment unit making a
+  different, equally true statement about itself -- see the audit note under
+  "What remains reference-only or unimplemented".) **`cross_entity_mutation`, closed phase 3.5 WP-2/WP-3**
   (`docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`): no longer
   `unavailable` -- `POST /v1/data/mutations` executes a real two-pass
   (validate-all-then-execute) atomic unit across `insert`/`update`/`delete`
@@ -159,12 +166,16 @@ real-instance verification procedure for when that changes).
 - **Capability envelope frozen this phase** (design v1.2 §0): `upsert`,
   `contains`/`matches`/`is_null`, `row_addressability`,
   `revision_preconditions`, `idempotency`, `application_catalog`,
-  `audit_query`, and `best_effort_transactions` stay at their current
+  and `best_effort_transactions` stay at their current
   declaration (`unavailable`/`unsupported`). **`cross_entity_mutation` no
   longer belongs on this list**: the requester approved phase 3.5
   (2026-08-31) and it shipped as `partial` in WP-2/WP-3 -- see the "What
   now exists" section above and
-  `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`.
+  `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md`. **Neither does
+  `audit_query`**: phase 4 WP-3(b) shipped it as `enabled` on the CONTROL
+  service (the data service still declares it `unavailable`, truthfully --
+  that host does not serve it), see the audit note at the end of this
+  section and `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`.
 - **Application-plane resource bounds beyond `request_bytes`**: request
   rate, concurrency, and execution-time limits are not implemented at the
   application-code layer on this peer (Cloud Run's own concurrency/
@@ -175,9 +186,26 @@ real-instance verification procedure for when that changes).
   and a **shared/cross-instance control-plane rate window** (needed only
   if the control service ever runs with more than one instance) are all
   deferred future strengthening, not implemented.
-- **Application-plane durable audit sink** and `audit_query` itself are
+- ~~**Application-plane durable audit sink** and `audit_query` itself are
   phase 4 scope -- the control plane's own audit trail (above) is durable
-  and real; the application plane's is not yet.
+  and real; the application plane's is not yet.~~ **Closed, phase 4
+  WP-3(a)/WP-3(b)** (`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`): the
+  application plane now writes to `mitatedb_registry.application_audit`
+  (migration `0005`, `mitatedbsvc_api` INSERT-only, a separate SELECT-only
+  `mitatedbsvc_auditreader` as the only network reader). Fail-closed-class
+  events are committed **before** the data transaction commits -- a sink
+  failure rolls the operation back with `SERVICE_UNAVAILABLE` -- and the
+  backends' `commit()` moved inside the classified `try` so a commit failure
+  produces a durable `error` row for the same `request_id` instead of
+  escaping unclassified. Ordinary query/insert/update successes are recorded
+  too (they previously were not recorded anywhere) via a bounded buffer whose
+  overflow is never silent. The pre-existing 6-field in-memory sink, whose
+  allowlist silently rounds unknown values, is deliberately kept OFF the
+  durable path. `audit_query` is served on the control service at
+  `/control/v1/audit/query` and the `/v1/audit/query` alias, for control and
+  audit credentials only, with `contract_version` now `1.4.0`. Operational
+  procedure is `docs/cloud-run-cloud-sql.md` §3.2b-§3.2f; the evidence table
+  is `security/CONTROL_MAPPING.md`'s SI-14 row.
 - The SQLite backend (`backend_sqlite.py`) remains a local, deterministic
   test double and is never a deployment target (unchanged from the
   original foundation).

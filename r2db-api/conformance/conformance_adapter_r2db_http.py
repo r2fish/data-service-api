@@ -1706,20 +1706,22 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         return [{col: value for col, value in zip(columns, row) if value is not None} for row in rows]
 
     # ------------------------------------------------------------------
-    # audit_query surface (port v1.8, phase 4 WP-1). Real HTTP POST /v1/
-    # audit/query -- against the CONTROL client (`self._control_client`),
-    # never the data-plane client -- once a peer declares audit_query
-    # enabled/partial (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+    # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
+    # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
+    # _control_client`), never the data-plane client (design docs/design/
+    # PHASE4_DURABLE_AUDIT_SINK_V1.md
     # §8.3/D-5: the contract's application-surface path string is served
     # by the control host as an alias of control_endpoints.audit_query,
     # not by the data-plane host at all -- data-plane's own POST /v1/
     # audit/query stays the pre-existing CAPABILITY_UNSUPPORTED stub,
-    # unreached by this method). Every one of the three methods below
-    # always takes the `SurfaceAbsent` declare-first branch as of this WP
-    # (r2db-api's `capabilities()` always declares `audit_query:
-    # {"status": "unavailable"}` until WP-2's flip) -- written against the
-    # real, eventual dispatch shape so WP-2 needs no further restructuring
-    # here.
+    # unreached by this method). Since WP-2(b)'s flip r2db-api's control
+    # host declares `audit_query: {"status": "enabled", ...}` whenever the
+    # reader DSN is configured -- which this adapter's own harness does --
+    # so every one of the three methods below takes the PROVIDED branch.
+    # They were written in WP-1 against this real, eventual dispatch shape,
+    # so the flip needed no restructuring here; the `SurfaceAbsent`
+    # declare-first branch is retained and remains the correct dispatch for
+    # a deployment that declares no audit surface.
     # ------------------------------------------------------------------
 
     def _audit_query_status(self) -> str:

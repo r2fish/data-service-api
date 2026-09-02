@@ -1,6 +1,7 @@
 # フェーズ4 実施設計: application-plane 耐久 audit sink + audit_query
 
-- 版数: v1.4 (2026-09-02。v1.0 = 初版。v1.1 = 起草時の疑義 7 件への監督裁定 R1〜R7 を反映。v1.2 = 独立レビュー (blocker 3 / major 11 / minor 8) 全件採用の監督裁定を反映 — D-1〜D-6・D-10 / §4 R-B / §5 U-1〜U-5 / §6 / §7 全節 / §8 / §9.2・9.3 / §10)
+- 版数: **v1.5 (2026-09-03、WP-4 記録整理)** — 実装完了後の記録を反映。§3 D-4 に buffer flush 失敗時の復元切り詰めの計上規則を追記、§5 に WP 実施中の監督裁定を **P4-D6〜P4-D14** として番号付きで記録、**§9.4 = 各 WP の実装記録・レビュー裁定・変異注入・受理境界**を新設、§9.2 の 11 性質に実在テスト名の対応表を確定、§11 台帳に未解決項目を起票。本文の実装前の言い回し (「新設する」「実装要件とする」) は**当時の設計文として保存**し、実態は §9.4 が記録する
+- 旧 v1.4 (2026-09-02。v1.0 = 初版。v1.1 = 起草時の疑義 7 件への監督裁定 R1〜R7 を反映。v1.2 = 独立レビュー (blocker 3 / major 11 / minor 8) 全件採用の監督裁定を反映 — D-1〜D-6・D-10 / §4 R-B / §5 U-1〜U-5 / §6 / §7 全節 / §8 / §9.2・9.3 / §10)
 - v1.4 (2026-09-02): **依頼者裁定 (直接回答) を反映し §5 を確定形へ** — P4-D1〜P4-D5 を確定、§2 末尾に依頼者の設計原則を記録、本文の「U-x の決着待ち」を全て確定形へ。P4-D5 は監督推奨 (a) から (b) へ変更
 - v1.3 (2026-09-02): 再確認レビューの新規 major 4 件 (N-1〜N-4) 全件採用の監督裁定を反映 — D-2 の allow 単独行の読み / D-3 バッファ類 4 種の非耐久化 / D-6 lag 導出式と両接続への timeout 強制 / 合体・buffer のプロセスローカル性 (§6.1・6.2 / §7.2・7.3 / §9.2 / §9.3)
 - 位置づけ: `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §0「入らないもの」が明示的に繰延べた最後の項目 (application-plane 耐久 audit sink) の実施設計。`docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-6 が control-plane についてのみ先行実施した規律を、application-plane へ持ち込む
@@ -11,6 +12,8 @@
 ---
 
 ## 1. 問題設定と現状
+
+> **v1.5 註 (2026-09-03)**: 本節と §7 が記述する「現状」は**フェーズ4 着手前 (2026-09-02 時点) の状態**であり、当時の問題設定の記録として逐語のまま保存する。実装後の実態は §9.4 (WP 実装記録)、`security/CONTROL_MAPPING.md` の SI-14 行、および両 peer の runbook が正本である。とくに §1.1 の「両 peer とも揮発性である」と §1.5 の「`audit_query` は両 peer ともスタブである」は**現在は真ではない**。
 
 ### 1.1 application-plane の監査は両 peer とも揮発性である
 
@@ -209,8 +212,10 @@ overflow 時は最古から捨て、同時に:
 
 この 2 番目が契約の言う「explicit operational alert」の in-band 実現である。運用側の logs-based alert 設定は runbook の管轄とする。捨てられた件数は、新設する 14 番目の列 **`count`** (「この行が代表する発生回数。NULL = 1」) に載せる (契約 `audit.fields_note` が `audit.fields` を additive 語彙と明記しているため適合)。 **累積の欠落数がちょうど 1 件だった alert 行も同じ規則に従い、`count` は NULL のまま書く** (WP-2(b) レビュー B-1、監督裁定 2026-09-03)。`count` は overflow alert 行と D-3 の合体 denial 行の 2 用途が共有し、それ以外の event では NULL である。
 
-- **壊れるシナリオ**: overflow を黙って捨てると、契約 `sink_failure_policy` 後段の「alert なしの silent discard」に不適合となり、監査に穴があること自体が観測不能になる。
-- **検証方法**: buffer 容量を小さく設定して意図的に溢れさせ、`logging.error` の発火と `security_control_failure` 行がちょうど 1 件耐久記録されることを実測する。
+**flush は swap-out であり、失敗時の復元でも容量を超えない (v1.5 追記、WP-2(a) follow-up `411c034` / WP-3(a) `54318c6`)**: flush は lock 下で pending list を**丸ごと swap-out** する (snapshot して後から前置分を削る形では、定期 flush と閾値 flush が重なったときに同じ event を二重に耐久記録する)。書込みが失敗したら、保持していたバッチを先頭へ戻した上で **buffer を容量まで最古から切り詰める** — さもなければ「復元で容量を超える」経路が bounded buffer の上限そのものを破る。**このとき切り詰められた分は overflow と同じ扱いで `dropped` に計上する** (alert 行の `count` に乗り、固定メッセージの `logging.error` を伴う) — 復元は捨てた事実を消さない。`failing` フラグは buffer が完全に排出されたときにのみ解除する。
+
+- **壊れるシナリオ**: overflow を黙って捨てると、契約 `sink_failure_policy` 後段の「alert なしの silent discard」に不適合となり、監査に穴があること自体が観測不能になる。復元時の切り詰めを `dropped` に計上しないと、同じ穴が「復元」という名前で無音のまま開く。
+- **検証方法**: buffer 容量を小さく設定して意図的に溢れさせ、`logging.error` の発火と `security_control_failure` 行がちょうど 1 件耐久記録されることを実測する。失敗中の flush と並行して push を続け、buffer が容量を超えないことと、切り詰め分が drop として計上されることを実測する。
 
 ### D-5 audit_query は control HTTP app のホスト上で、契約パスを逐語で提供する
 
@@ -389,6 +394,26 @@ SI-14 由来の共通最小集合は本文書 §9 の表で示すが、両 peer 
 **代償として引き受けるもの**: MitateDB 側の emit コストと buffer 圧が増える。visibility lag 下での `audit_query` 全件取得において通常 read が証拠を希釈する。SI-14 の "Does not require" は全 successful read の記録を**不要**としているだけで**禁じてはいない**ため、契約適合性の問題は生じない。
 
 **却下した側とその理由**: 「非対称を許容する」は上記 2 点を失う。「両方記録しない」は r2db の既存挙動と既存テストを後退させる方向であり、証拠の量を減らす変更を「揃える」ためだけに行うことになる。
+
+---
+
+### 5.1 WP 実施中の監督裁定 (v1.5 追記、P4-D6〜P4-D14)
+
+P4-D1〜P4-D5 は依頼者裁定である。以下は **WP-1〜WP-3 の実装・レビュー・受け入れ監査の過程で監督が確定した裁定**であり、いずれも設計本文 (§3/§6/§7) の該当箇所に既に反映済みだが、番号のない裁定が本文に溶けている状態を避けるためここに列挙する。番号は本節で新規に振ったものであり、当時のレビュー記号 (J-1 等) を併記する。
+
+| 記号 | 裁定 | 由来 | 本文の該当箇所 |
+|---|---|---|---|
+| **P4-D6** | 合体 denial は「窓内初回の同期行 + 窓末の集約行」の **2 行**であり、「窓あたり 1 行」ではない。`application_audit` は書き手に INSERT しか与えないので初回行の `count` を後から改訂できない以上、2 行が 1 プロセス・1 窓・1 キーの実効上限である | WP-2(a) レビュー **J-1** (実装者の裁量判断を追認)、2026-09-02 | D-1 有界化 2 / D-3(2) / §9.2 性質 10(ii)。runbook の容量算式は `2 × 窓数 × M` |
+| **P4-D7** | 耐久対象 denial は **包含列挙**である — D-3 表が挙げる 6 コードだけが耐久であり、それ以外は表が名指しした 4 種に限らず**すべて**非耐久 (`CONFLICT`/`PRECONDITION_FAILED`/`SERVICE_UNAVAILABLE`/`AUTH_STATE_UNAVAILABLE` を含む) | WP-2(a) レビュー **J-2**、2026-09-02。除外列挙の読みでは、監査パイプライン自身の失敗が生む `SERVICE_UNAVAILABLE` が新規 denial として再入し 1 操作が耐久 3 行を生む (D-10 禁止条件 (ii) の破れ) ことが実測された | D-2 の「非耐久」/ D-3(1) / §7.2 |
+| **P4-D8** | `count` は「この 1 行が代表する発生回数」であり、契約の "never zero or one" に従う — **繰り返しがちょうど 1 回の集約行も、累積欠落がちょうど 1 件の alert 行も `count` を NULL のまま書く** | WP-2(b) レビュー **B-1**、2026-09-03 | D-3(2) / D-4 |
+| **P4-D9** | buffer の **flush 失敗も alert 対象**とする (eviction による欠落と同格に `dropped` へ計上する) — 「捨てた」のが容量超過か書込み失敗かは、証拠が失われた事実を変えない | WP-2(a) レビュー **J-3** (実装者の裁量判断を追認)、2026-09-02 | D-4 / §7.4 |
+| **P4-D10** | `audit_events` 予約名は**文書化だけでなく実装義務**である (契約 1.4.0 の無条件義務 (a))。予約は `create_entity` だけでなく、**entity 識別子を受け取るあらゆる位置**で効かねばならない | WP-2(b) 受け入れ監査 **C**、2026-09-03 | §1.7 / P4-D4 項目 6。台帳の継承項目はこれで RESOLVED |
+| **P4-D11** | 合体の排他は**キー単位の lock** とし、耐久 I/O を lock 保持のまま行わない。異なる合体キーの denial が互いに待たないことをテストで固定する | WP-2(a) レビュー m-2、2026-09-02 | D-3(2) / §7.2 |
+| **P4-D12** | buffer の flush は **swap-out** で行い、失敗時の復元では **buffer を容量まで切り詰め、切り詰めた分を `dropped` に計上する**。`failing` フラグの解除は buffer が完全に排出されたときのみ | WP-2(a) follow-up (`411c034`) / WP-3(a) レビュー B-2、2026-09-03。snapshot + 後置削除の形は定期 flush と閾値 flush の重なりで同一 event を二重に耐久記録していた (両 peer 共通の欠陥として MitateDB 側レビューで発見され、r2db へ対称に適用) | D-4 (v1.5 追記) |
+| **P4-D13** | `after` cursor は**フィルタ非依存の keyset** とし、その旨を宣言 (`cursor_note`) で公開する。両 peer で同一意味論に揃える | WP-2(b) 受け入れ監査 **F/E**、2026-09-03 | D-6。「同一フィルタ条件下でのみ有効」という v1.1 起草時の表現より強い性質を出荷している |
+| **P4-D14** | 非監査の認証面 (`auth.CredentialStore.peek()`) は **conformance adapter 専用**に限定し、`src/mitatedb_api` パッケージ内部からの呼び出しが一切無いことを AST 走査で機械的に固定する | WP-3(b) レビュー **G**、2026-09-03 | §11 台帳 (経緯と副作用点検) |
+
+これらはいずれも「設計の変更」ではなく、**設計が一段粗く書いていた箇所を実装が踏んで判明した確定**である。再検討する場合は上表の「由来」列の実測事実を出発点にすること。
 
 ---
 
@@ -773,6 +798,26 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
 10. **1 application の侵害が platform DB を無制限に肥大させられない** (レビュー M-5) — (i) api role が長さ制約を超える値を INSERT できない (生の接続で実測)、(ii) 同一の無効 secret の N 連打で増える耐久行が**プロセスあたり**窓あたり最大 2 行 (初回行 + 集約行) に留まる (D-3 の合体。配備全体の上限は窓数 × 最大インスタンス数 M であり、テストは単一プロセスでこの性質を固定した上で、M の織り込みを runbook 側の責務とする — レビュー N-4)、(iii) buffer が上限を超えて成長しない (これも 1 プロセスあたり)、(iv) buffer overflow alert 行自体の emit 頻度が flush 間隔あたり最大 1 行に律速され、eviction/flush 失敗の発生頻度に比例して増えない (WP-2(a) fix round 2 review N-2)。行サイズ × 行数の両方が有界であることをもって、SI-00 の可用性側の露出が閉じていることを示す。
 11. **`plane` は書き手が指定できない** (レビュー m-2) — api role が `application_audit` に INSERT した行は、どのような値を書こうとしても `audit_query` からは必ず `plane="application"` として読み出される (`plane` は行の出所テーブルからの導出値であり、実列ではない)。
 
+#### 9.2.1 11 性質 × 実在テスト (v1.5 確定。作業指示書 §5 の対応表の最終形)
+
+以下のテスト名は**すべて実在を確認済み**である (WP-4 起草時に全数 grep)。作業指示書 §5 の表は発注時点の**予定**名であり、実装が採った名前と食い違う箇所がある — その差分は本表が正本である。とくに `test_migration_0007_applies_after_0006_and_changes_no_existing_grant` は発注書の予定名であり、実装は初回適用と再適用を 2 本に分けた。
+
+| # | 性質 | r2db-api | MitateDB-api |
+|---|---|---|---|
+| 1 | fail-closed by construction | `tests/test_application_audit.py::test_destructive_mutate_is_service_unavailable_when_the_durable_sink_fails`、`::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails`、`::test_denial_response_is_service_unavailable_when_the_first_coalesced_insert_fails` | `tests/test_application_audit.py::test_destructive_delete_is_service_unavailable_when_the_durable_sink_fails_sqlite` / `_postgres`、`::test_schema_operation_is_service_unavailable_when_the_durable_sink_fails_sqlite` / `_postgres`、`::test_denial_response_is_service_unavailable_when_the_first_coalesced_insert_fails_sqlite` (**backend ごとに分割**されている点が r2db との命名差) |
+| 2 | append-only by grant | `::test_api_role_cannot_select_update_or_delete_application_audit`、`::test_api_role_cannot_insert_a_value_longer_than_the_length_check`、`::test_controlplane_role_has_no_privilege_on_application_audit`、`::test_auditreader_role_can_select_both_audit_tables_and_nothing_else`、`::test_migration_0007_applied_for_the_first_time_changes_no_0001_through_0006_grant`、`::test_migration_0007_reapplication_is_idempotent_and_changes_no_existing_grant` | 同名 4 本 + `::test_api_role_can_insert_but_not_read_it_back`、`::test_migration_0005_applies_after_0004_and_changes_no_existing_grant`、`::test_migration_0005_reapplication_is_idempotent`、`::test_new_auditreader_role_has_no_memberships`。既存 `tests/test_control_plane_postgres.py::test_application_plane_role_has_no_privilege_on_control_audit` は**緩めずそのまま緑** |
+| 3 | overflow が alert 行として耐久記録される | `::test_buffer_overflow_emits_logging_error_and_exactly_one_security_control_failure_row`、`::test_buffer_overflow_alert_row_with_exactly_one_drop_writes_no_literal_count_of_one`、`::test_alert_row_rate_is_bounded_to_at_most_one_per_flush_interval`、`::test_alert_insert_failure_is_sticky_with_exponential_backoff_and_does_not_block_operations` | 同名 4 本 + `::test_buffer_overflow_is_reachable_from_the_real_emit_path` (P4-D5 により実 emit 経路から到達可能) |
+| 4 | application credential が `audit_query` で FORBIDDEN | 共通 `conformance-tests/test_c09_audit_evidence.py::test_c09_v3_application_credential_is_forbidden_on_the_control_host_audit_query` (4 adapter)。peer: `tests/test_audit_query.py::test_application_credential_is_forbidden_on_the_control_host_audit_query` | 同じ共通テスト + `tests/test_audit_query.py::test_application_credential_is_forbidden_on_the_control_host_audit_query`、`::test_application_credential_is_forbidden_on_the_control_host_audit_query_over_http` |
+| 5 | emit された `event_class` ⊆ 宣言語彙 | `tests/test_audit_query.py::test_declared_event_classes_cover_every_emittable_class`、`::test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed`、`::test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the_declared_vocabulary_check_red`、`::test_every_known_emission_method_name_is_still_called` | `tests/test_application_audit.py::test_declared_event_classes_cover_every_emittable_class` と `tests/test_audit_query.py::` の同名テスト + `tests/test_application_audit.py::test_durable_path_never_passes_through_the_six_field_rounding_sink`、`::test_declared_event_class_values_are_disjoint_from_the_six_field_sink_rounding_fallbacks` (丸め再混入の回帰ガード) |
+| 6 | fail-closed 類は buffer に載らない / 判定点が確認 choke | `::test_delete_bearing_mutate_never_enters_the_buffer_path`、`::test_dispatch_point_is_the_destructive_confirmation_choke` | 同名 2 本 |
+| 7 | buffer 行の失敗が fail-closed 操作を止めない | `::test_buffer_row_failure_does_not_block_a_fail_closed_operation` | 同名 |
+| 8 | 1 操作 = 耐久 1 行 | `::test_each_data_operation_adds_exactly_one_application_audit_row` | 同名 + `::test_each_data_operation_adds_exactly_one_application_audit_row_for_every_operation_kind` |
+| 9 | commit 失敗が `error` 行を生む / プロセス消失は `allow` 単独 | `::test_failed_data_commit_writes_an_error_row_for_the_same_request_id`、`::test_failed_data_commit_through_dataservice_writes_exactly_two_durable_rows`、`::test_error_row_write_failure_makes_the_response_service_unavailable`、`::test_simulated_process_loss_leaves_the_allow_row_alone` | 同名 3 本 (`through_dataservice` を除く) + `::test_backend_commit_failure_is_classified_and_produces_an_error_row` (commit の try 移設) |
+| 10 | 無制限肥大化の防止 | (i) `::test_api_role_cannot_insert_a_value_longer_than_the_length_check` / (ii) `::test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n`、`::test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one`、`::test_different_denial_keys_do_not_coalesce_together`、`::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`、`::test_capability_unsupported_and_not_found_denials_add_no_durable_row`、`::test_durable_denial_codes_match_the_design_d3_table` / (iii) `::test_buffer_does_not_grow_past_its_configured_bound`、`::test_concurrent_push_during_a_failing_flush_never_grows_the_buffer_past_capacity` / (iv) `::test_alert_row_rate_is_bounded_to_at_most_one_per_flush_interval` | 同名 (ただし (ii) の 5 本目は `::test_capability_unsupported_and_not_found_and_service_unavailable_denials_add_no_durable_row`)。**M (最大インスタンス数) の織り込みは runbook 側の責務**であり、両 peer の runbook で算式として書かれた (`POSTGRES_PROVISIONING_RUNBOOK.md` §15.1 / `cloud-run-cloud-sql.md` §3.2d) |
+| 11 | `plane` は書き手が指定できない | `tests/test_audit_query.py::test_application_audit_rows_always_read_back_as_plane_application`、`::test_ordering_uses_plane_as_a_tiebreaker_not_event_id_alone`、`::test_cursor_boundary_on_identical_cross_table_event_id_has_no_loss_stall_or_duplicate` | 同名 3 本 |
+
+**共通 suite 側** (`conformance-tests/`、全 4 adapter が PROVIDED 分岐): `test_c09_audit_evidence.py::test_c09_v1_fail_closed_events_are_observable_through_audit_query` / `::test_c09_v2_no_forbidden_field_key_or_reusable_secret_value_appears` / `::test_c09_v3_application_credential_is_forbidden_on_the_control_host_audit_query` / `::test_c09_v4_no_audit_mutation_or_deletion_surface_exists` / `::test_c09_declared_enabled_audit_query_actually_answers` / `::test_c09_declared_capability_implies_provided_branch` / `::test_c09_every_control_surface_adapter_takes_the_provided_branch`、`test_c11_response_schema_conformance.py::test_c11_audit_result_reverse_validates_against_the_closed_schema` / `::test_audit_query_request_closed_schema_rejects_an_excess_key` (**後者に `c11_` 接頭辞は無い** — 発注書の予定名との差)。
+
 ### 9.3 更新対象の既存記録 (スコープ内、監督裁定 R7)
 
 以下は本フェーズの**記録 WP のスコープ内**であり、実装と同じフェーズで更新する。
@@ -782,6 +827,78 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
 - **`conformance-tests/CONDITIONS.md` の C-09 行と C-11 行**: C-09 の「not yet executable (common suite) — peer-local evidence only」を executable 化後の実態へ、C-11 の `AuditResult`/`AuditQueryRequest` zero-coverage 記述を実被覆へ更新する。既存行の書式 (どの adapter が PROVIDED でどれが absent かを正直に列挙する) を踏襲する。
 - **配備ドキュメントの構成図とパス一覧** (レビュー m-8): `MitateDB-api/docs/cloud-run-cloud-sql.md` の構成図は control サービスを `main:app /control/v1/*` と記述しており、D-5 で `/v1/audit/query` が加わると陳腐化する。r2db 側の対応する配備ドキュメントも同様。あわせて「control ホストのエッジポリシーは `/control/v1/*` だけでなく `/v1/audit/query` も覆わねばならない」を明記する。
 - **両 peer の runbook**: (i) 新 migration の適用手順 (適用順・実行 role・環境変数名)、(ii) reader role の DSN 設定 (`R2DB_AUDIT_DSN` / `MITATEDB_AUDIT_DSN`) と未設定時に `audit_query` が `unavailable` 宣言のままになること、(iii) **platform DB の容量監視** (M-5 の第 3 段。1 行サイズ上限 × 行数上限を根拠にした閾値設計。**行数上限の算出には最大インスタンス数 M を織り込む** — 合体も buffer もプロセスローカルなので、実効上限は「窓数 × M」および「buffer 容量 × M」である、レビュー N-4)、(iii-b) **監査書込み接続の `statement_timeout` / `idle_in_transaction_session_timeout` の設定値と、そこから導出される `visibility_lag_ms` の関係** (N-3。値を変えたら宣言も変わる)、(iv) **監査ポーリングと rate window の関係** (M-8 / P4-D4 項目 8。窓は `audit_requests_per_minute` として分離されるため break-glass との競合は構造的に解消されるが、推奨ポーリング間隔 = 宣言された `visibility_lag_ms` 以上、および両窓のサイズ設計は runbook の管轄)、(v) **platform DB 障害時の独立した読み取り路は帯域外 CLI のみ**であること (m-6)、(vi) D-11 の保持期間・剪定の操作手順。
+
+### 9.4 WP 実装記録 (v1.5、WP-4 起草)
+
+体裁は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §10 に倣う。基準値はフェーズ3.5 完了時点の **1292 passed / 0 failed / 0 skipped**。
+
+**集計行の出所 (記録)**: 下表の集計行はすべて**監督がリポジトリルートで単独実行して得た実測値**であり (作業指示書 §4 の完了ゲート規律)、各コミット本文に記載されている。本記録 (WP-4) はそれを転記したものであって、起草時に再実行して得た値ではない — 再現するには同じ単独実行手順を踏む必要がある。
+
+| WP | コミット | 集計行 (単独実行) |
+|---|---|---|
+| WP-0 (設計 v1.4 + 作業指示書 v1.2) | `3ec95cf` (merge `b99368d`) | 1292 passed / 0 failed / 0 skipped (基準値確認のみ) |
+| WP-1 (契約 1.4.0 + C-09/C-11 + port v1.8) | `09233dd` (merge `a107f6b`) | **1331** passed / 0 / 0 / **xfailed 1** |
+| WP-2(a) (r2db 耐久 sink) | `2c5288a` (merge `1e643e9`) | **1370** passed / 0 / 0 / xfailed 1 |
+| WP-2(b) (r2db `audit_query` + 1.4.0 flip) | `a1a1409` (merge `13c899a`) | **1419** passed / 0 / 0 / xfailed 1 |
+| WP-3(a) (MitateDB 耐久 sink) | `54318c6` (merge `6df2713`) | **1485** passed / 0 / 0 / xfailed 1 |
+| follow-up 1 (r2db flush swap-out) | `411c034` (merge `afd24ef`) | **1487** passed / 0 / 0 / xfailed 1 |
+| WP-3(b) (MitateDB `audit_query` + 1.4.0 flip + guard 解除) + follow-up 2 (r2db テスト補強 `cb9f7a3`) | `a3571dc` / `cb9f7a3` (merge `e60eb1e`) | **1526** passed / 0 failed / 0 skipped / **xfailed 0** |
+
+xfailed は WP-1 で登録した全体 vacuity guard 1 本であり、WP-3(b) の flip コミットが `xfail(strict=True)` を外して 0 に戻した (作業指示書 §4 の想定どおり)。
+
+#### 9.4.1 WP-1 — 契約 1.4.0 + 共通 suite (`09233dd`)
+
+契約 8 件を単一 1.4.0 束として出荷し、`spec/CCR_DISPOSITION.md` に従属判断 9 を記録。項目 7 (endpoint 分類) は**移動ではなく `endpoints.audit_query` 保持 + `deprecation_note` + `control_endpoints.audit_query` 新設**として実装され、監査の再帰 additive 比較 (キー削除 0 / 型変更 0 / enum・required・閉鎖宣言の退行 0、スカラー変更 3 件のみ) で additive 性を機械確認。port v1.8 (`audit_query` / `flush_audit_buffer` / `audit_visibility_lag_ms`) と `SurfaceAbsent` の意味拡張。
+
+レビュー **0 blocker / 1 major / 3 medium / 3 low**、全数反映: F-1 (major) = C-09 vector 1 の相関キーが契約・設計・両 peer の実 emitter のいずれとも矛盾 / F-2 = `version_binding` 1.4.0 節の「Two」が自身の 3 項目と矛盾 / F-3 = 正本設計 §8.4 が出荷挙動と反対の記述のまま (→ 本文書 §8.4 に訂正註を追加) / F-4 = `AuditResult` の閉鎖を固定する positive control 欠落。変異 6 本 (guard の `strict` 除去・版数の文字列比較化・偽 `enabled` 宣言・全体 guard の弱化・閉鎖検査除去・packaged copy 1 バイト改変) すべて期待どおり。受け入れ監査 13/13 充足。
+
+**受理境界 (この WP で「固定しない」と決めた点)**: C-09 vector 4 は共通 port ABC の**自己言及的な構造検査**であり、adapter ごとに分岐しない — 「peer 側に監査変更面が無い」ことの証拠ではない。共通 suite に置ける形の限界として開示し、peer 観測は各 peer の suite の管轄とした (`conformance-tests/CONDITIONS.md` C-09 行に明記)。
+
+#### 9.4.2 WP-2(a) — r2db 耐久 sink (`2c5288a`)
+
+migration 0007、`ApplicationAuditHook` を `StorageBackend.transact`/`apply_schema` の commit 前に露出、リクエスト構造による振り分け、合体 denial、bounded buffer + alert、両 composition root の timeout 配線。宣言は不変 (1.3.0 / `audit_query` unavailable)。
+
+レビュー **1 blocker / 3 major / 3 minor**、全数反映。B-1 (blocker) = 1 操作が耐久 3 行を生む (D-10 禁止条件 (ii) の破れ) — 監査パイプライン自身の失敗が生む `SERVICE_UNAVAILABLE` が新規 denial として再入していた。**これが P4-D7 (包含列挙) の決定根拠**である。B-2 = 合体初回 INSERT が並行時に fail-closed でない / M-1 = composition root の timeout 配線が無テスト (変異 2 本が生存) / M-2 = buffer に閾値 flush 契機が無い。実装者の裁量判断 3 件 (J-1 = 合体 2 行、J-2 = 除外列挙の読み、J-3 = flush 失敗も alert) はレビューで設計原文と突き合わされ、**J-1/J-3 は追認、J-2 は包含列挙へ是正**された (→ P4-D6/D7/D9)。変異 8 本中 6 本が期待どおり赤、2 本 (timeout 配線削除) が生存し M-1 の根拠となった。受け入れ監査はさらに 3 ラウンド回り、major 2 件 (二重計上・alert 行の無制限化) と requeue/overwrite 経路を閉じた。
+
+**運用上の事故 (記録)**: 変異復元時に backup を取り忘れ、fallback の `git checkout` が実装者の変更を一度消した。レビュー開始時に採取した `git diff` 全文から逐語復元し `git diff --stat` の完全一致を確認して復旧。作業指示書 §6-10 の「変異注入は scratchpad へ復元する (`git checkout` は使わない)」はこの事故の後、以後の全 WP で例外なく守られている。
+
+#### 9.4.3 WP-2(b) — r2db `audit_query` + 1.4.0 flip (`a1a1409`)
+
+control ホストの 2 パス、`r2dbsvc_auditreader` による UNION 読み、不透明 keyset cursor、`audit_requests_per_minute` 専用窓、`control_capabilities.audit_query` 宣言、両 plane の `contract_version` 1.4.0 flip。
+
+レビュー **7 major / 7 minor**、全数反映: B-1 = 合体集約行が `count = 1` を出す (→ **P4-D8**) / B-2 = 1.4.0 宣言に対し `audit_events` 予約が不足 (→ **P4-D10**) / M-3 = 宣言語彙の AST 走査が 6 emit サイトを見ていない / M-4 = 「control 窓を消費しない」が HTTP 層で無固定 / M-5 = audit 窓の pre-auth 性が無固定 / M-6 = 全順序キーの `plane` が無固定 / M-7 = HTTP conformance adapter の書き手に timeout が無い。変異 11 本中 7 本が赤、**4 本の生存がそのまま M-3〜M-6 の 4 major になった** (変異注入が指摘を生成した唯一の WP)。受け入れ監査 2 ラウンドで 3 件の証拠ギャップ (遅延 tx テストの load-bearing 化、AST の append 形、予約の全位置化) を閉塞。
+
+**発注書スコープ外だが完了条件に必須だった作業 (記録)**: HTTP conformance adapter への migration 0007 bootstrap と実 PostgreSQL の durable_audit 配線は「変更対象」に列挙されていなかったが、完了条件 23 (2 adapter が C-09/C-11 の PROVIDED 分岐を実行する) を満たすには不可欠だった。発注書の変更対象一覧は完了条件の閉包になっていない、という一般的教訓として記録する。
+
+**受理境界**: (i) `coalescing_window_ms` の宣言は control プロセスの単一定数から作られ、data-plane 側の `DataService(denial_coalesce_window_s=...)` 上書きとは機械的に結ばれていない (runbook に「変えるなら宣言も変わる」として記載) / (ii) `visibility_lag_ms` の 2 プロセス整合も同型に無強制 (§11 台帳 + CONTROL_MAPPING SI-14 点 12) / (iii) M-6 の実ベクタは「跨表**同一** event_id」ではない (順序キーの `plane` は固定されたが、衝突そのものは合成していない) / (iv) 契約無条件義務 (b) の「unavailable × audit role」組合せの直接テストは無い。
+
+#### 9.4.4 WP-3(a) — MitateDB 耐久 sink (`54318c6`)
+
+migration 0005 (Cloud SQL 実配備への逐条互換性論証つき)、13 列 emitter の新設 (6 フィールド sink の丸めを耐久経路から排除)、`commit()` の try 内移設 (SQLite は DDL を明示的擬似 tx 化)、P4-D5 の emit サイト新設、`request_id` の HTTP → auth/cell/backend 縦断、swap-out flush。
+
+レビュー **1 blocker / 4 major / 3 minor**、全数反映: B-1 (blocker) = 未認証の client 申告 `credential_id` が耐久行と合体キーに入る (**攻撃者が合体キーを自由に散らせる = 有界化の破れ**) / B-2 = 並行 flush が buffer 類の耐久行を二重に書く — **両 peer 共通の欠陥として発見され、r2db へ対称に適用されたのが follow-up `411c034`** (→ P4-D12) / M-1 = WP-2(a) の M-1 (timeout 配線の無テスト) が対称実装で**再発** / M-2 = 耐久行の `request_id` が全件 `None` で D-2 の識別規則が成立しない / M-3 = `_require_data` の `FORBIDDEN` が D-3 経路に載っていない。変異 17 本中 15 本が赤、2 本が対照・生存。
+
+**「対称実装は前 WP の裁定を発注時点で織り込む」の効き方 (記録)**: 発注書 §2 の教訓どおり WP-2 の裁定は発注に織り込まれたが、**M-1 は再発した** — 織り込みは「同じ指摘を出さない」ことを保証しない。一方 B-2 は逆向きに働き、後発 peer のレビューが先行 peer の潜在欠陥を見つけて follow-up を生んだ。対称実装の価値は指摘数の減少ではなく**両向きの照合**にある。
+
+#### 9.4.5 follow-up 1 — r2db flush swap-out (`411c034`)
+
+`_AuditBuffer.flush()` の snapshot + 後置削除を swap-out へ。失敗時は保持バッチを先頭へ戻した上で容量まで切り詰め、**切り詰め分のみを dropped / alert / 固定ログ行に計上**し、`failing` フラグは buffer が排出されたときのみ解除 (→ P4-D12、本文書 D-4 に v1.5 で追記)。決定的な並行テスト 2 本 (二重書込み / 失敗 flush 下の容量)。読み取り専用レビュー 1 往復 (blocker 1 件をパッチ内で修正)。
+
+#### 9.4.6 WP-3(b) — MitateDB `audit_query` + 1.4.0 flip + guard 解除 (`a3571dc`)
+
+WP-2(b) の対称実装 + 全体 vacuity guard の `xfail` 削除。application credential の副作用なし probe (`CredentialStore.peek`、→ P4-D14)、HTTP adapter の bearer 二重前置バグの修正、共通 vector 1 の `target_kind` 候補集合の開示的拡張。
+
+レビュー **0 blocker / 4 major / 5 minor**、全数反映。**4 major はすべて「テストの空振り」** — A/B = 順序・cursor の `plane` を固定しているはずのテストが実際には固定していない (probe で「素で緑・変異で赤」を作って実装は正・テストが空振りと確定) / C = `visibility_lag_ms` の**適用**を固定するテストが 1 本も無い / D = 共通テストの `_LIKELY_DESTRUCTIVE_OPERATIONS` への `"transact"` 追加が不要かつ未開示。変異 29 本 (うち無効変異 2 本、probe 4 本) を実行し、生存 7 本がそのまま指摘 A/B/C/D/E/G/I になった。受け入れ監査は独立に 9 本の変異を実行し 8 本赤、1 本 (`http.py` の `event_class` literal) が緑のまま残り、下記の受理境界となった。
+
+**受理境界 (WP-3(b) の受け入れ監査が「未充足/部分充足」として明示したもの)**:
+1. **`event_class` AST 走査のファイル列挙漏れを機械検出する手段が無い** — `ops.py` は閉じたが、`http.py` の実 emit サイトは走査の外で変異が生存する。現時点の宣言は真 (union は実 literal と一致) なので契約義務違反ではないが、性質 5 の回帰ガードとしては片肺である。**r2db 側も同型**であり、閉じるなら両 peer 同時が筋。
+2. **`peek()` の非監査性は変異で固定されたが、呼び出し元の限定は台帳記録のみ** — 監査時点では機械的固定が無かった。P4-D14 として裁定され、AST 走査テストで固定された。
+3. **composition root が AUDIT DSN 未設定時に `unavailable` を宣言することの peer-local テスト**が MitateDB に無い (service 層のみ固定)。r2db は follow-up `cb9f7a3` でこれを閉じたため、**現時点では非対称**である。
+4. WP-2(b) 完了条件 15 後半 (`..._does_not_import_the_control_credential_store`) の同名対応物が MitateDB に無い (別形の `test_main.py` のテストが同じ分離を固定している)。
+
+#### 9.4.7 follow-up 2 — r2db テスト補強 (`cb9f7a3`)
+
+WP-3(b) 受け入れ監査の対称適用 (テストのみ、製品コード無変更): `event_class` の AST 走査を `src/r2db_api/*.py` 全体へ (手書きファイル列挙を廃止、`ops.py` の直接 `control_audit` 書込みと bare-name 呼び出しを包含)、プロセス内変異による load-bearing 証明と構造被覆テスト、`build_control_app` が `R2DB_AUDIT_DSN` の有無で `audit_query` の宣言を切り替えることを実 HTTP + 実 platform DB で固定。上記受理境界 1 の残余 (`http.py` 相当の emit サイト) は**両 peer とも未閉塞**であり §11 台帳へ起票した。
 
 ---
 
@@ -830,6 +947,18 @@ CLAUDE.md の「If a new capability cannot yet demonstrate an applicable invaria
   呼び出し元は conformance adapter (`src/mitatedb_api` の外) のみである、という設計上の境界を
   機械的に強制する。
 
-WP 実施中に発生した項目をここへ追記する。
+### 11.1 WP-4 起票分 (2026-09-03。すべて本フェーズでは扱わないと裁定済み)
 
-継承分は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §7 を参照 (`audit_events` 予約名の未文書化、識別子受理域の開示ギャップ、json 列の write/read 非対称、wire-level positive-existence check、ほか)。このうち **`audit_events` 予約名の文書化**は P4-D4 の項目 6 として本フェーズで解消される。
+- **L4-1 `operation` / `target_kind` の語彙が宣言されていない (契約 1.5.0 候補)**。共通テスト C-09 vector 1 は、耐久行を「破壊的操作の行」と同定するために `operation` の候補集合 `{delete, mutate}` と `target_kind` の候補集合 `{entity, collection}` を**手で列挙**している。どちらのフィールドも `capabilities.audit_query` の宣言キー集合に含まれないため、この相関は宣言と機械的に結ばれておらず、peer が語彙を変えても共通 suite は気付かない。`event_class` が D-7 で「宣言される語彙」になったのと同じ扱いを `operation`/`target_kind` にも与えれば C-17 系で機械固定できるが、契約変更 (1.5.0) を要する。共通語彙へ統一する案 (`entity` に寄せる) は両 peer の既存 `control_audit` 行と出荷済み語彙を破るため D-7 と衝突し、採れない。(WP-1 受け入れ監査 疑義 3/4、WP-3(b) 受け入れ監査 疑義 2)
+- **L4-2 契約 1.4.0 無条件義務 (b) の適用範囲 (両 peer 同型、契約文言の解釈問題)**。data-plane ホストは `control_plane: enabled` を宣言しつつ control credential store を持たないため、そのホストの `/v1/audit/query` alias に control/audit credential を出すと `AUTH_INVALID` になる。義務 (b) を「control surface の `audit_query` control endpoint に掛かる」と読めば適合、「capabilities 文書を出すそのホストに掛かる」と読めば不適合。**現在は前者の読みで両 peer とも受理されている**。この経路 (control credential × data ホスト) を実測する共通/peer テストは両 peer とも存在しない。次回の契約見直しで文言を締めるか、テストを足すかを決める。(WP-3(b) 受け入れ監査 疑義 1。`security/CONTROL_MAPPING.md` の SI-00/SI-14 行にも記録済み)
+- **L4-3 `failing` フラグの貼り付き (両 peer、minor)**。buffer flush の成功時に `failing` を解除する条件が「buffer が空になったとき」限定であるため、継続負荷下では sink が実際に回復した後もフラグが立ったままになり、alert 行の再発火間隔が最大 60s のバックオフ上限まで開き得る。**証拠は失われない** (欠落数は累積し、最終的な alert 行の `count` に載る) が、運用者が「メッセージが途切れた = 回復した」と読む危険がある。両 peer の runbook に「回復は 3 番目の固定メッセージで読む」として記載済み。構造的に直すなら解除条件を「flush が 1 回成功したとき」へ変える案があるが、それは alert の発火頻度を上げる方向であり本フェーズでは触らない。
+- **L4-4 `audit_requests_per_minute` の既定 60、および受理レンジの peer 非対称**。既定 60 は両 peer 共通で、「宣言 `visibility_lag_ms` 以上の間隔でポーリングする」前提の監査エージェント約 10 体分に相当する。エージェント数の増加、または障害復旧後の cursor 追い付き (ポーリングではなくページングなので所要リクエストが桁違いに増える) で足りなくなる。**このとき取れる手当てが peer で異なる**: r2db の `ControlPlaneLimits.__post_init__` (`r2db-api/src/r2db_api/limits.py`) は「正の整数であること」しか検査せず**上限を持たない**ため、`R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` を上げる**設定変更**で済む (peer 自身のテストが 100_000 を構築・宣言している)。MitateDB は既存 3 クラスと同じ `[1, 200]` を全 request-count クラスに掛けているため、200 超は**コード変更**になる。契約は本クラスに数値レンジを宣言していないので双方適合であり、CLAUDE.md の「同じ安全結果を与えるなら platform-specific control は peer 間で異なってよい」に該当する開示済み非対称である (要求される結果 = 窓が pre-auth かつ control 窓と別であること — これは両 peer が満たす)。窓を広げても監査行は増えない (pre-auth のため無認証 flood は行を生まない)。両 peer の runbook に算式と、この非対称を記載済み。(WP-3(b) 受け入れ監査 疑義 3、WP-4 記録レビュー Blocker)
+- **L4-5 宣言語彙 AST 走査のファイル列挙漏れを機械検出できない (両 peer 同型)**。`event_class` の宣言 ⊇ 実 emit を固定する AST 走査は、r2db は follow-up `cb9f7a3` で `src/r2db_api/*.py` 全体へ、MitateDB は WP-3(b) で `src/mitatedb_api` 全体へ広げたが、**走査が見ていない emit サイトが将来生じたことを検出する手段は無い** (MitateDB の受け入れ監査では `http.py` の実 emit サイトに未宣言 literal を注入する変異が緑で生存した)。現時点の宣言は両 peer とも真であり契約義務違反ではないが、性質 5 の回帰ガードとしては片肺である。閉じるなら両 peer 同時が筋。
+- **L4-6 HTTP conformance adapter の書き手 timeout 設定漏れを検出する共通テストが無い** (両 peer 共通、WP-3(b) レビュー D6)。adapter 側の書き手接続から timeout 配線を落とす変異が緑で生存する。peer 本体の composition root については両 peer とも実測テストがある (`security/CONTROL_MAPPING.md` SI-14 行の点 (12) 参照) ので、宣言の真実性は保たれている。
+- **L4-7 両 peer 間に残る非対称 3 件**。(i) composition root が AUDIT DSN 未設定時に `audit_query: unavailable` を宣言することを固定する peer-local テストは r2db にはある (`test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env`) が MitateDB には無い (service 層のみ)。(ii) WP-2(b) 完了条件 15 後半の `..._does_not_import_the_control_credential_store` と同名の対応物が MitateDB に無い (別形のテストが同じ分離を固定してはいる)。(iii) **`audit_requests_per_minute` の受理レンジ** — MitateDB は `[1, 200]`、r2db は上限なし (L4-4)。(i)(ii) はテスト名レベルの非対称にとどまり実害は見えていない。(iii) は挙動の非対称であり、契約が範囲を宣言していない以上どちらも適合だが、運用者から見ると「同じ窓の広げ方が peer で違う」ことになるので、対称化するか (r2db に上限を入れる案は peer 自身の既存テストが 100_000 を構築しているため単独では通らない)、契約側でレンジを宣言するかは次フェーズの判断事項。
+- **L4-8 C-09 vector 4 の射程**。共通 port の ABC に監査変更面が無いことの構造検査であり、**adapter ごとに分岐しない**。port にメソッドを足さない限り恒久的に緑なので、peer 側に監査変更面が生えたときにこの vector は反応しない。`conformance-tests/CONDITIONS.md` の C-09 行に開示済み。peer 観測形へ作り直すか、射程を port 構造保証に限定すると明示するかは未決。
+- **L4-9 vector 1 の新規 event 同定キーが `event_id` 単独**。本フェーズが出荷した契約自身が「`event_id` は `control_audit`/`application_audit` の UNION では一意でない (だから順序キーに `plane` を入れる)」と述べているのに、共通テストの baseline 差分は `event_id` 単独で新規判定している。実運用の `event_id` 空間 (uuid) では衝突しないため現在は偽陰性を生まないが、契約が明文で否定した一意性に依存している点は `(plane, event_id)` または `cursor` を同定キーにする方が整合する。(WP-1 受け入れ監査 疑義 3)
+
+**継承分の解消**: `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §7 の **`audit_events` 予約名の未文書化は RESOLVED (2026-09-02/09-03)** — 契約 1.4.0 の項目 6 として文書化され、さらに監督裁定 **P4-D10** により「entity 識別子を受け取るあらゆる位置で予約が効く」実装義務 (無条件義務 (a)) としてテストで固定された。文書化だけでなく実装義務まで進んだ点が当初の台帳項目より強い。
+
+その他の継承分 (識別子受理域の開示ギャップ、json 列の write/read 非対称、wire-level positive-existence check、C-03 の `ScopedMutation.entity` 未列挙、ほか) は同 §7 のまま未解消であり、本フェーズは触れていない。

@@ -97,29 +97,31 @@ reporting requirement):
   first. Each provider is its own separate, individually-identified test
   case (`pytest.mark.parametrize`, id = adapter name), so a schema defect
   in a second provider's real document fails distinctly from the first's.
-- `AuditResult` / `AuditQueryRequest` (phase 4 WP-1 update, docs/design/
-  PHASE4_DURABLE_AUDIT_SINK_V1.md §8.2): port v1.8 adds `ConformanceAdapter.
-  audit_query(actor, request)`, a real client-side entry point to the
-  contract's `POST /v1/audit/query`-equivalent operation (control host,
-  design D-5) -- so this file's own reverse-validation/positive-control
-  machinery now has a real path to exercise, closing the "no other method
-  exists that could" gap this section used to record. `test_c11_audit_
-  result_reverse_validates_against_the_closed_schema` (below) runs `audit_
-  query` for EVERY registered adapter (declare-first, per `audit_query`'s
-  own docstring): as of this WP every registered peer still declares
-  `audit_query` `unavailable` (WP-1 does not implement a durable sink or a
-  real `audit_query` on any peer -- that is WP-2/WP-3's own scope), so all
-  four currently take the `SurfaceAbsent` branch, independently
-  re-verified rather than skipped -- this is honestly still ZERO real
-  `AuditResult` document coverage as of WP-1, not a claimed fix; what
-  changed is that a real, adapter-independent path to close the gap now
-  exists and will start validating a genuine document automatically the
-  moment WP-2(b)/WP-3(b) flips a peer to `enabled`/`partial`, with no
-  further change to this file. `test_audit_query_request_closed_schema_
-  rejects_an_excess_key` (below) is a schema-only positive control,
-  independent of any adapter (same style as `test_nested_row_schemas_
-  reject_an_excess_key` below), and needs no real document at all --
-  closing that half of the gap outright, today.
+- `AuditResult` / `AuditQueryRequest` (phase 4; **the last zero-coverage
+  entry in this file, now closed**. docs/design/PHASE4_DURABLE_AUDIT_SINK_
+  V1.md §8.2): port v1.8 adds `ConformanceAdapter.audit_query(actor,
+  request)`, a real client-side entry point to the contract's `POST /v1/
+  audit/query`-equivalent operation (control host, design D-5) -- which
+  closed the "no other method exists that could" gap this section used to
+  record. `test_c11_audit_result_reverse_validates_against_the_closed_
+  schema` (below) runs `audit_query` for EVERY registered adapter
+  (declare-first, per `audit_query`'s own docstring), and **all four
+  registered adapters now take the PROVIDED branch** -- the r2db pair since
+  WP-2(b), the MitateDB pair since WP-3(b) (merge `e60eb1e`, the same commit
+  that removed the whole-registry vacuity guard's `xfail`) -- so a real
+  `AuditResult` document is reverse-validated against the closed schema on
+  every one of them. The `SurfaceAbsent` branch is retained, and still
+  independently re-verified rather than skipped, for a future peer that
+  declares no audit surface at all; no currently-registered adapter reaches
+  it. The additive `events[]` members phase 4 introduced (`plane`,
+  `recorded_at`, `cursor`, and `count` on coalesced-denial/overflow-alert
+  rows only) do not break the closed envelope, because subordinate ruling
+  7(A) left each `events[]` element open while closing `AuditResult` itself
+  -- exactly the property this reverse-validation exercises rather than
+  assumes. `test_audit_query_request_closed_schema_rejects_an_excess_key`
+  (below) is a schema-only positive control, independent of any adapter
+  (same style as `test_nested_row_schemas_reject_an_excess_key` below), and
+  needs no real document at all -- it closed that half of the gap in WP-1.
 """
 from __future__ import annotations
 
@@ -503,9 +505,10 @@ def test_c11_audit_result_reverse_validates_against_the_closed_schema(adapter, f
     immediately above), never silently skipped. A `ConformanceDenial` from
     a genuine control credential is a hard failure here -- a real control
     credential must never be refused its own read-only audit surface. The
-    PROVIDED branch (unreachable as of this WP -- see module docstring)
-    reverse-validates the real `AuditResult` document against the closed
-    schema, exactly as every other schema in this file does.
+    PROVIDED branch -- taken by all four registered adapters since phase 4
+    WP-2(b)/WP-3(b), see module docstring -- reverse-validates the real
+    `AuditResult` document against the closed schema, exactly as every
+    other schema in this file does.
     """
     contract = load_contract()
     control_actor = adapter.control_credential()
@@ -571,9 +574,10 @@ def test_audit_result_closed_envelope_rejects_an_excess_key():
     mutation 5): removing `additionalProperties: false` from `AuditResult`
     left the WHOLE suite green, because `test_c11_audit_result_reverse_
     validates_against_the_closed_schema` (above) is real-document
-    reverse-validation, vacuous as of this WP (every adapter takes the
-    `SurfaceAbsent` branch -- module docstring). This test needs no real
-    document and closes that gap TODAY, independent of any peer flip --
+    reverse-validation, which was vacuous when that mutation was measured
+    (no peer had flipped yet, so every adapter took the `SurfaceAbsent`
+    branch); it is load-bearing on all four adapters today. This test needs
+    no real document and closed that gap in WP-1, independent of any flip --
     same style as `test_audit_query_request_closed_schema_rejects_an_
     excess_key` immediately above and `test_nested_row_schemas_reject_an_
     excess_key` below.

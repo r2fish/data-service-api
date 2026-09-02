@@ -19,8 +19,11 @@ Public behavior should conform to `../spec/` and `../conformance-tests/`. VPS-sp
 `src/r2db_api` models server-bound credentials, application-scoped
 structured operations, finite limits, canonical audit events, and the
 authority topology. `config/authority-topology.yaml` is a deployment
-skeleton: production evidence for identity, network, database grants, and
-an external append-only audit sink remains required.
+skeleton: production evidence for identity, network and database grants
+remains required. (The append-only audit sink itself is no longer pending --
+both planes now have one, backed by PostgreSQL grants rather than by code
+discipline; see the audit note further down and
+`security/CONTROL_MAPPING.md`'s SI-14 row.)
 
 This is still not a production deployment. What has changed since the
 initial in-memory foundation is described below; `security/CONTROL_MAPPING.md`
@@ -142,38 +145,59 @@ production identity/network/database-grant evidence exists yet
   than removed.
 - The connection pool (`postgres.py`'s `_RolePool`) is hand-rolled, not
   `psycopg_pool`.
-- The audit sink failure policy (`spec/data-service-api.v1.json`
-  `audit.sink_failure_policy`: durable, fail-closed recording for
-  authentication/authorization denials, credential/Application lifecycle
-  changes, destructive/privilege-sensitive operations, and security-control
-  failures; bounded-buffer-plus-alert for ordinary data-operation events) is
-  stated by the contract but not yet enforced against a real external sink.
-  `AuditSink` (`src/r2db_api/audit.py`) is still a single in-process,
-  append-only list with no durability boundary to fail against -- there is
-  no bounded buffer, no alerting path, and no fail-closed enforcement tied
-  to sink failure. A production deployment must add both the external sink
-  and the policy's enforcement.
+- ~~The audit sink failure policy ... is stated by the contract but not yet
+  enforced against a real external sink.~~ **Closed, phase 4 WP-2(a)/WP-2(b)**
+  (`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`): the application plane now
+  has a durable sink, `r2dbsvc_registry.application_audit` (migration
+  `0007`), and the policy is enforced against it. Fail-closed-class events
+  (destructive operations through the confirmation choke, every schema
+  operation, lifecycle events, security-control failures, and the six
+  authentication/authorization denial codes) are written and committed on a
+  separate platform connection **before** the data transaction commits, so a
+  sink failure rolls the operation back and answers `SERVICE_UNAVAILABLE`;
+  ordinary data-operation successes ride a bounded buffer (default 1000) that
+  never discards silently -- an overflow emits a fixed-text `logging.error`
+  and a durable `security_control_failure` row carrying the dropped count.
+  `r2dbsvc_api` holds `INSERT` only on that table; a separate SELECT-only
+  `r2dbsvc_auditreader` role is the only network reader. The in-process
+  `AuditSink` (`src/r2db_api/audit.py`) still exists, but only as the record
+  of denials the design deliberately keeps non-durable, not as the plane's
+  only audit trail. Operational procedure (capacity thresholds, alerting,
+  retention, reading evidence during an outage) is
+  `docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15; the evidence table is
+  `security/CONTROL_MAPPING.md`'s SI-14 row.
 - Long-running schema evolution jobs are not implemented by this
   synchronous foundation. A future job capability must define finite
   execution/queue bounds, observable state transitions, cancellation,
   expiry, and rollback semantics before it is advertised.
-- `/v1/audit/query` (the data-plane, application-facing endpoint) still
-  authenticates the caller but always fails with `CAPABILITY_UNSUPPORTED`:
-  `audit_query` itself remains unimplemented (out of CCR-14's own scope --
-  its endpoint/read-access shape is a separate, not-yet-designed decision),
-  and `DataService`'s public facade deliberately exposes no audit accessor
-  for any *application* credential to reach regardless. This is no longer
-  because no control/audit credential type exists at all -- CCR-14 added a
-  `role=control` credential type (above) -- but that type authenticates
-  only against `/control/v1`, a different plane entirely; it is fail-closed
-  against every `/v1` data/schema endpoint, `/v1/audit/query` included
-  (condition C-14), and `/control/v1` itself has no audit-QUERY endpoint of
-  its own either. **Update, phase 3.5 WP-1/WP-4**: a distributable, weaker
-  `role="audit"` control credential now exists and can read `list_credentials`/
-  `list_applications`/`control_capabilities` -- a read-only view of
-  control-plane STATE (never a query over `control_audit` itself, which
-  remains unread by any in-band path) -- see `security/CONTROL_MAPPING.md`'s
-  SI-02/SI-06 rows.
+- `/v1/audit/query` **on the data-plane host** still authenticates the caller
+  and then answers `CAPABILITY_UNSUPPORTED`, and the data plane still
+  declares `audit_query: unavailable` -- deliberately, because that host does
+  not provide the audit surface and says so truthfully. `DataService`'s
+  public facade exposes no audit accessor for any *application* credential to
+  reach, and never will.
+  **Update, phase 4 WP-2(b): `audit_query` itself is implemented, on the
+  control host.** `POST /control/v1/audit/query` (canonical, contract 1.4.0
+  classifies it under `control_endpoints`) and `POST /v1/audit/query` (the
+  same handler, kept as an alias for one minor) read the UNION of
+  `control_audit` and `application_audit` as the SELECT-only
+  `r2dbsvc_auditreader` role, in a total order of
+  `(recorded_at, plane, event_id)`, paged with an opaque per-event cursor,
+  withholding rows newer than a declared visibility lag that is DERIVED from
+  the two audit-writer timeouts rather than asserted. `plane` is derived from
+  the source table, not a column any writer can set. Authority is control or
+  audit credentials only -- an application credential is `FORBIDDEN` -- and
+  the `role="audit"` credential (phase 3.5) is now allowed `audit_query` in
+  addition to its three read endpoints, so a distributable, read-only
+  credential can read the audit trail itself, which was not previously
+  reachable by any in-band path. Both paths are registered whether or not
+  `R2DB_AUDIT_DSN` is configured; unset means an authenticated caller gets
+  `CAPABILITY_UNSUPPORTED`, never a bare 404, and the capability stays
+  declared `unavailable`. `audit_query` consumes its own
+  `audit_requests_per_minute` window and never the control-plane one, so
+  polling for evidence cannot lock out a break-glass `revoke_credential`. See
+  `security/CONTROL_MAPPING.md`'s SI-02/SI-06/SI-08/SI-14 rows and
+  `docs/POSTGRES_PROVISIONING_RUNBOOK.md` §15.
 
 Application-facing code intentionally has no SQL/native-command execution
 surface and no access to Control or Provisioning authorities.

@@ -7,20 +7,20 @@ PHASE4_DURABLE_AUDIT_SINK_WORK_ORDER.md WP-1 (supplementary rulings 1 and
 2). Registered here via `@pytest.mark.condition("C-09")` (module-level
 `pytestmark`).
 
-This is phase 4 WP-1's own new file: it makes C-09 executable through the
+This file was added in phase 4 WP-1: it makes C-09 executable through the
 common conformance port for the first time (`CONDITIONS.md`'s prior status
 for C-09 was "not yet executable (common suite) -- peer-local evidence
-only"). **This WP does not implement a durable audit sink or a real
-`audit_query` on any peer** (that is WP-2/WP-3's own scope) -- every one of
-the 4 vectors below, plus the two guards, dispatches correctly today, and
-the dispatch it takes for all 4 currently-registered adapters is
-`SurfaceAbsent` (design §8.4's own declare-first extension), because every
-adapter's own `capabilities().audit_query.status` is currently
-`"unavailable"`. The PROVIDED branches below are exercised for the first
-time only once a peer flips its own `contract_version` to 1.4.0 and
-declares `audit_query` `enabled`/`partial` (WP-2(b)/WP-3(b)) -- they are
-written now, against the real eventual dispatch shape, so that flip needs
-no further changes to this file.
+only"). **All four registered adapters now take the PROVIDED branch** --
+the r2db pair since WP-2(b), the MitateDB pair since WP-3(b) (merge
+`e60eb1e`, the same commit that removed the whole-registry guard's
+`xfail`) -- so the 4 vectors below and both guards observe a real durable
+audit sink through a real `audit_query`, on every one of them. The
+`SurfaceAbsent` dispatch (design §8.4's own declare-first extension) is
+retained and still correct for a deployment whose own
+`capabilities().audit_query.status` is not `enabled`/`partial`, but no
+currently-registered adapter reaches it. Written when no peer had flipped
+yet, against the real eventual dispatch shape -- so the flips needed no
+change to this file beyond removing that one `xfail`.
 
 Declare-first dispatch (work order WP-1 supplementary ruling 1, mirrored on
 `ConformanceAdapter.audit_query`'s own docstring and `SurfaceAbsent`'s):
@@ -58,9 +58,9 @@ The 4 vectors (design §8.1 / §9.2 property 4):
    §7.5/§8.1 vector 3: two hosts answering differently is not a
    contradiction, since each is stating a true fact about itself) is
    peer-local evidence (`r2db-api`'s/`MitateDB-api`'s own `test_data_plane_
-   host_audit_query_still_refuses_with_capability_unsupported`, WP-2/WP-3
-   scope), disclosed here as a known boundary of what this common-suite
-   vector can mechanically check, not silently assumed proven.
+   host_audit_query_still_refuses_with_capability_unsupported`, shipped in
+   WP-2(b)/WP-3(b)), disclosed here as a known boundary of what this
+   common-suite vector can mechanically check, not silently assumed proven.
 4. **No mutation/deletion surface**: no application-authority-reachable
    operation can author, override, update, or delete audit evidence
    (contract `audit.immutability`). Two layers, neither alone sufficient
@@ -87,18 +87,18 @@ registry-wide loop collecting each adapter's own reason, never a bare
 - `test_c09_declared_capability_implies_provided_branch` -- the INDIVIDUAL
   guard. Always active (no `xfail`): an adapter declaring `contract_version
   >= 1.4.0` (semver-tuple compared, never string-compared) AND `audit_query:
-  enabled`/`partial` MUST take the PROVIDED branch. Vacuously green as of
-  this WP (no adapter yet declares 1.4.0), and load-bearing the instant one
-  does (WP-2(b)).
+  enabled`/`partial` MUST take the PROVIDED branch. Vacuous while no adapter
+  declared 1.4.0; load-bearing since WP-2(b), and now binding on all 4.
 - `test_c09_every_control_surface_adapter_takes_the_provided_branch` -- the
-  WHOLE-REGISTRY guard. Registered here with `@pytest.mark.xfail(strict=
-  True, ...)`: it requires EVERY registered adapter with a control surface
-  (`control_plane` status `enabled`/`partial` -- currently all 4) to take
-  the PROVIDED branch, which is false until the LAST flip WP (WP-3(b)) --
-  `strict=True` means an unexpected green (a premature partial flip, or a
-  weakened guard) fails loudly rather than passing silently. Removing the
-  `xfail` is WP-3(b)'s own responsibility, in the same commit as that
-  flip (work order §2.1 / §6 item 8b).
+  WHOLE-REGISTRY guard. It requires EVERY registered adapter with a control
+  surface (`control_plane` status `enabled`/`partial` -- currently all 4,
+  derived from the registry and each adapter's own declaration, never a
+  hardcoded name list) to take the PROVIDED branch. Registered in WP-1 with
+  `@pytest.mark.xfail(strict=True, ...)` because that was false until the
+  LAST flip; `strict=True` meant an unexpected green (a premature partial
+  flip, or a weakened guard) would fail loudly rather than pass silently.
+  **The `xfail` was removed in WP-3(b)'s own flip commit** (work order §2.1
+  / §6 item 8b), so this guard now runs plain and green.
 """
 from __future__ import annotations
 
@@ -602,8 +602,9 @@ def test_c09_declared_enabled_audit_query_actually_answers(adapter):
 
 def test_c09_declared_capability_implies_provided_branch(adapter):
     """Individual guard (work order WP-1 supplementary ruling 2). Always
-    active -- no `xfail`. Vacuously green as of WP-1 (no adapter declares
-    `contract_version >= 1.4.0` yet); load-bearing the instant one does."""
+    active -- no `xfail`. Vacuous while no adapter declared
+    `contract_version >= 1.4.0`; load-bearing since WP-2(b), and binding on
+    all four registered adapters since WP-3(b)."""
     contract_version, status = _audit_query_declaration(adapter)
     if _semver_tuple(contract_version) < (1, 4, 0) or status not in ("enabled", "partial"):
         return
