@@ -744,6 +744,63 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         )
         return lag_ms
 
+    # port v1.9 (phase 5 WP-1, D-2/CCR_DISPOSITION.md subordinate ruling
+    # 10 item 2, design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_
+    # V1.md §6.2): reaches `http.py::post_audit_query`'s own real body
+    # directly -- `MitateDataService.open_session` (the SAME `auth.
+    # CredentialStore.authenticate` call `HttpService.authenticate` itself
+    # makes first, `service.py`'s own `open_session`) then a `Capability
+    # Error` denial, mirroring `http.py::post_audit_query`'s own second
+    # step -- rather than a mere authentication-surface fallback: this
+    # in-process plug has no ASGI `Request` to route through the real
+    # handler with, but it can call the exact same authenticate entry
+    # point the real handler's own body calls. No declare-first `Surface
+    # Absent` gate for `control_plane` here: every application this
+    # adapter's own `provision_application` (above) provisions is
+    # constructed with `FoundationConfig(control_plane_status="enabled")`
+    # unconditionally -- a fixed fact of this adapter's own harness
+    # construction, never a live-varying declaration the way `audit_
+    # query`'s own status is.
+    def audit_query_on_data_plane_host(
+        self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        # Fix-round F-4 (disclosed limit, CONDITIONS.md C-09 limit (c)):
+        # `MitateDataService.open_session` reaches the SAME `auth.
+        # CredentialStore.authenticate` call `HttpService.authenticate`
+        # itself makes first -- a real product-code call, not hand-
+        # written. `request_id` is not threaded through this in-process
+        # call (this harness call has no ASGI `Request` to read one from).
+        credential_id, secret = self._actor_id_secret(actor)
+        self._call(lambda: self._service.open_session(credential_id, secret))
+        # Unreached by any currently-registered adapter: this foundation's
+        # application-only `auth.CredentialStore` never recognizes a
+        # control/audit credential's id/secret -- a genuinely separate
+        # store from the control-plane one (`control_auth.
+        # ControlCredentialStore`) -- so `open_session` above always
+        # raises AUTH_INVALID first. The SECOND step below, unlike the
+        # first, is HAND-WRITTEN, not a call into a real product
+        # function: `http.py::post_audit_query`'s own second step (`raise
+        # CapabilityError("audit evidence query requires control/audit
+        # authority this peer does not expose here")`) is written inline
+        # in that HTTP handler's own body, with no separate importable
+        # product-code callable this in-process plug could invoke instead
+        # -- unlike r2db-api's own `DataService.deny_unsupported`, a real,
+        # reusable product method this port revision's r2db plug calls
+        # directly. This message is a literal copy of that inline string,
+        # disclosed as a limit (CONDITIONS.md C-09 limit (c)) rather than
+        # left to look like a real call.
+        native = CapabilityError("audit evidence query requires control/audit authority this peer does not expose here")
+        raise ConformanceDenial(code=self.classify(native), adapter=self.name, native_type=type(native).__name__) from native
+
+    # port v1.9 fix-round (F-2/F-3): declares this in-process plug's own
+    # topology fact -- `MitateDataService` (data plane) and
+    # `ControlPlaneService` (control plane) are two genuinely separate
+    # objects on this adapter, each backed by its own separate credential
+    # store (`auth.CredentialStore` vs `control_auth.ControlCredentialStore`)
+    # -- never co-hosted.
+    def control_surface_cohosted_with_data_plane(self) -> bool:
+        return False
+
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability
     # (there is no `deprovision`/`unregister` entry point anywhere on this

@@ -2081,3 +2081,194 @@ of the gap outright today).
   is what makes `_audit_query_status()` always reading `"unavailable"`
   today, not a limitation of the port -- port v1.8 itself imposes no new
   requirement on a peer that has not yet flipped.
+
+## 19. v1.9 port revision (coordinated with docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md phase 5 WP-1)
+
+`docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` §6.2 (D-2) requires
+one new port-level operation so the common suite can observe contract
+1.4.0's unconditional obligation (b), same-label-amended by
+`spec/CCR_DISPOSITION.md` subordinate ruling 10 item 2: a control/audit
+credential presented on the DATA-plane host's own `POST /v1/audit/query`
+alias is not thereby owed acceptance merely because that host also
+declares `control_plane` as something other than `unavailable`. This WP
+does not change any peer's product behavior at all -- both peers' real
+data-plane alias handlers already reject a control/audit credential with
+`AUTH_INVALID` (their application-only credential store never recognizes
+it); this revision only builds the port-side observation path and wires
+all four currently-registered plugs to it.
+
+### 19.1 Two new abstract methods
+
+Added to `ConformanceAdapter` immediately after `audit_visibility_lag_ms()`
+(port v1.8, §18.1), before the `# --- application plane ---` group:
+
+- `audit_query_on_data_plane_host(self, actor: CredentialHandle |
+  ControlCredentialHandle, request: Mapping[str, Any]) -> Mapping[str,
+  Any]` -- presents `request` (the same raw `AuditQueryRequest`-shaped
+  mapping `audit_query` takes) to this peer's DATA-PLANE host's own
+  `POST /v1/audit/query` alias -- never the control host `audit_query`
+  reaches, the mirror image of that method's own "control base URL,
+  never the data-plane one" rule (§18.4/design R1).
+- `control_surface_cohosted_with_data_plane(self) -> bool` -- fix-round
+  addition (F-2/F-3, independent review). Declares, for THIS test
+  harness's own construction, whether the control surface and the
+  data-plane host are provided on the same host/process. A pure topology
+  fact, not derived from any request; see §19.3 for why this exists and
+  how `test_c09_data_plane_host_audit_query_alias_rejects_control_
+  credential_unless_cohosted` uses it.
+
+Unlike `audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`
+(port v1.8), `audit_query_on_data_plane_host` carries NO declare-first
+dispatch gated on `audit_query`'s own status: the obligation it observes
+binds on `control_plane` (whether a control surface is provided at all),
+not on whether `audit_query` itself is `enabled`/`partial` -- the same
+distinction `versioning.version_binding`'s own 1.4.0 unconditional item
+(b) draws from its conditional items (1)-(6).
+
+### 19.2 Reaching the alias handler itself (design §6.2) -- honest per-plug fidelity
+
+D-2's contract proposition is "the data-plane host's `POST /v1/audit/
+query` alias endpoint does not accept a control credential" -- so this
+method is required to reach the alias HANDLER ITSELF, not merely the
+peer's authentication surface in general, wherever a plug genuinely can.
+Fix-round F-4 (independent review) corrected this section's own prior
+overclaim ("both reach the real handler's own full behavior") -- what
+each plug ACTUALLY does:
+
+- **HTTP plugs** (`r2db-api-http`/`MitateDB-api-http`) send a real POST
+  to the DATA base URL (`self._client`, never `self._control_client`) --
+  the mirror image of `audit_query`'s own control-only client choice, and
+  a genuine, full-fidelity round trip through the real ASGI handler. This
+  is a genuinely new HTTP path for both adapters: `audit_query` above
+  documents that it "reaches it via the CONTROL base URL, never the
+  data-plane one", so no existing method already exercised this route.
+- **`r2db-api` (in-process)** calls the real `DataService.authenticate`
+  then the real `DataService.deny_unsupported` -- the exact two product
+  methods `http.py::post_audit_query`'s own body calls, in the same
+  order. One disclosed fidelity gap (`conformance-tests/CONDITIONS.md`
+  C-09 limit (c)): `request_id` is not threaded through this in-process
+  call, unlike the real handler's own `_authenticate(request, service)`,
+  which passes the ASGI request's own `_request_id(request)` -- this
+  harness call has no `Request` object to read one from.
+  `deny_unsupported`'s own second step is unreached in practice
+  (`authenticate` always raises `AUTH_INVALID` first, since this
+  foundation's application-only `CredentialStore` never recognizes a
+  control/audit credential), so the gap has no observable effect today.
+- **`MitateDB-api` (in-process)** calls the real `MitateDataService.
+  open_session`, which reaches the same `auth.CredentialStore.
+  authenticate` call `HttpService.authenticate` itself makes first -- a
+  real product-code call for the FIRST step, same as r2db-api. The
+  SECOND step is NOT a call into a real product function: `http.py::
+  post_audit_query`'s own second step (`raise CapabilityError("audit
+  evidence query requires control/audit authority this peer does not
+  expose here")`) is written inline in that HTTP handler's body, with no
+  separate importable product-code callable for this plug to invoke
+  instead -- unlike r2db-api's `DataService.deny_unsupported`, a real,
+  reusable method. This plug's second step is therefore a literal,
+  hand-written copy of that inline message string (disclosed,
+  `CONDITIONS.md` C-09 limit (c)), not a call to product code -- and, as
+  with r2db-api, unreached in practice since `open_session` always
+  raises `AUTH_INVALID` first.
+- No plug currently registered needed the narrower "authentication
+  surface only" fallback design §6.2 anticipates for a plug that cannot
+  reach even the first step at all; if a future plug needs it, that
+  plug's own limitation must be disclosed on `conformance-tests/
+  CONDITIONS.md`'s C-09 row (design §6.3), naming the plug and stating it
+  observes the authentication surface rather than the alias handler.
+
+### 19.3 Judging `provided` by declared topology, not by response content (fix-round F-2/F-3)
+
+The port revision's own independent review found a real detection gap in
+the FIRST cut of this mechanism: a `provided` outcome was accepted
+whenever the returned document's events overlapped with a real
+control-host `audit_query` response. This could not distinguish a
+genuinely co-hosted acceptance from a PORT-LEVEL identity mistake -- a
+mutation reproducing exactly this bug (`audit_query_on_data_plane_host`
+implemented as `return self.audit_query(actor, request)`, i.e.
+accidentally forwarding to the control-host method) still returns a
+GENUINE control-host document, which trivially overlaps with itself, and
+would have passed silently.
+
+The mechanism is replaced: `control_surface_cohosted_with_data_plane()`
+(§19.1) declares the deployment's own TOPOLOGY (a fact about how this
+harness is built, established once, not derived from any request); the
+condition test (`conformance-tests/test_c09_audit_evidence.py::test_c09_
+data_plane_host_audit_query_alias_rejects_control_credential_unless_
+cohosted`) requires a `provided` outcome to be accompanied by a `True`
+declaration, and is RED otherwise -- catching the proxy-mutation bug
+class directly, independent of what the returned document happens to
+contain. All four currently-registered plugs declare `False` (§19.4), so
+`provided` is conformant for none of them today; `denied` must still be
+exactly `AUTH_INVALID` regardless of the declaration (a cohosted
+deployment may still keep separate credential stores).
+
+### 19.4 Return convention and `SurfaceAbsent`
+
+Mirrors `audit_query`'s own convention exactly (§18.1/§18.2): success (the
+credential was genuinely accepted) returns the peer's raw `Mapping`
+document; the peer's own genuine refusal raises `ConformanceDenial` with a
+real contract code (most commonly `AUTH_INVALID`). `SurfaceAbsent` is
+reserved for a peer that declares `control_plane` `unavailable`, or that
+has no data-plane `/v1/audit/query` alias at all -- neither condition
+holds for any of the four currently-registered plugs (`control_plane` is
+always `enabled` in this harness's own construction, and the alias route
+is always unconditionally mounted per contract 1.4.0 item (c)), so this
+branch is unreached by any of them today, exactly like `audit_query`'s own
+`SurfaceAbsent` branch was unreached throughout port v1.8 before any peer
+flipped.
+
+### 19.5 The four plugs, as of this WP
+
+All four currently-registered plugs implement `audit_query_on_data_plane_
+host` against a control/audit credential genuinely presented to the real
+data-plane alias (HTTP plugs) or the real authenticate step plus a
+deny/refusal (in-process plugs, §19.2), and every one of them currently
+observes `AUTH_INVALID`. All four also implement `control_surface_
+cohosted_with_data_plane` returning `False` (§19.3) -- their control and
+data-plane surfaces are genuinely separate objects/processes with no
+shared credential store, so the `provided`/co-hosted branch is
+conformant for none of them today, the same "written against the real
+eventual shape, currently unreached" honesty this document's other
+new-method sections already carry (§18.4).
+
+### 19.6 `conformance-tests/test_c09_audit_evidence.py`
+
+One new UNCONDITIONAL test, `test_c09_data_plane_host_audit_query_alias_
+rejects_control_credential_unless_cohosted` -- registered `xfail`-free
+(unlike every other new-method test this document's §12-§18 sections
+describe, which are all conditional on a capability/version): D-2's
+obligation is unconditional (subordinate ruling 10 item 2), and both
+currently-registered peers are already conformant to it without any
+product change. A `provided` outcome is judged against `control_surface_
+cohosted_with_data_plane()`'s own declaration (§19.3), never against
+response content -- `provided` while declaring non-cohosted is red,
+catching a port-level identity mistake (the proxy-mutation bug class
+§19.3 names) directly. Also added: `test_c09_every_control_surface_
+adapter_declares_1_5_0`, the 1.5.0 whole-registry vacuity guard for D-1
+(registered `xfail(strict=True)`, mirroring §18's own 1.4.0 whole-
+registry guard).
+
+### 19.7 Compatibility impact (mirrors §12.7/§13.8/§14.3/§15.8/§16.7/§18.7)
+
+- The two new abstract methods are additive to the ABC; a plug that does
+  not implement either one fails to instantiate (Python's own `ABC`
+  enforcement) -- all four registered plugs implement both as of this
+  revision, so this is not a live compatibility break for any currently-
+  registered adapter.
+- `SurfaceAbsent`'s constructor signature and documented meaning are both
+  unchanged by this revision; `audit_query_on_data_plane_host`'s own
+  `SurfaceAbsent` raise conditions are the SAME two structural absences
+  (§4.3's classic meaning, never the port v1.8 audit-surface extension of
+  §18.3) -- D-2's obligation does not depend on whether `audit_query`
+  itself is declared available. `control_surface_cohosted_with_data_
+  plane` never raises `SurfaceAbsent` at all -- it is a plain boolean
+  declaration, not a request-dispatching operation.
+- `audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`'s own
+  documented semantics (port v1.8, §18.1-§18.3) are unchanged: they still
+  reach only the control host, exactly as documented; `audit_query_on_
+  data_plane_host` is the first to reach the data-plane host for an
+  audit-shaped request.
+- No peer's product code changed in this WP -- both peers' real data-plane
+  alias handlers already rejected a control/audit credential with
+  `AUTH_INVALID` before this revision; only the port and the four plugs
+  gained a way to observe that existing behavior.
