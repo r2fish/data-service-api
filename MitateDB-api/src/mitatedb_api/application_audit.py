@@ -118,6 +118,39 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset({
     "security_control_failure",
 })
 
+# Phase 5 WP-3 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+# D-1, contract 1.5.0 subordinate ruling 10 item 1): this peer's
+# application-plane half of the `operation` vocabulary (`audit_query.
+# DECLARED_AUDIT_OPERATIONS`'s own union with `audit_query.py`'s control
+# half -- same 2-module shape as `DECLARED_AUDIT_EVENT_CLASSES` above).
+# Every element here is a real literal `cell.ApplicationCell`/`auth.
+# CredentialStore`/`credential_store_postgres.PostgresCredentialStore`/
+# `http.py`/`audit_dispatch.AuditRouter` durably write to `application_
+# audit` -- fixed against the real source by `tests/test_audit_query.py`'s
+# generalized `U == D | N` AST scan.
+DECLARED_AUDIT_OPERATIONS = frozenset({
+    "access",
+    "add_field",
+    "assert_active",
+    "audit_buffer",
+    "authenticate",
+    "create_collection",
+    "delete",
+    "insert",
+    "query",
+    "schema",
+    "transact",
+    "update",
+})
+
+# Phase 5 WP-3 (same design/ruling as `DECLARED_AUDIT_OPERATIONS` above):
+# this peer's application-plane half of the `target_kind` vocabulary.
+DECLARED_AUDIT_TARGET_KINDS = frozenset({
+    "audit_sink",
+    "collection",
+    "credential",
+})
+
 # Contract `audit.fields`, verbatim order (matches `control_audit.
 # CONTROL_AUDIT_FIELDS`) plus the 14th, durable-schema-only `count` column
 # (D-3's coalesced-denial summary row / D-4's buffer-overflow alert row;
@@ -382,6 +415,8 @@ __all__ = [
     "DEFAULT_AUDIT_FLUSH_INTERVAL_S",
     "DEFAULT_DENIAL_COALESCE_WINDOW_S",
     "DECLARED_AUDIT_EVENT_CLASSES",
+    "DECLARED_AUDIT_OPERATIONS",
+    "DECLARED_AUDIT_TARGET_KINDS",
     "APPLICATION_AUDIT_FIELDS",
     "coalesced_count",
     "ApplicationAuditEvent",

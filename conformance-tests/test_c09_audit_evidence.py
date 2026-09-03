@@ -126,8 +126,11 @@ topology fact rather than a live cross-check of response content --
 registered `xfail`-free, since it is unconditional and both currently-
 registered peers (both declaring non-cohosted) are already conformant. A
 second whole-registry vacuity guard (`test_c09_every_control_surface_
-adapter_declares_1_5_0`) is registered `xfail(strict=True)` in this WP,
-mirroring the 1.4.0 whole-registry guard's own WP-1 -> last-flip-WP arc.
+adapter_declares_1_5_0`) was registered `xfail(strict=True)` in WP-1,
+mirroring the 1.4.0 whole-registry guard's own WP-1 -> last-flip-WP arc --
+**the `xfail` was removed in WP-3's own flip commit** (r2db-api flipped in
+WP-2, MitateDB-api in WP-3; the guard now runs plain and green on all 4
+plugs).
 """
 from __future__ import annotations
 
@@ -968,22 +971,23 @@ def test_c09_every_control_surface_adapter_takes_the_provided_branch():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="no peer declares 1.5.0 yet; un-xfailed by the last flip WP")
 def test_c09_every_control_surface_adapter_declares_1_5_0():
     """Whole-registry guard for D-1 (CCR_DISPOSITION.md subordinate ruling
     10 item 1; work order docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_
     V1.md WP-1 §1 D-4). Registered `xfail(strict=True)` in WP-1 -- false
-    until every registered adapter with a control surface has flipped to
-    `contract_version` 1.5.0; the `xfail` is removed only in the SAME
-    commit as the LAST flip WP -- mirrors `test_c09_every_control_
-    surface_adapter_takes_the_provided_branch`'s own WP-1 -> WP-3(b) arc
-    exactly, and is written in the SAME shape: a non-parametrized function
-    that walks `registered_adapters()` itself (never a hardcoded
-    adapter-name list), deriving its target set from `control_plane`
-    status, never from `audit_query`'s own status (D-1's obligation binds
-    on the DECLARED version, independent of whether `audit_query` itself
-    is enabled -- the same distinction the whole-registry PROVIDED-branch
-    guard above draws between `control_plane` and `audit_query`).
+    until every registered adapter with a control surface had flipped to
+    `contract_version` 1.5.0. **The `xfail` was removed in WP-3's own flip
+    commit** (both r2db-api, WP-2, and MitateDB-api, WP-3, now declare
+    1.5.0 on every control-surface-bearing plug), so this guard now runs
+    plain and green -- mirrors `test_c09_every_control_surface_adapter_
+    takes_the_provided_branch`'s own WP-1 -> WP-3(b) arc exactly, and is
+    written in the SAME shape: a non-parametrized function that walks
+    `registered_adapters()` itself (never a hardcoded adapter-name list),
+    deriving its target set from `control_plane` status, never from
+    `audit_query`'s own status (D-1's obligation binds on the DECLARED
+    version, independent of whether `audit_query` itself is enabled -- the
+    same distinction the whole-registry PROVIDED-branch guard above draws
+    between `control_plane` and `audit_query`).
     """
     control_surface_adapters: list[str] = []
     not_1_5_0: list[str] = []
