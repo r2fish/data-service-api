@@ -62,6 +62,31 @@ Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
                                                         OWN pre-auth window,
                                                         never shared with
                                                         the class above.
+    R2DB_CONTROL_LIMIT_REQUEST_BYTES                   optional, default
+                                                        `ControlPlaneLimits.
+                                                        request_bytes`
+                                                        (1_048_576, Phase 4
+                                                        ledger closure L4-10)
+                                                        -- was previously
+                                                        unwired here (the
+                                                        dataclass default was
+                                                        the only source);
+                                                        `create_control_app`
+                                                        derives BOTH the
+                                                        declared limit and
+                                                        the ASGI enforcement
+                                                        bound from this SAME
+                                                        `ControlPlaneLimits.
+                                                        request_bytes` value
+                                                        (R-7's "宣言値と
+                                                        enforce 値が同一
+                                                        ソースから出る"
+                                                        rule), mirroring
+                                                        MitateDB-api's
+                                                        `MITATEDB_CONTROL_
+                                                        REQUEST_BYTES_LIMIT`
+                                                        (`control_
+                                                        composition.py`).
     R2DB_AUDIT_DSN                        optional (Phase 4 WP-2(b), design
                                            D-5) -- the `r2dbsvc_auditreader`
                                            role DSN (migration `0007_
@@ -320,6 +345,14 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # window -- a separate env var, mirroring the 3 lines above, never
         # sharing `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`.
         audit_requests_per_minute=_optional_int(env, "R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE", _DEFAULT_LIMITS.audit_requests_per_minute),
+        # Phase 4 ledger closure L4-10 (work order WP-B3): previously
+        # unwired -- `ControlPlaneLimits.request_bytes`'s dataclass default
+        # (1_048_576) was the only source, so no deployer could ever change
+        # it here (MitateDB-api's `control_composition.py` already wires
+        # its own `MITATEDB_CONTROL_REQUEST_BYTES_LIMIT` equivalent).
+        # Default is the SAME 1_048_576 (`_DEFAULT_LIMITS.request_bytes`),
+        # so leaving this env var unset changes nothing (behavior-preserving).
+        request_bytes=_optional_int(env, "R2DB_CONTROL_LIMIT_REQUEST_BYTES", _DEFAULT_LIMITS.request_bytes),
     )
     # Phase 4 (design D-6/N-3): read from the SAME env-var names
     # `r2db_api.main.build_app` reads for the `application_audit` writer

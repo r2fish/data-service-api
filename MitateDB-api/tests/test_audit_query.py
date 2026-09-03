@@ -1309,6 +1309,51 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
     from mitatedb_api.application_audit import DECLARED_AUDIT_EVENT_CLASSES as APP_CLASSES
     assert APP_CLASSES <= declared
 
+
+# ===========================================================================
+# Phase 4 ledger closure WP-B3 addendum (監督裁定、WP-B1 監査 M5b 由来,
+# design §11.1 未起票 -- 作業指示書 WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md
+# §4 WP-B3 追加項目 (e) が正本): `test_declared_event_classes_cover_every_
+# emittable_class` above fixes `U == D ∪ N` -- it can never detect D
+# SHRINKING while a matching word simultaneously moves into N (a
+# "downgrade": declaring a word non-durable without that being a genuine,
+# reviewed decision), because that edit keeps `U == D ∪ N` satisfied. This
+# test pins `DECLARED_AUDIT_EVENT_CLASSES`'s own CONTENT directly, as a
+# frozenset literal, so any change to D -- shrink, grow, or downgrade --
+# must touch this test in the same commit as a deliberate, reviewed act.
+# Same name as r2db-api's own equivalent (peer-symmetric).
+# ===========================================================================
+
+
+def test_declared_audit_event_classes_change_only_deliberately() -> None:
+    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py:76`,
+    `_CONTROL_PLANE_EVENT_CLASSES | application_audit.DECLARED_AUDIT_EVENT_
+    CLASSES`) currently holds exactly these 12 words. Dropping a word out
+    of D and into N (WP-B1's (e), `test_declared_event_classes_cover_
+    every_emittable_class` above -- N is `set()` for this peer today) is
+    NOT detected by that test alone -- `U == D ∪ N` stays satisfied either
+    way, so a downgrade could land silently. This test's only job is to
+    force the declaration itself to be a deliberate, single-commit edit:
+    changing `DECLARED_AUDIT_EVENT_CLASSES` (or either half it is built
+    from) without updating this literal here fails immediately."""
+    assert DECLARED_AUDIT_EVENT_CLASSES == frozenset(
+        {
+            "authentication_denial",
+            "authorization_denial",
+            "capability_denial",
+            "application_lifecycle",
+            "credential_lifecycle",
+            "control_credential_lifecycle",
+            "schema_change",
+            "destructive_data_operation",
+            "data_operation",
+            "authentication_denied",
+            "authorization_denied",
+            "security_control_failure",
+        }
+    )
+
+
 def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(control_platform) -> None:
     h = _postgres_harness(control_platform, audit_statement_timeout_ms=3_000, audit_idle_timeout_ms=4_000)
     try:

@@ -300,3 +300,122 @@ def test_control_service_factory_rejects_identical_peppers(main_module, platform
     }
     with pytest.raises(ValueError):
         main_module.build_control_service(env)
+
+
+# ===========================================================================
+# Phase 4 ledger closure WP-B3 (L4-7(ii), design §11.1 未起票 -- 作業指示書
+# WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md §1 L4-7(ii) が正本): peer-symmetric
+# counterpart of r2db-api's own `tests/test_audit_query.py`
+# `test_data_plane_composition_root_does_not_import_the_control_credential_
+# store` (same test name -- work order §4 WP-B3 completion condition 5/6).
+# No fixture needed (a pure source-text read, no PostgreSQL, no import).
+# ===========================================================================
+
+
+_MITATEDB_FORBIDDEN_CONTROL_CREDENTIAL_IDENTIFIERS = frozenset(
+    {"ControlCredentialStore", "PostgresControlCredentialStore", "ControlPlaneService"}
+)
+# Grounded in a real `grep` of this peer's own `src/mitatedb_api/` tree
+# (review fix M4): `control_auth.py` (in-memory `ControlCredentialStore`)
+# and `control_credential_store_postgres.py` (`PostgresControlCredential
+# Store`) are dedicated modules with no legitimate reason to be imported
+# by `main.py` (the DATA-plane root) at all -- unlike r2db-api, where the
+# equivalent classes live inside already-legitimately-imported modules
+# (`auth.py`/`credential_store.py`), so r2db-api's own module-name check
+# covers only `control_plane`. `control_composition` is DELIBERATELY
+# EXCLUDED here even though it is control-plane-only machinery: `main.py`
+# legitimately imports `build_control_service` from it (`main.py:398`,
+# kept for `test_main.py`'s own pre-existing call sites) -- checking that
+# module name would false-positive on real, required code. The class-name
+# check above still catches anything control-credential-shaped reached
+# THROUGH `control_composition` (e.g. `control_composition.
+# ControlPlaneService`, an `Attribute.attr` hit).
+_MITATEDB_FORBIDDEN_CONTROL_CREDENTIAL_MODULES = frozenset({"control_auth", "control_credential_store_postgres", "control_plane"})
+
+
+def _control_credential_vocabulary_hits(source: str, *, forbidden_identifiers: frozenset, forbidden_modules: frozenset) -> list:
+    """AST-based replacement (review fix M4) for the prior bare
+    case-insensitive substring check. Reasons this is a strictly STRONGER
+    form than string-containment, not merely a different one:
+
+    - A source-level string check cannot distinguish an actual Python
+      reference (`ControlPlaneService(...)`) from an unrelated string
+      literal that happens to contain the same characters -- THIS peer's
+      own documented, legitimate `MITATEDB_CONTROL_CREDENTIAL_PEPPER` env
+      var name (`main.py`'s own module docstring) only ever appears as an
+      `ast.Constant` string argument (e.g. `env.get("MITATEDB_CONTROL_
+      CREDENTIAL_PEPPER")`), which this walk never inspects at all -- no
+      special-case stripping is needed any more (the prior revision's own
+      `source.replace("MITATEDB_CONTROL_CREDENTIAL_PEPPER", "")` workaround
+      is removed entirely).
+    - `ast.parse` is used, never `import` -- `mitatedb_api.main` ends with
+      a module-level `app = build_app()` that reads `os.environ`
+      immediately on import (this function's own caller explains why
+      below).
+    - Checks BOTH import statements (`Import`/`ImportFrom` -- the module
+      path itself, split on ".", and every imported name's own original
+      AND locally-bound (`asname or name`) spelling) AND every other
+      reference anywhere in the module body (`ast.Name.id`, `ast.
+      Attribute.attr` -- catching `some_module.ControlPlaneService`-style
+      access after a bare `import some_module`, which an import-statement-
+      only check would miss). Identical implementation shape to r2db-api's
+      own `tests/test_audit_query.py::_control_credential_vocabulary_hits`
+      (not cross-imported -- this repository's own established
+      no-code-sharing-between-peers convention), with this peer's own
+      grep-verified vocabulary above."""
+    import ast
+
+    tree = ast.parse(source)
+    hits: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if any(part in forbidden_modules for part in alias.name.split(".")):
+                    hits.append(f"line {node.lineno}: import {alias.name!r}")
+                bound = alias.asname or alias.name.split(".")[-1]
+                if bound in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: import bound as {bound!r}")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if any(part in forbidden_modules for part in module.split(".")):
+                hits.append(f"line {node.lineno}: from {module!r} import ...")
+            for alias in node.names:
+                if alias.name in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: from {module!r} import {alias.name!r}")
+                bound = alias.asname or alias.name
+                if bound in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: bound as {bound!r}")
+        elif isinstance(node, ast.Name):
+            if node.id in forbidden_identifiers:
+                hits.append(f"line {node.lineno}: Name {node.id!r}")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in forbidden_identifiers:
+                hits.append(f"line {node.lineno}: Attribute .{node.attr!r}")
+    return hits
+
+
+def test_data_plane_composition_root_does_not_import_the_control_credential_store() -> None:
+    """D-5's own "壊れるシナリオ" (i), applied to this peer: the
+    application-plane composition root must never gain a reference to the
+    control-credential universe -- `ControlCredentialStore` (in-memory,
+    `control_auth.py:99`), `PostgresControlCredentialStore` (`control_
+    credential_store_postgres.py:65`), or `ControlPlaneService` (`control_
+    plane.py`). Reads the SOURCE FILE directly (never `import mitatedb_api.
+    main` -- that module ends with a module-level `app = build_app()`
+    (`main.py:400`) that reads `os.environ` at import time), then
+    `ast.parse`s it (never regex/substring, review fix M4 -- see
+    `_control_credential_vocabulary_hits`'s own docstring for why this is
+    strictly stronger, including why THIS peer's own documented
+    `MITATEDB_CONTROL_CREDENTIAL_PEPPER` env-var name needs no special
+    handling under this approach, unlike the prior substring-based
+    revision)."""
+    from pathlib import Path
+
+    main_py = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api" / "main.py"
+    source = main_py.read_text()
+    hits = _control_credential_vocabulary_hits(
+        source,
+        forbidden_identifiers=_MITATEDB_FORBIDDEN_CONTROL_CREDENTIAL_IDENTIFIERS,
+        forbidden_modules=_MITATEDB_FORBIDDEN_CONTROL_CREDENTIAL_MODULES,
+    )
+    assert not hits, f"mitatedb_api/main.py references the control-credential universe: {hits!r}"
