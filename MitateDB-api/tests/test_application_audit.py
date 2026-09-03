@@ -1295,6 +1295,225 @@ def test_concurrent_push_during_a_failing_flush_never_grows_the_buffer_past_capa
     )
 
 
+def test_a_successful_flush_clears_the_failing_flag_even_when_the_buffer_is_not_empty() -> None:
+    """P4-D15 (WP-B2, ledger L4-3): `_flush_currently_failing` clears on
+    ANY successful `append_many`, regardless of whether the buffer this
+    call observes afterward is empty. Under sustained push load the
+    buffer is essentially never empty even once the sink has genuinely
+    recovered (the threshold flush keeps refilling it), so the prior
+    "only when empty" gate left the flag (and the alert backoff it feeds)
+    stuck at the sink-broken state long after recovery.
+
+    Independent implementation of r2db-api's own identical-shape test:
+    reproduces "buffer not empty under continuous push" deterministically
+    rather than by timing -- the recovery flush's own (now succeeding)
+    `append_many` call appends a new event directly into the buffer
+    before returning, standing in for a concurrent `push()` landing while
+    that I/O was in flight, so `self._events` is provably non-empty at
+    the moment the success branch runs.
+
+    Opus review M-1 (coordinator-adopted): completion condition 1 also
+    requires the ALERT BACKOFF to return to its floor on this same
+    successful flush, not merely the flag. Reproduced here by: (1)
+    forcing GENUINE drops via `push()`'s own eviction branch while both
+    sink write paths durably fail, so `_alert_pending`/`_dropped_total`
+    are set for real (not hand-seeded); (2) driving further failing
+    `_retry_alert()` passes so `_alert_backoff_s` grows past the floor via
+    its own exception branch; (3) recovering both write paths; (4) one
+    successful flush, arranged (per above) to leave the buffer non-empty;
+    (5) asserting BOTH the flag and the backoff the flush's own trailing
+    `_retry_alert()` call already advanced are back to their recovered
+    state.
+
+    LOAD-BEARING (flag half): on the prior code
+    (`if not self._events: self._flush_currently_failing = False`) the
+    flag assertion fails, because the buffer is non-empty when the
+    successful flush's success branch runs, and the flag stays True.
+    LOAD-BEARING (backoff half, M-1): mutating the floor-reset branch in
+    `_retry_alert` (`if flush_failing:` -> `if True:`) makes the backoff
+    assertion fail, because the just-recovered flush would then still be
+    treated as failing for backoff purposes.
+    """
+    def _event(request_id: str) -> ApplicationAuditEvent:
+        return ApplicationAuditEvent(
+            event_id=str(uuid.uuid4()), event_class="data_operation", occurred_at="2026-09-03T00:00:00+00:00",
+            request_id=request_id, application_id="a", actor_type="application_credential", actor_id="c1",
+            role="runtime", operation="query", target_kind="collection", outcome="allow", reason_code=None,
+            target_id=None,
+        )
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class _ControllableSink(ApplicationAuditSink):
+        """A single `fail` switch controls BOTH write paths (`append_many`
+        -- the ordinary buffer flush -- and `append` -- the overflow-alert
+        row), standing in for "the sink is down" / "the sink has
+        recovered" as one fact, the same way a real Postgres outage would
+        affect both. `refill_on_next_success_write`, when set, lets the
+        NEXT successful `append_many` refill the buffer before returning
+        -- simulating a concurrent `push()` landing mid-flight."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+            self.buffer: Any = None
+            self.refill_on_next_success_write = False
+
+        def append_many(self, events):
+            if self.fail:
+                raise RuntimeError("simulated durably-failing sink (write path)")
+            if self.refill_on_next_success_write:
+                self.refill_on_next_success_write = False
+                assert self.buffer is not None
+                self.buffer._events.append(_event("concurrent-push"))
+
+        def append(self, **kwargs):
+            if self.fail:
+                raise RuntimeError("simulated durably-failing sink (alert path)")
+
+    clock = _Clock()
+    sink = _ControllableSink()
+    alert_min_interval_s = 2.0
+    capacity = 2
+    router = make_router(sink, buffer_capacity=capacity, alert_min_interval_s=alert_min_interval_s, clock=clock)
+    buffer = router._buffer
+    sink.buffer = buffer
+
+    # Genuine drops via push()'s own eviction branch (capacity 2, 5
+    # pushes, BOTH sink write paths durably failing throughout) -- also
+    # drives several threshold-triggered failing flush() calls, each
+    # setting `_flush_currently_failing = True` and (once `_alert_pending`
+    # is set) attempting, and failing, the alert row -- growing
+    # `_alert_backoff_s` past the floor via `_retry_alert`'s own exception
+    # branch.
+    for i in range(5):
+        buffer.push(_event(f"seed{i + 1}"))
+    assert buffer._alert_pending is True
+    assert buffer._dropped_total > 0
+    assert buffer._flush_currently_failing is True
+
+    # Drive a few more failing retry-alert passes explicitly, each spaced
+    # past the current backoff, so it keeps growing (both write paths
+    # still fail here -- the sink stays fully down).
+    for _ in range(3):
+        clock.advance(buffer._alert_backoff_s + 0.001)
+        buffer._retry_alert()
+    grown_backoff = buffer._alert_backoff_s
+    assert grown_backoff > alert_min_interval_s, (
+        f"setup check: the alert backoff must have grown past the floor ({alert_min_interval_s}) "
+        f"before recovery -- got {grown_backoff}"
+    )
+
+    # Recover: BOTH write paths start succeeding. Arrange for this
+    # recovery flush's own `append_many` to refill the buffer before
+    # returning, so the buffer is NOT empty when the success branch runs.
+    sink.fail = False
+    sink.refill_on_next_success_write = True
+    clock.advance(buffer._alert_backoff_s + 0.001)
+    buffer.flush()
+
+    assert buffer.pending_count() == 1, "sanity check: the buffer must be non-empty when the success branch runs"
+    assert buffer._flush_currently_failing is False, (
+        "a successful flush must clear the failing flag unconditionally (P4-D15) -- "
+        "even though the buffer is not empty afterward"
+    )
+    # M-1: `flush()`'s own trailing `_retry_alert()` call (which already
+    # ran, above, as part of this same `flush()`) reads the JUST-CLEARED
+    # `_flush_currently_failing` and must take the reset-to-floor branch,
+    # not the exponential-growth one.
+    assert buffer._alert_backoff_s == alert_min_interval_s, (
+        "the alert backoff must reset to the floor (alert_min_interval_s) on the retry that runs as part "
+        f"of a successful flush (P4-D15) -- got backoff still elevated at {buffer._alert_backoff_s}"
+    )
+
+
+def test_a_failing_flush_that_completes_after_a_successful_one_sets_the_flag_again() -> None:
+    """P4-D15 (WP-B2, ledger L4-3): completion-order semantics -- the
+    FAILURE branch unconditionally sets `_flush_currently_failing = True`
+    (unchanged by this WP). A failing flush that completes AFTER a
+    successful one must therefore win, which is what lets the flag track
+    "the outcome of the most recently COMPLETED flush attempt", not
+    merely "has any flush ever succeeded". This is a regression guard,
+    not a load-bearing test for P4-D15 itself: it is green both before
+    and after the WP-B2 change, because the failure branch is untouched
+    by it.
+
+    Opus review M-2 (coordinator-adopted): uses REAL threads with a
+    blocking fake sink to force the actual COMPLETION order, rather than
+    merely calling `flush()` twice in program order (which cannot by
+    itself distinguish "completes after" from "is merely called after").
+    Thread A's flush() BEGINS first and is durably failing, but is
+    blocked mid-I/O on a `threading.Event`; the main thread's own,
+    independent flush() then BEGINS and COMPLETES successfully SECOND,
+    while A is still blocked; only THEN is A released to finish failing,
+    reproducing "a failing flush that completes after a successful one"
+    by actual completion order, not call order.
+    """
+    def _event(request_id: str) -> ApplicationAuditEvent:
+        return ApplicationAuditEvent(
+            event_id=str(uuid.uuid4()), event_class="data_operation", occurred_at="2026-09-03T00:00:00+00:00",
+            request_id=request_id, application_id="a", actor_type="application_credential", actor_id="c1",
+            role="runtime", operation="query", target_kind="collection", outcome="allow", reason_code=None,
+            target_id=None,
+        )
+
+    class _BlockFirstCallThenFailSink(ApplicationAuditSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.first_call_started = threading.Event()
+            self.release_first_call = threading.Event()
+
+        def append_many(self, events):
+            self.calls += 1
+            if self.calls == 1:
+                self.first_call_started.set()
+                assert self.release_first_call.wait(timeout=5), "test never released the blocked first call"
+                raise RuntimeError("simulated durably-failing sink (first call)")
+            # second call onward: succeeds immediately, unblocked.
+
+    sink = _BlockFirstCallThenFailSink()
+    router = make_router(sink, buffer_capacity=100, alert_min_interval_s=0.0)
+    buffer = router._buffer
+
+    # Thread A: a flush() whose own write is the FIRST call this sink ever
+    # receives -- blocked mid-I/O below, will raise once released.
+    buffer._events.append(_event("a1"))
+    thread_a = threading.Thread(target=buffer.flush, name="failing-flush")
+    thread_a.start()
+    assert sink.first_call_started.wait(timeout=5), "thread A's flush() never reached append_many()"
+
+    # Thread A is now blocked inside append_many, holding no lock (the B-2
+    # /B-3 swap-out already emptied `self._events`). Push a new event and
+    # run a SECOND, independent flush() on the main thread: its own
+    # append_many call is the second one this sink ever receives, which
+    # succeeds immediately.
+    buffer.push(_event("b1"))
+    buffer.flush()
+    assert buffer._flush_currently_failing is False, (
+        "the main thread's own flush() completed successfully (second call to the sink) and must have "
+        "cleared the flag"
+    )
+
+    # NOW release thread A -- its still in-flight, durably-failing call
+    # COMPLETES AFTER the successful one above.
+    sink.release_first_call.set()
+    thread_a.join(timeout=5)
+    assert not thread_a.is_alive(), "thread A's flush() deadlocked after being released"
+
+    assert buffer._flush_currently_failing is True, (
+        "a failing flush that completes after a successful one must set the flag back to True"
+    )
+
+
 def test_healthy_sink_threshold_flush_prevents_reaching_capacity_eviction(caplog: pytest.LogCaptureFixture) -> None:
     router = make_router(buffer_capacity=10, alert_min_interval_s=1000.0)
     with caplog.at_level(logging.ERROR):
