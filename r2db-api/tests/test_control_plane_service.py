@@ -1663,8 +1663,11 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         caps = h.service.capabilities(secret)
         # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
         # version_binding`): the flip lands in this same commit as
-        # `audit_query`'s own real behavior.
-        assert caps["contract_version"] == "1.4.0"
+        # `audit_query`'s own real behavior. Phase 5 WP-2: re-flipped to
+        # 1.5.0 in the same commit as the `operations`/`target_kinds`
+        # declaration keys below (design D-4/§8 -- flip and behavior land
+        # together, never separately).
+        assert caps["contract_version"] == "1.5.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         # This harness's `ControlPlaneService` is built with no `audit_
         # reader` (AUDIT DSN unconfigured) -- `audit_query` stays declared

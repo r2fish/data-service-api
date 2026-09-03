@@ -843,7 +843,7 @@ class DataService:
             context = self._credentials.authenticate(secret)
             if context.application_id in self._disabled_apps:
                 fail("APPLICATION_DISABLED", "Application is disabled.", status=403)
-            self._event(context, "authenticate", "allow", "application", event_class="authentication", request_id=rid)
+            self._event(context, operation="authenticate", outcome="allow", target_kind="application", event_class="authentication", request_id=rid)
             return context
         except FoundationError as exc:
             # Phase 4 (design D-2/D-3): the legacy in-memory `self._audit`
@@ -871,14 +871,15 @@ class DataService:
             # than a new C-12 "declared unavailable, executes anyway" gap.
             schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
             return {
-                # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
-                # version_binding`): unconditional -- every deployment of
-                # this data-plane host declares 1.4.0 now, whether or not
+                # Phase 4 WP-2(b) (P4-D4, contract `versioning.
+                # version_binding`), flipped to 1.5.0 in phase 5 WP-2:
+                # unconditional -- every deployment of this data-plane host
+                # declares 1.5.0 now, whether or not
                 # the CONTROL host alongside it has AUDIT DSN configured
                 # (`audit_query` stays `unavailable` right below,
                 # unchanged: this host never provides it, D-5's own
                 # "declaration = real behavior" rule).
-                "contract_version": "1.4.0",
+                "contract_version": "1.5.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -976,10 +977,10 @@ class DataService:
                 )
                 # Phase 4 (design D-2 §7.3): `query` never passes through
                 # the confirmation choke -- always buffer-class.
-                self._event(canonical, "query", "allow", "entity", event_class="data_operation", request_id=rid)
+                self._event(canonical, operation="query", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid)
                 return outcome
         except FoundationError as exc:
-            self._event(context, "query", "deny", "entity", exc.code, event_class="authorization_denial", request_id=rid, details=exc.details)
+            self._event(context, operation="query", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="authorization_denial", request_id=rid, details=exc.details)
             raise
 
     def mutate(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None) -> int:
@@ -1025,10 +1026,10 @@ class DataService:
                 # `already_durable` tells `_event` to skip the buffer-class
                 # enqueue in that case (at most one durable row per
                 # operation).
-                self._event(canonical, "mutate", "allow", "entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
+                self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
                 return outcome
         except FoundationError as exc:
-            self._event(context, "mutate", "deny", "entity", exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
+            self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
@@ -1051,10 +1052,10 @@ class DataService:
                 # one (unlike `mutate` above).
                 hook = self._make_audit_hook(canonical, event_class="privilege_sensitive", operation="schema", target_kind="entity", request_id=rid)
                 revision = self._cells[canonical.application_id].apply_schema(operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline, clock=self._clock, audit_hook=hook)
-                self._event(canonical, "schema", "allow", "entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
+                self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
                 return revision
         except FoundationError as exc:
-            self._event(context, "schema", "deny", "entity", exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
+            self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
             raise
 
     def catalog(self, context: AuthContext, *, request_id: str | None = None) -> dict[str, Any]:
@@ -1069,13 +1070,13 @@ class DataService:
                 entities = self._cells[canonical.application_id].catalog()
                 # Phase 4 (design D-2 §7.3): `catalog` never passes through
                 # the confirmation choke -- always buffer-class.
-                self._event(canonical, "catalog", "allow", "entity", event_class="data_operation", request_id=rid)
+                self._event(canonical, operation="catalog", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid)
                 return {"application_scope": canonical.application_id, "entities": entities}
         except FoundationError as exc:
-            self._event(context, "catalog", "deny", "entity", exc.code, event_class="authorization_denial", request_id=rid, details=exc.details)
+            self._event(context, operation="catalog", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="authorization_denial", request_id=rid, details=exc.details)
             raise
 
-    def deny_unsupported(self, context: AuthContext, operation: str, message: str, *, request_id: str | None = None) -> None:
+    def deny_unsupported(self, context: AuthContext, *, operation: str, message: str, request_id: str | None = None) -> None:
         """Refuse a capability this foundation does not implement, while
         still passing through `_slot`'s rate/concurrency accounting and
         emitting a denial audit event -- exactly like every other
@@ -1100,7 +1101,7 @@ class DataService:
             with self._slot(context):
                 fail("CAPABILITY_UNSUPPORTED", message)
         except FoundationError as exc:
-            self._event(context, operation, "deny", "entity", exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
+            self._event(context, operation=operation, outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
 
     @contextmanager
@@ -1136,7 +1137,7 @@ class DataService:
                 fail("LIMIT_EXCEEDED", "Request rate limit exceeded.", status=429, details={"resource": "requests_per_minute", "limit_class": "requests_per_minute", "limit": self.limits.requests_per_minute})
             window.append(now)
 
-    def _event(self, context: AuthContext, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, *, event_class: str, request_id: str | None = None, target_id: str | None = None, already_durable: bool = False, details: dict[str, Any] | None = None) -> None:
+    def _event(self, context: AuthContext, *, operation: str, outcome: str, target_kind: str, reason_code: str | None = None, event_class: str, request_id: str | None = None, target_id: str | None = None, already_durable: bool = False, details: dict[str, Any] | None = None) -> None:
         """The single dispatch point every public method above calls,
         both on success (`outcome="allow"`) and on denial
         (`outcome="deny"`). Always appends to the pre-existing legacy
@@ -1293,9 +1294,9 @@ class ControlAuthority:
     def register_application(self, application_id: str, *, entities: dict[str, list[dict[str, Any]]] | None = None) -> None:
         try:
             self._service._register_application(application_id, entities)
-            self._control_event("register_application", "allow", application_id, event_class="application_lifecycle")
+            self._control_event(operation="register_application", outcome="allow", target=application_id, event_class="application_lifecycle")
         except FoundationError as exc:
-            self._control_event("register_application", "deny", application_id, exc.code, event_class="control_failure")
+            self._control_event(operation="register_application", outcome="deny", target=application_id, reason_code=exc.code, event_class="control_failure")
             raise
 
     def set_application_enabled(self, application_id: str, enabled: bool) -> None:
@@ -1303,9 +1304,9 @@ class ControlAuthority:
             if not isinstance(enabled, bool):
                 fail("VALIDATION_FAILED", "Application enabled state must be boolean.")
             self._service._set_application_disabled(application_id, not enabled)
-            self._control_event("enable_application" if enabled else "disable_application", "allow", application_id, event_class="application_lifecycle")
+            self._control_event(operation="enable_application" if enabled else "disable_application", outcome="allow", target=application_id, event_class="application_lifecycle")
         except FoundationError as exc:
-            self._control_event("enable_application" if enabled else "disable_application", "deny", application_id, exc.code, event_class="control_failure")
+            self._control_event(operation="enable_application" if enabled else "disable_application", outcome="deny", target=application_id, reason_code=exc.code, event_class="control_failure")
             raise
 
     def set_credential_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: Any = None) -> None:
@@ -1337,9 +1338,9 @@ class ControlAuthority:
                 # ritual/CLI-path writes to in this work package).
                 with self._service._credentials.unit_of_work() as own_work:
                     self._service._credentials.set_state(credential_id, enabled=enabled, revoked=revoked, work=own_work)
-            self._control_event("set_credential_state", "allow", credential_id, event_class="credential_lifecycle")
+            self._control_event(operation="set_credential_state", outcome="allow", target=credential_id, event_class="credential_lifecycle")
         except FoundationError as exc:
-            self._control_event("set_credential_state", "deny", credential_id, exc.code, event_class="control_failure")
+            self._control_event(operation="set_credential_state", outcome="deny", target=credential_id, reason_code=exc.code, event_class="control_failure")
             raise
 
     def issue_credential(self, credential_id: str, application_id: str, role: str, secret: str, *, work: Any = None) -> None:
@@ -1354,9 +1355,9 @@ class ControlAuthority:
             else:
                 with self._service._credentials.unit_of_work() as own_work:
                     self._service._credentials.add(credential_id, application_id, role, secret, work=own_work)
-            self._control_event("issue_credential", "allow", application_id, event_class="credential_lifecycle")
+            self._control_event(operation="issue_credential", outcome="allow", target=application_id, event_class="credential_lifecycle")
         except FoundationError as exc:
-            self._control_event("issue_credential", "deny", application_id, exc.code, event_class="control_failure")
+            self._control_event(operation="issue_credential", outcome="deny", target=application_id, reason_code=exc.code, event_class="control_failure")
             raise
 
     def audit_events(self) -> tuple[Any, ...]:
@@ -1367,7 +1368,7 @@ class ControlAuthority:
         try:
             self._service._audit.delete()
         except PermissionError:
-            self._control_event("delete_audit", "deny", "audit", "AUDIT_APPEND_ONLY", event_class="control_failure")
+            self._control_event(operation="delete_audit", outcome="deny", target="audit", reason_code="AUDIT_APPEND_ONLY", event_class="control_failure")
             raise
 
     def set_authorization_state_available(self, available: bool) -> None:
@@ -1375,11 +1376,11 @@ class ControlAuthority:
             if not isinstance(available, bool):
                 fail("VALIDATION_FAILED", "Authorization state availability must be boolean.")
             self._service._credentials.available = available
-            self._control_event("set_authorization_state_available", "allow", "authorization", event_class="control_state")
+            self._control_event(operation="set_authorization_state_available", outcome="allow", target="authorization", event_class="control_state")
         except FoundationError as exc:
-            self._control_event("set_authorization_state_available", "deny", "authorization", exc.code, event_class="control_failure")
+            self._control_event(operation="set_authorization_state_available", outcome="deny", target="authorization", reason_code=exc.code, event_class="control_failure")
             raise
 
-    def _control_event(self, operation: str, outcome: str, target: str, reason_code: str | None = None, *, event_class: str) -> None:
+    def _control_event(self, *, operation: str, outcome: str, target: str, reason_code: str | None = None, event_class: str) -> None:
         target_app = target if target in self._service._cells else self._service._credentials.application_id_for(target)
         self._service._audit.append(event_class=event_class, request_id=str(uuid.uuid4()), application_id=target_app, actor_type="control_authority", actor_id=None, role="control", operation=operation, target_kind="application_or_credential", outcome=outcome, reason_code=reason_code)

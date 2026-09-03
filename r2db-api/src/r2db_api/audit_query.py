@@ -69,6 +69,100 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset(
     }
 )
 
+# Phase 5 WP-2 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+# D-1, contract 1.5.0 subordinate ruling 10 item 1): the `operation`
+# vocabulary this peer's `audit_query` reader can ever surface -- same
+# declare-the-hazard posture as `DECLARED_AUDIT_EVENT_CLASSES` above, and
+# fixed against the real source by the SAME generalized AST scanner
+# (`r2db-api/tests/test_audit_query.py`'s `U == D | N` equality, now
+# parameterized over `event_class`/`operation`/`target_kind` instead of
+# `event_class` alone). Deliberately EXCLUDES 4 words -- 3 for one reason,
+# 1 for a DIFFERENT reason (fix-round M-1, Opus review):
+# - `delete_audit`, `set_authorization_state_available`, `set_credential_
+#   state`: each is real (found by the scanner's own unfiltered walk) but
+#   every one of its emit sites is `ControlAuthority._control_event`
+#   (`service.py`), which writes ONLY to the legacy in-memory `AuditSink`,
+#   never to `control_audit`/`application_audit` (`ControlAuthority.
+#   _control_event`'s own docstring: "ControlAuthority's own audit trail
+#   stays on the existing in-memory AuditSink ... not on the new
+#   control_audit table").
+# - `control_capabilities`: a DIFFERENT shape of non-durability (fix-round
+#   M-1) -- its only 2 emit sites (`control_plane.py`'s `capabilities()`
+#   method, `_authorize_role(context, operation="control_capabilities",
+#   ...)` and `_gate_must_rotate(context, operation="control_capabilities",
+#   ...)`) can NEVER reach a `_deny` call for this operation AT ALL, on any
+#   role or must_rotate state -- not merely "reaches a non-durable sink".
+#   `_authorize_role`'s own deny condition is `role == "audit" and
+#   operation not in _AUDIT_ROLE_ALLOWED_OPERATIONS`; `"control_
+#   capabilities"` is a PERMANENT member of that allow-list (`control_
+#   plane.py`'s own `_AUDIT_ROLE_ALLOWED_OPERATIONS`), so the condition is
+#   never true for it. `_gate_must_rotate`'s own body opens with `if
+#   operation == "control_capabilities": return` -- an unconditional early
+#   return before its own `_deny` call. No other emit site anywhere in the
+#   package ever passes this literal (`grep` real-source confirmed). See
+#   `test_audit_query.py`'s own `test_control_capabilities_operation_has_
+#   no_reachable_deny_branch` for the structural + behavioral fixed proof
+#   (this word has no failure mode to durably record in the first place,
+#   so it is not exercised by the OTHER 3 words' runtime-observation test).
+# `authenticate` is NOT excluded, unlike the original 8-word candidate
+# list's naive reading (design §1.4 の 8) might suggest --
+# `DataService.authenticate`'s SUCCESS event (`_event(...,
+# event_class="authentication")`) is indeed non-durable-only, but its
+# FAILURE path (`except FoundationError`, `_denial_event(event_class=
+# "authentication_denial", operation="authenticate", ...)`) durably routes
+# through the coalescing denial router whenever `exc.code` is one of
+# `_DURABLE_DENIAL_CODES` (`AUTH_REQUIRED`/`AUTH_INVALID`/`AUTH_REVOKED`
+# among them) -- an actually-observed durable row is what caught this
+# during WP-2 (`conformance-tests/test_c09_audit_evidence.py`'s own
+# declaration-agreement vector), confirming the design's own "N は実行時
+# テストで確定する" discipline is load-bearing, not a formality.
+DECLARED_AUDIT_OPERATIONS = frozenset(
+    {
+        "audit_buffer",
+        "audit_query",
+        "authenticate",
+        "bootstrap_control_credential",
+        "catalog",
+        "control_authenticate",
+        "cross_entity_mutate",
+        "delete_credential",
+        "disable_application",
+        "disable_credential",
+        "enable_application",
+        "enable_control_credential",
+        "enable_credential",
+        "freeze_issuance",
+        "issue_audit_credential",
+        "issue_credential",
+        "list_applications",
+        "list_credentials",
+        "mutate",
+        "query",
+        "register_application",
+        "reset_control_credentials",
+        "revoke_credential",
+        "rotate_control_credential",
+        "rotate_credential",
+        "schema",
+        "unfreeze_issuance",
+    }
+)
+
+# Phase 5 WP-2 (same design/ruling as `DECLARED_AUDIT_OPERATIONS` above):
+# the `target_kind` vocabulary. Deliberately EXCLUDES `application_or_
+# credential` -- its only emit site is `ControlAuthority._control_event`
+# (`service.py`, hardcoded), the same non-durable-only legacy sink
+# described above.
+DECLARED_AUDIT_TARGET_KINDS = frozenset(
+    {
+        "application",
+        "audit_sink",
+        "control_credential",
+        "credential",
+        "entity",
+    }
+)
+
 # D-3 (P4-D3, confirmed value) -- the denial-coalescing window. Declared in
 # `capabilities().audit_query.coalescing_window_ms` (control_plane.py) so a
 # consumer can interpret a `count`-bearing coalesced row's own time span
@@ -216,6 +310,8 @@ class InMemoryAuditQueryStore:
 
 __all__ = [
     "DECLARED_AUDIT_EVENT_CLASSES",
+    "DECLARED_AUDIT_OPERATIONS",
+    "DECLARED_AUDIT_TARGET_KINDS",
     "DECLARED_COALESCING_WINDOW_MS",
     "AuditQueryReader",
     "InMemoryAuditQueryStore",

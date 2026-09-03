@@ -1605,7 +1605,7 @@ def test_capability_unsupported_and_not_found_denials_add_no_durable_row() -> No
     ctx = runtime_context(service)
 
     with pytest.raises(FoundationError) as exc:
-        service.deny_unsupported(ctx, "audit_query", "not implemented")
+        service.deny_unsupported(ctx, operation="audit_query", message="not implemented")
     assert exc.value.code == "CAPABILITY_UNSUPPORTED"
 
     with pytest.raises(FoundationError) as exc:
