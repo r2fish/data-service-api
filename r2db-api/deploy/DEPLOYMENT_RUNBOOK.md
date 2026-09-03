@@ -43,20 +43,27 @@ document beyond stating its plan and preconditions.
 Confirm all of the following before starting §2. This runbook does not
 re-verify them; it assumes they are already true.
 
-1. **PostgreSQL migrations `0001` through `0006` have been applied** against
+1. **PostgreSQL migrations `0001` through `0007` have been applied** against
    the target cluster, per `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`
    §5 (`0001_bootstrap_control_plane.sql` through
    `0004_deprovision_application.sql`), migration `0005` (the
    `r2dbsvc_registry.credentials` table and `applications.enabled` column,
    `docs/design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md`
-   P2-D1/P2-D2), and migration `0006_control_plane_http.sql` (CCR-14,
+   P2-D1/P2-D2), migration `0006_control_plane_http.sql` (CCR-14,
    `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` R-2/R-3/R-4/R-6 -- the
    `applications` two-state registry, `control_credentials`, `control_audit`,
    and the `r2dbsvc_controlplane` role; see `POSTGRES_PROVISIONING_RUNBOOK.md`
    §11 -- **required even when this deployment does not run the
    control-plane HTTP process at all**, since `0006` also revises
    `begin_provision_application`/`finish_provision_application`, which
-   ordinary application onboarding (`0003`) depends on). Every application
+   ordinary application onboarding (`0003`) depends on), and migration
+   `0007_application_audit.sql` (Phase 4, `docs/design/
+   PHASE4_DURABLE_AUDIT_SINK_V1.md` D-1/D-5 -- the `application_audit` table
+   and the `r2dbsvc_auditreader` role; `POSTGRES_PROVISIONING_RUNBOOK.md`
+   §15 -- **also required even when `R2DB_AUDIT_DSN` is left unset**: the
+   application-plane process' `application_audit` writer connection depends
+   on the table existing regardless of whether `audit_query` itself is
+   declared `enabled`). Every application
    slug this deployment will serve must already be provisioned (`0003`) and
    present in `r2dbsvc_registry.applications` with `enabled = true`. **The
    target cluster must be PostgreSQL 13 or later** (CCR-13, `docs/design/
@@ -138,6 +145,11 @@ object-name prefix.
    ownership plus `0600` is the intended, sufficient protection boundary,
    matching `POSTGRES_PROVISIONING_RUNBOOK.md`'s treatment of the control
    DSN as an operator-only secret.
+5. If this deployment also runs the control-plane process (§7), keep
+   `R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS`
+   identical between this file and `control.env` -- both derive the same
+   declared `audit_query.visibility_lag_ms` (§7's table,
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §15).
 
 ### Step 3 -- choose and verify the internal port
 
@@ -502,11 +514,19 @@ see that module's docstring for the authoritative list):**
 | `R2DB_CREDENTIAL_PEPPER` | The same application-plane pepper `r2db_api.main` uses -- required here too (not merely "if configured"), because this process also issues/rotates *application* credentials in-band; see `control_main`'s own module docstring for why this departs from an earlier design-table reading. |
 | `R2DB_CONTROL_LIMIT_APPLICATIONS` / `R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION` / `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE` | Optional, SI-08 resource bounds (R-7); default to the contract's `example_profile` values if unset. |
 | `R2DB_PLATFORM_SCHEMA` / `R2DB_PLATFORM_POOL_SIZE` | Optional -- identical escape hatch/tuning knob to the application-plane process' own (§10 of the provisioning runbook); a real deployment leaves `R2DB_PLATFORM_SCHEMA` unset. |
+| `R2DB_AUDIT_DSN` | Optional (Phase 4, design `PHASE4_DURABLE_AUDIT_SINK_V1.md` D-5) -- the `r2dbsvc_auditreader` role's DSN against `r2dbsvc_platform` (migration `0007_application_audit.sql`, `POSTGRES_PROVISIONING_RUNBOOK.md` §15), read-only over both `control_audit` and `application_audit`. Unset means `audit_query` (`POST /control/v1/audit/query` and its `POST /v1/audit/query` alias) stays declared `unavailable` -- the routes remain registered and still authenticate the caller, answering `CAPABILITY_UNSUPPORTED` rather than a bare 404. |
+| `R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS` | Optional, both default `5000` (Phase 4, design D-1/D-6) -- session-level timeouts on this process' `control_audit` writer connection. **Must be set to the SAME value as the application-plane process' own `api.env`** (identically-named variables, read independently by each composition root) -- the two together derive the declared `audit_query.visibility_lag_ms` (`statement_timeout_ms + idle_timeout_ms + 1000` ms clock-skew margin); changing either value on either process changes that published declaration (`POSTGRES_PROVISIONING_RUNBOOK.md` §15). |
+| `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` | Optional, default `60` (Phase 4, design D-5) -- `audit_query`'s own pre-auth rate window (both paths above), never shared with `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`. See `POSTGRES_PROVISIONING_RUNBOOK.md` §15 for sizing guidance. |
+
+A ready-to-copy template listing every variable above, with synthetic
+placeholder values and the same style as `deploy/env/api.env.example`, is
+`deploy/env/control.env.example`.
 
 **Deployment steps (mirrors §2 above, for the second unit):**
 
 1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
-   root-owned, mode `0600`, containing the table above -- never the
+   root-owned, mode `0600`, containing the table above (copy
+   `deploy/env/control.env.example` as a starting point) -- never the
    application plane's own `api.env`.
 2. Install a second systemd unit pointing `ExecStart=` at
    `uvicorn r2db_api.control_main:app` on its own internal port, following
