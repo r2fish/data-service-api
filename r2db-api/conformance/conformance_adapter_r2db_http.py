@@ -1796,6 +1796,45 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         )
         return lag_ms
 
+    # port v1.9 (phase 5 WP-1, D-2/CCR_DISPOSITION.md subordinate ruling
+    # 10 item 2, design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_
+    # V1.md §6.2): `_control_send`'s own twin, built specifically for
+    # `audit_query_on_data_plane_host` -- reaches this adapter's OWN
+    # DATA-plane app/client (`self._client`), never the control one (the
+    # mirror image of `audit_query` above, which never reaches the data-
+    # plane client). No declare-first `SurfaceAbsent` gate here: `/v1/
+    # audit/query` is unconditionally mounted on the data-plane app
+    # regardless of `audit_query`'s own declared status (`http.py`'s own
+    # `_ROUTES`), so a real request always reaches a real handler.
+    def _data_send_with_actor(
+        self, method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        header_pairs = [("authorization", f"Bearer {actor.secret}")]
+        request = self._client.build_request(method, path, json=json_body, headers=header_pairs)
+        response = self._run(self._client.send(request))
+        if response.status_code >= 400:
+            failure = _HttpFailure(response)
+            raise ConformanceDenial(
+                code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                details=_failure_details(failure),
+            ) from failure
+        if not response.content:
+            return {}
+        return response.json()
+
+    def audit_query_on_data_plane_host(
+        self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return self._data_send_with_actor("POST", "/v1/audit/query", actor, json_body=dict(request))
+
+    # port v1.9 fix-round (F-2/F-3): declares this HTTP plug's own topology
+    # fact -- the control app (`self._control_client`) and the data-plane
+    # app (`self._client`) are two genuinely separate `Starlette` ASGI
+    # instances behind two separate httpx clients -- never co-hosted.
+    def control_surface_cohosted_with_data_plane(self) -> bool:
+        return False
+
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.
     # Design §12.5(iii)/work order §3: handles BOTH shapes this adapter's

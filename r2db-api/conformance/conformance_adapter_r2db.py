@@ -536,6 +536,56 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         )
         return lag_ms
 
+    # port v1.9 (phase 5 WP-1, D-2/CCR_DISPOSITION.md subordinate ruling
+    # 10 item 2, design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_
+    # V1.md §6.2): reaches `http.py::post_audit_query`'s own real body
+    # directly -- `DataService.authenticate` then `DataService.deny_
+    # unsupported`, in the same order, with the same arguments -- rather
+    # than a mere authentication-surface fallback: this in-process plug
+    # has no ASGI `Request` to route through the real handler with, but it
+    # can call the exact same two methods the real handler's own body
+    # calls, reaching the alias handler's own real behavior, not an
+    # approximation of it.
+    def audit_query_on_data_plane_host(
+        self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if self._service._control_plane_status == "unavailable":  # noqa: SLF001
+            raise self._audit_surface_absent(
+                "audit_query_on_data_plane_host",
+                "this data-plane host declares control_plane unavailable -- no control/audit credential "
+                "could ever be presented to its own audit_query alias",
+            )
+        # Fix-round F-4 (disclosed limit, CONDITIONS.md C-09 limit (c)):
+        # `request_id` is not threaded through this in-process call, unlike
+        # the real `http.py::post_audit_query`'s own `_authenticate(request,
+        # service)`, which passes the real ASGI request's own `_request_id
+        # (request)`. This harness call has no ASGI `Request` to read one
+        # from; the gap is disclosed rather than silently present.
+        context = self._call(lambda: self._service.authenticate(actor.secret))
+        # Unreached by any currently-registered adapter: this foundation's
+        # application-only CredentialStore (`auth.py`) never recognizes a
+        # control/audit credential's secret -- a genuinely separate store
+        # from the control-plane one -- so `authenticate` above always
+        # raises AUTH_INVALID first. A future co-hosted deployment whose
+        # data-plane store DID recognize it would reach here, mirroring
+        # `http.py::post_audit_query`'s own second step exactly.
+        self._call(lambda: self._service.deny_unsupported(
+            context,
+            "audit_query",
+            "Audit evidence query requires separately authenticated control/audit authority "
+            "that this foundation does not expose over the application-facing HTTP surface.",
+        ))
+        raise AssertionError("unreachable")  # deny_unsupported always raises
+
+    # port v1.9 fix-round (F-2/F-3): declares this in-process plug's own
+    # topology fact -- `DataService` (data plane) and `ControlPlaneService`
+    # (control plane) are two genuinely separate objects on this adapter,
+    # constructed with no shared credential store (`self._credentials` is
+    # application-only; the control plane's own credential store is a
+    # separate object entirely) -- never co-hosted.
+    def control_surface_cohosted_with_data_plane(self) -> bool:
+        return False
+
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.
     # Design §12.5(iii): "port deprovision_application は service に対応物

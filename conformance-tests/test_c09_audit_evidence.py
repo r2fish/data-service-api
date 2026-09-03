@@ -99,12 +99,41 @@ registry-wide loop collecting each adapter's own reason, never a bare
   flip, or a weakened guard) would fail loudly rather than pass silently.
   **The `xfail` was removed in WP-3(b)'s own flip commit** (work order §2.1
   / §6 item 8b), so this guard now runs plain and green.
+
+Phase 5 WP-1 addendum (docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+§3 D-1/D-2, docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md WP-1,
+fix-round F-1/F-2/F-3): contract 1.5.0 makes `operation`/`target_kind`
+declared vocabularies (`capabilities().audit_query.operations`/
+`.target_kinds`, the same declare-the-hazard posture `event_class`
+already had under 1.4.0), and same-label-amends 1.4.0's own unconditional
+obligation (b) to scope its credential acceptance to the control
+surface's `audit_query` control endpoint. This file's vector 1 no longer
+correlates on a hand-enumerated candidate set (the former two module-
+level frozenset constants this WP removed outright, never kept as a
+fallback); three new same-shaped "declaration agreement" vectors instead
+check that every event `audit_query` actually returns carries a value
+inside the peer's OWN declared vocabulary for `event_class` (1.4.0
+conditional; red only for the classes THIS suite's own session actually
+observes -- a peer's full declared vocabulary is pinned by its own
+peer-local (e) equality and snapshot test, not by this vector), and
+`operation`/`target_kind` (both 1.5.0 conditional, vacuous until a peer
+flips). A new unconditional vector (`test_c09_data_plane_host_audit_
+query_alias_rejects_control_credential_unless_cohosted`, port v1.9's
+`audit_query_on_data_plane_host` + `control_surface_cohosted_with_data_
+plane()`) observes the amended obligation (b) directly against the
+DATA-plane host's own alias, judged against the adapter's own DECLARED
+topology fact rather than a live cross-check of response content --
+registered `xfail`-free, since it is unconditional and both currently-
+registered peers (both declaring non-cohosted) are already conformant. A
+second whole-registry vacuity guard (`test_c09_every_control_surface_
+adapter_declares_1_5_0`) is registered `xfail(strict=True)` in this WP,
+mirroring the 1.4.0 whole-registry guard's own WP-1 -> last-flip-WP arc.
 """
 from __future__ import annotations
 
 import inspect
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -121,44 +150,6 @@ from adapter import (
 from conftest import registered_adapters
 
 pytestmark = pytest.mark.condition("C-09")
-
-# Review F-1: a small, EXPLICITLY DISCLOSED-UNCERTAIN candidate set for
-# vector 1's `operation` correlation, never a single hardcoded `"delete"`
-# literal -- WP-2/WP-3 own the real emitted vocabulary and may spell a
-# destructive data-operation event's `operation` field either way (r2db's
-# own CURRENT application-plane emit site for mutate-class operations
-# already uses the bare `"mutate"` spelling, `service.py`'s `_event` call,
-# not `"delete"`). This set is expected to need revisiting once a real
-# emitter exists -- both real emitters now do.
-#
-# WP-3(b) review finding D (supervisor-forwarded fix): `"transact"` was
-# added here alongside the `target_kind` widening below during WP-3(b),
-# but MitateDB-api's own destructive-delete DENY event already carries
-# `operation="delete"` (`cell.ApplicationCell`'s confirmation-choke denial
-# path) -- confirmed by mutation: removing `"transact"` from this set
-# leaves every C-09/C-11 test green. Adding it loosened this common
-# test's own correlation condition with no adapter that needed it, so it
-# is removed again (`operation` stays a 2-member set, matching r2db's own
-# real vocabulary plus MitateDB's `"delete"`).
-_LIKELY_DESTRUCTIVE_OPERATIONS = frozenset({"delete", "mutate"})
-
-# WP-3(b) (flip-time finding, mirrors F-1's own rationale immediately
-# above): `target_kind` was originally treated as the STRONGER, "contract-
-# stable" half of vector 1's two correlation conditions -- true only
-# because r2db-api was the only real emitter known at the time this test
-# was written (`target_kind="entity"`, `service.py`'s own mutate/schema
-# emit sites). MitateDB-api's own real emitter (`cell.py`) spells the
-# identical concept -- "the schema-level container this destructive
-# operation targets" -- as `target_kind="collection"` (this peer's own
-# established vocabulary for what r2db calls an "entity"; contract `audit.
-# fields` places no enum on this field at all, `spec/data-service-api.v1.
-# json`). Both values name the SAME concept for the SAME real event (a
-# destructive delete's own durable row) -- downgraded to a disclosed-
-# uncertain candidate set for the identical reason `_LIKELY_DESTRUCTIVE_
-# OPERATIONS` above already is one, not a weakening of what this vector
-# actually verifies (an application_id-scoped, target_kind-typed,
-# destructive-operation-shaped event is still required to exist).
-_LIKELY_DESTRUCTIVE_TARGET_KINDS = frozenset({"entity", "collection"})
 
 
 # --- shared helpers ----------------------------------------------------
@@ -219,6 +210,16 @@ def _audit_query_declaration(adapter) -> tuple[str, str]:
     document = adapter.control_capabilities(control_actor)
     status = document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
     return document.get("contract_version", "0.0.0"), status
+
+
+def _declared_audit_vocabulary(document: Mapping[str, Any], key: str) -> frozenset[str]:
+    """Reads one of `audit_query`'s own declared vocabulary keys
+    (`event_classes`/`operations`/`target_kinds`, contract 1.4.0 item 4 /
+    1.5.0 subordinate ruling 10 item 1) off a REAL `control_capabilities()`
+    document -- never a hardcoded set. Declare-the-hazard (D-7): the
+    contract places no enum on any of these three keys, only the shape
+    "each implementation's own declared list"."""
+    return frozenset(document.get("capabilities", {}).get("audit_query", {}).get(key, []))
 
 
 def _assert_audit_surface_absent_claim(adapter, exc: SurfaceAbsent) -> None:
@@ -310,6 +311,42 @@ def _require_provided(adapter, actor, request: Mapping[str, Any]) -> Mapping[str
     return outcome
 
 
+def _dispatch_audit_query_on_data_plane_host(adapter, actor, request: Mapping[str, Any]):
+    """Twin of `_dispatch_audit_query` for port v1.9's `audit_query_on_
+    data_plane_host` (D-2, CCR_DISPOSITION.md subordinate ruling 10 item
+    2) -- classifies the outcome the identical 3-way
+    ("surface_absent"/"provided"/"denied") shape, so this test file has
+    exactly one dispatch idiom, not two divergent ones."""
+    try:
+        result = adapter.audit_query_on_data_plane_host(actor, request)
+    except SurfaceAbsent as exc:
+        _assert_audit_surface_absent_claim(adapter, exc)
+        return "surface_absent", exc
+    except ConformanceDenial as exc:
+        return "denied", exc
+    assert isinstance(result, Mapping) and "events" in result, (
+        f"{adapter.name}: audit_query_on_data_plane_host(actor, {request!r}) succeeded but did not return an "
+        f"AuditResult-shaped mapping (missing 'events') -- got {result!r}"
+    )
+    return "provided", result
+
+
+def _require_denied_with(adapter, form: str, outcome: Any, code: str) -> None:
+    """Requires a dispatched `(form, outcome)` pair (`_dispatch_audit_
+    query`/`_dispatch_audit_query_on_data_plane_host`'s own return shape)
+    to be the DENIED form with EXACTLY `code` -- never a different denial
+    code (even a plausible-looking one, e.g. `CAPABILITY_UNSUPPORTED`/
+    `FORBIDDEN`), never `provided`, never `surface_absent`. The first
+    helper in this file that checks a denial's own CODE rather than only
+    its FORM (`_require_provided` only ever checks form)."""
+    assert form == "denied", (
+        f"{adapter.name}: expected the DENIED branch with code {code!r}, got {form!r} instead: {outcome!r}"
+    )
+    assert outcome.code == code, (
+        f"{adapter.name}: expected ConformanceDenial({code!r}), got {outcome.code!r} instead: {outcome!r}"
+    )
+
+
 # --- vector 1: observability --------------------------------------------
 
 
@@ -324,25 +361,17 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
             "genuine control credential must never be denied its own read-only audit surface"
         )
 
-    # PROVIDED (unreachable as of WP-1). Review F-1: the row inserted below
-    # is set up BEFORE the baseline snapshot, so the insert's own event (a
-    # buffer-class, non-fail-closed event, design §7.3) is never counted as
-    # "new" below -- only the DESTRUCTIVE DELETE that follows the baseline
-    # snapshot can be. The new event is identified by EVENT_ID SET
-    # DIFFERENCE against that baseline (the "time window" the review's own
-    # "あるべき形" names), never by a value this test injected into row
-    # data riding along as `target_id` -- `target_id` is contract-reserved
-    # for a single target CREDENTIAL/APPLICATION id (`audit.fields_note`),
-    # never a data row key (design docs/design/PHASE4_DURABLE_AUDIT_SINK_
-    # V1.md:438 "target_id は当面すべて NULL になる"), and r2db's own
-    # current application-plane emitter does not even pass `operation=
-    # "delete"` for its mutate-class emit site (`service.py`'s `_event`
-    # call there uses `operation="mutate"`) -- so neither `target_id` nor
-    # a hardcoded `"delete"` literal is a safe correlation key here.
-    # Correlated instead on `application_id` + `target_kind` (both
-    # contract-stable identifiers, never row values) within the baseline
-    # diff window, with `operation` checked against a small, disclosed-
-    # uncertain candidate set rather than a single hardcoded literal.
+    # PROVIDED. Review F-1: the row inserted below is set up BEFORE the
+    # baseline snapshot, so the insert's own event (a buffer-class,
+    # non-fail-closed event, design §7.3) is never counted as "new" below
+    # -- only the DESTRUCTIVE DELETE that follows the baseline snapshot
+    # can be. The new event is identified by EVENT_ID SET DIFFERENCE
+    # against that baseline (the "time window" the review's own "あるべき
+    # 形" names), never by a value this test injected into row data riding
+    # along as `target_id` -- `target_id` is contract-reserved for a
+    # single target CREDENTIAL/APPLICATION id (`audit.fields_note`), never
+    # a data row key (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md:
+    # 438 "target_id は当面すべて NULL になる").
     session = fx.runtime_a
     entity = fx.shared_entity
     marker = fresh_identifier("c09v1")
@@ -367,15 +396,44 @@ def test_c09_v1_fail_closed_events_are_observable_through_audit_query(adapter, f
         f"{adapter.name}: no new audit_query event appeared after the destructive delete "
         f"(baseline had {len(baseline_ids)} event(s))"
     )
+
+    # 1.4.0 obligation (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_
+    # RANGE_V1.md §6.1's own "(i) is a subset of (ii)" framing): the
+    # destructive delete's own new event(s) must be scoped to THIS
+    # application -- `operation`/`target_kind` are no longer correlated
+    # here against a hand-enumerated candidate set (phase 5 WP-1, D-1:
+    # the candidate-set mechanism that used to stand in for this is
+    # replaced by the declared-vocabulary subset vectors below, which see
+    # ALL returned events, not only this window's own new ones).
+    scoped_events = [event for event in new_events if event.get("application_id") == fx.app_a]
+    assert scoped_events, (
+        f"{adapter.name}: none of the {len(new_events)} new event(s) after the destructive delete are scoped to "
+        f"application_id={fx.app_a!r} -- new events: {new_events!r}"
+    )
+
+    # 1.5.0 conditional obligation (D-1, CCR_DISPOSITION.md subordinate
+    # ruling 10 item 1): for a 1.5.0-declaring peer whose own audit_query
+    # is enabled/partial, the destructive delete's own application_id-
+    # scoped event(s) must ALSO carry an operation/target_kind pair that
+    # is a member of THIS peer's own declared audit_query.operations/
+    # target_kinds vocabulary -- read from a REAL control_capabilities()
+    # document, never a hardcoded set. A 1.4.0-declaring peer takes only
+    # the application_id-scoping obligation above (work order WP-1 §4
+    # "1.4.0 の peer は従来どおりの vector 1... だけを課される").
+    contract_version, _status = _audit_query_declaration(adapter)
+    if _semver_tuple(contract_version) < (1, 5, 0):
+        return
+    document = adapter.control_capabilities(control_actor)
+    declared_operations = _declared_audit_vocabulary(document, "operations")
+    declared_target_kinds = _declared_audit_vocabulary(document, "target_kinds")
     assert any(
-        event.get("application_id") == fx.app_a
-        and event.get("target_kind") in _LIKELY_DESTRUCTIVE_TARGET_KINDS
-        and event.get("operation") in _LIKELY_DESTRUCTIVE_OPERATIONS
-        for event in new_events
+        event.get("operation") in declared_operations and event.get("target_kind") in declared_target_kinds
+        for event in scoped_events
     ), (
-        f"{adapter.name}: none of the {len(new_events)} new event(s) after the destructive delete correlate on "
-        f"application_id={fx.app_a!r} / target_kind in {sorted(_LIKELY_DESTRUCTIVE_TARGET_KINDS)!r} / operation in "
-        f"{sorted(_LIKELY_DESTRUCTIVE_OPERATIONS)!r} -- new events: {new_events!r}"
+        f"{adapter.name}: none of the {len(scoped_events)} application_id-scoped new event(s) after the "
+        "destructive delete carry an operation/target_kind pair that is a member of this peer's OWN declared "
+        f"audit_query.operations/target_kinds vocabulary -- declared operations={sorted(declared_operations)!r}, "
+        f"target_kinds={sorted(declared_target_kinds)!r}, events: {scoped_events!r}"
     )
 
 
@@ -588,6 +646,238 @@ def test_c09_v4_no_audit_mutation_or_deletion_surface_exists(adapter):
     )
 
 
+# --- declaration agreement (宣言整合): returned events ⊆ declared vocabulary ---
+#
+# Phase 5 WP-1 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+# §6.1, work order docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md
+# WP-1 §4): the common suite's first machine check that EVERY event
+# `audit_query` actually returns carries a value that is a member of this
+# peer's OWN declared vocabulary for that field -- not merely that a NEW
+# event correlates with one after a specific probe (vector 1's own,
+# narrower, scoping). Three same-shaped vectors, one per field:
+# `event_class` (1.4.0 conditional obligation (4), CCR_DISPOSITION.md
+# subordinate ruling 9 item 4) and `operation`/`target_kind` (1.5.0
+# conditional obligation, subordinate ruling 10 item 1 -- vacuous until a
+# peer declares 1.5.0, work order WP-1 completion condition 9).
+#
+# Fix-round U-1 (2nd independent audit): the prior revision of these 3
+# vectors queried `audit_query` once, unconditionally, and treated an
+# EMPTY `events` list as vacuously passing its own subset check -- a real
+# non-vacuity gap the audit's mutation (vi) exposed: on the two HTTP-
+# shaped plugs, `audit_query`'s real control-audit trail happened to be
+# empty at the point in the session these tests ran, so the subset check
+# never had anything to check and the vector was silently vacuous for
+# HALF the registry, not "load-bearing on all 4" as previously claimed.
+# Each vector below now (a) generates a KNOWN durable event via a real
+# in-band `register_application_inband` call (`application_lifecycle`
+# class -- durable by construction on both peers' control planes, no
+# buffer/coalescing there, confirmed by source: r2db-api's
+# `control_plane.py::ControlPlaneService.register_application` and
+# MitateDB-api's `control_plane.py`'s own `register_application` both
+# emit `event_class="application_lifecycle"`/`operation=
+# "register_application"`/`target_kind="application"` -- so this probe
+# needs no data-plane fixture at all, unlike vector 1's own destructive-
+# delete probe), (b) polls `audit_query` for up to `audit_visibility_
+# lag_ms() + 2000`ms (capped at 30000ms total) until at least one event
+# comes back -- never a fixed sleep, (c) asserts the result is genuinely
+# non-empty BEFORE running the subset check (a real, asserted
+# precondition, not an implicit hope). Mutation-verified (see docstrings
+# below): dropping the probe's own `application_lifecycle` class from a
+# peer's declared vocabulary now turns ALL FOUR of that peer's plugs red
+# (not only the in-process one).
+#
+# What this half does NOT reach (disclosed, `CONDITIONS.md`'s C-09 row):
+# the REVERSE direction -- a declared vocabulary member the peer's real
+# emit sites never actually produce -- is not machine-checked here; that
+# half is carried by each peer's own local AST equality (`U == D ∪ N`).
+
+
+def _assert_returned_field_subset_of_declaration(
+    adapter, field: str, declared: frozenset[str], events: Sequence[Mapping[str, Any]]
+) -> None:
+    """Shared shape for the 3 declaration-agreement vectors. Fix-round F-6:
+    strict reading of the contract's own finalized wording ("every event
+    it returns MUST carry values drawn from the declared sets",
+    `versioning.version_binding`'s 1.5.0 paragraph) -- a MISSING/`None`
+    `field`, or a non-`Mapping` event, is itself a violation, not merely a
+    value present but outside the declared set. Every currently-registered
+    peer's real emit sites always set `operation`/`target_kind`/
+    `event_class` explicitly (never omitted), so this strict reading is
+    not expected to be vacuous-by-omission in practice."""
+    offending = [
+        event for event in events
+        if not isinstance(event, Mapping) or event.get(field) is None or event[field] not in declared
+    ]
+    assert not offending, (
+        f"{adapter.name}: {len(offending)} audit_query event(s) do not carry a {field!r} value drawn from this "
+        f"peer's own declared vocabulary {sorted(declared)!r}: {offending!r}"
+    )
+
+
+def _require_nonvacuous_provided(adapter, control_actor, request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Fix-round U-1: generates a KNOWN durable event (a real in-band
+    `register_application_inband` call -- `application_lifecycle` class,
+    durable by construction on both planes, no data-plane fixture needed),
+    then polls `audit_query` for up to `audit_visibility_lag_ms() + 2000`ms
+    (capped at 30000ms total) until it returns at least one event, and
+    asserts that non-emptiness as a REQUIRED precondition -- never a
+    silent vacuous pass. The probe application is deprovisioned afterward
+    (test-harness-only cleanup; the durable audit row it already produced
+    is immutable and unaffected -- contract `audit.immutability`)."""
+    probe_app_id = fresh_identifier("c09decl")
+    adapter.register_application_inband(control_actor, probe_app_id)
+    try:
+        deadline_ms = min(adapter.audit_visibility_lag_ms() + 2000, 30000)
+        waited_ms = 0
+        poll_interval_s = 0.25
+        result: Mapping[str, Any] = {"events": []}
+        while True:
+            result = _require_provided(adapter, control_actor, request)
+            if result.get("events"):
+                break
+            if waited_ms >= deadline_ms:
+                break
+            time.sleep(poll_interval_s)
+            waited_ms += int(poll_interval_s * 1000)
+    finally:
+        adapter.deprovision_application(probe_app_id)
+    events = result.get("events") or []
+    assert events, (
+        f"{adapter.name}: audit_query returned zero events after polling for {waited_ms}ms (deadline "
+        f"{deadline_ms}ms) following a real register_application_inband probe of {probe_app_id!r} -- this "
+        "vector requires at least one real event to check a non-vacuous subset relation against, and must "
+        "never silently pass on an empty result"
+    )
+    return result
+
+
+def test_c09_declaration_agreement_event_class(adapter):
+    """1.4.0 conditional obligation (4) (CCR_DISPOSITION.md subordinate
+    ruling 9 item 4) already requires a declared `event_classes`
+    vocabulary; this is the common suite's own first check that every
+    RETURNED event obeys it -- previously only each peer's own peer-local
+    AST scan (`test_declared_audit_event_classes_change_only_
+    deliberately`-adjacent machinery) checked this, never the common
+    suite.
+
+    Fix-round F-1 / U-1 (corrected claim, 2nd independent audit): this
+    vector is red only for the event_class VALUES actually observed among
+    the events `audit_query` returns during this test -- it is NOT a
+    fixed-point check of a peer's ENTIRE declared vocabulary (that stays
+    the job of each peer's own peer-local (e) equality and declared-
+    vocabulary snapshot test). As of this fix round, the observed set is
+    GUARANTEED non-empty and known to include at least `application_
+    lifecycle` on all four currently-registered adapters (`_require_
+    nonvacuous_provided`'s own real in-band `register_application_inband`
+    probe, above, always causes this class to be emitted and observed
+    before the subset check runs -- fix-round U-1; before that fix, two
+    of the four adapters' own real control-audit trail happened to be
+    empty at the point in the session this vector ran, so this vector
+    was silently vacuous on those two plugs).
+    Mutation-verified: dropping `application_lifecycle` -- the class the
+    probe above actually causes to be emitted -- from a peer's own
+    declared `event_classes` turns this red on ALL FOUR of that peer's
+    plugs (both in-process and HTTP-shaped), not only the in-process one.
+    """
+    contract_version, status = _audit_query_declaration(adapter)
+    if _semver_tuple(contract_version) < (1, 4, 0) or status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    result = _require_nonvacuous_provided(adapter, control_actor, {"limit": 1000})
+    document = adapter.control_capabilities(control_actor)
+    declared = _declared_audit_vocabulary(document, "event_classes")
+    _assert_returned_field_subset_of_declaration(adapter, "event_class", declared, result["events"])
+
+
+def test_c09_declaration_agreement_operation(adapter):
+    """1.5.0 conditional obligation (D-1, CCR_DISPOSITION.md subordinate
+    ruling 10 item 1). Vacuous until a peer declares 1.5.0 with
+    `audit_query` enabled/partial (no adapter does as of phase 5 WP-1 --
+    peer flips land in WP-2/WP-3). Fix-round U-1: kept in the SAME
+    non-vacuous-probe skeleton as `test_c09_declaration_agreement_event_
+    class` above (`_require_nonvacuous_provided`), even though the version
+    gate makes it currently unreachable -- so the shape is already correct
+    for WP-2/WP-3's own flip, not a retrofit deferred to that WP."""
+    contract_version, status = _audit_query_declaration(adapter)
+    if _semver_tuple(contract_version) < (1, 5, 0) or status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    result = _require_nonvacuous_provided(adapter, control_actor, {"limit": 1000})
+    document = adapter.control_capabilities(control_actor)
+    declared = _declared_audit_vocabulary(document, "operations")
+    _assert_returned_field_subset_of_declaration(adapter, "operation", declared, result["events"])
+
+
+def test_c09_declaration_agreement_target_kind(adapter):
+    """1.5.0 conditional obligation (D-1, CCR_DISPOSITION.md subordinate
+    ruling 10 item 1). Vacuous until a peer declares 1.5.0 with
+    `audit_query` enabled/partial (no adapter does as of phase 5 WP-1 --
+    peer flips land in WP-2/WP-3). Fix-round U-1: same non-vacuous-probe
+    skeleton as the other two declaration-agreement vectors above."""
+    contract_version, status = _audit_query_declaration(adapter)
+    if _semver_tuple(contract_version) < (1, 5, 0) or status not in ("enabled", "partial"):
+        return
+    control_actor = adapter.control_credential()
+    result = _require_nonvacuous_provided(adapter, control_actor, {"limit": 1000})
+    document = adapter.control_capabilities(control_actor)
+    declared = _declared_audit_vocabulary(document, "target_kinds")
+    _assert_returned_field_subset_of_declaration(adapter, "target_kind", declared, result["events"])
+
+
+# --- unconditional obligation (b), same-label addendum: data-plane host --
+
+
+def test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless_cohosted(adapter):
+    """Contract 1.4.0's unconditional obligation (b), same-label-addended
+    by CCR_DISPOSITION.md subordinate ruling 10 item 2 (design docs/
+    design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md §3 D-2). Registered
+    `xfail`-free (work order WP-1 completion condition 10) -- this is an
+    UNCONDITIONAL obligation, unlike every other vector in this file that
+    branches on `contract_version`/`audit_query` status: both currently-
+    registered peers already declare 1.4.0 and are already conformant.
+
+    Fix-round F-2/F-3: dispatch is judged against this adapter's OWN
+    declared topology fact, `control_surface_cohosted_with_data_plane()`
+    (port v1.9) -- never against a live cross-check of returned event
+    content (the prior revision's "overlap with a real control-host
+    query" mechanism is REMOVED: it could not distinguish a genuinely
+    co-hosted acceptance from one that happened to overlap by
+    coincidence, and inspected response CONTENT rather than the
+    deployment's own declared TOPOLOGY, the property this obligation is
+    actually about).
+
+    - `provided`: conformant ONLY when this adapter declares
+      `control_surface_cohosted_with_data_plane() == True` (a deployment
+      that co-hosts both surfaces, `versioning.control_discovery`'s own
+      "convenience, not a requirement"). Under a NON-cohosted declaration
+      (every currently-registered adapter), `provided` is RED -- this is
+      what catches a port-level identity mistake, e.g. an implementation
+      that accidentally forwards to `audit_query`'s own control-host call
+      instead of genuinely presenting to the data host (mutation-verified
+      below: `return self.audit_query(actor, request)` in place of a real
+      data-host call turns this red on both r2db plugs).
+    - `denied`: must be EXACTLY `AUTH_INVALID` (this deployment's data
+      host holds no control-credential store) regardless of the cohosted
+      declaration -- a cohosted deployment MAY still keep separate
+      stores. `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/any other denial code
+      is non-conformant either way.
+    """
+    cohosted = adapter.control_surface_cohosted_with_data_plane()
+    control_actor = adapter.control_credential()
+    form, outcome = _dispatch_audit_query_on_data_plane_host(adapter, control_actor, {"limit": 1})
+    if form == "surface_absent":
+        return
+    if form == "provided":
+        assert cohosted, (
+            f"{adapter.name}: audit_query_on_data_plane_host returned PROVIDED, but this adapter declares "
+            "control_surface_cohosted_with_data_plane() == False -- a non-cohosted deployment's data-plane "
+            "host must never answer a control/audit credential (a PROVIDED outcome is conformant only when "
+            "the adapter's own declared topology says both surfaces are genuinely co-hosted)"
+        )
+        return
+    _require_denied_with(adapter, form, outcome, "AUTH_INVALID")
+
+
 # --- declaration truthfulness --------------------------------------------
 
 
@@ -675,4 +965,40 @@ def test_c09_every_control_surface_adapter_takes_the_provided_branch():
     assert not non_provided_reasons, (
         "not every control-surface-bearing registered adapter took the PROVIDED audit_query branch: "
         f"{non_provided_reasons!r} (control-surface adapters checked: {control_surface_adapters!r})"
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="no peer declares 1.5.0 yet; un-xfailed by the last flip WP")
+def test_c09_every_control_surface_adapter_declares_1_5_0():
+    """Whole-registry guard for D-1 (CCR_DISPOSITION.md subordinate ruling
+    10 item 1; work order docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_
+    V1.md WP-1 §1 D-4). Registered `xfail(strict=True)` in WP-1 -- false
+    until every registered adapter with a control surface has flipped to
+    `contract_version` 1.5.0; the `xfail` is removed only in the SAME
+    commit as the LAST flip WP -- mirrors `test_c09_every_control_
+    surface_adapter_takes_the_provided_branch`'s own WP-1 -> WP-3(b) arc
+    exactly, and is written in the SAME shape: a non-parametrized function
+    that walks `registered_adapters()` itself (never a hardcoded
+    adapter-name list), deriving its target set from `control_plane`
+    status, never from `audit_query`'s own status (D-1's obligation binds
+    on the DECLARED version, independent of whether `audit_query` itself
+    is enabled -- the same distinction the whole-registry PROVIDED-branch
+    guard above draws between `control_plane` and `audit_query`).
+    """
+    control_surface_adapters: list[str] = []
+    not_1_5_0: list[str] = []
+    for name, adapter_obj in registered_adapters().items():
+        if _control_plane_status(adapter_obj) not in ("enabled", "partial"):
+            continue
+        control_surface_adapters.append(name)
+        contract_version, _status = _audit_query_declaration(adapter_obj)
+        if _semver_tuple(contract_version) < (1, 5, 0):
+            not_1_5_0.append(f"{name}: declares {contract_version!r}")
+
+    assert control_surface_adapters, (
+        "no registered adapter has a control surface at all -- this guard is vacuous by construction"
+    )
+    assert not not_1_5_0, (
+        f"not every control-surface-bearing registered adapter declares contract_version >= 1.5.0: "
+        f"{not_1_5_0!r} (control-surface adapters checked: {control_surface_adapters!r})"
     )

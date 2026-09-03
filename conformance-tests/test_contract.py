@@ -75,19 +75,20 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_4_0():
-    # Phase 4 WP-1 (docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §5 P4-D4,
-    # CCR_DISPOSITION.md subordinate ruling 9): the version bump itself,
-    # pinned so a future revert of just this one line is caught here rather
-    # than only by whichever other test happens to touch contract_version.
-    # Supersedes the 1.3.0 pin (phase 3.5 WP-1, subordinate ruling 8) this
-    # test itself carried before -- 1.3.0 is already published, so this file
-    # never re-adds a standalone "declares 1.3.0" test: any implementation
-    # still declaring 1.3.0 or earlier is exercised by version_binding's own
-    # retroactivity rule, not by a dedicated pin here for a version this
-    # document no longer declares.
+def test_contract_declares_1_5_0():
+    # Phase 5 WP-1 (docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+    # §3 D-1/D-2, CCR_DISPOSITION.md subordinate ruling 10): the version
+    # bump itself, pinned so a future revert of just this one line is
+    # caught here rather than only by whichever other test happens to
+    # touch contract_version. Supersedes the 1.4.0 pin (phase 4 WP-1,
+    # subordinate ruling 9) this test itself carried before -- 1.4.0 is
+    # already published, so this file never re-adds a standalone
+    # "declares 1.4.0" test: any implementation still declaring 1.4.0 or
+    # earlier is exercised by version_binding's own retroactivity rule,
+    # not by a dedicated pin here for a version this document no longer
+    # declares.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.4.0"
+    assert contract["contract_version"] == "1.5.0"
 
 
 def test_contract_audit_fields_include_optional_target_id_and_it_is_not_forbidden():
@@ -403,3 +404,119 @@ def test_version_binding_1_4_0_unconditional_and_conditional_counts_agree():
         f"CCR_DISPOSITION.md subordinate ruling 9(b) does not restate {stated_conditional}件, matching "
         "versioning.version_binding's own conditional count"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 WP-1 fix-round (work order v1.2 §0.1 standing discipline 4, WP-1
+# completion condition 18): a literal string pin for the requester-finalized
+# English -- the 1.4.0 unconditional obligation (b) same-label addendum (one
+# block, CCR_DISPOSITION.md subordinate ruling 10 item 2) and the 1.5.0
+# paragraph's 4 finalized sentences (subordinate ruling 10 item 1) -- so a
+# future accidental edit to this prose is caught by an assertion INDEPENDENT
+# of the contract file itself, not only by eyeballing a diff. Normalization
+# is deliberately narrow (the exact 4 operations the work order names):
+# backtick removal, "**" removal, em dash "—" unified with ASCII "--" (never
+# just stripped -- stripping alone is what let a prior revision of this pin
+# silently fail to match sentence 1, whose reference text uses "—" while the
+# contract itself uses "--"), and whitespace collapsed to single spaces. No
+# other transformation (no case-folding, no punctuation removal).
+# ---------------------------------------------------------------------------
+
+PIN_1_4_0_OBLIGATION_B_ADDENDUM = (
+    "this acceptance is scoped to the control surface's `audit_query` control endpoint (the "
+    "canonical `POST /control/v1/audit/query`, and its alias as served on the control host — the "
+    "same host scoping `endpoints.audit_query.deprecation_note` already states, and this "
+    "document's own 1.4.0 conditional obligation (5) below, which requires both paths to answer "
+    "as the identical operation). A data-plane host is not thereby obliged to authenticate "
+    "control or audit credentials merely because it declares `control_plane` as something other "
+    "than `unavailable`; where such a host holds no control-credential store, it may refuse a "
+    "control or audit credential presented on its own `POST /v1/audit/query` alias as an unknown "
+    "credential (`AUTH_INVALID`); it is not thereby required to accept, verify, or forward it. "
+    "Co-hosting both surfaces in one process remains permitted (`versioning.control_discovery`) "
+    "and is not what this scoping addresses"
+)
+
+PIN_1_5_0_SENTENCE_1 = (
+    "Since 1.5.0 (subordinate ruling 10, item 1, conditional): `operations` and `target_kinds` "
+    "are vocabularies each implementation declares for itself at "
+    "`capabilities().audit_query.operations` / `.target_kinds` — the sets of values the "
+    "`operation` and `target_kind` fields of events returned by `audit_query` can take."
+)
+
+PIN_1_5_0_SENTENCE_2 = (
+    "As with `event_classes`, this contract enumerates no fixed enum and requires no particular "
+    "member (declare-the-hazard)."
+)
+
+PIN_1_5_0_SENTENCE_3 = (
+    "An implementation declaring 1.5.0 or higher whose `audit_query` is other than `unavailable` "
+    "MUST declare both, and every event it returns MUST carry values drawn from the declared "
+    "sets; the same superset relation holds for `event_classes`, stated here explicitly."
+)
+
+PIN_1_5_0_SENTENCE_4 = (
+    "`audit_query.operations` is the vocabulary of the audit row's `operation` field and is "
+    "unrelated to `capability_status.defined.atomic_mutation.operations`, which enumerates the "
+    "executable mutation verbs."
+)
+
+
+def _normalize_prose_for_pin(text: str) -> str:
+    """The work order's own 4 named normalizations, and only those: strip
+    backticks and `**`; unify em dash "—" with ASCII "--" (never simply
+    strip either one -- unifying is what makes the reference text, written
+    with "—", compare equal to the contract's own "--" spelling); collapse
+    whitespace runs to single spaces. No case-folding, no punctuation
+    removal beyond that."""
+    text = text.replace("`", "").replace("**", "")
+    text = text.replace("—", "--")
+    return " ".join(text.split())
+
+
+def test_contract_pins_the_requester_finalized_1_4_0_and_1_5_0_prose():
+    """Fix-round (2nd independent audit, mechanical check 1): pins the
+    requester-finalized English verbatim (normalized) into an assertion,
+    rather than leaving verbatim-ness as something only a human diff review
+    confirmed. Checks both `versioning.version_binding` (all 5 blocks) and
+    `audit.query_operation_vocabulary`/`query_target_kind_vocabulary` (the
+    4 sentence-1-4 block, which fix-round U-2 placed identically in both
+    notes)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = _normalize_prose_for_pin(contract["versioning"]["version_binding"])
+    query_operation_vocabulary = _normalize_prose_for_pin(contract["audit"]["query_operation_vocabulary"])
+    query_target_kind_vocabulary = _normalize_prose_for_pin(contract["audit"]["query_target_kind_vocabulary"])
+
+    assert _normalize_prose_for_pin(PIN_1_4_0_OBLIGATION_B_ADDENDUM) in version_binding, (
+        "versioning.version_binding no longer contains the requester-finalized 1.4.0 unconditional "
+        "obligation (b) same-label addendum (subordinate ruling 10 item 2) verbatim"
+    )
+    # Sentences 1-3 belong in version_binding itself (the 1.5.0 obligation
+    # text); sentence 4 (the atomic_mutation.operations disambiguation) is
+    # deliberately placed ONLY in the audit-section notes, never duplicated
+    # into version_binding -- confirmed correct placement, not an omission
+    # (1st independent audit, "(B) 1.5.0 段落" table: "sentence 4: ...
+    # PRESENT (逐語) ... audit.query_operation_vocabulary 末尾"). All 4
+    # sentences are required verbatim in BOTH audit-section notes (fix-round
+    # U-2 placed the identical 4-sentence block in both).
+    for name, sentence in (
+        ("sentence 1", PIN_1_5_0_SENTENCE_1),
+        ("sentence 2", PIN_1_5_0_SENTENCE_2),
+        ("sentence 3", PIN_1_5_0_SENTENCE_3),
+    ):
+        normalized_sentence = _normalize_prose_for_pin(sentence)
+        assert normalized_sentence in version_binding, (
+            f"versioning.version_binding no longer contains the requester-finalized 1.5.0 {name} verbatim"
+        )
+    for name, sentence in (
+        ("sentence 1", PIN_1_5_0_SENTENCE_1),
+        ("sentence 2", PIN_1_5_0_SENTENCE_2),
+        ("sentence 3", PIN_1_5_0_SENTENCE_3),
+        ("sentence 4", PIN_1_5_0_SENTENCE_4),
+    ):
+        normalized_sentence = _normalize_prose_for_pin(sentence)
+        assert normalized_sentence in query_operation_vocabulary, (
+            f"audit.query_operation_vocabulary no longer contains the requester-finalized 1.5.0 {name} verbatim"
+        )
+        assert normalized_sentence in query_target_kind_vocabulary, (
+            f"audit.query_target_kind_vocabulary no longer contains the requester-finalized 1.5.0 {name} verbatim"
+        )

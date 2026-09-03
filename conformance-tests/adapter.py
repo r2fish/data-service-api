@@ -1159,6 +1159,90 @@ class ConformanceAdapter(ABC):
         since there is then no real declared lag value to read.
         """
 
+    # ------------------------------------------------------------------
+    # audit_query on the DATA-plane host (port v1.9, phase 5 WP-1, design
+    # docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md §6.2, work
+    # order docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md WP-1) --
+    # observes contract 1.4.0's unconditional obligation (b), same-label-
+    # addended by CCR_DISPOSITION.md subordinate ruling 10 item 2: a
+    # control/audit credential presented on the DATA-plane host's own
+    # `POST /v1/audit/query` alias is not thereby owed acceptance merely
+    # because that host also declares `control_plane` as something other
+    # than `unavailable`.
+    # ------------------------------------------------------------------
+    @abstractmethod
+    def audit_query_on_data_plane_host(
+        self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Presents `request` (the same raw `AuditQueryRequest`-shaped
+        mapping `audit_query` above takes) to this peer's DATA-PLANE
+        host's own `POST /v1/audit/query` alias -- never the control host
+        `audit_query` above always reaches, the mirror image of that
+        method's own "control base URL, never the data-plane one" rule.
+
+        Reaches the alias HANDLER ITSELF where the plug can: an HTTP plug
+        sends a real request to the DATA base URL (the same real ASGI app
+        the data-plane's other in-band methods already use). An in-process
+        plug that has no ASGI routing layer to send a request through
+        instead calls the exact same product-code steps the real handler's
+        own body calls, in the same order, with the same arguments,
+        reaching the alias handler's own real behavior directly rather
+        than approximating it. A plug that genuinely cannot reach even that
+        much (a narrower observation than the real handler) presents
+        `actor`'s credential at this peer's own data-plane authentication
+        surface instead -- disclosed as a limit on this peer's own row in
+        `conformance-tests/CONDITIONS.md`'s C-09 entry, never silently
+        substituted without that disclosure.
+
+        Returns the peer's raw `AuditResult` document (a `Mapping`) on
+        success (the credential was genuinely accepted -- legitimate only
+        for a deployment that co-hosts both surfaces on the data host,
+        `versioning.control_discovery`'s own "convenience, not a
+        requirement"), or raises `ConformanceDenial` with a genuine
+        contract-code denial (most commonly `AUTH_INVALID`: this host
+        holds no control-credential store) -- the same success/denial
+        convention `audit_query` above already follows. Raises
+        `SurfaceAbsent` (this peer declares `control_plane` `unavailable`,
+        or has no data-plane `/v1/audit/query` alias at all -- both
+        structural absences, never taken on the adapter's word) rather
+        than presenting any request, following the same `signature_
+        forbids_parameters`-verifiable convention every other `Surface
+        Absent` raise site on this port already follows.
+        """
+
+    @abstractmethod
+    def control_surface_cohosted_with_data_plane(self) -> bool:
+        """Declares, for the deployment under test, whether the control
+        surface is provided on the SAME host/process as the data-plane
+        host (port v1.9, phase 5 WP-1 fix-round F-2/F-3, design docs/
+        design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md §6.2). This is a
+        topology fact about THIS test harness's own construction, not an
+        observation derived from any single request -- it exists so
+        `test_c09_data_plane_host_audit_query_alias_rejects_control_
+        credential_unless_cohosted` can tell a genuine co-hosted
+        acceptance apart from a PORT-LEVEL mistake (e.g. an `audit_query_
+        on_data_plane_host` implementation that accidentally forwards to
+        the control host instead of genuinely presenting to the data
+        host -- a real class of bug this port revision's own review found
+        by mutation: `return self.audit_query(actor, request)` in place
+        of a real data-host call returns a genuine PROVIDED document on
+        every currently-registered plug, and would pass silently were
+        `provided` accepted unconditionally).
+
+        Every currently-registered plug returns `False`: the two HTTP
+        plugs build the control and data-plane ASGI apps as genuinely
+        separate `Starlette` instances behind separate clients (`self.
+        _control_client`/`self._client`); the two in-process plugs
+        construct genuinely separate service objects (`ControlPlaneService`
+        vs `DataService`/`MitateDataService`) with no shared credential
+        store between them. A plug returning `True` asserts this
+        deployment's own construction genuinely shares one process/host
+        between both surfaces -- never asserted lightly, since it widens
+        what `test_c09_data_plane_host_audit_query_alias_rejects_control_
+        credential_unless_cohosted` will accept as conformant (a `PROVIDED`
+        outcome becomes acceptable, alongside `AUTH_INVALID`).
+        """
+
     # --- application plane ---
     @abstractmethod
     def authenticate(self, handle: CredentialHandle) -> object: ...  # may raise ConformanceDenial
