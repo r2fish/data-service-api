@@ -188,6 +188,65 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(control_
     assert response.json()["code"] == "LIMIT_EXCEEDED"
 
 
+# ===========================================================================
+# Phase 4 ledger closure WP-B3 (L4-7(i), design §11.1 未起票 -- 作業指示書
+# WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md §1 L4-7(i) が正本): the two tests
+# below (`test_build_control_service_declares_audit_query_...`) exercise
+# `build_control_service` directly -- the lower-level assembly helper --
+# never `control_main.build_control_app` itself, the literal `uvicorn
+# mitatedb_api.control_main:app` entry point. A composition-root bug that
+# only breaks `build_control_app`'s OWN `MITATEDB_AUDIT_DSN` env-var read
+# (e.g. a typo'd env var name at that specific call site) would go
+# undetected by either existing test. Same name as r2db-api's own
+# `tests/test_audit_query.py` `test_build_control_app_declares_audit_query_
+# status_from_r2db_audit_dsn_env` (work order §4 WP-B3 completion condition
+# 4), adapted to this peer's own `MITATEDB_AUDIT_DSN` env var and bearer-
+# token format (`{credential_id}.{secret}`, mirroring this file's own
+# `test_build_control_app_mounts_a_real_working_control_v1_surface`).
+# ===========================================================================
+
+
+def test_build_control_app_declares_audit_query_status_from_mitatedb_audit_dsn_env(control_main_module, control_platform) -> None:
+    """`control_composition.build_control_service`'s own `audit_dsn = env.
+    get("MITATEDB_AUDIT_DSN") or None` read (`control_composition.py:169`)
+    must reach a real `GET /control/v1/capabilities` response two ways,
+    built through `control_main.build_control_app` itself -- the literal
+    entry-point factory, not `build_control_service` directly:
+    `MITATEDB_AUDIT_DSN` unset -> `audit_query: {"status": "unavailable"}`
+    (D-5 M-4's declared default), and set to this module's own real
+    `auditreader` DSN -> `audit_query.status != "unavailable"` (`"enabled"`
+    with a real, positive `visibility_lag_ms`)."""
+    base_env = _env(control_platform)
+    assert "MITATEDB_AUDIT_DSN" not in base_env
+
+    service = build_control_service(base_env)
+    backend = service._backend  # test-only reach-in, mirrors this file's own established convention
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+
+    # MITATEDB_AUDIT_DSN unset entirely -- the D-5 M-4 default.
+    unavailable_app = control_main_module.build_control_app(dict(base_env))
+    rotate_resp = _run(_apost(unavailable_app, f"/control/v1/credentials/{credential_id}/rotate",
+                              headers={"authorization": f"Bearer {credential_id}.{secret}"}))
+    assert rotate_resp.status_code == 200, rotate_resp.text
+    secret = rotate_resp.json()["secret"]
+    auth_header = {"authorization": f"Bearer {credential_id}.{secret}"}
+
+    caps_resp = _run(_aget(unavailable_app, "/control/v1/capabilities", headers=auth_header))
+    assert caps_resp.status_code == 200, caps_resp.text
+    assert caps_resp.json()["capabilities"]["audit_query"] == {"status": "unavailable"}
+
+    # MITATEDB_AUDIT_DSN set to the real mitatedbsvc_auditreader DSN this
+    # module's own `control_platform` fixture provisions -- same rotated
+    # credential (same underlying control-plane database), a fresh app.
+    enabled_env = dict(base_env)
+    enabled_env["MITATEDB_AUDIT_DSN"] = control_platform.auditreader_dsn
+    enabled_app = control_main_module.build_control_app(enabled_env)
+    caps_resp = _run(_aget(enabled_app, "/control/v1/capabilities", headers=auth_header))
+    assert caps_resp.status_code == 200, caps_resp.text
+    assert caps_resp.json()["capabilities"]["audit_query"]["status"] != "unavailable"
+
+
 def test_build_control_service_declares_audit_query_unavailable_without_audit_dsn(control_platform) -> None:
     """WP-3(b) review round 2 instruction 3 (supervisor-forwarded fix): no
     peer-local test previously pinned `build_control_service`'s own

@@ -1520,6 +1520,47 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
     finally:
         h.cleanup()
 
+
+# ===========================================================================
+# Phase 4 ledger closure WP-B3 addendum (監督裁定、WP-B1 監査 M5b 由来,
+# design §11.1 未起票 -- 作業指示書 WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md
+# §4 WP-B3 追加項目 (e) が正本): `test_declared_event_classes_cover_every_
+# emittable_class` above fixes `U == D ∪ N` -- it can never detect D
+# SHRINKING while a matching word simultaneously moves into N (a
+# "downgrade": declaring a word non-durable without that being a genuine,
+# reviewed decision), because that edit keeps `U == D ∪ N` satisfied. This
+# test pins `DECLARED_AUDIT_EVENT_CLASSES`'s own CONTENT directly, as a
+# frozenset literal, so any change to D -- shrink, grow, or downgrade --
+# must touch this test in the same commit as a deliberate, reviewed act.
+# ===========================================================================
+
+
+def test_declared_audit_event_classes_change_only_deliberately() -> None:
+    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py:53`)
+    currently holds exactly these 11 words. Dropping a word out of D and
+    into N (WP-B1's (e), `test_declared_event_classes_cover_every_
+    emittable_class` above) is NOT detected by that test alone -- `U == D
+    ∪ N` stays satisfied either way, so a downgrade could land silently.
+    This test's only job is to force the declaration itself to be a
+    deliberate, single-commit edit: changing `DECLARED_AUDIT_EVENT_
+    CLASSES` without updating this literal here fails immediately."""
+    assert DECLARED_AUDIT_EVENT_CLASSES == frozenset(
+        {
+            "data_operation",
+            "privilege_sensitive",
+            "authorization_denial",
+            "operation_denial",
+            "privilege_denial",
+            "authentication_denial",
+            "security_control_failure",
+            "application_lifecycle",
+            "capability_denial",
+            "control_credential_lifecycle",
+            "credential_lifecycle",
+        }
+    )
+
+
 def test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed():
     """[MitateDB WP-3(b) 対称 evidence-hardening item 1] structural proof,
     not merely an assertion, that `_iter_src_files()` + `_scan_event_class_
@@ -1864,18 +1905,94 @@ async def test_data_plane_host_audit_query_still_refuses_with_capability_unsuppo
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
+# Phase 4 ledger closure WP-B3 review fix (M4, 監督採用): the vocabulary
+# below is grounded in a real `grep` of this peer's own source tree, not
+# guessed. r2db-api has no dedicated `control_auth.py`/`control_
+# credential_store_postgres.py` modules the way MitateDB-api does -- its
+# in-memory `ControlCredentialStore` lives inside `auth.py` (alongside the
+# data-plane's own, legitimately-imported `CredentialStore`/`AuthContext`)
+# and its `PostgresControlCredentialStore` lives inside `credential_
+# store.py` (alongside the data-plane's own, legitimately-imported
+# `PostgresCredentialStore`/`PostgresApplicationAuditSink`) -- so checking
+# EITHER module name here would false-positive on `main.py`'s own real,
+# required imports. `control_plane` is the one module name safe to check:
+# `main.py` (the DATA-plane root) has no legitimate reason to import
+# anything from it at all.
+_R2DB_FORBIDDEN_CONTROL_CREDENTIAL_IDENTIFIERS = frozenset(
+    {"ControlCredentialStore", "PostgresControlCredentialStore", "ControlPlaneService"}
+)
+_R2DB_FORBIDDEN_CONTROL_CREDENTIAL_MODULES = frozenset({"control_plane"})
+
+
+def _control_credential_vocabulary_hits(source: str, *, forbidden_identifiers: frozenset, forbidden_modules: frozenset) -> list[str]:
+    """AST-based replacement (review fix M4) for the prior bare
+    case-insensitive substring check. Reasons this is a strictly STRONGER
+    form than string-containment, not merely a different one:
+
+    - A source-level string check cannot distinguish an actual Python
+      reference (`ControlPlaneService(...)`) from an unrelated string
+      literal that happens to contain the same characters (e.g. this
+      peer's own `MITATEDB_CONTROL_CREDENTIAL_PEPPER`-shaped env-var
+      names on MitateDB-api's sibling test -- those only ever appear as
+      `ast.Constant` string arguments, e.g. `env.get("...")`, which this
+      walk never inspects at all: no special-case stripping is needed
+      here, unlike the substring form it replaces).
+    - `ast.parse` is used, never `import` -- `r2db_api.main` ends with a
+      module-level `app = build_app()` that reads `os.environ` immediately
+      on import (this function's own docstring explains why below).
+    - Checks BOTH import statements (`Import`/`ImportFrom` -- the module
+      path itself, split on ".", and every imported name's own original
+      AND locally-bound (`asname or name`) spelling) AND every other
+      reference anywhere in the module body (`ast.Name.id`, `ast.
+      Attribute.attr` -- catching `some_module.ControlPlaneService`-style
+      access after a bare `import some_module`, which an import-statement-
+      only check would miss)."""
+    tree = _ast.parse(source)
+    hits: list[str] = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            for alias in node.names:
+                if any(part in forbidden_modules for part in alias.name.split(".")):
+                    hits.append(f"line {node.lineno}: import {alias.name!r}")
+                bound = alias.asname or alias.name.split(".")[-1]
+                if bound in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: import bound as {bound!r}")
+        elif isinstance(node, _ast.ImportFrom):
+            module = node.module or ""
+            if any(part in forbidden_modules for part in module.split(".")):
+                hits.append(f"line {node.lineno}: from {module!r} import ...")
+            for alias in node.names:
+                if alias.name in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: from {module!r} import {alias.name!r}")
+                bound = alias.asname or alias.name
+                if bound in forbidden_identifiers:
+                    hits.append(f"line {node.lineno}: bound as {bound!r}")
+        elif isinstance(node, _ast.Name):
+            if node.id in forbidden_identifiers:
+                hits.append(f"line {node.lineno}: Name {node.id!r}")
+        elif isinstance(node, _ast.Attribute):
+            if node.attr in forbidden_identifiers:
+                hits.append(f"line {node.lineno}: Attribute .{node.attr!r}")
+    return hits
+
+
 def test_data_plane_composition_root_does_not_import_the_control_credential_store():
     """D-5's own "壊れるシナリオ" (i): the application-plane composition
     root must never gain a reference to the control-credential universe.
     Reads the SOURCE FILE directly (never `import r2db_api.main` -- that
     module ends with a module-level `app = build_app()` that reads
     `os.environ` at import time and would require yet another placeholder-
-    env dance for a test that only wants to grep its source text)."""
+    env dance for a test that only wants to inspect its syntax tree), then
+    `ast.parse`s it (never regex/substring, review fix M4 -- see
+    `_control_credential_vocabulary_hits`'s own docstring)."""
     main_py = Path(__file__).resolve().parents[1] / "src" / "r2db_api" / "main.py"
     source = main_py.read_text()
-    assert "control_credential" not in source.lower()
-    assert "ControlCredentialStore" not in source
-    assert "ControlPlaneService" not in source
+    hits = _control_credential_vocabulary_hits(
+        source,
+        forbidden_identifiers=_R2DB_FORBIDDEN_CONTROL_CREDENTIAL_IDENTIFIERS,
+        forbidden_modules=_R2DB_FORBIDDEN_CONTROL_CREDENTIAL_MODULES,
+    )
+    assert not hits, f"r2db_api/main.py references the control-credential universe: {hits!r}"
 
 
 # ===========================================================================
@@ -1934,5 +2051,89 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
             response = client.get("/control/v1/capabilities", headers=headers)
             assert response.status_code == 200
             assert response.json()["capabilities"]["audit_query"]["status"] == "enabled"
+    finally:
+        seed_store.close()
+
+
+# ===========================================================================
+# Phase 4 ledger closure WP-B3 (L4-10, design §11.1 未起票 -- 作業指示書
+# WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md §1 L4-10 が正本): `control_main.
+# build_control_app` previously never read `request_bytes` from `env` at
+# all -- `ControlPlaneLimits(...)`'s construction (§4 lines ~315-323) built
+# every field except `request_bytes` from an env var, leaving that one
+# field permanently pinned to the dataclass default (1_048_576). MitateDB's
+# `control_composition.py:128` (`MITATEDB_CONTROL_REQUEST_BYTES_LIMIT`)
+# already wired the equivalent env var; this was the one peer-asymmetric
+# gap the ledger closure fixes. Same name as MitateDB-api's own
+# `tests/test_control_main.py:165` `test_build_control_app_request_bytes_
+# limit_matches_the_declared_one` (work order §4 WP-B3 completion condition
+# 7: "MitateDB tests/test_control_main.py:165 と同名・同形").
+# ===========================================================================
+
+
+def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform):
+    """R-7's "宣言値と enforce 値が同一ソースから出ることを構造で保証する"
+    rule, applied to `R2DB_CONTROL_LIMIT_REQUEST_BYTES`: a custom value
+    must change BOTH (i) the declared `limits.request_bytes` a real `GET
+    /control/v1/capabilities` response reports, AND (ii) the byte bound
+    `RequestByteBoundMiddleware` actually enforces against a real oversized
+    request (never only the declaration -- a composition root that wired
+    the declared number without also wiring what `create_control_app`
+    passes to the middleware would pass a naive "declaration changed" check
+    while leaving the OLD bound silently enforced). `create_control_app`
+    (`control_http.py:430`) reads `control_service.limits` directly -- the
+    SAME `ControlPlaneLimits` instance `capabilities()` reports from -- so
+    both readings are, structurally, one source; this test is the
+    behavioral proof of that, not a second, independent assumption."""
+    seed_store = PostgresControlCredentialStore(platform.control_dsn, pepper=CONTROL_PEPPER, schema=platform.schema)
+    credential_id = "ctl_" + secrets.token_hex(8)
+    secret = "request-bytes-env-" + secrets.token_urlsafe(8)
+    try:
+        with seed_store.unit_of_work() as work:
+            seed_store.add(credential_id, secret, work=work)
+            seed_store.rotate(credential_id, secret, work=work)  # clears must_rotate (R-5)
+
+        headers = {"authorization": f"Bearer {secret}"}
+        base_env = {
+            "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+            "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
+            "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
+            "R2DB_PLATFORM_SCHEMA": platform.schema,
+        }
+
+        # (i) declaration: env unset -> the untouched default (1_048_576,
+        # behavior-preserving); env set -> the custom value.
+        default_app = control_main.build_control_app(dict(base_env))
+        with TestClient(default_app) as client:
+            response = client.get("/control/v1/capabilities", headers=headers)
+            assert response.status_code == 200
+            assert response.json()["limits"]["request_bytes"] == 1_048_576
+
+        custom_env = dict(base_env)
+        custom_env["R2DB_CONTROL_LIMIT_REQUEST_BYTES"] = "256"
+        custom_app = control_main.build_control_app(custom_env)
+        with TestClient(custom_app) as client:
+            response = client.get("/control/v1/capabilities", headers=headers)
+            assert response.status_code == 200
+            assert response.json()["limits"]["request_bytes"] == 256
+
+            # (ii) enforcement: the SAME custom app, a real oversized (for
+            # the CUSTOM 256-byte bound only -- 1024 bytes stays well
+            # UNDER the old 1_048_576 default) `POST /control/v1/
+            # applications` body. Review fix (M3, matches measured
+            # behavior): 413/`LIMIT_EXCEEDED` is the actual discriminator
+            # between "the custom bound is really enforced" and "the OLD
+            # bound is still silently in effect" -- a composition root
+            # that wires the declaration but not the enforcement (this
+            # WP's own mutation 4, second variant) does NOT read back as
+            # "still accepted"; `RequestByteBoundMiddleware` never
+            # triggers at all under the old, much larger bound, and this
+            # 1024-byte body instead fails ordinary `application_id`
+            # length validation with a plain 400 -- so 413 is exactly the
+            # signal this test needs, not merely "any non-2xx".
+            oversized = {"application_id": "a" * 1024}
+            response = client.post("/control/v1/applications", headers=headers, json=oversized)
+            assert response.status_code == 413
+            assert response.json()["code"] == "LIMIT_EXCEEDED"
     finally:
         seed_store.close()
