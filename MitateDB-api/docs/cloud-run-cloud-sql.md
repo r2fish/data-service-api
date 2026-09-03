@@ -787,6 +787,138 @@ gcloud run services add-iam-policy-binding mitatedb-ctrl \
   --role=roles/run.invoker
 ```
 
+### 6.3 Calling the control service over HTTP: Cloud Run IAM vs. the control credential
+
+`mitatedb-ctrl` is deployed `--no-allow-unauthenticated` (§6.2): Cloud Run's
+own front end requires a caller-supplied Google ID token before the request
+ever reaches this container, checked against the `roles/run.invoker`
+binding (§6.2's own operator-group binding). Separately, every
+`/control/v1/*` handler (and its `/v1/audit/query` alias, §0) requires a
+control credential, carried the same way an application credential is on
+the data service: `Authorization: Bearer <credential_id>.<secret>`
+(`control_http.py`'s own `_bearer_pair`, which reuses `_extract_bearer`
+from `http.py` unchanged). Both checks want the SAME header. Neither §6.2
+above nor `docs/work-orders/DEPLOY_PHASE4_20260903.md` previously said how
+an operator reconciles that collision; this section does.
+
+**Two paths, chosen by who the caller is -- not interchangeable defaults.**
+
+- **Interactive operator (a human, a user account) -- default:
+  `gcloud run services proxy`.** `gcloud run services proxy mitatedb-ctrl
+  --project=example-project --region=us-central1 --port=8443` starts a
+  local proxy that authenticates to Cloud Run using the operator's own
+  `gcloud` user-account credentials and handles the IAM layer itself; the
+  operator's own request to the local proxy needs only the application's
+  own `Authorization: Bearer <credential_id>.<secret>` header --
+  `curl -sk -H "Authorization: Bearer <control credential id>.<control credential secret>" http://127.0.0.1:8443/control/v1/capabilities`
+  is enough. No ID token to mint by hand, nothing extra to construct. Use
+  this for a person at a terminal.
+
+- **Service account (automation: CI/CD, a scheduled audit-polling agent)
+  -- `X-Serverless-Authorization`.** Cloud Run also accepts the caller's
+  Google ID token in an `X-Serverless-Authorization: Bearer <ID token>`
+  header; when present, Cloud Run's own front end authenticates the
+  request against that header and passes the token through to the
+  container with its signature removed (Cloud Run's own documented
+  behavior: "This removes the signature before passing the token to the
+  user container" -- it does not strip the header outright). This is
+  Cloud Run's own accommodation for an application that already uses
+  `Authorization` for its own purposes, and it is the path for a caller
+  that cannot run a local proxy: put the control credential in
+  `Authorization` and the ID token in `X-Serverless-Authorization`.
+
+  ```sh
+  curl -sk \
+    -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+    -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
+    <mitatedb-ctrl Cloud Run URL>/control/v1/capabilities
+  ```
+
+  **Unverified on real infrastructure -- check before relying on this in
+  automation.** There are reports that `gcloud auth print-identity-token
+  --audiences=<url>` is refused for a user-account principal and only
+  succeeds for a service account; this runbook has not exercised that call
+  against a real `mitatedb-ctrl` deployment either way, so both
+  possibilities are recorded here rather than asserted. If it is refused
+  for your caller, mint the ID token another way appropriate to that
+  principal type, or fall back to the `gcloud run services proxy` path
+  above (which needs no `--audiences` at all and is the recommended
+  default for exactly this reason).
+
+(No secret value belongs in this document -- `<control credential id>`,
+`<control credential secret>`, and `<mitatedb-ctrl Cloud Run URL>` are
+placeholders, filled in only at the caller's own terminal or automation
+config, never here. The caller -- human or service account -- must be a
+principal named in the `roles/run.invoker` binding of §6.2.)
+
+**The application never treats the IAM layer as a credential.**
+`control_http.py`'s own `_bearer_pair` (`control_http.py:148-157`) calls
+`_extract_bearer`, defined once in `http.py:344-351` and reused unchanged
+by both services; it reads `request.headers.get("authorization")` only --
+no code in this repository reads `X-Serverless-Authorization` at all, so it
+makes no difference to the application that Cloud Run forwards a
+signature-stripped copy of the ID token in that header on the
+`X-Serverless-Authorization` path above -- nothing here looks at it either
+way. The IAM check (Cloud Run's front end, against the `roles/run.invoker`
+binding) and the control-credential check (`ControlPlaneService.
+authenticate`, inside the container) are therefore two independent layers,
+verified by two different parties over two different headers -- the
+credential the container asserts against is never the same secret Cloud Run
+used to admit the connection.
+
+**Verification calls used after deployment**
+(`docs/work-orders/DEPLOY_PHASE4_20260903.md` §4 -- endpoint and expected
+shape only, no real values; shown on the `X-Serverless-Authorization` path,
+substitute the `gcloud run services proxy` path above if calling
+interactively):
+
+```sh
+# capabilities declaration (§4-1/§4-2)
+curl -sk \
+  -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
+  <mitatedb-ctrl Cloud Run URL>/control/v1/capabilities
+# expect 200; capabilities.audit_query.status == "enabled" if MITATEDB_AUDIT_DSN is
+# wired (else "unavailable", not a failure -- §4-6); capabilities.contract_version == "1.4.0"
+
+# audit_query, cursor-paginated (§4-5)
+curl -sk -X POST \
+  -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
+  -H 'Content-Type: application/json' -d '{"limit": 5}' \
+  <mitatedb-ctrl Cloud Run URL>/control/v1/audit/query
+# expect 200; events[].cursor present; resume with {"after": "<last cursor>", "limit": 5}
+# until an empty page comes back (len(events) < limit does not by itself mean "done")
+
+# DSN unset -> CAPABILITY_UNSUPPORTED on BOTH the canonical path and the alias
+# (DEPLOY_PHASE4 §4-6 requires checking both; a legacy edge rule scoped to
+# only one prefix would leave the other one unchecked, §0's own warning)
+curl -sk -X POST \
+  -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
+  -H 'Content-Type: application/json' -d '{"limit": 5}' \
+  <mitatedb-ctrl Cloud Run URL>/control/v1/audit/query
+# expect HTTP 400 (not 404, not 200); error.code == "CAPABILITY_UNSUPPORTED"
+# (control_http.py:71 -- CAPABILITY_UNSUPPORTED maps to 400; the route is
+# registered and authenticates/authorizes before this check ever runs)
+
+curl -sk -X POST \
+  -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
+  -H 'Content-Type: application/json' -d '{"limit": 5}' \
+  <mitatedb-ctrl Cloud Run URL>/v1/audit/query
+# expect the SAME on the alias: HTTP 400, error.code == "CAPABILITY_UNSUPPORTED"
+```
+
+**Ordering note (§0.1 invariant 3).** Only flip the data service's
+`MITATEDB_CONTROL_PLANE_STATUS` to `enabled` (§3(c) step 6 of the deploy
+work order) *after* `mitatedb-ctrl`'s capabilities have actually been
+fetched successfully through one of the two paths above -- that response is
+the confirmation that the control service is reachable at all. Flipping the
+env var first asserts a control plane the operator has not yet observed to
+be up, which is exactly the false declaration invariant 3 exists to
+prevent.
+
 ## 7. Break-glass CLI (`python -m mitatedb_api.ops`, WP-6)
 
 Run from a checked-out source tree with `PYTHONPATH=MitateDB-api/src`
