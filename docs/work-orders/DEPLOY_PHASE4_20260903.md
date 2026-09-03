@@ -3,7 +3,7 @@
 対象: `r2db-api` (VPS) と `MitateDB-api` (Cloud Run / Cloud SQL) の両 peer。
 適用するもの: application-plane 耐久 audit sink (`application_audit`) +
 `audit_query` + 契約 1.4.0 宣言 (`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`
-v1.5、引き継ぎ `docs/work-orders/HANDOVER_20260903_FABLE.md`)。
+v1.6、引き継ぎ `docs/work-orders/HANDOVER_20260903_FABLE.md`)。
 
 **この手順書の位置付け。** フェーズ4 の成果は main にマージ済みだが、実配備には
 まだ乗っていない。適用に必要な 5 項目 — migration 適用 / reader role DSN 配線 /
