@@ -1264,15 +1264,20 @@ class ApplicationRuntime:
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
         return {
-            # Phase 4 WP-3(b) (P4-D4, contract 1.4.0 `versioning.version_
-            # binding`): unconditional -- every deployment of this
-            # data-plane host declares 1.4.0 now, whether or not the
-            # CONTROL host alongside it has AUDIT DSN configured (`audit_
-            # query` stays `unavailable` right below, unchanged: this host
-            # never provides it, D-5's own "declaration = real behavior"
-            # rule -- design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
-            # §7.5 "data-plane ホスト (不変)").
-            "contract_version": "1.4.0",
+            # Phase 4 WP-3(b) (P4-D4, contract `versioning.version_
+            # binding`), flipped to 1.5.0 in Phase 5 WP-3 (design D-1,
+            # subordinate ruling 10 item 1): unconditional -- every
+            # deployment of this data-plane host declares 1.5.0 now,
+            # whether or not the CONTROL host alongside it has AUDIT DSN
+            # configured (`audit_query` stays `unavailable` right below,
+            # unchanged: this host never provides it, D-5's own
+            # "declaration = real behavior" rule -- design docs/design/
+            # PHASE4_DURABLE_AUDIT_SINK_V1.md §7.5 "data-plane ホスト
+            # (不変)"). `operations`/`target_kinds` are NOT declared here
+            # -- this host's own `audit_query` stays `unavailable`, and
+            # declaring a vocabulary for a surface this host never
+            # provides would contradict declare-the-hazard (design D-1).
+            "contract_version": "1.5.0",
             "capabilities": {
                 "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
                 "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

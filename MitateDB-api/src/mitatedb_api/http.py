@@ -728,8 +728,15 @@ async def post_schema(request: Request) -> Response:
     session = _authenticate(request)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["SchemaOperationRequest"], label="SchemaOperationRequest")
-    operation = body.get("operation")
-    if operation not in _SCHEMA_OPERATIONS:
+    # Phase 5 WP-3 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_
+    # V1.md D-1, (d') -- a request body carrying a key literally named
+    # "operation" would otherwise be indistinguishable, to the generalized
+    # audit-vocabulary scanner, from an audit-field `operation` local
+    # variable; renamed (never behavior -- the `_SCHEMA_OPERATIONS` gate
+    # below is unchanged) so this local variable never collides with that
+    # name.
+    schema_operation = body.get("operation")
+    if schema_operation not in _SCHEMA_OPERATIONS:
         raise ValidationError("unsupported schema operation")
     entity = body["entity"]
 
@@ -747,7 +754,7 @@ async def post_schema(request: Request) -> Response:
     if not isinstance(session, ApplicationDeveloper):
         raise AuthorizationError("developer authority required")
 
-    if operation == "create_entity":
+    if schema_operation == "create_entity":
         # M-3 (independent review): `SchemaOperationRequest.field_type` is
         # a valid top-level property of this request shape (the contract
         # gives it no per-operation `if`/`then` narrowing that would
@@ -811,7 +818,7 @@ async def post_schema(request: Request) -> Response:
         # after every schema change.
         return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
 
-    if operation == "add_field":
+    if schema_operation == "add_field":
         field = body.get("field")
         field_type = body.get("field_type")
         if not isinstance(field, str) or field_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
@@ -824,7 +831,7 @@ async def post_schema(request: Request) -> Response:
     # shaped requests this real dispatcher receives and refuses -- never a
     # structural absence on this composition, since the entry point
     # genuinely exists and executes for the two operations above.
-    raise CapabilityError(f"schema operation {operation!r} is not supported by this peer")
+    raise CapabilityError(f"schema operation {schema_operation!r} is not supported by this peer")
 
 
 @_endpoint

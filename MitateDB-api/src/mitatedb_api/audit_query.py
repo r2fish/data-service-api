@@ -75,6 +75,98 @@ def _application_event_classes() -> frozenset:
 
 DECLARED_AUDIT_EVENT_CLASSES = _CONTROL_PLANE_EVENT_CLASSES | _application_event_classes()
 
+# Phase 5 WP-3 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+# D-1, contract 1.5.0 subordinate ruling 10 item 1): the `operation`
+# vocabulary this peer's `audit_query` reader can ever surface -- same
+# 2-module (control_audit / application_audit) union shape as `DECLARED_
+# AUDIT_EVENT_CLASSES` above, fixed against the real source by the SAME
+# generalized AST scanner (`tests/test_audit_query.py`'s `U == D | N`
+# equality, parameterized over `event_class`/`operation`/`target_kind`).
+# This half covers every literal this peer's own `control_plane.py`/`ops.py`
+# durably write to `control_audit` (`ControlPlaneService._deny_audit`/
+# `append_audit`, and the out-of-band bootstrap/reset/issue-audit-credential
+# ceremony functions `control_plane.py` itself defines, called from `ops.py`
+# with a real, durable `audit_append` callback -- never the in-memory-only
+# legacy sink r2db-api's own `ControlAuthority` has; MitateDB's control
+# plane has no non-durable equivalent at all). Deliberately EXCLUDES
+# `control_capabilities` -- its only 2 emit sites (`ControlPlaneService.
+# control_capabilities`'s own `_authorize_role(principal, operation=
+# "control_capabilities", ...)` / `_gate_must_rotate(principal, operation=
+# "control_capabilities", ...)`) can NEVER reach a `_deny_audit` call for
+# this operation AT ALL, on any role or must_rotate state -- the SAME
+# structurally-unreachable-deny-branch shape r2db-api's own WP-2 found for
+# the identical literal (fix-round M-1 there): `_authorize_role`'s own deny
+# condition is `principal.role == "audit" and operation not in
+# _AUDIT_ROLE_ALLOWED_OPERATIONS`, and `"control_capabilities"` is a
+# PERMANENT member of that allow-list; `_gate_must_rotate`'s own body opens
+# with `if operation == "control_capabilities": return` -- an unconditional
+# early return before its own `_deny_audit` call. See `tests/test_audit_
+# query.py::test_control_capabilities_operation_has_no_reachable_deny_
+# branch` for the structural + behavioral proof.
+_CONTROL_PLANE_OPERATIONS = frozenset(
+    {
+        "audit_query",
+        "bootstrap_control_credential",
+        "control_authenticate",
+        "disable_application",
+        "disable_credential",
+        "enable_application",
+        "enable_credential",
+        "freeze_issuance",
+        "issue_audit_credential",
+        "issue_credential",
+        "list_applications",
+        "list_credentials",
+        "register_application",
+        "reset_control_credentials",
+        "revoke_credential",
+        "rotate_credential",
+        "unfreeze_issuance",
+    }
+)
+
+
+def _application_operations() -> frozenset:
+    from .application_audit import DECLARED_AUDIT_OPERATIONS
+
+    return DECLARED_AUDIT_OPERATIONS
+
+
+DECLARED_AUDIT_OPERATIONS = _CONTROL_PLANE_OPERATIONS | _application_operations()
+
+# Phase 5 WP-3 (same design/ruling as `DECLARED_AUDIT_OPERATIONS` above):
+# the `target_kind` vocabulary's control half. No exclusion here -- every
+# `target_kind` literal this peer's `control_plane.py` durably writes is
+# reachable (design's own N determination: MitateDB's initial N hypothesis
+# was empty, confirmed by `tests/test_audit_query.py`'s own `test_
+# authenticate_and_assert_active_denials_are_durable_not_excluded` /
+# `test_postgres_authenticate_and_assert_active_denials_are_durable_not_
+# excluded` (the `operation`/`target_kind` candidate sites) and `test_
+# control_capabilities_operation_has_no_reachable_deny_branch` / `test_
+# operation_and_target_kind_non_durable_exclusions_never_reach_the_
+# durable_tables` (`"control_capabilities"`, the one `operation` word
+# that IS excluded -- see `_NON_DURABLE_OPERATIONS` in that same test
+# module). WP-3 fix-round M-3 (Opus review): this comment previously
+# cited `test_operation_and_target_kind_non_durable_exclusions_never_
+# reach_the_durable_tables` before that test existed on this peer at all
+# (it now does, added in the same fix round).
+_CONTROL_PLANE_TARGET_KINDS = frozenset(
+    {
+        "application",
+        "control_credential",
+        "credential",
+    }
+)
+
+
+def _application_target_kinds() -> frozenset:
+    from .application_audit import DECLARED_AUDIT_TARGET_KINDS
+
+    return DECLARED_AUDIT_TARGET_KINDS
+
+
+DECLARED_AUDIT_TARGET_KINDS = _CONTROL_PLANE_TARGET_KINDS | _application_target_kinds()
+
 # D-3 (P4-D3, confirmed value): the denial-coalescing window's DEFAULT.
 # Declared in `capabilities().audit_query.coalescing_window_ms` via a
 # constructor parameter derived from the REAL `AuditRouter.denial_coalesce_
@@ -388,6 +480,8 @@ def shape_audit_query_row(row: "dict[str, Any]") -> "dict[str, Any]":
 __all__ = [
     "DEFAULT_SCHEMA",
     "DECLARED_AUDIT_EVENT_CLASSES",
+    "DECLARED_AUDIT_OPERATIONS",
+    "DECLARED_AUDIT_TARGET_KINDS",
     "DEFAULT_COALESCING_WINDOW_MS",
     "AuditQueryReader",
     "InMemoryAuditQueryStore",

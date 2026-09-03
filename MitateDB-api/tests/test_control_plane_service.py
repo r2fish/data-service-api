@@ -496,8 +496,9 @@ def test_control_capabilities_result_matches_schema_exactly_and_declares_request
     assert result["limit_enforcement"]["applications"] == "enforced"
     # Phase 4 WP-3(b): this WP ships the 1.4.0 obligations for this peer's
     # control plane, so the flip lands in this same commit as the audit_
-    # query bundle it accompanies.
-    assert result["contract_version"] == "1.4.0"
+    # query bundle it accompanies. Phase 5 WP-3: re-flipped to 1.5.0 in the
+    # same commit as the `operations`/`target_kinds` declaration keys.
+    assert result["contract_version"] == "1.5.0"
     assert result["role"] == "control"
 
 

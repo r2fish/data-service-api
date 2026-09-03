@@ -2221,17 +2221,17 @@ def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the
 
 
 # ===========================================================================
-# Peer isomorphism (常設規律 6, WP-2 完了条件16): the scanner-support
-# helpers above are re-implemented (never shared/imported) in MitateDB-api's
-# own `tests/test_audit_query.py` (WP-3). Until WP-3 lands, there is
-# nothing on the MitateDB side to diff against -- this is registered here,
-# NOW, as an explicit `xfail(strict=True)` rather than silently deferred,
-# so a missed WP-3 follow-through fails LOUD (an accidental green here
-# would mean the isomorphism was never actually checked).
+# Peer isomorphism (常設規律 6, WP-2 完了条件16 / WP-3 完了条件17): the
+# scanner-support helpers above are re-implemented (never shared/imported)
+# in MitateDB-api's own `tests/test_audit_query.py` (WP-3). WP-2 registered
+# this as `xfail(strict=True)` since nothing existed yet on the MitateDB
+# side to diff against; WP-3 adds the matching helpers there and removes
+# the `xfail` in the SAME commit (this one) -- an accidental green while
+# still `xfail`-marked would have meant the isomorphism was never actually
+# checked, and `strict=True` would have caught that (XPASS -> failure).
 # ===========================================================================
 
 
-@pytest.mark.xfail(strict=True, reason="WP-3 で追随 -- MitateDB-api 側に同名ヘルパがまだ存在しない (WP-2 時点)")
 def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     """常設規律6: diffs this peer's scanner-support helpers against
     MitateDB-api's own same-named helpers, after normalizing peer name /
@@ -2267,14 +2267,37 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
         "_analyze_field_scope",
         "_FieldForwardResolver",
         "_scan_source_field_sites",
+        # WP-3 fix-round L-4 (Opus review): completion condition 17 names
+        # the exclusion-list validators ((i)/(ii') judgment) as part of
+        # this same isomorphism check -- omitting them let a peer change
+        # (ii')'s own judgment (e.g. dropping the safe-forward id check)
+        # go undetected by this test.
+        "_iter_field_definitions",
+        "_field_positional_definitions",
+        "_excluded_definition_forwards_its_own_parameter",
     )
 
     def _normalize(source: str, *, peer_module: str, peer_package: str) -> str:
-        """Strips whitespace/blank-line differences and substitutes this
-        peer's own module/package name for a neutral placeholder, so the
-        comparison is blind to peer naming, never to actual logic."""
+        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) this
+        peer's own module/package name (substituted for a neutral
+        placeholder), (b) TRAILING whitespace at the end of each line, and
+        (c) the number of consecutive blank lines (collapsed to none) --
+        NEVER leading indentation and NEVER in-line token spacing. The
+        PRIOR form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
+        spaces/tabs ANYWHERE, including a line's own leading indentation --
+        which made a nesting-depth-only mutation (moving a branch one
+        `if`/`else` level deeper, or shallower, with the exact same token
+        sequence and no operator/condition change at all) invisible to
+        this comparison: Python's own semantics are indentation-sensitive,
+        so an indentation-only edit is a REAL logic change this test must
+        catch, not whitespace noise to discard. The review's own
+        reproduction (moving `_is_field_assignment_target`'s `Attribute`
+        branch one level deeper, past its sibling's `return`, so it never
+        executes) went undetected under the old, over-eager normalization
+        even though both peers' scanners had come to disagree in EXACTLY
+        this way -- confirmed now going red on both peers (mutation 19)."""
         text = source.replace(peer_package, "<PEER_PACKAGE>").replace(peer_module, "<PEER_MODULE>")
-        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
         text = re.sub(r"\n\s*\n+", "\n", text)
         return text.strip()
 
