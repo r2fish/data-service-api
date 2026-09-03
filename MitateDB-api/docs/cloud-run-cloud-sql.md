@@ -480,14 +480,24 @@ Both retrying/recovered pairs fire only on a failing<->healthy **state
 transition** (never once per attempt), the same logging-DoS discipline the
 overflow alert uses.
 
-**Known sharpness, both peers**: the flush "failing" flag clears only when
-the buffer fully drains, so under continuous load it can stay set after the
-sink has actually recovered, holding the alert re-fire interval at the 60s
-backoff ceiling. No evidence is lost (the drop counter keeps accumulating and
-is reported in the eventual alert row's `count`), but **do not read a gap
-between messages as recovery** -- read the recovery message of the pair
-concerned (the third message for the buffer/overflow channel, the fifth for
-the coalescing one).
+**Known sharpness, both peers (P4-D15, WP-B2, 2026-09-03)**: the flush
+"failing" flag clears on ANY successful flush, regardless of how much the
+buffer still holds -- it is not gated on the buffer fully draining, as an
+earlier revision had it. Completion-order semantics govern concurrent
+flushes (periodic, threshold, and explicit can all race on the same buffer):
+whichever attempt COMPLETES LAST decides the flag's value, so a still-failing
+concurrent flush that completes after a successful one sets the flag back to
+failing. If the sink is FLAPPING (success and failure completing
+alternately), the alert re-fire interval can rise from the 60s backoff
+ceiling up to one row per flush interval -- this is an accepted tradeoff, not
+a defect: the declared bound of at most one alert row per flush interval
+still holds regardless (the `alert_min_interval_s` floor rate-limits every
+attempt independently of this flag), evidence reaches the durable table
+sooner from a partially-working sink, and no evidence is ever lost either way
+(the drop counter keeps accumulating and is reported in the eventual alert
+row's `count`). As before, **do not read a gap between messages as
+recovery** -- read the recovery message of the pair concerned (the third
+message for the buffer/overflow channel, the fifth for the coalescing one).
 
 ### 3.2e Retention and pruning (manual, external, deliberately unautomated)
 

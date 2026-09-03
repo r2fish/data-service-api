@@ -289,18 +289,44 @@ class _AuditBuffer:
             # genuine, irrevocable loss.
         else:
             with self._lock:
-                # Review B-3 (supervisor ruling 2026-09-03, "後勝ちレース
-                # 防止"): a CONCURRENT flush() covering a DIFFERENT
-                # (disjoint) batch may be failing right now -- this call's
-                # own success says nothing about that. Only clear the
-                # failing flag once the buffer this call can actually
-                # observe is empty (nothing left retained, nothing new
-                # sitting unflushed); otherwise leave the flag as it
-                # already is rather than blindly forcing it to `False` and
-                # letting a genuinely-failing concurrent flush's own
-                # backoff get reset to the floor by a race.
-                if not self._events:
-                    self._flush_currently_failing = False
+                # P4-D15 (WP-B2): `_flush_currently_failing` clears
+                # unconditionally on ANY successful `append_many` -- not
+                # gated on `self._events` being empty. Under sustained
+                # push load the buffer is rarely empty even once the sink
+                # has genuinely recovered (the threshold flush keeps
+                # refilling it), so the prior "only when empty" gate left
+                # the flag -- and the alert backoff it feeds, see
+                # `_retry_alert` below -- stuck at the sink-broken state
+                # long after recovery.
+                #
+                # Completion-order semantics absorb the review B-3 race
+                # this replaces: a DIFFERENT, still-failing concurrent
+                # flush (disjoint batch, per the B-2/B-3 swap above) sets
+                # this back to True in its own failure branch whenever IT
+                # completes -- whichever flush completes LAST wins, exactly
+                # as with any other unsynchronized shared-state update. A
+                # brief window where this reads False while that
+                # concurrent failure is still in flight does not weaken
+                # the alert-rate guarantee: `_retry_alert`'s own
+                # `alert_min_interval_s` floor on `alert_next_retry_at`
+                # still bounds attempts to at most one per flush interval
+                # regardless of how many times this flag flips in between
+                # (§7.4's "at most 1 alert row per flush interval" is
+                # enforced by that floor, not by this flag).
+                #
+                # Accepted tradeoff (P4-D15): if the sink is FLAPPING
+                # (success and failure completing alternately), the
+                # backoff resets to the floor on every success, so the
+                # observed alert-row rate can rise from "stuck at the 60s
+                # backoff cap" up to "one per alert_min_interval_s"
+                # (default matches the composition root's own periodic-
+                # flush interval). This is intentional -- evidence
+                # (`count`) reaches the durable table sooner from a
+                # partially-working sink, and the declared bound itself
+                # (at most 1 row per flush interval) still holds; only the
+                # realized rate moves toward that bound instead of sitting
+                # far under it.
+                self._flush_currently_failing = False
         self._retry_alert()
 
     def _retry_alert(self) -> None:
