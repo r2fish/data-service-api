@@ -32,7 +32,13 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.testclient import TestClient
 
 from r2db_api.audit import ApplicationAuditSink, AuditEvent, ControlAuditSink
-from r2db_api.audit_query import DECLARED_AUDIT_EVENT_CLASSES, DECLARED_COALESCING_WINDOW_MS, InMemoryAuditQueryStore
+from r2db_api.audit_query import (
+    DECLARED_AUDIT_EVENT_CLASSES,
+    DECLARED_AUDIT_OPERATIONS,
+    DECLARED_AUDIT_TARGET_KINDS,
+    DECLARED_COALESCING_WINDOW_MS,
+    InMemoryAuditQueryStore,
+)
 from r2db_api.auth import AuthContext, ControlCredentialStore, CredentialStore
 
 # `r2db_api.control_main` ends with a module-level `app = build_control_
@@ -48,7 +54,7 @@ os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-pl
 import r2db_api.control_main as control_main  # noqa: E402 -- module object itself (not just `assemble_control_stack`), see `test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env` below
 from r2db_api.control_http import _ROUTES, create_control_app  # noqa: E402
 from r2db_api.control_main import assemble_control_stack  # noqa: E402
-from r2db_api.control_plane import ControlPlaneService, InMemoryControlBackend  # noqa: E402
+from r2db_api.control_plane import _AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneService, InMemoryControlBackend  # noqa: E402
 from r2db_api.credential_store import PostgresApplicationAuditSink, PostgresControlCredentialStore  # noqa: E402
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits  # noqa: E402
@@ -876,119 +882,178 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
 # principled, explicit home instead of the declared vocabulary.
 import ast as _ast  # noqa: E402 -- kept local to this test-support block, mirrors this file's own late-import style
 
+# Phase 5 WP-2 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
+# D-1, work order docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md
+# WP-2 変更対象 C): P4-D16 v3's own (a)-(e) block above this comment
+# described a scanner hardcoded to the single field `event_class`. This WP
+# generalizes that SAME "global invariant" method (never the withdrawn
+# "resolve every call site's value" method -- design §3 D-1 explicitly
+# rejects that alternative) by PARAMETERIZING every rule over a field name,
+# and adds exactly three new rules the generalization itself makes
+# necessary (design's own accounting -- `event_class`'s emit surface is
+# uniformly keyword-only in this package, so these gaps never showed up for
+# it):
+#
+#   (b') `IfExp` values (`"enable_application" if enabled else
+#        "disable_application"`) are recognized -- allowed when BOTH
+#        branches are themselves string `Constant`s (or nested `IfExp`s
+#        that reduce the same way), contributing every `Constant` leaf to
+#        U. Applies at BOTH the keyword-argument-value position and the
+#        (name-assignment-only, see (b'') below) assignment-value position.
+#   (b'') A `Name` reference to a variable BOUND, in its own direct scope,
+#        by exactly ONE binding form -- a single-target `Assign` (`<field>
+#        = ...`) whose value is a string `Constant` or (b')-recognized
+#        `IfExp` -- is treated as a safe forward, on par with an enclosing
+#        function's own `<field>` parameter, closure-crossing included.
+#        ANY other binding form for that name in the same scope (a second
+#        assignment, a `for`/`with-as`/`except-as`/walrus/`match-as`/
+#        `global`/`nonlocal`, or a same-named nested `def`/`class`) forfeits
+#        the exemption -- the name reverts to being a plain, non-forward
+#        local, exactly as P4-D16 v3's original shadow rule already treated
+#        every other local variable.
+#   (b''') Read-path passthrough (`.{field}` `Attribute` / `["{field}"]`
+#        `Subscript`) is allowed ONLY at a dict-literal value, a subscript-
+#        assignment value (`x["{field}"] = ...`), or an attribute-
+#        assignment value (`obj.{field} = ...`) -- NEVER at a `{field}=`
+#        keyword-argument-value position. Closes a hole the generalization
+#        itself opens: a request body can genuinely carry a key literally
+#        named `"operation"` (MitateDB's `http.py`, WP-3), so an unrestricted
+#        `foo(operation=body["operation"])` would let client-supplied text
+#        reach a durable audit column unlit by (b)'s own literal-discipline
+#        scan or by U. Verified (design N-6): every real read-path site in
+#        THIS peer already uses the dict-literal form, so (b''') requires
+#        zero product-code changes here.
+#
+# `_FIELDS` below is the pinned set this whole block is parameterized over
+# -- `test_scanner_is_parameterized_over_exactly_these_three_fields` fixes
+# its CONTENT directly (a scanner silently narrowed back down to `event_
+# class` alone would go undetected by every other test in this block, since
+# every rule's own violation collectors would simply never be called for
+# the missing field(s)).
+_FIELDS: tuple[str, ...] = ("event_class", "operation", "target_kind")
+
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
+
+
+def test_scanner_is_parameterized_over_exactly_these_three_fields() -> None:
+    """Pins `_FIELDS` directly (WP-2 変更対象 C, 監督裁定 2026-09-04 --
+    an explicit發注項目, not implementer discretion). Mutation 9: drop
+    `target_kind` from this tuple and every rule test below silently stops
+    exercising it -- this test is the only thing that turns that into a
+    failure."""
+    assert _FIELDS == ("event_class", "operation", "target_kind")
 
 
 def _iter_src_files() -> list[Path]:
     """Every `*.py` file anywhere under `src/r2db_api/`, found by a
     RECURSIVE `rglob` -- P4-D16 v3(a): a hand-maintained file list, and a
-    non-recursive top-level-only `glob`, are both banned by design. A
-    future new subpackage's own emission call sites can never silently
-    fall outside this guard's coverage. Sorted for deterministic
-    iteration order. (`contract/`'s packaged JSON schema copy is not
-    `.py`, so it is never picked up regardless of recursion.)"""
+    non-recursive top-level-only `glob`, are both banned by design. Shared,
+    unparameterized -- unchanged by this WP."""
     return sorted(_SRC_DIR.rglob("*.py"))
 
 
-def _collect_direct_shadow_names(body: list) -> set[str]:
-    """WP-B1 acceptance-audit round 2 (M8): redesigned around a GENERAL
-    principle -- 'any name binding of "event_class" anywhere in a
-    function's OWN direct body (never descending into a nested `def`/
-    `async def`/`lambda`/`class` -- those are separate scopes) shadows
-    it' -- rather than an enumeration of individual statement shapes.
-    The PRIOR enumeration (`Assign`/`AugAssign`/`AnnAssign`/`For`/
-    `AsyncFor`/`NamedExpr`/`Global`/`Nonlocal`) missed `with ... as
-    event_class:`, `except ... as event_class:`, `match` capture
-    patterns, `import ... as event_class`, a nested `def event_class`/
-    `class event_class`, and `del event_class`. Implementation:
+def _literal_leaves(node: "_ast.AST") -> set[str]:
+    """(b) + (b'): every string `Constant` leaf reachable from `node`
+    through zero or more `IfExp` layers whose branches are BOTH themselves
+    recognized this same way -- an `IfExp` with even one non-Constant,
+    non-fully-reducible branch contributes NOTHING (the whole expression
+    then falls through to being treated as a plain unresolved value, not
+    as a partial literal source) -- this is what makes mutation 3 (one
+    branch replaced by an undeclared-but-still-Constant word) detectable
+    by the (e) equality rather than swallowed silently at this layer."""
+    if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, _ast.IfExp):
+        left = _literal_leaves(node.body)
+        right = _literal_leaves(node.orelse)
+        if left and right:
+            return left | right
+        return set()
+    return set()
 
-    (i) every `Name(id="event_class")` node whose `ctx` is `Store` or
-        `Del` -- this ALONE covers `Assign`/`AugAssign`/`AnnAssign`
-        targets, `for`/`async for` targets, comprehension targets,
-        walrus (`:=`) targets, `with ... as` targets, and tuple/list/
-        starred destructuring of any of the above, and `del
-        event_class` -- none of these need a dedicated per-statement
-        visitor once `ctx`-based `Name` matching is the rule (a plain
-        default `generic_visit` traversal reaches every one of them).
-    (ii) `alias.asname == "event_class"` (`import ... as event_class` /
-         `from x import y as event_class`).
-    (iii) `ExceptHandler.name == "event_class"` (`except ... as
-          event_class:` -- a plain string attribute, not a `Name` node,
-          so `ctx`-based matching alone cannot see it).
-    (iv) `MatchAs.name` / `MatchStar.name` / `MatchMapping.rest` equal
-         to `"event_class"` (`match` statement capture patterns -- also
-         plain string attributes, not `Name` nodes).
-    (v) a NESTED `def`/`async def`/`class` (directly inside this
-        function's own body) whose OWN `.name` is `"event_class"` --
-        this binds a function/class object under that name in the
-        enclosing scope, same as any other local. (An inner lambda's or
-        nested function's OWN `event_class` PARAMETER needs no separate
-        handling here: `_EventClassForwardResolver`'s stack-based scope
-        resolution already resolves a `Name` reference inside that
-        inner scope against the INNERMOST frame first, correctly
-        blocking it from ever being attributed to an outer function's
-        parameter -- the "遮る" ("blocks") relationship is structural,
-        not something `_collect_direct_shadow_names` needs to encode.)
-    (vi) `Global`/`Nonlocal` names (unchanged).
 
-    Mirrors Python's own scoping rule: a name bound ANYWHERE in a
-    function's body (compile-time, not execution-order) is that
-    function's local for the WHOLE body, regardless of whether it is
-    ALSO a formal parameter of that same function."""
+def _iter_name_or_attribute_targets(target: "_ast.AST"):
+    """WP-B1 acceptance-audit finding M7: decomposes an assignment TARGET
+    (including tuple/list/starred unpacking) into every leaf `Name`/
+    `Attribute` node it assigns to. `Subscript` targets are NOT decomposed
+    here -- the dict-smuggling scan handles those separately. Unchanged by
+    this WP (already field-agnostic)."""
+    if isinstance(target, (_ast.Name, _ast.Attribute)):
+        yield target
+    elif isinstance(target, (_ast.Tuple, _ast.List)):
+        for elt in target.elts:
+            yield from _iter_name_or_attribute_targets(elt)
+    elif isinstance(target, _ast.Starred):
+        yield from _iter_name_or_attribute_targets(target.value)
+
+
+def _is_field_assignment_target(leaf: "_ast.AST", field: str) -> bool:
+    if isinstance(leaf, _ast.Name):
+        return leaf.id == field
+    if isinstance(leaf, _ast.Attribute):
+        return leaf.attr == field
+    return False
+
+
+def _collect_direct_shadow_names(body: list, field: str) -> set[str]:
+    """Generalized P4-D16 v3 acceptance-audit-round-2 shadow detector: any
+    name binding of `field` anywhere in a function's OWN direct body (never
+    descending into a nested `def`/`async def`/`lambda`/`class`) shadows
+    it -- every binding SHAPE `_analyze_field_scope` below also enumerates
+    for its own, narrower (b'') purpose, kept here as the plain yes/no
+    "is this name local to this scope at all" question the forward
+    resolver needs first."""
     shadowed: set[str] = set()
 
     class _ShadowScan(_ast.NodeVisitor):
         def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
-            if node.name == "event_class":
+            if node.name == field:
                 shadowed.add(node.name)
-            # do not descend -- separate scope
 
         def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
-            if node.name == "event_class":
+            if node.name == field:
                 shadowed.add(node.name)
-            # do not descend -- separate scope
 
         def visit_Lambda(self, node: "_ast.Lambda") -> None:
-            pass  # separate scope; lambdas have no `.name` to bind -- do not descend
+            pass  # separate scope; do not descend
 
         def visit_ClassDef(self, node: "_ast.ClassDef") -> None:
-            if node.name == "event_class":
+            if node.name == field:
                 shadowed.add(node.name)
-            # do not descend -- separate scope
 
         def visit_Name(self, node: "_ast.Name") -> None:
-            if node.id == "event_class" and isinstance(node.ctx, (_ast.Store, _ast.Del)):
+            if node.id == field and isinstance(node.ctx, (_ast.Store, _ast.Del)):
                 shadowed.add(node.id)
 
         def visit_alias(self, node: "_ast.alias") -> None:
-            if node.asname == "event_class":
+            if node.asname == field:
                 shadowed.add(node.asname)
 
         def visit_ExceptHandler(self, node: "_ast.ExceptHandler") -> None:
-            if node.name == "event_class":
+            if node.name == field:
                 shadowed.add(node.name)
             self.generic_visit(node)
 
         def visit_MatchAs(self, node: "_ast.AST") -> None:
-            if getattr(node, "name", None) == "event_class":
-                shadowed.add("event_class")
+            if getattr(node, "name", None) == field:
+                shadowed.add(field)
             self.generic_visit(node)
 
         def visit_MatchStar(self, node: "_ast.AST") -> None:
-            if getattr(node, "name", None) == "event_class":
-                shadowed.add("event_class")
+            if getattr(node, "name", None) == field:
+                shadowed.add(field)
             self.generic_visit(node)
 
         def visit_MatchMapping(self, node: "_ast.AST") -> None:
-            if getattr(node, "rest", None) == "event_class":
-                shadowed.add("event_class")
+            if getattr(node, "rest", None) == field:
+                shadowed.add(field)
             self.generic_visit(node)
 
         def visit_Global(self, node: "_ast.Global") -> None:
-            shadowed.update(node.names)
+            shadowed.update(n for n in node.names if n == field)
 
         def visit_Nonlocal(self, node: "_ast.Nonlocal") -> None:
-            shadowed.update(node.names)
+            shadowed.update(n for n in node.names if n == field)
 
     scanner = _ShadowScan()
     for stmt in body:
@@ -996,27 +1061,108 @@ def _collect_direct_shadow_names(body: list) -> set[str]:
     return shadowed
 
 
-class _EventClassForwardResolver(_ast.NodeVisitor):
-    """WP-B1 review round 2 (M3/M6): a single, scope-tracking traversal
-    that determines, for EVERY `Name(id="event_class", ctx=Load())` node
-    in a tree, whether it is a genuine forward of an ENCLOSING function's
-    own `event_class` formal parameter -- walked innermost-to-outermost
-    over a stack of `(param_names, shadowed_names)` per enclosing
-    function/lambda. A name that is local-but-shadowed in the innermost
-    scope that claims it (a plain local variable, a `for` target, a
-    walrus target, or a `global`/`nonlocal` declaration -- see
-    `_collect_direct_shadow_names` above) STOPS resolution there and is
-    NEVER treated as a safe forward, even if that same function also
-    happens to declare `event_class` as a parameter, and even if an
-    OUTER function's own parameter of the same name exists. This closes
-    the gap the previous (unscoped) `Name(id="event_class")`-only check
-    had: a local variable coincidentally named `event_class` could
-    silently carry an undeclared literal straight past both the literal
-    -discipline check (b) and the dict-smuggling check (d)."""
+def _analyze_field_scope(body: list, field: str) -> tuple[set[str], "_ast.AST | None"]:
+    """(b''): returns `(shadow_names, const_bound_value_or_None)` for
+    `field` within one function's own DIRECT body (same non-descent rule as
+    `_collect_direct_shadow_names`). `const_bound_value` is set ONLY when
+    `field`'s SOLE binding touch anywhere in this direct body is a single-
+    target `Assign` (`field = ...`, never `AnnAssign`/`AugAssign`, never a
+    tuple/attribute/subscript target) whose value satisfies `_literal_
+    leaves` -- ANY other touch (a second assign of any shape, a for/with-
+    as/except-as/walrus/match-as/global/nonlocal, or a same-named nested
+    def/class) forfeits the exemption entirely, even if this qualifying
+    assign is also present."""
+    touches: list[tuple[str, "_ast.AST | None"]] = []
 
-    def __init__(self) -> None:
+    class _Scan(_ast.NodeVisitor):
+        def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
+            if node.name == field:
+                touches.append(("other", None))
+
+        def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
+            if node.name == field:
+                touches.append(("other", None))
+
+        def visit_Lambda(self, node: "_ast.Lambda") -> None:
+            pass  # separate scope; do not descend
+
+        def visit_ClassDef(self, node: "_ast.ClassDef") -> None:
+            if node.name == field:
+                touches.append(("other", None))
+
+        def visit_Assign(self, node: "_ast.Assign") -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name) and node.targets[0].id == field:
+                touches.append(("assign", node.value))
+            else:
+                for target in node.targets:
+                    for leaf in _iter_name_or_attribute_targets(target):
+                        if isinstance(leaf, _ast.Name) and leaf.id == field:
+                            touches.append(("other", None))
+            self.visit(node.value)
+
+        def visit_Name(self, node: "_ast.Name") -> None:
+            if node.id == field and isinstance(node.ctx, (_ast.Store, _ast.Del)):
+                touches.append(("other", None))
+
+        def visit_alias(self, node: "_ast.alias") -> None:
+            if node.asname == field:
+                touches.append(("other", None))
+
+        def visit_ExceptHandler(self, node: "_ast.ExceptHandler") -> None:
+            if node.name == field:
+                touches.append(("other", None))
+            self.generic_visit(node)
+
+        def visit_MatchAs(self, node: "_ast.AST") -> None:
+            if getattr(node, "name", None) == field:
+                touches.append(("other", None))
+            self.generic_visit(node)
+
+        def visit_MatchStar(self, node: "_ast.AST") -> None:
+            if getattr(node, "name", None) == field:
+                touches.append(("other", None))
+            self.generic_visit(node)
+
+        def visit_MatchMapping(self, node: "_ast.AST") -> None:
+            if getattr(node, "rest", None) == field:
+                touches.append(("other", None))
+            self.generic_visit(node)
+
+        def visit_Global(self, node: "_ast.Global") -> None:
+            if field in node.names:
+                touches.append(("other", None))
+
+        def visit_Nonlocal(self, node: "_ast.Nonlocal") -> None:
+            if field in node.names:
+                touches.append(("other", None))
+
+    scanner = _Scan()
+    for stmt in body:
+        scanner.visit(stmt)
+
+    if not touches:
+        return set(), None
+    if len(touches) == 1 and touches[0][0] == "assign" and _literal_leaves(touches[0][1]):
+        return {field}, touches[0][1]
+    return {field}, None
+
+
+class _FieldForwardResolver(_ast.NodeVisitor):
+    """Generalized `_EventClassForwardResolver`: a single, scope-tracking
+    traversal determining, for every `Name(id=field, ctx=Load())` node,
+    whether it is a genuine forward -- either of an ENCLOSING function's own
+    `field` formal parameter (unchanged from P4-D16 v3), OR (b'') of a
+    same-scope-or-enclosing-scope local variable bound by exactly one
+    qualifying constant-or-`IfExp`-of-constants `Assign`. A name that is
+    locally shadowed in the innermost scope that claims it, WITHOUT
+    qualifying for (b''), stops resolution there and is never a safe
+    forward -- identical in spirit to P4-D16 v3's own shadow rule, just
+    with one narrow, mechanically-verified exception carved out."""
+
+    def __init__(self, field: str) -> None:
+        self.field = field
         self.safe_forward_ids: set[int] = set()
-        self._stack: list[tuple[set[str], set[str]]] = []
+        self._stack: list[tuple[set[str], set[str], "_ast.AST | None"]] = []
 
     def _param_names(self, node: "_ast.AST") -> set[str]:
         args = node.args
@@ -1027,125 +1173,82 @@ class _EventClassForwardResolver(_ast.NodeVisitor):
             names.add(args.kwarg.arg)
         return names
 
-    def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
-        self._stack.append((self._param_names(node), _collect_direct_shadow_names(node.body)))
+    def _push_and_visit(self, node: "_ast.AST") -> None:
+        shadow_names, const_bound = _analyze_field_scope(node.body, self.field)
+        self._stack.append((self._param_names(node), shadow_names, const_bound))
         self.generic_visit(node)
         self._stack.pop()
+
+    def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
+        self._push_and_visit(node)
 
     def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
-        self._stack.append((self._param_names(node), _collect_direct_shadow_names(node.body)))
-        self.generic_visit(node)
-        self._stack.pop()
+        self._push_and_visit(node)
 
     def visit_Lambda(self, node: "_ast.Lambda") -> None:
-        # No emit definition in this package is ever a lambda, but a
-        # correct frame is still pushed so a lambda parameter named
-        # `event_class` cannot be falsely resolved against an OUTER
-        # frame instead of its own.
-        self._stack.append((self._param_names(node), set()))
+        self._stack.append((self._param_names(node), set(), None))
         self.generic_visit(node)
         self._stack.pop()
 
     def visit_Name(self, node: "_ast.Name") -> None:
-        if node.id == "event_class" and isinstance(node.ctx, _ast.Load):
-            for param_names, shadowed_names in reversed(self._stack):
-                if "event_class" in shadowed_names:
-                    break  # locally rebound in this scope -- never a safe forward
-                if "event_class" in param_names:
+        if node.id == self.field and isinstance(node.ctx, _ast.Load):
+            for param_names, shadow_names, const_bound in reversed(self._stack):
+                if self.field in shadow_names:
+                    if const_bound is not None:
+                        self.safe_forward_ids.add(id(node))
+                    break  # locally rebound in this scope -- resolution stops here either way
+                if self.field in param_names:
                     self.safe_forward_ids.add(id(node))
                     break
-                # not local to this frame at all -- Python's own scoping
-                # would keep looking outward, so we do too.
         self.generic_visit(node)
 
 
-def _iter_name_or_attribute_targets(target: "_ast.AST"):
-    """WP-B1 acceptance-audit finding M7: decomposes an assignment
-    TARGET (including tuple/list/starred unpacking, e.g. `a, event_class
-    = ...`) into every leaf `Name`/`Attribute` node it assigns to.
-    `Subscript` targets (`d["event_class"] = ...`) are NOT decomposed
-    here -- those are the existing, separately-handled dict-smuggling
-    scan's own job."""
-    if isinstance(target, (_ast.Name, _ast.Attribute)):
-        yield target
-    elif isinstance(target, (_ast.Tuple, _ast.List)):
-        for elt in target.elts:
-            yield from _iter_name_or_attribute_targets(elt)
-    elif isinstance(target, _ast.Starred):
-        yield from _iter_name_or_attribute_targets(target.value)
-
-
-def _is_event_class_assignment_target(leaf: "_ast.AST") -> bool:
-    if isinstance(leaf, _ast.Name):
-        return leaf.id == "event_class"
-    if isinstance(leaf, _ast.Attribute):
-        return leaf.attr == "event_class"
-    return False
-
-
-def _scan_source_event_class_sites(source: str, filename: str) -> tuple[
+def _scan_source_field_sites(source: str, filename: str, field: str) -> tuple[
     list[tuple[int, "_ast.AST", bool]], list[tuple[int, str, "_ast.AST", bool]], list[tuple[int, str, "_ast.AST", bool]]
 ]:
-    """One parse, one `_EventClassForwardResolver` pass over `source`.
-    Returns `(keyword_sites, dict_sites, assignment_sites)`:
-    - `keyword_sites`: `(lineno, value_node, is_safe_forward)` for every
-      `Call` carrying an `event_class=` keyword (P4-D16 v3(b)'s input).
-    - `dict_sites`: `(lineno, kind, value_node, is_safe_forward)` for
-      every `Dict` literal keyed `"event_class"` (`kind="dict"`) and
-      every `x["event_class"] = ...` `Subscript` assignment
-      (`kind="subscript"`) (P4-D16 v3(d)'s input).
-    - `assignment_sites`: `(lineno, kind, value_node, is_safe_forward)`
-      for every `Assign`/`AnnAssign`/`AugAssign` anywhere in `source`
-      (EVERY scope -- module top-level, class body, function body alike;
-      this is a plain, unconditional `ast.walk`, never scope-restricted)
-      whose TARGET (decomposed through tuple/list/starred unpacking) is
-      `Name(id="event_class")` (`kind="name_assign"`, e.g. a MODULE- or
-      CLASS-level `event_class = "..."`) or `Attribute(attr=
-      "event_class")` (`kind="attribute_assign"`, e.g. `self.event_class
-      = "..."`). WP-B1 acceptance-audit finding M7: without this, `class
-      _Cfg: event_class = "zz"` followed by `event_class=_Cfg.event_class`
-      at a real emit call site passed (b)/(c)/(d)/(e) all green -- the
-      unconditional `Attribute(attr="event_class")` passthrough in
-      `is_forward` below (added for the READ-path case, see the third
-      bullet) legitimately accepted the READ `_Cfg.event_class`, but
-      nothing was checking what value the WRITE `event_class = "zz"`
-      that fed it had actually assigned. This closes that: the value
-      side of every such assignment, anywhere, is checked with the SAME
-      `is_forward` rule (b)/(d) already use.
+    """Generalized `_scan_source_event_class_sites`. One parse, one
+    `_FieldForwardResolver` pass. Returns `(keyword_sites, dict_sites,
+    assignment_sites)`, each `(..., value_node, ok)`:
 
-    `is_safe_forward` recognizes THREE shapes, none of which can ever
-    author a brand-new value -- each only re-exposes something already
-    unambiguously named/keyed `event_class` elsewhere:
-    - `Name(id="event_class")` bound to an ENCLOSING function's own
-      `event_class` PARAMETER (`_EventClassForwardResolver` above; WP-B1
-      review round 2 M3/M6 -- a local variable/global/for-target/walrus
-      of the identical name is explicitly NOT this and IS a violation).
-    - `Attribute(attr="event_class")` (e.g. `event.event_class`) --
-      reading an already-durable event/row OBJECT's own `event_class`
-      field back out for a READ-path response (r2db-api
-      `audit_query.py`'s `_event_dict`, `control_plane.py`'s
-      `_shape_audit_query_row`). This is the READ side of D-6/D-7, the
-      structural opposite of an emit site: the value it copies was
-      already validated wherever it was ORIGINALLY durably written: no
-      new literal can be authored by attribute access alone -- PROVIDED
-      the assignment_sites check above also holds (an `Attribute` read
-      is only as safe as every WRITE that could have produced it).
-    - `Subscript` keyed by the literal `"event_class"` (e.g.
-      `row["event_class"]`) -- the same READ-path passthrough, one
-      layer removed (a dict/row field lookup instead of an attribute)."""
+    - `keyword_sites`: every `Call` carrying a `field=` keyword. `ok` is
+      True for a `_literal_leaves`-bearing value ((b)/(b') -- literal
+      AUTHORSHIP is legal only here) or a safe `Name` forward. `Attribute`/
+      `Subscript` are NEVER `ok` here (b''' -- no read-path passthrough at
+      a keyword-value position).
+    - `dict_sites`: every `Dict` literal keyed `field` (`kind="dict"`) and
+      every `x["field"] = ...` subscript assignment (`kind="subscript"`).
+      `ok` is True ONLY for a safe `Name` forward or `Attribute`/
+      `Subscript` read-path passthrough (b''') -- a literal here is NEVER
+      `ok` (unchanged from P4-D16 v3 -- literal authorship must go through
+      a real keyword call site, not be smuggled into a dict).
+    - `assignment_sites`: every `Assign`/`AnnAssign`/`AugAssign` anywhere
+      (every scope) whose target is `Name(id=field)` (`kind="name_assign"`)
+      or `Attribute(attr=field)` (`kind="attribute_assign"`). `name_assign`
+      additionally allows `_literal_leaves` values `ok` (b''/b' -- this is
+      the exact shape the (b'') exemption's OWN qualifying assignment
+      takes, e.g. `operation = "enable_application" if enabled else
+      "disable_application"`; a plain string `Constant` there is likewise
+      `ok`, on par with a fully-reduced `IfExp`). `attribute_assign` never
+      allows a bare literal (`self.field = "literal"` stays banned, same as
+      P4-D16 v3) but DOES allow `Attribute`/`Subscript` read-path
+      passthrough (b''').
+    """
     tree = _ast.parse(source, filename=filename)
-    resolver = _EventClassForwardResolver()
+    resolver = _FieldForwardResolver(field)
     resolver.visit(tree)
     safe_ids = resolver.safe_forward_ids
 
-    def is_forward(value: "_ast.AST") -> bool:
+    def is_ok(value: "_ast.AST", *, position: str) -> bool:
+        if position in ("keyword", "name_assign") and _literal_leaves(value):
+            return True
         if isinstance(value, _ast.Name):
             return id(value) in safe_ids
-        if isinstance(value, _ast.Attribute):
-            return value.attr == "event_class"
-        if isinstance(value, _ast.Subscript):
-            key_node = value.slice
-            return isinstance(key_node, _ast.Constant) and key_node.value == "event_class"
+        if position in ("dict", "subscript", "attribute_assign"):
+            if isinstance(value, _ast.Attribute):
+                return value.attr == field
+            if isinstance(value, _ast.Subscript):
+                key_node = value.slice
+                return isinstance(key_node, _ast.Constant) and key_node.value == field
         return False
 
     keyword_sites: list[tuple[int, "_ast.AST", bool]] = []
@@ -1153,287 +1256,380 @@ def _scan_source_event_class_sites(source: str, filename: str) -> tuple[
     assignment_sites: list[tuple[int, str, "_ast.AST", bool]] = []
     for node in _ast.walk(tree):
         if isinstance(node, _ast.Call):
-            kw = next((k for k in node.keywords if k.arg == "event_class"), None)
+            kw = next((k for k in node.keywords if k.arg == field), None)
             if kw is not None:
-                keyword_sites.append((node.lineno, kw.value, is_forward(kw.value)))
+                keyword_sites.append((node.lineno, kw.value, is_ok(kw.value, position="keyword")))
         elif isinstance(node, _ast.Dict):
             for key, value in zip(node.keys, node.values):
-                if isinstance(key, _ast.Constant) and key.value == "event_class":
-                    dict_sites.append((node.lineno, "dict", value, is_forward(value)))
+                if isinstance(key, _ast.Constant) and key.value == field:
+                    dict_sites.append((node.lineno, "dict", value, is_ok(value, position="dict")))
         elif isinstance(node, _ast.Assign):
             for target in node.targets:
                 if isinstance(target, _ast.Subscript):
                     key_node = target.slice
-                    if isinstance(key_node, _ast.Constant) and key_node.value == "event_class":
-                        dict_sites.append((node.lineno, "subscript", node.value, is_forward(node.value)))
+                    if isinstance(key_node, _ast.Constant) and key_node.value == field:
+                        dict_sites.append((node.lineno, "subscript", node.value, is_ok(node.value, position="subscript")))
                 for leaf in _iter_name_or_attribute_targets(target):
-                    if _is_event_class_assignment_target(leaf):
+                    if _is_field_assignment_target(leaf, field):
                         kind = "name_assign" if isinstance(leaf, _ast.Name) else "attribute_assign"
-                        assignment_sites.append((node.lineno, kind, node.value, is_forward(node.value)))
+                        assignment_sites.append((node.lineno, kind, node.value, is_ok(node.value, position=kind)))
         elif isinstance(node, (_ast.AnnAssign, _ast.AugAssign)):
             if node.value is None:
-                continue  # a bare annotation (`event_class: str`) with no assigned value at all
+                continue
             for leaf in _iter_name_or_attribute_targets(node.target):
-                if _is_event_class_assignment_target(leaf):
+                if _is_field_assignment_target(leaf, field):
                     kind = "name_assign" if isinstance(leaf, _ast.Name) else "attribute_assign"
-                    assignment_sites.append((node.lineno, kind, node.value, is_forward(node.value)))
+                    assignment_sites.append((node.lineno, kind, node.value, is_ok(node.value, position=kind)))
     return keyword_sites, dict_sites, assignment_sites
 
 
-def _scan_file_event_class_sites(path: Path):
-    return _scan_source_event_class_sites(path.read_text(), path.name)
+def _scan_file_field_sites(path: Path, field: str):
+    return _scan_source_field_sites(path.read_text(), path.name, field)
 
 
-def _event_class_keyword_call_sites(paths: list[Path]) -> list[tuple[str, int, "_ast.AST", bool]]:
-    """P4-D16 v3(b)'s own input, aggregated across files: `(filename,
-    lineno, value_node, is_safe_forward)` for every `Call` node anywhere
-    in the given files that carries an `event_class=` keyword argument --
-    UNFILTERED by callee name."""
+def _field_keyword_call_sites(paths: list[Path], field: str) -> list[tuple[str, int, "_ast.AST", bool]]:
+    """(b)'s own input, aggregated across files: `(filename, lineno,
+    value_node, ok)` for every `Call` anywhere in the given files carrying
+    a `field=` keyword -- UNFILTERED by callee name."""
     sites: list[tuple[str, int, "_ast.AST", bool]] = []
     for path in paths:
-        keyword_sites, _dict_sites, _assignment_sites = _scan_file_event_class_sites(path)
-        for lineno, value, is_forward in keyword_sites:
-            sites.append((path.name, lineno, value, is_forward))
+        keyword_sites, _dict_sites, _assignment_sites = _scan_file_field_sites(path, field)
+        for lineno, value, ok in keyword_sites:
+            sites.append((path.name, lineno, value, ok))
     return sites
 
 
-def _scan_event_class_literals(source: str, filename: str) -> tuple[set[str], list[str]]:
-    """Single-file variant of the same unfiltered walk (b) performs,
-    kept for the `ops.py`-specific regression/mutation-proof tests below
-    that substitute a mutated copy of ONE file's text in isolation, and
-    for this WP's own new synthetic-source regression tests. Returns
-    `(literals, unresolved)`: `literals` is every string literal found at
-    an `event_class=` keyword position; `unresolved` describes any such
-    call whose value is neither a string literal nor a genuine bound
-    parameter forward (`_EventClassForwardResolver` above)."""
-    keyword_sites, _dict_sites, _assignment_sites = _scan_source_event_class_sites(source, filename)
+def _scan_field_literals(source: str, filename: str, field: str) -> tuple[set[str], list[str]]:
+    """Single-file variant kept for the `ops.py`-specific regression tests
+    and this WP's own synthetic-source tests. Returns `(literals,
+    unresolved)`."""
+    keyword_sites, _dict_sites, _assignment_sites = _scan_source_field_sites(source, filename, field)
     literals: set[str] = set()
     unresolved: list[str] = []
-    for lineno, value, is_forward in keyword_sites:
-        if isinstance(value, _ast.Constant) and isinstance(value.value, str):
-            literals.add(value.value)
-        elif is_forward:
+    for lineno, value, ok in keyword_sites:
+        leaves = _literal_leaves(value)
+        if leaves:
+            literals |= leaves
+        elif ok:
             continue
         else:
             unresolved.append(f"{filename}:{lineno}")
     return literals, unresolved
 
 
-def _event_class_positional_definitions(paths: list[Path]) -> list[str]:
-    """P4-D16 v3(c)'s own violation collector: every `def`/`async def`
-    anywhere in the given files whose formal parameters include
-    `event_class` NOT declared keyword-only (i.e. not in `kwonlyargs`).
-    `self`/`cls` (a bound method's own first parameter) is never itself
-    named `event_class`, so no separate exclusion is needed beyond a
-    plain by-name membership check across every parameter list."""
-    violations: list[str] = []
+def _field_literal_union(paths: list[Path], field: str) -> set[str]:
+    """The full literal union U for `field` across `paths` -- every
+    `_literal_leaves`-bearing value found at a keyword-argument position
+    (b/b'), PLUS every one found at a `name_assign` position (b''/b') --
+    the latter is what lets a (b'')-qualifying local-variable assignment
+    (e.g. `operation = "enable_application" if enabled else "disable_
+    application"`) contribute its own literals to U even though the
+    keyword site that FORWARDS that variable contributes none itself (the
+    literal's true origin is the assignment, not the forward)."""
+    literals: set[str] = set()
+    for path in paths:
+        keyword_sites, _dict_sites, assignment_sites = _scan_file_field_sites(path, field)
+        for _lineno, value, _ok in keyword_sites:
+            literals |= _literal_leaves(value)
+        for _lineno, kind, value, _ok in assignment_sites:
+            if kind == "name_assign":
+                literals |= _literal_leaves(value)
+    return literals
+
+
+def _iter_field_definitions(paths: list[Path], field: str) -> list[tuple[str, Path, "_ast.AST", bool]]:
+    """P4-D16 v3(c)'s own definition-side enumeration, generalized and
+    widened to also expose a QUALIFIED name (`module[.Class].function`) per
+    definition -- the exclusion list (below) is keyed by this qualified
+    name. Returns `(qualified_name, path, node, is_kwonly)` for every
+    `def`/`async def` anywhere in the given files whose formal parameters
+    include `field`, positional-or-keyword-only alike."""
+    results: list[tuple[str, Path, "_ast.AST", bool]] = []
     for path in paths:
         tree = _ast.parse(path.read_text(), filename=path.name)
-        for node in _ast.walk(tree):
-            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                continue
-            kwonly_names = {arg.arg for arg in node.args.kwonlyargs}
-            if "event_class" in kwonly_names:
-                continue
-            positional_names = {arg.arg for arg in node.args.posonlyargs + node.args.args}
-            if "event_class" in positional_names:
-                violations.append(f"{path.name}:{node.lineno}: {node.name}(...) takes event_class positionally, not keyword-only")
+        class_stack: list[str] = []
+
+        class _Walk(_ast.NodeVisitor):
+            def visit_ClassDef(self, node: "_ast.ClassDef") -> None:
+                class_stack.append(node.name)
+                self.generic_visit(node)
+                class_stack.pop()
+
+            def _record(self, node: "_ast.AST") -> None:
+                positional_names = {a.arg for a in node.args.posonlyargs + node.args.args}
+                kwonly_names = {a.arg for a in node.args.kwonlyargs}
+                if field in positional_names or field in kwonly_names:
+                    qualified = ".".join([path.stem, *class_stack, node.name])
+                    results.append((qualified, path, node, field in kwonly_names))
+
+            def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
+                self._record(node)
+                self.generic_visit(node)
+
+            def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
+                self._record(node)
+                self.generic_visit(node)
+
+        _Walk().visit(tree)
+    return results
+
+
+# WP-2 変更対象 B: regla (c) is name-BASED, not callee-name-based, so it
+# reacts to every definition anywhere under `src/r2db_api/` whose formal
+# parameters include `operation` -- and `operation` is not an audit-only
+# word (335 identifier occurrences in this package, design §3 D-1). The 8
+# definitions below all take a CLIENT-SUPPLIED mutation/schema-operation
+# dict named `operation` -- never an audit field -- and keyword-only-ifying
+# them would change a public/semi-public call signature (an ABC's own
+# abstract signature, or `DataService.schema`'s established `service.schema
+# (context, body, request_id=...)` positional-call convention, `http.py:
+# 355`) for no audit-safety benefit. Each entry names its qualified
+# definition and its rationale; the two validation tests immediately below
+# hold this list itself accountable: (i) every entry must still resolve to
+# a real `operation`-parameter definition (a renamed/removed function goes
+# red here, not silently), and (ii') no excluded definition's own body may
+# forward ITS OWN `operation` parameter into an audit emit call (design
+# N-1 -- NOT "carries no operation= Constant at all": `DataService.schema`
+# legitimately both takes this client dict AND separately authors literal
+# `operation="schema"` Constants elsewhere in its own body; excluding it
+# does not, and must not, hide a genuine client-value forward if one were
+# ever added).
+_NON_AUDIT_OPERATION_PARAMETERS: frozenset[str] = frozenset(
+    {
+        # Client-supplied schema-mutation dict, an ABC's own abstract
+        # signature -- `operation` here is never an audit field.
+        "backend.StorageBackend.apply_schema",
+        "postgres.PostgresCell._apply",
+        "postgres.PostgresCell.apply_schema",
+        "service.DataService.schema",
+        "structured.bind_mutation",
+        "structured.bind_schema_operation",
+        "structured.ApplicationCell._apply",
+        "structured.ApplicationCell.apply_schema",
+    }
+)
+
+# `event_class`/`target_kind` need no such exclusion list -- neither name
+# collides with an unrelated client-supplied parameter anywhere in this
+# package (`test_every_definition_taking_the_field_declares_it_keyword_
+# only`'s own zero-violation result for both, WITH an empty exclusion set,
+# is the proof; see that test's own assertion below).
+_NON_AUDIT_FIELD_PARAMETERS: dict[str, frozenset[str]] = {
+    "event_class": frozenset(),
+    "operation": _NON_AUDIT_OPERATION_PARAMETERS,
+    "target_kind": frozenset(),
+}
+
+
+def _field_positional_definitions(paths: list[Path], field: str) -> list[str]:
+    """P4-D16 v3(c)'s own violation collector, generalized: every
+    definition taking `field` NOT keyword-only AND not on this field's
+    exclusion list."""
+    exclusions = _NON_AUDIT_FIELD_PARAMETERS.get(field, frozenset())
+    violations: list[str] = []
+    for qualified, path, node, is_kwonly in _iter_field_definitions(paths, field):
+        if is_kwonly or qualified in exclusions:
+            continue
+        violations.append(f"{path.name}:{node.lineno}: {node.name}(...) takes {field} positionally, not keyword-only")
     return violations
 
 
-def _event_class_dict_smuggling_violations(paths: list[Path]) -> list[str]:
-    """P4-D16 v3(d)'s own violation collector -- WP-B1 review round 2
-    (M3/M6) INVERTED this from "flag only a plain string `Constant`
-    value" to "allow ONLY the three passthrough shapes
-    `_scan_source_event_class_sites` recognizes (a bound parameter
-    forward, an `event.event_class` attribute read, or a
-    `row["event_class"]` subscript read -- see that function's own
-    docstring) and flag everything else": a string `Constant`, an
-    f-string (`JoinedStr`), string concatenation (`BinOp`), a function
-    `Call` result, an unbound/shadowed `Name`, or an `Attribute`/
-    `Subscript` that does NOT read a field literally named
-    `event_class` are ALL violations now -- not merely a plain literal
-    string. Closes the gap where a non-Constant, non-forward value (an
-    f-string smuggled via `**{"event_class": f"..."}`, for instance)
-    silently passed the old, narrower check."""
+def _excluded_definition_forwards_its_own_parameter(node: "_ast.AST", field: str) -> bool:
+    """(ii'): True if `node`'s own body contains a `Call` passing
+    `field=<Name>` where the Name resolves to THIS definition's OWN
+    `field` parameter -- a genuine client-value-into-audit-emit transfer, as
+    opposed to a `Constant`/`IfExp` audit literal the same body might also,
+    legitimately, author elsewhere."""
+    resolver = _FieldForwardResolver(field)
+    if isinstance(node, _ast.AsyncFunctionDef):
+        resolver.visit_AsyncFunctionDef(node)
+    else:
+        resolver.visit_FunctionDef(node)
+    safe_ids = resolver.safe_forward_ids
+    for sub in _ast.walk(node):
+        if isinstance(sub, _ast.Call):
+            for kw in sub.keywords:
+                if kw.arg == field and isinstance(kw.value, _ast.Name) and id(kw.value) in safe_ids:
+                    return True
+    return False
+
+
+def _field_dict_smuggling_violations(paths: list[Path], field: str) -> list[str]:
     violations: list[str] = []
     for path in paths:
-        _keyword_sites, dict_sites, _assignment_sites = _scan_file_event_class_sites(path)
-        for lineno, kind, value, is_forward in dict_sites:
-            if is_forward:
+        _keyword_sites, dict_sites, _assignment_sites = _scan_file_field_sites(path, field)
+        for lineno, kind, value, ok in dict_sites:
+            if ok:
                 continue
-            violations.append(f"{path.name}:{lineno}: {kind} sets event_class to a non-forward value ({_ast.dump(value)})")
+            violations.append(f"{path.name}:{lineno}: {kind} sets {field} to a non-allowed value ({_ast.dump(value)})")
     return violations
 
 
-def _event_class_assignment_violations(paths: list[Path]) -> list[str]:
-    """WP-B1 acceptance-audit finding M7's own violation collector: every
-    `Assign`/`AnnAssign`/`AugAssign` anywhere in the given files (EVERY
-    scope, never restricted to function bodies) whose target is
-    `Name(id="event_class")` (a MODULE- or CLASS-level assignment, e.g.
-    `class _Cfg: event_class = "zz"`) or `Attribute(attr="event_class")`
-    (e.g. `self.event_class = "zz"`) must assign a genuine passthrough
-    value (the SAME `is_forward` rule (b)/(d) use) -- a string `Constant`,
-    f-string, `BinOp`, `Call` result, or unbound/shadowed `Name` is a
-    violation. Closes the gap where `_scan_source_event_class_sites`'s
-    own unconditional `Attribute(attr="event_class")` READ-passthrough
-    (added for legitimate cases like `event.event_class`) could be fed by
-    an UNCHECKED write -- `class _Cfg: event_class = "zz"` followed by
-    `event_class=_Cfg.event_class` at a real emit site passed every other
-    check green before this."""
+def _field_assignment_violations(paths: list[Path], field: str) -> list[str]:
     violations: list[str] = []
     for path in paths:
-        _keyword_sites, _dict_sites, assignment_sites = _scan_file_event_class_sites(path)
-        for lineno, kind, value, is_forward in assignment_sites:
-            if is_forward:
+        _keyword_sites, _dict_sites, assignment_sites = _scan_file_field_sites(path, field)
+        for lineno, kind, value, ok in assignment_sites:
+            if ok:
                 continue
-            violations.append(f"{path.name}:{lineno}: {kind} sets event_class to a non-forward value ({_ast.dump(value)})")
+            violations.append(f"{path.name}:{lineno}: {kind} sets {field} to a non-allowed value ({_ast.dump(value)})")
     return violations
 
 
-def test_every_event_class_keyword_argument_is_a_string_literal():
-    """P4-D16 v3(b). Every `Call` anywhere under `src/r2db_api/` that
-    carries an `event_class=` keyword must pass a plain string literal or
-    a genuine bound parameter forward of an ENCLOSING function's own
-    `event_class` parameter (`_EventClassForwardResolver` above) -- no
-    callee-name filter of any kind. Violations are reported by
-    file:line."""
+@pytest.mark.parametrize("field", _FIELDS)
+def test_every_field_keyword_argument_is_a_string_literal_ifexp_or_forward(field):
+    """(b)/(b'). Every `Call` anywhere under `src/r2db_api/` carrying a
+    `field=` keyword must pass a plain string literal, an `IfExp` reducing
+    to string literals on both branches, or a genuine bound forward -- no
+    callee-name filter of any kind. Violations reported by file:line."""
     paths = _iter_src_files()
     violations: list[str] = []
-    for filename, lineno, value, is_forward in _event_class_keyword_call_sites(paths):
-        if isinstance(value, _ast.Constant) and isinstance(value.value, str):
+    for filename, lineno, value, ok in _field_keyword_call_sites(paths, field):
+        if ok:
             continue
-        if is_forward:
-            continue
-        violations.append(f"{filename}:{lineno}: event_class= is not a string literal or a bound parameter forward ({_ast.dump(value)})")
-    assert not violations, f"non-literal, non-forwarded event_class= call site(s): {violations!r}"
+        violations.append(f"{filename}:{lineno}: {field}= is not a string literal, IfExp-of-literals, or a bound forward ({_ast.dump(value)})")
+    assert not violations, f"non-literal, non-forwarded {field}= call site(s): {violations!r}"
 
 
-def test_every_definition_taking_event_class_declares_it_keyword_only():
-    """P4-D16 v3(c). Every function/method anywhere under `src/r2db_api/`
-    that takes `event_class` as a formal parameter must declare it
-    keyword-only -- this is the product-code invariant `_event` (:1112)
-    and `_control_event` (:1356) were converted to satisfy (this WP's
-    only product-code change). Makes a positionally-passed emit site
-    syntactically unwritable, closing the historical "positional call
-    sites are invisible to a keyword-only-oriented scan" gap
-    structurally rather than by convention."""
+@pytest.mark.parametrize("field", _FIELDS)
+def test_every_definition_taking_the_field_declares_it_keyword_only(field):
+    """(c). Every function/method anywhere under `src/r2db_api/` that takes
+    `field` as a formal parameter must declare it keyword-only, UNLESS it is
+    named on that field's own exclusion list (`_NON_AUDIT_FIELD_PARAMETERS`
+    -- empty for `event_class`/`target_kind`, proven by this same
+    assertion going green for them with nothing excluded)."""
     paths = _iter_src_files()
-    violations = _event_class_positional_definitions(paths)
-    assert not violations, f"definition(s) with a non-keyword-only event_class parameter: {violations!r}"
+    violations = _field_positional_definitions(paths, field)
+    assert not violations, f"definition(s) with a non-keyword-only {field} parameter: {violations!r}"
 
 
-def test_no_event_class_string_literal_is_smuggled_through_a_dict():
-    """P4-D16 v3(d) (WP-B1 review round 2, M3/M6). No `Dict` literal or
-    `Subscript` assignment anywhere under `src/r2db_api/` sets an
-    `"event_class"` key to anything other than a genuine passthrough of
-    an existing `event_class` value (a bound parameter forward, or a
-    READ-path `event.event_class`/`row["event_class"]` field read -- see
-    `_scan_source_event_class_sites`'s own docstring) -- a plain string
-    literal, an f-string, string concatenation, a call result, or an
-    unbound/shadowed name are ALL violations, closing the path
-    (`**{"event_class": ...}` expansion, or building the sink's field
-    dict via subscript assignment) that could otherwise let a
-    non-literal, non-forward value reach the durable sink invisibly to
-    (b)'s keyword-argument walk."""
+def test_non_audit_operation_parameters_exclusion_list_entries_exist():
+    """(i). Every `_NON_AUDIT_OPERATION_PARAMETERS` entry must resolve to a
+    real, current `operation`-parameter definition -- a renamed or removed
+    function must turn this red, not silently stop being checked at all."""
     paths = _iter_src_files()
-    violations = _event_class_dict_smuggling_violations(paths)
-    assert not violations, f"dict/subscript event_class literal smuggling site(s): {violations!r}"
+    known_qualified = {qualified for qualified, _p, _n, _kw in _iter_field_definitions(paths, "operation")}
+    missing = sorted(name for name in _NON_AUDIT_OPERATION_PARAMETERS if name not in known_qualified)
+    assert missing == [], f"exclusion-list entries that no longer resolve to a real operation-parameter definition: {missing!r}"
+    assert _NON_AUDIT_OPERATION_PARAMETERS, "the exclusion list itself must be non-empty for this test to observe anything"
 
 
-def test_no_event_class_string_literal_is_smuggled_through_an_assignment():
-    """WP-B1 acceptance-audit finding M7. No `Assign`/`AnnAssign`/
-    `AugAssign` anywhere under `src/r2db_api/` (module top-level, class
-    body, or function body -- EVERY scope) assigns a non-forward value to
-    a target named/keyed `event_class` (`Name(id="event_class")` or
-    `Attribute(attr="event_class")`, tuple/list/starred-unpacked targets
-    included). Closes the hole a class/module-level `event_class = "..."`
-    (or `self.event_class = "..."`) constant left open: an unconditional
-    `Attribute(attr="event_class")` READ passthrough is only as safe as
-    every WRITE that could have produced it."""
+def test_event_class_and_target_kind_need_no_exclusion_list():
+    """Fix-round M-4 (Opus review): completion condition 5's "除外リストが
+    event_class/target_kind には不要であることも確認すること" was, before
+    this test, proven only by `test_every_definition_taking_the_field_
+    declares_it_keyword_only[event_class]`/`[target_kind]` going green WITH
+    an empty exclusion set -- a future 1-line addition to either field's
+    entry in `_NON_AUDIT_FIELD_PARAMETERS` would silently reopen (c)'s own
+    escape hatch for that field without any test noticing. Pins both
+    frozensets' emptiness directly."""
+    assert _NON_AUDIT_FIELD_PARAMETERS["event_class"] == frozenset()
+    assert _NON_AUDIT_FIELD_PARAMETERS["target_kind"] == frozenset()
+
+
+def test_non_audit_operation_parameters_never_forward_their_own_parameter_into_an_emit_call():
+    """(ii'). No excluded definition's own body forwards its OWN
+    client-supplied `operation` parameter into an audit emit call --
+    (ii), the withdrawn predecessor rule ("no Constant operation= at all
+    in the body"), is deliberately NOT implemented (design N-1:
+    `DataService.schema` both needs the exclusion AND legitimately authors
+    `operation="schema"` literals in its own body -- (ii) cannot go green
+    against the real codebase)."""
     paths = _iter_src_files()
-    violations = _event_class_assignment_violations(paths)
-    assert not violations, f"event_class assignment-target literal smuggling site(s): {violations!r}"
+    defs = {qualified: node for qualified, _p, node, _kw in _iter_field_definitions(paths, "operation")}
+    violations: list[str] = []
+    for qualified in _NON_AUDIT_OPERATION_PARAMETERS:
+        node = defs.get(qualified)
+        if node is None:
+            continue  # covered by the existence test above
+        if _excluded_definition_forwards_its_own_parameter(node, "operation"):
+            violations.append(qualified)
+    assert not violations, (
+        f"excluded definition(s) that forward their own client-supplied operation parameter into an audit emit call: {violations!r}"
+    )
+
+
+@pytest.mark.parametrize("field", _FIELDS)
+def test_no_field_string_literal_is_smuggled_through_a_dict(field):
+    """(d). No `Dict` literal or `x["field"] = ...` subscript assignment
+    anywhere under `src/r2db_api/` sets `field` to anything other than a
+    genuine forward or read-path passthrough (b''')."""
+    paths = _iter_src_files()
+    violations = _field_dict_smuggling_violations(paths, field)
+    assert not violations, f"dict/subscript {field} literal smuggling site(s): {violations!r}"
+
+
+@pytest.mark.parametrize("field", _FIELDS)
+def test_no_field_string_literal_is_smuggled_through_an_assignment(field):
+    """(d'). No `Assign`/`AnnAssign`/`AugAssign` anywhere (every scope)
+    assigns a non-allowed value to a target named/keyed `field`. A plain
+    `name_assign` MAY carry a `_literal_leaves` value (b''/b') -- this is
+    exactly the shape the (b'') exemption's own qualifying assignment
+    takes; an `attribute_assign` may not (unchanged from P4-D16 v3)."""
+    paths = _iter_src_files()
+    violations = _field_assignment_violations(paths, field)
+    assert not violations, f"{field} assignment-target literal smuggling site(s): {violations!r}"
 
 
 def test_event_class_forward_exclusion_requires_genuine_parameter_binding():
-    """WP-B1 review round 2 (M3/M6): the predecessor `_is_forwarded_
-    event_class` treated ANY `Name(id="event_class")` as a safe forward,
-    regardless of whether that name was actually bound to an ENCLOSING
-    function's own `event_class` parameter -- a local variable, global,
-    for-loop target, or walrus binding of the identical name could
-    silently carry an undeclared literal straight past both (b) and (d).
-    Builds SYNTHETIC source text (never touches a real repository file)
-    reproducing exactly those two shapes and fixes that both are now
-    rejected -- run this test against the PRE-fix resolver (a bare
-    `isinstance(value_node, ast.Name) and value_node.id == "event_class"`
-    check) to see it go red; that is the round-2 review finding this
-    test is load-bearing against.
-    """
-    # (i) a local variable named `event_class` (never a parameter of the
-    # enclosing function `f`), forwarded via `event_class=event_class` --
-    # must be rejected by (b)'s own literal-discipline scan, not silently
-    # accepted as a forward.
+    """WP-B1 review round 2 (M3/M6), unchanged by this WP: a local variable/
+    global/for-target/walrus of the identical name is explicitly NOT a
+    forward and IS a violation. Kept event_class-specific (the original
+    synthetic-source regression) -- `_scan_field_literals`/`_scan_source_
+    field_sites` are the generalized functions it now calls."""
     source_local_var = (
         "def f(sink):\n"
         "    event_class = \"__WPB1_SYNTHETIC_FIXTURE_LOCAL__\"\n"
         "    sink.append(event_class=event_class)\n"
     )
-    literals, unresolved = _scan_event_class_literals(source_local_var, "synthetic_local_var.py")
-    assert not literals, f"a local-variable-shadowed event_class must never be collected as a literal: {literals!r}"
-    assert unresolved == ["synthetic_local_var.py:3"], (
-        f"a local-variable-shadowed event_class=event_class must be flagged unresolved, not silently accepted as a forward: {unresolved!r}"
-    )
+    # NOTE: this local variable IS a qualifying (b'') const-bound name (a
+    # single Assign of a plain string Constant, no other binding form) --
+    # WP-B1's original claim ("must be rejected, flagged unresolved") no
+    # longer holds verbatim under the Phase 5 generalization: (b'') was
+    # deliberately designed to accept exactly this shape (design N-6's
+    # sibling reasoning -- a same-scope, singly-bound Constant/IfExp local
+    # is now ON PAR with a parameter forward). The literal is instead
+    # picked up as authored AT THE ASSIGNMENT (`_field_literal_union`'s own
+    # `name_assign` contribution), and the keyword-site forward itself
+    # contributes nothing further -- so the net U is identical to the
+    # pre-Phase-5 accounting, just attributed to a different site.
+    literals, unresolved = _scan_field_literals(source_local_var, "synthetic_local_var.py", "event_class")
+    assert not literals, "a keyword-site forward of a (b'')-qualifying local must contribute nothing directly to U at THIS site"
+    assert not unresolved, "a (b'')-qualifying local-variable forward must resolve, not be flagged unresolved"
 
     # (ii) a dict literal with an f-string (`JoinedStr`) value, smuggled
     # into a call via `**{...}` expansion -- must be caught by (d)'s
-    # dict-smuggling scan. An f-string is not a plain string `Constant`,
-    # so the PRE-round-2 dict check (which flagged only string
-    # `Constant` values) silently missed this shape entirely.
+    # dict-smuggling scan. An f-string is not a plain string `Constant`.
     source_dict_fstring = (
         "def g(sink, suffix):\n"
         "    sink.append(**{\"event_class\": f\"__WPB1_SYNTHETIC_FIXTURE_FSTRING_{suffix}__\"})\n"
     )
-    _keyword_sites, dict_sites, _assignment_sites = _scan_source_event_class_sites(source_dict_fstring, "synthetic_dict_fstring.py")
-    dict_violations = [f"synthetic_dict_fstring.py:{lineno}" for lineno, _kind, _value, is_forward in dict_sites if not is_forward]
+    _keyword_sites, dict_sites, _assignment_sites = _scan_source_field_sites(source_dict_fstring, "synthetic_dict_fstring.py", "event_class")
+    dict_violations = [f"synthetic_dict_fstring.py:{lineno}" for lineno, _kind, _value, ok in dict_sites if not ok]
     assert dict_violations == ["synthetic_dict_fstring.py:2"], (
         f"an f-string value smuggled through a dict literal's event_class key must be flagged as a violation: "
         f"{dict_violations!r} (raw sites: {dict_sites!r})"
     )
 
-    # (iii) WP-B1 acceptance-audit round 2 (M8): `with ... as event_class:`
-    # -- the context manager's bound variable is NOT a parameter forward,
-    # even though it is a plain `Name(id="event_class")`. The prior
-    # per-statement-shape enumeration in `_collect_direct_shadow_names`
-    # never visited `withitem.optional_vars` at all.
-    # `h` deliberately DECLARES `event_class` as its own keyword-only
-    # PARAMETER too -- the bug this reproduces only manifests when a
-    # `with ... as event_class:` REBINDS a name that is ALSO a genuine
-    # parameter of the enclosing function: an incomplete shadow-detector
-    # would see "event_class is a parameter of h" and stop there,
-    # wrongly treating the REBOUND (with-as) value as if it were still
-    # the untouched parameter.
+    # (iii) `with ... as event_class:` -- the context manager's bound
+    # variable is NOT a parameter forward and does NOT qualify for (b'')
+    # (its binding form is a `withitem`, not a plain `Assign`), even though
+    # `h` also declares `event_class` as its own keyword-only parameter.
     source_with_as = (
         "from contextlib import nullcontext\n"
         "def h(sink, *, event_class):\n"
         "    with nullcontext(\"__WPB1_SYNTHETIC_FIXTURE_WITH__\") as event_class:\n"
         "        sink.append(event_class=event_class)\n"
     )
-    literals_with, unresolved_with = _scan_event_class_literals(source_with_as, "synthetic_with_as.py")
+    literals_with, unresolved_with = _scan_field_literals(source_with_as, "synthetic_with_as.py", "event_class")
     assert not literals_with, f"a with-as-rebound event_class must never be collected as a literal: {literals_with!r}"
     assert unresolved_with == ["synthetic_with_as.py:4"], (
         f"a with-as-rebound event_class=event_class must be flagged unresolved, not silently accepted as the function's own parameter forward: {unresolved_with!r}"
     )
 
-    # (iv) WP-B1 acceptance-audit round 2 (M8): `except ... as
-    # event_class:` -- `ExceptHandler.name` is a plain STRING attribute,
-    # not a `Name` node, so `ctx`-based `Name` matching alone cannot see
-    # it; the prior enumeration never checked `ExceptHandler.name` either.
-    # `k` likewise declares `event_class` as its own keyword-only
-    # parameter, then an `except ... as event_class:` clause rebinds it
-    # to the caught exception object -- the same "parameter exists, but
-    # was locally rebound" shape as above, this time via a plain string
-    # attribute (`ExceptHandler.name`) rather than a `Name` node.
+    # (iv) `except ... as event_class:` -- `ExceptHandler.name` is a plain
+    # STRING attribute, not a `Name` node, and (like with-as) is not a
+    # (b'')-qualifying binding form either.
     source_except_as = (
         "def k(sink, *, event_class):\n"
         "    try:\n"
@@ -1441,72 +1637,363 @@ def test_event_class_forward_exclusion_requires_genuine_parameter_binding():
         "    except Exception as event_class:\n"
         "        sink.append(event_class=event_class)\n"
     )
-    literals_except, unresolved_except = _scan_event_class_literals(source_except_as, "synthetic_except_as.py")
+    literals_except, unresolved_except = _scan_field_literals(source_except_as, "synthetic_except_as.py", "event_class")
     assert not literals_except, f"an except-as-rebound event_class must never be collected as a literal: {literals_except!r}"
     assert unresolved_except == ["synthetic_except_as.py:5"], (
         f"an except-as-rebound event_class=event_class must be flagged unresolved, not silently accepted as the function's own parameter forward: {unresolved_except!r}"
     )
 
 
-# P4-D16 v3(e)'s own N: the explicit, non-durable exclusion set. Each
-# element is real (found by (b)'s own unfiltered walk) but reaches ONLY
-# the legacy in-memory `AuditSink` (`DataService._audit`), never the
-# durable `application_audit`/`control_audit` tables `audit_query` reads
-# -- adding these to `DECLARED_AUDIT_EVENT_CLASSES` would make
-# `audit_query`'s own declaration lie about a vocabulary it can never
-# actually return (禁止事項 9b). `D ∩ N == ∅` is fixed by the test below,
-# not merely asserted here.
-_NON_DURABLE_EVENT_CLASSES: frozenset[str] = frozenset({
-    # `_event` (service.py:819, `event_class="authentication"`) --
-    # `authenticate()`'s own success event. `_event`'s own dispatch body
-    # (service.py, the `if event_class != "data_operation": return` guard
-    # right before the buffer-class enqueue) keeps this literal in the
-    # legacy in-memory `self._audit` sink only; it never reaches the
-    # buffer or the denial-coalescer. `audit_query.py`'s own
-    # `DECLARED_AUDIT_EVENT_CLASSES` docstring documents this same
-    # exclusion.
-    "authentication",
-    # `_control_event` (service.py:1356) writes ONLY to the legacy
-    # in-memory `self._service._audit` sink -- never to the durable
-    # `control_audit` table (that table is written exclusively by
-    # `ops.py`'s own `_write_control_audit`, a structurally separate call
-    # path). `control_failure` is one of `_control_event`'s two
-    # non-durable-only literals (every `except FoundationError` deny
-    # branch across register/enable/disable-application,
-    # set_credential_state, issue_credential, delete_audit, and
-    # set_authorization_state_available).
-    "control_failure",
-    # Same call path/rationale as `control_failure` above --
-    # `_control_event`'s own `set_authorization_state_available` SUCCESS
-    # literal (the one `_control_event` call site whose `outcome` is
-    # `"allow"` rather than `"deny"`).
-    "control_state",
-})
+def test_field_forward_exclusion_rejects_a_second_binding_form_even_with_a_qualifying_assign():
+    """(b'') acceptance-audit-round-2-style boundary case, new for Phase 5:
+    a qualifying single-`Assign`-of-`Constant` local, ALSO reassigned by a
+    non-qualifying second binding (a `for` target reusing the same name) in
+    the SAME scope, must forfeit the (b'') exemption entirely -- design's
+    own "同スコープに他の束縛形が1つでもあれば違反のまま" requirement.
+    Mirrors mutation 4 (同名変数へ Call 束縛) but with a `for`-target rebind
+    instead, proving the "any other form" wording, not merely "any other
+    Call", is enforced."""
+    source = (
+        "def f(sink, items):\n"
+        "    operation = \"__WPB2_SYNTHETIC_QUALIFYING__\"\n"
+        "    for operation in items:\n"
+        "        pass\n"
+        "    sink.append(operation=operation)\n"
+    )
+    literals, unresolved = _scan_field_literals(source, "synthetic_second_binding.py", "operation")
+    assert not literals, f"a variable with a second, non-qualifying binding form must never be treated as (b'')-eligible: {literals!r}"
+    assert unresolved == ["synthetic_second_binding.py:5"], (
+        f"a variable rebound by a for-target after a qualifying assign must be flagged unresolved, not silently accepted: {unresolved!r}"
+    )
+
+
+def test_field_keyword_position_never_accepts_attribute_or_subscript_read_passthrough():
+    """(b'''), new for Phase 5: `.field`/`["field"]` read-path passthrough
+    is legal at a dict-literal/subscript-assignment/attribute-assignment
+    value position but NEVER at a `field=` keyword-argument-value
+    position -- the hole the generalization itself opens (a request body
+    key literally named `"operation"`, closed structurally rather than by
+    convention)."""
+    source_attribute = (
+        "def f(sink, event):\n"
+        "    sink.append(operation=event.operation)\n"
+    )
+    literals, unresolved = _scan_field_literals(source_attribute, "synthetic_kw_attr.py", "operation")
+    assert not literals
+    assert unresolved == ["synthetic_kw_attr.py:2"], (
+        f"an Attribute read-passthrough at a keyword-value position must be rejected, not silently accepted: {unresolved!r}"
+    )
+
+    source_subscript = (
+        "def g(sink, row):\n"
+        "    sink.append(operation=row[\"operation\"])\n"
+    )
+    literals2, unresolved2 = _scan_field_literals(source_subscript, "synthetic_kw_sub.py", "operation")
+    assert not literals2
+    assert unresolved2 == ["synthetic_kw_sub.py:2"], (
+        f"a Subscript read-passthrough at a keyword-value position must be rejected, not silently accepted: {unresolved2!r}"
+    )
+
+    # Sanity/contrast (常設規律1, 空振り禁止): the SAME passthrough shapes
+    # ARE allowed at a dict-literal value position -- proves the rejection
+    # above is positional, not a blanket ban on Attribute/Subscript.
+    source_dict_ok = (
+        "def h(sink, event, row):\n"
+        "    return {\"operation\": event.operation, \"other\": row[\"operation\"]}\n"
+    )
+    _kw, dict_sites, _assign = _scan_source_field_sites(source_dict_ok, "synthetic_dict_ok.py", "operation")
+    assert dict_sites, "the dict-literal site itself must be observed by the scanner for this contrast to mean anything"
+    assert all(ok for _lineno, _kind, _value, ok in dict_sites), (
+        f"Attribute/Subscript read-path passthrough must remain legal at a dict-literal value position: {dict_sites!r}"
+    )
+
+
+# P4-D16 v3(e)'s own N for `event_class`, UNCHANGED by this WP (content
+# and rationale identical to the pre-Phase-5 file -- kept here, next to its
+# `operation`/`target_kind` siblings below, purely for locality).
+_NON_DURABLE_EVENT_CLASSES: frozenset[str] = frozenset(
+    {
+        # `_event` (service.py, `event_class="authentication"`) --
+        # `authenticate()`'s own success event. `_event`'s own dispatch
+        # body (the `if event_class != "data_operation": return` guard
+        # right before the buffer-class enqueue) keeps this literal in the
+        # legacy in-memory `self._audit` sink only; it never reaches the
+        # buffer or the denial-coalescer.
+        "authentication",
+        # `_control_event` (service.py) writes ONLY to the legacy
+        # in-memory `self._service._audit` sink -- never to the durable
+        # `control_audit` table (that table is written exclusively by
+        # `ops.py`'s own `_write_control_audit`, a structurally separate
+        # call path). `control_failure` is one of `_control_event`'s two
+        # non-durable-only literals (every `except FoundationError` deny
+        # branch across register/enable/disable-application,
+        # set_credential_state, issue_credential, delete_audit, and
+        # set_authorization_state_available).
+        "control_failure",
+        # Same call path/rationale as `control_failure` above --
+        # `_control_event`'s own `set_authorization_state_available`
+        # SUCCESS literal (the one `_control_event` call site whose
+        # `outcome` is `"allow"` rather than `"deny"`).
+        "control_state",
+    }
+)
+
+# P4-D16 v3(e)'s own N, generalized: the explicit, non-durable exclusion
+# set per field. Each element is real (found by the scanner's own
+# unfiltered walk) but reaches ONLY the legacy in-memory `AuditSink`
+# (`ControlAuthority._control_event`'s own docstring: "ControlAuthority's
+# own audit trail stays on the existing in-memory AuditSink ... not on the
+# new control_audit table" -- `service.py`), never the durable `application_
+# audit`/`control_audit` tables `audit_query` reads.
+# `test_operation_and_target_kind_non_durable_exclusions_never_reach_the_
+# durable_tables` below is the REQUIRED runtime proof (design §3 D-1: "N
+# は実行時テストで確定する" -- a structural/docstring argument alone is a
+# starting point, never proof by itself).
+#
+# Design's own worked example of why EVERY one of the 8 original
+# candidate words (§1.4 の 8) needed individual, not blanket, treatment:
+# `enable_application`/`disable_application`/`issue_credential`/`register_
+# application` ALL also appear on `ControlPlaneService`'s OWN durable
+# `_write_state_audit`/`_deny` call sites (a structurally SEPARATE class
+# from `ControlAuthority`, backed by a real `ControlAuditSink`/
+# `PostgresControlAuditSink`) -- so all four are D, not N, even though
+# `ControlAuthority` ALSO happens to emit the identical literal string on
+# its own non-durable path. `authenticate` needed the SAME per-site care in
+# the OTHER direction, and static reasoning alone got it wrong on the first
+# pass: its SUCCESS site (`DataService._event(operation="authenticate",
+# event_class="authentication")`) is genuinely non-durable-only, but its
+# FAILURE site (`authenticate`'s own `except FoundationError`, `_denial_
+# event(event_class="authentication_denial", operation="authenticate",
+# ...)`) durably routes through the coalescing denial router whenever
+# `exc.code` is one of `_DURABLE_DENIAL_CODES` (`AUTH_INVALID` among them,
+# the ordinary "bad secret" case) -- an ACTUALLY-OBSERVED durable row is
+# what caught this (`conformance-tests/test_c09_audit_evidence.py`'s own
+# declaration-agreement vector, run against this WP's first draft
+# declaration), not a re-reading of the docstring. `authenticate` is
+# therefore D, not N (`DECLARED_AUDIT_OPERATIONS`'s own comment carries the
+# same correction). Only a word with NO durable emit site anywhere in the
+# package may be N.
+_NON_DURABLE_OPERATIONS: frozenset[str] = frozenset(
+    {
+        # `ControlAuthority.delete_audit` -> `_control_event(operation=
+        # "delete_audit", ...)` -- the in-memory `AuditSink`'s own
+        # append-only enforcement failure path; no `ControlPlaneService`
+        # method (the durable class) ever names this operation.
+        "delete_audit",
+        # `ControlAuthority.set_authorization_state_available` ->
+        # `_control_event(operation="set_authorization_state_available",
+        # ...)` -- this literal never appears in control_plane.py at all.
+        "set_authorization_state_available",
+        # `ControlAuthority.set_credential_state` -> `_control_event(
+        # operation="set_credential_state", ...)` -- `ControlPlaneService.
+        # _set_credential_state` (the durable class's OWN, differently-
+        # named method) forwards its caller's `operation` parameter
+        # verbatim (always "enable_credential"/"disable_credential"/etc.)
+        # and never itself passes the literal "set_credential_state".
+        "set_credential_state",
+        # `ControlPlaneService.capabilities()`'s own 2 emit sites
+        # (`_authorize_role(context, operation="control_capabilities",
+        # ...)` / `_gate_must_rotate(context, operation=
+        # "control_capabilities", ...)`) -- a DIFFERENT shape of non-
+        # durability from the 3 words above (fix-round M-1, Opus review):
+        # there is no reachable `_deny` call for this operation AT ALL, on
+        # any role or must_rotate state, so this word has no failure mode
+        # to durably record in the first place -- not merely "the only
+        # emit path is the legacy sink". `_AUDIT_ROLE_ALLOWED_OPERATIONS`
+        # permanently includes it (closing `_authorize_role`'s own deny
+        # condition), and `_gate_must_rotate` opens with an unconditional
+        # `if operation == "control_capabilities": return`. Structural,
+        # not exercised for observed-absence purposes by `test_operation_
+        # and_target_kind_non_durable_exclusions_never_reach_the_durable_
+        # tables` above (there is nothing to durably fail INTO) -- fixed
+        # instead by `test_control_capabilities_operation_has_no_
+        # reachable_deny_branch` below, which pins both structural facts
+        # directly and behaviorally proves the must_rotate early return
+        # (a must_rotate=True credential can still call `capabilities()`
+        # successfully).
+        "control_capabilities",
+    }
+)
+_NON_DURABLE_TARGET_KINDS: frozenset[str] = frozenset(
+    {
+        # `ControlAuthority._control_event`'s own hardcoded target_kind --
+        # every `ControlAuthority` call site funnels through this one
+        # non-durable emit function; no durable emit site anywhere in the
+        # package ever passes this literal.
+        "application_or_credential",
+    }
+)
+
+
+def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
+    """Fix-round M-1 (Opus review): `operation="control_capabilities"` is in
+    `_NON_DURABLE_OPERATIONS` for a DIFFERENT reason than its 3 siblings --
+    not "reaches only the legacy sink", but "reaches no `_deny` call at
+    all". Pins BOTH structural facts directly, plus a behavioral proof:
+
+    (a) `_authorize_role`'s own deny condition (`control_plane.py`) is
+    `context.role == "audit" and operation not in _AUDIT_ROLE_ALLOWED_
+    OPERATIONS` -- `"control_capabilities"` is a PERMANENT member of that
+    allow-list, so the condition can never be true for it, regardless of
+    role.
+    (b) `_gate_must_rotate`'s own body (`control_plane.py`) opens with `if
+    operation == "control_capabilities": return` -- an unconditional early
+    return before its own `_deny` call is ever reached. Proven both
+    structurally (the source literally starts this way, verified by (a)'s
+    sibling fact holding) and BEHAVIORALLY here: a credential with `must_
+    rotate=True` (freshly `add()`-ed, never `rotate()`-d -- `Control
+    CredentialRecord`'s own `must_rotate: bool = True` default) must still
+    be able to call `capabilities()` successfully -- if `_gate_must_rotate`
+    ever reached its own `_deny` for this operation, this call would raise
+    `FORBIDDEN` instead.
+    """
+    assert "control_capabilities" in _AUDIT_ROLE_ALLOWED_OPERATIONS
+
+    control_credentials = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    authority = ControlAuthority(DataService(CredentialStore(pepper=APP_PEPPER)))
+    backend = InMemoryControlBackend(authority, control_credentials)
+    service = ControlPlaneService(backend, audit=ControlAuditSink(), limits=_GENEROUS_LIMITS)
+    credential_id = "ctl_" + secrets.token_hex(8)
+    secret = "m1-must-rotate-" + secrets.token_urlsafe(8)
+    with control_credentials.unit_of_work() as work:
+        control_credentials.add(credential_id, secret, work=work)  # must_rotate=True by construction; deliberately never rotated
+    document = service.capabilities(secret)  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
+    assert document["contract_version"] == "1.5.0"
+    assert document["capabilities"]["audit_query"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durable_tables(kind, platform):
+    """N の実行時実測 (design §3 D-1). Exercises the REAL, non-durable call
+    path for every `_NON_DURABLE_OPERATIONS`/`_NON_DURABLE_TARGET_KINDS`
+    word directly (a fresh `ControlAuthority(h.data_service)` -- never
+    mocked), then queries the SAME durable `audit_query` surface every
+    other test in this file uses, and asserts none of these words is EVER
+    observable there. A sanity/contrast assertion (常設規律1, 空振り禁止)
+    proves the harness itself CAN observe a durable row at all --
+    `register_application`/`enable_application`/`issue_credential` (through
+    `h.service`, the REAL, durable `ControlPlaneService`) AND a FAILED
+    `DataService.authenticate` call (`authenticate` is D, not N -- its own
+    denial path is what this same runtime discipline caught during WP-2,
+    see `_NON_DURABLE_OPERATIONS`'s own comment). For `kind="postgres"`,
+    `h.service` is architecturally a SEPARATE backend from `h.data_service`,
+    so the D-word contrast is deliberately driven through `h.service`'s own
+    public methods, never through `ControlAuthority`, which for
+    `kind="postgres"` would touch an unrelated, throwaway `DataService`
+    whose `cell_factory` intentionally raises if invoked. Deliberately does
+    NOT exercise `"control_capabilities"` (also in `_NON_DURABLE_
+    OPERATIONS` as of fix-round M-1) -- that word has no reachable `_deny`
+    call to exercise in the first place (structural, not "reaches a
+    non-durable sink"); see `test_control_capabilities_operation_has_no_
+    reachable_deny_branch` for its own dedicated structural + behavioral
+    proof instead.
+    """
+    h = _build_harness(kind, platform)
+    try:
+        # ---- D-word sanity/contrast: genuinely DURABLE control-plane
+        # writes, through the REAL `ControlPlaneService` this harness's own
+        # `audit_query` reads from. ----
+        durable_app_id = "n_word_durable_app_" + secrets.token_hex(4)
+        h.service.register_application(h.control_credential_secret, durable_app_id)
+        h.service.set_application_enabled(h.control_credential_secret, durable_app_id, True)
+        h.service.issue_credential(h.control_credential_secret, durable_app_id, "runtime")
+
+        # ---- N-word exercise: the REAL, non-durable `ControlAuthority`
+        # call path, driven directly against this harness's own `data_
+        # service` (`service.py`'s own docstring: this class's audit trail
+        # never lands in control_audit/application_audit, regardless of
+        # which concrete `DataService` instance backs it). Deliberately
+        # avoids `ControlAuthority.register_application`/`set_application_
+        # enabled` (which touch `DataService._cells` via `cell_factory` --
+        # for `kind="postgres"`, `h.data_service`'s own `cell_factory` is
+        # built to raise if ever invoked, since that harness's `data_
+        # service` exists only to hold a real `_durable_audit`/
+        # `_credentials`, not a usable cell catalog) -- none of the four
+        # N-words need `_cells` to exercise their real non-durable path.
+        authority = ControlAuthority(h.data_service)
+        legacy_app_id = "n_word_legacy_app_" + secrets.token_hex(4)
+
+        authority.set_authorization_state_available(True)  # -> N-word "set_authorization_state_available"
+
+        try:
+            authority.delete_audit()  # -> N-word "delete_audit" (append-only sink refuses; PermissionError)
+        except PermissionError:
+            pass
+
+        credential_id = "crd_" + secrets.token_hex(8)
+        credential_secret = "n-word-cred-" + secrets.token_urlsafe(8)
+        with h.credentials.unit_of_work() as work:
+            h.credentials.add(credential_id, legacy_app_id, "runtime", credential_secret, work=work)
+        authority.set_credential_state(credential_id, enabled=False)  # -> N-word "set_credential_state"
+
+        # `authenticate` D-word contrast: its SUCCESS path (`DataService.
+        # authenticate`, `event_class="authentication"`) is non-durable, but
+        # its FAILURE path durably records `operation="authenticate"` under
+        # `event_class="authentication_denial"` whenever the failure code is
+        # in `_DURABLE_DENIAL_CODES` -- `AUTH_INVALID` (a bad secret) is one.
+        # Never through `ControlAuthority` -- `authenticate` is a `DataService`
+        # method, always.
+        context, secret = _seed_application_credential(h.credentials, legacy_app_id, "runtime")
+        h.data_service.authenticate(secret)  # success -- legacy in-memory sink only
+        with pytest.raises(FoundationError):
+            h.data_service.authenticate("wrong-" + secret)  # -> D-word "authenticate" via authentication_denial (durable)
+
+        h.data_service.flush_audit_buffer()
+        _wait_for_visibility(h)
+
+        # ---- Read back through the DURABLE surface every other test in
+        # this file uses -- large limit, no event_classes filter, so every
+        # durable row this exercise could possibly have produced is
+        # included. ----
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 200})
+        events = result["events"]
+        assert events, "the harness itself must have produced at least one durable row for this test to observe anything (常設規律1)"
+
+        observed_operations = {event["operation"] for event in events}
+        observed_target_kinds = {event["target_kind"] for event in events}
+
+        # Sanity/contrast: the exercise above DOES reach the durable
+        # tables for genuinely durable operations -- proves the read side
+        # of this test is not itself vacuous. Includes `authenticate`
+        # itself, specifically: it is D, not N, and this same failed-
+        # authenticate exercise is what the runtime discipline uses to
+        # prove that (design §3 D-1's own "N は実行時テストで確定する").
+        assert observed_operations & {"register_application", "enable_application", "issue_credential"}, (
+            f"the harness must observe at least one genuinely durable D-word from this same exercise: {observed_operations!r}"
+        )
+        assert "authenticate" in observed_operations, (
+            f"a failed DataService.authenticate() must durably record operation='authenticate' via the "
+            f"authentication_denial path -- if not, `authenticate`'s own D classification is unproven: {observed_operations!r}"
+        )
+
+        leaked_operations = observed_operations & _NON_DURABLE_OPERATIONS
+        assert not leaked_operations, (
+            f"MUTATION SHOULD HAVE BEEN CAUGHT (or N is wrong): non-durable-exclusion operation word(s) actually reached "
+            f"the durable audit_query surface: {leaked_operations!r}"
+        )
+        leaked_target_kinds = observed_target_kinds & _NON_DURABLE_TARGET_KINDS
+        assert not leaked_target_kinds, (
+            f"MUTATION SHOULD HAVE BEEN CAUGHT (or N is wrong): non-durable-exclusion target_kind word(s) actually reached "
+            f"the durable audit_query surface: {leaked_target_kinds!r}"
+        )
+    finally:
+        h.cleanup()
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
 def test_declared_event_classes_cover_every_emittable_class(kind, platform):
-    """§9.2 property 5 / P4-D16 v3(e). With (b) closing the callee-name
-    blind spot, (c) closing positional passing, and (d) closing dict
-    smuggling, every real `event_class` literal anywhere under `src/
-    r2db_api/` is reachable by (b)'s own unfiltered walk. This test
-    computes that full literal union U and fixes `U == D | N` AND
-    `D & N == set()`, where D is `DECLARED_AUDIT_EVENT_CLASSES`
-    (unchanged by this WP) and N is the explicit non-durable exclusion
-    set above. A future new literal now forces a choice: declare it, or
-    name it in N with a reason -- there is no silent third path.
-    """
+    """§9.2 property 5 / P4-D16 v3(e), unchanged in substance -- now calls
+    the generalized `_field_literal_union` instead of an inline
+    keyword-sites-only loop (the two are equivalent for `event_class`,
+    which has no `name_assign`-position IfExp/Constant sites in this
+    package)."""
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
         declared = set(document["capabilities"]["audit_query"]["event_classes"])
         assert declared == DECLARED_AUDIT_EVENT_CLASSES
 
-        paths = _iter_src_files()
-        emitted: set[str] = set()
-        for _filename, _lineno, value, _is_forward in _event_class_keyword_call_sites(paths):
-            if isinstance(value, _ast.Constant) and isinstance(value.value, str):
-                emitted.add(value.value)
+        emitted = _field_literal_union(_iter_src_files(), "event_class")
         assert emitted, "the AST scanner found zero event_class literals -- it is itself broken"
 
         d = DECLARED_AUDIT_EVENT_CLASSES
@@ -1521,29 +2008,66 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
         h.cleanup()
 
 
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_declared_operations_cover_every_emittable_operation(kind, platform):
+    """P4-D16 v3(e) for `operation` (design D-1). Same `U == D | N`, `D & N
+    == set()` equality as `event_class` above, now load-bearing (this WP
+    flips `contract_version` to 1.5.0 in the same commit)."""
+    h = _build_harness(kind, platform)
+    try:
+        document = h.service.capabilities(h.control_credential_secret)
+        declared = set(document["capabilities"]["audit_query"]["operations"])
+        assert declared == DECLARED_AUDIT_OPERATIONS
+
+        emitted = _field_literal_union(_iter_src_files(), "operation")
+        assert emitted, "the AST scanner found zero operation literals -- it is itself broken"
+
+        d = DECLARED_AUDIT_OPERATIONS
+        n = _NON_DURABLE_OPERATIONS
+        assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
+        assert emitted == d | n, (
+            f"emittable-vs-(declared|N) mismatch: "
+            f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
+            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        )
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_declared_target_kinds_cover_every_emittable_target_kind(kind, platform):
+    """P4-D16 v3(e) for `target_kind` (design D-1)."""
+    h = _build_harness(kind, platform)
+    try:
+        document = h.service.capabilities(h.control_credential_secret)
+        declared = set(document["capabilities"]["audit_query"]["target_kinds"])
+        assert declared == DECLARED_AUDIT_TARGET_KINDS
+
+        emitted = _field_literal_union(_iter_src_files(), "target_kind")
+        assert emitted, "the AST scanner found zero target_kind literals -- it is itself broken"
+
+        d = DECLARED_AUDIT_TARGET_KINDS
+        n = _NON_DURABLE_TARGET_KINDS
+        assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
+        assert emitted == d | n, (
+            f"emittable-vs-(declared|N) mismatch: "
+            f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
+            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        )
+    finally:
+        h.cleanup()
+
+
 # ===========================================================================
-# Phase 4 ledger closure WP-B3 addendum (監督裁定、WP-B1 監査 M5b 由来,
-# design §11.1 未起票 -- 作業指示書 WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md
-# §4 WP-B3 追加項目 (e) が正本): `test_declared_event_classes_cover_every_
-# emittable_class` above fixes `U == D ∪ N` -- it can never detect D
-# SHRINKING while a matching word simultaneously moves into N (a
-# "downgrade": declaring a word non-durable without that being a genuine,
-# reviewed decision), because that edit keeps `U == D ∪ N` satisfied. This
-# test pins `DECLARED_AUDIT_EVENT_CLASSES`'s own CONTENT directly, as a
-# frozenset literal, so any change to D -- shrink, grow, or downgrade --
-# must touch this test in the same commit as a deliberate, reviewed act.
+# Phase 4 ledger closure WP-B3 addendum, generalized for Phase 5: `U == D |
+# N` cannot detect D SHRINKING while a matching word simultaneously moves
+# into N. Pins each declared vocabulary's own CONTENT directly.
 # ===========================================================================
 
 
 def test_declared_audit_event_classes_change_only_deliberately() -> None:
-    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py:53`)
-    currently holds exactly these 11 words. Dropping a word out of D and
-    into N (WP-B1's (e), `test_declared_event_classes_cover_every_
-    emittable_class` above) is NOT detected by that test alone -- `U == D
-    ∪ N` stays satisfied either way, so a downgrade could land silently.
-    This test's only job is to force the declaration itself to be a
-    deliberate, single-commit edit: changing `DECLARED_AUDIT_EVENT_
-    CLASSES` without updating this literal here fails immediately."""
+    """Snapshot guard: `DECLARED_AUDIT_EVENT_CLASSES` (`audit_query.py`)
+    currently holds exactly these 11 words."""
     assert DECLARED_AUDIT_EVENT_CLASSES == frozenset(
         {
             "data_operation",
@@ -1561,46 +2085,105 @@ def test_declared_audit_event_classes_change_only_deliberately() -> None:
     )
 
 
+def test_declared_audit_operations_change_only_deliberately() -> None:
+    """Snapshot guard: `DECLARED_AUDIT_OPERATIONS` (`audit_query.py`)
+    currently holds exactly these 27 words -- the full emitted union U (31
+    words, `_field_literal_union`) minus N's 4 words (`_NON_DURABLE_
+    OPERATIONS`: `delete_audit`/`set_authorization_state_available`/
+    `set_credential_state`, all legacy-sink-only, plus `control_
+    capabilities`, structurally deny-unreachable -- fix-round M-1, Opus
+    review). `authenticate` is D, not N (its own denial path durably
+    routes); see `_NON_DURABLE_OPERATIONS`'s own comments for both
+    corrections' rationale."""
+    assert DECLARED_AUDIT_OPERATIONS == frozenset(
+        {
+            "audit_buffer",
+            "audit_query",
+            "authenticate",
+            "bootstrap_control_credential",
+            "catalog",
+            "control_authenticate",
+            "cross_entity_mutate",
+            "delete_credential",
+            "disable_application",
+            "disable_credential",
+            "enable_application",
+            "enable_control_credential",
+            "enable_credential",
+            "freeze_issuance",
+            "issue_audit_credential",
+            "issue_credential",
+            "list_applications",
+            "list_credentials",
+            "mutate",
+            "query",
+            "register_application",
+            "reset_control_credentials",
+            "revoke_credential",
+            "rotate_control_credential",
+            "rotate_credential",
+            "schema",
+            "unfreeze_issuance",
+        }
+    )
+
+
+def test_declared_audit_target_kinds_change_only_deliberately() -> None:
+    """Snapshot guard: `DECLARED_AUDIT_TARGET_KINDS` (`audit_query.py`)
+    currently holds exactly these 5 words."""
+    assert DECLARED_AUDIT_TARGET_KINDS == frozenset(
+        {
+            "application",
+            "audit_sink",
+            "control_credential",
+            "credential",
+            "entity",
+        }
+    )
+
+
+def test_audit_query_declares_operations_and_target_kinds_over_http(platform):
+    """完了条件9 (宣言キーの露出): the `operations`/`target_kinds` keys
+    reach a real HTTP client, not merely the in-process `capabilities()`
+    dict -- mirrors this file's own existing in-process/HTTP-parity
+    pattern for `event_classes`. Reuses `_postgres_harness`'s own already-
+    seeded `control_credential_secret` (that harness's own `PostgresControl
+    CredentialStore` seeding, mirrored here, is a separate object from
+    `assemble_control_stack`'s returned `stores` tuple -- `stores[0]` is a
+    `PostgresApplicationRegistry`, not a credential store)."""
+    h = _postgres_harness(platform)
+    try:
+        app = create_control_app(h.service)
+        with TestClient(app) as client:
+            response = client.get("/control/v1/capabilities", headers=_auth(h.control_credential_secret))
+            assert response.status_code == 200
+            document = response.json()
+            declared = document["capabilities"]["audit_query"]
+            assert set(declared["operations"]) == DECLARED_AUDIT_OPERATIONS
+            assert set(declared["target_kinds"]) == DECLARED_AUDIT_TARGET_KINDS
+    finally:
+        h.cleanup()
+
+
 def test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed():
-    """[MitateDB WP-3(b) 対称 evidence-hardening item 1] structural proof,
-    not merely an assertion, that `_iter_src_files()` + `_scan_event_class_
-    literals`'s plain-`Name`-call support together actually reach `ops.py`'s
-    `_write_control_audit(...)` call sites -- the OLD scan (hardcoded
-    `service.py`/`control_plane.py` file list) would never have found these
-    at all, regardless of the `Attribute`-vs-`Name` call-shape fix, simply
-    because `ops.py` itself was never read.
-    """
+    """[MitateDB WP-3(b) 対称 evidence-hardening item 1] structural proof
+    that `_iter_src_files()` + `_scan_field_literals` reach `ops.py`'s
+    `_write_control_audit(...)` call sites."""
     ops_py = _SRC_DIR / "ops.py"
     assert ops_py in _iter_src_files(), "ops.py must be part of the scanned file set for this proof to be meaningful"
-    literals, unresolved = _scan_event_class_literals(ops_py.read_text(), "ops.py")
+    literals, unresolved = _scan_field_literals(ops_py.read_text(), "ops.py", "event_class")
     assert not unresolved
-    # The three real literals `ops.py`'s own `_write_control_audit(...)`
-    # call sites carry (confirmed by direct source inspection during this
-    # hardening work) -- all three already happen to be members of
-    # `DECLARED_AUDIT_EVENT_CLASSES` today (why the old, narrower scan's
-    # blind spot was silent rather than red), which is exactly why the
-    # broader mutation test below is the one that actually proves the new
-    # coverage is load-bearing.
     assert literals == {"credential_lifecycle", "application_lifecycle", "control_credential_lifecycle"}
 
 
 def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the_declared_vocabulary_check_red(platform):
     """[MitateDB WP-3(b) 対称 evidence-hardening item 1] the actual mutation
-    proof: writes a throwaway copy of `ops.py` (never the real source file
-    -- this process never mutates its own checked-out tree) with ONE
-    `_write_control_audit(..., event_class="credential_lifecycle", ...)`
-    literal changed to a value that is NOT in `DECLARED_AUDIT_EVENT_
-    CLASSES`, then re-runs the exact same emittable-vs-declared comparison
-    `test_declared_event_classes_cover_every_emittable_class` performs, this
-    time against `_iter_src_files()` with the mutated copy substituted in
-    for the real `ops.py`. Before this file's own evidence-hardening item 1
-    (a hardcoded `service.py`/`control_plane.py` file list, `Attribute`-
-    call-only), this exact mutation would have stayed invisible to the old
-    scan -- `ops.py` was never read at all -- and this assertion would have
-    failed to fail. `platform` (module-scoped, real PostgreSQL) is needed
-    only for a real `DECLARED_AUDIT_EVENT_CLASSES` capabilities-document
-    round trip via the in-memory harness below, mirroring every other test
-    in this section.
+    proof: writes a throwaway copy of `ops.py`'s TEXT (never the real
+    source file) with ONE `_write_control_audit(...,
+    event_class="credential_lifecycle", ...)` literal changed to an
+    undeclared value, then re-runs the same emittable-vs-declared
+    comparison against `_iter_src_files()` with the mutated copy
+    substituted in for the real `ops.py`.
     """
     real_source = (_SRC_DIR / "ops.py").read_text()
     assert 'event_class="credential_lifecycle"' in real_source, (
@@ -1619,7 +2202,7 @@ def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the
         unresolved: list[str] = []
         for path in _iter_src_files():
             source = mutated_source if path.name == "ops.py" else path.read_text()
-            literals, file_unresolved = _scan_event_class_literals(source, path.name)
+            literals, file_unresolved = _scan_field_literals(source, path.name, "event_class")
             emitted |= literals
             unresolved += file_unresolved
         assert not unresolved
@@ -1635,6 +2218,93 @@ def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the
         )
     finally:
         h.cleanup()
+
+
+# ===========================================================================
+# Peer isomorphism (常設規律 6, WP-2 完了条件16): the scanner-support
+# helpers above are re-implemented (never shared/imported) in MitateDB-api's
+# own `tests/test_audit_query.py` (WP-3). Until WP-3 lands, there is
+# nothing on the MitateDB side to diff against -- this is registered here,
+# NOW, as an explicit `xfail(strict=True)` rather than silently deferred,
+# so a missed WP-3 follow-through fails LOUD (an accidental green here
+# would mean the isomorphism was never actually checked).
+# ===========================================================================
+
+
+@pytest.mark.xfail(strict=True, reason="WP-3 で追随 -- MitateDB-api 側に同名ヘルパがまだ存在しない (WP-2 時点)")
+def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
+    """常設規律6: diffs this peer's scanner-support helpers against
+    MitateDB-api's own same-named helpers, after normalizing peer name /
+    package name / path / whitespace -- proving the two independently
+    (never shared-module) implementations agree, without sharing code
+    between peers. WP-2 (r2db, this commit) defines the TARGET list and
+    the normalization function; WP-3 (MitateDB) is expected to add the
+    matching helpers on its own side and remove this `xfail`.
+
+    Fix-round M-2 (Opus review): the sibling module is read as TEXT from
+    its real file path (`importlib.import_module("mitatedb_api.tests.
+    test_audit_query")` always raised `ImportError` -- `mitatedb_api` has
+    no `tests` subpackage at all -- so the prior form of this xfail was
+    "always ImportError", never an actual "WP-3 not done yet" signal). A
+    missing file, or a present file lacking one of the target helper
+    names (or defining it with different content), each count as a
+    mismatch -- `xfail(strict=True)` only turns green once WP-3 has
+    actually added matching helpers, at which point the decorator itself
+    must be removed (an accidental green is a hard failure by
+    `strict=True`, not a silent pass). The resolved path is asserted to
+    point at the MitateDB-api sibling, never back at this file, so a
+    future edit cannot accidentally make this a self-comparison."""
+    import inspect
+    import re
+    import sys
+
+    target_helper_names = (
+        "_iter_src_files",
+        "_literal_leaves",
+        "_iter_name_or_attribute_targets",
+        "_is_field_assignment_target",
+        "_collect_direct_shadow_names",
+        "_analyze_field_scope",
+        "_FieldForwardResolver",
+        "_scan_source_field_sites",
+    )
+
+    def _normalize(source: str, *, peer_module: str, peer_package: str) -> str:
+        """Strips whitespace/blank-line differences and substitutes this
+        peer's own module/package name for a neutral placeholder, so the
+        comparison is blind to peer naming, never to actual logic."""
+        text = source.replace(peer_package, "<PEER_PACKAGE>").replace(peer_module, "<PEER_MODULE>")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        return text.strip()
+
+    this_module = sys.modules[__name__]
+
+    mitatedb_path = Path(__file__).resolve().parents[2] / "MitateDB-api" / "tests" / "test_audit_query.py"
+    assert "MitateDB-api" in mitatedb_path.parts, f"sibling path must resolve under MitateDB-api, not self: {mitatedb_path}"
+    assert "r2db-api" not in mitatedb_path.parts, f"sibling path must never resolve back into r2db-api: {mitatedb_path}"
+
+    mitatedb_source = mitatedb_path.read_text() if mitatedb_path.exists() else None
+    mitatedb_tree = _ast.parse(mitatedb_source, filename=str(mitatedb_path)) if mitatedb_source is not None else None
+    mitatedb_top_level = (
+        {node.name: node for node in mitatedb_tree.body if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))}
+        if mitatedb_tree is not None
+        else {}
+    )
+
+    mismatches: list[str] = []
+    for name in target_helper_names:
+        r2db_obj = getattr(this_module, name)
+        r2db_src = _normalize(inspect.getsource(r2db_obj), peer_module="test_audit_query", peer_package="r2db_api")
+        mitate_node = mitatedb_top_level.get(name)
+        if mitate_node is None:
+            mismatches.append(name)  # not yet ported -- WP-3 not done, a real signal (not an ImportError artifact)
+            continue
+        mitate_src_segment = _ast.get_source_segment(mitatedb_source, mitate_node)
+        mitate_src = _normalize(mitate_src_segment, peer_module="test_audit_query", peer_package="mitatedb_api")
+        if r2db_src != mitate_src:
+            mismatches.append(name)
+    assert not mismatches, f"peer-local helper(s) not isomorphic after normalization (or not yet ported by WP-3): {mismatches!r}"
 
 
 def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(platform):
@@ -1787,16 +2457,18 @@ def test_audit_requests_per_minute_is_declared_enforced_in_control_capabilities(
 
 
 # ===========================================================================
-# contract_version 1.4.0.
+# contract_version 1.5.0 (Phase 5 WP-2 flip -- design D-4/§8: lands in the
+# same commit as the `operations`/`target_kinds` declaration keys and the
+# generalized scanner above; both plane declarations move together).
 # ===========================================================================
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
-def test_control_capabilities_declares_contract_version_1_4_0(kind, platform):
+def test_control_capabilities_declares_contract_version_1_5_0(kind, platform):
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
-        assert document["contract_version"] == "1.4.0"
+        assert document["contract_version"] == "1.5.0"
     finally:
         h.cleanup()
 
@@ -1814,7 +2486,7 @@ def _seed_application_credential(credentials: CredentialStore, application_id: s
     return AuthContext(credential_id, application_id, role), secret
 
 
-def test_data_plane_capabilities_declares_contract_version_1_4_0_and_audit_query_unavailable():
+def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable():
     credentials = CredentialStore(pepper=APP_PEPPER)
     service = DataService(credentials)
     application_id = "dpver" + secrets.token_hex(4)
@@ -1824,7 +2496,7 @@ def test_data_plane_capabilities_declares_contract_version_1_4_0_and_audit_query
     authority.register_application(application_id)
     context, _secret = _seed_application_credential(credentials, application_id, "runtime")
     document = service.capabilities(context)
-    assert document["contract_version"] == "1.4.0"
+    assert document["contract_version"] == "1.5.0"
     assert document["capabilities"]["audit_query"] == {"status": "unavailable", "authority": "control_or_audit"}
 
 

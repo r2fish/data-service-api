@@ -571,8 +571,8 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # `http.py::post_audit_query`'s own second step exactly.
         self._call(lambda: self._service.deny_unsupported(
             context,
-            "audit_query",
-            "Audit evidence query requires separately authenticated control/audit authority "
+            operation="audit_query",
+            message="Audit evidence query requires separately authenticated control/audit authority "
             "that this foundation does not expose over the application-facing HTTP surface.",
         ))
         raise AssertionError("unreachable")  # deny_unsupported always raises

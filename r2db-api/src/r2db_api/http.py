@@ -386,8 +386,8 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     context = _authenticate(request, service)
     service.deny_unsupported(
         context,
-        "cross_entity_mutate",
-        "Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
+        operation="cross_entity_mutate",
+        message="Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
         request_id=_request_id(request),
     )
     raise AssertionError("unreachable")
@@ -411,8 +411,8 @@ async def post_audit_query(request: Request) -> Response:
     context = _authenticate(request, service)
     service.deny_unsupported(
         context,
-        "audit_query",
-        "Audit evidence query requires separately authenticated control/audit authority "
+        operation="audit_query",
+        message="Audit evidence query requires separately authenticated control/audit authority "
         "that this foundation does not expose over the application-facing HTTP surface.",
         request_id=_request_id(request),
     )

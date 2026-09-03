@@ -64,7 +64,15 @@ from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator, Proto
 import uuid
 
 from .audit import ControlAuditSink
-from .audit_query import DECLARED_AUDIT_EVENT_CLASSES, DECLARED_COALESCING_WINDOW_MS, AuditQueryReader, decode_cursor, encode_cursor
+from .audit_query import (
+    DECLARED_AUDIT_EVENT_CLASSES,
+    DECLARED_AUDIT_OPERATIONS,
+    DECLARED_AUDIT_TARGET_KINDS,
+    DECLARED_COALESCING_WINDOW_MS,
+    AuditQueryReader,
+    decode_cursor,
+    encode_cursor,
+)
 from .auth import AuthContext, ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork
 from .errors import FoundationError, fail
 from .limits import ControlPlaneLimits
@@ -621,6 +629,8 @@ class ControlPlaneService:
         audit_reader: AuditQueryReader | None = None,
         audit_visibility_lag_ms: int = 0,
         audit_event_classes: frozenset[str] = DECLARED_AUDIT_EVENT_CLASSES,
+        audit_operations: frozenset[str] = DECLARED_AUDIT_OPERATIONS,
+        audit_target_kinds: frozenset[str] = DECLARED_AUDIT_TARGET_KINDS,
         audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
         audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
         audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
@@ -646,6 +656,8 @@ class ControlPlaneService:
         self._audit_reader = audit_reader
         self._audit_visibility_lag_ms = audit_visibility_lag_ms
         self._audit_event_classes = frozenset(audit_event_classes)
+        self._audit_operations = frozenset(audit_operations)
+        self._audit_target_kinds = frozenset(audit_target_kinds)
         self._audit_default_limit = audit_default_limit
         self._audit_max_limit = audit_max_limit
         self._audit_coalescing_window_ms = audit_coalescing_window_ms
@@ -672,8 +684,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "control_capabilities", request_id=request_id)
-        self._gate_must_rotate(context, "control_capabilities", request_id=request_id)
+        self._authorize_role(context, operation="control_capabilities", request_id=request_id)
+        self._gate_must_rotate(context, operation="control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
         limit_enforcement = {name: "enforced" for name in limits}
         # Phase 3.5 WP-4 (§4 "L4", MitateDB-parity two-layer form, review
@@ -699,7 +711,7 @@ class ControlPlaneService:
             # `audit_query` itself is `enabled` on this deployment; the
             # 1.4.0 obligations that are conditional on `audit_query` being
             # provided stay conditional per version_binding's own text).
-            "contract_version": "1.4.0",
+            "contract_version": "1.5.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -727,6 +739,15 @@ class ControlPlaneService:
             "status": "enabled",
             "authority": "control_or_audit",
             "event_classes": sorted(self._audit_event_classes),
+            # Phase 5 WP-2 (design D-1, contract 1.5.0 subordinate ruling 10
+            # item 1, conditional on `audit_query` being provided): the
+            # `operation`/`target_kind` vocabulary this reader can ever
+            # surface -- same declare-the-hazard posture as `event_classes`
+            # above, not the `capability_status.defined.atomic_mutation.
+            # operations` execution vocabulary (contract's own disambiguation
+            # note).
+            "operations": sorted(self._audit_operations),
+            "target_kinds": sorted(self._audit_target_kinds),
             "default_limit": self._audit_default_limit,
             "max_limit": self._audit_max_limit,
             # D-6 point 3: a DERIVED value (composition root's own two
@@ -792,8 +813,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "register_application", request_id=request_id)
-        self._gate_must_rotate(context, "register_application", request_id=request_id)
+        self._authorize_role(context, operation="register_application", request_id=request_id)
+        self._gate_must_rotate(context, operation="register_application", request_id=request_id)
         self._validate_application_id(application_id)
         if self._backend.application_exists(application_id):
             fail("CONFLICT", "Application already exists.", status=409)
@@ -812,8 +833,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "list_applications", request_id=request_id)
-        self._gate_must_rotate(context, "list_applications", request_id=request_id)
+        self._authorize_role(context, operation="list_applications", request_id=request_id)
+        self._gate_must_rotate(context, operation="list_applications", request_id=request_id)
         return {"applications": [{"application_id": app_id, "enabled": enabled} for app_id, enabled in self._backend.list_applications()]}
 
     def set_application_enabled(self, secret: str | None, application_id: Any, enabled: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
@@ -836,8 +857,8 @@ class ControlPlaneService:
         if not isinstance(enabled, bool):
             fail("VALIDATION_FAILED", "enabled must be a boolean.")
         operation = "enable_application" if enabled else "disable_application"
-        self._authorize_role(context, operation, request_id=request_id, target_id=application_id if isinstance(application_id, str) else None)
-        self._gate_must_rotate(context, operation, request_id=request_id)
+        self._authorize_role(context, operation=operation, request_id=request_id, target_id=application_id if isinstance(application_id, str) else None)
+        self._gate_must_rotate(context, operation=operation, request_id=request_id)
         if not self._backend.application_exists(application_id):
             fail("NOT_FOUND", "Application was not found.", status=404)
 
@@ -853,8 +874,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "issue_credential", request_id=request_id)
-        self._gate_must_rotate(context, "issue_credential", request_id=request_id)
+        self._authorize_role(context, operation="issue_credential", request_id=request_id)
+        self._gate_must_rotate(context, operation="issue_credential", request_id=request_id)
         # (4) semantic/shape validation -- `role=control` is a *shape-valid*
         # enum member (contract `CredentialIssueRequest`), so it must pass
         # this check before the (5) capability refusal below can reject it
@@ -903,8 +924,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "list_credentials", request_id=request_id)
-        self._gate_must_rotate(context, "list_credentials", request_id=request_id)
+        self._authorize_role(context, operation="list_credentials", request_id=request_id)
+        self._gate_must_rotate(context, operation="list_credentials", request_id=request_id)
         rows: list[dict[str, Any]] = []
         for credential_id, application_id, role, enabled, revoked in self._backend.list_credentials():
             # Application-credential rows never carry `must_rotate` at all --
@@ -935,8 +956,8 @@ class ControlPlaneService:
             self._check_rate()
         context = self._authenticate(secret, request_id)
         self_rotate = isinstance(credential_id, str) and credential_id == context.credential_id
-        self._authorize_role(context, "rotate_credential", request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
-        self._gate_must_rotate(context, "rotate_credential", request_id=request_id, self_rotate=self_rotate)
+        self._authorize_role(context, operation="rotate_credential", request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
+        self._gate_must_rotate(context, operation="rotate_credential", request_id=request_id, self_rotate=self_rotate)
         kind, state = self._locate_credential(credential_id)
         if kind is None:
             fail("NOT_FOUND", "Credential was not found.", status=404)
@@ -981,8 +1002,8 @@ class ControlPlaneService:
         if not rate_precharged:
             self._check_rate()
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "revoke_credential", request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
-        self._gate_must_rotate(context, "revoke_credential", request_id=request_id)
+        self._authorize_role(context, operation="revoke_credential", request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
+        self._gate_must_rotate(context, operation="revoke_credential", request_id=request_id)
         # Review blocker B-1: shape validation of the request's own
         # `destructive`/`confirmation` fields (contract `CredentialRevoke
         # Request.destructive: {"type": "boolean"}` / `.confirmation:
@@ -1068,8 +1089,8 @@ class ControlPlaneService:
         if not isinstance(enabled, bool):
             fail("VALIDATION_FAILED", "enabled must be a boolean.")
         operation = "enable_credential" if enabled else "disable_credential"
-        self._authorize_role(context, operation, request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
-        self._gate_must_rotate(context, operation, request_id=request_id)
+        self._authorize_role(context, operation=operation, request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
+        self._gate_must_rotate(context, operation=operation, request_id=request_id)
         return self._set_credential_state(context, credential_id, enabled=enabled, operation=operation, request_id=request_id)
 
     def audit_query(self, secret: str | None, request: Any, *, request_id: str | None = None, rate_precharged: bool = False) -> dict[str, Any]:
@@ -1099,8 +1120,8 @@ class ControlPlaneService:
         if app_context is not None:
             self._deny_application_credential_on_audit_query(app_context, request_id=request_id)
         context = self._authenticate(secret, request_id)
-        self._authorize_role(context, "audit_query", request_id=request_id)
-        self._gate_must_rotate(context, "audit_query", request_id=request_id)
+        self._authorize_role(context, operation="audit_query", request_id=request_id)
+        self._gate_must_rotate(context, operation="audit_query", request_id=request_id)
         if self._audit_reader is None:
             self._deny_audit_capability_unsupported(context, request_id=request_id)
         if not isinstance(request, dict):
@@ -1332,7 +1353,7 @@ class ControlPlaneService:
                 )
             raise
 
-    def _authorize_role(self, context: ControlAuthContext, operation: str, *, request_id: str, target_id: str | None = None) -> None:
+    def _authorize_role(self, context: ControlAuthContext, *, operation: str, request_id: str, target_id: str | None = None) -> None:
         """Phase 3.5 WP-4 (design §1-D/§4, P35-D12): contract `control_plane.
         authority` -- an `audit`-role principal is accepted ONLY on the 3
         read-only control endpoints (`_AUDIT_ROLE_ALLOWED_OPERATIONS` above);
@@ -1360,7 +1381,7 @@ class ControlPlaneService:
                 target_id=target_id,
             )
 
-    def _gate_must_rotate(self, context: ControlAuthContext, operation: str, *, request_id: str, self_rotate: bool = False) -> None:
+    def _gate_must_rotate(self, context: ControlAuthContext, *, operation: str, request_id: str, self_rotate: bool = False) -> None:
         """R-5/§7: allow-list gate -- only `control_capabilities` and a
         self-targeted `rotate_credential` (`role="control"` only) pass while
         `must_rotate` is true; every other operation is `FORBIDDEN`.
