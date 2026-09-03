@@ -24,7 +24,6 @@ territory and are not exercised here.
 from __future__ import annotations
 
 import asyncio
-import ast
 import logging
 import os
 import secrets
@@ -834,53 +833,19 @@ def test_durable_denial_codes_match_the_design_d3_table() -> None:
 # ===========================================================================
 # Declared-vocabulary AST guard (§9.2 property 5)
 # ===========================================================================
-
-_SOURCE_FILES_WITH_EMIT_SITES = (
-    "cell.py", "auth.py", "credential_store_postgres.py", "audit_dispatch.py",
-)
-
-
-def _string_literal(node: ast.AST) -> "str | None":
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    return None
-
-
-def _emitted_event_class_literals(tree: ast.AST) -> set[str]:
-    """Walks every `Call` node in `tree` and collects the string literal
-    passed as `event_class`, whether positional-in-a-kwargs-only-call
-    (this codebase always uses keyword args for these calls, but a
-    positional form is scanned too for robustness), a `event_class=...`
-    keyword, or the identical shape reached via `.append(event_class=...)`
-    on any sink object. A literal that is not a plain string constant
-    (e.g. a variable) is ignored -- every real emit site in this codebase
-    passes a literal (the class's own source-reading discipline this test
-    itself enforces going forward)."""
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for kw in node.keywords:
-            if kw.arg == "event_class":
-                literal = _string_literal(kw.value)
-                if literal is not None:
-                    found.add(literal)
-    return found
-
-
-def test_declared_event_classes_cover_every_emittable_class() -> None:
-    """§9.2 property 5: the set of `event_class` string literals every
-    durable emit call site in this codebase constructs must be a SUBSET
-    of `DECLARED_AUDIT_EVENT_CLASSES` -- an AST walk (not a runtime probe)
-    so this holds regardless of which code paths a given test run happens
-    to exercise."""
-    src_dir = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
-    emitted: set[str] = set()
-    for name in _SOURCE_FILES_WITH_EMIT_SITES:
-        tree = ast.parse((src_dir / name).read_text())
-        emitted |= _emitted_event_class_literals(tree)
-    assert emitted, "expected to find at least one event_class= call site"
-    assert emitted <= DECLARED_AUDIT_EVENT_CLASSES, emitted - DECLARED_AUDIT_EVENT_CLASSES
+#
+# WP-B1 (P4-D16 v3): this file's own `test_declared_event_classes_cover_
+# every_emittable_class` (a hand-picked 4-file enumeration,
+# `_SOURCE_FILES_WITH_EMIT_SITES`, that never reached `http.py`'s real
+# `route_denial(..., event_class="authentication_denied", ...)` emit site)
+# has been REMOVED and consolidated into `test_audit_query.py`'s own
+# test of the same name -- that file's scan already walked the whole
+# package unfiltered by callee name; WP-B1 widened it to a RECURSIVE
+# `rglob` and added the (b)/(c)/(d) checks (literal discipline,
+# definition-side keyword-only guarantee, dict-smuggling ban) alongside
+# it. Two same-named tests with two different (one strong, one weak)
+# implementations is exactly the kind of drift L4-5 exists to close; see
+# `docs/work-orders/WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md` §1 P4-D16 v3.
 
 
 def test_durable_path_never_passes_through_the_six_field_rounding_sink() -> None:

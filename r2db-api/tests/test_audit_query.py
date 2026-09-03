@@ -806,201 +806,695 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
 
 
 # WP-2(b) review M-3 (major, supervisor ruling 2026-09-03): a regex over
-# `event_class="..."` misses every POSITIONAL call site -- `service.py`'s
-# own `_event`/`_control_event` calls pass `event_class` positionally
-# (`self._event(context, "authorization_denial", ...)`), never as a
-# keyword, so the old `re.findall(r'event_class="...")` scan silently saw
-# zero of them (confirmed by mutation: deleting `operation_denial` from
-# `DECLARED_AUDIT_EVENT_CLASSES` stayed green). This AST-based scanner
-# extracts the real literal from EVERY known emission call site, positional
-# or keyword, the same way `test_limit_class_vocabulary.py`'s own AST scan
-# fixes `limit_class` against real call sites rather than trusting a regex.
+# `event_class="..."` misses every POSITIONAL call site -- this AST-based
+# scanner extracts the real literal from every real emission call site,
+# the same way `test_limit_class_vocabulary.py`'s own AST scan fixes
+# `limit_class` against real call sites rather than trusting a regex.
 #
-# [MitateDB WP-3(b) 対称 evidence-hardening item 1] the scan used to walk
-# ONLY service.py/control_plane.py's own source text -- a hand-picked file
-# enumeration, not structural coverage. `ops.py`'s `_write_control_audit`
-# (a plain module-level function, called positionally-as-`Name`, e.g.
-# `_write_control_audit(work.connection, event_class="credential_lifecycle",
-# ...)`, never as `something.attr(...)`) is a REAL durable `control_audit`
-# emission site that lived entirely outside that two-file enumeration --
-# its own literals happen to already be a subset of `DECLARED_AUDIT_EVENT_
-# CLASSES` today, so the old scan's blind spot was silent (see this file's
-# own `test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed`
-# below, which mutates one of `ops.py`'s literals to prove the point). Both
-# `_scan_event_class_literals` (now also matching plain-`Name` calls, not
-# only `Attribute` calls) and `test_declared_event_classes_cover_every_
-# emittable_class` below now walk EVERY `*.py` file directly under `src/
-# r2db_api/` (`_iter_src_files()`) instead of a hardcoded two-file list, so
-# a future new file with its own emission call site can never silently
-# fall outside this guard's coverage again.
+# WP-B1 (P4-D16 v3, docs/work-orders/WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md
+# §1/§4): this whole block was rewritten from a CALLEE-NAME-KEYED scan
+# (`_EVENT_CLASS_CALL_SPECS`, a hand-maintained `{name: ("positional"|
+# "keyword", index)}` map a human had to keep in sync with every real
+# emission call site -- exactly the class of gap L4-5's diagnostic found)
+# to FOUR independent, callee-name-FILTER-FREE checks that together close
+# every literal-hiding path a human-maintained spec could silently miss:
+#
+#   (a) `_iter_src_files()` -- every `*.py` under `src/r2db_api/`, found by
+#       a RECURSIVE `rglob` (never a hardcoded file list, never a
+#       non-recursive top-level-only `glob`).
+#   (b) literal discipline (`test_every_event_class_keyword_argument_is_a_
+#       string_literal`) -- every `Call` ANYWHERE in the package that
+#       carries an `event_class=` keyword must pass a string `Constant`,
+#       or be the one recognized parameter-forward shape (`event_class=
+#       event_class`, an enclosing function forwarding its OWN parameter
+#       verbatim). No callee-name filter at all.
+#   (c) definition-side keyword-only guarantee (`test_every_definition_
+#       taking_event_class_declares_it_keyword_only`) -- every `def`/
+#       `async def` anywhere under `src/r2db_api/` whose formal parameters
+#       include `event_class` must declare it AFTER a bare `*` (keyword-
+#       only). This makes a POSITIONALLY-PASSED emit site syntactically
+#       impossible to write -- (b)'s literal scan can never be bypassed by
+#       positional passing, because nothing compiles that way any more.
+#   (d) dict-smuggling ban (`test_no_event_class_string_literal_is_
+#       smuggled_through_a_dict`) -- no `{"event_class": "<literal>"}`
+#       dict literal or `x["event_class"] = "<literal>"` subscript
+#       assignment anywhere in the package (a `**{"event_class": ...}`
+#       expansion would otherwise let a literal bypass (b)'s keyword-arg
+#       walk entirely). Values that are `Name`/`Attribute` (forwards) stay
+#       allowed, same rule as (b).
+#   (e) exact vocabulary-relation match
+#       (`test_declared_event_classes_cover_every_emittable_class`) --
+#       with (b) closing the callee-name blind spot, (c) closing
+#       positional passing, and (d) closing dict smuggling, EVERY real
+#       `event_class` literal in the package is now reachable by (b)'s own
+#       walk with nothing left unaccounted for. This test computes that
+#       full literal union U and requires `U == D | N` AND `D & N == set()`
+#       where D is the declared vocabulary (`DECLARED_AUDIT_EVENT_CLASSES`,
+#       unchanged by this WP) and N is an EXPLICIT, name-by-name,
+#       rationale-commented set of literals that are real but deliberately
+#       non-durable (never reach the table `audit_query` reads). A new
+#       literal appearing anywhere now forces a choice -- declare it (D)
+#       or name it with a reason (N) -- there is no silent third path.
+#
+# v2 of this WP ("three-way match": a name-derived "emit definition set"
+# cross-checked against call sites) was PROPOSED AND WITHDRAWN before
+# implementation -- round-1 independent review found it cannot go green
+# against the real codebase: (i) `append` (the durable sinks' own keyword-
+# only `event_class` parameter) would enter the definition set and flag
+# EVERY unrelated `list.append()` call in the package (36 in r2db, 46 in
+# MitateDB) as a violation; (ii) MitateDB's `control_audit` writes route
+# through forwarding wrappers (`append_audit(**fields)`) that never
+# themselves declare `event_class` as a parameter, so 13 real emit sites
+# would register as "unknown emit surfaces"; (iii) r2db's `_control_event`
+# carries two literals (`control_failure`/`control_state`) that are real
+# but reach ONLY the legacy in-memory sink, never the durable table -- v2
+# had no way to represent "real but intentionally undeclared" other than
+# adding them to `DECLARED_AUDIT_EVENT_CLASSES`, which would have made
+# `audit_query`'s own declaration lie about what it can return. (b)-(e)
+# above route around all three: no definition SET is ever cross-matched
+# against callee names at all (closing i/ii), and N gives (iii) a
+# principled, explicit home instead of the declared vocabulary.
 import ast as _ast  # noqa: E402 -- kept local to this test-support block, mirrors this file's own late-import style
 
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 
 
 def _iter_src_files() -> list[Path]:
-    """Every top-level `*.py` module in `src/r2db_api/` (never recursive --
-    the `contract/` subpackage is data/schema, not emission-call-bearing
-    code, and this scan's own job is `r2db_api/*.py`, not a package-wide
-    walk). Sorted for deterministic iteration order."""
-    return sorted(_SRC_DIR.glob("*.py"))
+    """Every `*.py` file anywhere under `src/r2db_api/`, found by a
+    RECURSIVE `rglob` -- P4-D16 v3(a): a hand-maintained file list, and a
+    non-recursive top-level-only `glob`, are both banned by design. A
+    future new subpackage's own emission call sites can never silently
+    fall outside this guard's coverage. Sorted for deterministic
+    iteration order. (`contract/`'s packaged JSON schema copy is not
+    `.py`, so it is never picked up regardless of recursion.)"""
+    return sorted(_SRC_DIR.rglob("*.py"))
 
 
-# (method/function name) -> ("positional", arg_index) | ("keyword", None) |
-# ("keyword_optional", None). Every real, DURABLE-ELIGIBLE `event_class`-
-# carrying call site anywhere under `src/r2db_api/*.py` is named here --
-# `test_every_known_emission_method_name_is_still_called` below is this
-# list's own vacuity guard (a renamed/removed method would otherwise
-# silently shrink coverage to zero for that site). `_control_event`
-# (service.py, `ControlAuthority`'s own PRE-PHASE-4 legacy trail) is
-# deliberately NOT here -- its `self._service._audit.append(...)` call
-# writes only to the non-durable legacy `AuditSink` (`DataService._audit`),
-# never to the durable `application_audit`/`control_audit` tables
-# `audit_query` reads, so its own literals (`"control_failure"`/
-# `"control_state"`, confirmed by direct AST probe during WP-2(b) review
-# M-3's fix) are correctly OUTSIDE the declared vocabulary's scope -- same
-# category as `_event`'s own excluded `"authentication"` literal, not an
-# omission.
-_EVENT_CLASS_CALL_SPECS: dict[str, tuple[str, int | None]] = {
-    "_event": ("positional", 1),  # service.py: def _event(self, context, event_class, ...)
-    "_denial_event": ("keyword", None),  # service.py: def _denial_event(self, *, event_class, ...)
-    "_write_state_audit": ("keyword", None),  # control_plane.py: def _write_state_audit(self, work, *, event_class, ...)
-    "_deny": ("keyword", None),  # control_plane.py: def _deny(self, *, ..., event_class, ...)
-    # ops.py: def _write_control_audit(conn, *, event_class, ...) -- a
-    # plain module-level function (called as `_write_control_audit(...)`,
-    # an `ast.Name`, never `something._write_control_audit(...)`, an
-    # `ast.Attribute`), the CLI's own direct `control_audit` INSERT for
-    # every `python -m r2db_api.ops <cmd>` state-changing command
-    # (issue/rotate/revoke-credential, register/enable/disable-application,
-    # issue/rotate/revoke-control-credential). This is the file-enumeration
-    # gap this test file's own evidence-hardening item 1 closes.
-    "_write_control_audit": ("keyword", None),
-    # WP-2(b) fix round 2 (audit finding §4-B): sink-DIRECT writes --
-    # `self._sink.append(event_class="security_control_failure", ...)`
-    # (service.py's overflow-alert path) bypass every method above
-    # entirely. "keyword_optional" (not "keyword"): `.append(...)` is also
-    # a completely ordinary list/dict method used all over this codebase
-    # with NO `event_class` keyword at all (`self._events.append(event)`,
-    # `rows.append({...})`, `self._rate_window.append(now)`, ...) -- those
-    # must be silently SKIPPED (not flagged as "unresolved"), never
-    # confused with a genuine, missed audit emission site.
-    "append": ("keyword_optional", None),
-}
+def _collect_direct_shadow_names(body: list) -> set[str]:
+    """WP-B1 acceptance-audit round 2 (M8): redesigned around a GENERAL
+    principle -- 'any name binding of "event_class" anywhere in a
+    function's OWN direct body (never descending into a nested `def`/
+    `async def`/`lambda`/`class` -- those are separate scopes) shadows
+    it' -- rather than an enumeration of individual statement shapes.
+    The PRIOR enumeration (`Assign`/`AugAssign`/`AnnAssign`/`For`/
+    `AsyncFor`/`NamedExpr`/`Global`/`Nonlocal`) missed `with ... as
+    event_class:`, `except ... as event_class:`, `match` capture
+    patterns, `import ... as event_class`, a nested `def event_class`/
+    `class event_class`, and `del event_class`. Implementation:
 
-# `_denial_event`'s OWN two call sites: one passes a literal
-# (`service.py`'s `authenticate` except-clause, already captured by this
-# scan), the other (`_event`'s own deny-branch) purely FORWARDS the
-# `event_class` parameter `_event` itself already received -- not a new
-# literal source, since every real caller of `_event` is itself scanned via
-# the `"_event"` entry above. Narrow, explicit, verified-by-hand allowlist
-# (mirrors `test_limit_class_vocabulary.py`'s own `_KNOWN_DYNAMIC_LIMIT_
-# CLASS_NAMES` idiom) -- never a blanket "skip anything unresolved" escape
-# hatch.
-_KNOWN_DYNAMIC_EVENT_CLASS_FORWARDS = {
-    ("service.py", "_denial_event", "event_class"),
-    # WP-2(b) fix round 2 (§4-B's own "append" addition surfaced these):
-    # every `.append(event_class=event_class, ...)` site in either file
-    # forwards an ALREADY-SCANNED enclosing function's own `event_class`
-    # parameter -- `_event`/`_write_state_audit`/`_deny` each forward their
-    # own parameter to their sink via this exact pattern (their literal
-    # callers are captured by those methods' own spec entries above), and
-    # `_control_event` (service.py) forwards its own parameter to the
-    # LEGACY, deliberately-excluded non-durable trail (same exclusion
-    # rationale as its own literals, `_EVENT_CLASS_CALL_SPECS`'s comment
-    # above) -- none of these four `.append(...)` call sites is a NEW
-    # literal source.
-    ("service.py", "append", "event_class"),
-    ("control_plane.py", "append", "event_class"),
-}
+    (i) every `Name(id="event_class")` node whose `ctx` is `Store` or
+        `Del` -- this ALONE covers `Assign`/`AugAssign`/`AnnAssign`
+        targets, `for`/`async for` targets, comprehension targets,
+        walrus (`:=`) targets, `with ... as` targets, and tuple/list/
+        starred destructuring of any of the above, and `del
+        event_class` -- none of these need a dedicated per-statement
+        visitor once `ctx`-based `Name` matching is the rule (a plain
+        default `generic_visit` traversal reaches every one of them).
+    (ii) `alias.asname == "event_class"` (`import ... as event_class` /
+         `from x import y as event_class`).
+    (iii) `ExceptHandler.name == "event_class"` (`except ... as
+          event_class:` -- a plain string attribute, not a `Name` node,
+          so `ctx`-based matching alone cannot see it).
+    (iv) `MatchAs.name` / `MatchStar.name` / `MatchMapping.rest` equal
+         to `"event_class"` (`match` statement capture patterns -- also
+         plain string attributes, not `Name` nodes).
+    (v) a NESTED `def`/`async def`/`class` (directly inside this
+        function's own body) whose OWN `.name` is `"event_class"` --
+        this binds a function/class object under that name in the
+        enclosing scope, same as any other local. (An inner lambda's or
+        nested function's OWN `event_class` PARAMETER needs no separate
+        handling here: `_EventClassForwardResolver`'s stack-based scope
+        resolution already resolves a `Name` reference inside that
+        inner scope against the INNERMOST frame first, correctly
+        blocking it from ever being attributed to an outer function's
+        parameter -- the "遮る" ("blocks") relationship is structural,
+        not something `_collect_direct_shadow_names` needs to encode.)
+    (vi) `Global`/`Nonlocal` names (unchanged).
+
+    Mirrors Python's own scoping rule: a name bound ANYWHERE in a
+    function's body (compile-time, not execution-order) is that
+    function's local for the WHOLE body, regardless of whether it is
+    ALSO a formal parameter of that same function."""
+    shadowed: set[str] = set()
+
+    class _ShadowScan(_ast.NodeVisitor):
+        def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
+            if node.name == "event_class":
+                shadowed.add(node.name)
+            # do not descend -- separate scope
+
+        def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
+            if node.name == "event_class":
+                shadowed.add(node.name)
+            # do not descend -- separate scope
+
+        def visit_Lambda(self, node: "_ast.Lambda") -> None:
+            pass  # separate scope; lambdas have no `.name` to bind -- do not descend
+
+        def visit_ClassDef(self, node: "_ast.ClassDef") -> None:
+            if node.name == "event_class":
+                shadowed.add(node.name)
+            # do not descend -- separate scope
+
+        def visit_Name(self, node: "_ast.Name") -> None:
+            if node.id == "event_class" and isinstance(node.ctx, (_ast.Store, _ast.Del)):
+                shadowed.add(node.id)
+
+        def visit_alias(self, node: "_ast.alias") -> None:
+            if node.asname == "event_class":
+                shadowed.add(node.asname)
+
+        def visit_ExceptHandler(self, node: "_ast.ExceptHandler") -> None:
+            if node.name == "event_class":
+                shadowed.add(node.name)
+            self.generic_visit(node)
+
+        def visit_MatchAs(self, node: "_ast.AST") -> None:
+            if getattr(node, "name", None) == "event_class":
+                shadowed.add("event_class")
+            self.generic_visit(node)
+
+        def visit_MatchStar(self, node: "_ast.AST") -> None:
+            if getattr(node, "name", None) == "event_class":
+                shadowed.add("event_class")
+            self.generic_visit(node)
+
+        def visit_MatchMapping(self, node: "_ast.AST") -> None:
+            if getattr(node, "rest", None) == "event_class":
+                shadowed.add("event_class")
+            self.generic_visit(node)
+
+        def visit_Global(self, node: "_ast.Global") -> None:
+            shadowed.update(node.names)
+
+        def visit_Nonlocal(self, node: "_ast.Nonlocal") -> None:
+            shadowed.update(node.names)
+
+    scanner = _ShadowScan()
+    for stmt in body:
+        scanner.visit(stmt)
+    return shadowed
+
+
+class _EventClassForwardResolver(_ast.NodeVisitor):
+    """WP-B1 review round 2 (M3/M6): a single, scope-tracking traversal
+    that determines, for EVERY `Name(id="event_class", ctx=Load())` node
+    in a tree, whether it is a genuine forward of an ENCLOSING function's
+    own `event_class` formal parameter -- walked innermost-to-outermost
+    over a stack of `(param_names, shadowed_names)` per enclosing
+    function/lambda. A name that is local-but-shadowed in the innermost
+    scope that claims it (a plain local variable, a `for` target, a
+    walrus target, or a `global`/`nonlocal` declaration -- see
+    `_collect_direct_shadow_names` above) STOPS resolution there and is
+    NEVER treated as a safe forward, even if that same function also
+    happens to declare `event_class` as a parameter, and even if an
+    OUTER function's own parameter of the same name exists. This closes
+    the gap the previous (unscoped) `Name(id="event_class")`-only check
+    had: a local variable coincidentally named `event_class` could
+    silently carry an undeclared literal straight past both the literal
+    -discipline check (b) and the dict-smuggling check (d)."""
+
+    def __init__(self) -> None:
+        self.safe_forward_ids: set[int] = set()
+        self._stack: list[tuple[set[str], set[str]]] = []
+
+    def _param_names(self, node: "_ast.AST") -> set[str]:
+        args = node.args
+        names = {a.arg for a in (args.posonlyargs + args.args + args.kwonlyargs)}
+        if args.vararg:
+            names.add(args.vararg.arg)
+        if args.kwarg:
+            names.add(args.kwarg.arg)
+        return names
+
+    def visit_FunctionDef(self, node: "_ast.FunctionDef") -> None:
+        self._stack.append((self._param_names(node), _collect_direct_shadow_names(node.body)))
+        self.generic_visit(node)
+        self._stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: "_ast.AsyncFunctionDef") -> None:
+        self._stack.append((self._param_names(node), _collect_direct_shadow_names(node.body)))
+        self.generic_visit(node)
+        self._stack.pop()
+
+    def visit_Lambda(self, node: "_ast.Lambda") -> None:
+        # No emit definition in this package is ever a lambda, but a
+        # correct frame is still pushed so a lambda parameter named
+        # `event_class` cannot be falsely resolved against an OUTER
+        # frame instead of its own.
+        self._stack.append((self._param_names(node), set()))
+        self.generic_visit(node)
+        self._stack.pop()
+
+    def visit_Name(self, node: "_ast.Name") -> None:
+        if node.id == "event_class" and isinstance(node.ctx, _ast.Load):
+            for param_names, shadowed_names in reversed(self._stack):
+                if "event_class" in shadowed_names:
+                    break  # locally rebound in this scope -- never a safe forward
+                if "event_class" in param_names:
+                    self.safe_forward_ids.add(id(node))
+                    break
+                # not local to this frame at all -- Python's own scoping
+                # would keep looking outward, so we do too.
+        self.generic_visit(node)
+
+
+def _iter_name_or_attribute_targets(target: "_ast.AST"):
+    """WP-B1 acceptance-audit finding M7: decomposes an assignment
+    TARGET (including tuple/list/starred unpacking, e.g. `a, event_class
+    = ...`) into every leaf `Name`/`Attribute` node it assigns to.
+    `Subscript` targets (`d["event_class"] = ...`) are NOT decomposed
+    here -- those are the existing, separately-handled dict-smuggling
+    scan's own job."""
+    if isinstance(target, (_ast.Name, _ast.Attribute)):
+        yield target
+    elif isinstance(target, (_ast.Tuple, _ast.List)):
+        for elt in target.elts:
+            yield from _iter_name_or_attribute_targets(elt)
+    elif isinstance(target, _ast.Starred):
+        yield from _iter_name_or_attribute_targets(target.value)
+
+
+def _is_event_class_assignment_target(leaf: "_ast.AST") -> bool:
+    if isinstance(leaf, _ast.Name):
+        return leaf.id == "event_class"
+    if isinstance(leaf, _ast.Attribute):
+        return leaf.attr == "event_class"
+    return False
+
+
+def _scan_source_event_class_sites(source: str, filename: str) -> tuple[
+    list[tuple[int, "_ast.AST", bool]], list[tuple[int, str, "_ast.AST", bool]], list[tuple[int, str, "_ast.AST", bool]]
+]:
+    """One parse, one `_EventClassForwardResolver` pass over `source`.
+    Returns `(keyword_sites, dict_sites, assignment_sites)`:
+    - `keyword_sites`: `(lineno, value_node, is_safe_forward)` for every
+      `Call` carrying an `event_class=` keyword (P4-D16 v3(b)'s input).
+    - `dict_sites`: `(lineno, kind, value_node, is_safe_forward)` for
+      every `Dict` literal keyed `"event_class"` (`kind="dict"`) and
+      every `x["event_class"] = ...` `Subscript` assignment
+      (`kind="subscript"`) (P4-D16 v3(d)'s input).
+    - `assignment_sites`: `(lineno, kind, value_node, is_safe_forward)`
+      for every `Assign`/`AnnAssign`/`AugAssign` anywhere in `source`
+      (EVERY scope -- module top-level, class body, function body alike;
+      this is a plain, unconditional `ast.walk`, never scope-restricted)
+      whose TARGET (decomposed through tuple/list/starred unpacking) is
+      `Name(id="event_class")` (`kind="name_assign"`, e.g. a MODULE- or
+      CLASS-level `event_class = "..."`) or `Attribute(attr=
+      "event_class")` (`kind="attribute_assign"`, e.g. `self.event_class
+      = "..."`). WP-B1 acceptance-audit finding M7: without this, `class
+      _Cfg: event_class = "zz"` followed by `event_class=_Cfg.event_class`
+      at a real emit call site passed (b)/(c)/(d)/(e) all green -- the
+      unconditional `Attribute(attr="event_class")` passthrough in
+      `is_forward` below (added for the READ-path case, see the third
+      bullet) legitimately accepted the READ `_Cfg.event_class`, but
+      nothing was checking what value the WRITE `event_class = "zz"`
+      that fed it had actually assigned. This closes that: the value
+      side of every such assignment, anywhere, is checked with the SAME
+      `is_forward` rule (b)/(d) already use.
+
+    `is_safe_forward` recognizes THREE shapes, none of which can ever
+    author a brand-new value -- each only re-exposes something already
+    unambiguously named/keyed `event_class` elsewhere:
+    - `Name(id="event_class")` bound to an ENCLOSING function's own
+      `event_class` PARAMETER (`_EventClassForwardResolver` above; WP-B1
+      review round 2 M3/M6 -- a local variable/global/for-target/walrus
+      of the identical name is explicitly NOT this and IS a violation).
+    - `Attribute(attr="event_class")` (e.g. `event.event_class`) --
+      reading an already-durable event/row OBJECT's own `event_class`
+      field back out for a READ-path response (r2db-api
+      `audit_query.py`'s `_event_dict`, `control_plane.py`'s
+      `_shape_audit_query_row`). This is the READ side of D-6/D-7, the
+      structural opposite of an emit site: the value it copies was
+      already validated wherever it was ORIGINALLY durably written: no
+      new literal can be authored by attribute access alone -- PROVIDED
+      the assignment_sites check above also holds (an `Attribute` read
+      is only as safe as every WRITE that could have produced it).
+    - `Subscript` keyed by the literal `"event_class"` (e.g.
+      `row["event_class"]`) -- the same READ-path passthrough, one
+      layer removed (a dict/row field lookup instead of an attribute)."""
+    tree = _ast.parse(source, filename=filename)
+    resolver = _EventClassForwardResolver()
+    resolver.visit(tree)
+    safe_ids = resolver.safe_forward_ids
+
+    def is_forward(value: "_ast.AST") -> bool:
+        if isinstance(value, _ast.Name):
+            return id(value) in safe_ids
+        if isinstance(value, _ast.Attribute):
+            return value.attr == "event_class"
+        if isinstance(value, _ast.Subscript):
+            key_node = value.slice
+            return isinstance(key_node, _ast.Constant) and key_node.value == "event_class"
+        return False
+
+    keyword_sites: list[tuple[int, "_ast.AST", bool]] = []
+    dict_sites: list[tuple[int, str, "_ast.AST", bool]] = []
+    assignment_sites: list[tuple[int, str, "_ast.AST", bool]] = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call):
+            kw = next((k for k in node.keywords if k.arg == "event_class"), None)
+            if kw is not None:
+                keyword_sites.append((node.lineno, kw.value, is_forward(kw.value)))
+        elif isinstance(node, _ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, _ast.Constant) and key.value == "event_class":
+                    dict_sites.append((node.lineno, "dict", value, is_forward(value)))
+        elif isinstance(node, _ast.Assign):
+            for target in node.targets:
+                if isinstance(target, _ast.Subscript):
+                    key_node = target.slice
+                    if isinstance(key_node, _ast.Constant) and key_node.value == "event_class":
+                        dict_sites.append((node.lineno, "subscript", node.value, is_forward(node.value)))
+                for leaf in _iter_name_or_attribute_targets(target):
+                    if _is_event_class_assignment_target(leaf):
+                        kind = "name_assign" if isinstance(leaf, _ast.Name) else "attribute_assign"
+                        assignment_sites.append((node.lineno, kind, node.value, is_forward(node.value)))
+        elif isinstance(node, (_ast.AnnAssign, _ast.AugAssign)):
+            if node.value is None:
+                continue  # a bare annotation (`event_class: str`) with no assigned value at all
+            for leaf in _iter_name_or_attribute_targets(node.target):
+                if _is_event_class_assignment_target(leaf):
+                    kind = "name_assign" if isinstance(leaf, _ast.Name) else "attribute_assign"
+                    assignment_sites.append((node.lineno, kind, node.value, is_forward(node.value)))
+    return keyword_sites, dict_sites, assignment_sites
+
+
+def _scan_file_event_class_sites(path: Path):
+    return _scan_source_event_class_sites(path.read_text(), path.name)
+
+
+def _event_class_keyword_call_sites(paths: list[Path]) -> list[tuple[str, int, "_ast.AST", bool]]:
+    """P4-D16 v3(b)'s own input, aggregated across files: `(filename,
+    lineno, value_node, is_safe_forward)` for every `Call` node anywhere
+    in the given files that carries an `event_class=` keyword argument --
+    UNFILTERED by callee name."""
+    sites: list[tuple[str, int, "_ast.AST", bool]] = []
+    for path in paths:
+        keyword_sites, _dict_sites, _assignment_sites = _scan_file_event_class_sites(path)
+        for lineno, value, is_forward in keyword_sites:
+            sites.append((path.name, lineno, value, is_forward))
+    return sites
 
 
 def _scan_event_class_literals(source: str, filename: str) -> tuple[set[str], list[str]]:
-    """Returns `(literals, unresolved)` -- `literals` is every string
-    literal found at a known call site's `event_class` position;
-    `unresolved` describes any matched call site whose `event_class` is
-    NOT a plain string literal and not in `_KNOWN_DYNAMIC_EVENT_CLASS_
-    FORWARDS` (a future dynamic emission this scanner cannot statically
-    resolve -- treated as a finding, not silently skipped).
-
-    Matches BOTH method calls (`node.func` an `ast.Attribute`, e.g.
-    `self._sink.append(...)`) AND plain function calls (`node.func` an
-    `ast.Name`, e.g. `ops.py`'s own `_write_control_audit(conn, ...)`) --
-    the file-enumeration gap this scanner's own evidence-hardening item 1
-    closed (see `_EVENT_CLASS_CALL_SPECS`'s header comment) turned out to
-    be paired with a call-shape gap too: the pre-existing `Attribute`-only
-    check would have kept missing `_write_control_audit`'s own call sites
-    even after `ops.py` was added to the scanned file set, since every one
-    of them is a bare-name call, never a `.method(...)` one.
-    """
-    tree = _ast.parse(source, filename=filename)
+    """Single-file variant of the same unfiltered walk (b) performs,
+    kept for the `ops.py`-specific regression/mutation-proof tests below
+    that substitute a mutated copy of ONE file's text in isolation, and
+    for this WP's own new synthetic-source regression tests. Returns
+    `(literals, unresolved)`: `literals` is every string literal found at
+    an `event_class=` keyword position; `unresolved` describes any such
+    call whose value is neither a string literal nor a genuine bound
+    parameter forward (`_EventClassForwardResolver` above)."""
+    keyword_sites, _dict_sites, _assignment_sites = _scan_source_event_class_sites(source, filename)
     literals: set[str] = set()
     unresolved: list[str] = []
-    for node in _ast.walk(tree):
-        if not isinstance(node, _ast.Call):
-            continue
-        if isinstance(node.func, _ast.Attribute):
-            call_name = node.func.attr
-        elif isinstance(node.func, _ast.Name):
-            call_name = node.func.id
-        else:
-            continue
-        spec = _EVENT_CLASS_CALL_SPECS.get(call_name)
-        if spec is None:
-            continue
-        kind, index = spec
-        value_node: _ast.AST | None = None
-        if kind == "positional":
-            if len(node.args) > index:
-                value_node = node.args[index]
-        else:
-            value_node = next((kw.value for kw in node.keywords if kw.arg == "event_class"), None)
-        if value_node is None:
-            if kind == "keyword_optional":
-                continue  # an ordinary, unrelated .append(...) call -- not a match at all
-            unresolved.append(f"{filename}:{node.lineno}: {call_name}(...) call has no resolvable event_class argument at all")
-            continue
-        if isinstance(value_node, _ast.Constant) and isinstance(value_node.value, str):
-            literals.add(value_node.value)
-        elif isinstance(value_node, _ast.Name) and (filename, call_name, value_node.id) in _KNOWN_DYNAMIC_EVENT_CLASS_FORWARDS:
+    for lineno, value, is_forward in keyword_sites:
+        if isinstance(value, _ast.Constant) and isinstance(value.value, str):
+            literals.add(value.value)
+        elif is_forward:
             continue
         else:
-            unresolved.append(f"{filename}:{node.lineno}: {call_name}(...)'s event_class is not a string literal ({_ast.dump(value_node)})")
+            unresolved.append(f"{filename}:{lineno}")
     return literals, unresolved
 
 
-def test_every_known_emission_method_name_is_still_called():
-    """Vacuity guard for `_EVENT_CLASS_CALL_SPECS` itself -- if a method
-    named there is renamed/removed, `_scan_event_class_literals` would
-    silently stop finding it and this whole regression guard would degrade
-    back to under-coverage without anyone noticing. Checked against every
-    file `_iter_src_files()` itself scans (not a hardcoded two-file list
-    any more), so a name whose only real definition moved to a THIRD file
-    (e.g. `ops.py`'s `_write_control_audit`) is still found."""
-    sources = {path.name: path.read_text() for path in _iter_src_files()}
-    for name in _EVENT_CLASS_CALL_SPECS:
-        if name == "append":
-            # Not a locally-defined method (it is called ON sink objects
-            # defined elsewhere) -- checked as a literal call-site
-            # substring instead of a `def` line.
-            assert any(".append(" in text for text in sources.values()), "no .append( call site found in any src/r2db_api/*.py file"
+def _event_class_positional_definitions(paths: list[Path]) -> list[str]:
+    """P4-D16 v3(c)'s own violation collector: every `def`/`async def`
+    anywhere in the given files whose formal parameters include
+    `event_class` NOT declared keyword-only (i.e. not in `kwonlyargs`).
+    `self`/`cls` (a bound method's own first parameter) is never itself
+    named `event_class`, so no separate exclusion is needed beyond a
+    plain by-name membership check across every parameter list."""
+    violations: list[str] = []
+    for path in paths:
+        tree = _ast.parse(path.read_text(), filename=path.name)
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            kwonly_names = {arg.arg for arg in node.args.kwonlyargs}
+            if "event_class" in kwonly_names:
+                continue
+            positional_names = {arg.arg for arg in node.args.posonlyargs + node.args.args}
+            if "event_class" in positional_names:
+                violations.append(f"{path.name}:{node.lineno}: {node.name}(...) takes event_class positionally, not keyword-only")
+    return violations
+
+
+def _event_class_dict_smuggling_violations(paths: list[Path]) -> list[str]:
+    """P4-D16 v3(d)'s own violation collector -- WP-B1 review round 2
+    (M3/M6) INVERTED this from "flag only a plain string `Constant`
+    value" to "allow ONLY the three passthrough shapes
+    `_scan_source_event_class_sites` recognizes (a bound parameter
+    forward, an `event.event_class` attribute read, or a
+    `row["event_class"]` subscript read -- see that function's own
+    docstring) and flag everything else": a string `Constant`, an
+    f-string (`JoinedStr`), string concatenation (`BinOp`), a function
+    `Call` result, an unbound/shadowed `Name`, or an `Attribute`/
+    `Subscript` that does NOT read a field literally named
+    `event_class` are ALL violations now -- not merely a plain literal
+    string. Closes the gap where a non-Constant, non-forward value (an
+    f-string smuggled via `**{"event_class": f"..."}`, for instance)
+    silently passed the old, narrower check."""
+    violations: list[str] = []
+    for path in paths:
+        _keyword_sites, dict_sites, _assignment_sites = _scan_file_event_class_sites(path)
+        for lineno, kind, value, is_forward in dict_sites:
+            if is_forward:
+                continue
+            violations.append(f"{path.name}:{lineno}: {kind} sets event_class to a non-forward value ({_ast.dump(value)})")
+    return violations
+
+
+def _event_class_assignment_violations(paths: list[Path]) -> list[str]:
+    """WP-B1 acceptance-audit finding M7's own violation collector: every
+    `Assign`/`AnnAssign`/`AugAssign` anywhere in the given files (EVERY
+    scope, never restricted to function bodies) whose target is
+    `Name(id="event_class")` (a MODULE- or CLASS-level assignment, e.g.
+    `class _Cfg: event_class = "zz"`) or `Attribute(attr="event_class")`
+    (e.g. `self.event_class = "zz"`) must assign a genuine passthrough
+    value (the SAME `is_forward` rule (b)/(d) use) -- a string `Constant`,
+    f-string, `BinOp`, `Call` result, or unbound/shadowed `Name` is a
+    violation. Closes the gap where `_scan_source_event_class_sites`'s
+    own unconditional `Attribute(attr="event_class")` READ-passthrough
+    (added for legitimate cases like `event.event_class`) could be fed by
+    an UNCHECKED write -- `class _Cfg: event_class = "zz"` followed by
+    `event_class=_Cfg.event_class` at a real emit site passed every other
+    check green before this."""
+    violations: list[str] = []
+    for path in paths:
+        _keyword_sites, _dict_sites, assignment_sites = _scan_file_event_class_sites(path)
+        for lineno, kind, value, is_forward in assignment_sites:
+            if is_forward:
+                continue
+            violations.append(f"{path.name}:{lineno}: {kind} sets event_class to a non-forward value ({_ast.dump(value)})")
+    return violations
+
+
+def test_every_event_class_keyword_argument_is_a_string_literal():
+    """P4-D16 v3(b). Every `Call` anywhere under `src/r2db_api/` that
+    carries an `event_class=` keyword must pass a plain string literal or
+    a genuine bound parameter forward of an ENCLOSING function's own
+    `event_class` parameter (`_EventClassForwardResolver` above) -- no
+    callee-name filter of any kind. Violations are reported by
+    file:line."""
+    paths = _iter_src_files()
+    violations: list[str] = []
+    for filename, lineno, value, is_forward in _event_class_keyword_call_sites(paths):
+        if isinstance(value, _ast.Constant) and isinstance(value.value, str):
             continue
-        assert any(f"def {name}(" in text for text in sources.values()), (
-            f"{name!r} is in _EVENT_CLASS_CALL_SPECS but no longer defined anywhere in src/r2db_api/*.py"
-        )
+        if is_forward:
+            continue
+        violations.append(f"{filename}:{lineno}: event_class= is not a string literal or a bound parameter forward ({_ast.dump(value)})")
+    assert not violations, f"non-literal, non-forwarded event_class= call site(s): {violations!r}"
+
+
+def test_every_definition_taking_event_class_declares_it_keyword_only():
+    """P4-D16 v3(c). Every function/method anywhere under `src/r2db_api/`
+    that takes `event_class` as a formal parameter must declare it
+    keyword-only -- this is the product-code invariant `_event` (:1112)
+    and `_control_event` (:1356) were converted to satisfy (this WP's
+    only product-code change). Makes a positionally-passed emit site
+    syntactically unwritable, closing the historical "positional call
+    sites are invisible to a keyword-only-oriented scan" gap
+    structurally rather than by convention."""
+    paths = _iter_src_files()
+    violations = _event_class_positional_definitions(paths)
+    assert not violations, f"definition(s) with a non-keyword-only event_class parameter: {violations!r}"
+
+
+def test_no_event_class_string_literal_is_smuggled_through_a_dict():
+    """P4-D16 v3(d) (WP-B1 review round 2, M3/M6). No `Dict` literal or
+    `Subscript` assignment anywhere under `src/r2db_api/` sets an
+    `"event_class"` key to anything other than a genuine passthrough of
+    an existing `event_class` value (a bound parameter forward, or a
+    READ-path `event.event_class`/`row["event_class"]` field read -- see
+    `_scan_source_event_class_sites`'s own docstring) -- a plain string
+    literal, an f-string, string concatenation, a call result, or an
+    unbound/shadowed name are ALL violations, closing the path
+    (`**{"event_class": ...}` expansion, or building the sink's field
+    dict via subscript assignment) that could otherwise let a
+    non-literal, non-forward value reach the durable sink invisibly to
+    (b)'s keyword-argument walk."""
+    paths = _iter_src_files()
+    violations = _event_class_dict_smuggling_violations(paths)
+    assert not violations, f"dict/subscript event_class literal smuggling site(s): {violations!r}"
+
+
+def test_no_event_class_string_literal_is_smuggled_through_an_assignment():
+    """WP-B1 acceptance-audit finding M7. No `Assign`/`AnnAssign`/
+    `AugAssign` anywhere under `src/r2db_api/` (module top-level, class
+    body, or function body -- EVERY scope) assigns a non-forward value to
+    a target named/keyed `event_class` (`Name(id="event_class")` or
+    `Attribute(attr="event_class")`, tuple/list/starred-unpacked targets
+    included). Closes the hole a class/module-level `event_class = "..."`
+    (or `self.event_class = "..."`) constant left open: an unconditional
+    `Attribute(attr="event_class")` READ passthrough is only as safe as
+    every WRITE that could have produced it."""
+    paths = _iter_src_files()
+    violations = _event_class_assignment_violations(paths)
+    assert not violations, f"event_class assignment-target literal smuggling site(s): {violations!r}"
+
+
+def test_event_class_forward_exclusion_requires_genuine_parameter_binding():
+    """WP-B1 review round 2 (M3/M6): the predecessor `_is_forwarded_
+    event_class` treated ANY `Name(id="event_class")` as a safe forward,
+    regardless of whether that name was actually bound to an ENCLOSING
+    function's own `event_class` parameter -- a local variable, global,
+    for-loop target, or walrus binding of the identical name could
+    silently carry an undeclared literal straight past both (b) and (d).
+    Builds SYNTHETIC source text (never touches a real repository file)
+    reproducing exactly those two shapes and fixes that both are now
+    rejected -- run this test against the PRE-fix resolver (a bare
+    `isinstance(value_node, ast.Name) and value_node.id == "event_class"`
+    check) to see it go red; that is the round-2 review finding this
+    test is load-bearing against.
+    """
+    # (i) a local variable named `event_class` (never a parameter of the
+    # enclosing function `f`), forwarded via `event_class=event_class` --
+    # must be rejected by (b)'s own literal-discipline scan, not silently
+    # accepted as a forward.
+    source_local_var = (
+        "def f(sink):\n"
+        "    event_class = \"__WPB1_SYNTHETIC_FIXTURE_LOCAL__\"\n"
+        "    sink.append(event_class=event_class)\n"
+    )
+    literals, unresolved = _scan_event_class_literals(source_local_var, "synthetic_local_var.py")
+    assert not literals, f"a local-variable-shadowed event_class must never be collected as a literal: {literals!r}"
+    assert unresolved == ["synthetic_local_var.py:3"], (
+        f"a local-variable-shadowed event_class=event_class must be flagged unresolved, not silently accepted as a forward: {unresolved!r}"
+    )
+
+    # (ii) a dict literal with an f-string (`JoinedStr`) value, smuggled
+    # into a call via `**{...}` expansion -- must be caught by (d)'s
+    # dict-smuggling scan. An f-string is not a plain string `Constant`,
+    # so the PRE-round-2 dict check (which flagged only string
+    # `Constant` values) silently missed this shape entirely.
+    source_dict_fstring = (
+        "def g(sink, suffix):\n"
+        "    sink.append(**{\"event_class\": f\"__WPB1_SYNTHETIC_FIXTURE_FSTRING_{suffix}__\"})\n"
+    )
+    _keyword_sites, dict_sites, _assignment_sites = _scan_source_event_class_sites(source_dict_fstring, "synthetic_dict_fstring.py")
+    dict_violations = [f"synthetic_dict_fstring.py:{lineno}" for lineno, _kind, _value, is_forward in dict_sites if not is_forward]
+    assert dict_violations == ["synthetic_dict_fstring.py:2"], (
+        f"an f-string value smuggled through a dict literal's event_class key must be flagged as a violation: "
+        f"{dict_violations!r} (raw sites: {dict_sites!r})"
+    )
+
+    # (iii) WP-B1 acceptance-audit round 2 (M8): `with ... as event_class:`
+    # -- the context manager's bound variable is NOT a parameter forward,
+    # even though it is a plain `Name(id="event_class")`. The prior
+    # per-statement-shape enumeration in `_collect_direct_shadow_names`
+    # never visited `withitem.optional_vars` at all.
+    # `h` deliberately DECLARES `event_class` as its own keyword-only
+    # PARAMETER too -- the bug this reproduces only manifests when a
+    # `with ... as event_class:` REBINDS a name that is ALSO a genuine
+    # parameter of the enclosing function: an incomplete shadow-detector
+    # would see "event_class is a parameter of h" and stop there,
+    # wrongly treating the REBOUND (with-as) value as if it were still
+    # the untouched parameter.
+    source_with_as = (
+        "from contextlib import nullcontext\n"
+        "def h(sink, *, event_class):\n"
+        "    with nullcontext(\"__WPB1_SYNTHETIC_FIXTURE_WITH__\") as event_class:\n"
+        "        sink.append(event_class=event_class)\n"
+    )
+    literals_with, unresolved_with = _scan_event_class_literals(source_with_as, "synthetic_with_as.py")
+    assert not literals_with, f"a with-as-rebound event_class must never be collected as a literal: {literals_with!r}"
+    assert unresolved_with == ["synthetic_with_as.py:4"], (
+        f"a with-as-rebound event_class=event_class must be flagged unresolved, not silently accepted as the function's own parameter forward: {unresolved_with!r}"
+    )
+
+    # (iv) WP-B1 acceptance-audit round 2 (M8): `except ... as
+    # event_class:` -- `ExceptHandler.name` is a plain STRING attribute,
+    # not a `Name` node, so `ctx`-based `Name` matching alone cannot see
+    # it; the prior enumeration never checked `ExceptHandler.name` either.
+    # `k` likewise declares `event_class` as its own keyword-only
+    # parameter, then an `except ... as event_class:` clause rebinds it
+    # to the caught exception object -- the same "parameter exists, but
+    # was locally rebound" shape as above, this time via a plain string
+    # attribute (`ExceptHandler.name`) rather than a `Name` node.
+    source_except_as = (
+        "def k(sink, *, event_class):\n"
+        "    try:\n"
+        "        raise ValueError(\"__WPB1_SYNTHETIC_FIXTURE_EXCEPT__\")\n"
+        "    except Exception as event_class:\n"
+        "        sink.append(event_class=event_class)\n"
+    )
+    literals_except, unresolved_except = _scan_event_class_literals(source_except_as, "synthetic_except_as.py")
+    assert not literals_except, f"an except-as-rebound event_class must never be collected as a literal: {literals_except!r}"
+    assert unresolved_except == ["synthetic_except_as.py:5"], (
+        f"an except-as-rebound event_class=event_class must be flagged unresolved, not silently accepted as the function's own parameter forward: {unresolved_except!r}"
+    )
+
+
+# P4-D16 v3(e)'s own N: the explicit, non-durable exclusion set. Each
+# element is real (found by (b)'s own unfiltered walk) but reaches ONLY
+# the legacy in-memory `AuditSink` (`DataService._audit`), never the
+# durable `application_audit`/`control_audit` tables `audit_query` reads
+# -- adding these to `DECLARED_AUDIT_EVENT_CLASSES` would make
+# `audit_query`'s own declaration lie about a vocabulary it can never
+# actually return (禁止事項 9b). `D ∩ N == ∅` is fixed by the test below,
+# not merely asserted here.
+_NON_DURABLE_EVENT_CLASSES: frozenset[str] = frozenset({
+    # `_event` (service.py:819, `event_class="authentication"`) --
+    # `authenticate()`'s own success event. `_event`'s own dispatch body
+    # (service.py, the `if event_class != "data_operation": return` guard
+    # right before the buffer-class enqueue) keeps this literal in the
+    # legacy in-memory `self._audit` sink only; it never reaches the
+    # buffer or the denial-coalescer. `audit_query.py`'s own
+    # `DECLARED_AUDIT_EVENT_CLASSES` docstring documents this same
+    # exclusion.
+    "authentication",
+    # `_control_event` (service.py:1356) writes ONLY to the legacy
+    # in-memory `self._service._audit` sink -- never to the durable
+    # `control_audit` table (that table is written exclusively by
+    # `ops.py`'s own `_write_control_audit`, a structurally separate call
+    # path). `control_failure` is one of `_control_event`'s two
+    # non-durable-only literals (every `except FoundationError` deny
+    # branch across register/enable/disable-application,
+    # set_credential_state, issue_credential, delete_audit, and
+    # set_authorization_state_available).
+    "control_failure",
+    # Same call path/rationale as `control_failure` above --
+    # `_control_event`'s own `set_authorization_state_available` SUCCESS
+    # literal (the one `_control_event` call site whose `outcome` is
+    # `"allow"` rather than `"deny"`).
+    "control_state",
+})
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
 def test_declared_event_classes_cover_every_emittable_class(kind, platform):
-    """§9.2 property 5. `DECLARED_AUDIT_EVENT_CLASSES` (audit_query.py) is
-    fixed against every REAL `event_class` literal anywhere in `src/
-    r2db_api/*.py`, positional or keyword (`_scan_event_class_literals`
-    above) -- a regression guard against a future new emission call site
-    with no corresponding declared-vocabulary entry. [MitateDB WP-3(b)
-    対称 evidence-hardening item 1] this now walks EVERY file `_iter_src_
-    files()` returns, not a hardcoded `service.py`/`control_plane.py`
-    enumeration -- see that helper's own header comment and `test_ast_
-    scan_now_covers_files_the_old_hardcoded_enumeration_missed` below for
-    the mutation proof that this structurally closes the old blind spot.
+    """§9.2 property 5 / P4-D16 v3(e). With (b) closing the callee-name
+    blind spot, (c) closing positional passing, and (d) closing dict
+    smuggling, every real `event_class` literal anywhere under `src/
+    r2db_api/` is reachable by (b)'s own unfiltered walk. This test
+    computes that full literal union U and fixes `U == D | N` AND
+    `D & N == set()`, where D is `DECLARED_AUDIT_EVENT_CLASSES`
+    (unchanged by this WP) and N is the explicit non-durable exclusion
+    set above. A future new literal now forces a choice: declare it, or
+    name it in N with a reason -- there is no silent third path.
     """
     h = _build_harness(kind, platform)
     try:
@@ -1008,23 +1502,23 @@ def test_declared_event_classes_cover_every_emittable_class(kind, platform):
         declared = set(document["capabilities"]["audit_query"]["event_classes"])
         assert declared == DECLARED_AUDIT_EVENT_CLASSES
 
+        paths = _iter_src_files()
         emitted: set[str] = set()
-        unresolved: list[str] = []
-        for path in _iter_src_files():
-            literals, file_unresolved = _scan_event_class_literals(path.read_text(), path.name)
-            emitted |= literals
-            unresolved += file_unresolved
-        assert not unresolved, f"unresolvable event_class call site(s), investigate manually: {unresolved!r}"
+        for _filename, _lineno, value, _is_forward in _event_class_keyword_call_sites(paths):
+            if isinstance(value, _ast.Constant) and isinstance(value.value, str):
+                emitted.add(value.value)
         assert emitted, "the AST scanner found zero event_class literals -- it is itself broken"
-        # "authentication" (service.py) is the one real literal deliberately
-        # excluded -- it never reaches the durable/buffered sink at all
-        # (service.py's own `_event` comment). Every other real literal
-        # must be a subset of the declared vocabulary.
-        durable_eligible = emitted - {"authentication"}
-        assert durable_eligible <= declared, f"emittable but undeclared: {durable_eligible - declared!r}"
+
+        d = DECLARED_AUDIT_EVENT_CLASSES
+        n = _NON_DURABLE_EVENT_CLASSES
+        assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
+        assert emitted == d | n, (
+            f"emittable-vs-(declared|N) mismatch: "
+            f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "
+            f"declared or in N but never actually emitted: {(d | n) - emitted!r}"
+        )
     finally:
         h.cleanup()
-
 
 def test_ast_scan_now_covers_files_the_old_hardcoded_enumeration_missed():
     """[MitateDB WP-3(b) 対称 evidence-hardening item 1] structural proof,
