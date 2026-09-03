@@ -532,6 +532,22 @@ def _assert_wire_verb_rejected(adapter, control_actor, method: str, path: str) -
 
 
 def test_c09_v4_no_audit_mutation_or_deletion_surface_exists(adapter):
+    """Declared scope, fixed by supervisor ruling P4-D18 (2026-09-03,
+    `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §5.1 / §11.1 L4-8; the
+    same wording is on the C-09 row of `CONDITIONS.md`, and the two must
+    not drift apart). What this vector guarantees adapter-independently is
+    a STRUCTURAL property of the common port itself (the ABC check above);
+    what it adds per adapter -- real wire verbs on both audit paths, or
+    introspection of the real audit objects an in-process adapter reads --
+    reaches only the surface an adapter can see. Neither half reaches a
+    peer's audit-mutation surface at the DATABASE level: that absence is
+    guaranteed by GRANTs (application-plane writer INSERT-only on
+    `application_audit`, audit reader SELECT-only on both audit tables)
+    and is pinned over bare connections by each peer's OWN suite, not
+    here. P4-D18 therefore leaves this vector as it is with that scope
+    stated -- rebuilding it into a peer-observing form would yield no new
+    safety outcome -- rather than closing the ledger item.
+    """
     _assert_port_abc_has_no_audit_mutation_surface()
 
     if hasattr(adapter, "_control_send"):
