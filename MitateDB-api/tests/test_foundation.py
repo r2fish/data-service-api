@@ -25,8 +25,8 @@ class FoundationTests(unittest.TestCase):
         self.other_id, self.other_secret = self.control.issue_credential("app_b", Role.RUNTIME)
         self.other_dev_id, self.other_dev_secret = self.control.issue_credential("app_b", Role.DEVELOPER)
         self.service = MitateDataService(self.control)
-        self.dev = self.service.open_session(self.dev_id, self.dev_secret)
-        self.runtime = self.service.open_session(self.runtime_id, self.runtime_secret)
+        self.dev = self.service.open_session(self.dev_secret)
+        self.runtime = self.service.open_session(self.runtime_secret)
 
     def test_developer_schema_and_runtime_crud(self):
         self.dev.create_collection("notes", {"title": "text", "rank": "integer"})
@@ -37,9 +37,9 @@ class FoundationTests(unittest.TestCase):
     def test_application_scope_is_server_bound(self):
         self.dev.create_collection("notes", {"title": "text"})
         self.runtime.insert("notes", {"title": "private"})
-        other_dev = self.service.open_session(self.other_dev_id, self.other_dev_secret)
+        other_dev = self.service.open_session(self.other_dev_secret)
         other_dev.create_collection("notes", {"title": "text"})
-        other = self.service.open_session(self.other_id, self.other_secret)
+        other = self.service.open_session(self.other_secret)
         other.insert("notes", {"title": "other-private"})
         self.assertEqual(other.read("notes")[0]["title"], "other-private")
         self.assertEqual(self.runtime.read("notes")[0]["title"], "private")
@@ -477,8 +477,8 @@ class FoundationTests(unittest.TestCase):
         control.provision_application("entities_bound")
         dev_id, dev_secret = control.issue_credential("entities_bound", Role.DEVELOPER)
         runtime_id, runtime_secret = control.issue_credential("entities_bound", Role.RUNTIME)
-        dev = MitateDataService(control).open_session(dev_id, dev_secret)
-        runtime = MitateDataService(control).open_session(runtime_id, runtime_secret)
+        dev = MitateDataService(control).open_session(dev_secret)
+        runtime = MitateDataService(control).open_session(runtime_secret)
         for name in ("ent_one", "ent_two", "ent_three"):
             dev.create_collection(name, {"title": "text"})
 
@@ -659,16 +659,16 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(AuthenticationError):
             self.runtime.read("notes")
         with self.assertRaises(AuthenticationError):
-            self.service.open_session(self.runtime_id, self.runtime_secret)
+            self.service.open_session(self.runtime_secret)
         self.control.disable_application("app_a")
         with self.assertRaises(AuthenticationError):
             self.dev.read("notes")
         with self.assertRaises(AuthenticationError):
-            self.service.open_session(self.dev_id, self.dev_secret)
+            self.service.open_session(self.dev_secret)
         self.control.credentials.enable_application("app_a")
         self.control.credentials.authorization_state_available = False
         with self.assertRaises(AuthorizationStateUnavailable):
-            self.service.open_session(self.dev_id, self.dev_secret)
+            self.service.open_session(self.dev_secret)
 
     def test_revoke_of_unknown_credential_id_is_rejected_not_silently_ignored(self):
         # Control-plane fail-open: an operator revoking a credential id that
@@ -703,7 +703,7 @@ class FoundationTests(unittest.TestCase):
         control = ControlPlane("synthetic-test-pepper-0123456789", config)
         control.provision_application("small")
         dev_id, dev_secret = control.issue_credential("small", Role.DEVELOPER)
-        dev = MitateDataService(control).open_session(dev_id, dev_secret)
+        dev = MitateDataService(control).open_session(dev_secret)
         dev.create_collection("notes", {"title": "text"})
         with self.assertRaises(ResourceLimitError) as batch_ctx:
             dev.transact([
@@ -743,8 +743,8 @@ class FoundationTests(unittest.TestCase):
         control.provision_application("bounds")
         dev_id, dev_secret = control.issue_credential("bounds", Role.DEVELOPER)
         runtime_id, runtime_secret = control.issue_credential("bounds", Role.RUNTIME)
-        dev = MitateDataService(control).open_session(dev_id, dev_secret)
-        runtime = MitateDataService(control).open_session(runtime_id, runtime_secret)
+        dev = MitateDataService(control).open_session(dev_secret)
+        runtime = MitateDataService(control).open_session(runtime_secret)
         limits = runtime.capabilities()["limits"]
         self.assertEqual(limits["batch_items"], 2)
         self.assertEqual(limits["result_items"], 2)
@@ -808,8 +808,8 @@ class FoundationTests(unittest.TestCase):
         control.provision_application("narrow")
         dev_id, dev_secret = control.issue_credential("narrow", Role.DEVELOPER)
         runtime_id, runtime_secret = control.issue_credential("narrow", Role.RUNTIME)
-        dev = MitateDataService(control).open_session(dev_id, dev_secret)
-        runtime = MitateDataService(control).open_session(runtime_id, runtime_secret)
+        dev = MitateDataService(control).open_session(dev_secret)
+        runtime = MitateDataService(control).open_session(runtime_secret)
 
         with self.assertRaises(ValidationError):
             dev.create_collection("wide", {"a": "text", "b": "text", "c": "text"})
@@ -932,7 +932,7 @@ class FoundationTests(unittest.TestCase):
         control = ControlPlane("synthetic-test-pepper-0123456789", config)
         control.provision_application("narrow_add_field")
         dev_id, dev_secret = control.issue_credential("narrow_add_field", Role.DEVELOPER)
-        dev = MitateDataService(control).open_session(dev_id, dev_secret)
+        dev = MitateDataService(control).open_session(dev_secret)
         dev.create_collection("full", {"a": "text", "b": "text"})
         with self.assertRaises(ValidationError):
             dev.add_field("full", "c", "text")
@@ -1072,6 +1072,72 @@ class FoundationTests(unittest.TestCase):
         self.assertFalse(hasattr(self.runtime, "audit"))
         self.control.audit.record("test", detail=self.runtime_secret + " SELECT secret")
         self.assertEqual(self.control.audit.snapshot()[-1].detail, "unspecified")
+
+    # =======================================================================
+    # Phase 6 WP-3 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+    # DISCOVERY_V1.md D-3): declared-type registry -- SQLite/in-process
+    # parity half of `test_postgres.py`'s own identically-purposed suite.
+    # Non-vacuity requirement (work order §0.1 item 1, WP-3 completion
+    # condition 13/non-vacuity note): the choke point must be real here
+    # too -- `backend_sqlite.SQLiteBackend.field_domains` returns all-
+    # `None` domains (no live PostgreSQL-style enforcement at all), so
+    # this backend's own defence-in-depth layer never runs; a mutation
+    # that removed the cell-layer choke point entirely would only be
+    # caught by exactly these tests.
+    # =======================================================================
+
+    def test_declared_type_registry_round_trips_every_contract_type_on_sqlite(self):
+        from mitatedb_api.field_types import CONTRACT_TYPE_TO_FOUNDATION_TYPE
+        contract_types = {
+            "s": "string", "i": "integer", "n": "number", "b": "boolean",
+            "o": "object", "arr": "array", "j": "json",
+        }
+        fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[t] for name, t in contract_types.items()}
+        self.dev.create_entity("typed_things", fields=fields, field_types=contract_types)
+        values = {
+            "s": "hello", "i": 42, "n": 3.5, "b": True,
+            "o": {"a": 1, "b": [1, 2]}, "arr": [1, "two", {"three": 3}],
+            "j": "a plain string written to a json field",
+        }
+        self.runtime.insert("typed_things", values)
+        rows = self.runtime.read("typed_things")
+        self.assertEqual(len(rows), 1)
+        for key, expected in values.items():
+            self.assertEqual(rows[0][key], expected, f"{key}: expected {expected!r}, got {rows[0][key]!r}")
+        self.assertIs(rows[0]["b"], True)  # not 1 -- a real JSON boolean
+
+    def test_declared_type_registry_rejects_mismatched_values_on_sqlite(self):
+        from mitatedb_api.field_types import CONTRACT_TYPE_TO_FOUNDATION_TYPE
+        contract_types = {
+            "s": "string", "i": "integer", "n": "number", "b": "boolean",
+            "o": "object", "arr": "array",
+        }
+        fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[t] for name, t in contract_types.items()}
+        self.dev.create_entity("typed_negatives", fields=fields, field_types=contract_types)
+        bad_values = {"s": 123, "i": "abc", "n": "abc", "b": 7, "o": [1, 2], "arr": {"a": 1}}
+        for field, bad_value in bad_values.items():
+            with self.assertRaises(ValidationError):
+                self.runtime.insert("typed_negatives", {field: bad_value})
+        self.assertEqual(self.runtime.read("typed_negatives"), [])
+
+    def test_declared_boolean_rejects_int_zero_and_one_on_sqlite(self):
+        self.dev.create_entity("bool_strict", fields={"flag": "boolean"}, field_types={"flag": "boolean"})
+        for bad in (0, 1, 7):
+            with self.assertRaises(ValidationError):
+                self.runtime.insert("bool_strict", {"flag": bad})
+        self.runtime.insert("bool_strict", {"flag": False})
+        self.assertIs(self.runtime.read("bool_strict")[0]["flag"], False)
+
+    def test_catalog_reports_three_keys_and_undeclared_fields_default_to_json_on_sqlite(self):
+        self.dev.create_entity(
+            "catalog_probe", fields={"typed": "integer", "untyped": "json"}, field_types={"typed": "integer"})
+        entries = self.runtime.catalog()
+        entry = next(e for e in entries if e["entity"] == "catalog_probe")
+        self.assertEqual(set(entry.keys()), {"entity", "fields", "field_types"})
+        self.assertEqual(set(entry["fields"]), {"typed", "untyped"})
+        self.assertEqual(set(entry["field_types"]), set(entry["fields"]))
+        self.assertEqual(entry["field_types"]["typed"], "integer")
+        self.assertEqual(entry["field_types"]["untyped"], "json")
 
 
 if __name__ == "__main__":

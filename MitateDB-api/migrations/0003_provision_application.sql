@@ -141,6 +141,33 @@ CREATE TABLE public._mdb_schema_revision (
 );
 INSERT INTO public._mdb_schema_revision (id, revision) VALUES (TRUE, 0);
 
+-- Phase 6 WP-3 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+-- V1.md D-3, §1.5 finding 2a): the declared-type registry -- the SOLE
+-- source of truth for every entity field's own contract-vocabulary type
+-- (`backend_postgres.PostgresBackend.field_types`/`field_domains`,
+-- `http.py::get_catalog`). Physical column type alone cannot answer this
+-- (`object`/`array`/`json` are all physically TEXT, and a declared
+-- `boolean` is physically INTEGER -- indistinguishable from `integer`'s
+-- own INTEGER-range values without this table). Created here, same
+-- bookkeeping-table treatment as `_mdb_schema_revision` immediately
+-- above -- BEFORE the `ALTER DEFAULT PRIVILEGES` statement below, so the
+-- runtime role gets NO privilege on it either (read/written exclusively
+-- over the developer connection, same reasoning as that table's own
+-- comment: nothing in this foundation's design requires the runtime role
+-- to read it directly). `(entity, field)` is the natural primary key --
+-- at most one declared type per field, ever (`add_field` cannot replace
+-- an existing field's type; this peer has no `alter_field`, design §1.5
+-- finding 1c). `declared_type` is constrained to the SAME 7-word contract
+-- vocabulary `field_types.CONTRACT_TYPES` enumerates in Python -- a
+-- second, independent enforcement point (defence in depth, R-2's own
+-- precedent), not the only one.
+CREATE TABLE public._mdb_field_types (
+    entity text NOT NULL,
+    field text NOT NULL,
+    declared_type text NOT NULL CHECK (declared_type IN ('string', 'integer', 'number', 'boolean', 'object', 'array', 'json')),
+    PRIMARY KEY (entity, field)
+);
+
 -- From here on, any table the developer role creates in `public` (i.e.
 -- every entity table `PostgresBackend.create_collection`/`add_field`
 -- creates at request time) automatically grants the runtime role DML --

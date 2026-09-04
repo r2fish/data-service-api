@@ -30,6 +30,7 @@ from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
                             PostgresControlBackend, PostgresCredentialRegistry)
 from .credential_store_postgres import DEFAULT_SCHEMA, assert_pepper_separation
+from .surfaces import build_surfaces, validate_control_base_url, validate_data_base_url
 
 # Phase 4 WP-3(b) (design D-6): "clock-skew margin" -- the third term
 # `visibility_lag_ms` sums beyond the two writer-connection timeouts
@@ -177,9 +178,21 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         # clock-skew margin. Changing either timeout changes this value.
         audit_visibility_lag_ms = audit_statement_timeout_ms + audit_idle_timeout_ms + _VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
 
+    # Phase 6 WP-3 (design D-2): both required -- this IS the control
+    # process, so it always has a control surface of its own to declare
+    # (`surfaces.control`), and the SAME `surfaces.data` obligation
+    # `main.build_app`'s own `FoundationConfig.from_env` enforces applies
+    # here too (the data-plane document and the control-plane document
+    # must return the SAME `surfaces` object, contract 1.6.0).
+    data_base_url = _require(env, "MITATEDB_DATA_BASE_URL")
+    control_base_url = _require(env, "MITATEDB_CONTROL_BASE_URL")
+    surfaces = build_surfaces(
+        data_url=validate_data_base_url(data_base_url), control_url=validate_control_base_url(control_base_url))
+
     return ControlPlaneService(
         backend, limits=limits,
         audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
+        surfaces=surfaces,
         # Phase 4 WP-3(b) (r2db-api WP-2(b) review item H): derived from the
         # SAME single-source constant `audit_query.DEFAULT_COALESCING_
         # WINDOW_MS` (itself derived from `application_audit.DEFAULT_

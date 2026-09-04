@@ -11,6 +11,7 @@ from typing import Optional
 
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
+from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import AuthenticationError, AuthorizationStateUnavailable, NotFoundError
 
 
@@ -108,6 +109,28 @@ class CredentialStore:
         the in-process conformance adapter's own control-plane backend
         needs: a credential issued in-band (`issue_credential_inband`)
         must be the exact row `authenticate()` below can read back.
+
+        Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        this method now returns a COMPOSED bearer (`compose_bearer_locator`),
+        reversing this docstring's own earlier WP-3 "deliberately
+        UNCHANGED" decision. This store is still never reached from a
+        real wire boundary (`main.build_app`'s own production composition
+        uses `credential_store_postgres.PostgresCredentialStore` instead,
+        `main.py:285`); its two consumers are `ProvisioningFacade`/
+        `service.MitateDataService.open_session` (in-process; `open_
+        session`'s own `secret` parameter is now this same composed
+        string) and this peer's own in-band `issue_credential_inband`
+        path (`control_plane.ControlPlaneService`, via `_ReconciledControl
+        Backend` -- pre-generated id/secret, this method's return value
+        still discarded there, so composing it here is harmless to that
+        path either way). The stored `digest` is still computed from the
+        RAW `secret` -- only the RETURN value composes. `authenticate`/
+        `peek` below now split the composed bearer back apart (`split_
+        bearer_locator`) before comparing digests, closing the "in-band と
+        帯域外の混在" gap the previous split (raw store, composed HTTP
+        boundary) left open -- see `credential_wire.split_bearer_locator`'s
+        own docstring for the full reasoning and the WP-3 "4 テスト赤化"
+        this resolves.
         """
         with self._lock:
             if application_id not in self._applications:
@@ -129,7 +152,7 @@ class CredentialStore:
             self.audit.record("credential_issued", application_id,
                               credential_id, detail="role=" + role.value)
             # The secret is returned once and never stored or returned again.
-            return credential_id, secret
+            return credential_id, compose_bearer_locator(credential_id, secret)
 
     def revoke(self, credential_id):
         with self._lock:
@@ -304,12 +327,18 @@ class CredentialStore:
         credential's digest in place -- this peer's application-plane
         store never needed a rotate operation before the in-band
         control-plane surface (`control_plane.ControlPlaneService.
-        rotate_credential`) existed; that service is this method's first
-        caller. `credential_id`/`application_id`/`role` are unchanged;
-        only the secret (and therefore the stored digest) changes,
-        mirroring `control_auth.ControlCredentialStore.rotate`'s own
-        contract for the control-credential store. Fails closed on an
-        unknown id."""
+        rotate_credential`) existed. `credential_id`/`application_id`/
+        `role` are unchanged; only the secret (and therefore the stored
+        digest) changes, mirroring `control_auth.ControlCredentialStore.
+        rotate`'s own contract for the control-credential store. Fails
+        closed on an unknown id.
+
+        Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        returns a COMPOSED bearer now, same "every issuance point returns
+        ready-to-present" discipline `issue` above follows -- a rotate is
+        a re-issuance of the same `credential_id`. The stored `digest` is
+        still computed from the RAW `secret`; only the RETURN value
+        composes."""
         secret = secret or secrets.token_urlsafe(32)
         with self._lock:
             item = self._credentials.get(credential_id)
@@ -317,7 +346,7 @@ class CredentialStore:
                 raise NotFoundError("credential not found")
             item.digest = self._digest(secret)
             self.audit.record("credential_rotated", item.application_id, credential_id)
-        return secret
+        return compose_bearer_locator(credential_id, secret)
 
     def get_state(self, credential_id):
         """`(enabled, revoked)` for `credential_id`, or `None` if it does
@@ -356,42 +385,72 @@ class CredentialStore:
                 return True
             return False
 
-    def authenticate(self, credential_id, secret, *, request_id=None):
+    def authenticate(self, secret, *, request_id=None):
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer (the composed string
+        `issue`/`rotate` above return, verbatim) -- this method is this
+        store's own single receiving boundary, matching every OTHER store
+        on this peer (`credential_store_postgres.PostgresCredentialStore.
+        authenticate`, `control_auth.ControlCredentialStore.authenticate`,
+        `control_credential_store_postgres.PostgresControlCredentialStore.
+        authenticate`) and r2db-api's own `auth.CredentialStore.
+        authenticate`/`ControlCredentialStore.authenticate` (same name,
+        same one-bearer-in signature). Splits via `split_bearer_locator`
+        (r2db-api's own `auth.split_bearer_locator` contract, same name/
+        signature) exactly ONCE, HERE -- the caller (`http.py::HttpService.
+        authenticate`, `service.MitateDataService.open_session`, this
+        peer's own in-process conformance adapter) never pre-splits; no
+        caller anywhere else on this peer ever calls `split_bearer_locator`
+        again downstream of this point. A malformed `secret` (no `.`, an
+        empty half, or a NUL byte in either half) fails BEFORE any lookup
+        or digest comparison at all -- mirrors r2db's own `CredentialStore.
+        authenticate`: `locator is None` never even computes `compare_
+        digest`, since a structurally malformed token could never have
+        been a real credential attempt (no timing property to protect
+        there -- unlike an UNKNOWN but well-formed `credential_id`, which
+        still gets the unconditional dummy-digest compare below)."""
         with self._lock:
             if not self.authorization_state_available:
                 self.audit.record("authorization_state_failure",
                                   outcome="denied", detail="state_unavailable")
                 raise AuthorizationStateUnavailable("authorization unavailable")
-            item = self._credentials.get(credential_id)
-            # WP-2 review m-4: compute `hmac.compare_digest` against a
-            # fixed-shape 32-byte value UNCONDITIONALLY, whether or not
-            # `item` was found -- see `_DUMMY_DIGEST`'s own module-level
-            # docstring for why an unknown `credential_id` must not skip
-            # this call on a cheaper early-exit path.
-            stored_digest = item.digest if item is not None else _DUMMY_DIGEST
-            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
-            # Review B-1 (supervisor ruling 2026-09-03): tracked
-            # SEPARATELY from the final `valid` flag below -- `authenticated`
-            # is `True` only once the secret has matched a REAL, known
-            # credential's stored digest. This is what the durable-audit
-            # dispatch below keys its actor identity on: a subsequent
-            # state check (disabled/revoked/app-disabled/expired) failing
-            # is a REAL, known credential being refused (D-3's own
-            # "credential の revoked" table entry, safe to record); an
-            # unknown `credential_id` or a mismatched secret never reaches
-            # `authenticated = True` at all, however `valid` itself is computed.
-            authenticated = item is not None and digest_matches
-            valid = authenticated
-            if valid:
-                # WP-2 (design v1.2 R-4): `enabled` and `revoked` are
-                # checked independently -- `revoked` is terminal and is
-                # never reversed by `enable` (see `enable`'s docstring), so
-                # this check must survive even after `item.enabled` has
-                # been flipped back to `True`.
-                valid = valid and item.enabled and not item.revoked
-                valid = valid and self._applications.get(item.application_id, False)
-                valid = valid and (item.expires_at is None or
-                                   item.expires_at > datetime.now(timezone.utc))
+            locator = split_bearer_locator(secret)
+            if locator is None:
+                item = None
+                authenticated = False
+                valid = False
+            else:
+                credential_id, secret_part = locator
+                item = self._credentials.get(credential_id)
+                # WP-2 review m-4: compute `hmac.compare_digest` against a
+                # fixed-shape 32-byte value UNCONDITIONALLY, whether or not
+                # `item` was found -- see `_DUMMY_DIGEST`'s own module-level
+                # docstring for why an unknown `credential_id` must not skip
+                # this call on a cheaper early-exit path.
+                stored_digest = item.digest if item is not None else _DUMMY_DIGEST
+                digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
+                # Review B-1 (supervisor ruling 2026-09-03): tracked
+                # SEPARATELY from the final `valid` flag below -- `authenticated`
+                # is `True` only once the secret has matched a REAL, known
+                # credential's stored digest. This is what the durable-audit
+                # dispatch below keys its actor identity on: a subsequent
+                # state check (disabled/revoked/app-disabled/expired) failing
+                # is a REAL, known credential being refused (D-3's own
+                # "credential の revoked" table entry, safe to record); an
+                # unknown `credential_id` or a mismatched secret never reaches
+                # `authenticated = True` at all, however `valid` itself is computed.
+                authenticated = item is not None and digest_matches
+                valid = authenticated
+                if valid:
+                    # WP-2 (design v1.2 R-4): `enabled` and `revoked` are
+                    # checked independently -- `revoked` is terminal and is
+                    # never reversed by `enable` (see `enable`'s docstring), so
+                    # this check must survive even after `item.enabled` has
+                    # been flipped back to `True`.
+                    valid = valid and item.enabled and not item.revoked
+                    valid = valid and self._applications.get(item.application_id, False)
+                    valid = valid and (item.expires_at is None or
+                                       item.expires_at > datetime.now(timezone.utc))
             if not valid:
                 self.audit.record("authentication_denied", outcome="denied",
                                   detail="invalid_or_disabled")
@@ -438,12 +497,12 @@ class CredentialStore:
                               item.credential_id, detail="role=" + item.role.value)
             return Principal(item.application_id, item.credential_id, item.role)
 
-    def peek(self, credential_id, secret):
+    def peek(self, secret):
         """Phase 4 WP-3(b) (design D-5): a READ-ONLY probe, deliberately
         NEVER auditing anything (unlike `authenticate` above, which durably
         routes a coalesced denial on every failed attempt, known or
-        unknown id alike) -- returns a `Principal` when `credential_id`/
-        `secret` genuinely authenticates a currently active (enabled, not
+        unknown id alike) -- returns a `Principal` when the presented
+        bearer genuinely authenticates a currently active (enabled, not
         revoked, application enabled, not expired) application credential;
         `None` for an unknown id, wrong secret, disabled/revoked
         credential, disabled application, or expiry -- never raises.
@@ -458,11 +517,22 @@ class CredentialStore:
         adapter-only artifact this peer's own real product code
         (`control_plane.InMemoryCredentialRegistry`/`PostgresCredential
         Registry.authenticate`, genuinely separate registries with no such
-        side effect) never has."""
+        side effect) never has.
+
+        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer, exactly like
+        `authenticate` above -- same single-bearer-in, split-once-here
+        contract, no separate `credential_id` parameter. A malformed
+        `secret` returns `None` directly, with no digest comparison at all
+        (mirrors `authenticate`'s own identical treatment)."""
         with self._lock:
+            locator = split_bearer_locator(secret)
+            if locator is None:
+                return None
+            credential_id, secret_part = locator
             item = self._credentials.get(credential_id)
             stored_digest = item.digest if item is not None else _DUMMY_DIGEST
-            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
             if item is None or not digest_matches:
                 return None
             valid = item.enabled and not item.revoked

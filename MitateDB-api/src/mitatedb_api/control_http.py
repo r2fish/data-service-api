@@ -45,8 +45,8 @@ from .errors import (AuthenticationError, AuthenticationRequiredError,
                      NotFoundError, ResourceLimitError,
                      StorageConfigurationError, ValidationError)
 from .http import (PROBLEM_CONTENT_TYPE, RequestByteBoundMiddleware,
-                   _CredentialMalformed, _CredentialMissing, _extract_bearer,
-                   _read_json_object, _request_id, _split_bearer)
+                   _CredentialMissing, _extract_bearer,
+                   _read_json_object, _request_id)
 # Phase 6 WP-0 (design D-4(b)): `_SCHEMAS` is imported from `.http` rather
 # than this module loading its own second, independent copy of the
 # contract -- `.http` already owns the packaged-copy / `importlib.
@@ -155,16 +155,26 @@ def _check_object_shape(value: Any, schema: Mapping[str, Any], *, label: str) ->
     return value
 
 
-def _bearer_pair(request: Request) -> tuple[str | None, str | None]:
-    """Returns `(credential_id, secret)`, or `(None, None)` when no bearer
-    token is present at all. Raises `_CredentialMalformed` (reused from
-    `http.py`) for a present-but-unparseable token -- classified
-    `AUTH_INVALID`, same as the application plane (a malformed credential
-    was presented, distinct from none at all)."""
-    token = _extract_bearer(request)
-    if token is None:
-        return None, None
-    return _split_bearer(token)
+def _bearer(request: Request) -> str | None:
+    """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+    裁定 1): this HTTP boundary never splits the presented bearer itself
+    any more -- it is a thin wrapper over `http.py::_extract_bearer`
+    (`None` when no bearer token is present at all), returning the
+    presented token VERBATIM. Every handler below forwards this value,
+    unsplit, straight to `ControlPlaneService`, which forwards it
+    unchanged to `self._backend.authenticate_control`
+    (`control_auth.ControlCredentialStore.authenticate`/
+    `control_credential_store_postgres.PostgresControlCredentialStore.
+    authenticate`) -- the single choke point that calls `split_bearer_
+    locator` exactly once. A malformed bearer is no longer distinguished
+    HERE: it reaches `ControlPlaneService._authenticate` like any other
+    credential and comes back as an ordinary, durably-audited `AUTH_
+    INVALID` (`ControlPlaneService.deny_malformed_credential`'s own
+    separate pre-emptive routing is therefore no longer reachable from
+    this module and has been retired -- the standard `_authenticate`
+    except-`AuthenticationError` path already records the identical
+    denial shape)."""
+    return _extract_bearer(request)
 
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -175,8 +185,6 @@ def _endpoint(handler: Handler) -> Handler:
         request_id = _request_id(request)
         try:
             return await handler(request)
-        except _CredentialMalformed:
-            return _problem("AUTH_INVALID", "Credential is not valid.", request_id=request_id)
         except FoundationError as exc:
             return _problem_for_exception(exc, request_id)
         except Exception:
@@ -216,9 +224,9 @@ def _precharge(request: Request) -> None:
 @_endpoint
 async def get_control_capabilities(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     document = request.app.state.control_service.control_capabilities(
-        credential_id, secret, rate_precharged=True)
+        secret, rate_precharged=True)
     # R-7: the HTTP-layer enforcement fact, added on top of the
     # service-layer default (`unavailable`) in the same commit as the real
     # enforcement it declares (`RequestByteBoundMiddleware` below).
@@ -229,74 +237,74 @@ async def get_control_capabilities(request: Request) -> Response:
 @_endpoint
 async def post_register_application(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["ApplicationRegistrationRequest"], label="ApplicationRegistrationRequest")
     result = _service(request).register_application(
-        credential_id, secret, body.get("application_id"), rate_precharged=True)
+        secret, body.get("application_id"), rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def get_list_applications(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
-    result = _service(request).list_applications(credential_id, secret, rate_precharged=True)
+    secret = _bearer(request)
+    result = _service(request).list_applications(secret, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_disable_application(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     application_id = request.path_params["application_id"]
     result = _service(request).set_application_enabled(
-        credential_id, secret, application_id, False, rate_precharged=True)
+        secret, application_id, False, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_enable_application(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     application_id = request.path_params["application_id"]
     result = _service(request).set_application_enabled(
-        credential_id, secret, application_id, True, rate_precharged=True)
+        secret, application_id, True, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_issue_credential(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["CredentialIssueRequest"], label="CredentialIssueRequest")
     result = _service(request).issue_credential(
-        credential_id, secret, body.get("application_id"), body.get("role"), rate_precharged=True)
+        secret, body.get("application_id"), body.get("role"), rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def get_list_credentials(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
-    result = _service(request).list_credentials(credential_id, secret, rate_precharged=True)
+    secret = _bearer(request)
+    result = _service(request).list_credentials(secret, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_rotate_credential(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     target_credential_id = request.path_params["credential_id"]
-    result = _service(request).rotate_credential(credential_id, secret, target_credential_id, rate_precharged=True)
+    result = _service(request).rotate_credential(secret, target_credential_id, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_revoke_credential(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     target_credential_id = request.path_params["credential_id"]
     raw_body = await request.body()
     body: dict[str, Any] = {}
@@ -304,7 +312,7 @@ async def post_revoke_credential(request: Request) -> Response:
         body = await _read_json_object(request)
         _check_object_shape(body, _SCHEMAS["CredentialRevokeRequest"], label="CredentialRevokeRequest")
     result = _service(request).revoke_credential(
-        credential_id, secret, target_credential_id,
+        secret, target_credential_id,
         destructive=body.get("destructive"), confirmation=body.get("confirmation"), rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
@@ -312,20 +320,20 @@ async def post_revoke_credential(request: Request) -> Response:
 @_endpoint
 async def post_disable_credential(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     target_credential_id = request.path_params["credential_id"]
     result = _service(request).set_credential_enabled(
-        credential_id, secret, target_credential_id, False, rate_precharged=True)
+        secret, target_credential_id, False, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_enable_credential(request: Request) -> Response:
     _precharge(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     target_credential_id = request.path_params["credential_id"]
     result = _service(request).set_credential_enabled(
-        credential_id, secret, target_credential_id, True, rate_precharged=True)
+        secret, target_credential_id, True, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 
@@ -359,7 +367,7 @@ def _precharge_audit(request: Request) -> None:
 @_endpoint
 async def post_audit_query(request: Request) -> Response:
     _precharge_audit(request)
-    credential_id, secret = _bearer_pair(request)
+    secret = _bearer(request)
     # `AuditQueryRequest`'s own contract schema has no `required` entries
     # at all (every field optional) -- read the same way `post_revoke_
     # credential` reads its own optional body above.
@@ -368,7 +376,7 @@ async def post_audit_query(request: Request) -> Response:
     if raw_body:
         body = await _read_json_object(request)
         _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
-    result = _service(request).audit_query(credential_id, secret, body, rate_precharged=True)
+    result = _service(request).audit_query(secret, body, rate_precharged=True)
     return JSONResponse(result, status_code=200)
 
 

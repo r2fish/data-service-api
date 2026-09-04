@@ -34,7 +34,14 @@ _CONTROL_PEPPER = "control-http-unmounted-ctl-pepper-x"
 def _service_with_bootstrapped_credential():
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    # Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `bootstrap_control_
+    # credential` returns the COMPOSED bearer -- used verbatim, via
+    # `_bearer_header(secret)`, never recomposed here. The real HTTP
+    # boundary (`control_http.py`) is what does the splitting, on the
+    # SERVER side, exactly once, inside the credential store it forwards
+    # this bearer to unchanged.
+    secret = bearer
     # Phase 4 WP-3(b) (design D-5): a real in-memory `audit_query` reader --
     # this file's own audit-role matrix test needs `audit_query` to
     # genuinely be `enabled` (not `unavailable`) so an authorized audit-role
@@ -63,8 +70,12 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _auth_header(credential_id: str, secret: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {credential_id}.{secret}"}
+def _bearer_header(bearer: str) -> dict[str, str]:
+    """Phase 6 WP-3 (design D-1(d)): for a bearer already returned by a
+    real `/control/v1` issue/rotate response (`control_http.py::_with_
+    composed_secret`) -- used verbatim, never recomposed with a
+    `credential_id` a second time (that would double-prefix it)."""
+    return {"Authorization": f"Bearer {bearer}"}
 
 
 async def _apost(app, path, *, headers=None, json_body=None) -> httpx.Response:
@@ -83,7 +94,7 @@ def test_control_capabilities_declares_control_plane_enabled_and_request_bytes_e
     app, credential_id, secret = control_app
     # must_rotate is still true right after bootstrap -- capabilities is on
     # the must_rotate allow-list.
-    response = _run(_aget(app, "/control/v1/capabilities", headers=_auth_header(credential_id, secret)))
+    response = _run(_aget(app, "/control/v1/capabilities", headers=_bearer_header(secret)))
     assert response.status_code == 200
     body = response.json()
     assert body["capabilities"]["control_plane"]["status"] == "enabled"
@@ -101,22 +112,24 @@ def test_missing_bearer_token_is_auth_required(control_app) -> None:
 def test_full_register_issue_list_flow_over_real_http(control_app) -> None:
     app, credential_id, secret = control_app
     # Clear must_rotate first via self-rotate over HTTP.
-    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_bearer_header(secret)))
     assert rotate_resp.status_code == 200
+    # Phase 6 WP-3 (design D-1(d)): the rotate response's own `secret` is
+    # now the complete bearer -- used verbatim from here on.
     secret = rotate_resp.json()["secret"]
 
-    register_resp = _run(_apost(app, "/control/v1/applications", headers=_auth_header(credential_id, secret),
+    register_resp = _run(_apost(app, "/control/v1/applications", headers=_bearer_header(secret),
                                 json_body={"application_id": "httpapp"}))
     assert register_resp.status_code == 200
     assert register_resp.json() == {"application_id": "httpapp", "enabled": True}
 
-    issue_resp = _run(_apost(app, "/control/v1/credentials", headers=_auth_header(credential_id, secret),
+    issue_resp = _run(_apost(app, "/control/v1/credentials", headers=_bearer_header(secret),
                              json_body={"application_id": "httpapp", "role": "runtime"}))
     assert issue_resp.status_code == 200
     issued = issue_resp.json()
     assert issued["role"] == "runtime"
 
-    listing_resp = _run(_aget(app, "/control/v1/credentials", headers=_auth_header(credential_id, secret)))
+    listing_resp = _run(_aget(app, "/control/v1/credentials", headers=_bearer_header(secret)))
     assert listing_resp.status_code == 200
     ids = {row["credential_id"] for row in listing_resp.json()["credentials"]}
     assert issued["credential_id"] in ids
@@ -124,9 +137,9 @@ def test_full_register_issue_list_flow_over_real_http(control_app) -> None:
 
 def test_body_entity_smuggling_is_rejected_as_unknown_field(control_app) -> None:
     app, credential_id, secret = control_app
-    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_bearer_header(secret)))
     secret = rotate_resp.json()["secret"]
-    response = _run(_apost(app, "/control/v1/applications", headers=_auth_header(credential_id, secret),
+    response = _run(_apost(app, "/control/v1/applications", headers=_bearer_header(secret),
                            json_body={"application_id": "shapeapp", "unexpected_extra_field": True}))
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_FAILED"
@@ -164,7 +177,7 @@ def test_control_problem_response_never_leaks_the_underlying_exception_message(c
 
     monkeypatch.setattr(service._backend, "authenticate_control", _raise)
 
-    response = _run(_aget(app, "/control/v1/capabilities", headers=_auth_header(credential_id, secret)))
+    response = _run(_aget(app, "/control/v1/capabilities", headers=_bearer_header(secret)))
     assert response.status_code == 503
     body = response.json()
     assert body["code"] == "SERVICE_UNAVAILABLE"
@@ -175,15 +188,15 @@ def test_control_problem_response_never_leaks_the_underlying_exception_message(c
 
 def test_revoke_last_active_control_credential_requires_confirmation_over_http(control_app) -> None:
     app, credential_id, secret = control_app
-    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_bearer_header(secret)))
     secret = rotate_resp.json()["secret"]
-    denial = _run(_apost(app, f"/control/v1/credentials/{credential_id}/revoke", headers=_auth_header(credential_id, secret)))
+    denial = _run(_apost(app, f"/control/v1/credentials/{credential_id}/revoke", headers=_bearer_header(secret)))
     assert denial.status_code == 409
     body = denial.json()
     assert body["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
     phrase = body["details"]["required_confirmation"]
 
-    confirmed = _run(_apost(app, f"/control/v1/credentials/{credential_id}/revoke", headers=_auth_header(credential_id, secret),
+    confirmed = _run(_apost(app, f"/control/v1/credentials/{credential_id}/revoke", headers=_bearer_header(secret),
                             json_body={"destructive": True, "confirmation": phrase}))
     assert confirmed.status_code == 200
     assert confirmed.json()["revoked"] is True
@@ -200,7 +213,11 @@ def test_revoke_last_active_control_credential_requires_confirmation_over_http(c
 def _seed_audit_credential_over_backend(service, *, must_rotate: bool = False):
     store = service._backend.control_credential_store  # noqa: SLF001 -- test-only direct seed
     with service._backend.unit_of_work() as work:  # noqa: SLF001
-        credential_id, secret = store.issue(must_rotate=must_rotate, role="audit", work=work)
+        credential_id, bearer = store.issue(must_rotate=must_rotate, role="audit", work=work)
+    # Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `.issue()` returns the
+    # COMPOSED bearer -- used verbatim by this helper's own caller
+    # (`_bearer_header(secret)`), never recomposed.
+    secret = bearer
     return credential_id, secret
 
 
@@ -248,17 +265,17 @@ def test_audit_role_http_authorization_matrix_all_13_routes(control_app) -> None
     directly rather than re-typed as a literal).
     """
     app, credential_id, secret = control_app
-    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_bearer_header(secret)))
     secret = rotate_resp.json()["secret"]
 
     service = app.app.state.control_service  # RequestByteBoundMiddleware -> inner Starlette app
     audit_id, audit_secret = _seed_audit_credential_over_backend(service)
-    audit_headers = _auth_header(audit_id, audit_secret)
+    audit_headers = _bearer_header(audit_secret)
 
-    register_resp = _run(_apost(app, "/control/v1/applications", headers=_auth_header(credential_id, secret),
+    register_resp = _run(_apost(app, "/control/v1/applications", headers=_bearer_header(secret),
                                 json_body={"application_id": "app_audit_matrix"}))
     assert register_resp.status_code == 200
-    issue_resp = _run(_apost(app, "/control/v1/credentials", headers=_auth_header(credential_id, secret),
+    issue_resp = _run(_apost(app, "/control/v1/credentials", headers=_bearer_header(secret),
                              json_body={"application_id": "app_audit_matrix", "role": "runtime"}))
     assert issue_resp.status_code == 200
     target_credential_id = issue_resp.json()["credential_id"]
@@ -325,9 +342,9 @@ def test_issuance_freeze_forbidden_over_http_then_unfreeze_allows_again(control_
     freeze-issuance`/`unfreeze-issuance` do out-of-band) and confirms the
     in-band `issue_credential` endpoint refuses/allows accordingly."""
     app, credential_id, secret = control_app
-    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_auth_header(credential_id, secret)))
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate", headers=_bearer_header(secret)))
     secret = rotate_resp.json()["secret"]
-    headers = _auth_header(credential_id, secret)
+    headers = _bearer_header(secret)
 
     register_resp = _run(_apost(app, "/control/v1/applications", headers=headers, json_body={"application_id": "app_freeze_http"}))
     assert register_resp.status_code == 200

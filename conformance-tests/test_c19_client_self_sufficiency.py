@@ -514,7 +514,6 @@ def test_c19_field_types_negative_rejects_value_outside_declared_type(
 # --- whole-registry vacuity guard (work order WP-1 item 8) ---------------
 
 
-@pytest.mark.xfail(strict=True, reason="no peer declares 1.6.0 yet; un-xfailed by the last flip WP")
 def test_c19_every_control_surface_adapter_declares_1_6_0():
     """Whole-registry guard, same non-parametrized/`registered_adapters()`
     -walking shape as `test_c09_every_control_surface_adapter_declares_
@@ -522,10 +521,11 @@ def test_c19_every_control_surface_adapter_declares_1_6_0():
     contract bump) -- requires every control-surface-bearing registered
     adapter to declare `contract_version >= 1.6.0`. Registered `xfail(
     strict=True)` in WP-1 (false until every peer flips); the `xfail` is
-    removed in the SAME commit as the LAST 1.6.0 flip (WP-3), the guard's
-    own body unchanged -- so that flip commit itself demonstrates the
-    guard turning green unaided, exactly as the 1.4.0/1.5.0 guards did at
-    their own last flips.
+    removed here, in the SAME commit as the LAST 1.6.0 flip (WP-3 追補,
+    supervisor ruling 2026-09-04 -- both peers now declare 1.6.0), the
+    guard's own body unchanged -- so that flip commit itself demonstrates
+    the guard turning green unaided, exactly as the 1.4.0/1.5.0 guards did
+    at their own last flips.
 
     This guard is what stands in, for THIS work package, for the fact
     that `test_c19_application_credential_verbatim_...`/`test_c19_
@@ -581,6 +581,35 @@ _DECOMPOSITION_METHODS = ("split", "rsplit", "partition", "rpartition")
 # future finding is added here ONE LINE AT A TIME, with a reason, never
 # by narrowing the scanner's own rule back toward name-dependence.
 _DECOMPOSITION_ALLOWLIST: dict[tuple[str, int], str] = {}
+
+# Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 2,
+# review F2/F3, audit finding C): the MIRROR of `_DECOMPOSITION_ALLOWLIST`
+# above, for composition -- port v1.10's new `tampered_bearer(handle) ->
+# str` abstract method is EXPLICITLY the one place every plug is permitted
+# (indeed required) to compose a bearer string (`handle.credential_ref` +
+# "." + a fresh, never-issued identifier), so the common suite can
+# construct a KNOWN-BAD credential without a peer-specific store dial-in
+# (`tampered_bearer`'s own port docstring).
+#
+# Keyed by (relative-path-string, ENCLOSING FUNCTION NAME) -- never a bare
+# line number (F2's own empirical finding: a line-keyed entry goes stale
+# silently the moment the function it names gains/loses a line above it,
+# and this round's own two stale entries, discovered by direct re-
+# execution against the allowlist-ignored scanner, are exactly that
+# failure). `test_c19_composition_allowlist_has_no_dead_entries` below
+# asserts every entry here corresponds to an ACTUAL finding when the
+# allowlist is ignored -- an entry that suppresses nothing is a bug in
+# this table, caught structurally, not merely by prose review.
+_COMPOSITION_ALLOWLIST: dict[tuple[str, str], str] = {
+    ("MitateDB-api/conformance/conformance_adapter_mitatedb.py", "tampered_bearer"):
+        "tampered_bearer: the port's own designated bearer-tampering primitive (brief item C)",
+    ("MitateDB-api/conformance/conformance_adapter_mitatedb_http.py", "tampered_bearer"):
+        "tampered_bearer: the port's own designated bearer-tampering primitive (brief item C)",
+    ("r2db-api/conformance/conformance_adapter_r2db.py", "tampered_bearer"):
+        "tampered_bearer: the port's own designated bearer-tampering primitive (brief item C)",
+    ("r2db-api/conformance/conformance_adapter_r2db_http.py", "tampered_bearer"):
+        "tampered_bearer: the port's own designated bearer-tampering primitive (brief item C)",
+}
 
 
 def _scanned_adapter_files() -> tuple[Path, ...]:
@@ -641,32 +670,163 @@ def _joinedstr_expr_and_literal_parts(node: ast.JoinedStr) -> tuple[list[str], l
     return expr_parts, literal_parts
 
 
-def _composition_findings(tree: ast.AST) -> list[str]:
-    """(a)合成不在: no expression concatenates an id-shaped INTERPOLATED
-    value with a secret-shaped INTERPOLATED value, joined by a literal
-    "." -- covers an f-string/JoinedStr, a "+" BinOp chain, and a
-    "." .join([...]) call, the three ordinary ways Python composes two
-    strings with a separator."""
+def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
+    """Maps `id(node) -> parent node` for every node in `tree` -- `ast`
+    itself carries no parent pointers, so a caller that needs to walk
+    UP from a matched node (here: to find its innermost enclosing
+    function) must build this once per tree."""
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    return parents
+
+
+def _enclosing_function_name(node: ast.AST, parents: dict[int, ast.AST]) -> str | None:
+    """Walks UP `parents` from `node` to the nearest `FunctionDef`/
+    `AsyncFunctionDef` ancestor's own name -- `None` for a match at
+    module level (no enclosing function at all)."""
+    current = parents.get(id(node))
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return current.name
+        current = parents.get(id(current))
+    return None
+
+
+def _secret_bound_names(tree: ast.AST) -> dict[int, set[str]]:
+    """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+    裁定 2 (b), review F3): a SIMPLE, single-function-scoped dataflow
+    pass -- for every `FunctionDef`/`AsyncFunctionDef` node, collects the
+    plain local names directly assigned from a `.secret` attribute
+    access (`token = handle.secret`, `x.y = z.secret` excluded --
+    only a bare `Name` target) anywhere in that function's own body
+    (nested function bodies included, a conservative over-approximation:
+    a name that would actually be scoped to a DEEPER nested closure is
+    still treated as secret-shaped in the outer function's own set,
+    which only makes this MORE cautious, never less). Returns `{id(func_
+    node): {names...}}` -- deliberately keyed by the function node's own
+    identity, not its name (two functions can share a name across
+    different classes/nesting levels in the same file).
+
+    This closes the specific gap review finding R1 measured: a receiver-
+    name-independent decomposition scan already existed (`_decomposition_
+    findings` below), but composition detection still required the
+    INTERPOLATED text itself to literally contain the substring "secret"
+    -- `token = handle.secret; f"{handle.credential_ref}.{token}"` evades
+    that substring check even though `token` genuinely IS the secret,
+    one assignment removed. This function makes that one-hop indirection
+    visible to `_is_secret_shaped_at`."""
+    result: dict[int, set[str]] = {}
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names: set[str] = set()
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (isinstance(node.value, ast.Attribute) and node.value.attr == "secret"):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        result[id(func)] = names
+    return result
+
+
+def _is_secret_shaped_at(expr_node: ast.AST, text: str, *, bound_names: set[str]) -> bool:
+    """`_is_secret_shaped` (substring on the expression's own unparsed
+    text) OR (the expression is a bare local name this function's own
+    `_secret_bound_names` dataflow pass traced back to a `.secret`
+    attribute access) -- the two independent ways an interpolated part
+    can genuinely BE the secret without spelling out "secret" itself."""
+    if _is_secret_shaped(text):
+        return True
+    return isinstance(expr_node, ast.Name) and expr_node.id in bound_names
+
+
+def _composition_findings(tree: ast.AST, relative_path: str) -> list[str]:
+    """(a)合成不在, BROADENED (supervisor ruling 2026-09-04, 裁定 2 (a),
+    review F2/F3, audit finding C): the prior form required the SECOND
+    (non-id) interpolated part to itself be secret-SHAPED (contain the
+    substring "secret") -- measured, direct re-execution with the
+    allowlist ignored, to find ZERO findings against any of the four
+    real `tampered_bearer` bodies (`f"{handle.credential_ref}.{fresh_
+    identifier('tampered')}"`): `fresh_identifier('tampered')` names no
+    secret at all, by design (a deliberately KNOWN-BAD, never-issued
+    probe value) -- so the substring check never fired, and the four
+    `_COMPOSITION_ALLOWLIST` entries suppressed nothing (dead lines).
+
+    This peer's own bearer shape (`credential_wire.py`'s own docstring)
+    IS `<credential_id>.<secret>` -- joining an id-shaped expression with
+    ANY other expression via a literal "." is ALREADY the composition
+    act on this port, regardless of what the second part happens to be
+    named or shaped like; requiring it to ALSO look like "secret" was
+    over-narrow from the start. Dropped here for all three forms
+    (f-string/`+`/`".".join`) -- an id-shaped part plus a literal "."
+    plus ANY second part is now sufficient. `_is_secret_shaped_at`
+    (裁定 2 (b), dataflow-aware) still runs and is recorded in the
+    finding message for audit traceability (which part genuinely reads
+    as secret-shaped, directly or one assignment removed), but is no
+    longer a GATING condition -- see the module-level rationale above.
+
+    Findings are keyed by (relative_path, ENCLOSING FUNCTION NAME) for
+    `_COMPOSITION_ALLOWLIST` lookups (F2: line-number keys go stale
+    silently; a function-name key survives an unrelated line shifting
+    inside the same function) -- port v1.10's own `tampered_bearer` is
+    the ONE designated exception to the "no composition" rule."""
     findings: list[str] = []
+    parents = _build_parent_map(tree)
+    secret_names_by_func = _secret_bound_names(tree)
+
+    def _bound_names_for(node: ast.AST) -> set[str]:
+        current = parents.get(id(node))
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return secret_names_by_func.get(id(current), set())
+            current = parents.get(id(current))
+        return set()
+
+    def _allowlisted(node: ast.AST) -> bool:
+        func_name = _enclosing_function_name(node, parents)
+        return func_name is not None and (relative_path, func_name) in _COMPOSITION_ALLOWLIST
+
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
-            expr_parts, literal_parts = _joinedstr_expr_and_literal_parts(node)
+            expr_nodes = [v.value for v in node.values if isinstance(v, ast.FormattedValue)]
+            expr_parts = [_text(e) for e in expr_nodes]
+            _, literal_parts = _joinedstr_expr_and_literal_parts(node)
             has_id = any(_is_id_shaped(p) for p in expr_parts)
-            has_secret = any(_is_secret_shaped(p) for p in expr_parts)
             has_dot_literal = any("." in p for p in literal_parts)
-            if has_id and has_secret and has_dot_literal:
-                findings.append(f"line {node.lineno}: composition(f-string): {_text(node)}")
+            if has_id and has_dot_literal and len(expr_nodes) >= 2:
+                if _allowlisted(node):
+                    continue
+                bound = _bound_names_for(node)
+                secret_note = any(_is_secret_shaped_at(e, t, bound_names=bound) for e, t in zip(expr_nodes, expr_parts))
+                findings.append(
+                    f"line {node.lineno}: composition(f-string, secret-shaped-part={secret_note}): {_text(node)}"
+                )
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             text = _text(node)
-            if _is_id_shaped(text) and _is_secret_shaped(text) and "." in text:
-                findings.append(f"line {node.lineno}: composition(+): {text}")
+            if _is_id_shaped(text) and "." in text:
+                if _allowlisted(node):
+                    continue
+                bound = _bound_names_for(node)
+                secret_note = _is_secret_shaped_at(node, text, bound_names=bound)
+                findings.append(f"line {node.lineno}: composition(+, secret-shaped-part={secret_note}): {text}")
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join":
             sep_text = _text(node.func.value)
             is_dot_sep = "." in sep_text or (isinstance(node.func.value, ast.Constant) and node.func.value.value == ".")
             if is_dot_sep:
                 args_text = " ".join(_text(a) for a in node.args)
-                if _is_id_shaped(args_text) and _is_secret_shaped(args_text):
-                    findings.append(f"line {node.lineno}: composition(join): {_text(node)}")
+                if _is_id_shaped(args_text):
+                    if _allowlisted(node):
+                        continue
+                    bound = _bound_names_for(node)
+                    secret_note = _is_secret_shaped_at(node, args_text, bound_names=bound)
+                    findings.append(
+                        f"line {node.lineno}: composition(join, secret-shaped-part={secret_note}): {_text(node)}"
+                    )
     return findings
 
 
@@ -727,37 +887,33 @@ def _decomposition_findings(tree: ast.AST, relative_path: str) -> list[str]:
     return findings
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "conformance_adapter_mitatedb_http.py composes credential_id+secret at 5 sites "
-        "(issue_credential/issue_credential_inband/_control_send/audit_query_on_data_plane_host/"
-        "isolated_control_surface); removed in WP-3 alongside the last 1.6.0 flip"
-    ),
-)
 def test_c19_adapters_never_compose_or_decompose_the_bearer_secret() -> None:
     """Static, source-level fixed test (design section 6.2's own D-1(e),
     work order WP-1 item 8's second `xfail(strict=True)`): scans every
     REGISTERED adapter's own module file's AST (`_scanned_adapter_files()`
     below, never the port, never a peer's product `src/`) for (a)
     composition and (b) decomposition (see each helper's own docstring
-    above). Registered `xfail(strict=True)` NOW, not because the check is
-    untrustworthy, but because it currently finds real, load-bearing
-    findings: `conformance_adapter_mitatedb_http.py`'s own 5 composition
-    sites (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md
-    section 3 D-1(d); the 5th, `isolated_control_surface` -- the
-    addendum A test primitive -- was added by this same WP's addendum A
-    and originally left OFF this count, corrected by review finding F3 /
-    audit finding (iv), 2026-09-04, common-suite discipline 3's own
-    "主張は実測の後") -- WP-1 completion condition 16 (variant 7/7' in
-    the work order's own mutation table). WP-3's own removal target is
-    therefore 5 sites, not 4.
+    above).
+
+    Phase 6 WP-3 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+    DISCOVERY_V1.md section 3 D-1(d)): `xfail(strict=True)` removed in
+    this same commit as MitateDB-api's own last 1.6.0 flip --
+    `conformance_adapter_mitatedb_http.py`'s own 5 composition sites
+    (`issue_credential`/`issue_credential_inband`/`_control_send`/
+    `audit_query_on_data_plane_host`/`isolated_control_surface`) are
+    removed alongside it: every real issuance point on that peer now
+    returns an already-composed, ready-to-present bearer (`credential_
+    store_postgres.PostgresCredentialStore.issue`, `control_http.py`'s
+    own issue/rotate JSON responses, `ops.py`'s own CLI stdout), so the
+    adapter has nothing left to compose. This flip is a real, load-
+    bearing removal, not a weakening of the check itself -- the scan
+    logic below is unchanged from WP-1's own registration.
     """
     all_findings: dict[str, list[str]] = {}
     for path in _scanned_adapter_files():
         relative_path = str(path.relative_to(REPO_ROOT))
         tree = ast.parse(path.read_text(), filename=str(path))
-        findings = _composition_findings(tree) + _decomposition_findings(tree, relative_path)
+        findings = _composition_findings(tree, relative_path) + _decomposition_findings(tree, relative_path)
         if findings:
             all_findings[relative_path] = findings
 
@@ -765,3 +921,65 @@ def test_c19_adapters_never_compose_or_decompose_the_bearer_secret() -> None:
         "one or more conformance adapters compose or decompose a credential's bearer secret "
         f"(port v1.10 verbatim regulation, D-1(e)): {all_findings!r}"
     )
+
+
+def test_c19_composition_allowlist_has_no_dead_entries() -> None:
+    """裁定 2 (F2/F3, audit finding C): every `_COMPOSITION_ALLOWLIST`
+    entry must suppress a REAL finding -- an entry that matches nothing
+    (the pre-fix state: all 4 entries were dead, `fresh_identifier(
+    'tampered')` never satisfied the old substring-based `has_secret`
+    gate at all) is a bug in this table, not a harmless no-op. Measured
+    directly: run the scanner with the allowlist ignored, then assert
+    every `_COMPOSITION_ALLOWLIST` key names a (relative_path, function)
+    pair that the ignored-allowlist run actually flagged at least once."""
+    findings_by_key: dict[tuple[str, str], int] = {}
+    for path in _scanned_adapter_files():
+        relative_path = str(path.relative_to(REPO_ROOT))
+        tree = ast.parse(path.read_text(), filename=str(path))
+        parents = _build_parent_map(tree)
+        secret_names_by_func = _secret_bound_names(tree)
+
+        def _bound_names_for(node: ast.AST, _parents=parents, _by_func=secret_names_by_func) -> set[str]:
+            current = _parents.get(id(node))
+            while current is not None:
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return _by_func.get(id(current), set())
+                current = _parents.get(id(current))
+            return set()
+
+        for node in ast.walk(tree):
+            matched = False
+            if isinstance(node, ast.JoinedStr):
+                expr_nodes = [v.value for v in node.values if isinstance(v, ast.FormattedValue)]
+                expr_parts = [_text(e) for e in expr_nodes]
+                _, literal_parts = _joinedstr_expr_and_literal_parts(node)
+                if any(_is_id_shaped(p) for p in expr_parts) and any("." in p for p in literal_parts) and len(expr_nodes) >= 2:
+                    matched = True
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                text = _text(node)
+                if _is_id_shaped(text) and "." in text:
+                    matched = True
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join":
+                sep_text = _text(node.func.value)
+                is_dot_sep = "." in sep_text or (isinstance(node.func.value, ast.Constant) and node.func.value.value == ".")
+                if is_dot_sep:
+                    args_text = " ".join(_text(a) for a in node.args)
+                    if _is_id_shaped(args_text):
+                        matched = True
+            if matched:
+                func_name = _enclosing_function_name(node, parents)
+                if func_name is not None:
+                    findings_by_key[(relative_path, func_name)] = findings_by_key.get((relative_path, func_name), 0) + 1
+
+    dead_entries = [key for key in _COMPOSITION_ALLOWLIST if findings_by_key.get(key, 0) == 0]
+    assert not dead_entries, (
+        f"_COMPOSITION_ALLOWLIST entries that suppress no actual finding (dead lines): {dead_entries!r}"
+    )
+    # And the converse direction (常設規律1's own "非空振り" spirit,
+    # applied to this table too): every registered plug's own
+    # `tampered_bearer` genuinely IS flagged when the allowlist is
+    # ignored -- exactly one composition site per plug.
+    for relative_path, function_name in _COMPOSITION_ALLOWLIST:
+        assert findings_by_key.get((relative_path, function_name), 0) >= 1, (
+            f"{relative_path}::{function_name}: allowlisted but the allowlist-ignored scan found nothing there"
+        )

@@ -66,6 +66,7 @@ from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService,
                                         PostgresCredentialRegistry,
                                         _AUDIT_ROLE_ALLOWED_OPERATIONS,
                                         bootstrap_control_credential)
+from mitatedb_api.credential_wire import split_bearer_locator
 from mitatedb_api.errors import AuthorizationError, CapabilityError, ValidationError
 
 _APP_PEPPER = "audit-query-app-pepper-x0000000"
@@ -80,6 +81,16 @@ BASE_URL = "http://mitatedb-audit-query.example.invalid"
 
 def _auth(credential_id: str, secret: str) -> dict[str, str]:
     return {"authorization": f"Bearer {credential_id}.{secret}"}
+
+
+def _bearer_auth(bearer: str) -> dict[str, str]:
+    """Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): for a bearer already
+    composed by a real issue/rotate response (or the ceremony core) --
+    used verbatim, never recomposed via `_auth` above (which is for
+    building a bearer out of two SEPARATE, not-yet-composed halves,
+    still needed by the one test that constructs a synthetic literal
+    credential_id/secret pair)."""
+    return {"authorization": f"Bearer {bearer}"}
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +108,20 @@ def _memory_harness(limits: ControlPlaneLimits | None = None) -> types.SimpleNam
         audit_coalescing_window_ms=DEFAULT_COALESCING_WINDOW_MS,
     )
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    rotated = service.rotate_credential(cid, secret, cid)
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    # Phase 6 WP-3 追補, round 2 (supervisor ruling 2026-09-04,
+    # corrected after empirical finding): `control_auth.
+    # ControlCredentialStore.authenticate` takes the RAW secret only
+    # now (it can also be reached via a real HTTP boundary that always
+    # pre-splits, `tests/test_control_http_unmounted.py`'s own
+    # topology) -- this harness is a direct in-process caller, so it
+    # splits ONCE here, same as the Postgres-backed harness below.
+    secret = bearer
+    rotated = service.rotate_credential(secret, cid)
+    rotated_secret = rotated["secret"]
     return types.SimpleNamespace(
         service=service, backend=backend, control_audit=backend.audit_sink, application_audit=application_audit,
-        control_credential_id=cid, control_credential_secret=rotated["secret"],
+        control_credential_id=cid, control_credential_secret=rotated_secret,
         seed_app_pepper=_APP_PEPPER, audit_reader=audit_reader,
     )
 
@@ -145,11 +165,16 @@ def _postgres_harness(control_platform, *, limits: ControlPlaneLimits | None = N
         audit_coalescing_window_ms=DEFAULT_COALESCING_WINDOW_MS,
     )
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    rotated = service.rotate_credential(cid, secret, cid)
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    # Phase 6 WP-3 追補, round 2 (supervisor ruling 2026-09-04): see the
+    # in-memory harness's own identical comment above -- this Postgres
+    # harness is ALSO a direct in-process caller, so it splits ONCE here.
+    secret = bearer
+    rotated = service.rotate_credential(secret, cid)
+    rotated_secret = rotated["secret"]
     return types.SimpleNamespace(
         service=service, backend=backend, platform=control_platform,
-        control_credential_id=cid, control_credential_secret=rotated["secret"],
+        control_credential_id=cid, control_credential_secret=rotated_secret,
         visibility_lag_ms=visibility_lag_ms, audit_reader=audit_reader,
     )
 
@@ -229,7 +254,7 @@ def _build_harness(kind: str, control_platform=None, **kwargs):
 def test_invalid_cursor_is_validation_failed() -> None:
     h = _memory_harness()
     with pytest.raises(ValidationError):
-        h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"after": "not-a-real-cursor"})
+        h.service.audit_query(h.control_credential_secret, {"after": "not-a-real-cursor"})
 
 
 def test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writes() -> None:
@@ -260,7 +285,7 @@ def test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writ
     # genuinely concurrent cursor paging, not a static upfront snapshot.
     idle_polls = 0
     while not stop.is_set():
-        result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 5, "after": after})
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 5, "after": after})
         events = result["events"]
         if not events:
             idle_polls += 1
@@ -279,7 +304,7 @@ def test_cursor_paging_covers_every_row_without_duplicates_under_concurrent_writ
     for _ in range(50):
         if set(seen) >= written_ids:
             break
-        result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 5, "after": after})
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 5, "after": after})
         events = result["events"]
         if not events:
             time.sleep(0.005)
@@ -319,7 +344,7 @@ def test_ordering_uses_plane_as_a_tiebreaker_not_event_id_alone() -> None:
     h.control_audit._events.append(control_event)  # noqa: SLF001 -- direct fixture injection
     _write_application_audit_row(h, request_id=f"{marker}-application", event_id="ffffffffffffffffffffffffffffffff", recorded_at=tied_at)
 
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000})
+    result = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
     matched = [e for e in result["events"] if e.get("request_id", "").startswith(marker)]
     assert len(matched) == 2, f"expected exactly the 2 probe rows, got {matched!r}"
     assert [e["plane"] for e in matched] == ["application", "control"], (
@@ -357,7 +382,7 @@ def test_cursor_boundary_on_identical_cross_table_event_id_has_no_loss_stall_or_
     after = None
     seen_request_ids: list[str] = []
     for _ in range(6):
-        result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1, "after": after})
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 1, "after": after})
         events = result["events"]
         if not events:
             break
@@ -377,7 +402,7 @@ def test_application_audit_rows_always_read_back_as_plane_application() -> None:
     h = _memory_harness()
     marker = "planederived" + secrets.token_hex(4)
     _write_application_audit_row(h, request_id=marker)
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000})
+    result = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
     matched = [e for e in result["events"] if e.get("request_id") == marker]
     assert len(matched) == 1
     assert matched[0]["plane"] == "application"
@@ -385,7 +410,7 @@ def test_application_audit_rows_always_read_back_as_plane_application() -> None:
     # "plane" field is silently ignored (there is no writable `plane`
     # parameter to accept in the first place) -- the row above still reads
     # back as "application" regardless.
-    still = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"plane": "control", "limit": 1000})
+    still = h.service.audit_query(h.control_credential_secret, {"plane": "control", "limit": 1000})
     still_matched = [e for e in still["events"] if e.get("request_id") == marker]
     assert still_matched and still_matched[0]["plane"] == "application"
 
@@ -404,16 +429,16 @@ def test_in_memory_and_postgres_audit_query_semantics_have_parity(pg) -> None:
     time.sleep(pg.visibility_lag_ms / 1000 + 0.3)
 
     for h in (hm, pg):
-        result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1, "event_classes": ["data_operation"]})
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 1, "event_classes": ["data_operation"]})
         assert len(result["events"]) == 1
         first_cursor = result["events"][0]["cursor"]
-        second = h.service.audit_query(h.control_credential_id, h.control_credential_secret,
+        second = h.service.audit_query(h.control_credential_secret,
                                        {"limit": 1, "event_classes": ["data_operation"], "after": first_cursor})
         assert len(second["events"]) == 1
         assert second["events"][0]["cursor"] != first_cursor
         # after decodes to a real (recorded_at, plane, event_id) triple.
         decode_cursor(first_cursor)
-        empty = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"event_classes": ["no_such_class_at_all"]})
+        empty = h.service.audit_query(h.control_credential_secret, {"event_classes": ["no_such_class_at_all"]})
         assert empty["events"] == []
 
 
@@ -458,7 +483,7 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
         # ("a delayed commit's own row returns on the NEXT PAGE"), not
         # merely PostgreSQL's MVCC (which a blanket re-read conflates
         # with lag-based visibility -- the original form of this test).
-        baseline = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000})
+        baseline = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
         baseline_events = baseline["events"]
         baseline_cursor = baseline_events[-1]["cursor"] if baseline_events else None
 
@@ -480,7 +505,7 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
         writer.start()
         time.sleep(max(0.0, probe_at_s - (time.monotonic() - start)))
         assert writer.is_alive(), "writer already finished before the load-bearing probe point"
-        probe = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000, "after": baseline_cursor})
+        probe = h.service.audit_query(h.control_credential_secret, {"limit": 1000, "after": baseline_cursor})
         assert not any(e.get("request_id") == marker for e in probe["events"]), (
             "the row became visible before its writer transaction committed -- load-bearing assertion"
         )
@@ -495,7 +520,7 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
         after = baseline_cursor
         found = False
         for _ in range(20):
-            page = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1, "after": after})
+            page = h.service.audit_query(h.control_credential_secret, {"limit": 1, "after": after})
             events = page["events"]
             if not events:
                 break
@@ -580,12 +605,22 @@ def test_postgres_visibility_lag_ms_actually_filters_rows_inside_the_window(cont
 
 def test_control_and_audit_credentials_are_accepted_on_audit_query() -> None:
     h = _memory_harness()
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1})
+    result = h.service.audit_query(h.control_credential_secret, {"limit": 1})
     assert "events" in result
 
-    audit_id, audit_secret = h.backend._control_credentials.issue(role="audit")  # noqa: SLF001
-    audit_secret = h.backend._control_credentials.rotate(audit_id, secret=audit_secret)  # noqa: SLF001
-    audit_result = h.service.audit_query(audit_id, audit_secret, {"limit": 1})
+    audit_id, audit_bearer = h.backend._control_credentials.issue(role="audit")  # noqa: SLF001
+    # Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `.issue()` returns a
+    # COMPOSED bearer; the `secret=` kwarg to `.rotate()` below is a RAW
+    # new secret VALUE to set (its own composition precondition rejects a
+    # value already containing "."), so this recovers the raw part before
+    # rotating to it (a degenerate rotate-to-the-same-value, exercising
+    # the rotate mechanism only) -- this is unrelated to the `authenticate`
+    # boundary's own one-bearer-in contract; `rotate`'s `secret=` kwarg
+    # never was, and still is not, an authentication input.
+    _audit_locator_id, audit_raw_secret = split_bearer_locator(audit_bearer)
+    audit_bearer2 = h.backend._control_credentials.rotate(audit_id, secret=audit_raw_secret)  # noqa: SLF001
+    audit_secret = audit_bearer2
+    audit_result = h.service.audit_query(audit_secret, {"limit": 1})
     assert "events" in audit_result
 
 
@@ -597,7 +632,7 @@ def test_application_credential_is_forbidden_on_the_control_host_audit_query() -
     with h.backend.unit_of_work() as work:
         h.backend.issue_credential("fbdapp", "runtime", credential_id="crd_fbd1", secret="app-secret-1234567890", work=work)
     with pytest.raises(AuthorizationError):
-        h.service.audit_query("crd_fbd1", "app-secret-1234567890", {"limit": 1})
+        h.service.audit_query("crd_fbd1.app-secret-1234567890", {"limit": 1})
 
 
 def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_404() -> None:
@@ -608,20 +643,25 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     service = ControlPlaneService(backend, limits=_GENEROUS_LIMITS)  # no audit_reader
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    rotated = service.rotate_credential(cid, secret, cid)
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
+    rotated = service.rotate_credential(secret, cid)
     secret = rotated["secret"]
-
     with pytest.raises(CapabilityError):
-        service.audit_query(cid, secret, {"limit": 1})
+        service.audit_query(secret, {"limit": 1})
 
-    document = service.control_capabilities(cid, secret)
+    document = service.control_capabilities(secret)
     assert document["capabilities"]["audit_query"] == {"status": "unavailable"}
 
-    audit_id, audit_secret = backend._control_credentials.issue(role="audit")  # noqa: SLF001
-    audit_secret = backend._control_credentials.rotate(audit_id, secret=audit_secret)  # noqa: SLF001
+    audit_id, audit_bearer = backend._control_credentials.issue(role="audit")  # noqa: SLF001
+    # `rotate`'s own `secret=` kwarg is a RAW new secret VALUE to set, not
+    # an authentication input -- recover the raw part before rotating to
+    # it (degenerate rotate-to-the-same-value, exercising the mechanism).
+    _audit_locator_id, audit_raw_secret = split_bearer_locator(audit_bearer)
+    audit_bearer2 = backend._control_credentials.rotate(audit_id, secret=audit_raw_secret)  # noqa: SLF001
+    audit_secret = audit_bearer2
     with pytest.raises(CapabilityError) as excinfo:
-        service.audit_query(audit_id, audit_secret, {"limit": 1})
+        service.audit_query(audit_secret, {"limit": 1})
     assert not isinstance(excinfo.value, AuthorizationError)
 
 
@@ -1526,9 +1566,10 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
         # `bootstrap_control_credential` always issues a fresh must_rotate=
         # True credential (`control_auth.ControlCredentialStore.issue`'s own
         # default) -- deliberately never rotated here.
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    document = service.control_capabilities(cid, secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.5.0"
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
+    document = service.control_capabilities(secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
+    assert document["contract_version"] == "1.6.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -1557,8 +1598,8 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     ALLOWED_OPERATIONS` member, so that branch's own condition is false
     regardless of role, and this omission does not weaken the proof."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
-    assert document["contract_version"] == "1.5.0"
+    document = h.service.control_capabilities(h.control_credential_secret)
+    assert document["contract_version"] == "1.6.0"
 
     fresh_backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with fresh_backend.unit_of_work() as work:
@@ -1566,10 +1607,11 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
         # True credential -- deliberately never rotated here (same
         # construction as `test_control_capabilities_operation_has_no_
         # reachable_deny_branch` above).
-        fresh_cid, fresh_secret = bootstrap_control_credential(fresh_backend.control_credential_store, fresh_backend.append_audit, work=work)
+        fresh_cid, fresh_bearer = bootstrap_control_credential(fresh_backend.control_credential_store, fresh_backend.append_audit, work=work)
+    fresh_secret = fresh_bearer
     fresh_service = ControlPlaneService(fresh_backend, limits=_GENEROUS_LIMITS)
-    fresh_document = fresh_service.control_capabilities(fresh_cid, fresh_secret)  # must_rotate=True path
-    assert fresh_document["contract_version"] == "1.5.0"
+    fresh_document = fresh_service.control_capabilities(fresh_secret)  # must_rotate=True path
+    assert fresh_document["contract_version"] == "1.6.0"
 
     durable_operations = {event.operation for event in h.control_audit.snapshot()}
     durable_operations |= {event.operation for event in fresh_backend.audit_sink.snapshot()}
@@ -1604,7 +1646,7 @@ def test_authenticate_and_assert_active_denials_are_durable_not_excluded() -> No
     store.provision_application("n_word_probe_app")
 
     with pytest.raises(Exception):
-        store.authenticate("no-such-credential-" + secrets.token_hex(4), "wrong-secret")
+        store.authenticate("no-such-credential-" + secrets.token_hex(4) + ".wrong-secret")
     bogus_principal = Principal("n_word_probe_app", "no-such-credential-" + secrets.token_hex(4), None)
     with pytest.raises(Exception):
         store.assert_active(bogus_principal)
@@ -1628,7 +1670,7 @@ def test_authenticate_and_assert_active_denials_are_durable_not_excluded() -> No
     real_credential_id, real_secret = store.issue(real_app, "runtime")
     store.disable(real_credential_id)
     with pytest.raises(Exception):
-        store.authenticate(real_credential_id, real_secret)  # -> auth.py's `if authenticated:` branch (a real, known, but disabled credential)
+        store.authenticate(real_secret)  # -> auth.py's `if authenticated:` branch (a real, known, but disabled credential)
     real_principal = Principal(real_app, real_credential_id, None)
     with pytest.raises(Exception):
         store.assert_active(real_principal)
@@ -1672,6 +1714,7 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
     from mitatedb_api.audit_dispatch import AuditRouter
     from mitatedb_api.application_audit import PostgresApplicationAuditSink
     from mitatedb_api.credential_store_postgres import PostgresCredentialStore
+    from mitatedb_api.credential_wire import split_bearer_locator
 
     h = _postgres_harness(control_platform, audit_statement_timeout_ms=200, audit_idle_timeout_ms=200)
     try:
@@ -1680,7 +1723,7 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
         pg_store = PostgresCredentialStore(control_platform.api_dsn, pepper=_APP_PEPPER, schema=control_platform.registry_schema, audit_router=pg_router)
 
         with pytest.raises(Exception):
-            pg_store.authenticate("no-such-credential-pg-" + secrets.token_hex(4), "wrong-secret")
+            pg_store.authenticate("no-such-credential-pg-" + secrets.token_hex(4) + ".wrong-secret")
         with pytest.raises(Exception):
             pg_store.assert_active(types.SimpleNamespace(application_id=None, credential_id="no-such-credential-pg-" + secrets.token_hex(4), role=None))
 
@@ -1696,16 +1739,26 @@ def test_postgres_authenticate_and_assert_active_denials_are_durable_not_exclude
         # registry_schema`), then the credential is DISABLED before
         # authenticating with its own still-correct secret.
         real_app_pg = "n_word_real_app_pg_" + secrets.token_hex(4)
-        h.service.register_application(h.control_credential_id, h.control_credential_secret, real_app_pg)
-        h.service.set_application_enabled(h.control_credential_id, h.control_credential_secret, real_app_pg, True)
-        issued = h.service.issue_credential(h.control_credential_id, h.control_credential_secret, real_app_pg, "runtime")
-        real_credential_id_pg, real_secret_pg = issued["credential_id"], issued["secret"]
-        h.service.set_credential_enabled(h.control_credential_id, h.control_credential_secret, real_credential_id_pg, False)
+        h.service.register_application(h.control_credential_secret, real_app_pg)
+        h.service.set_application_enabled(h.control_credential_secret, real_app_pg, True)
+        issued = h.service.issue_credential(h.control_credential_secret, real_app_pg, "runtime")
+        # Phase 6 WP-3 追補 (brief item A): `issued["secret"]` is now the
+        # COMPOSED bearer (`ControlPlaneService.issue_credential`'s own
+        # response composes it) -- `PostgresCredentialStore.authenticate`
+        # below is called DIRECTLY (bypassing the real HTTP boundary,
+        # which never splits the bearer itself in the first place, per
+        # Phase 6 WP-3 差し戻し 最終ラウンド 裁定 1 -- the store's own
+        # `authenticate` is the real receiving boundary that splits it),
+        # so this test recovers the raw secret itself, mirroring `test_
+        # postgres.py`'s own `_PostgresCredentialHarness.issue` wrapper.
+        real_credential_id_pg, real_bearer_pg = issued["credential_id"], issued["secret"]
+        real_secret_pg = real_bearer_pg
+        h.service.set_credential_enabled(h.control_credential_secret, real_credential_id_pg, False)
         with pytest.raises(Exception):
-            pg_store.authenticate(real_credential_id_pg, real_secret_pg)  # -> credential_store_postgres.py:445's `if not valid:` branch
+            pg_store.authenticate(real_secret_pg)  # -> credential_store_postgres.py:445's `if not valid:` branch
 
         time.sleep(h.visibility_lag_ms / 1000 + 0.5)
-        result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 200})
+        result = h.service.audit_query(h.control_credential_secret, {"limit": 200})
         events = result["events"]
         assert events, "the postgres exercise above must have produced at least one durable row (常設規律1)"
         observed_operations = {e["operation"] for e in events}
@@ -1741,7 +1794,7 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
     are equivalent for `event_class`, which has no `name_assign`-position
     IfExp/Constant sites in this package)."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     declared = set(document["capabilities"]["audit_query"]["event_classes"])
     assert declared == DECLARED_AUDIT_EVENT_CLASSES
 
@@ -1766,7 +1819,7 @@ def test_declared_operations_cover_every_emittable_operation() -> None:
     == set()` equality as `event_class` above, now load-bearing (this WP
     flips `contract_version` to 1.5.0 in the same commit)."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     declared = set(document["capabilities"]["audit_query"]["operations"])
     assert declared == DECLARED_AUDIT_OPERATIONS
 
@@ -1786,7 +1839,7 @@ def test_declared_operations_cover_every_emittable_operation() -> None:
 def test_declared_target_kinds_cover_every_emittable_target_kind() -> None:
     """P4-D16 v3(e) for `target_kind` (design D-1)."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     declared = set(document["capabilities"]["audit_query"]["target_kinds"])
     assert declared == DECLARED_AUDIT_TARGET_KINDS
 
@@ -1905,7 +1958,7 @@ async def _async_test_audit_query_declares_operations_and_target_kinds_over_http
     h, app = _memory_control_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
-        response = await client.get("/control/v1/capabilities", headers=_auth(h.control_credential_id, h.control_credential_secret))
+        response = await client.get("/control/v1/capabilities", headers=_bearer_auth(h.control_credential_secret))
         assert response.status_code == 200
         document = response.json()
         declared = document["capabilities"]["audit_query"]
@@ -1930,119 +1983,163 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 #
 # Phase 6 WP-0 (design D-4(c), L5-5/L5-6): the single-file/named-tuple
 # mechanism this section describes is generalized below into the
-# `_ISOMORPHIC_TARGETS` (relative path, symbol name) table, which now also
-# covers `src/mitatedb_api/main.py::_optional_float` and `tests/test_http.
-# py`'s byte-identical-contract test function, not only this file's own 11
-# scanner-support helpers -- see that table's own comment for the full
-# rationale.
+# `_ISOMORPHIC_TARGETS` (r2db relative path, MitateDB relative path,
+# symbol name) table, which now also covers `src/mitatedb_api/main.py::
+# _optional_float` and `tests/test_http.py`'s byte-identical-contract test
+# function, not only this file's own 11 scanner-support helpers -- see
+# that table's own comment for the full rationale.
+#
+# Phase 6 WP-3 追補 (isomorphism table extension, supervisor ruling
+# 2026-09-04): the table widens from a (relative path, symbol name) PAIR
+# to a (r2db relative path, MitateDB relative path, symbol name) TRIPLE --
+# the earlier `{package}` template slot only ever solved the ONE row whose
+# two peers' source trees differ by package name alone (`main.py`); it had
+# no way to name a row whose two peers keep the same symbol under
+# DIFFERENT relative paths (`compose_bearer_locator`/`split_bearer_
+# locator` live in `src/r2db_api/auth.py` on r2db-api, `src/mitatedb_api/
+# credential_wire.py` on this peer -- a real, intentional per-peer module
+# split, not a naming accident). The 15 pre-existing rows migrate
+# MECHANICALLY: every row whose path was peer-name-independent repeats
+# that same literal path in both slots; the `main.py` row's `{package}`
+# template resolves to its two now-literal paths.
 # ===========================================================================
 
 
 # ---------------------------------------------------------------------------
 # Phase 6 WP-0 (design D-4(c), work order §4 WP-0 変更対象 C, L5-5/L5-6):
 # the mechanism above (WP-3, "1 file + a tuple of helper names") is
-# generalized into a (relative path, symbol name) TABLE -- the pair-per-row
-# form is the object that now defines the full set of peer-local symbols
-# this repository pins isomorphic, rather than one hardcoded sibling file.
-# The 11 rows below are the WP-2/WP-3 helpers, carried over UNCHANGED (not
-# one dropped); 4 rows are new this WP: `main.py::_optional_float` and
-# `tests/test_http.py`'s byte-identical-contract test function (design
-# D-4(a)/(b)), plus the mechanism's OWN two new pieces of test-support code
-# -- `_isomorphic_symbol_source` (the row resolver below) and this table's
-# own pin test -- added by supervisor review ruling (2026-09-04) so the
-# generalized mechanism pins itself the same way it pins everything else it
-# was built to check, rather than being exempt from its own guarantee.
-# `{package}` is a template slot resolved per side (this peer's own package
-# name on the self side, the sibling's on the sibling side) -- the ONLY row
-# that needs it is the `main.py` one, since the two peers' package names
-# differ but both source trees are `src/<package>/main.py`; every other
-# relative path here is peer-name-independent (`tests/test_audit_query.py`,
-# `tests/test_http.py` name the same file in both peer checkouts). This
-# tuple's own literal text is peer-name-free, so it reads identically in
-# r2db-api's own copy of this file.
+# generalized below into a table -- the row form is the object that now
+# defines the full set of peer-local symbols this repository pins
+# isomorphic, rather than one hardcoded sibling file. The 11 rows below
+# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 4
+# rows are the Phase 6 WP-0 additions (`main.py::_optional_float`, `tests/
+# test_http.py`'s byte-identical-contract test function, plus the
+# mechanism's OWN two pieces of test-support code -- `_isomorphic_symbol_
+# source`, the row resolver below, and this table's own pin test -- added
+# by supervisor review ruling 2026-09-04 so the generalized mechanism pins
+# itself the same way it pins everything else it was built to check,
+# rather than being exempt from its own guarantee). 3 rows are the Phase 6
+# WP-3 追補 additions (supervisor ruling 2026-09-04): `compose_bearer_
+# locator`/`split_bearer_locator` (contract 1.6.0 subordinate ruling 11
+# item 1's shared bearer-locator realization, WP-2 on r2db-api / WP-3 追補
+# on this peer), and the unconditional-`compare_digest` timing-pin test
+# (coordinator item 7(i)) -- each peer's 4 `authenticate` methods live
+# under DIFFERENT file/class names, so that test's own per-peer {filename:
+# {class names}} map is kept OUTSIDE the pinned function body (module-level
+# `_TIMING_PIN_TARGETS` in `tests/test_control_plane_store.py`, not
+# isomorphism-checked) precisely so the pinned function ITSELF stays
+# byte-identical after normalization. This tuple's own literal text is
+# peer-name-free (both path slots are now literal per-peer paths, no
+# `{package}` template survives), so it reads identically in r2db-api's
+# own copy of this file.
 # ---------------------------------------------------------------------------
 
-_ISOMORPHIC_TARGETS: tuple[tuple[str, str], ...] = (
-    ("tests/test_audit_query.py", "_iter_src_files"),
-    ("tests/test_audit_query.py", "_literal_leaves"),
-    ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
-    ("tests/test_audit_query.py", "_is_field_assignment_target"),
-    ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
-    ("tests/test_audit_query.py", "_analyze_field_scope"),
-    ("tests/test_audit_query.py", "_FieldForwardResolver"),
-    ("tests/test_audit_query.py", "_scan_source_field_sites"),
+_ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_src_files"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_literal_leaves"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_is_field_assignment_target"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_collect_direct_shadow_names"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_analyze_field_scope"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_FieldForwardResolver"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_scan_source_field_sites"),
     # WP-3 fix-round L-4 (Opus review): completion condition 17 names the
     # exclusion-list validators ((i)/(ii') judgment) as part of this same
     # isomorphism check -- omitting them let a peer change (ii')'s own
     # judgment (e.g. dropping the safe-forward id check) go undetected.
-    ("tests/test_audit_query.py", "_iter_field_definitions"),
-    ("tests/test_audit_query.py", "_field_positional_definitions"),
-    ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
     # Phase 6 WP-0 additions (design D-4(a)/(b)):
-    ("src/{package}/main.py", "_optional_float"),
-    ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
+    ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
     # Phase 6 WP-0 additions, round 2 (supervisor review ruling
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
-    ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+    # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
+    # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
+    # coordinator item 7(i)'s timing-pin test):
+    ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
+    ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
+    (
+        "tests/test_control_plane_store.py",
+        "tests/test_control_plane_store.py",
+        "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_15_rows() -> None:
-    """WP-0 completion condition 8: a bare `len(_ISOMORPHIC_TARGETS) == 15`
-    check would not catch a row silently DROPPED and a different,
-    coincidentally-same-length row added in its place -- only pinning the
-    table's own full CONTENT (not merely its length) catches that. One-time
-    human fixation, same character as Phase 5's "走査対象フィールド集合を
-    pin する" test -- a future WP that adds/removes a row edits this
-    assertion deliberately, not by accident.
+def test_isomorphic_target_table_is_pinned_to_its_current_18_rows() -> None:
+    """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
+    ruling 2026-09-04): a bare `len(_ISOMORPHIC_TARGETS) == 18` check
+    would not catch a row silently DROPPED and a different, coincidentally
+    -same-length row added in its place -- only pinning the table's own
+    full CONTENT (not merely its length) catches that. One-time human
+    fixation, same character as Phase 5's "走査対象フィールド集合を pin
+    する" test -- a future WP that adds/removes a row edits this assertion
+    deliberately, not by accident.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
     the table fixes its own driving code isomorphic too, rather than
     treating the mechanism as exempt from the guarantee it enforces on
     every other row. This is not circular: the assertion below is a NAME
-    pinned as data (a 2-tuple of strings), evaluated once at call time
+    pinned as data (a 3-tuple of strings), evaluated once at call time
     against the already-fully-defined `_ISOMORPHIC_TARGETS` above -- it
     does not recurse into calling itself."""
     assert _ISOMORPHIC_TARGETS == (
-        ("tests/test_audit_query.py", "_iter_src_files"),
-        ("tests/test_audit_query.py", "_literal_leaves"),
-        ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
-        ("tests/test_audit_query.py", "_is_field_assignment_target"),
-        ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
-        ("tests/test_audit_query.py", "_analyze_field_scope"),
-        ("tests/test_audit_query.py", "_FieldForwardResolver"),
-        ("tests/test_audit_query.py", "_scan_source_field_sites"),
-        ("tests/test_audit_query.py", "_iter_field_definitions"),
-        ("tests/test_audit_query.py", "_field_positional_definitions"),
-        ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
-        ("src/{package}/main.py", "_optional_float"),
-        ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
-        ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_src_files"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_literal_leaves"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_is_field_assignment_target"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_collect_direct_shadow_names"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_analyze_field_scope"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_FieldForwardResolver"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_scan_source_field_sites"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
+        ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+        ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
+        ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
+        (
+            "tests/test_control_plane_store.py",
+            "tests/test_control_plane_store.py",
+            "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 15
+    assert len(_ISOMORPHIC_TARGETS) == 18
 
 
-def _isomorphic_symbol_source(peer_root: Path, relative_path_template: str, package: str, symbol: str) -> str | None:
-    """Resolves ONE `_ISOMORPHIC_TARGETS` row against `peer_root` (either
-    this peer's own root or the sibling's) via a plain TEXT read + `ast.
-    parse` -- used for BOTH sides now (WP-0's own L5-6 fix: previously this
-    peer's own side used `inspect.getsource` -- which includes any
-    decorator line -- while the sibling side used `ast.get_source_segment`
-    -- whose `FunctionDef.lineno` starts at the `def`/`class` keyword,
-    never the decorator, per CPython's own AST docs -- so a future
-    decorator on either side alone would have flipped this test red/green
-    on THAT ASYMMETRY, not on an actual implementation difference. Only
-    top-level (`tree.body`) definitions are matched, same restriction the
-    WP-2/WP-3 mechanism already applied -- deliberately not `ast.walk`,
-    which would also match a same-named symbol nested inside an unrelated
-    class/function and silently diff the wrong one. Returns `None` if the
-    file does not exist or does not define `symbol` at module level (the
-    caller decides what that means for each side)."""
-    path = peer_root / relative_path_template.format(package=package)
+def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
+    """Resolves ONE `_ISOMORPHIC_TARGETS` row's own per-side relative path
+    against `peer_root` (either this peer's own root or the sibling's) via
+    a plain TEXT read + `ast.parse` -- used for BOTH sides now (WP-0's own
+    L5-6 fix: previously this peer's own side used `inspect.getsource` --
+    which includes any decorator line -- while the sibling side used
+    `ast.get_source_segment` -- whose `FunctionDef.lineno` starts at the
+    `def`/`class` keyword, never the decorator, per CPython's own AST docs
+    -- so a future decorator on either side alone would have flipped this
+    test red/green on THAT ASYMMETRY, not on an actual implementation
+    difference. Only top-level (`tree.body`) definitions are matched, same
+    restriction the WP-2/WP-3 mechanism already applied -- deliberately
+    not `ast.walk`, which would also match a same-named symbol nested
+    inside an unrelated class/function and silently diff the wrong one.
+    Returns `None` if the file does not exist or does not define `symbol`
+    at module level (the caller decides what that means for each side).
+
+    Phase 6 WP-3 追補 (supervisor ruling 2026-09-04): takes the row's own
+    already-resolved relative path directly -- no `package`/`{package}`
+    template parameter -- now that `_ISOMORPHIC_TARGETS` carries one
+    literal path per side (a (r2db path, MitateDB path, symbol) triple)
+    rather than a single peer-name-independent path plus a template slot
+    only one row ever needed."""
+    path = peer_root / relative_path
     if not path.exists():
         return None
     source = path.read_text()
@@ -2058,20 +2155,22 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path_template: str, pack
 
 def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     """常設規律6: diffs this peer's own `_ISOMORPHIC_TARGETS` symbols
-    against r2db-api's own same-named symbols at the same relative paths,
-    after normalizing peer package name / trailing whitespace / blank-line
-    runs -- proving the two independently (never shared-module)
-    implementations agree, without sharing code between peers.
+    against r2db-api's own same-named symbols at each row's own r2db-side
+    relative path, after normalizing peer package name / the symbol's own
+    leading docstring / trailing whitespace / blank-line runs -- proving
+    the two independently (never shared-module) implementations agree,
+    without sharing code between peers.
 
     Table-driven generalization of the WP-2/WP-3 mechanism (design D-4(c),
     L5-5/L5-6): the prior form read one hardcoded sibling file
     (`tests/test_audit_query.py`) and diffed 11 named helpers found inside
-    it; `_ISOMORPHIC_TARGETS` above widens that to 15 rows spanning THREE
-    files (`tests/test_audit_query.py`, `src/<package>/main.py`,
-    `tests/test_http.py`), so this WP's own new same-named symbols
-    (`_optional_float`, the byte-identical-contract test function) fall
-    under the SAME peer-symmetry guarantee `_optional_float` (a product
-    file, not a test-support helper) would otherwise have had none of.
+    it; `_ISOMORPHIC_TARGETS` above widens that to 18 rows spanning FOUR
+    files per side (`tests/test_audit_query.py`, `src/<package>/main.py`,
+    `tests/test_http.py`, and -- Phase 6 WP-3 追補 -- the bearer-locator
+    module (`credential_wire.py` on this peer, `auth.py` on r2db-api) and
+    `tests/test_control_plane_store.py`), so each WP's own new same-named
+    symbols fall under the SAME peer-symmetry guarantee a product file
+    (not just a test-support helper) would otherwise have had none of.
 
     The sibling side is read as TEXT from its real file path (never
     `importlib.import_module` -- r2db-api's own package name is
@@ -2085,26 +2184,76 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     accidentally make this a self-comparison."""
     import re
 
-    def _normalize(source: str, *, package: str) -> str:
-        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) this
-        peer's own package name (substituted for a neutral placeholder),
-        (b) TRAILING whitespace at the end of each line, and (c) the
-        number of consecutive blank lines (collapsed to none) -- NEVER
-        leading indentation and NEVER in-line token spacing. The PRIOR
-        form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
-        spaces/tabs ANYWHERE, including a line's own leading indentation --
-        which made a nesting-depth-only mutation (moving a branch one
-        `if`/`else` level deeper, or shallower, with the exact same token
+    def _strip_leading_docstring(source: str) -> str:
+        """Phase 6 WP-3 追補 (isomorphism table extension, supervisor
+        ruling 2026-09-04): removes the function/class body's own leading
+        docstring (a bare `Expr(Constant(str))` as the first body
+        statement) BEFORE comparison -- prose is not shape, and the two
+        peers' own docstrings for the same symbol legitimately differ (one
+        names itself "this peer's own X", the other "r2db-api's own X";
+        see e.g. `compose_bearer_locator`'s two docstrings). Located via
+        `ast` (the docstring statement's own `lineno`/`end_lineno` against
+        THIS already-extracted, syntactically self-contained segment),
+        then deleted as TEXT -- never `ast.unparse`, which would also
+        reformat everything else the docstring did not touch (quote
+        style, line wrapping, trailing commas) and so could paper over a
+        real shape difference this comparison exists to catch. A symbol
+        with no leading docstring is returned unchanged."""
+        tree = _ast.parse(source)
+        target = tree.body[0]
+        body = getattr(target, "body", None)
+        if not body:
+            return source
+        first = body[0]
+        if not (isinstance(first, _ast.Expr) and isinstance(first.value, _ast.Constant) and isinstance(first.value.value, str)):
+            return source
+        lines = source.splitlines(keepends=True)
+        del lines[first.lineno - 1 : first.end_lineno]
+        return "".join(lines)
+
+    def _normalize(source: str) -> str:
+        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) the
+        symbol's own leading docstring (dropped entirely -- WP-3 追補,
+        supervisor ruling 2026-09-04), (b) BOTH peers' own package names
+        (each substituted for the SAME neutral placeholder), (c) TRAILING
+        whitespace at the end of each line, and (d) the number of
+        consecutive blank lines (collapsed to none) -- NEVER leading
+        indentation and NEVER in-line token spacing. The PRIOR form
+        (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of spaces/
+        tabs ANYWHERE, including a line's own leading indentation -- which
+        made a nesting-depth-only mutation (moving a branch one `if`/
+        `else` level deeper, or shallower, with the exact same token
         sequence and no operator/condition change at all) invisible to
         this comparison: Python's own semantics are indentation-sensitive,
         so an indentation-only edit is a REAL logic change this test must
         catch, not whitespace noise to discard. WP-0 drops the separate
         `peer_module` substitution the WP-2/WP-3 form also took: none of
-        the 15 target symbols' own source text (verified when this table
-        was assembled) references either peer's test-module name at all,
-        only (occasionally) its own package name, so a second substitution
-        parameter that never fires is dead generality, not a real need."""
-        text = source.replace(package, "<PEER_PACKAGE>")
+        the target symbols' own source text (verified when this table was
+        assembled) references either peer's test-module name at all, only
+        (occasionally) its own package name, so a second substitution
+        parameter that never fires is dead generality, not a real need.
+
+        WP-3 追補 round 2 (empirical finding, supervisor ruling
+        2026-09-04): switched from a single "this side's own package
+        name" substitution to BOTH known package names, symmetrically, on
+        EITHER side. A one-name-per-side substitution worked fine while
+        every pinned symbol's own text mentioned at most its OWN peer's
+        package name -- but this WP's new `_ISOMORPHIC_TARGETS` rows for
+        `compose_bearer_locator`/`split_bearer_locator`/the main.py row
+        each carry BOTH peers' package names as literal path DATA in the
+        SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
+        mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
+        pinned_to_its_current_18_rows` literally asserts that whole table
+        -- so its own body mentions both names too. A single-name
+        substitution leaves the OTHER peer's name untouched differently
+        on each side (r2db's own normalization leaves "mitatedb_api"
+        alone, MitateDB-api's own leaves "r2db_api" alone), so two
+        raw-identical texts would normalize to two DIFFERENT strings --
+        a false mismatch this fix removes, without weakening the check
+        (both substitutions still collapse to the exact same placeholder,
+        so a REAL difference elsewhere in the text is still caught)."""
+        text = _strip_leading_docstring(source)
+        text = text.replace("r2db_api", "<PEER_PACKAGE>").replace("mitatedb_api", "<PEER_PACKAGE>")
         text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
         text = re.sub(r"\n\s*\n+", "\n", text)
         return text.strip()
@@ -2115,26 +2264,26 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     assert "MitateDB-api" not in sibling_root.parts, f"sibling root must never resolve back into MitateDB-api: {sibling_root}"
 
     mismatches: list[str] = []
-    for relative_path_template, symbol in _ISOMORPHIC_TARGETS:
-        self_src = _isomorphic_symbol_source(self_root, relative_path_template, "mitatedb_api", symbol)
+    for sibling_relative_path, self_relative_path, symbol in _ISOMORPHIC_TARGETS:
+        self_src = _isomorphic_symbol_source(self_root, self_relative_path, symbol)
         if self_src is None:
             raise AssertionError(
                 f"this peer's own table row does not resolve against its own tree -- a table bug, not a sibling "
-                f"mismatch: {relative_path_template}::{symbol}"
+                f"mismatch: {self_relative_path}::{symbol}"
             )
-        sibling_src = _isomorphic_symbol_source(sibling_root, relative_path_template, "r2db_api", symbol)
+        sibling_src = _isomorphic_symbol_source(sibling_root, sibling_relative_path, symbol)
         if sibling_src is None:
-            mismatches.append(f"{relative_path_template}::{symbol}")  # not (yet) present on the sibling side
+            mismatches.append(f"{sibling_relative_path}::{symbol}")  # not (yet) present on the sibling side
             continue
-        if _normalize(self_src, package="mitatedb_api") != _normalize(sibling_src, package="r2db_api"):
-            mismatches.append(f"{relative_path_template}::{symbol}")
+        if _normalize(self_src) != _normalize(sibling_src):
+            mismatches.append(f"{sibling_relative_path}::{symbol}")
     assert not mismatches, f"peer-local symbol(s) not isomorphic after normalization (or missing on the sibling side): {mismatches!r}"
 
 
 def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(control_platform) -> None:
     h = _postgres_harness(control_platform, audit_statement_timeout_ms=3_000, audit_idle_timeout_ms=4_000)
     try:
-        document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+        document = h.service.control_capabilities(h.control_credential_secret)
         assert document["capabilities"]["audit_query"]["visibility_lag_ms"] == 3_000 + 4_000 + 1_000
     finally:
         _cleanup_postgres(control_platform)
@@ -2142,7 +2291,7 @@ def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(control_pla
 
 def test_in_memory_visibility_lag_ms_is_zero_by_construction() -> None:
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     assert document["capabilities"]["audit_query"]["visibility_lag_ms"] == 0
 
 
@@ -2153,7 +2302,7 @@ def test_declared_coalescing_window_ms_matches_the_single_source_constant() -> N
     own default falls back to -- via `audit_query.DEFAULT_COALESCING_
     WINDOW_MS`, never a second, independently-maintained literal."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     assert document["capabilities"]["audit_query"]["coalescing_window_ms"] == int(DEFAULT_DENIAL_COALESCE_WINDOW_S * 1000)
     assert DEFAULT_COALESCING_WINDOW_MS == int(DEFAULT_DENIAL_COALESCE_WINDOW_S * 1000)
 
@@ -2169,7 +2318,7 @@ def test_coalesced_and_alert_rows_never_carry_a_literal_count_of_0_or_1() -> Non
     assert coalesced_count(2) == 2
     h = _memory_harness()
     _write_application_audit_row(h, request_id="countnone", count=None)
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000})
+    result = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
     matched = [e for e in result["events"] if e.get("request_id") == "countnone"]
     assert len(matched) == 1
     assert "count" not in matched[0]
@@ -2181,7 +2330,7 @@ def test_forbidden_fields_never_appear_as_keys_or_reusable_secret_values() -> No
     `private_key`/`sql`/`row_value` as keys."""
     h = _memory_harness()
     _write_application_audit_row(h, request_id="forbiddenprobe")
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1000})
+    result = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
     forbidden = {"credential", "token", "password", "secret", "private_key", "sql", "row_value"}
     for event in result["events"]:
         assert not (forbidden & set(event)), f"forbidden field key present: {event!r}"
@@ -2219,7 +2368,7 @@ def test_omitted_limit_applies_the_declared_default_limit_not_the_full_set() -> 
     for i in range(total_written):
         _write_application_audit_row(h, request_id=f"{marker}-{i}", event_id=uuid.uuid4().hex)
 
-    result = h.service.audit_query(h.control_credential_id, h.control_credential_secret, {})
+    result = h.service.audit_query(h.control_credential_secret, {})
     assert len(result["events"]) == 100, (
         f"omitting 'limit' must return exactly 100 events when more are available, got {len(result['events'])}"
     )
@@ -2233,10 +2382,10 @@ def test_audit_query_over_its_own_window_is_limit_exceeded_with_limit_class_audi
     from mitatedb_api.errors import ResourceLimitError
     h = _memory_harness(limits=ControlPlaneLimits(
         applications=50, credentials_per_application=10, control_requests_per_minute=200, audit_requests_per_minute=2))
-    h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1})
-    h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1})
+    h.service.audit_query(h.control_credential_secret, {"limit": 1})
+    h.service.audit_query(h.control_credential_secret, {"limit": 1})
     with pytest.raises(ResourceLimitError) as excinfo:
-        h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1})
+        h.service.audit_query(h.control_credential_secret, {"limit": 1})
     assert excinfo.value.details["limit_class"] == "audit_requests_per_minute"
 
 
@@ -2260,12 +2409,12 @@ def test_audit_query_does_not_consume_the_control_requests_per_minute_window() -
     from mitatedb_api.errors import ResourceLimitError
     h = _memory_harness(limits=_TIGHT_CONTROL_WINDOW)
     for _ in range(200):
-        h.service.audit_query(h.control_credential_id, h.control_credential_secret, {"limit": 1})
+        h.service.audit_query(h.control_credential_secret, {"limit": 1})
     successful = 0
     exceeded = False
     for _ in range(_TIGHT_CONTROL_WINDOW.control_requests_per_minute + 5):
         try:
-            h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+            h.service.control_capabilities(h.control_credential_secret)
             successful += 1
         except ResourceLimitError as exc:
             assert exc.details["limit_class"] == "control_requests_per_minute"
@@ -2284,7 +2433,7 @@ def test_audit_query_does_not_consume_the_control_requests_per_minute_window() -
 
 def test_audit_requests_per_minute_is_declared_enforced_in_control_capabilities() -> None:
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
+    document = h.service.control_capabilities(h.control_credential_secret)
     assert document["limits"]["audit_requests_per_minute"] == _GENEROUS_LIMITS.audit_requests_per_minute
     assert document["limit_enforcement"]["audit_requests_per_minute"] == "enforced"
 
@@ -2299,8 +2448,8 @@ def test_control_capabilities_declares_contract_version_1_5_0() -> None:
     1.5.0 in the same commit as the `operations`/`target_kinds`
     declaration keys (flip and behavior land together, never separately)."""
     h = _memory_harness()
-    document = h.service.control_capabilities(h.control_credential_id, h.control_credential_secret)
-    assert document["contract_version"] == "1.5.0"
+    document = h.service.control_capabilities(h.control_credential_secret)
+    assert document["contract_version"] == "1.6.0"
 
 
 # ---------------------------------------------------------------------------
@@ -2325,7 +2474,7 @@ async def _async_test_control_host_serves_both_audit_query_paths_with_one_handle
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
-        headers = _auth(h.control_credential_id, h.control_credential_secret)
+        headers = _bearer_auth(h.control_credential_secret)
         canonical = await client.post("/control/v1/audit/query", headers=headers, json={"limit": 1000})
         alias = await client.post("/v1/audit/query", headers=headers, json={"limit": 1000})
         assert canonical.status_code == alias.status_code == 200
@@ -2359,7 +2508,7 @@ async def _async_test_audit_query_wire_calls_never_consume_the_control_requests_
     h = _memory_harness(limits=limits)
     app = create_control_app(h.service, request_bytes_limit=1_048_576)
     transport = httpx.ASGITransport(app=app)
-    headers = _auth(h.control_credential_id, h.control_credential_secret)
+    headers = _bearer_auth(h.control_credential_secret)
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
         for path in ("/control/v1/audit/query", "/v1/audit/query"):
             for _ in range(50):

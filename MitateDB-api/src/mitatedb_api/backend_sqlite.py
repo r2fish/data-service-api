@@ -16,6 +16,7 @@ import sqlite3
 
 from .backend import SQL_OPERATOR_TOKENS
 from .errors import ConflictError, NotFoundError, ValidationError
+from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
 
 # R-3 (design v1.1, WP-0 m-7): this set is backend-specific, unlike the
@@ -77,6 +78,18 @@ class SQLiteBackend:
         # storage IS durable across restarts (see that module's own
         # comment).
         self._schema_revision = 0
+        # Phase 6 WP-3 (design D-3, §1.5 finding 2a): sqlite has no
+        # provisioning concept, so this registry is lazily-created,
+        # in-memory state -- `{collection: {field: contract_type}}`, the
+        # SAME 7-word contract vocabulary the PostgreSQL registry table
+        # stores (see `field_types` below). Never derived from `PRAGMA
+        # table_info` -- that reports THIS backend's own physical type
+        # (`_TYPES`, `text`/`integer`/`real`/`json` -- SQLite's dynamic
+        # column affinity does not even enforce it), which cannot recover
+        # `object` vs `array` vs `json`, nor a declared `boolean` (also
+        # physically `INTEGER`, same as a declared `integer` "0/1"
+        # value).
+        self._declared_types = {}
 
     @property
     def raw_connection(self):
@@ -140,7 +153,7 @@ class SQLiteBackend:
             self._db.rollback()
         self._db.execute("BEGIN")
 
-    def create_collection(self, name, fields, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
         definitions = []
         for field, field_type in fields.items():
             definitions.append(quote_identifier(field) + " " + _TYPES[field_type])
@@ -176,8 +189,19 @@ class SQLiteBackend:
             self._db.rollback()
             raise
         self._schema_revision += 1
+        # Phase 6 WP-3 (design D-3): registry write lands only on this
+        # success path -- an exception above already `raise`d, so a
+        # rolled-back DDL never leaves a stray registry entry behind.
+        # Robust to a direct caller (bypassing `cell.py`) supplying no
+        # `field_types` at all, or only a partial one -- the SAME
+        # backfill-rule fallback `cell.ApplicationCell.create_collection`
+        # itself applies for every uncovered name.
+        resolved = dict(field_types or {})
+        for field, physical_type in fields.items():
+            resolved.setdefault(field, FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
+        self._declared_types[name] = resolved
 
-    def add_field(self, collection, field, field_type, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
         table = quote_identifier(collection)
         statement = "ALTER TABLE " + table + " ADD COLUMN " + \
             quote_identifier(field) + " " + _TYPES[field_type]
@@ -207,6 +231,27 @@ class SQLiteBackend:
             self._db.rollback()
             raise
         self._schema_revision += 1
+        if contract_type is None:
+            contract_type = FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+        self._declared_types.setdefault(collection, {})[field] = contract_type
+
+    def field_types(self, collection):
+        """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
+        field_types`'s own contract. `field_domains` is called only for
+        its existence check -- its own return value (all-`None` domains,
+        this backend's own unchanged behaviour) is discarded here."""
+        self.field_domains(collection)  # NotFoundError if `collection` does not exist
+        return dict(self._declared_types.get(collection, {}))
+
+    def all_field_types(self):
+        """Phase 6 WP-3 (design D-3): `{collection: {field: contract_
+        type}}` for EVERY collection this backend currently has -- `GET
+        /v1/catalog`'s own sole data source (`http.py::get_catalog`).
+        Never includes a collection with no registry entries (cannot
+        occur for one this backend's own `create_collection` created --
+        every field always gets a registry row, `create_collection`'s own
+        docstring)."""
+        return {name: dict(types) for name, types in self._declared_types.items()}
 
     def encode_value(self, value, domain=None):
         # `domain` is accepted only to match the shared `StorageBackend`

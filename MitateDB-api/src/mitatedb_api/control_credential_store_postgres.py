@@ -37,6 +37,7 @@ import psycopg
 from psycopg import sql
 
 from .control_auth import ControlPrincipal
+from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthorizationStateUnavailable, NotFoundError,
                      StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
@@ -104,7 +105,16 @@ class PostgresControlCredentialStore:
         table's own `CHECK (role IN ('control', 'audit'))` (migration 0002,
         in-place WP-5 revision) is the authoritative enforcement; this
         Python-level check exists only to surface a clean `VALIDATION_
-        FAILED`-shaped error before ever reaching SQL."""
+        FAILED`-shaped error before ever reaching SQL.
+
+        Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        returns a COMPOSED bearer now (`compose_bearer_locator`) -- this
+        store's own "帯域外 store API" issuance point. Phase 6 WP-3 差し戻し
+        最終ラウンド (裁定 1): `control_http.py` no longer splits the bearer
+        itself -- this store's OWN `authenticate` method below is the real
+        receiving boundary, splitting it back apart exactly once via
+        `split_bearer_locator` (see `authenticate`'s own docstring below).
+        The stored `digest` is still computed from the RAW `secret`."""
         if role not in ("control", "audit"):
             raise ValidationError("control-table credentials require control or audit role")
         credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
@@ -132,7 +142,7 @@ class PostgresControlCredentialStore:
         finally:
             if owns:
                 conn.close()
-        return credential_id, secret
+        return credential_id, compose_bearer_locator(credential_id, secret)
 
     def _update_flag(self, credential_id: str, column: str, value, *, work) -> None:
         conn, owns = self._own_connection(work)
@@ -204,6 +214,10 @@ class PostgresControlCredentialStore:
 
     def rotate(self, credential_id: str, *, secret: Optional[str] = None,
                clear_must_rotate: bool = True, work=None) -> str:
+        """Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        returns a COMPOSED bearer now -- same re-issuance discipline
+        `issue` above follows. The stored `digest` is still computed from
+        the RAW `secret`."""
         secret = secret or secrets.token_urlsafe(32)
         digest = self._digest(secret)
         conn, owns = self._own_connection(work)
@@ -241,7 +255,7 @@ class PostgresControlCredentialStore:
         finally:
             if owns:
                 conn.close()
-        return secret
+        return compose_bearer_locator(credential_id, secret)
 
     # ---- reads ------------------------------------------------------------
 
@@ -342,9 +356,25 @@ class PostgresControlCredentialStore:
                 conn.close()
         return bool(row[0])
 
-    def authenticate(self, credential_id, secret) -> ControlPrincipal:
-        if not isinstance(credential_id, str) or not credential_id:
+    def authenticate(self, secret) -> ControlPrincipal:
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer -- this store's own
+        single receiving boundary, splitting via `split_bearer_locator`
+        exactly ONCE, HERE (mirrors `credential_store_postgres.
+        PostgresCredentialStore.authenticate`'s own identical, now-uniform
+        one-bearer-in contract, and `control_auth.ControlCredentialStore.
+        authenticate`'s in-memory sibling). Neither real receiving shape
+        this store serves (`control_http.py`'s own control-plane handlers;
+        `ops.py`'s CLI) splits the bearer itself any more -- both pass it
+        through verbatim, exactly once, to this single choke point. A
+        malformed bearer (no `.`, an empty half, or a NUL byte in either
+        half) fails BEFORE any lookup at all -- SI-15 fail-closed, and
+        never durably attributed (matches `credential_store_postgres.
+        PostgresCredentialStore.authenticate`'s identical treatment)."""
+        locator = split_bearer_locator(secret)
+        if locator is None:
             raise AuthenticationError("control authentication failed")
+        credential_id, secret_part = locator
         conn = self._connect()
         try:
             statement = sql.SQL(
@@ -363,7 +393,7 @@ class PostgresControlCredentialStore:
         finally:
             conn.close()
         stored_digest = bytes(row[0]) if row is not None else _DUMMY_DIGEST
-        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
         if row is None or not digest_matches:
             raise AuthenticationError("control authentication failed")
         _digest, enabled, revoked, must_rotate, role = row

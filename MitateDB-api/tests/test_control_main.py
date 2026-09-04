@@ -27,16 +27,24 @@ import asyncio
 import sys
 
 import httpx
+import psycopg
 import pytest
+from psycopg import sql
 
 from .control_plane_harness import control_platform  # noqa: F401 (fixture)
 from mitatedb_api.control_composition import build_control_service
 from mitatedb_api.control_plane import bootstrap_control_credential
+from mitatedb_api.credential_wire import split_bearer_locator
 
 BASE_URL = "http://mitatedb-control-main-test.invalid"
 
 _APP_PEPPER = "control-main-test-app-pepper-00000"
 _CONTROL_PEPPER = "control-main-test-ctl-pepper-00000"
+# Phase 6 WP-3 (design D-2): both required from here on (see
+# `config.FoundationConfig.from_env`/`control_composition.
+# build_control_service`).
+_DATA_BASE_URL = "http://mitatedb-control-main-test.example.invalid/v1"
+_CONTROL_BASE_URL = "http://mitatedb-control-main-test.example.invalid/control/v1"
 
 
 def _env(control_platform, **overrides) -> dict[str, str]:
@@ -45,6 +53,8 @@ def _env(control_platform, **overrides) -> dict[str, str]:
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": control_platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": control_platform.registry_schema,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     env.update(overrides)
     return env
@@ -135,10 +145,13 @@ def test_build_control_app_mounts_a_real_working_control_v1_surface(control_main
         credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
 
     rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate",
-                              headers={"authorization": f"Bearer {credential_id}.{secret}"}))
+                              headers={"authorization": f"Bearer {secret}"}))
     assert rotate_resp.status_code == 200, rotate_resp.text
+    # Phase 6 WP-3 (design D-1(d)): the `/control/v1/.../rotate` response's
+    # own `secret` is now the complete bearer (`control_http.py::_with_
+    # composed_secret`) -- used verbatim, never recomposed with `credential_id`.
     secret = rotate_resp.json()["secret"]
-    auth_header = {"authorization": f"Bearer {credential_id}.{secret}"}
+    auth_header = {"authorization": f"Bearer {secret}"}
 
     caps_resp = _run(_aget(app, "/control/v1/capabilities", headers=auth_header))
     assert caps_resp.status_code == 200, caps_resp.text
@@ -175,9 +188,12 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(control_
     with backend.unit_of_work() as work:
         credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate",
-                              headers={"authorization": f"Bearer {credential_id}.{secret}"}))
+                              headers={"authorization": f"Bearer {secret}"}))
+    # Phase 6 WP-3 (design D-1(d)): the `/control/v1/.../rotate` response's
+    # own `secret` is now the complete bearer (`control_http.py::_with_
+    # composed_secret`) -- used verbatim, never recomposed with `credential_id`.
     secret = rotate_resp.json()["secret"]
-    auth_header = {"authorization": f"Bearer {credential_id}.{secret}"}
+    auth_header = {"authorization": f"Bearer {secret}"}
 
     caps_resp = _run(_aget(app, "/control/v1/capabilities", headers=auth_header))
     assert caps_resp.json()["limits"]["request_bytes"] == 256
@@ -227,10 +243,13 @@ def test_build_control_app_declares_audit_query_status_from_mitatedb_audit_dsn_e
     # MITATEDB_AUDIT_DSN unset entirely -- the D-5 M-4 default.
     unavailable_app = control_main_module.build_control_app(dict(base_env))
     rotate_resp = _run(_apost(unavailable_app, f"/control/v1/credentials/{credential_id}/rotate",
-                              headers={"authorization": f"Bearer {credential_id}.{secret}"}))
+                              headers={"authorization": f"Bearer {secret}"}))
     assert rotate_resp.status_code == 200, rotate_resp.text
+    # Phase 6 WP-3 (design D-1(d)): the `/control/v1/.../rotate` response's
+    # own `secret` is now the complete bearer (`control_http.py::_with_
+    # composed_secret`) -- used verbatim, never recomposed with `credential_id`.
     secret = rotate_resp.json()["secret"]
-    auth_header = {"authorization": f"Bearer {credential_id}.{secret}"}
+    auth_header = {"authorization": f"Bearer {secret}"}
 
     caps_resp = _run(_aget(unavailable_app, "/control/v1/capabilities", headers=auth_header))
     assert caps_resp.status_code == 200, caps_resp.text
@@ -258,9 +277,11 @@ def test_build_control_service_declares_audit_query_unavailable_without_audit_ds
     service = build_control_service(env)
     backend = service._backend  # test-only reach-in, mirrors this file's own existing convention
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    rotated = service.rotate_credential(credential_id, secret, credential_id)
-    document = service.control_capabilities(credential_id, rotated["secret"])
+        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
+    rotated = service.rotate_credential(secret, credential_id)
+    rotated_secret = rotated["secret"]
+    document = service.control_capabilities(rotated_secret)
     assert document["capabilities"]["audit_query"] == {"status": "unavailable"}
 
 
@@ -275,14 +296,78 @@ def test_build_control_service_declares_audit_query_enabled_with_audit_dsn(contr
     service = build_control_service(env)
     backend = service._backend
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-    rotated = service.rotate_credential(credential_id, secret, credential_id)
-    document = service.control_capabilities(credential_id, rotated["secret"])
+        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
+    rotated = service.rotate_credential(secret, credential_id)
+    rotated_secret = rotated["secret"]
+    document = service.control_capabilities(rotated_secret)
     audit_query = document["capabilities"]["audit_query"]
     assert audit_query["status"] == "enabled"
     assert isinstance(audit_query["visibility_lag_ms"], int) and audit_query["visibility_lag_ms"] > 0
     # The route itself genuinely answers, not merely the declaration --
     # confirms `build_control_service`'s own `audit_reader` wiring is a
     # real, working `PostgresAuditQueryStore`, not merely a truthy stub.
-    result = service.audit_query(credential_id, rotated["secret"], {"limit": 1})
+    result = service.audit_query(rotated_secret, {"limit": 1})
     assert "events" in result
+
+
+def _count_control_authentication_denials(control_platform) -> int:
+    """Counts only rows shaped exactly like `ControlPlaneService.
+    _authenticate`'s own except-`AuthenticationError` denial
+    (`event_class`/`reason_code`/`target_kind` per `control_plane.py:1256-
+    1258`) with `actor_id IS NULL` folded directly into the `WHERE`
+    clause -- review B-1's "never record the client-claimed id" discipline
+    (`_deny_audit` is never passed an `actor_id` on this path), asserted
+    here as a query-level constraint rather than a separate row fetch."""
+    conn = psycopg.connect(control_platform.provision_dsn)
+    try:
+        with conn.cursor() as cur:
+            table = sql.Identifier(control_platform.registry_schema, "control_audit").as_string(conn)
+            cur.execute(
+                f"SELECT count(*) FROM {table} WHERE event_class = 'authentication_denial' "
+                "AND reason_code = 'AUTH_INVALID' AND target_kind = 'control_credential' "
+                "AND actor_id IS NULL"
+            )
+            (count,) = cur.fetchone()
+    finally:
+        conn.close()
+    return count
+
+
+def test_control_http_durably_audits_a_nul_locator_as_auth_invalid_not_503(control_main_module, control_platform) -> None:
+    """WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 3,
+    review F4), the control-plane counterpart of `test_application_audit.
+    py::test_http_service_durably_audits_a_nul_locator_as_auth_invalid_
+    not_503` -- same regression, same fix, the CONTROL boundary
+    (`control_main.build_control_app`/`control_http.py`) instead of the
+    data-plane one: before `credential_wire.split_bearer_locator`'s own
+    NUL-byte check existed, a bearer with a NUL (U+0000) byte in either
+    locator half would have reached `psycopg` as a real query parameter
+    deep inside `control_credential_store_postgres.
+    PostgresControlCredentialStore.authenticate`, which maps a raw
+    `psycopg.Error` to `AuthorizationStateUnavailable` (503) instead of
+    the durably-audited `AuthenticationError` (401) every OTHER malformed
+    shape already produced. `split_bearer_locator` now rejects a NUL in
+    either half before any lookup, so this test fixes both halves of that
+    regression over REAL HTTP + REAL PostgreSQL: (1) the response is `401
+    AUTH_INVALID`, never `503`; (2) `ControlPlaneService._authenticate`'s
+    own `except AuthenticationError` branch durably records the denial
+    (`event_class="authentication_denial"`, `reason_code="AUTH_INVALID"`,
+    `target_kind="control_credential"`) with `actor_id` left `None`
+    (`_deny_audit` is never passed one on this path).
+
+    Unlike the data-plane store, `ControlPlaneService._deny_audit` writes
+    one row per call with NO coalescing layer in front of it (mirrors
+    `conformance-tests/test_c15_bootstrap_reset_lifecycle.py`'s own
+    established "two distinct malformed presentations -> two distinct
+    durable rows" C-15 property) -- so this test asserts a delta of
+    exactly +1 per NUL-bearing locator presented, immediately after each
+    one, rather than a single aggregate delta across both."""
+    app = control_main_module.build_control_app(_env(control_platform))
+    for locator in ("crd_\x00nulid.secret", "crd_nulid.sec\x00ret"):
+        before = _count_control_authentication_denials(control_platform)
+        response = _run(_aget(app, "/control/v1/capabilities", headers={"authorization": f"Bearer {locator}"}))
+        assert response.status_code == 401, f"NUL locator {locator!r} returned {response.status_code}, not 401: {response.text}"
+        assert response.json()["code"] == "AUTH_INVALID"
+        after = _count_control_authentication_denials(control_platform)
+        assert after - before == 1, f"NUL locator {locator!r}: expected exactly one new durable denial row, before={before} after={after}"

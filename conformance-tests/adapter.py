@@ -530,47 +530,49 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     return (parts.scheme, parts.hostname, parts.port)
 
 
-def surfaces_cohosted(document: Mapping[str, Any], *, fallback: Callable[[], bool]) -> bool:
+def surfaces_cohosted(document: Mapping[str, Any]) -> bool:
     """port v1.10 (design section 6.1 item 2, D-2): judges whether this
     deployment's control surface is co-hosted with its data-plane surface,
-    preferring a 1.6.0+ peer's own DECLARED `surfaces` origins over the
-    pre-1.6.0 topology-declaration fallback -- the port-level realization
-    of "surfaces を返す peer では origin 比較を正とし、返さない (1.5.0
-    宣言の) peer では従来の申告メソッドへフォールバックする" (work order
-    WORK_ORDER_PHASE6_CONTRACT_160_V1.md WP-1 item 5(b)).
+    from a 1.6.0+ peer's own DECLARED `surfaces` origins -- the port-level
+    realization of "surfaces を返す peer では origin 比較を正とする" (work
+    order WORK_ORDER_PHASE6_CONTRACT_160_V1.md WP-1 item 5(b)).
+
+    Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    pre-1.6.0 topology-declaration fallback (`ConformanceAdapter.control_
+    surface_cohosted_with_data_plane`, this WP's own final flip target)
+    is removed -- both peers now unconditionally declare 1.6.0+ `surfaces`
+    (`test_c19_every_control_surface_adapter_declares_1_6_0`, un-xfailed
+    in this same commit), so there is no longer any registered adapter
+    for which `document` could fail to affirmatively demonstrate a 1.6.0+
+    `surfaces` object. This judgment is now surfaces-derived ONLY.
 
     `document` is any real `CapabilityDocument` this deployment returns
     (the data-plane one and the control one are required, by 1.6.0's own
     unconditional obligation, to carry the SAME `surfaces` object -- so
     either serves this function equally; callers pass whichever they
-    already have in hand). `fallback` is the adapter's own pre-1.6.0
-    topology declaration (`ConformanceAdapter.control_surface_cohosted_
-    with_data_plane`), called ONLY when `document` does not affirmatively
-    demonstrate a 1.6.0+ `surfaces` object -- i.e. `contract_version` is
-    below 1.6.0, or `surfaces`/`surfaces.data.base_url` is missing or
-    malformed. This function does not itself assert well-shapedness (that
-    is `test_c19_client_self_sufficiency.py`'s own D-2 vectors' job); a
-    malformed 1.6.0+ document degrades to the fallback rather than raising
-    here, so a shape defect surfaces as a vector failure, never as an
-    opaque exception from this helper.
+    already have in hand). A `contract_version` below 1.6.0, or a missing/
+    malformed `surfaces`/`surfaces.data.base_url`, now returns `False`
+    directly rather than falling back to a since-removed adapter method --
+    the SAME value that fallback always returned for every currently-
+    registered adapter (its own pre-removal docstring), so this removal
+    changes no adapter's observed answer (work order WP-1 completion
+    condition 11's own "置換が挙動を変えないことの実測", now load-bearing
+    against the fallback's own removal rather than its introduction). This
+    function does not itself assert well-shapedness (that is `test_c19_
+    client_self_sufficiency.py`'s own D-2 vectors' job).
 
     When `surfaces.control` is itself absent (a `control_plane:
     unavailable` deployment, contract-permitted to omit it) this returns
-    `False` DIRECTLY -- never the fallback -- matching design's own "there
-    is no co-hosting partner to be co-hosted WITH" reasoning (section 3
-    D-2) and the pre-1.6.0 fallback's own value for every currently-
-    registered adapter (`False`), so replacing one judgment source with
-    the other is not expected to change any adapter's observed answer
-    (work order WP-1 completion condition 11's own "置換が挙動を変えない
-    ことの実測").
+    `False` too, matching design's own "there is no co-hosting partner to
+    be co-hosted WITH" reasoning (section 3 D-2).
     """
     contract_version = str(document.get("contract_version", "0.0.0"))
     surfaces = document.get("surfaces")
     if not contract_version_at_least(contract_version, "1.6.0") or not isinstance(surfaces, Mapping):
-        return fallback()
+        return False
     data_surface = surfaces.get("data")
     if not isinstance(data_surface, Mapping) or not data_surface.get("base_url"):
-        return fallback()
+        return False
     control_surface = surfaces.get("control")
     if not isinstance(control_surface, Mapping) or not control_surface.get("base_url"):
         return False
@@ -845,6 +847,39 @@ class ConformanceAdapter(ABC):
 
     @abstractmethod
     def revoke_credential(self, handle: CredentialHandle) -> None: ...
+
+    @abstractmethod
+    def tampered_bearer(self, handle: "CredentialHandle | ControlCredentialHandle") -> str:
+        """port v1.10 追補 (supervisor ruling 2026-09-04, brief item C):
+        returns a bearer string that names the SAME credential `handle`
+        does (`handle.credential_ref`) but does NOT authenticate -- a
+        digest mismatch on an otherwise-real, known `credential_id`, the
+        common-suite's own synthetic stand-in for "an attacker who knows
+        a real credential_id but not its secret" (`test_c15_bootstrap_
+        reset_lifecycle.py`'s own bogus-actor vector). This is PLUG-
+        SPECIFIC knowledge (this port never assumes a peer's own bearer
+        SHAPE) -- both currently-registered peers happen to use the same
+        `<credential_id>.<secret>` locator form, so both plugs realize
+        this identically (`f"{handle.credential_ref}.{fresh_identifier(...)}"`),
+        but a future peer with a different bearer shape implements this
+        however its own real wire format requires; the port itself makes
+        no assumption about that shape.
+
+        The ONLY place ANY adapter composes a bearer string (D-1(d)'s
+        "no composition, no decomposition" regulation binds every OTHER
+        method on this port) -- `test_c19_client_self_sufficiency.py`'s
+        own static fixed test (`test_c19_adapters_never_compose_or_
+        decompose_the_bearer_secret`) allowlists exactly the composition
+        line(s) inside each plug's own `tampered_bearer` implementation,
+        by (path, lineno), with this stated reason -- never a blanket
+        exemption for the whole file. A real client never constructs a
+        bearer this way (or any way -- D-1(d)'s own "credential is
+        Never Composed, Split, or Derived by a Client"); this exists
+        purely so the common suite can construct a KNOWN-BAD credential
+        without dialing into a peer's own internal store, exactly the
+        same test-harness-only privilege `revoke_credential`/`control_
+        credential` above already exercise."""
+        ...
 
     @abstractmethod
     def disable_application(self, application_id: str) -> None: ...
@@ -1373,53 +1408,16 @@ class ConformanceAdapter(ABC):
         Absent` raise site on this port already follows.
         """
 
-    @abstractmethod
-    def control_surface_cohosted_with_data_plane(self) -> bool:
-        """Declares, for the deployment under test, whether the control
-        surface is provided on the SAME host/process as the data-plane
-        host (port v1.9, phase 5 WP-1 fix-round F-2/F-3, design docs/
-        design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md §6.2). This is a
-        topology fact about THIS test harness's own construction, not an
-        observation derived from any single request -- it exists so
-        `test_c09_data_plane_host_audit_query_alias_rejects_control_
-        credential_unless_cohosted` can tell a genuine co-hosted
-        acceptance apart from a PORT-LEVEL mistake (e.g. an `audit_query_
-        on_data_plane_host` implementation that accidentally forwards to
-        the control host instead of genuinely presenting to the data
-        host -- a real class of bug this port revision's own review found
-        by mutation: `return self.audit_query(actor, request)` in place
-        of a real data-host call returns a genuine PROVIDED document on
-        every currently-registered plug, and would pass silently were
-        `provided` accepted unconditionally).
-
-        Every currently-registered plug returns `False`: the two HTTP
-        plugs build the control and data-plane ASGI apps as genuinely
-        separate `Starlette` instances behind separate clients (`self.
-        _control_client`/`self._client`); the two in-process plugs
-        construct genuinely separate service objects (`ControlPlaneService`
-        vs `DataService`/`MitateDataService`) with no shared credential
-        store between them. A plug returning `True` asserts this
-        deployment's own construction genuinely shares one process/host
-        between both surfaces -- never asserted lightly, since it widens
-        what `test_c09_data_plane_host_audit_query_alias_rejects_control_
-        credential_unless_cohosted` will accept as conformant (a `PROVIDED`
-        outcome becomes acceptable, alongside `AUTH_INVALID`).
-
-        port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
-        DISCOVERY_V1.md section 6.1 item 2, D-2): this method itself is
-        UNCHANGED and still required on every adapter -- it becomes the
-        FALLBACK branch of the free function `surfaces_cohosted` (this
-        module's own module-level function, defined ABOVE this ABC --
-        review F10, 2026-09-04, correcting "below") for a peer that has
-        not yet flipped to declaring
-        `contract_version >= 1.6.0` with a real `surfaces` object (no
-        currently-registered adapter has, as of this port revision); a
-        1.6.0-declaring peer's own `surfaces.data`/`surfaces.control`
-        origins become the primary judgment instead. This method's own
-        removal, and the last caller's switch to `surfaces_cohosted`
-        alone, is WP-3's job (same commit as the last peer's 1.6.0 flip,
-        design section 6.1 item 2) -- not this revision's.
-        """
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 topology-declaration method this abstract base class once
+    # required here -- the fallback `surfaces_cohosted` (module-level
+    # function, above) called before a peer declared a real `surfaces`
+    # object -- is REMOVED, in the same commit as the last peer's 1.6.0
+    # flip (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md
+    # section 6.1 item 2, D-2's own "この方式のフォールバックとしてのみ使
+    # う"). Every registered adapter's own implementation (which always
+    # returned `False`) is removed alongside it; `surfaces_cohosted` is
+    # now surfaces-derived only (its own docstring).
 
     # --- application plane ---
     @abstractmethod

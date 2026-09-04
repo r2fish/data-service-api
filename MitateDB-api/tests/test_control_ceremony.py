@@ -113,12 +113,24 @@ def _harness(name, memory_harness, postgres_harness):
     return memory_harness if name == "memory" else postgres_harness
 
 
+def _authenticate(name, harness, secret_or_bearer):
+    """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+    裁定 1): both kinds' `authenticate` (`control_auth.ControlCredentialStore`/
+    `control_credential_store_postgres.PostgresControlCredentialStore`) now
+    take the FULL presented bearer, splitting it exactly once INSIDE the
+    store itself -- this helper is a receiving boundary too (a direct
+    in-process caller) and passes `secret_or_bearer` straight through,
+    unsplit, for either kind. A deliberately wrong/bogus probe string is
+    passed through unchanged for either kind."""
+    return harness.store.authenticate(secret_or_bearer)
+
+
 @pytest.mark.parametrize("name", HARNESS_NAMES)
 def test_bootstrap_issues_a_must_rotate_credential_and_records_canonical_audit(name, memory_harness, postgres_harness) -> None:
     harness = _harness(name, memory_harness, postgres_harness)
     with harness.unit_of_work() as work:
         credential_id, secret = bootstrap_control_credential(harness.store, harness.append_audit, work=work)
-    principal = harness.store.authenticate(credential_id, secret)
+    principal = _authenticate(name, harness, secret)
     assert principal.must_rotate is True
 
     events = harness.audit_events()
@@ -163,7 +175,7 @@ def test_reset_requires_exact_declare_and_echo_confirmation(name, memory_harness
 
     # The old credential must still be alive -- the denied attempts must
     # not have partially executed.
-    principal = harness.store.authenticate(old_id, old_secret)
+    principal = _authenticate(name, harness, old_secret)
     assert principal.must_rotate is True
 
     with harness.unit_of_work() as work:
@@ -172,8 +184,8 @@ def test_reset_requires_exact_declare_and_echo_confirmation(name, memory_harness
     assert new_id != old_id
 
     with pytest.raises(Exception):
-        harness.store.authenticate(old_id, old_secret)
-    new_principal = harness.store.authenticate(new_id, new_secret)
+        _authenticate(name, harness, old_secret)
+    new_principal = _authenticate(name, harness, new_secret)
     assert new_principal.must_rotate is True
 
 
@@ -251,7 +263,7 @@ def test_issue_audit_credential_ceremony_distributes_a_must_rotate_false_audit_c
     harness = _harness(name, memory_harness, postgres_harness)
     with harness.unit_of_work() as work:
         credential_id, secret = issue_audit_credential_ceremony(harness.store, harness.append_audit, work=work)
-    principal = harness.store.authenticate(credential_id, secret)
+    principal = _authenticate(name, harness, secret)
     assert principal.credential_id == credential_id
     assert principal.must_rotate is False
     assert principal.role == "audit"
@@ -302,10 +314,10 @@ def test_reset_revokes_an_audit_credential_too(name, memory_harness, postgres_ha
     # Both prior rows -- the original control credential AND the audit
     # credential -- are dead; only the freshly reset credential survives.
     with pytest.raises(Exception):
-        harness.store.authenticate(audit_id, audit_secret)
+        _authenticate(name, harness, audit_secret)
     with pytest.raises(Exception):
-        harness.store.authenticate(control_id, control_secret)
-    new_principal = harness.store.authenticate(new_id, new_secret)
+        _authenticate(name, harness, control_secret)
+    new_principal = _authenticate(name, harness, new_secret)
     assert new_principal.role == "control"
 
 
@@ -334,7 +346,7 @@ def test_orphan_audit_row_with_no_control_row_blocks_bootstrap_but_reset_recover
 
     # The orphan audit row is still live -- bootstrap's own refusal did not
     # touch it.
-    principal = harness.store.authenticate(audit_id, audit_secret)
+    principal = _authenticate(name, harness, audit_secret)
     assert principal.role == "audit"
 
     active_ids = [row[0] for row in harness.store.list_all() if row[1] and not row[2]]
@@ -344,7 +356,7 @@ def test_orphan_audit_row_with_no_control_row_blocks_bootstrap_but_reset_recover
             harness.store, harness.append_audit, work=work, destructive=True, confirmation=phrase)
 
     with pytest.raises(Exception):
-        harness.store.authenticate(audit_id, audit_secret)
-    new_principal = harness.store.authenticate(new_id, new_secret)
+        _authenticate(name, harness, audit_secret)
+    new_principal = _authenticate(name, harness, new_secret)
     assert new_principal.role == "control"
     assert new_principal.must_rotate is True

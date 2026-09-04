@@ -104,11 +104,21 @@ class StorageBackend:
         exists)."""
         raise NotImplementedError
 
-    def create_collection(self, name, fields, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
         """``fields``: ``{field_name: declared_type}`` using this
-        foundation's own vocabulary (``cell._TYPES``). Raises
-        ``errors.ConflictError`` if ``name`` already exists. Bumps the
-        schema revision atomically with the DDL.
+        foundation's own vocabulary (``cell._FIELD_TYPE_VOCABULARY``).
+        Raises ``errors.ConflictError`` if ``name`` already exists. Bumps
+        the schema revision atomically with the DDL.
+
+        Phase 6 WP-3 (design D-3): ``field_types``, when given, is
+        ``{field_name: contract_type}`` (the 7-word contract vocabulary,
+        ``field_types.CONTRACT_TYPES``) -- written to this application's
+        own declared-type registry, atomically with the DDL above. Every
+        real caller (``cell.ApplicationCell.create_collection``) always
+        supplies one entry per field in ``fields`` (deriving it from the
+        foundation type when its own caller did not supply an explicit
+        contract type) -- ``None``/a partial map is tolerated defensively
+        but should not occur.
 
         Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
         D-2/D-10): ``audit_hook``, when given, is called (``pre_commit()``)
@@ -117,13 +127,43 @@ class StorageBackend:
         item 2). See ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
-    def add_field(self, collection, field, field_type, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
         Bumps the schema revision atomically with the DDL.
 
+        Phase 6 WP-3 (design D-3): ``contract_type`` (one of
+        ``field_types.CONTRACT_TYPES``) is written to the declared-type
+        registry for ``field``, atomically with the DDL above -- see
+        ``create_collection``'s own identical parameter.
+
         Phase 4: same ``audit_hook`` contract as ``create_collection``
         above."""
+        raise NotImplementedError
+
+    def field_types(self, collection):
+        """Phase 6 WP-3 (design D-3): live ``{field_name: contract_type}``
+        registry mapping for ``collection`` -- the 7-word contract
+        vocabulary (``field_types.CONTRACT_TYPES``), NEVER derived from
+        this backend's own physical column types (`object`/`array`/`json`
+        are physically indistinguishable, and PostgreSQL's own declared
+        `boolean` is physically an `INTEGER` column -- design §1.5 finding
+        2). Raises ``errors.NotFoundError`` if ``collection`` does not
+        exist, mirroring ``field_domains``. This is the SAME registry
+        ``GET /v1/catalog`` (``http.py::get_catalog``) reads, and the
+        single source of truth the ``cell.py`` choke point
+        (``_prepare_values``/``_bind_filters``) validates every value
+        against, backend-independently."""
+        raise NotImplementedError
+
+    def all_field_types(self):
+        """Phase 6 WP-3 (design D-3): ``{collection: {field: contract_
+        type}}`` for EVERY collection this backend currently has --
+        ``GET /v1/catalog``'s (``http.py::get_catalog``) sole data
+        source. A collection with zero registry rows is simply absent
+        from the result (cannot occur for one this backend's own
+        ``create_collection`` created -- every field always gets a
+        registry row)."""
         raise NotImplementedError
 
     def encode_value(self, value, domain=None):

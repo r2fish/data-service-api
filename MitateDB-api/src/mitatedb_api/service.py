@@ -75,8 +75,17 @@ class MitateDataService:
     def __init__(self, control_plane):
         self._control = control_plane
 
-    def open_session(self, credential_id, secret):
-        principal = self._control.credentials.authenticate(credential_id, secret)
+    def open_session(self, secret):
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer (the composed
+        string `CredentialStore.issue`/`.rotate` return, verbatim) --
+        this method is this peer's own in-process receiving boundary; it
+        never splits the bearer itself, passing it straight through to
+        `auth.CredentialStore.authenticate`, which is the single choke
+        point that calls `split_bearer_locator` exactly once. See `auth.
+        CredentialStore.authenticate`'s own docstring for the full
+        reasoning."""
+        principal = self._control.credentials.authenticate(secret)
         cell = self._control.cells.get(principal.application_id)
         if cell is None:
             # Do not permit an authorization record without a storage boundary.

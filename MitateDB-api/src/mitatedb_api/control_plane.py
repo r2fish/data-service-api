@@ -59,6 +59,7 @@ from .audit_query import (DECLARED_AUDIT_EVENT_CLASSES, DECLARED_AUDIT_OPERATION
                           validate_audit_event_classes, validate_audit_limit)
 from .control_audit import ControlAuditSink, insert_control_audit_row
 from .control_auth import ControlCredentialStore, ControlPrincipal, _InMemoryWork
+from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthenticationRequiredError,
                      AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError,
@@ -339,13 +340,13 @@ class InMemoryCredentialRegistry:
                 item.revoked = previous_revoked
             work.on_rollback(_undo)
 
-    def authenticate(self, credential_id: str, secret: str) -> Optional[tuple[str, str]]:
+    def authenticate(self, secret: str) -> Optional[tuple[str, str, str]]:
         """Phase 4 WP-3(b) (design D-5): a READ-ONLY probe against THIS
         registry's own application-credential rows -- reuses the SAME
         digest `issue`/`rotate` above already compute (never a separate
         auth.CredentialStore lookup, per this module's own header: control-
         plane writes/reads its own dedicated registries). Returns
-        `(application_id, role)` when `credential_id`/`secret` genuinely
+        `(application_id, role)` when the presented bearer genuinely
         authenticates a currently active (enabled, not revoked) application
         credential; `None` for an unknown id, wrong secret, disabled, or
         revoked credential -- never raises. Timing-safe: a digest
@@ -356,14 +357,25 @@ class InMemoryCredentialRegistry:
         credentials are FORBIDDEN" probe (D-5) -- never by any other
         operation, which authenticates via `_authenticate`/`control_
         credential_state` instead.
-        """
+
+        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer -- this method is
+        this registry's own single receiving boundary, splitting via
+        `split_bearer_locator` exactly ONCE, HERE, same one-bearer-in
+        contract every other store on this peer now uses. A malformed
+        bearer returns `None` directly, with no digest comparison at all
+        (mirrors `auth.CredentialStore.peek`'s identical treatment)."""
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            return None
+        credential_id, secret_part = locator
         with self._lock:
             item = self._credentials.get(credential_id)
             stored_digest = item.digest if item is not None else _APP_CREDENTIAL_DUMMY_DIGEST
-            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
             if item is None or not digest_matches or not item.enabled or item.revoked:
                 return None
-            return item.application_id, item.role
+            return item.credential_id, item.application_id, item.role
 
 
 # WP-3(b) (mirrors `control_auth._DUMMY_DIGEST`'s own rationale, applied to
@@ -743,7 +755,7 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
             if owns:
                 conn.close()
 
-    def authenticate(self, credential_id: str, secret: str) -> Optional[tuple[str, str]]:
+    def authenticate(self, secret: str) -> Optional[tuple[str, str, str]]:
         """Phase 4 WP-3(b) (design D-5): the PostgreSQL twin of `InMemory
         CredentialRegistry.authenticate` above -- identical contract
         (`(application_id, role)` or `None`, never raises for an ordinary
@@ -752,7 +764,17 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
         DOES still raise -- `ControlPlaneService.audit_query` lets that
         propagate exactly like every other backend call it makes (the
         design exemption for store-unreachable audit-write is unrelated to
-        this READ probe)."""
+        this READ probe).
+
+        Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer -- splits via
+        `split_bearer_locator` exactly ONCE, HERE, same one-bearer-in
+        contract every other store on this peer now uses. A malformed
+        bearer returns `None` directly, no lookup attempted."""
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            return None
+        credential_id, secret_part = locator
         conn = self._connect()
         try:
             statement = sql.SQL(
@@ -769,10 +791,10 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
         finally:
             conn.close()
         stored_digest = bytes(row[0]) if row is not None else _APP_CREDENTIAL_DUMMY_DIGEST
-        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
         if row is None or not digest_matches or not row[3] or row[4]:
             return None
-        return row[1], row[2]
+        return credential_id, row[1], row[2]
 
 
 # ===========================================================================
@@ -866,10 +888,10 @@ class InMemoryControlBackend:
         if revoked:
             self._control_credentials.revoke(credential_id, work=work)
 
-    def authenticate_control(self, credential_id, secret) -> ControlPrincipal:
-        return self._control_credentials.authenticate(credential_id, secret)
+    def authenticate_control(self, secret) -> ControlPrincipal:
+        return self._control_credentials.authenticate(secret)
 
-    def authenticate_application(self, credential_id, secret) -> Optional[tuple[str, str]]:
+    def authenticate_application(self, secret) -> Optional[tuple[str, str, str]]:
         """Phase 4 WP-3(b) (design D-5): a SEPARATE probe against the
         APPLICATION-credential universe (`self._credentials`, never
         `self._control_credentials`) -- `audit_query`'s own authority check
@@ -882,7 +904,7 @@ class InMemoryControlBackend:
         semantics`: "Application credentials are denied"). Returns `None`
         for every failure mode -- never raises for an ordinary auth
         mismatch."""
-        return self._credentials.authenticate(credential_id, secret)
+        return self._credentials.authenticate(secret)
 
     def append_audit(self, *, work=None, **fields):
         return self._audit.append(work=work, **fields)
@@ -992,15 +1014,15 @@ class PostgresControlBackend:
         if revoked:
             self._control_credentials.revoke(credential_id, work=work)
 
-    def authenticate_control(self, credential_id, secret) -> ControlPrincipal:
-        return self._control_credentials.authenticate(credential_id, secret)
+    def authenticate_control(self, secret) -> ControlPrincipal:
+        return self._control_credentials.authenticate(secret)
 
-    def authenticate_application(self, credential_id, secret) -> Optional[tuple[str, str]]:
+    def authenticate_application(self, secret) -> Optional[tuple[str, str, str]]:
         """Phase 4 WP-3(b): identical rationale to `InMemoryControlBackend.
         authenticate_application` above -- `self._credentials` is the SAME
         `PostgresCredentialRegistry` `issue_credential`/`rotate_credential`/
         `set_credential_state` already use."""
-        return self._credentials.authenticate(credential_id, secret)
+        return self._credentials.authenticate(secret)
 
     def append_audit(self, *, work, **fields):
         return insert_control_audit_row(work, self._audit_schema, **fields)
@@ -1081,8 +1103,17 @@ class ControlPlaneService:
                  audit_target_kinds: "frozenset[str]" = DECLARED_AUDIT_TARGET_KINDS,
                  audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
                  audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
-                 audit_coalescing_window_ms: int = DEFAULT_COALESCING_WINDOW_MS) -> None:
+                 audit_coalescing_window_ms: int = DEFAULT_COALESCING_WINDOW_MS,
+                 surfaces: Optional[dict] = None) -> None:
         self._backend = backend
+        # Phase 6 WP-3 (design D-2): single source of truth for this
+        # control-plane process' own `CapabilityDocument.surfaces` --
+        # composition-root-injected (`control_composition.
+        # build_control_service`'s own `MITATEDB_DATA_BASE_URL`/
+        # `_CONTROL_BASE_URL` read), never derived here. `None` (every
+        # pre-1.6.0-style direct construction -- most of this
+        # repository's own tests) omits the key entirely.
+        self._surfaces = surfaces
         self._limits = limits or ControlPlaneLimits()
         self._clock = clock or time.monotonic
         self._rate_lock = threading.Lock()
@@ -1201,13 +1232,23 @@ class ControlPlaneService:
         except Exception as exc:
             raise StorageConfigurationError("the denial could not be durably recorded") from exc
 
-    def _authenticate(self, credential_id: Optional[str], secret: Optional[str], *, request_id: str) -> ControlPrincipal:
-        if credential_id is None or secret is None:
+    def _authenticate(self, secret: Optional[str], *, request_id: str) -> ControlPrincipal:
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer -- this peer's own
+        `control_http.py` HTTP boundary passes the `Authorization: Bearer
+        <...>` value through UNCHANGED (no pre-split, r2db-api's own
+        `control_http.py::_extract_bearer` shape), and every public
+        operation below forwards it here unchanged too. The split into
+        `(credential_id, secret_part)` happens exactly once, downstream,
+        inside `self._backend.authenticate_control` (`control_auth.
+        ControlCredentialStore.authenticate` / `control_credential_store_
+        postgres.PostgresControlCredentialStore.authenticate`)."""
+        if secret is None:
             self._deny_audit(event_class="authentication_denial", operation="control_authenticate",
                              target_kind="control_credential", request_id=request_id, reason_code="AUTH_REQUIRED")
             raise AuthenticationRequiredError("authentication is required")
         try:
-            return self._backend.authenticate_control(credential_id, secret)
+            return self._backend.authenticate_control(secret)
         except AuthorizationStateUnavailable:
             # Design exemption (ii): the store itself is unreachable, so a
             # durable audit write is also impossible -- never attempted.
@@ -1338,11 +1379,11 @@ class ControlPlaneService:
 
     # ---- public operations --------------------------------------------------
 
-    def control_capabilities(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def control_capabilities(self, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="control_capabilities", request_id=request_id)
         self._gate_must_rotate(principal, operation="control_capabilities", request_id=request_id)
         limits = self._limits.as_dict()
@@ -1361,11 +1402,16 @@ class ControlPlaneService:
             # `audit_query` itself is `enabled` on this deployment; the
             # 1.4.0/1.5.0 obligations conditional on `audit_query` being
             # provided stay conditional per version_binding's own text).
-            "contract_version": "1.5.0",
+            # Phase 6 WP-3 (design D-1/D-2, subordinate ruling 11):
+            # flipped to 1.6.0 -- same commit as `surfaces` (already
+            # present, WP-3 D-2) and the composed-bearer issue/rotate
+            # responses (`control_http.py::_with_composed_secret`).
+            "contract_version": "1.6.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
             },
+            **({"surfaces": self._surfaces} if self._surfaces is not None else {}),
             "limits": limits,
             "limit_enforcement": limit_enforcement,
             "authorization_propagation_bound_ms": 0,
@@ -1439,11 +1485,11 @@ class ControlPlaneService:
             ),
         }
 
-    def register_application(self, credential_id, secret, application_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def register_application(self, secret, application_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="register_application", request_id=request_id)
         self._gate_must_rotate(principal, operation="register_application", request_id=request_id)
         self._validate_application_id(application_id)
@@ -1462,22 +1508,22 @@ class ControlPlaneService:
             )
         return {"application_id": application_id, "enabled": True}
 
-    def list_applications(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def list_applications(self, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="list_applications", request_id=request_id)
         self._gate_must_rotate(principal, operation="list_applications", request_id=request_id)
         return {"applications": [{"application_id": aid, "enabled": enabled}
                                   for aid, enabled in self._backend.list_applications()]}
 
-    def set_application_enabled(self, credential_id, secret, application_id, enabled, *,
+    def set_application_enabled(self, secret, application_id, enabled, *,
                                  request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         if not isinstance(enabled, bool):
             raise ValidationError("enabled must be a boolean")
         operation = "enable_application" if enabled else "disable_application"
@@ -1497,11 +1543,11 @@ class ControlPlaneService:
             )
         return {"application_id": application_id, "enabled": enabled}
 
-    def issue_credential(self, credential_id, secret, application_id, role, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def issue_credential(self, secret, application_id, role, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="issue_credential", request_id=request_id)
         self._gate_must_rotate(principal, operation="issue_credential", request_id=request_id)
         if role not in _ISSUABLE_ROLES:
@@ -1540,13 +1586,21 @@ class ControlPlaneService:
                 operation="issue_credential", target_kind="credential", outcome="allow", reason_code=None,
                 target_id=new_credential_id,
             )
-        return {"credential_id": new_credential_id, "application_id": application_id, "role": role, "secret": new_secret}
+        # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        # composed HERE, at this in-band issuance point's own response --
+        # `control_http.py`'s HTTP boundary now uses this dict verbatim
+        # (its own earlier `_with_composed_secret` wrapper is removed),
+        # and `ops.py cmd_rotate_credential`'s CLI print path (which calls
+        # THIS SAME service method) receives the composed value too, no
+        # second composition anywhere downstream.
+        return {"credential_id": new_credential_id, "application_id": application_id, "role": role,
+                "secret": compose_bearer_locator(new_credential_id, new_secret)}
 
-    def list_credentials(self, credential_id, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def list_credentials(self, secret, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="list_credentials", request_id=request_id)
         self._gate_must_rotate(principal, operation="list_credentials", request_id=request_id)
         rows: list[dict] = []
@@ -1572,11 +1626,11 @@ class ControlPlaneService:
             rows.append({"credential_id": cid, "role": ctl_role, "enabled": enabled, "revoked": revoked, "must_rotate": must_rotate})
         return {"credentials": rows}
 
-    def rotate_credential(self, credential_id, secret, target_credential_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
+    def rotate_credential(self, secret, target_credential_id, *, request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self_rotate = isinstance(target_credential_id, str) and target_credential_id == principal.credential_id
         self._authorize_role(principal, operation="rotate_credential", request_id=request_id,
                              target_id=target_credential_id if isinstance(target_credential_id, str) else None)
@@ -1597,7 +1651,9 @@ class ControlPlaneService:
                     operation="rotate_credential", target_kind="credential", outcome="allow", reason_code=None,
                     target_id=target_credential_id,
                 )
-            return {"credential_id": target_credential_id, "secret": new_secret}
+            # Phase 6 WP-3 追補 (brief item A): composed HERE, same
+            # single-point discipline `issue_credential` above follows.
+            return {"credential_id": target_credential_id, "secret": compose_bearer_locator(target_credential_id, new_secret)}
 
         with self._backend.unit_of_work() as work:
             self._backend.rotate_control_credential(target_credential_id, new_secret, work=work)
@@ -1607,14 +1663,14 @@ class ControlPlaneService:
                 operation="rotate_credential", target_kind="control_credential", outcome="allow", reason_code=None,
                 target_id=target_credential_id,
             )
-        return {"credential_id": target_credential_id, "secret": new_secret}
+        return {"credential_id": target_credential_id, "secret": compose_bearer_locator(target_credential_id, new_secret)}
 
-    def revoke_credential(self, credential_id, secret, target_credential_id, *, destructive=None, confirmation=None,
+    def revoke_credential(self, secret, target_credential_id, *, destructive=None, confirmation=None,
                           request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="revoke_credential", request_id=request_id,
                              target_id=target_credential_id if isinstance(target_credential_id, str) else None)
         self._gate_must_rotate(principal, operation="revoke_credential", request_id=request_id)
@@ -1692,12 +1748,12 @@ class ControlPlaneService:
             )
         return {"credential_id": target_credential_id, "enabled": enabled_now, "revoked": True}
 
-    def set_credential_enabled(self, credential_id, secret, target_credential_id, enabled, *,
+    def set_credential_enabled(self, secret, target_credential_id, enabled, *,
                                request_id: Optional[str] = None, rate_precharged: bool = False) -> dict:
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_rate()
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         if not isinstance(enabled, bool):
             raise ValidationError("enabled must be a boolean")
         operation = "enable_credential" if enabled else "disable_credential"
@@ -1729,36 +1785,35 @@ class ControlPlaneService:
             )
         return {"credential_id": target_credential_id, "enabled": enabled, "revoked": state[1]}
 
-    def audit_query(self, credential_id, secret, request: Any, *, request_id: Optional[str] = None,
+    def audit_query(self, secret, request: Any, *, request_id: Optional[str] = None,
                      rate_precharged: bool = False) -> dict:
         """Phase 4 WP-3(b) (design D-5/D-6). Processing order: `audit_
         requests_per_minute` (its OWN window, never `control_requests_per_
         minute`) -> application-credential probe (identified FORBIDDEN,
-        BEFORE the control-credential store ever sees this credential_id/
-        secret pair -- see `_deny_application_credential_on_audit_query`'s
-        own docstring for why the ordering matters) -> ordinary control/
-        audit authentication -> role authorization (`_AUDIT_ROLE_ALLOWED_
-        OPERATIONS` now includes `audit_query`) -> must_rotate gate ->
-        `CAPABILITY_UNSUPPORTED` when no reader is configured (D-5 M-4: the
-        route answers this AFTER authenticating, never a bare 404) ->
-        request shape/semantic validation -> the real read."""
+        BEFORE the control-credential store ever sees this bearer -- see
+        `_deny_application_credential_on_audit_query`'s own docstring for
+        why the ordering matters) -> ordinary control/audit authentication
+        -> role authorization (`_AUDIT_ROLE_ALLOWED_OPERATIONS` now
+        includes `audit_query`) -> must_rotate gate -> `CAPABILITY_
+        UNSUPPORTED` when no reader is configured (D-5 M-4: the route
+        answers this AFTER authenticating, never a bare 404) -> request
+        shape/semantic validation -> the real read."""
         request_id = request_id or _new_request_id()
         if not rate_precharged:
             self._check_audit_rate()
         # D-5's own authority-separation requirement: probe the
-        # APPLICATION-credential universe first. If this credential_id/
-        # secret genuinely authenticates there, deny it here -- attributed,
-        # `FORBIDDEN` -- without ever presenting it to `self._authenticate`
-        # below (which would otherwise durably record an unattributed
-        # `AUTH_INVALID` denial for a credential that, in fact, belongs to
-        # a real application credential, a confusing and duplicative
-        # record for one request).
-        if isinstance(credential_id, str) and secret is not None:
-            app_match = self._backend.authenticate_application(credential_id, secret)
+        # APPLICATION-credential universe first. If this bearer genuinely
+        # authenticates there, deny it here -- attributed, `FORBIDDEN` --
+        # without ever presenting it to `self._authenticate` below (which
+        # would otherwise durably record an unattributed `AUTH_INVALID`
+        # denial for a credential that, in fact, belongs to a real
+        # application credential, a confusing and duplicative record for
+        # one request).
+        if secret is not None:
+            app_match = self._backend.authenticate_application(secret)
             if app_match is not None:
-                self._deny_application_credential_on_audit_query(
-                    credential_id, app_match, request_id=request_id)
-        principal = self._authenticate(credential_id, secret, request_id=request_id)
+                self._deny_application_credential_on_audit_query(app_match, request_id=request_id)
+        principal = self._authenticate(secret, request_id=request_id)
         self._authorize_role(principal, operation="audit_query", request_id=request_id)
         self._gate_must_rotate(principal, operation="audit_query", request_id=request_id)
         if self._audit_reader is None:
@@ -1772,15 +1827,15 @@ class ControlPlaneService:
                                         visibility_lag_ms=self._audit_visibility_lag_ms)
         return {"events": [shape_audit_query_row(row) for row in rows]}
 
-    def _deny_application_credential_on_audit_query(self, credential_id: str, app_match: tuple, *,
+    def _deny_application_credential_on_audit_query(self, app_match: tuple, *,
                                                      request_id: str) -> None:
         """Contract `control_endpoints.audit_query.semantics`: "Application
-        credentials are denied." Always attributed (`app_match` names a
-        real, currently-active application credential this call already
+        credentials are denied." Always attributed (`app_match` -- a
+        `(credential_id, application_id, role)` triple -- names a real,
+        currently-active application credential this call already
         confirmed) -- see `audit_query`'s own docstring for why this must
-        run BEFORE `self._authenticate` ever sees the same credential_id/
-        secret pair."""
-        application_id, role = app_match
+        run BEFORE `self._authenticate` ever sees the same bearer."""
+        credential_id, application_id, role = app_match
         self._deny_audit(
             event_class="authorization_denial", operation="audit_query", target_kind="credential",
             request_id=request_id, actor_id=credential_id, actor_type="application_credential", role=role,
@@ -1863,13 +1918,23 @@ def reset_control_credentials(control_credentials, audit_append, *, work, destru
     credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
     secret = secret or _new_secret()
     control_credentials.revoke_all(work=work)
-    control_credentials.issue(must_rotate=True, credential_id=credential_id, secret=secret, work=work)
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+    # `.issue()` now returns the COMPOSED bearer as its second element
+    # (`credential_id`, unchanged, is its first) -- captured here rather
+    # than discarded, so this function's own return value (below) is the
+    # composed bearer `ops.py`'s `_print_secret_once` now prints verbatim,
+    # not the pre-generated raw `secret` local. Before this fix, the
+    # discarded return value meant `reset`'s own CLI/HTTP callers received
+    # a raw secret while `bootstrap`'s identical pattern (which already
+    # captured `.issue()`'s return) received a composed one -- exactly
+    # the "in-band と帯域外の混在" this WP closes.
+    credential_id, bearer = control_credentials.issue(must_rotate=True, credential_id=credential_id, secret=secret, work=work)
     audit_append(
         work=work, event_class="control_credential_lifecycle", request_id=request_id, application_id=None,
         actor_type=actor_type, actor_id=None, role=None, operation="reset_control_credentials",
         target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id,
     )
-    return credential_id, secret
+    return credential_id, bearer
 
 
 def issue_audit_credential_ceremony(

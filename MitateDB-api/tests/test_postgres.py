@@ -45,9 +45,11 @@ from mitatedb_api.auth import CredentialStore, Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend, _execute
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, Filter
 from mitatedb_api.config import FoundationConfig
+from mitatedb_api.credential_wire import split_bearer_locator
 from mitatedb_api.credential_store_postgres import (PostgresCredentialStore,
                                                     _role_or_state_unavailable,
                                                     assert_pepper_separation)
+from mitatedb_api.field_types import CONTRACT_TYPE_TO_FOUNDATION_TYPE
 from mitatedb_api.errors import (AuthenticationError, AuthorizationStateUnavailable,
                                  ConflictError, DestructiveConfirmationRequired,
                                  NotFoundError, StorageConfigurationError, ValidationError)
@@ -1176,7 +1178,7 @@ def test_validate_value_domain_accepts_none_for_every_domain() -> None:
     from mitatedb_api.backend_postgres import _validate_value_domain
 
     assert _validate_value_domain(None, domain=None) is None
-    assert _validate_value_domain(None, domain="text") is None
+    assert _validate_value_domain(None, domain="string") is None
     assert _validate_value_domain(None, domain="int32") is None
     assert _validate_value_domain(None, domain="int64") is None
 
@@ -1198,8 +1200,13 @@ def test_validate_value_domain_actually_invokes_the_domain_check() -> None:
         _validate_value_domain("not-a-number", domain="int64")
     with pytest.raises(ValidationError, match="is out of range for the declared field type"):
         _validate_value_domain(10 ** 30, domain="int64")
+    # Phase 6 WP-3 (design D-3, L6-1 (v)): the shared "text" domain name
+    # is retired -- `string`/`object`/`array`/`json` are now distinct
+    # domain names (`_TEXT_DOMAIN_BY_DECLARED_TYPE`), all still checked
+    # as `isinstance(value, str)` (the real object-vs-array-vs-json shape
+    # check runs upstream, at the cell-layer choke point, design G3).
     with pytest.raises(ValidationError, match="does not match the declared field type"):
-        _validate_value_domain(123, domain="text")
+        _validate_value_domain(123, domain="string")
     # `None` still bypasses everything (M-5), and a matching value still
     # passes through unchanged -- this test is about the CHECK actually
     # running, not about over-tightening it.
@@ -1229,8 +1236,16 @@ def test_check_domain_type_mismatches_are_rejected_at_the_mechanism_level() -> N
         _check_domain("not-a-bool", "int32")
     with pytest.raises(ValidationError, match="does not match the declared field type"):
         _check_domain("not-a-float", "float")
+    # Phase 6 WP-3 (design D-3, L6-1 (v)): see the identical comment in
+    # `test_validate_value_domain_actually_invokes_the_domain_check` above.
     with pytest.raises(ValidationError, match="does not match the declared field type"):
-        _check_domain(123, "text")
+        _check_domain(123, "string")
+    with pytest.raises(ValidationError, match="does not match the declared field type"):
+        _check_domain(123, "object")
+    with pytest.raises(ValidationError, match="does not match the declared field type"):
+        _check_domain(123, "array")
+    with pytest.raises(ValidationError, match="does not match the declared field type"):
+        _check_domain(123, "json")
 
 
 def test_check_domain_range_boundaries_at_the_mechanism_level() -> None:
@@ -1264,16 +1279,20 @@ def test_check_domain_range_boundaries_at_the_mechanism_level() -> None:
     with pytest.raises(ValidationError, match="is out of range for the declared field type"):
         _check_domain(-2147483649, "int32")
 
-    # float and text: type-check only (no range concept for either).
+    # float and the four str-shaped domains: type-check only (no range
+    # concept for any of them). Phase 6 WP-3 (design D-3, L6-1 (v)):
+    # `string`/`object`/`array`/`json` replace the former single shared
+    # `"text"` domain name (`_TEXT_DOMAIN_BY_DECLARED_TYPE`).
     assert _check_domain(1, "float") == 1.0
     assert _check_domain(1.5, "float") == 1.5
-    assert _check_domain("hello", "text") == "hello"
-    # An unrecognized domain string is passed through unchanged (matches
-    # `_DOMAIN_BY_DATA_TYPE`'s own fallback of `"text"` for anything not
-    # explicitly mapped -- this function itself has no "unknown domain"
-    # error path, by design: an unmapped PostgreSQL `data_type` is
-    # deliberately treated as `"text"` by the CALLER, `field_domains`,
-    # never reaching `_check_domain` with a truly unknown domain string).
+    assert _check_domain("hello", "string") == "hello"
+    assert _check_domain("{}", "object") == "{}"
+    assert _check_domain("[]", "array") == "[]"
+    assert _check_domain('"x"', "json") == '"x"'
+    # An unrecognized domain string is passed through unchanged -- this
+    # function itself has no "unknown domain" error path, by design: a
+    # `field_domains` caller only ever passes one of the domain names it
+    # itself produces.
     assert _check_domain("anything", "not-a-real-domain") == "anything"
 
 
@@ -2008,8 +2027,8 @@ class _InMemoryCredentialHarness:
     def issue(self, role):
         return self.store.issue(self.app_id, role)
 
-    def authenticate(self, credential_id, secret):
-        return self.store.authenticate(credential_id, secret)
+    def authenticate(self, secret):
+        return self.store.authenticate(secret)
 
     def assert_active(self, principal):
         self.store.assert_active(principal)
@@ -2053,10 +2072,21 @@ class _PostgresCredentialHarness:
         )
 
     def issue(self, role):
-        return self.writer.issue(self.app_id, role)
+        # Phase 6 WP-3 (design D-1(d)): `PostgresCredentialStore.issue`
+        # now returns the composed bearer, not the bare secret (this is
+        # the store an HTTP bearer is actually built from -- unlike
+        # `auth.CredentialStore`, see that class's own docstring). This
+        # harness's own scenario script authenticates with the bare
+        # secret directly (mirroring `authenticate`'s own unchanged,
+        # raw-secret receiving side), so it recovers that raw secret
+        # here, once, rather than pushing bearer-composition awareness
+        # into the shared scenario script itself.
+        credential_id, bearer = self.writer.issue(self.app_id, role)
+        secret = bearer
+        return credential_id, secret
 
-    def authenticate(self, credential_id, secret):
-        return self.reader.authenticate(credential_id, secret)
+    def authenticate(self, secret):
+        return self.reader.authenticate(secret)
 
     def assert_active(self, principal):
         self.reader.assert_active(principal)
@@ -2090,7 +2120,7 @@ def _assert_contract_credential_lifecycle(harness) -> None:
     """
     # issue -> authenticate succeeds.
     credential_id, secret = harness.issue(Role.RUNTIME)
-    principal = harness.authenticate(credential_id, secret)
+    principal = harness.authenticate(secret)
     assert principal.role == Role.RUNTIME
     harness.assert_active(principal)  # must not raise
 
@@ -2098,13 +2128,13 @@ def _assert_contract_credential_lifecycle(harness) -> None:
     # operational states", lifecycle.credential).
     harness.disable(credential_id)
     with pytest.raises(AuthenticationError):
-        harness.authenticate(credential_id, secret)
+        harness.authenticate(secret)
     with pytest.raises(AuthenticationError):
         harness.assert_active(principal)
 
     # enable -> revived (disable's own reversal).
     harness.enable(credential_id)
-    principal = harness.authenticate(credential_id, secret)
+    principal = harness.authenticate(secret)
     harness.assert_active(principal)
 
     # role mismatch -> refused: `assert_active` re-checks the caller's own
@@ -2117,38 +2147,38 @@ def _assert_contract_credential_lifecycle(harness) -> None:
     # credential can never be made valid again", lifecycle.credential).
     harness.revoke(credential_id)
     with pytest.raises(AuthenticationError):
-        harness.authenticate(credential_id, secret)
+        harness.authenticate(secret)
 
     # enable after revoke -> STILL refused. This is the parity-defining
     # assertion WP-2 exists for: "Reverses disable only. A revoked
     # credential is not resurrected." (enable_credential.semantics).
     harness.enable(credential_id)
     with pytest.raises(AuthenticationError):
-        harness.authenticate(credential_id, secret)
+        harness.authenticate(secret)
     with pytest.raises(AuthenticationError):
         harness.assert_active(principal)
 
     # unknown credential id -> refused, never a crash or a different
     # exception type than any other authentication failure.
     with pytest.raises(AuthenticationError):
-        harness.authenticate("no-such-credential-id-ever-issued", "whatever-secret")
+        harness.authenticate("no-such-credential-id-ever-issued.whatever-secret")
 
     # disabled Application -> "A disabled Application rejects all
     # application-facing operations" (lifecycle.application) even for a
     # credential that was never itself disabled or revoked.
     other_id, other_secret = harness.issue(Role.DEVELOPER)
-    other_principal = harness.authenticate(other_id, other_secret)
+    other_principal = harness.authenticate(other_secret)
     # WP-2 review m-1: `disable_application`/`enable_application` report
     # whether the application id existed (`True` here -- this harness's
     # own application was set up by the caller) rather than staying
     # silent either way.
     assert harness.disable_application() is True
     with pytest.raises(AuthenticationError):
-        harness.authenticate(other_id, other_secret)
+        harness.authenticate(other_secret)
     with pytest.raises(AuthenticationError):
         harness.assert_active(other_principal)
     assert harness.enable_application() is True
-    harness.authenticate(other_id, other_secret)  # revived
+    harness.authenticate(other_secret)  # revived
 
 
 def test_inmemory_credential_lifecycle_matches_the_contract() -> None:
@@ -2223,7 +2253,7 @@ def test_postgres_credential_store_fails_closed_when_the_database_is_unreachable
     unreachable_dsn = "host=127.0.0.1 port=1 dbname=nonexistent connect_timeout=1"
     store = PostgresCredentialStore(unreachable_dsn, pepper=_PARITY_PEPPER, connect_timeout=1)
     with pytest.raises(AuthorizationStateUnavailable):
-        store.authenticate("any-credential-id", "any-secret")
+        store.authenticate("any-credential-id.any-secret")
     with pytest.raises(AuthorizationStateUnavailable):
         store.assert_active(Principal("any-app", "any-credential-id", Role.RUNTIME))
     with pytest.raises(AuthorizationStateUnavailable):
@@ -2240,6 +2270,37 @@ def test_postgres_credential_store_fails_closed_when_the_database_is_unreachable
         store.disable_application("any-app")
     with pytest.raises(AuthorizationStateUnavailable):
         store.enable_application("any-app")
+
+
+def test_postgres_credential_store_rejects_a_nul_bearing_locator_before_any_lookup(platform) -> None:
+    """WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 3,
+    review F4): before `split_bearer_locator`'s own NUL-byte check
+    existed, a bearer like `crd_x\\x00y.secret` would split "successfully"
+    into a `credential_id` half carrying a NUL byte, which this store then
+    bound as a REAL SQL query parameter -- psycopg refuses a NUL-bearing
+    `text` parameter outright, and `authenticate`'s own generic `except
+    psycopg.Error` mapped that to `AuthorizationStateUnavailable` (503,
+    `AUTH_STATE_UNAVAILABLE`), a client-triggerable state-unavailable
+    response that is also never durably audited (`AUTH_STATE_UNAVAILABLE`
+    is not in the durable-denial code set) -- SI-14 regression.
+
+    Exercised here against a REAL, reachable PostgreSQL connection (not a
+    mock) specifically so this test would ALSO have caught the failure
+    mode if the NUL check were somehow bypassed and a NUL byte genuinely
+    reached psycopg: this store's own `authenticate` must raise `errors.
+    AuthenticationError` (401-shaped, `AUTH_INVALID`), never `errors.
+    AuthorizationStateUnavailable` (503-shaped), for either NUL-bearing
+    half -- proving the rejection happens BEFORE any lookup, not merely
+    that some exception was raised."""
+    store = PostgresCredentialStore(platform.controlplane_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
+    for locator in ("crd_\x00nulid.secret", "crd_nulid.sec\x00ret"):
+        # `pytest.raises(AuthenticationError)` is already the load-bearing
+        # distinction here -- `AuthorizationStateUnavailable` is a SIBLING
+        # class (both extend `errors.FoundationError` independently), not
+        # a subclass, so this block fails the test outright if a
+        # regression ever raises that 503-shaped exception instead.
+        with pytest.raises(AuthenticationError):
+            store.authenticate(locator)
 
 
 def test_postgres_credential_store_get_state_reports_both_independent_booleans(platform, credential_app) -> None:
@@ -2365,7 +2426,7 @@ def test_postgres_credential_store_reads_via_a_no_privilege_role_raise_storage_c
     """
     store = PostgresCredentialStore(no_select_grant_dsn, pepper=_PARITY_PEPPER, schema=platform.registry_schema)
     with pytest.raises(StorageConfigurationError):
-        store.authenticate("any-credential-id", "any-secret")
+        store.authenticate("any-credential-id.any-secret")
     with pytest.raises(StorageConfigurationError):
         store.assert_active(Principal("any-app", "any-credential-id", Role.RUNTIME))
     with pytest.raises(StorageConfigurationError):
@@ -2413,3 +2474,260 @@ def test_role_or_state_unavailable_classifies_an_out_of_vocabulary_role_as_state
         _role_or_state_unavailable("control")  # a real contract role enum member, but not one this table's CHECK allows
     with pytest.raises(AuthorizationStateUnavailable):
         _role_or_state_unavailable("garbage-not-a-role-at-all")
+
+
+# ===========================================================================
+# Phase 6 WP-3 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-3): declared-type registry -- round trip, negative validation,
+# catalog shape, migration 0006 backfill. All against the PostgreSQL
+# backend (`test_foundation.py` carries the sqlite/in-process parity
+# half -- design's own non-vacuity requirement that the choke point is
+# real on BOTH backends, not only the one with a live domain concept).
+# ===========================================================================
+
+
+def _typed_fields(contract_types: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """`ApplicationCell.create_collection`/`create_entity`'s own `fields`
+    parameter is `{name: FOUNDATION_type}` (`_FIELD_TYPE_VOCABULARY`,
+    the low-level, pre-1.6.0 shape -- unlike `http.py`'s own wire-facing
+    `fields` array of bare names) -- `field_types` (this WP's own new
+    parameter) is a SEPARATE, parallel `{name: CONTRACT_type}` map. This
+    helper builds both from one `{name: contract_type}` mapping, the
+    shape these tests want to express directly."""
+    fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[contract_type] for name, contract_type in contract_types.items()}
+    return fields, dict(contract_types)
+
+
+def test_declared_type_registry_round_trips_every_contract_type(app_a) -> None:
+    """Write-then-read parity for all 7 contract-vocabulary types,
+    exercised through `create_entity`'s own `field_types` (this WP's new
+    capability): `object`/`array`/`json` come back as the EXACT JSON
+    value written (design F2, never a string a caller must `json.loads()`
+    again), and `boolean` comes back as a real JSON boolean (design F3),
+    never `0`/`1`."""
+    cell = make_cell(app_a)
+    try:
+        developer, runtime = sessions_for(cell, app_a.app_id)
+        fields, field_types = _typed_fields({
+            "s": "string", "i": "integer", "n": "number", "b": "boolean",
+            "o": "object", "arr": "array", "j": "json",
+        })
+        developer.create_entity("typed_things", fields=fields, field_types=field_types)
+        values = {
+            "s": "hello", "i": 42, "n": 3.5, "b": True,
+            "o": {"a": 1, "b": [1, 2]}, "arr": [1, "two", {"three": 3}],
+            "j": "a plain string written to a json field",
+        }
+        runtime.insert("typed_things", values)
+        rows = runtime.read("typed_things")
+        assert len(rows) == 1
+        row = rows[0]
+        for key, expected in values.items():
+            assert row[key] == expected, f"{key}: expected {expected!r}, got {row[key]!r}"
+        assert row["b"] is True  # not 1 -- a real JSON boolean, not a truthy int
+    finally:
+        close_cell(cell)
+
+
+def test_declared_type_registry_rejects_mismatched_values_for_six_words(app_a) -> None:
+    """Design's own non-vacuity requirement (work order §0.1 item 1, WP-3
+    completion condition 12): the negative side is exercised for `json`-
+    excluded 6 words -- each gets one mismatched value that must be
+    rejected `VALIDATION_FAILED` (`errors.ValidationError`) by the cell-
+    layer choke point, before any statement reaches PostgreSQL (no row is
+    ever inserted for the field under test)."""
+    cell = make_cell(app_a)
+    try:
+        developer, runtime = sessions_for(cell, app_a.app_id)
+        fields, field_types = _typed_fields({
+            "s": "string", "i": "integer", "n": "number", "b": "boolean",
+            "o": "object", "arr": "array",
+        })
+        developer.create_entity("typed_negatives", fields=fields, field_types=field_types)
+        bad_values = {"s": 123, "i": "abc", "n": "abc", "b": 7, "o": [1, 2], "arr": {"a": 1}}
+        for field, bad_value in bad_values.items():
+            with pytest.raises(ValidationError):
+                runtime.insert("typed_negatives", {field: bad_value})
+        # None of the 6 rejected writes actually landed.
+        assert runtime.read("typed_negatives") == []
+    finally:
+        close_cell(cell)
+
+
+def test_declared_boolean_rejects_int_zero_and_one_too(app_a) -> None:
+    """0/1 are historically what this backend physically stores a
+    declared-boolean field as (design §1.5 finding 1b-2) -- this pins
+    that the choke point rejects them as VALUES too, not merely a
+    non-0/1 int like `7`: a silent accept-and-coerce here would make the
+    boolean check meaningless in the one case that matters most (the
+    exact physical representation this backend used to leak)."""
+    cell = make_cell(app_a)
+    try:
+        developer, runtime = sessions_for(cell, app_a.app_id)
+        fields, field_types = _typed_fields({"flag": "boolean"})
+        developer.create_entity("bool_strict", fields=fields, field_types=field_types)
+        for bad in (0, 1, 7):
+            with pytest.raises(ValidationError):
+                runtime.insert("bool_strict", {"flag": bad})
+        assert runtime.read("bool_strict") == []
+        runtime.insert("bool_strict", {"flag": False})
+        assert runtime.read("bool_strict")[0]["flag"] is False
+    finally:
+        close_cell(cell)
+
+
+def test_catalog_reports_three_keys_and_undeclared_fields_default_to_json(app_a) -> None:
+    """`ApplicationRuntime.catalog()` (`cell.py`, `application_catalog:
+    enabled` this same commit): the returned `EntityDescriptor` carries
+    exactly `entity`/`fields`/`field_types` (never `mutation_class`/
+    `address_fields`/`address_reuse`/`unique_keys` -- design §1.5 finding
+    4, `row_addressability: unavailable`), `fields` and `field_types`'
+    key set agree exactly, and a field named in `fields` but not in the
+    request's own `field_types` reports `json` (decision (ii))."""
+    cell = make_cell(app_a)
+    try:
+        developer, runtime = sessions_for(cell, app_a.app_id)
+        # `untyped` is deliberately omitted from `field_types` -- decision
+        # (ii)'s own default applies (the SAME derivation `http.py`'s own
+        # `create_entity` handler performs at the wire boundary: a name
+        # with no entry in the request's own `field_types` gets physical
+        # `json` and, through it, contract `json` too).
+        developer.create_entity(
+            "catalog_probe", fields={"typed": "integer", "untyped": "json"}, field_types={"typed": "integer"})
+        entries = runtime.catalog()
+        entry = next(e for e in entries if e["entity"] == "catalog_probe")
+        assert set(entry.keys()) == {"entity", "fields", "field_types"}
+        assert set(entry["fields"]) == {"typed", "untyped"}
+        assert set(entry["field_types"]) == set(entry["fields"])
+        assert entry["field_types"]["typed"] == "integer"
+        assert entry["field_types"]["untyped"] == "json"
+        # Every value in the enum is one of the contract's 7 words.
+        for value in entry["field_types"].values():
+            assert value in ("string", "integer", "number", "boolean", "object", "array", "json")
+    finally:
+        close_cell(cell)
+
+
+def test_migration_0006_backfills_declared_types_for_a_pre_1_6_0_style_database(
+    platform, tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Simulates an application provisioned before this WP: drops the
+    registry table the (now-updated) `0003` already created for it and
+    adds a handful of raw columns via direct SQL, with no registry rows
+    at all -- then runs the upgrade script `0006` and checks the
+    backfilled rows match design §1.5 finding 2a's own table exactly,
+    including the documented `object`/`array` -> `string` collapse
+    limitation (both physically TEXT, indistinguishable from `information_
+    schema` alone -- `0006`'s own header comment)."""
+    app = provision_app(platform, "upgrade_probe")
+    try:
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE public._mdb_field_types")
+                cur.execute(
+                    "CREATE TABLE public.legacy_thing "
+                    "(int_col BIGINT, num_col DOUBLE PRECISION, bool_col INTEGER, text_col TEXT)"
+                )
+        finally:
+            conn.close()
+
+        rewritten_dir = tmp_path_factory.mktemp("mitatedb_0006_" + platform.prefix)
+        text = (MIGRATIONS_DIR / "0006_declared_field_types_upgrade.sql").read_text().replace("mitatedb", platform.prefix)
+        rewritten_0006 = rewritten_dir / "0006_declared_field_types_upgrade.sql"
+        rewritten_0006.write_text(text)
+
+        _run_psql(platform.provision_dsn, rewritten_0006, {"app_id": "upgrade_probe"})
+
+        conn = psycopg.connect(app.developer_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT field, declared_type FROM public._mdb_field_types "
+                    "WHERE entity = 'legacy_thing' ORDER BY field"
+                )
+                rows = dict(cur.fetchall())
+            conn.commit()
+        finally:
+            conn.close()
+        assert rows == {
+            "int_col": "integer", "num_col": "number", "bool_col": "boolean", "text_col": "string",
+        }
+
+        # Re-running it is a safe no-op (ON CONFLICT DO NOTHING) -- an
+        # operator-corrected row (design's own documented object/array
+        # remediation) must never be clobbered by a second run.
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public._mdb_field_types SET declared_type = 'object' "
+                    "WHERE entity = 'legacy_thing' AND field = 'text_col'"
+                )
+        finally:
+            conn.close()
+        _run_psql(platform.provision_dsn, rewritten_0006, {"app_id": "upgrade_probe"})
+        conn = psycopg.connect(app.developer_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT declared_type FROM public._mdb_field_types "
+                    "WHERE entity = 'legacy_thing' AND field = 'text_col'"
+                )
+                (declared_type,) = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+        assert declared_type == "object"
+
+        # And the backend can actually read it back through the normal API.
+        cell = make_cell(app)
+        try:
+            declared = cell._backend.field_types("legacy_thing")
+            assert declared == {
+                "int_col": "integer", "num_col": "number", "bool_col": "boolean", "text_col": "object",
+            }
+        finally:
+            close_cell(cell)
+    finally:
+        deprovision_app(platform, "upgrade_probe")
+
+
+def test_missing_field_types_registry_is_storage_configuration_error_not_validation_failed(platform) -> None:
+    """WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 6,
+    review F9): a `_mdb_field_types`-less application DB (migration 0006
+    genuinely never applied -- not the `test_migration_0006_...` test
+    above, which DOES apply it) is an OPERATOR/DEPLOYMENT defect, never a
+    client mistake. Before this fix, `backend_postgres.py`'s `field_
+    domains`/`field_types`/`all_field_types` each caught the resulting
+    `psycopg.errors.UndefinedTable` only via their own generic `except
+    psycopg.Error`, surfacing `ValidationError` (contract `VALIDATION_
+    FAILED`, a CLIENT-fault code) for every read/write on the affected
+    entity -- fail-closed, but the wrong fault attribution (an operator
+    reading `VALIDATION_FAILED` back would reasonably suspect their OWN
+    request, not a missing migration). `StorageConfigurationError` is
+    this peer's own existing class for exactly this shape of defect
+    (`credential_store_postgres.py`'s identical `InsufficientPrivilege`
+    precedent), mapping to `SERVICE_UNAVAILABLE` at the HTTP boundary."""
+    app = provision_app(platform, "no_registry_probe")
+    try:
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE public._mdb_field_types")
+                cur.execute("CREATE TABLE public.unregistered_thing (int_col BIGINT, text_col TEXT)")
+        finally:
+            conn.close()
+
+        cell = make_cell(app)
+        try:
+            with pytest.raises(StorageConfigurationError):
+                cell._backend.field_types("unregistered_thing")
+            with pytest.raises(StorageConfigurationError):
+                cell._backend.field_domains("unregistered_thing")
+            with pytest.raises(StorageConfigurationError):
+                cell._backend.all_field_types()
+        finally:
+            close_cell(cell)
+    finally:
+        deprovision_app(platform, "no_registry_probe")

@@ -852,21 +852,20 @@ def test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless
     **Port v1.10 (phase 6 WP-1, design docs/design/
     PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md §6.1 item 2, D-2,
     `docs/design/CONFORMANCE_ADAPTER_V1.md` §20.3)**: the topology fact
-    itself now comes from `adapter.surfaces_cohosted(adapter.capability_
-    document(), fallback=adapter.control_surface_cohosted_with_data_
-    plane)` -- a 1.6.0+ peer's own declared `surfaces.data`/`surfaces.
-    control` origins where it has them, falling back to the pre-1.6.0
-    topology declaration (port v1.9, unchanged, still required on every
-    plug) where it does not. **This is a REPLACEMENT of the judgment
-    SOURCE, not of the observed OUTCOME**: no currently-registered
-    adapter declares `surfaces` yet, so every one of them still takes the
-    fallback branch and still resolves to `False`, exactly as before this
-    WP (work order WP-1 completion condition 11's own "置換が挙動を変え
-    ないことの実測" -- see the WP-1 completion report's mutation 8 for
-    the measured proof that the fallback branch is load-bearing, not
-    merely present). `control_surface_cohosted_with_data_plane`'s own
-    removal is WP-3's job, same commit as the last 1.6.0 flip -- this WP
-    changes only which function this ONE call site asks.
+    itself comes from `adapter.surfaces_cohosted(adapter.capability_
+    document())` -- a 1.6.0+ peer's own declared `surfaces.data`/
+    `surfaces.control` origins. Phase 6 WP-3 追補 (supervisor ruling
+    2026-09-04, brief item D): the pre-1.6.0 topology-declaration
+    fallback this call site originally also passed (the WP-1 port
+    revision's own second argument, since removed along with the adapter
+    method that provided it) is gone -- both peers now declare 1.6.0
+    unconditionally, so `surfaces_cohosted` is surfaces-derived only. The
+    OBSERVED OUTCOME is unchanged (every currently-registered adapter's
+    `data`/`control` `surfaces` origins still resolve to `False` here,
+    the same value the removed fallback always returned -- work order
+    WP-1 completion condition 11's own "置換が挙動を変えないことの実測",
+    now load-bearing against the fallback's removal rather than its
+    introduction).
 
     - `provided`: conformant ONLY when `surfaces_cohosted(...)` resolves
       `True` (a deployment that co-hosts both surfaces, `versioning.
@@ -884,9 +883,12 @@ def test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless
       `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/any other denial code is
       non-conformant either way.
     """
-    cohosted = surfaces_cohosted(
-        adapter.capability_document(), fallback=adapter.control_surface_cohosted_with_data_plane
-    )
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 `fallback=adapter.control_surface_cohosted_with_data_
+    # plane` argument is removed alongside that now-deleted port method --
+    # `surfaces_cohosted` is surfaces-derived only, both peers declaring
+    # 1.6.0 unconditionally.
+    cohosted = surfaces_cohosted(adapter.capability_document())
     control_actor = adapter.control_credential()
     form, outcome = _dispatch_audit_query_on_data_plane_host(adapter, control_actor, {"limit": 1})
     if form == "surface_absent":
@@ -900,6 +902,79 @@ def test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless
         )
         return
     _require_denied_with(adapter, form, outcome, "AUTH_INVALID")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 WP-3 追補 (mutation-testing finding, supervisor ruling 2026-09-04):
+# work order §4 WP-3 完了条件20 ("申告メソッドの消滅... 判定が実際に使われ
+# ていることの実測") names `test_c09_audit_evidence_on_data_plane_host`
+# above as the vector that should turn red if `adapter.surfaces_cohosted`
+# is broken (e.g. mutated to unconditionally return `True`). Empirically,
+# it does NOT: every currently-registered adapter's own data-plane host
+# genuinely never answers a control/audit request (`form` is always
+# "denied", never "provided"), so the `assert cohosted` branch above
+# (only reached when `form == "provided"`) is structurally UNREACHABLE
+# for the whole current registry -- a fail-OPEN mutation of `surfaces_
+# cohosted` (always `True`) passes the full suite unnoticed (measured).
+# This is a real gap, not a product-code defect: `surfaces_cohosted`
+# itself was never directly unit-tested anywhere (grep across this
+# repository, confirmed before adding this test). The test below closes
+# it directly, with synthetic `CapabilityDocument`-shaped dicts, needing
+# no adapter/dispatch machinery at all -- it observes `surfaces_cohosted`
+# itself, not an indirect, currently-unreachable consequence of it.
+# Product code is untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_surfaces_cohosted_resolves_true_only_for_matching_origins_and_false_otherwise() -> None:
+    """Direct unit coverage of `adapter.surfaces_cohosted` (port v1.10,
+    design section 6.1 item 2) -- same-origin data/control base URLs
+    resolve `True`; differing host, differing port, a pre-1.6.0
+    `contract_version`, and a missing `surfaces`/`surfaces.control` each
+    resolve `False`. Path is deliberately irrelevant to the origin
+    comparison (`/v1` vs `/control/v1` on the SAME host:port still
+    co-hosted)."""
+    same_origin = {
+        "contract_version": "1.6.0",
+        "surfaces": {
+            "data": {"base_url": "https://mtdb.example.invalid:8443/v1"},
+            "control": {"base_url": "https://mtdb.example.invalid:8443/control/v1"},
+        },
+    }
+    assert surfaces_cohosted(same_origin) is True
+
+    different_host = {
+        "contract_version": "1.6.0",
+        "surfaces": {
+            "data": {"base_url": "https://data.example.invalid/v1"},
+            "control": {"base_url": "https://control.example.invalid/control/v1"},
+        },
+    }
+    assert surfaces_cohosted(different_host) is False
+
+    different_port = {
+        "contract_version": "1.6.0",
+        "surfaces": {
+            "data": {"base_url": "https://mtdb.example.invalid:8443/v1"},
+            "control": {"base_url": "https://mtdb.example.invalid:9443/control/v1"},
+        },
+    }
+    assert surfaces_cohosted(different_port) is False
+
+    pre_1_6_0 = {
+        "contract_version": "1.5.0",
+        "surfaces": same_origin["surfaces"],
+    }
+    assert surfaces_cohosted(pre_1_6_0) is False
+
+    no_surfaces = {"contract_version": "1.6.0"}
+    assert surfaces_cohosted(no_surfaces) is False
+
+    control_absent = {
+        "contract_version": "1.6.0",
+        "surfaces": {"data": same_origin["surfaces"]["data"]},
+    }
+    assert surfaces_cohosted(control_absent) is False
 
 
 # --- declaration truthfulness --------------------------------------------

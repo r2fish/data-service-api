@@ -1,7 +1,14 @@
 # フェーズ6 作業指示書 — 契約 1.6.0 (credential の完全 bearer 化 + surface 発見 + 型付き catalog) + 衛生 2 件
 
-- 版数: **v1.2 (2026-09-04、WP-1 に追補 A/B = suite 高速化 2 件を同梱。WP-0 の実施で確定した 3 点: r2db 側の `parents[3]` フォールバックも除去、同型性テストの対応表は 15 行、WP-0 テストコマンドの `r2db-api/tests/test_main.py` は誤りで実体は `test_credential_persistence.py`)**。v1.1 (2026-09-04、起草報告 8 件に対する監督裁定を反映) — (1) 否定側 vector は **`json` を除く 6 語**に課す (`json` = any JSON value には違反値が存在しない。「監督が発注時に確定する」の逃がしを削除)、(2) 義務の分類語を **unconditional (前提は句)** に統一 (設計 §8 の 1 の書式例は v1.2 の残骸であり従わない)、(3) Dockerfile のパスは実測 `MitateDB-api/docker/Dockerfile` を採る、(4) `[tool.setuptools.package-data]` 節の新設を明記、(5) **同型性テストの機構を「(相対パス, シンボル名) の対応表」駆動へ一般化し、ソース取得方式を両 peer とも `ast.get_source_segment` へ統一する (L5-6 解消)** — WP-0 の確定発注とし、「実測 → 裁定」の形を廃止、(6) 静的固定テストは合成不在 (a) + 分解不在 (b) の両方、(7) **migration の 3 分類を確定**として §7 の 5 に置く、(8) 行番号は起草時の実測値を採る。**あわせて契約英文の確定文は依頼者確定済み (2026-09-04)** である。v1.0 = 起草
-- 正本設計: `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` (**v1.3、確定**)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・契約英文の骨子は設計文書が正本であり、本書はそれを重複させない。設計と本書が食い違ったら**設計が正**であり、本書の誤りとして監督へ差し戻すこと
+- 版数: **v1.3 (2026-09-04、WP-4 記録整理。本文の発注内容は書き換えず、実測で誤りと判明した箇所に【訂正註 2026-09-04】を置き、§11 に実施記録を書いた)**。訂正註は 6 件であり、いずれも**実装物の欠陥ではなく本書側の誤り**である (設計 §11 **L6-18**):
+  1. **WP-0 のテストコマンド** — `r2db-api/tests/test_main.py` は**存在しない**。r2db 側の該当テストは `tests/test_credential_persistence.py` にある (v1.2 の版数行が既に認めていたが、本文のコマンドが未訂正だった)。
+  2. **WP-1 完了条件 7 (d) の「D-4 却下 2 件」** — `spec/CCR_DISPOSITION.md` は**契約変更の従属判断**を記録する場所であり、契約に触れない衛生決定 (D-4) の却下案は射程外である。書くべきは**項目 4 (D-3 (vii)) の却下**だった。
+  3. **WP-1 変異表の変異 8「4 plug で赤」** — 実測は **1 plug** である (当該 vector は `form == "provided"` の枝でのみ同居判定に到達し、その枝へ入る plug が 1 つしかない)。
+  4. **WP-3 完了条件 8 (backfill 規則) の自己矛盾** — 「`object` / `array` 既存列は `json`」と「型無し既存列は `string`」は、MitateDB では 4 契約型がすべて物理 TEXT であるため**同時には満たせない**。監督裁定により**実装どおり `string` 一律が正**である (設計 §11 L6-16)。
+  5. **WP-3 変異表の変異 16「片方の plane だけ」** — 全体 vacuity guard を赤にするには **data 面 (`cell.py`) の flip が要る**。C-19 の guard は adapter の `contract_version()` = **data 面の capability 文書**を読むためであり、control 面の宣言だけを見ていたフェーズ5 の C-09 guard とは source が異なる。
+  6. **正本設計の版数参照** — 本書 4 行目の「v1.3、確定」は **v1.4** の誤りである (設計は WP-0(docs) の時点で v1.4)。
+- 旧 **v1.2 (2026-09-04、WP-1 に追補 A/B = suite 高速化 2 件を同梱。WP-0 の実施で確定した 3 点: r2db 側の `parents[3]` フォールバックも除去、同型性テストの対応表は 15 行、WP-0 テストコマンドの `r2db-api/tests/test_main.py` は誤りで実体は `test_credential_persistence.py`)**。v1.1 (2026-09-04、起草報告 8 件に対する監督裁定を反映) — (1) 否定側 vector は **`json` を除く 6 語**に課す (`json` = any JSON value には違反値が存在しない。「監督が発注時に確定する」の逃がしを削除)、(2) 義務の分類語を **unconditional (前提は句)** に統一 (設計 §8 の 1 の書式例は v1.2 の残骸であり従わない)、(3) Dockerfile のパスは実測 `MitateDB-api/docker/Dockerfile` を採る、(4) `[tool.setuptools.package-data]` 節の新設を明記、(5) **同型性テストの機構を「(相対パス, シンボル名) の対応表」駆動へ一般化し、ソース取得方式を両 peer とも `ast.get_source_segment` へ統一する (L5-6 解消)** — WP-0 の確定発注とし、「実測 → 裁定」の形を廃止、(6) 静的固定テストは合成不在 (a) + 分解不在 (b) の両方、(7) **migration の 3 分類を確定**として §7 の 5 に置く、(8) 行番号は起草時の実測値を採る。**あわせて契約英文の確定文は依頼者確定済み (2026-09-04)** である。v1.0 = 起草
+- 正本設計: `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` (**v1.3、確定**) **【訂正註 2026-09-04】 正しくは v1.4 である** (WP-0(docs) `488e8d3` の時点で v1.4。以後 WP-4 の記録整理で §10 / §11 を加筆している)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・契約英文の骨子は設計文書が正本であり、本書はそれを重複させない。設計と本書が食い違ったら**設計が正**であり、本書の誤りとして監督へ差し戻すこと
 - 前提となる引き継ぎ: `docs/work-orders/HANDOVER_20260904_FABLE.md` (第12次)。**現在地は main `a211584`、root suite 単独実行 1611 passed / 0 failed / 0 skipped / 0 xfailed、うち conformance 422 passed**。ブランチ `phase6-contract-160` は main から切ってある
 - 体制: Fable 監督/判断/コミット、Sonnet 実装 (コミットしない)、Opus 起草/独立レビュー/受け入れ監査
 - 先行作業指示書: `docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md` (v1.7)。**§0.1 の常設規律 7 項目・完了ゲートの実測規律・禁止事項・コミット規律・「完了条件番号 → 変異」対応表の書式を本書がそのまま引き継ぐ**
@@ -193,6 +200,8 @@
 ./.venv/bin/python -m pytest -q          # 完了ゲート、リポジトリルートで単独実行
 ```
 
+**【訂正註 2026-09-04】** 1 行目の **`r2db-api/tests/test_main.py` は存在しない** — r2db 側の `_optional_float` fail-fast テストは `r2db-api/tests/test_credential_persistence.py` にある (MitateDB 側は `MitateDB-api/tests/test_main.py` で正しい)。実装は正しいファイルに置いており、本書側の誤りである (設計 §11 L6-18 (a))。
+
 #### レビューが必ず探すべき点 (Opus、テンプレ 5)
 
 1. **fail-fast の射程超過** — `_optional_int` や alert 側の `max(0.0, …)` へ手が伸びていないか (射程外、L6-4)。
@@ -241,7 +250,7 @@
 - **従属判断 11** を house style で記録する (従属判断 10 と同じ構成)。
   - **(a) 各項目の内容と根拠** — 項目 1 = D-1、項目 2 = D-2、項目 3 = D-3、**項目 4 = D-3 (vii)** (`upsert` の同ラベル補筆。従属判断 10 項目 2 と同じ形式)。
   - **(b) すべて additive である根拠** — 設計 §8 の 4 が挙げる根拠を項目ごとに書く。**MitateDB の挙動変更 3 件 (α)(β)(γ) が契約の additive 性を損なわない理由も書く。**
-  - **(c) 版数の扱い**、**(d) 監督裁定の参照 + 却下側の明記** (設計 §4 の Q1 却下 4 件 / Q2 却下 3 件 / Q3 却下 5 件 / D-4 却下 2 件)。
+  - **(c) 版数の扱い**、**(d) 監督裁定の参照 + 却下側の明記** (設計 §4 の Q1 却下 4 件 / Q2 却下 3 件 / Q3 却下 5 件 / D-4 却下 2 件)。 **【訂正註 2026-09-04】 「D-4 却下 2 件」は誤りである** — `spec/CCR_DISPOSITION.md` は**契約変更の従属判断**を記録する場所であり、契約に 1 バイトも触れない衛生決定 (D-4、WP-0) の却下案は射程外である。**書くべきは項目 4 (D-3 (vii)、`upsert` の同ラベル補筆) の却下**であり、WP-1 の実装はそのとおりに書いている (WP-1 受け入れ監査 疑義 (ii)、設計 §11 L6-18 (e))。
   - **義務の条件付き性を独立した太字段落で書く** — **項目 1 と項目 2 は無条件義務** (control surface に関わる部分は「control surface が提供されている限り」という前提を句として持つ)、**条件付きなのは項目 3 だけ** (`application_catalog` / `schema_operations` の status に依存)、**項目 4 は 1.6.0 段落へ置かない同ラベル補筆なのでこの分類の外**。`version_binding` 本文の列挙と **1 対 1 に対応させる**。
   - **項目ごとの再検討条件。**
 
@@ -334,7 +343,7 @@
 | 8 新 vector 3 種と declare-first | **変異 5** (in-process adapter 1 本の宣言 `contract_version` を `1.6.0` へ上げる → 新 vector 3 種が当該 plug で 1.6.0 分岐へ入り、peer が未実装なので**赤**。分岐が実在することの実測。**否定側 6 語が 6 件として収集されていること・`json` の行が無いことを同時に確認する**。**必ず復元する**) |
 | 9 vector 配置先の裁定 | **監査照合** (変異を作らない。完了条件 9 に照合対象を明記) |
 | 10 port v1.10 (a) verbatim 規約 | **変異 6** (規約に反して adapter 1 本が `secret` へ前置を足す → 静的固定テストの合成不在 (a) が当該 adapter を検出。**xfail のままである**ことと、変異 7 の対照で load-bearing を示す) |
-| 11 port v1.10 (b) 同居判定 | **変異 8** (フォールバック分岐を除去し `surfaces` 不在時に `True` を返す形へ → `test_c09_audit_evidence.py` の無条件 vector が 4 plug で赤) |
+| 11 port v1.10 (b) 同居判定 | **変異 8** (フォールバック分岐を除去し `surfaces` 不在時に `True` を返す形へ → `test_c09_audit_evidence.py` の無条件 vector が 4 plug で赤) **【訂正註 2026-09-04】 赤になるのは 1 plug が上限である** — 当該 vector は `form == "provided"` の枝でのみ同居判定に到達し、現在その枝へ入る plug は 1 つだけである (残りは早期 return)。実測は `1 failed, 3 passed`。「4 plug で赤」は本書側の誤り (設計 §11 L6-18 (c)) |
 | 12 port v1.10 (c) catalog fixture | **監査照合** (変異を作らない。採った形の報告と port の実体を突合) |
 | 13 4 adapter の port 実装 | **変異 9** (1 plug から新メソッドの実装を削る → `ABC` により当該 plug が生成できず収集エラー) |
 | 14 `CONFORMANCE_ADAPTER_V1.md` §20 | **監査照合** (変異を作らない。§19 の構成と項目単位で突合) |
@@ -650,7 +659,7 @@ MitateDB に 1.6.0 の 3 つの義務を出荷し、`application_catalog` を `u
 5. **`surfaces` 環境変数の起動時検査** — 相対 URL / 誤った終端 / 末尾スラッシュ付き / 不在 の各形が**起動時に失敗**すること (4 形が個別ケース)。
 6. **宣言型 registry (両 backend)** — Postgres / sqlite の双方に宣言型の保管があり、**読み書き API が揃っている**こと。`create_entity` / `add_field` が 7 語をそのまま書き込み、型無しには `json` を書き込むこと。
 7. **migration `0006` が per-application 系列であること** — 新規 provisioning が `0003_provision_application.sql` の改訂で registry を作り、**既存 application データベースには upgrade script `0006` が当たる**こと。**platform 単発になっていない**こと。**番号が `0006` である**こと。
-8. **backfill 規則** — upgrade script が既存列を §変更対象 C の表どおりに写すこと。**`object` / `array` は物理的に区別できないため既存列は `json`**、**型無し既存列は `string`** として登録されること。**registry に行が無い既存 field が構造的に生じない**こと。
+8. **backfill 規則** — upgrade script が既存列を §変更対象 C の表どおりに写すこと。**`object` / `array` は物理的に区別できないため既存列は `json`**、**型無し既存列は `string`** として登録されること。**registry に行が無い既存 field が構造的に生じない**こと。 **【訂正註 2026-09-04】 本条件の前半 2 つは同時には満たせない (本書の自己矛盾)** — MitateDB では `string` / `object` / `array` / `json` の 4 契約型がすべて**物理 TEXT** であり、物理型からは区別できない。**監督裁定: 実装どおり「物理 TEXT は一律 `string`」が正**である (`0006` の KNOWN LIMITATION 節と runbook に開示、`object` / `array` として使っていた既存列は `add_field` で型付き列を足して移行)。後半の「行が無い既存 field が構造的に生じない」は実 PostgreSQL で確認済み (19 列すべてに行がある)。設計 §11 **L6-16** / L6-18 (b)。
 9. **catalog の flip と実装** — `application_catalog` が `enabled` であり、`GET /v1/catalog` が実際に応答すること。**宣言と実挙動が同一コミット**であること。
 10. **`EntityDescriptor` の 3 キー** — 返る記述子が `entity` / `fields` / `field_types` の**3 キーのみ**であり、`mutation_class` / `address_fields` / `address_reuse` / `unique_keys` を**省略している**こと。
 11. **`field_types` の総覧性と 7 語** — catalog の全 entity について `fields` の全要素が `field_types` に現れ、値が 7 語 enum に収まること。**型無し field が `json` として返る**こと。
@@ -705,7 +714,7 @@ MitateDB に 1.6.0 の 3 つの義務を出荷し、`application_catalog` を `u
 | 15 `json` の受理と読み出し | **変異 14** (読み出しの逆直列化を外す → 値 round-trip vector が赤。**「書けること」だけでは緑になる**ことの実測) |
 | 16 `boolean` の round-trip | **変異 15** (宣言 `boolean` の書き込みで `7` を通す → 否定側と round-trip が赤) |
 | 17 L6-1 (v) の訂正 | **監査照合** (変異を作らない。完了条件 17 に照合対象を明記) |
-| 18 flip | **変異 16** (片方の plane だけ `1.5.0` へ戻す → 両 plane の版数を固定するローカルテストと全体 vacuity guard が赤) |
+| 18 flip | **変異 16** (片方の plane だけ `1.5.0` へ戻す → 両 plane の版数を固定するローカルテストと全体 vacuity guard が赤) **【訂正註 2026-09-04】 どちらの面かで結果が変わる** — C-19 の全体 vacuity guard は adapter の `contract_version()` = **data 面の capability 文書**を読むので、guard を赤にするには **data 面 (`cell.py`) を戻す**必要がある (実測: `cell.py` を戻して `MitateDB-api/tests/test_http.py::test_capabilities_declares_request_bytes_enforced` と guard の 2 本が赤)。control 面の宣言だけを見ていたフェーズ5 の C-09 guard とは source が異なる (設計 §11 L6-18 (d)) |
 | 19 撤去 3 点が同一コミット | **監査照合** (変異を作らない。完了条件 19 に照合対象を明記) |
 | 20 申告メソッドの消滅 | **変異 17** (`surfaces` 由来の判定を `True` を返す形へ → `test_c09_audit_evidence.py` の無条件 vector が 4 plug で赤。**判定が実際に使われている**ことの実測) |
 | 21 合成・分解の不在 | **変異 18** (adapter 1 本に合成を戻す → 静的固定テストが赤) + **変異 18′** (合成ではなく `secret` の `split(".")` を 1 箇所足す → **分解不在 (b) が赤**) |
@@ -962,12 +971,13 @@ WP-0〜3 の実測を正本へ落とし、台帳と限界開示を現在形に�
 
 ## 11. 実施記録
 
-(WP-4 で記入する。体裁はフェーズ5 作業指示書 §10 に従う — WP / 完了日 / コミット (merge) / 集計行 (root suite、単独実行) / 分割の有無 / レビュー指摘の内訳 / 変異注入の未実測分があればその明示。)
+体裁はフェーズ5 作業指示書 §10 に従う。**集計行はすべて監督が完了ゲートで単独実行して得た実測値**であり (`scratchpad/wp0-160-gate.log` / `wp1-160-gate2.log` / `wp2-160-gate3.log` / `wp3-160-gate2.log`)、各 WP のコミットメッセージ末尾の `Root suite alone:` 行にも転記してある。**実施記録の正本は設計 §10** であり、本節はその要約と監督裁定の一覧だけを置く。
 
-- **WP-0**: `{未実施}`
-- **WP-1**: `{未実施}`
-- **WP-2**: `{未実施}`
-- **WP-3**: `{未実施}`
-- **WP-4**: `{未実施}`
+- **WP-0(docs)** (2026-09-04、`488e8d3` → merge `62e3099`): 設計 v1.4 + 本書 v1.1。文書のみ (基準 **1611 passed / 0 / 0 / 0**)。
+- **WP-0** (2026-09-04、`18bd0a0` → merge `c1c5c7c`): 衛生 2 件。**1626 passed / 0 failed / 0 skipped / 0 xfailed** (497.46s、逐次)。分割なし。レビュー **7 件 (中 3 / 小 4)**、差し戻し 1 回。受け入れ監査は完了条件 **11/11** 充足。変異 1〜7 (+4′) 実施。**監督裁定 3 件**: (i) `parents[3]` の除去を **r2db 側のフォールバックにも及ぼす** (peer 対称)、(ii) 同型性の対応表は **15 行** (機構自身を行として含める)、(iii) Dockerfile / `cloud-run-cloud-sql.md` の注記の書き換えを射程に含める。**変異 5 のみ生ログでない** (書き起こし。監督裁定により再実施不要) — 隠さずに記録する。
+- **WP-1** (2026-09-04、`bb86a37` → merge `99276a8`): 契約 1.6.0 公開 + port v1.10 + C-19 + 追補 A/B。**1675 passed / 0 / 0 / 2 xfailed** (132.38s、`-n 5 --dist loadgroup`)。分割なし。レビュー **10 件 (中 6 / 低 3 / nit 1)**、差し戻し 1 回。受け入れ監査は完了条件 20 + 追補 A-1〜A-3 / B-1〜B-3 を判定し、差し戻し後に全項目充足。変異は X 1/2/3/4/4b + Y 5/6/7/7′/8/9/10/A/A′ + 監督実施の literal A′。**未実測・訂正**: 変異 8 は 1 plug が上限 (上記訂正註)、追補 A-2 の A′ は `limit_class` の assert を C-14 に足してから字義どおり赤になった。**完了ゲートのコマンドは本 WP から `-n 5 --dist loadgroup` である。**
+- **WP-2** (2026-09-04、`36e6d35` → merge `1bc7b36`): r2db の 1.6.0 出荷。**1757 passed / 0 / 0 / 2 xfailed** (180.18s)。分割なし。レビュー **重大 1 + 中 1 + 観測 5**、差し戻し 1 回 (**監督裁定 8 項目**: F1 / F2 / 合成の置き場所 / 監査(a)(b)(c) / タイミング安全化 / 終端の相互排他 / `.` 拒否)。受け入れ監査は 1 回目に 充足 20 / 証拠不足 1 / 設計疑義 2、差し戻し後に **22/22** 充足。変異 1〜16 + 差し戻し裁定分 + レビュー自作 M-α/β/γ。**実バグ 1 件**: NUL を含む locator が 401 ではなく 503 を返し、その否認が耐久監査に残らなかった (SI-14 の後退)。
+- **WP-3** (2026-09-04、`{WP-3}` → merge `{WP-3 の merge}`): MitateDB の 1.6.0 出荷 + 撤去 3 点。**1800 passed / 0 failed / 0 skipped / 0 xfailed** (142.82s)。分割なし (撤去 3 点は同一差分)。レビュー **12 件 (重大 1 / 中 6 / 中〜低 2 / 低 3)**、差し戻し 1 回 + 最終ラウンド 1 回。受け入れ監査は完了条件 26 を判定し 充足 22 / 一部未充足・未充足 3 / 証拠不足 1、最終ラウンドで (B)(C)(E) を閉じ、(A) backfill と (D) `surfaces` ヘルパの同型性は台帳項目 (L6-16 / L6-17) として受理。変異は対応表 1〜18′ + 追補 A〜D + 同型性 A/B/C + 最終ラウンド分。**実バグ 2 件**: `reset_control_credentials` が raw secret を返していた / in-process adapter の生存確認が bearer を分割していたため毎回 control credential を reset していた。**監督裁定の要点**: 4 store すべてを**完全 bearer 受け**へ統一する (レビュー提案とは逆向き)、backfill は `string` 一律を正とする、`CONDITIONS.md` / `CONTROL_MAPPING.md` の訂正を WP-4 から前倒しする。
+- **WP-4** (2026-09-04、`{WP-4}`): 記録整理。**文書のみ (1800 のまま)**。設計 §10 / §11 (L6-18〜L6-20 の起票を含む)、本書 v1.3 (訂正註 6 件 + 本節)、`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4 と第 12 次引き継ぎ §4-2 への migration 番号の注記、引き継ぎ第 13 次。**`security/CONTROL_MAPPING.md` の SI-06 / SI-07 の r2db cell (設計 L6-1 (ii) の半分) は本コミットでは未了**である。
 
 **本書の版数について**: §11 は記録欄であり、本節への追記では版数を上げない。**文言の訂正を要する箇所が見つかったときに版数を上げる。**
