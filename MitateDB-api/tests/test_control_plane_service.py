@@ -83,24 +83,75 @@ def _bootstrapped(limits=None):
 # --------------------------------------------------------------------------
 
 
+# Phase 5 D-3 (Q3 案A, WP-4): the former [1, 200] ceiling on all four
+# request-count classes is removed -- `ControlPlaneLimits.__post_init__`
+# now checks only "positive integer" (symmetric with r2db-api's own
+# `ControlPlaneLimits`, r2db-api/src/r2db_api/limits.py:140-143). The
+# `201`-valued cases this parametrize used to carry are gone: `201` is now
+# an ordinary accepted value, not a rejection case. The lower-bound (`0`)
+# cases are kept and widened to all FOUR classes (the pre-Phase-5 list only
+# covered 3 -- `audit_requests_per_minute`'s own lower bound had never been
+# exercised here). `match=` pins the exact post-removal error text so a
+# reintroduction of the old "[1, 200]" wording (which would now describe a
+# nonexistent ceiling) is caught here, not just by a passing/failing count.
 @pytest.mark.parametrize("field,value", [
-    ("applications", 0), ("applications", 201),
-    ("credentials_per_application", 0), ("credentials_per_application", 201),
-    ("control_requests_per_minute", 0), ("control_requests_per_minute", 201),
+    ("applications", 0),
+    ("credentials_per_application", 0),
+    ("control_requests_per_minute", 0),
+    ("audit_requests_per_minute", 0),
 ])
 def test_limits_reject_out_of_range_values(field, value) -> None:
-    kwargs = dict(applications=5, credentials_per_application=2, control_requests_per_minute=90)
+    kwargs = dict(applications=5, credentials_per_application=2, control_requests_per_minute=90,
+                   audit_requests_per_minute=60)
     kwargs[field] = value
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be a positive integer"):
         ControlPlaneLimits(**kwargs)
 
 
 def test_limits_reject_control_requests_per_minute_too_close_to_the_margin() -> None:
     # applications=5, credentials_per_application=2 -> the floor is 5+4+67=76;
-    # 76 itself (not exceeding it) must be rejected.
+    # 76 itself (not exceeding it) must be rejected. Unaffected by the
+    # ceiling removal above -- this relational check is independent of it.
     with pytest.raises(ValueError):
         ControlPlaneLimits(applications=5, credentials_per_application=2, control_requests_per_minute=76)
     ControlPlaneLimits(applications=5, credentials_per_application=2, control_requests_per_minute=77)
+
+
+def test_limits_accept_generous_values_beyond_the_former_ceiling() -> None:
+    # Same shape as r2db-api's own `_GENEROUS_LIMITS`
+    # (r2db-api/tests/test_control_http.py:57: applications=1_000,
+    # credentials_per_application=1_000, control_requests_per_minute=
+    # 100_000; r2db-api/tests/test_audit_query.py's own module-level
+    # `_GENEROUS_LIMITS` additionally sets audit_requests_per_minute=
+    # 100_000, the 4th class, to the same scale) -- scaled well past the
+    # removed 200 ceiling on ALL FOUR request-count classes, and satisfying
+    # the still-enforced margin inequality (control_requests_per_minute >
+    # applications + 2*credentials_per_application + 67).
+    # `audit_requests_per_minute` is independent of that inequality (it is
+    # never a term in it), so it is included here explicitly rather than
+    # relying on the 3-field version above to stand in for the 4th class.
+    # Construction succeeding is the positive half of this WP's proof;
+    # `test_limits_reject_out_of_range_values` above only proves the LOWER
+    # bound survives, not that the ceiling is actually gone -- that
+    # requires an accepted value the old [1, 200] range would have
+    # rejected, for EVERY class the old range covered.
+    limits = ControlPlaneLimits(
+        applications=1_000,
+        credentials_per_application=1_000,
+        control_requests_per_minute=100_000,
+        audit_requests_per_minute=100_000,
+    )
+    assert limits.applications == 1_000
+    assert limits.credentials_per_application == 1_000
+    assert limits.control_requests_per_minute == 100_000
+    assert limits.audit_requests_per_minute == 100_000
+    # The accepted value is declared as-is, not silently clamped --
+    # `as_dict()` is the same structure `control_capabilities()` publishes.
+    declared = limits.as_dict()
+    assert declared["applications"] == 1_000
+    assert declared["credentials_per_application"] == 1_000
+    assert declared["control_requests_per_minute"] == 100_000
+    assert declared["audit_requests_per_minute"] == 100_000
 
 
 # --------------------------------------------------------------------------

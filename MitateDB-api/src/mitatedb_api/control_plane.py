@@ -122,15 +122,26 @@ def _new_secret() -> str:
 
 @dataclass(frozen=True)
 class ControlPlaneLimits:
-    """R-6 numeric constraints (WP-0 M-5): `applications`/`credentials_per_
-    application`/`control_requests_per_minute` are each capped at 200
-    (`_MAX_EXERCISABLE_LIMIT`), and `control_requests_per_minute` must
-    exceed `applications + 2*credentials_per_application + 67` (the
-    headroom+margin inequality a C-14 vector-5-style position-arithmetic
-    test needs room to walk up to a limit without the rate window itself
-    becoming the first bound hit). `request_bytes` is a separate, much
-    larger byte bound (unrelated to the ≤200 constraint) declared for
-    parity with R-6's "request_bytes を最初から宣言する" instruction.
+    """R-6 numeric constraints (WP-0 M-5; upper bound removed Phase 5 D-3,
+    Q3 案A, WP-4): `applications`/`credentials_per_application`/`control_
+    requests_per_minute`/`audit_requests_per_minute` must each be a
+    positive integer -- **no upper bound is enforced here**, symmetric
+    with r2db-api's own `ControlPlaneLimits` (`r2db-api/src/r2db_api/
+    limits.py`). The accepted value is an operator responsibility, carried
+    through as-declared into `control_capabilities()`; removing the former
+    `[1, 200]` ceiling also removes the deployment-misconfiguration
+    guardrail it incidentally provided (`docs/design/
+    PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` §3 D-3,
+    `MitateDB-api/docs/cloud-run-cloud-sql.md` §3.2c). `control_requests_
+    per_minute` must still exceed `applications + 2*credentials_per_
+    application + 67` (the headroom+margin inequality a C-14 vector-5-style
+    position-arithmetic test needs room to walk up to a limit without the
+    rate window itself becoming the first bound hit) -- this relational
+    check is independent of the removed ceiling and is unaffected by its
+    removal. `request_bytes` is a separate byte bound, checked
+    independently below (also positive-integer only, no upper bound),
+    declared for parity with R-6's "request_bytes を最初から宣言する"
+    instruction.
     """
 
     applications: int = 100
@@ -149,8 +160,8 @@ class ControlPlaneLimits:
         for name in ("applications", "credentials_per_application", "control_requests_per_minute",
                      "audit_requests_per_minute"):
             value = getattr(self, name)
-            if not isinstance(value, int) or isinstance(value, bool) or not (1 <= value <= 200):
-                raise ValueError(f"{name} must be an integer in [1, 200]")
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if self.control_requests_per_minute <= self.applications + 2 * self.credentials_per_application + 67:
             raise ValueError(
                 "control_requests_per_minute must exceed applications + 2*credentials_per_application + 67"
