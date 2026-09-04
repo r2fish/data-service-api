@@ -362,10 +362,17 @@ class _CredentialMissing(Exception):
 
 
 class _CredentialMalformed(Exception):
-    """A bearer token was presented but does not have this peer's own
-    `<credential_id>.<secret>` shape -- structurally cannot be valid, so
-    this is classified `AUTH_INVALID` (a credential WAS presented) rather
-    than `AUTH_REQUIRED` (no credential was presented at all)."""
+    """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+    裁定 1): kept only as a documented historical marker -- no code on
+    this peer constructs this exception any more. Before this round, this
+    HTTP boundary split a presented bearer itself and raised this class
+    for an unparseable shape; splitting now happens exactly once, inside
+    the credential store (`auth.CredentialStore.authenticate`/
+    `credential_store_postgres.PostgresCredentialStore.authenticate`), so
+    a malformed bearer reaches this boundary as an ordinary `Authentication
+    Error` (`AUTH_INVALID`) instead -- `_endpoint`'s own `except` clause
+    below still names this class for defense-in-depth, but the branch is
+    unreachable in practice."""
 
 
 def _extract_bearer(request: Request) -> str | None:
@@ -376,15 +383,6 @@ def _extract_bearer(request: Request) -> str | None:
     if scheme.lower() != "bearer" or not token:
         return None
     return token
-
-
-def _split_bearer(token: str) -> tuple[str, str]:
-    if "." not in token:
-        raise _CredentialMalformed()
-    credential_id, _, secret = token.partition(".")
-    if not credential_id or not secret:
-        raise _CredentialMalformed()
-    return credential_id, secret
 
 
 # --------------------------------------------------------------------------
@@ -433,6 +431,18 @@ class HttpService:
         self._audit_router = audit_router
 
     def authenticate(self, bearer_token: str | None, *, request_id: str | None = None) -> ApplicationRuntime:
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): this HTTP boundary never splits the presented bearer
+        itself any more -- it passes `bearer_token` straight through to
+        `self._credentials.authenticate` (`auth.CredentialStore`/
+        `credential_store_postgres.PostgresCredentialStore`, whichever
+        this service was composed with), which is the single choke point
+        that calls `split_bearer_locator` exactly once. A malformed
+        bearer is no longer distinguished HERE at all -- it reaches the
+        store like any other credential and comes back as an ordinary,
+        unattributed `AuthenticationError` (`AUTH_INVALID`), durably
+        routed by the store's own pre-auth branch (mirrors r2db-api's
+        own `http.py::authenticate`, which never pre-splits either)."""
         if bearer_token is None:
             if self._audit_router is not None:
                 # Review m-1/M-3: no bearer token was presented at all --
@@ -448,8 +458,7 @@ class HttpService:
                     operation="authenticate", target_kind="credential", target_id=None,
                 )
             raise _CredentialMissing()
-        credential_id, secret = _split_bearer(bearer_token)
-        principal = self._credentials.authenticate(credential_id, secret, request_id=request_id)
+        principal = self._credentials.authenticate(bearer_token, request_id=request_id)
         cell = self._cell_factory(principal.application_id)
         guard = self._credentials.assert_active
         if principal.role == Role.DEVELOPER:
@@ -515,6 +524,12 @@ _CONTRACT_FIELD_TYPE_TO_MITATEDB = {
     "boolean": "boolean",
     "object": "json",
     "array": "json",
+    # Phase 6 WP-3 (design D-3, item (i)): the contract's 7th `field_type`
+    # member -- physically the SAME `json` (TEXT) column `object`/`array`
+    # already use; the declared-type REGISTRY (`cell.py`/`backend_*.py`,
+    # `field_types.py`), never this map, is what recovers which of the
+    # three a field actually is.
+    "json": "json",
 }
 
 # `SchemaOperationRequest.operation`'s full contract enum. Only
@@ -743,11 +758,19 @@ async def post_cross_entity_mutate(request: Request) -> Response:
 
 @_endpoint
 async def get_catalog(request: Request) -> Response:
-    # `application_catalog: unavailable` (cell.py's own declaration,
-    # unchanged this WP) -- there is no public "list collections"
-    # operation on this peer at all.
-    _authenticate(request)
-    raise CapabilityError("application catalog discovery is not available on this peer")
+    # Phase 6 WP-3 (design D-3): `application_catalog: enabled`
+    # (`cell.py`'s own declaration, same commit) -- `session.catalog()`
+    # returns the SAME 3-key `EntityDescriptor` shape (`entity`/`fields`/
+    # `field_types`) for every entity, backed by the declared-type
+    # registry.
+    session = _authenticate(request)
+    entities = session.catalog(request_id=_request_id(request))
+    # `CatalogDocument.application_scope` is required alongside `entities`
+    # -- every other endpoint's own response already carries this same
+    # value (`get_capabilities`'s `application_scope` key, `cell.py::
+    # ApplicationRuntime.capabilities()`), read from the SAME `Application
+    # Runtime.application_id` property, never re-derived.
+    return JSONResponse({"application_scope": session.principal.application_id, "entities": entities}, status_code=200)
 
 
 @_endpoint
@@ -804,21 +827,22 @@ async def post_schema(request: Request) -> Response:
         if "field_type" in body:
             raise CapabilityError("create_entity cannot honor a request-level field_type for its fields array")
         fields_raw = body.get("fields")
+        field_types_raw = body.get("field_types")
+        # Phase 6 WP-3 (design D-3, decision (iv)): `field_types` is an
+        # OPTIONAL, PARTIAL map (field name -> one of the contract's 7
+        # `field_type` words) -- never required, never honored silently
+        # when malformed (the 3 invalid cases below are all
+        # `VALIDATION_FAILED`, matching `EntityDescriptor.field_types`'s
+        # own description: "none of the three is silently ignored").
+        if field_types_raw is not None and fields_raw is None:
+            # (c) field_types sent without fields.
+            raise ValidationError("field_types requires fields to be present")
         # P3-D1 (design §0 exception, WP-1): the contract's `fields` on
         # `create_entity` is a bare array of NAMES (no per-field
-        # `field_type` slot) -- `SchemaOperationRequest.field_type` is a
-        # single, request-level value with no per-field association, so a
-        # mixed-type entity can only be built as `create_entity` (fields
-        # omitted or name-only) followed by one `add_field` per typed
-        # field (the r2db-http-established form the design doc itself
-        # names). WP-3 design decision (reported to the requester): a
-        # name-only `fields` array here has no type information to honor
-        # at all, so every named field is created as this peer's own
-        # `text` type -- the same "untyped-equivalent" treatment r2db-api
-        # gives a type-less `create_entity` field (its own `field_type is
-        # None` "JSONB-equivalent" branch, `structured.py::_check_type`) --
-        # rather than silently guessing at a narrower type this peer's own
-        # backends could reject the caller's real first write against.
+        # `field_type` slot on `fields` itself) -- `SchemaOperationRequest.
+        # field_type` (singular, scalar) is a single, request-level value
+        # with no per-field association, refused above; `field_types`
+        # (plural, this WP) is the per-field carrier instead.
         if fields_raw is not None:
             if not isinstance(fields_raw, list) or not fields_raw:
                 raise ValidationError("fields must be a non-empty array")
@@ -834,10 +858,30 @@ async def post_schema(request: Request) -> Response:
             for item in fields_raw:
                 if not isinstance(item, str):
                     raise ValidationError("each field name must be a string")
-            fields = {name: "text" for name in fields_raw}
+            field_types_map: dict[str, str] = {}
+            if field_types_raw is not None:
+                if not isinstance(field_types_raw, dict):
+                    raise ValidationError("field_types must be an object")
+                for name, declared_type in field_types_raw.items():
+                    if name not in fields_raw:
+                        # (a) field_types names a field not in fields.
+                        raise ValidationError(f"field_types names {name!r}, which is not in fields")
+                    if declared_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
+                        # (b) field_types value outside the vocabulary.
+                        raise ValidationError(f"field_types[{name!r}] is not a supported field_type")
+                    field_types_map[name] = declared_type
+            # Decision (ii): a field named in `fields` but not in
+            # `field_types` (or every field, when `field_types` is absent
+            # entirely) defaults to `json` -- the MitateDB behaviour
+            # change (α): the physical, DDL-facing type for such a field
+            # is now `json` (`_CONTRACT_FIELD_TYPE_TO_MITATEDB["json"]`),
+            # not the pre-WP-3 hardcoded `text`.
+            contract_field_types = {name: field_types_map.get(name, "json") for name in fields_raw}
+            fields = {name: _CONTRACT_FIELD_TYPE_TO_MITATEDB[contract_field_types[name]] for name in fields_raw}
         else:
             fields = None
-        session.create_entity(entity, fields, request_id=_request_id(request))
+            contract_field_types = None
+        session.create_entity(entity, fields, field_types=contract_field_types, request_id=_request_id(request))
         # m-2 (independent review): the peer's REAL current schema-revision
         # counter (`ApplicationRuntime.schema_revision()`, the same value
         # `cell.py`'s own delete-confirmation fingerprint reads) -- never a
@@ -850,7 +894,9 @@ async def post_schema(request: Request) -> Response:
         field_type = body.get("field_type")
         if not isinstance(field, str) or field_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
             raise ValidationError("add_field requires field and a supported field_type")
-        session.add_field(entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type], request_id=_request_id(request))
+        session.add_field(
+            entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type],
+            contract_type=field_type, request_id=_request_id(request))
         return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
 
     # C-17 present-denial form (design R-8 item 1): `alter_field`/

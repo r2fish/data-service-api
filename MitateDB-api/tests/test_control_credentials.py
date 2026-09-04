@@ -51,11 +51,22 @@ def _make(kind, pg_store):
     return _memory_store() if kind == "memory" else pg_store
 
 
+def _authenticate(kind, store, secret_or_bearer):
+    """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+    裁定 1): both kinds' `authenticate` (`control_auth.ControlCredentialStore`/
+    `control_credential_store_postgres.PostgresControlCredentialStore`) now
+    take the FULL presented bearer, splitting it exactly once INSIDE the
+    store itself -- this helper is a receiving boundary too (a direct
+    in-process caller) and passes `secret_or_bearer` straight through,
+    unsplit, for either kind."""
+    return store.authenticate(secret_or_bearer)
+
+
 @pytest.mark.parametrize("kind", PARAM_STORES)
 def test_issue_then_authenticate_succeeds(kind, pg_store) -> None:
     store = _make(kind, pg_store)
     credential_id, secret = store.issue()
-    principal = store.authenticate(credential_id, secret)
+    principal = _authenticate(kind, store, secret)
     assert principal.credential_id == credential_id
     assert principal.must_rotate is False
 
@@ -64,7 +75,7 @@ def test_issue_then_authenticate_succeeds(kind, pg_store) -> None:
 def test_issue_with_must_rotate_true_is_reported_on_authenticate(kind, pg_store) -> None:
     store = _make(kind, pg_store)
     credential_id, secret = store.issue(must_rotate=True)
-    principal = store.authenticate(credential_id, secret)
+    principal = _authenticate(kind, store, secret)
     assert principal.must_rotate is True
 
 
@@ -73,14 +84,14 @@ def test_wrong_secret_is_rejected(kind, pg_store) -> None:
     store = _make(kind, pg_store)
     credential_id, _secret = store.issue()
     with pytest.raises(AuthenticationError):
-        store.authenticate(credential_id, "definitely-wrong")
+        _authenticate(kind, store, f"{credential_id}.definitely-wrong")
 
 
 @pytest.mark.parametrize("kind", PARAM_STORES)
 def test_unknown_credential_id_is_rejected(kind, pg_store) -> None:
     store = _make(kind, pg_store)
     with pytest.raises(AuthenticationError):
-        store.authenticate("no-such-id", "whatever")
+        _authenticate(kind, store, "no-such-id.whatever")
 
 
 @pytest.mark.parametrize("kind", PARAM_STORES)
@@ -89,10 +100,10 @@ def test_revoke_is_terminal_enable_cannot_resurrect_it(kind, pg_store) -> None:
     credential_id, secret = store.issue()
     store.revoke(credential_id)
     with pytest.raises(AuthenticationError):
-        store.authenticate(credential_id, secret)
+        _authenticate(kind, store, secret)
     store.enable(credential_id)
     with pytest.raises(AuthenticationError):
-        store.authenticate(credential_id, secret)
+        _authenticate(kind, store, secret)
     enabled, revoked, _must_rotate = store.get_state(credential_id)
     assert revoked is True
     assert enabled is True  # enable() still flips the flag itself...
@@ -105,9 +116,9 @@ def test_disable_then_enable_restores_authentication(kind, pg_store) -> None:
     credential_id, secret = store.issue()
     store.disable(credential_id)
     with pytest.raises(AuthenticationError):
-        store.authenticate(credential_id, secret)
+        _authenticate(kind, store, secret)
     store.enable(credential_id)
-    principal = store.authenticate(credential_id, secret)
+    principal = _authenticate(kind, store, secret)
     assert principal.credential_id == credential_id
 
 
@@ -116,10 +127,10 @@ def test_rotate_changes_digest_and_clears_must_rotate(kind, pg_store) -> None:
     store = _make(kind, pg_store)
     credential_id, _old_secret = store.issue(must_rotate=True)
     new_secret = store.rotate(credential_id)
-    principal = store.authenticate(credential_id, new_secret)
+    principal = _authenticate(kind, store, new_secret)
     assert principal.must_rotate is False
     with pytest.raises(AuthenticationError):
-        store.authenticate(credential_id, _old_secret)
+        _authenticate(kind, store, _old_secret)
 
 
 @pytest.mark.parametrize("kind", PARAM_STORES)
@@ -147,9 +158,9 @@ def test_revoke_all_revokes_every_row_including_already_disabled(kind, pg_store)
     store.disable(b)
     store.revoke_all()
     with pytest.raises(AuthenticationError):
-        store.authenticate(a, secret_a)
+        _authenticate(kind, store, secret_a)
     with pytest.raises(AuthenticationError):
-        store.authenticate(b, secret_b)
+        _authenticate(kind, store, secret_b)
     for credential_id in (a, b):
         _enabled, revoked, _must_rotate = store.get_state(credential_id)
         assert revoked is True

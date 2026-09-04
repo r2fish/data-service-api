@@ -669,6 +669,58 @@ reads back).
 both roles) -- run directly via `psql` the same way, or via the
 break-glass CLI's own `deprovision` subcommand (§7).
 
+### 3.4a Declared-type registry upgrade for existing applications (migration `0006`, Phase 6 WP-3)
+
+Contract 1.6.0 (design `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+V1.md` D-3) requires every field this peer serves to carry a real,
+declared type (`GET /v1/catalog`, `application_catalog: enabled`). A
+freshly `0003`-provisioned application already carries the registry table
+this needs (`public._mdb_field_types`) -- this step is for **applications
+provisioned before this WP shipped**.
+
+Run once per EXISTING application, connected as `mitatedbsvc_provision`:
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -v app_id='acme' \
+  -f MitateDB-api/migrations/0006_declared_field_types_upgrade.sql
+```
+
+This creates `public._mdb_field_types` in that application's own database
+(idempotent -- a no-op if the table already exists) and backfills one row
+per existing column from its own PHYSICAL type:
+
+| Physical type (this application's own table) | Backfilled contract type |
+|---|---|
+| `bigint` | `integer` |
+| `double precision` | `number` |
+| `integer` | `boolean` |
+| `text` | `string` |
+
+**Known limitation, disclosed (not resolved) by this script**: a physical
+`text` column is ambiguous on this backend -- it may have been declared
+`string` (the common case), or `object`/`array` (an `add_field` call
+naming either word was already valid before contract 1.6.0). PostgreSQL's
+own catalog cannot recover which of the two a column was originally
+declared as, so this script backfills every physical `text` column as
+`string`. If this application has an `add_field`-created `object`/`array`
+column, correct that one row by hand after running this script:
+
+```sql
+UPDATE public._mdb_field_types SET declared_type = 'object'
+  WHERE entity = '<entity>' AND field = '<field>';
+```
+
+Re-running the migration script is always safe (it never overwrites an
+existing row, hand-corrected or not).
+
+**Run this before flipping that application's own data service image to a
+contract-1.6.0 build** -- `GET /v1/catalog`/every structured write goes
+through the same registry the moment the new image starts, and an entity
+this script has not yet reached simply has no rows there until it is run
+(a schema operation issued through the new image writes its own registry
+row automatically; only PRE-EXISTING columns need this backfill).
+
 ## 4. Secret Manager
 
 Six secret families, none of which is ever committed to this repository or
@@ -788,10 +840,31 @@ gcloud run deploy mitatedb-data \
   --service-account=mitatedb-data-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_PLATFORM_DSN=mitatedb-platform-dsn:latest \
-  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled
+  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled,MITATEDB_DATA_BASE_URL=https://mitatedb-data.example.invalid/v1,MITATEDB_CONTROL_BASE_URL=https://mitatedb-ctrl.example.invalid/control/v1
 # ... plus one --set-secrets pair per onboarded application's own
 # MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN.
 ```
+
+`MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` (Phase 6 WP-3, design
+D-2, contract 1.6.0 `CapabilityDocument.surfaces`) are **required** from
+contract 1.6.0 on -- `main.build_app` fails closed at startup
+(`config.FoundationConfig.from_env`) if `MITATEDB_DATA_BASE_URL` is unset,
+or if `MITATEDB_CONTROL_BASE_URL` is unset while `MITATEDB_CONTROL_PLANE_
+STATUS=enabled`. Both values are **the deployer's own declaration** of
+each surface's real, externally-reachable base URL -- never derived, never
+guessed from a request. `MITATEDB_DATA_BASE_URL` must end at `/v1` (no
+trailing slash); `MITATEDB_CONTROL_BASE_URL` must end at `/control/v1` (no
+trailing slash) -- both checked at startup (form only, never
+reachability). **Both Cloud Run services must be given the SAME two
+values** (§6.2 below repeats them) -- the data service's own capability
+document and the control service's own capability document must return
+the identical `surfaces` object (contract 1.6.0's own unconditional
+obligation); nothing in either process can detect a mismatched pair by
+itself (design D-2 (b)/(c) -- this is a deployer responsibility, not
+something either process cross-validates). Replace the two example
+`https://...example.invalid` values above with this deployment's own real
+Cloud Run service URLs (`gcloud run services describe ... --format='value
+(status.url)'`) before going live.
 
 Invoker binding: **only `mitate-application`'s own service account**, never
 `allUsers` and never a broad project role:
@@ -813,8 +886,15 @@ gcloud run deploy mitatedb-ctrl \
   --service-account=mitatedb-ctrl-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --max-instances=1 \
-  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest
+  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest \
+  --set-env-vars=MITATEDB_DATA_BASE_URL=https://mitatedb-data.example.invalid/v1,MITATEDB_CONTROL_BASE_URL=https://mitatedb-ctrl.example.invalid/control/v1
 ```
+
+`MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are **required** here
+too, from contract 1.6.0 on (`control_composition.build_control_service`
+fails closed at startup if either is unset) -- see §6.1 above for the full
+explanation. **The SAME two values as §6.1**, not independently chosen
+ones.
 
 `MITATEDB_AUDIT_DSN` (Phase 4 WP-3(b), §3.2b above) is optional -- omit the
 `--set-secrets` entry entirely to leave `audit_query` declared
@@ -930,18 +1010,24 @@ substitute the `gcloud run services proxy` path above if calling
 interactively):
 
 ```sh
-# capabilities declaration (§4-1/§4-2)
+# capabilities declaration (§4-1/§4-2). Phase 6 WP-3 (design D-1(d)):
+# <control credential secret> is the EXACT value `ops.py`'s own `secret:`
+# line printed -- present it verbatim as the bearer; never split it apart
+# or reassemble it from a separately-remembered credential id.
 curl -sk \
-  -H "Authorization: Bearer <control credential id>.<control credential secret>" \
+  -H "Authorization: Bearer <control credential secret>" \
   -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
   <mitatedb-ctrl Cloud Run URL>/control/v1/capabilities
 # expect 200; capabilities.audit_query.status == "enabled" if MITATEDB_AUDIT_DSN is
-# wired (else "unavailable", not a failure -- §4-6); capabilities.contract_version == "1.5.0"
-# and, when audit_query is "enabled", three non-empty declared vocabularies under
-# capabilities.audit_query: event_classes, operations (29 words on this peer) and
-# target_kinds (5). An image built before contract 1.5.0 correctly declares "1.4.0"
-# and carries neither new key -- that is conformant for THAT version, not a failure;
-# what must never disagree is the image's version and its declaration (§3.2b).
+# wired (else "unavailable", not a failure -- §4-6); capabilities.contract_version == "1.6.0"
+# (Phase 6 WP-3) and, when audit_query is "enabled", three non-empty declared
+# vocabularies under capabilities.audit_query: event_classes, operations (29 words
+# on this peer) and target_kinds (5). capabilities.surfaces.data/.control must both
+# be present (§6.4/§0.1 invariant, contract 1.6.0 D-2) and must match the SAME
+# object the data service's own capabilities response returns. An image built
+# before contract 1.6.0 correctly declares an earlier version and carries neither
+# new key -- that is conformant for THAT version, not a failure; what must never
+# disagree is the image's version and its declaration (§3.2b).
 
 # audit_query, cursor-paginated (§4-5)
 curl -sk -X POST \
@@ -980,6 +1066,45 @@ the confirmation that the control service is reachable at all. Flipping the
 env var first asserts a control plane the operator has not yet observed to
 be up, which is exactly the false declaration invariant 3 exists to
 prevent.
+
+### 6.4 Phase 6 WP-3 cutover: 3 observable behavior changes (contract 1.6.0)
+
+Flipping a deployment's `contract_version` declaration to `1.6.0` (§0.1
+invariant 3's own ordering discipline applies here too: flip the
+declaration only once the underlying behavior is already live, same
+commit) brings 3 real, observable behavior changes alongside the
+additive contract itself (design `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+V1.md` §8 item 4, `spec/CCR_DISPOSITION.md` subordinate ruling 11's own
+additive-性 argument for why none of the three is a contract break):
+
+- **(α) undeclared field default, `text` -> `json`**: a `create_entity`
+  field named without an explicit `field_types` entry used to be created
+  as this peer's own `text` type (plain strings only); it is now created
+  `json` (any JSON value). This WIDENS what such a field accepts -- an
+  existing write that used to succeed still succeeds. Existing entities
+  created before this cutover are unaffected (their columns already
+  exist; this only changes what a NEW, undeclared field defaults to).
+- **(β) `json`/`object`/`array`-declared read shape**: reading a field
+  declared `json`, `object`, or `array` now returns the actual JSON value
+  (an object, array, string, number, boolean, or `null`) instead of a
+  JSON-text STRING a caller previously had to `json.loads()` a second
+  time. A client that keeps calling `json.loads()` on such a field's own
+  response value after this cutover gets a `TypeError` (the value is no
+  longer a string) -- update any such client before (or in the same
+  release as) flipping this deployment's image.
+- **(γ) `boolean`-declared wire representation**: a field declared
+  `boolean` now round-trips as a real JSON boolean (`true`/`false`) on
+  both read AND write -- writing an integer (`0`, `1`, or any other int)
+  to such a field is now `VALIDATION_FAILED`, where it previously
+  succeeded (silently storing `0`/`1`). A client that writes `0`/`1` to a
+  declared-boolean field must switch to `false`/`true` before (or in the
+  same release as) flipping this deployment's image.
+
+None of the three requires re-issuing any existing credential (unlike Q1's
+own credential-format change, which is entirely internal to this peer's
+issuance responses -- the RECEIVING side, `http.py::_split_bearer`/
+`control_http.py::_bearer_pair`, is unchanged by this WP, so an already-
+issued credential keeps authenticating exactly as before).
 
 ## 7. Break-glass CLI (`python -m mitatedb_api.ops`, WP-6)
 

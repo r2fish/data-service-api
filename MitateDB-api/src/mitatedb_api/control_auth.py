@@ -31,6 +31,7 @@ import secrets
 from threading import RLock
 from typing import Callable, Optional
 
+from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import AuthenticationError, NotFoundError, ValidationError
 
 # WP-2's own `_DUMMY_DIGEST` rationale, restated for this store: a
@@ -125,7 +126,15 @@ class ControlCredentialStore:
         -- is unaffected); `"audit"` is the one other accepted value, used
         only by `control_plane.issue_audit_credential_ceremony`. Only the
         out-of-band CLI ceremonies ever call this method -- there is no
-        in-band issuance path for either role (P35-D12)."""
+        in-band issuance path for either role (P35-D12).
+
+        Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        returns a COMPOSED bearer now (`compose_bearer_locator`) -- this
+        store's own "帯域外 store API" issuance point. `authenticate`
+        below takes the RAW secret only (round 2 correction: real callers
+        split it once at their own boundary -- see that method's own
+        docstring). The stored `digest` is still computed from the RAW
+        `secret`."""
         if role not in ("control", "audit"):
             raise ValidationError("control-table credentials require control or audit role")
         credential_id = credential_id or ("ctl_" + secrets.token_hex(12))
@@ -135,7 +144,7 @@ class ControlCredentialStore:
                 credential_id=credential_id, digest=self._digest(secret), must_rotate=must_rotate, role=role)
         if work is not None:
             work.on_rollback(lambda: self._credentials.pop(credential_id, None))
-        return credential_id, secret
+        return credential_id, compose_bearer_locator(credential_id, secret)
 
     def revoke(self, credential_id: str, *, work: Optional[_InMemoryWork] = None) -> None:
         with self._lock:
@@ -205,7 +214,12 @@ class ControlCredentialStore:
         refuses this at the policy layer (a revoked credential's rotation
         request is refused before this method is ever called), so this
         method itself stays a dumb primitive, mirroring `control_plane.py`'s
-        module docstring on backends never re-deciding policy."""
+        module docstring on backends never re-deciding policy.
+
+        Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A):
+        returns a COMPOSED bearer now -- same re-issuance discipline
+        `issue` above follows. The stored `digest` is still computed from
+        the RAW `secret`."""
         secret = secret or secrets.token_urlsafe(32)
         with self._lock:
             item = self._credentials.get(credential_id)
@@ -221,7 +235,7 @@ class ControlCredentialStore:
                 item.digest = previous_digest
                 item.must_rotate = previous_must_rotate
             work.on_rollback(_undo)
-        return secret
+        return compose_bearer_locator(credential_id, secret)
 
     def get_state(self, credential_id: str) -> Optional[tuple[bool, bool, bool]]:
         """`(enabled, revoked, must_rotate)` for `credential_id`, or `None`."""
@@ -285,13 +299,33 @@ class ControlCredentialStore:
                 return bool(self._credentials)
             return any(not item.revoked for item in self._credentials.values())
 
-    def authenticate(self, credential_id, secret) -> ControlPrincipal:
-        if not isinstance(credential_id, str) or not credential_id:
+    def authenticate(self, secret) -> ControlPrincipal:
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): `secret` is the FULL presented bearer -- this method is
+        this store's own single receiving boundary, splitting via `split_
+        bearer_locator` exactly ONCE, HERE, matching every OTHER store on
+        this peer (`auth.CredentialStore.authenticate`, `credential_store_
+        postgres.PostgresCredentialStore.authenticate`, `control_
+        credential_store_postgres.PostgresControlCredentialStore.
+        authenticate`) and r2db-api's own `auth.ControlCredentialStore.
+        authenticate` (same name, same one-bearer-in signature). Neither
+        real receiving shape this store serves (HTTP-fronted, via `control_
+        http.py`'s own `authenticate_control`; the in-process conformance
+        adapter's `_ReconciledControlBackend.authenticate_control`) splits
+        the bearer itself any more -- both now pass it through verbatim,
+        exactly once, to this single choke point. A malformed `secret`
+        (no `.`, an empty half, or a NUL byte in either half) fails BEFORE
+        any lookup or digest comparison at all -- SI-15 fail-closed,
+        mirroring `auth.CredentialStore.authenticate`'s identical `locator
+        is None` branch."""
+        locator = split_bearer_locator(secret)
+        if locator is None:
             raise AuthenticationError("control authentication failed")
+        credential_id, secret_part = locator
         with self._lock:
             item = self._credentials.get(credential_id)
             stored_digest = item.digest if item is not None else _DUMMY_DIGEST
-            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+            digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
             valid = item is not None and digest_matches and item.enabled and not item.revoked
             if not valid:
                 raise AuthenticationError("control authentication failed")

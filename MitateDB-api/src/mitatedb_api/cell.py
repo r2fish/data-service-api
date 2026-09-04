@@ -34,7 +34,9 @@ from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
                      ResourceLimitError, ValidationError)
+from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE, check_declared_value
 from .identifiers import validate_identifier
+from .surfaces import build_surfaces
 
 # The common contract's own mutation vocabulary
 # (`structured_operations.allowed_mutations`). Of the four names, only
@@ -195,6 +197,18 @@ _DELETE_CONSEQUENCE = (
 # durable, queryable audit trail an operator could use to reconstruct
 # removed rows, and no soft-delete/undo mechanism of any kind -- claiming
 # either would be untrue.
+
+
+def _surfaces_document_fragment(config):
+    """Phase 6 WP-3 (design D-2): `{"surfaces": {...}}` when this process'
+    own `config.data_base_url` is set, or `{}` (the key omitted entirely)
+    when it is not -- meant to be splatted (`**`) directly into a
+    `CapabilityDocument` dict literal. Never derives or infers either URL
+    (`surfaces.build_surfaces`'s own docstring) -- both come straight from
+    this SAME `FoundationConfig`, the single source of truth `control_
+    plane_status` immediately above already uses."""
+    surfaces = build_surfaces(data_url=config.data_base_url, control_url=config.control_base_url)
+    return {"surfaces": surfaces} if surfaces is not None else {}
 
 
 def _canonical_where_json(filters):
@@ -369,7 +383,18 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
-    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None):
+    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None, field_types=None):
+        """Phase 6 WP-3 (design D-3): `field_types`, when given, is a
+        `{field_name: contract_type}` map (the 7-word contract vocabulary,
+        `field_types.CONTRACT_TYPES`) -- the declared type this call
+        records in the registry for that field. A field named in `fields`
+        but NOT in `field_types` (or every field, when `field_types` is
+        `None` -- every pre-1.6.0-shaped direct caller: this repository's
+        own tests, the in-process conformance adapter) gets its declared
+        contract type DERIVED from the foundation type it was given
+        (`field_types.FOUNDATION_TYPE_TO_CONTRACT_TYPE`) -- the same
+        backfill rule `migrations/0006_...upgrade_declared_types.sql`
+        applies to pre-existing columns (design §1.5 finding 2a)."""
         self._require_developer(principal, request_id=request_id)
         name = self._identifier(name, "collection")
         if not isinstance(fields, dict) or not fields:
@@ -384,11 +409,16 @@ class ApplicationCell:
         if self._backend.schema_count() >= self.config.max_schema_objects:
             raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
         validated_fields = {}
+        declared_types = {}
         for field, field_type in fields.items():
             field = self._identifier(field, "field")
             if field_type not in _FIELD_TYPE_VOCABULARY:
                 raise ValidationError("unsupported field type")
             validated_fields[field] = field_type
+            declared_types[field] = (
+                field_types.get(field) if field_types is not None and field in field_types
+                else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+            )
         # Phase 4 (design D-2 item 2): every schema operation is
         # unconditionally fail-closed class -- the hook's own `pre_commit()`
         # is called by `self._backend.create_collection` itself, as the
@@ -398,11 +428,11 @@ class ApplicationCell:
             target_kind="collection", target_id=name, request_id=request_id,
         )
         with self._lock:
-            self._backend.create_collection(name, validated_fields, audit_hook=hook)
+            self._backend.create_collection(name, validated_fields, field_types=declared_types, audit_hook=hook)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="create_collection")
 
-    def create_entity(self, principal, name, fields=None, *, request_id=None):
+    def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -423,9 +453,9 @@ class ApplicationCell:
         """
         if fields is None:
             fields = {"id": "integer"}
-        return self.create_collection(principal, name, fields, request_id=request_id)
+        return self.create_collection(principal, name, fields, request_id=request_id, field_types=field_types)
 
-    def add_field(self, principal, collection, field, field_type, *, request_id=None):
+    def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -433,12 +463,21 @@ class ApplicationCell:
         collection; see the module-level comment above `_DELETE_
         CONSEQUENCE` for why this is also what makes a schema-revision
         fingerprint necessary in the `delete` confirmation phrase.
+
+        Phase 6 WP-3 (design D-3): `contract_type`, when given, is the
+        7-word contract vocabulary type this call records in the
+        registry for `field` (`http.py`'s own `add_field` handler always
+        supplies it -- `SchemaOperationRequest.field_type` is required
+        there). `None` (every pre-1.6.0-shaped direct caller) derives it
+        from `field_type` via the same backfill rule `create_collection`
+        uses.
         """
         self._require_developer(principal, request_id=request_id)
         collection = self._identifier(collection, "collection")
         field = self._identifier(field, "field")
         if field_type not in _FIELD_TYPE_VOCABULARY:
             raise ValidationError("unsupported field type")
+        declared_type = contract_type if contract_type is not None else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
         # Q1-D11-consistent shape bound (same reasoning as `create_
         # collection`'s own field-count check above): the total column
         # count this collection would carry AFTER this call mirrors the
@@ -457,7 +496,8 @@ class ApplicationCell:
             target_kind="collection", target_id=collection, request_id=request_id,
         )
         with self._lock:
-            self._backend.add_field(collection, field, field_type, audit_hook=hook)  # ConflictError if `field` already exists
+            # ConflictError if `field` already exists
+            self._backend.add_field(collection, field, field_type, contract_type=declared_type, audit_hook=hook)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
 
@@ -476,6 +516,25 @@ class ApplicationCell:
         self._require_data(principal, request_id=request_id)
         with self._lock:
             return self._backend.schema_revision()
+
+    def catalog(self, principal, *, request_id=None):
+        """Phase 6 WP-3 (design D-3): `application_catalog`'s own real
+        implementation (`cell.py::ApplicationRuntime.capabilities()`'s
+        sibling flip, same commit -- `http.py::get_catalog`). Returns
+        `[{"entity": ..., "fields": [...], "field_types": {...}}, ...]`,
+        sorted by entity name for a deterministic response -- EXACTLY the
+        contract `definitions.EntityDescriptor`'s three unconditional/
+        `application_catalog`-conditional keys this peer can honestly
+        populate (`mutation_class`/`address_fields`/`address_reuse`/
+        `unique_keys` are all OMITTED -- `row_addressability:
+        unavailable`, design §1.5 finding 4)."""
+        self._require_data(principal, request_id=request_id)
+        with self._lock:
+            all_types = self._backend.all_field_types()
+        return [
+            {"entity": entity, "fields": sorted(types), "field_types": dict(types)}
+            for entity, types in sorted(all_types.items())
+        ]
 
     def insert(self, principal, collection, values, *, request_id=None):
         self._require_data(principal, request_id=request_id)
@@ -501,6 +560,7 @@ class ApplicationCell:
             raise ResourceLimitError("result limit exceeded", limit_class="result_items")
         with self._lock:
             rows = self._backend.read(collection, selected, bound_filters, order, limit)
+        rows = self._decode_rows(collection, rows)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- "query"
         # is this peer's own contract-vocabulary operation name for this
         # method (`read`, internally), matching r2db-api's identical
@@ -1008,6 +1068,29 @@ class ApplicationCell:
             result.append(field)
         return result
 
+    def _decode_rows(self, collection, rows):
+        """Phase 6 WP-3 (design D-3, F2/F3): the read-side counterpart of
+        `_normalize_value_for_storage` -- restores a physical value to its
+        declared contract shape, backend-independently (both `backend_
+        sqlite.py`/`backend_postgres.py`'s own `read()` return the SAME
+        physical representation this undoes: canonical JSON text for
+        `object`/`array`/`json`, `0`/`1` for `boolean`). A field with no
+        registry row (`None`, backward compatible) or declared `string`/
+        `integer`/`number` passes through unchanged. `None` (SQL NULL)
+        always passes through unchanged, for every declared type."""
+        declared_types = self._backend.field_types(collection)
+        json_types = ("object", "array", "json")
+        for row in rows:
+            for field, value in row.items():
+                if value is None:
+                    continue
+                declared_type = declared_types.get(field)
+                if declared_type in json_types:
+                    row[field] = json.loads(value)
+                elif declared_type == "boolean":
+                    row[field] = bool(value)
+        return rows
+
     # WP-3 (design docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md v1.2
     # R-5/§2): the HTTP `/v1/data/{entity}/query` endpoint maps contract
     # `QueryRequest.order_by` -- an ARRAY of `Order` objects
@@ -1050,6 +1133,14 @@ class ApplicationCell:
     def _prepare_values(self, collection, values):
         collection = self._identifier(collection, "collection")
         available = self._backend.field_domains(collection)
+        # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
+        # declared-type choke point -- `field_types.check_declared_value`
+        # runs BEFORE `encode_value` on every backend (sqlite included,
+        # where `field_domains` alone enforces nothing at all, `available`
+        # above being all-`None` there). Backend domain validation stays
+        # underneath this as defence-in-depth (`encode_value` itself),
+        # never a substitute for it.
+        declared_types = self._backend.field_types(collection)
         if not isinstance(values, dict) or not values:
             raise ValidationError("values must be a non-empty object")
         if len(values) > self.config.max_fields:
@@ -1064,6 +1155,8 @@ class ApplicationCell:
             if field not in available:
                 raise ValidationError("unknown field")
             fields.append(field)
+            declared_type = declared_types.get(field)
+            check_declared_value(value, declared_type)
             # B-1 (independent review round 2): `available[field]` is this
             # field's own value-domain category from the active backend's
             # live catalog (`None` on SQLite -- domain validation skipped
@@ -1071,7 +1164,8 @@ class ApplicationCell:
             # passed through so a type-mismatched value (e.g. a string for
             # a declared-`integer` column) is rejected deterministically
             # here, before any statement reaches PostgreSQL.
-            params.append(self._backend.encode_value(self._normalize_value(value), domain=available[field]))
+            params.append(self._backend.encode_value(
+                self._normalize_value_for_storage(value, declared_type), domain=available[field]))
         return collection, fields, params
 
     def _bind_filters(self, collection, filters):
@@ -1084,6 +1178,9 @@ class ApplicationCell:
             # (`config.max_filter_terms`) under the `query_complexity` key.
             raise ResourceLimitError("filter limit exceeded", limit_class="query_complexity")
         available = self._backend.field_domains(collection)
+        # Phase 6 WP-3 (design D-3, G3): same choke point `_prepare_values`
+        # above uses.
+        declared_types = self._backend.field_types(collection)
         bound = []
         for item in filters:
             if not isinstance(item, Filter):
@@ -1117,10 +1214,19 @@ class ApplicationCell:
                 # B-1: every element compares against the SAME column, so
                 # they all share that column's own domain.
                 domain = available[field]
-                encoded = [self._backend.encode_value(self._normalize_value(v), domain=domain) for v in item.value]
+                declared_type = declared_types.get(field)
+                for v in item.value:
+                    check_declared_value(v, declared_type)
+                encoded = [
+                    self._backend.encode_value(self._normalize_value_for_storage(v, declared_type), domain=domain)
+                    for v in item.value
+                ]
                 bound.append(Filter(field, "in", encoded))
             else:
-                encoded = self._backend.encode_value(self._normalize_value(item.value), domain=available[field])
+                declared_type = declared_types.get(field)
+                check_declared_value(item.value, declared_type)
+                encoded = self._backend.encode_value(
+                    self._normalize_value_for_storage(item.value, declared_type), domain=available[field])
                 bound.append(Filter(field, item.operator, encoded))
         return bound
 
@@ -1138,6 +1244,28 @@ class ApplicationCell:
         if isinstance(value, (bool, str, int, float)) or value is None:
             return value
         raise ValidationError("unsupported value")
+
+    @classmethod
+    def _normalize_value_for_storage(cls, value, declared_type):
+        """Phase 6 WP-3 (design D-3, F2): `declared_type` (one of
+        `field_types.CONTRACT_TYPES`, or `None`) has ALREADY been checked
+        against `value` by `field_types.check_declared_value` before this
+        runs. For `object`/`array`/`json` -- the three contract types this
+        peer stores as physical `json` (TEXT) -- every value (not only
+        dict/list; `str`/`int`/`float`/`bool` too) becomes canonical JSON
+        text, so the read side can UNCONDITIONALLY `json.loads()` it back
+        and recover the exact original value (a plain string written to a
+        `json`-declared field must round-trip as that same string, not
+        get confused with a `string`-declared field's own literal text).
+        `None` (SQL NULL) is never encoded -- NULL is valid for any
+        declared type (`field_types.check_declared_value`'s own identical
+        precedent) and stays NULL, never becomes the JSON text `"null"`.
+        Every other declared type (`string`/`integer`/`number`/`boolean`,
+        or `None` -- no registry row, backward compatible) falls back to
+        `_normalize_value` unchanged."""
+        if value is not None and declared_type in ("object", "array", "json"):
+            return json.dumps(value, separators=(",", ":"), sort_keys=True)
+        return cls._normalize_value(value)
 
     def _require_data(self, principal, *, request_id=None):
         if self.__guard is not None:
@@ -1233,6 +1361,10 @@ class ApplicationRuntime:
         self.__authorize(request_id=request_id)
         return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit, request_id=request_id)
 
+    def catalog(self, *, request_id=None):
+        self.__authorize(request_id=request_id)
+        return self.__cell.catalog(self.__principal, request_id=request_id)
+
     def update(self, collection, values, filters, *, request_id=None):
         self.__authorize(request_id=request_id)
         return self.__cell.update(self.__principal, collection, values, filters, request_id=request_id)
@@ -1277,12 +1409,21 @@ class ApplicationRuntime:
             # -- this host's own `audit_query` stays `unavailable`, and
             # declaring a vocabulary for a surface this host never
             # provides would contradict declare-the-hazard (design D-1).
-            "contract_version": "1.5.0",
+            # Phase 6 WP-3 (design D-1/D-2/D-3, subordinate ruling 11):
+            # flipped to 1.6.0 -- same commit as `surfaces` (already
+            # present, WP-3 D-2), the declared-type registry, and this
+            # capability's own flip immediately below (declaration and
+            # real behaviour land together, unconditionally -- every
+            # deployment of this data-plane host declares 1.6.0 now).
+            "contract_version": "1.6.0",
             "capabilities": {
                 "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
                 "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},
-                # No public "list collections" operation exists on this peer.
-                "application_catalog": {"status": "unavailable"},
+                # Phase 6 WP-3 (design D-3): flipped to `enabled` --
+                # `GET /v1/catalog` (`http.py::get_catalog`) now answers
+                # for real, backed by the declared-type registry
+                # (`ApplicationCell.catalog`, same commit).
+                "application_catalog": {"status": "enabled"},
                 # P3-D1 (design v1.1 §0 exception, WP-1): `add_field` is
                 # now a real, developer-only, executed capability on both
                 # backends -- declaration and implementation land in this
@@ -1336,6 +1477,7 @@ class ApplicationRuntime:
                 # で保証する").
                 "control_plane": {"status": config.control_plane_status}
             },
+            **_surfaces_document_fragment(config),
             "limits": {
                 "batch_items": config.max_batch_items,
                 # P35 WP-2 (R-2): distinct-entity bound for `transact()`
@@ -1373,17 +1515,18 @@ class ApplicationRuntime:
 class ApplicationDeveloper(ApplicationRuntime):
     """Developer authority adds structured schema operations only."""
 
-    def create_collection(self, name, fields, *, request_id=None):
+    def create_collection(self, name, fields, *, request_id=None, field_types=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.create_collection(
-            self._ApplicationRuntime__principal, name, fields, request_id=request_id)
+            self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types)
 
-    def create_entity(self, name, fields=None, *, request_id=None):
+    def create_entity(self, name, fields=None, *, request_id=None, field_types=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.create_entity(
-            self._ApplicationRuntime__principal, name, fields, request_id=request_id)
+            self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types)
 
-    def add_field(self, collection, field, field_type, *, request_id=None):
+    def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
         return self._ApplicationRuntime__cell.add_field(
-            self._ApplicationRuntime__principal, collection, field, field_type, request_id=request_id)
+            self._ApplicationRuntime__principal, collection, field, field_type,
+            request_id=request_id, contract_type=contract_type)

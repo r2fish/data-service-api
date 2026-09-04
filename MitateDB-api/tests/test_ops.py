@@ -48,6 +48,13 @@ def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
     env["MITATEDB_CONTROLPLANE_DSN"] = control_platform.controlplane_dsn
     env["MITATEDB_PLATFORM_SCHEMA"] = control_platform.registry_schema
+    # Phase 6 WP-3 (design D-2): both required unconditionally from here
+    # on (`control_composition.build_control_service`) -- supplied for
+    # every subprocess this helper launches so a break-glass command's
+    # OWN missing-actor-credential checks (this file's own intended
+    # target) are what actually fires, not this newer requirement.
+    env["MITATEDB_DATA_BASE_URL"] = "http://mitatedb-ops-cli-test.example.invalid/v1"
+    env["MITATEDB_CONTROL_BASE_URL"] = "http://mitatedb-ops-cli-test.example.invalid/control/v1"
     if control_pepper is not None:
         env["MITATEDB_CONTROL_CREDENTIAL_PEPPER"] = control_pepper
     else:
@@ -64,6 +71,14 @@ def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER
     else:
         env.pop("MITATEDB_CONTROL_CREDENTIAL_ID", None)
     if actor_secret is not None:
+        # Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        # 裁定 1): `ops.py::_actor_credential` requires `MITATEDB_CONTROL_
+        # CREDENTIAL_SECRET` to hold the COMPOSED bearer (the exact
+        # `secret:` value a real operator would have saved) -- this
+        # module's own test callers (`_bootstrapped_actor`) already pass
+        # that composed bearer directly, so it is set here VERBATIM, no
+        # re-composition (this file never held the raw, unsplit secret
+        # part separately from its own composed form).
         env["MITATEDB_CONTROL_CREDENTIAL_SECRET"] = actor_secret
     else:
         env.pop("MITATEDB_CONTROL_CREDENTIAL_SECRET", None)
@@ -166,11 +181,16 @@ def _bootstrapped_actor(control_platform):
                                      control_credentials=control_credentials,
                                      audit_schema=control_platform.registry_schema, dsn=control_platform.controlplane_dsn)
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(control_credentials, backend.append_audit, work=work)
+        credential_id, bearer = bootstrap_control_credential(control_credentials, backend.append_audit, work=work)
     service = ControlPlaneService(backend, limits=ControlPlaneLimits(
         applications=20, credentials_per_application=5, control_requests_per_minute=190))
-    rotated = service.rotate_credential(credential_id, secret, credential_id)
-    return service, credential_id, rotated["secret"]
+    # Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `PostgresControlCredentialStore.
+    # authenticate` takes the FULL composed bearer -- passed straight
+    # through, unsplit.
+    secret = bearer
+    rotated = service.rotate_credential(secret, credential_id)
+    rotated_secret = rotated["secret"]
+    return service, credential_id, rotated_secret
 
 
 def test_bootstrap_issues_a_real_must_rotate_credential(control_platform) -> None:
@@ -330,8 +350,8 @@ def _run_bg(control_platform, actor_credential_id: str, actor_secret: str, *args
 
 def test_list_applications_and_list_credentials_report_real_registry_state(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brklist1")
-    issued = service.issue_credential(actor_id, actor_secret, "brklist1", "runtime")
+    service.register_application(actor_secret, "brklist1")
+    issued = service.issue_credential(actor_secret, "brklist1", "runtime")
 
     apps = _run_bg(control_platform, actor_id, actor_secret, "list-applications")
     assert apps.returncode == 0, apps.stderr
@@ -353,12 +373,12 @@ def test_list_applications_and_list_credentials_report_real_registry_state(contr
 
 def test_enable_and_disable_application_round_trip(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkapp1")
+    service.register_application(actor_secret, "brkapp1")
 
     disabled = _run_bg(control_platform, actor_id, actor_secret, "disable-application", "brkapp1")
     assert disabled.returncode == 0, disabled.stderr
     assert json.loads(disabled.stdout) == {"application_id": "brkapp1", "enabled": False}
-    assert dict(service.list_applications(actor_id, actor_secret)["applications"][0].items()) == {
+    assert dict(service.list_applications(actor_secret)["applications"][0].items()) == {
         "application_id": "brkapp1", "enabled": False}
 
     enabled = _run_bg(control_platform, actor_id, actor_secret, "enable-application", "brkapp1")
@@ -368,8 +388,8 @@ def test_enable_and_disable_application_round_trip(control_platform) -> None:
 
 def test_enable_and_disable_credential_round_trip(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkcred1")
-    issued = service.issue_credential(actor_id, actor_secret, "brkcred1", "runtime")
+    service.register_application(actor_secret, "brkcred1")
+    issued = service.issue_credential(actor_secret, "brkcred1", "runtime")
     target = issued["credential_id"]
 
     disabled = _run_bg(control_platform, actor_id, actor_secret, "disable-credential", target)
@@ -383,8 +403,8 @@ def test_enable_and_disable_credential_round_trip(control_platform) -> None:
 
 def test_rotate_credential_replaces_the_secret_for_either_kind(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkrot1")
-    issued = service.issue_credential(actor_id, actor_secret, "brkrot1", "runtime")
+    service.register_application(actor_secret, "brkrot1")
+    issued = service.issue_credential(actor_secret, "brkrot1", "runtime")
 
     rotated = _run_bg(control_platform, actor_id, actor_secret, "rotate-credential", issued["credential_id"])
     assert rotated.returncode == 0, rotated.stderr
@@ -403,8 +423,8 @@ def test_rotate_credential_replaces_the_secret_for_either_kind(control_platform)
 
 def test_revoke_application_credential_needs_no_confirmation(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkrev1")
-    issued = service.issue_credential(actor_id, actor_secret, "brkrev1", "runtime")
+    service.register_application(actor_secret, "brkrev1")
+    issued = service.issue_credential(actor_secret, "brkrev1", "runtime")
 
     revoked = _run_bg(control_platform, actor_id, actor_secret, "revoke-credential", issued["credential_id"])
     assert revoked.returncode == 0, revoked.stderr
@@ -443,7 +463,7 @@ def test_revoke_last_active_control_credential_requires_declare_and_echo(control
 
 def test_audit_report_prints_events_oldest_first_as_json_lines(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkaudit1")
+    service.register_application(actor_secret, "brkaudit1")
 
     result = _run_ops(control_platform, "audit-report", provision_dsn=control_platform.provision_dsn)
     assert result.returncode == 0, result.stderr
@@ -456,7 +476,7 @@ def test_audit_report_prints_events_oldest_first_as_json_lines(control_platform)
 
 def test_audit_report_since_and_until_window_the_report(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkaudit2")
+    service.register_application(actor_secret, "brkaudit2")
 
     far_future = _run_ops(control_platform, "audit-report", "--since", "2999-01-01T00:00:00Z",
                           provision_dsn=control_platform.provision_dsn)
@@ -471,7 +491,7 @@ def test_audit_report_since_and_until_window_the_report(control_platform) -> Non
 def test_deprovision_without_confirm_declares_the_phrase_and_touches_nothing(
         control_platform, deprovision_script_dir) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkdep1")
+    service.register_application(actor_secret, "brkdep1")
 
     denial = _run_ops(control_platform, "deprovision", "brkdep1",
                       provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
@@ -482,27 +502,27 @@ def test_deprovision_without_confirm_declares_the_phrase_and_touches_nothing(
     assert body["details"]["consequence"]
     # Untouched: the application is still registered.
     assert any(row["application_id"] == "brkdep1"
-              for row in service.list_applications(actor_id, actor_secret)["applications"])
+              for row in service.list_applications(actor_secret)["applications"])
 
 
 def test_deprovision_with_wrong_confirmation_is_refused_and_touches_nothing(
         control_platform, deprovision_script_dir) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkdep2")
+    service.register_application(actor_secret, "brkdep2")
 
     denial = _run_ops(control_platform, "deprovision", "brkdep2", "--confirm", "not the right phrase",
                       provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
     assert denial.returncode == 2
     assert json.loads(denial.stderr.strip())["code"] == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
     assert any(row["application_id"] == "brkdep2"
-              for row in service.list_applications(actor_id, actor_secret)["applications"])
+              for row in service.list_applications(actor_secret)["applications"])
 
 
 def test_deprovision_with_the_echoed_phrase_removes_the_registration(
         control_platform, deprovision_script_dir) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "brkdep3")
-    issued = service.issue_credential(actor_id, actor_secret, "brkdep3", "runtime")
+    service.register_application(actor_secret, "brkdep3")
+    issued = service.issue_credential(actor_secret, "brkdep3", "runtime")
 
     probe = _run_ops(control_platform, "deprovision", "brkdep3",
                      provision_dsn=control_platform.provision_dsn, migrations_dir=deprovision_script_dir)
@@ -514,12 +534,12 @@ def test_deprovision_with_the_echoed_phrase_removes_the_registration(
     assert "brkdep3" in confirmed.stdout
     assert "deprovisioned" in confirmed.stdout
 
-    remaining = service.list_applications(actor_id, actor_secret)["applications"]
+    remaining = service.list_applications(actor_secret)["applications"]
     assert all(row["application_id"] != "brkdep3" for row in remaining)
     # M-4 (WP-1): deprovision removes the application's credential rows in
     # the same step -- the just-issued credential must be gone too, not
     # merely the application row.
-    remaining_creds = {row["credential_id"] for row in service.list_credentials(actor_id, actor_secret)["credentials"]}
+    remaining_creds = {row["credential_id"] for row in service.list_credentials(actor_secret)["credentials"]}
     assert issued["credential_id"] not in remaining_creds
 
 
@@ -577,13 +597,21 @@ def test_cli_issue_audit_credential_produces_a_ready_to_use_credential(control_p
     otherwise clear it with)."""
     result = _run_ops(control_platform, "issue-audit-credential")
     assert result.returncode == 0, result.stderr
-    credential_id, secret = _parse_issued(result.stdout)
+    # Phase 6 WP-3 (design D-1(d)): `ops.py`'s own stdout now prints the
+    # complete, composed bearer on the `secret:` line -- recover the raw
+    # secret this test's own direct `store.authenticate()` call still
+    # needs (mirrors that store's own `authenticate` method, the real
+    # receiving boundary that splits the bearer -- Phase 6 WP-3 差し戻し
+    # 最終ラウンド 裁定 1 retired the old `http.py::_split_bearer` helper
+    # this comment used to name here).
+    credential_id, bearer = _parse_issued(result.stdout)
+    secret = bearer
     assert "must_rotate: false" in result.stdout
     assert credential_id.startswith("ctl_")
 
     store = PostgresControlCredentialStore(control_platform.controlplane_dsn, pepper=_CONTROL_PEPPER,
                                            schema=control_platform.registry_schema)
-    principal = store.authenticate(credential_id, secret)
+    principal = store.authenticate(secret)
     assert principal.credential_id == credential_id
     assert principal.must_rotate is False
     assert principal.role == "audit"
@@ -605,7 +633,7 @@ def test_cli_issue_audit_credential_is_not_a_once_only_ritual(control_platform) 
 
 def test_cli_freeze_issuance_then_unfreeze_round_trips(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "fzcli1")
+    service.register_application(actor_secret, "fzcli1")
 
     frozen = _run_ops(control_platform, "freeze-issuance", "fzcli1")
     assert frozen.returncode == 0, frozen.stderr
@@ -613,13 +641,13 @@ def test_cli_freeze_issuance_then_unfreeze_round_trips(control_platform) -> None
 
     from mitatedb_api.errors import AuthorizationError
     with pytest.raises(AuthorizationError):
-        service.issue_credential(actor_id, actor_secret, "fzcli1", "runtime")
+        service.issue_credential(actor_secret, "fzcli1", "runtime")
 
     unfrozen = _run_ops(control_platform, "unfreeze-issuance", "fzcli1")
     assert unfrozen.returncode == 0, unfrozen.stderr
     assert "no longer frozen" in unfrozen.stdout
 
-    issued = service.issue_credential(actor_id, actor_secret, "fzcli1", "runtime")
+    issued = service.issue_credential(actor_secret, "fzcli1", "runtime")
     assert issued["application_id"] == "fzcli1"
 
 
@@ -630,7 +658,7 @@ def test_cli_freeze_issuance_unknown_application_fails_closed(control_platform) 
 
 def test_cli_freeze_issuance_writes_control_audit_row(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "fzcli2")
+    service.register_application(actor_secret, "fzcli2")
     result = _run_ops(control_platform, "freeze-issuance", "fzcli2")
     assert result.returncode == 0, result.stderr
 
@@ -652,8 +680,8 @@ def test_cli_freeze_issuance_writes_control_audit_row(control_platform) -> None:
 
 def test_cli_freeze_issuance_does_not_affect_already_issued_credentials(control_platform) -> None:
     service, actor_id, actor_secret = _bootstrapped_actor(control_platform)
-    service.register_application(actor_id, actor_secret, "fzcli3")
-    issued = service.issue_credential(actor_id, actor_secret, "fzcli3", "runtime")
+    service.register_application(actor_secret, "fzcli3")
+    issued = service.issue_credential(actor_secret, "fzcli3", "runtime")
 
     result = _run_ops(control_platform, "freeze-issuance", "fzcli3")
     assert result.returncode == 0, result.stderr

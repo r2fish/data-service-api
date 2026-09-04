@@ -76,15 +76,17 @@ def app_a_stack(platform, app_a):
     service = HttpService(read_store, _cell_factory)
     app = create_app(service, request_bytes_limit=1024)
 
-    runtime_id, runtime_secret = write_store.issue(app_a.app_id, Role.RUNTIME)
-    developer_id, developer_secret = write_store.issue(app_a.app_id, Role.DEVELOPER)
+    # Phase 6 WP-3 (design D-1(d)): `PostgresCredentialStore.issue` now
+    # returns the complete bearer as its second element -- used verbatim.
+    runtime_id, runtime_bearer = write_store.issue(app_a.app_id, Role.RUNTIME)
+    developer_id, developer_bearer = write_store.issue(app_a.app_id, Role.DEVELOPER)
 
     import types
     stack = types.SimpleNamespace(
         app=app,
         app_id=app_a.app_id,
-        runtime_bearer=f"{runtime_id}.{runtime_secret}",
-        developer_bearer=f"{developer_id}.{developer_secret}",
+        runtime_bearer=runtime_bearer,
+        developer_bearer=developer_bearer,
         write_store=write_store,
     )
     try:
@@ -296,7 +298,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 4 WP-3(b): contract_version flip lands in the same commit as
     # the audit_query bundle it accompanies (design §5, P4-D4). Phase 5
     # WP-3: re-flipped to 1.5.0 (design D-1, subordinate ruling 10 item 1).
-    assert document["contract_version"] == "1.5.0"
+    assert document["contract_version"] == "1.6.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -500,10 +502,12 @@ def test_body_entity_field_in_mutation_request_is_rejected_as_unknown_field(app_
 # ---------------------------------------------------------------------------
 
 
-def _create_entity(stack, entity, fields=None):
+def _create_entity(stack, entity, fields=None, field_types=None):
     body = {"operation": "create_entity", "entity": entity}
     if fields is not None:
         body["fields"] = fields
+    if field_types is not None:
+        body["field_types"] = field_types
     response = _post(stack, "/v1/schema/operations", bearer=stack.developer_bearer, json_body=body)
     assert response.status_code == 200, response.text
     return response
@@ -540,8 +544,13 @@ def test_create_entity_then_add_field_object_and_array_round_trip(app_a_stack):
     assert query.status_code == 200
     items = query.json()["items"]
     assert len(items) == 1
-    assert json.loads(items[0]["payload_obj"]) == nested_object
-    assert json.loads(items[0]["payload_arr"]) == nested_array
+    # Phase 6 WP-3 (design D-3, F2 -- behaviour change (β)): the read side
+    # now restores the declared JSON shape itself -- `payload_obj`/
+    # `payload_arr` come back as a real object/array in the response's
+    # OWN JSON body, not a string a caller must `json.loads()` a second
+    # time.
+    assert items[0]["payload_obj"] == nested_object
+    assert items[0]["payload_arr"] == nested_array
 
 
 def test_schema_operation_result_revision_is_a_real_advancing_counter(app_a_stack):
@@ -578,6 +587,61 @@ def test_create_entity_with_field_type_is_capability_unsupported_not_silently_ho
         app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["rank"]},
     )
     assert query.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 WP-3 追補 (mutation-testing finding, supervisor ruling 2026-09-04):
+# work order §4 WP-3 完了条件12 ("不正3ケース -- `fields` に無い名前 / 7語外
+# の値 / `fields` を伴わない `field_types` の3つが全て `VALIDATION_FAILED`
+# であること") had NO test anywhere -- neither in the common conformance
+# suite nor peer-local -- before this addition. `http.py::post_schema`
+# already implements all 3 checks ((a)/(b)/(c) comments right above each
+# `raise ValidationError` in that function), but nothing exercised them:
+# mutating any ONE of the 3 branches away (confirmed for (b), the
+# vocabulary check) passed the full existing suite. This is a test gap,
+# not a product-code gap -- the 3 cases below close it. Product code is
+# untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_create_entity_field_types_naming_an_unknown_field_is_validation_failed(app_a_stack):
+    """(a): `field_types` names a field not present in `fields`."""
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={
+            "operation": "create_entity", "entity": "http_bad_field_types_a",
+            "fields": ["known"], "field_types": {"unknown_field": "string"},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+def test_create_entity_field_types_outside_the_7_word_vocabulary_is_validation_failed(app_a_stack):
+    """(b): a `field_types` value outside the contract's 7-word vocabulary
+    (`string`/`integer`/`number`/`boolean`/`object`/`array`/`json`)."""
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={
+            "operation": "create_entity", "entity": "http_bad_field_types_b",
+            "fields": ["rank"], "field_types": {"rank": "not_a_real_field_type"},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+def test_create_entity_field_types_without_fields_is_validation_failed(app_a_stack):
+    """(c): `field_types` present but `fields` absent entirely."""
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={
+            "operation": "create_entity", "entity": "http_bad_field_types_c",
+            "field_types": {"rank": "integer"},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_FAILED"
 
 
 def test_multi_field_order_by(app_a_stack):
@@ -622,7 +686,15 @@ def test_page_cursor_is_deterministically_rejected(app_a_stack):
 
 def test_nul_value_is_validation_failed(app_a_stack):
     entity = "http_nul_entity"
-    _create_entity(app_a_stack, entity, fields=["label"])
+    # Phase 6 WP-3 (design D-3, decision (ii)): a name-only field now
+    # defaults to `json`, whose write-side canonicalization (`cell.py::
+    # _normalize_value_for_storage`) JSON-escapes an embedded NUL byte
+    # (`json.dumps` turns it into the 6-character `backslash-u-0000` sequence,
+    # never a literal NUL) -- so this test declares `label` explicitly
+    # `string` to keep exercising the PostgreSQL backend's own literal-
+    # NUL rejection (`backend_postgres._validate_value_domain`), the
+    # property this test's own name is actually about.
+    _create_entity(app_a_stack, entity, fields=["label"], field_types={"label": "string"})
     response = _post(
         app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
         json_body={"operations": [{"operation": "insert", "values": {"label": "value\x00tail"}}]},
@@ -643,7 +715,10 @@ def test_nul_value_is_validation_failed(app_a_stack):
         # P35 WP-2: `/v1/data/mutations` (cross_entity_mutation) is no
         # longer declared unavailable -- see the dedicated cross-entity
         # mutation test section below for its own coverage.
-        ("GET", "/v1/catalog", None),
+        # Phase 6 WP-3 (design D-3): `/v1/catalog` (`application_catalog`)
+        # is no longer declared unavailable either -- flipped to `enabled`,
+        # own dedicated coverage above (`test_create_entity_then_add_
+        # field_object_and_array_round_trip` and friends).
         ("POST", "/v1/audit/query", {}),
     ],
 )

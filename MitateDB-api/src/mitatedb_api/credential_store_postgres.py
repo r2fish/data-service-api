@@ -120,6 +120,7 @@ from psycopg import sql
 
 from .audit_dispatch import AuditRouter
 from .auth import Principal, Role
+from .credential_wire import compose_bearer_locator, split_bearer_locator
 from .errors import (AuthenticationError, AuthorizationStateUnavailable,
                      NotFoundError, StorageConfigurationError)
 from .identifiers import validate_identifier
@@ -363,16 +364,28 @@ class PostgresCredentialStore:
 
     # ---- read path ----------------------------------------------------
 
-    def authenticate(self, credential_id, secret, *, request_id=None) -> Principal:
-        """Same shape as `auth.CredentialStore.authenticate`: looks up BY
-        `credential_id`, then compares digests with `hmac.compare_digest`
-        (never a bare `==`, matching the in-memory store's own choice --
-        this is not a lookup-by-index shortcut like r2db's own verifier-
-        keyed lookup, so the constant-time comparison is load-bearing
-        here, exactly as it is in `auth.CredentialStore`).
+    def authenticate(self, secret, *, request_id=None) -> Principal:
+        """Same shape as `auth.CredentialStore.authenticate` (WP-3 差し戻し
+        最終ラウンド 裁定 1 -- now literally true, not merely aspirational):
+        `secret` is the FULL presented bearer -- this method is this
+        store's own single receiving boundary, splitting via `split_
+        bearer_locator` exactly ONCE, HERE, then looking up BY the
+        recovered `credential_id`, then comparing digests with `hmac.
+        compare_digest` (never a bare `==`, matching the in-memory store's
+        own choice -- this is not a lookup-by-index shortcut like r2db's
+        own verifier-keyed lookup, so the constant-time comparison is
+        load-bearing here, exactly as it is in `auth.CredentialStore`).
+        A malformed bearer (no `.`, an empty half, or a NUL byte in either
+        half) fails BEFORE any lookup at all -- SI-15 fail-closed, mirroring
+        `auth.CredentialStore.authenticate`'s identical `locator is None`
+        branch, and never durably attributed (matches this method's own
+        pre-existing pre-auth `credential_id=None` discipline below).
         """
-        if not isinstance(credential_id, str) or not credential_id:
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            self._route_denial(application_id=None, credential_id=None, operation="authenticate", request_id=request_id)
             raise AuthenticationError("authentication failed")
+        credential_id, secret_part = locator
         with self._borrow_connection() as conn:
             statement = sql.SQL(
                 "SELECT c.digest, c.role, c.application_id, c.enabled, c.revoked, "
@@ -397,14 +410,15 @@ class PostgresCredentialStore:
         # return via a measurably cheaper path than a known one that only
         # fails the secret comparison (see `_DUMMY_DIGEST`'s own docstring).
         stored_digest = bytes(row[0]) if row is not None else _DUMMY_DIGEST
-        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret))
+        digest_matches = hmac.compare_digest(stored_digest, self._digest(secret_part))
         if row is None or not digest_matches:
             # Phase 4 (design D-3; review B-1, supervisor ruling
             # 2026-09-03): this is a PRE-AUTH branch -- the credential is
             # not resolved to a real, known row at all (unknown id, or a
             # known id whose secret did not match). `credential_id` here
             # is an UNAUTHENTICATED, client-claimed value with no length/
-            # charset validation (`http.py::_split_bearer` just splits a
+            # charset validation (`credential_wire.split_bearer_locator`,
+            # called once above by this method itself, just splits a
             # bearer token on "."). Recording it as `actor_id`/`target_id`
             # -- and, worse, folding it into the D-3 coalescing KEY -- lets
             # an attacker who merely varies the claimed id defeat
@@ -545,10 +559,15 @@ class PostgresCredentialStore:
             except psycopg.Error as exc:
                 conn.rollback()
                 raise AuthorizationStateUnavailable("authorization state unavailable") from exc
-        # Same contract as `auth.CredentialStore.issue`: the secret is
-        # returned once and never stored or returned again (only its
-        # digest is durable, in the `digest` column above).
-        return credential_id, secret
+        # Same contract as `auth.CredentialStore.issue`: the raw secret is
+        # captured once, above (its digest is what stays durable, in the
+        # `digest` column) and never returned in raw form -- Phase 6 WP-3
+        # (design D-1(d)): this is the out-of-band store API the HTTP
+        # conformance adapter's own `issue_credential` calls directly, so
+        # the second element returned here is the complete, ready-to-
+        # present bearer, not the bare secret a caller would otherwise
+        # have to compose itself.
+        return credential_id, compose_bearer_locator(credential_id, secret)
 
     def revoke(self, credential_id):
         """Sets `revoked` only -- never `enabled` -- same reasoning as

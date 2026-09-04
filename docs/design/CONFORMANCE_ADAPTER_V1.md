@@ -2437,6 +2437,8 @@ D-1(d)'s own "混在期間を作らない" instruction: all of this plug's
 issue/rotate/bootstrap/reset/addendum-A points move to peer-side
 composition in one commit, never some points before others).
 
+**実施記録 (WP-3 追補, supervisor ruling 2026-09-04)**: the five composition sites named above are removed from `conformance_adapter_mitatedb_http.py`, in the same commit as MitateDB's own last 1.6.0 flip -- every real issuance point on that peer (`credential_store_postgres.PostgresCredentialStore.issue`, `auth.CredentialStore.issue`/`.rotate`, `control_auth.ControlCredentialStore.issue`/`.rotate`, `control_credential_store_postgres.PostgresControlCredentialStore.issue`/`.rotate`, `control_plane.ControlPlaneService.issue_credential`/`.rotate_credential`'s own response dicts) now returns an already-composed, ready-to-present bearer, so the adapter has nothing left to compose. The static test `test_c19_adapters_never_compose_or_decompose_the_bearer_secret` (§20.5) confirms zero findings across all four registered adapters. The port-level topology-declaration method (§20.7 below) is removed in the same commit, and its own fallback branch inside `surfaces_cohosted` (§20.3) is removed alongside it -- `surfaces_cohosted` is surfaces-derived only from this commit forward.
+
 ### 20.5 Two new `xfail(strict=True)` registrations, `test_c19_client_self_sufficiency.py`
 
 Mirrors §18.6/§19.6's own whole-registry-guard discipline, plus one NEW

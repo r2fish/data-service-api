@@ -2,8 +2,10 @@
 
 from dataclasses import dataclass
 import os
+from typing import Optional
 
 from .errors import ResourceLimitError, ValidationError
+from .surfaces import build_surfaces, validate_control_base_url, validate_data_base_url
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,17 @@ class FoundationConfig:
     # never a second, independently-drifting copy.
     control_plane_status: str = "unavailable"
 
+    # Phase 6 WP-3 (design D-2): the deployer's own declaration of where
+    # THIS process' data surface (and, when known, the sibling control
+    # surface) is reached -- `cell.ApplicationRuntime.capabilities()`'s
+    # single source of truth for `CapabilityDocument.surfaces`, mirroring
+    # `control_plane_status` immediately above (composition-root-injected,
+    # never a hardcoded literal). `None` for either omits `surfaces`
+    # (`data_base_url` unset) or `surfaces.control` (`control_base_url`
+    # unset) entirely -- see `surfaces.build_surfaces`.
+    data_base_url: Optional[str] = None
+    control_base_url: Optional[str] = None
+
     _VALID_CONTROL_PLANE_STATUSES = ("enabled", "unavailable")
 
     def __post_init__(self) -> None:
@@ -58,6 +71,20 @@ class FoundationConfig:
                 f"control_plane_status must be one of {self._VALID_CONTROL_PLANE_STATUSES!r}, "
                 f"got {self.control_plane_status!r}"
             )
+        # Phase 6 WP-3 (design D-2): form-only, structural (applies on
+        # every construction path, `from_env` included -- see this
+        # dataclass' own m-1 finding above `control_plane_status` for why
+        # the check belongs on the field itself). Presence (a real
+        # deployment's own `MITATEDB_DATA_BASE_URL`/`_CONTROL_BASE_URL`
+        # being required at all) is `from_env`'s own job below, not this
+        # constructor's -- many callers (every pre-1.6.0-style direct
+        # construction, this repository's own tests) legitimately build a
+        # `FoundationConfig` with neither set.
+        try:
+            validate_data_base_url(self.data_base_url)
+            validate_control_base_url(self.control_base_url)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
 
     @classmethod
     def from_env(cls, environ=None):
@@ -97,6 +124,39 @@ class FoundationConfig:
                 f"got {control_plane_status!r}"
             )
         parsed["control_plane_status"] = control_plane_status
+        # Phase 6 WP-3 (design D-2): `surfaces.data` is an unconditional
+        # 1.6.0 obligation -- a REAL deployment (this factory's own
+        # purpose) must always supply `MITATEDB_DATA_BASE_URL`.
+        # `MITATEDB_CONTROL_BASE_URL` is required only when this same
+        # process declares `control_plane` other than `unavailable`
+        # (the contract's own conditional-on-a-control-surface framing) --
+        # a data-plane process with no sibling control process has
+        # nothing to declare there.
+        data_base_url = values.get("MITATEDB_DATA_BASE_URL")
+        if not data_base_url:
+            raise ValidationError("MITATEDB_DATA_BASE_URL is required")
+        control_base_url = values.get("MITATEDB_CONTROL_BASE_URL")
+        if control_plane_status != "unavailable" and not control_base_url:
+            raise ValidationError(
+                "MITATEDB_CONTROL_BASE_URL is required when MITATEDB_CONTROL_PLANE_STATUS is not 'unavailable'"
+            )
+        try:
+            parsed["data_base_url"] = validate_data_base_url(data_base_url)
+            # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+            # 裁定 5, review F6): a deployment that declares `control_
+            # plane: unavailable` must never surface `surfaces.control`
+            # (contract 1.6.0: "a deployment declaring control_plane
+            # unavailable omits surfaces.control entirely") -- even when
+            # `MITATEDB_CONTROL_BASE_URL` happens to be set in the
+            # environment (a stale/leftover value from a previous
+            # configuration, say), it is never adopted while `control_
+            # plane_status == "unavailable"`. Mirrors r2db-api's own
+            # `main.py::_surfaces`: `if control_plane_status !=
+            # "unavailable": ...` gates `surfaces["control"]` identically.
+            if control_plane_status != "unavailable" and control_base_url:
+                parsed["control_base_url"] = validate_control_base_url(control_base_url)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
         return cls(**parsed)
 
     def validate_request_size(self, size):

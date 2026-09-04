@@ -457,12 +457,34 @@ def test_c15_lifecycle_changes_emit_canonical_audit_and_denials_are_recorded(ada
     # (a bogus secret on a real credential_ref) must be durably recorded
     # too (design section 8 B-3 -- sink_failure_policy names denials
     # first, not only state changes).
-    bogus_actor = ControlCredentialHandle(credential_ref=control_actor.credential_ref, secret=fresh_identifier("c15_bogus"))
+    #
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item C/B):
+    # two DISTINCT bogus shapes, both against the SAME real `credential_
+    # ref`, each expected to add its own durable denial row (+2 total,
+    # not +1):
+    # (i) `adapter.tampered_bearer(control_actor)` -- port v1.10's own
+    #     designated primitive for "a WELL-FORMED bearer naming a real
+    #     credential_id, wrong digest" (a genuinely parseable locator that
+    #     simply does not authenticate -- the ORIGINAL shape this vector
+    #     tested before this WP, now realized through the port rather than
+    #     this test file constructing it by hand).
+    # (ii) a bare `fresh_identifier(...)` string as `secret` -- MALFORMED
+    #      (no locator separator at all, brief item B's own SI-14
+    #      consistency requirement: a malformed bearer is routed as an
+    #      attributionless `authentication_denied` row too, not merely
+    #      classified `AUTH_INVALID` and dropped).
+    tampered_actor = ControlCredentialHandle(
+        credential_ref=control_actor.credential_ref, secret=adapter.tampered_bearer(control_actor))
     with pytest.raises(ConformanceDenial):
-        adapter.control_capabilities(bogus_actor)
+        adapter.control_capabilities(tampered_actor)
+    malformed_actor = ControlCredentialHandle(credential_ref=control_actor.credential_ref, secret=fresh_identifier("c15_malformed"))
+    with pytest.raises(ConformanceDenial):
+        adapter.control_capabilities(malformed_actor)
     after_denial = adapter.control_audit_events()
-    assert len(after_denial) >= len(after_state_change) + 1, (
-        f"{adapter.name}: an authentication denial against the control plane did not add a durable audit event"
+    assert len(after_denial) >= len(after_state_change) + 2, (
+        f"{adapter.name}: a tampered-bearer denial and a malformed-bearer denial against the control plane did "
+        f"not each add their own durable audit event (expected >= {len(after_state_change) + 2}, got "
+        f"{len(after_denial)})"
     )
 
 

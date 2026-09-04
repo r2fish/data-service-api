@@ -58,6 +58,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    fresh_identifier,
     resolve_valid_confirmation,
 )
 
@@ -75,6 +76,7 @@ from mitatedb_api.control_plane import (  # noqa: E402
     bootstrap_control_credential,
     reset_control_credentials,
 )
+from mitatedb_api.field_types import CONTRACT_TYPE_TO_FOUNDATION_TYPE  # noqa: E402
 from mitatedb_api.errors import (  # noqa: E402
     AuthenticationError,
     AuthorizationError,
@@ -88,6 +90,13 @@ from mitatedb_api.errors import (  # noqa: E402
     ValidationError,
 )
 from mitatedb_api.service import MitateDataService as _MitateDataServiceClass  # noqa: E402,F401
+from mitatedb_api.surfaces import build_surfaces  # noqa: E402
+
+# Phase 6 WP-3 (design D-2, §6.1 (b)): this plug's own synthetic,
+# unreachable pair of `surfaces` base URLs -- see `__init__`'s own
+# comment for why a real one is neither possible nor required here.
+_SYNTHETIC_DATA_BASE_URL = "http://mitatedb-inprocess.example.invalid/v1"
+_SYNTHETIC_CONTROL_BASE_URL = "http://mitatedb-inprocess.example.invalid/control/v1"
 
 _CLASSIFY_ORDER = (
     (AuthorizationStateUnavailable, "AUTH_STATE_UNAVAILABLE"),
@@ -273,20 +282,31 @@ class _ReconciledControlBackend:
         if revoked:
             self._control_credentials.revoke(credential_id, work=work)
 
-    def authenticate_control(self, credential_id, secret):
-        return self._control_credentials.authenticate(credential_id, secret)
+    def authenticate_control(self, secret):
+        """Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+        裁定 1): this adapter never splits a bearer it did not itself
+        compose (design D-1(d), port v1.10's own "no composition, no
+        decomposition" fixture) -- `secret` here is the composed bearer
+        this adapter's own `ControlCredentialHandle.secret` carries,
+        passed straight through, UNSPLIT, to `control_auth.
+        ControlCredentialStore.authenticate`, which is the single choke
+        point that calls `split_bearer_locator` exactly once."""
+        return self._control_credentials.authenticate(secret)
 
-    def authenticate_application(self, credential_id, secret):
+    def authenticate_application(self, secret):
         """Phase 4 WP-3(b) (design D-5): `self._control.credentials` is
         this adapter's own `auth.CredentialStore` (2ストア突合, this
         module's own header) -- `peek()` (not `authenticate()`) is used
         deliberately: see `CredentialStore.peek`'s own docstring for why
         `authenticate()` would durably record a spurious denial row on
-        every `audit_query` call made with a control/audit credential."""
-        principal = self._control.credentials.peek(credential_id, secret)
+        every `audit_query` call made with a control/audit credential.
+        Phase 6 WP-3 差し戻し 最終ラウンド (裁定 1): `secret` is the full
+        presented bearer, passed straight through, unsplit -- `peek`
+        itself is the single choke point that splits it."""
+        principal = self._control.credentials.peek(secret)
         if principal is None:
             return None
-        return principal.application_id, principal.role.value
+        return principal.credential_id, principal.application_id, principal.role.value
 
     def append_audit(self, *, work=None, **fields):
         return self._audit.append(work=work, **fields)
@@ -327,7 +347,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
         self._control = ControlPlane(
             "synthetic-conformance-pepper-mitatedb-0000000",
-            config=FoundationConfig(control_plane_status="enabled"),
+            config=FoundationConfig(
+                control_plane_status="enabled",
+                # Phase 6 WP-3 (design D-2, §6.1 (b)): this plug has no
+                # real host at all -- a synthetic, unreachable pair of
+                # base URLs satisfies contract 1.6.0's own unconditional
+                # `surfaces.data` obligation without claiming a real
+                # address this plug never answers requests at (the
+                # declare-and-echo vector is HTTP-plug-only, design §6.2
+                # (2)(iii)).
+                data_base_url=_SYNTHETIC_DATA_BASE_URL,
+                control_base_url=_SYNTHETIC_CONTROL_BASE_URL,
+            ),
             audit_router=self._audit_router,
         )
         self._service = MitateDataService(self._control)
@@ -394,6 +425,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             self._control_backend, limits=self._control_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
+            # Phase 6 WP-3 (design D-2): the SAME synthetic pair the
+            # data-plane `FoundationConfig` above declares -- both this
+            # plug's own "processes" agree on `surfaces` structurally
+            # (one Python object literally shares the values), never by
+            # cross-checking two independently-configured copies.
+            surfaces=build_surfaces(data_url=_SYNTHETIC_DATA_BASE_URL, control_url=_SYNTHETIC_CONTROL_BASE_URL),
         )
         # `control_credential()`'s own maintained handle (memoize + call-
         # time validity check -- port v1.5 WP-1 independent review major
@@ -416,6 +453,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
         self._control.revoke_credential(handle.credential_ref)
+
+    def tampered_bearer(self, handle: "CredentialHandle | ControlCredentialHandle") -> str:
+        """port v1.10 追補 (supervisor ruling 2026-09-04, brief item C):
+        this peer's own locator bearer shape (`credential_wire.split_bearer_locator`, split once inside the store)
+        is `<credential_id>.<secret>` -- a bearer naming the SAME real
+        `credential_id` with a fresh, never-issued secret authenticates
+        as `credential_id`-known-but-digest-mismatched, exactly the
+        "bogus secret on a real credential_ref" vector `test_c15` needs.
+        Composition ALLOWLISTED at this one line (test_c19_client_self_
+        sufficiency.py's own `_COMPOSITION_ALLOWLIST`, port docstring's
+        own "the ONLY place ANY adapter composes a bearer" rule)."""
+        return f"{handle.credential_ref}.{fresh_identifier('tampered')}"
 
     def disable_application(self, application_id: str) -> None:
         self._control.disable_application(application_id)
@@ -494,47 +543,52 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # every other service method raises, so `classify()` needs no
     # control-plane-specific branch at all.
 
-    def _actor_id_secret(self, actor: "CredentialHandle | ControlCredentialHandle") -> tuple[str, str]:
-        # Both port handle types carry `.credential_ref`/`.secret`
-        # (application `CredentialHandle` and control-plane
-        # `ControlCredentialHandle` alike) -- this adapter never inspects
-        # which kind `actor` is before presenting it: `ControlPlaneService.
-        # _authenticate` tries the control-credential store only, so an
-        # application credential's id/secret simply fails to match there,
-        # exactly the fail-closed behavior C-14 vector 1 measures.
-        return actor.credential_ref, actor.secret
+    def _actor_secret(self, actor: "CredentialHandle | ControlCredentialHandle") -> str:
+        # Both port handle types carry `.secret` (application
+        # `CredentialHandle` and control-plane `ControlCredentialHandle`
+        # alike) -- this adapter never inspects which kind `actor` is
+        # before presenting it: `ControlPlaneService._authenticate` tries
+        # the control-credential store only, so an application
+        # credential's bearer simply fails to match there, exactly the
+        # fail-closed behavior C-14 vector 1 measures. Phase 6 WP-3 差し
+        # 戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 1): `actor.
+        # secret` is already the full composed bearer (port v1.10, this
+        # adapter never composes/decomposes it) -- returned verbatim, no
+        # separate `credential_id` extraction any more (every
+        # `ControlPlaneService` public method now takes this ONE value).
+        return actor.secret
 
     # port v1.5
     def control_capabilities(self, actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.control_capabilities(credential_id, secret))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.control_capabilities(secret))
 
     # port v1.5
     def register_application_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str
     ) -> Mapping[str, Any]:
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.register_application(credential_id, secret, application_id))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.register_application(secret, application_id))
 
     # port v1.5
     def list_applications(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        credential_id, secret = self._actor_id_secret(actor)
-        result = self._call(lambda: self._control_service.list_applications(credential_id, secret))
+        secret = self._actor_secret(actor)
+        result = self._call(lambda: self._control_service.list_applications(secret))
         return result["applications"]
 
     # port v1.5
     def set_application_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, enabled: bool
     ) -> Mapping[str, Any]:
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.set_application_enabled(credential_id, secret, application_id, enabled))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.set_application_enabled(secret, application_id, enabled))
 
     # port v1.5
     def issue_credential_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", application_id: str, role: str
     ) -> CredentialHandle:
-        credential_id, secret = self._actor_id_secret(actor)
-        result = self._call(lambda: self._control_service.issue_credential(credential_id, secret, application_id, role))
+        secret = self._actor_secret(actor)
+        result = self._call(lambda: self._control_service.issue_credential(secret, application_id, role))
         return CredentialHandle(
             credential_ref=result["credential_id"], application_id=result["application_id"],
             role=result["role"], secret=result["secret"],
@@ -542,14 +596,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
     # port v1.5
     def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
-        credential_id, secret = self._actor_id_secret(actor)
-        result = self._call(lambda: self._control_service.list_credentials(credential_id, secret))
+        secret = self._actor_secret(actor)
+        result = self._call(lambda: self._control_service.list_credentials(secret))
         return result["credentials"]
 
     # port v1.5
     def rotate_credential(self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str) -> object:
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.rotate_credential(credential_id, secret, credential_ref))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.rotate_credential(secret, credential_ref))
 
     # port v1.5
     def revoke_credential_inband(
@@ -560,16 +614,16 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         destructive: bool | None = None,
         confirmation: str | None = None,
     ) -> Mapping[str, Any]:
-        credential_id, secret = self._actor_id_secret(actor)
+        secret = self._actor_secret(actor)
         return self._call(lambda: self._control_service.revoke_credential(
-            credential_id, secret, credential_ref, destructive=destructive, confirmation=confirmation))
+            secret, credential_ref, destructive=destructive, confirmation=confirmation))
 
     # port v1.5
     def set_credential_enabled_inband(
         self, actor: "CredentialHandle | ControlCredentialHandle", credential_ref: str, enabled: bool
     ) -> Mapping[str, Any]:
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.set_credential_enabled(credential_id, secret, credential_ref, enabled))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.set_credential_enabled(secret, credential_ref, enabled))
 
     @contextmanager
     def _control_ritual_unit_of_work(self):
@@ -649,7 +703,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         """
         if self._control_credential_ref is not None:
             try:
-                self._control_credentials.authenticate(self._control_credential_ref, self._control_credential_secret)
+                # Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling
+                # 2026-09-04, 裁定 1): `control_auth.ControlCredentialStore.
+                # authenticate` now takes the FULL composed bearer -- `self.
+                # _control_credential_secret` (`ControlPlaneService.
+                # rotate_credential`'s own response) is passed straight
+                # through, unsplit, exactly like `authenticate_control`
+                # above.
+                self._control_credentials.authenticate(self._control_credential_secret)
                 return  # still live, and already rotated by a prior call to this method
             except FoundationError:
                 pass  # revoked/disabled since last use -- repair via reset below
@@ -659,7 +720,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             with self._control_ritual_unit_of_work() as work:
                 credential_id, secret = bootstrap_control_credential(
                     self._control_credentials, self._control_audit.append, work=work)
-        rotated = self._control_service.rotate_credential(credential_id, secret, credential_id)
+        rotated = self._control_service.rotate_credential(secret, credential_id)
         self._control_credential_ref = credential_id
         self._control_credential_secret = rotated["secret"]
 
@@ -690,11 +751,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             self._control_backend, limits=self._control_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
+            surfaces=build_surfaces(data_url=_SYNTHETIC_DATA_BASE_URL, control_url=_SYNTHETIC_CONTROL_BASE_URL),
         )
 
         def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-            credential_id, secret = self._actor_id_secret(actor)
-            return self._call(lambda: fresh_service.control_capabilities(credential_id, secret))
+            secret = self._actor_secret(actor)
+            return self._call(lambda: fresh_service.control_capabilities(secret))
 
         yield call
 
@@ -716,8 +778,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         enabled) unreachable.
         """
         control_actor = self.control_credential()
-        credential_id, secret = self._actor_id_secret(control_actor)
-        document = self._call(lambda: self._control_service.control_capabilities(credential_id, secret))
+        secret = self._actor_secret(control_actor)
+        document = self._call(lambda: self._control_service.control_capabilities(secret))
         return document.get("capabilities", {}).get("audit_query", {}).get("status", "unavailable")
 
     def _audit_surface_absent(self, operation: str, reason: str) -> SurfaceAbsent:
@@ -736,8 +798,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 "declare-first discipline does not present a request to ControlPlaneService.audit_query "
                 "(design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md §8.4's extended SurfaceAbsent meaning)",
             )
-        credential_id, secret = self._actor_id_secret(actor)
-        return self._call(lambda: self._control_service.audit_query(credential_id, secret, dict(request)))
+        secret = self._actor_secret(actor)
+        return self._call(lambda: self._control_service.audit_query(secret, dict(request)))
 
     # port v1.8
     def flush_audit_buffer(self) -> None:
@@ -756,8 +818,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # port v1.8
     def audit_visibility_lag_ms(self) -> int:
         control_actor = self.control_credential()
-        credential_id, secret = self._actor_id_secret(control_actor)
-        document = self._call(lambda: self._control_service.control_capabilities(credential_id, secret))
+        secret = self._actor_secret(control_actor)
+        document = self._call(lambda: self._control_service.control_capabilities(secret))
         audit_query_capability = document.get("capabilities", {}).get("audit_query", {})
         if audit_query_capability.get("status") not in ("enabled", "partial"):
             raise self._audit_surface_absent(
@@ -798,8 +860,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # itself makes first -- a real product-code call, not hand-
         # written. `request_id` is not threaded through this in-process
         # call (this harness call has no ASGI `Request` to read one from).
-        credential_id, secret = self._actor_id_secret(actor)
-        self._call(lambda: self._service.open_session(credential_id, secret))
+        secret = self._actor_secret(actor)
+        self._call(lambda: self._service.open_session(secret))
         # Unreached by any currently-registered adapter: this foundation's
         # application-only `auth.CredentialStore` never recognizes a
         # control/audit credential's id/secret -- a genuinely separate
@@ -820,14 +882,11 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         native = CapabilityError("audit evidence query requires control/audit authority this peer does not expose here")
         raise ConformanceDenial(code=self.classify(native), adapter=self.name, native_type=type(native).__name__) from native
 
-    # port v1.9 fix-round (F-2/F-3): declares this in-process plug's own
-    # topology fact -- `MitateDataService` (data plane) and
-    # `ControlPlaneService` (control plane) are two genuinely separate
-    # objects on this adapter, each backed by its own separate credential
-    # store (`auth.CredentialStore` vs `control_auth.ControlCredentialStore`)
-    # -- never co-hosted.
-    def control_surface_cohosted_with_data_plane(self) -> bool:
-        return False
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 topology-declaration method this adapter once implemented
+    # here is removed -- the port's own `surfaces_cohosted` free function
+    # is now surfaces-derived only (both peers declare 1.6.0
+    # unconditionally).
 
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability
@@ -844,7 +903,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # application plane
     # ------------------------------------------------------------------
     def authenticate(self, handle: CredentialHandle) -> object:
-        return self._call(lambda: self._service.open_session(handle.credential_ref, handle.secret))
+        return self._call(lambda: self._service.open_session(handle.secret))
 
     def scope_of(self, session: object) -> ScopeView:
         principal = session.principal
@@ -940,21 +999,16 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return {row["name"] for row in rows}
         return self._call(op)
 
-    def catalog_document(self, session) -> str:
-        # There is no public "list collections"/catalog operation anywhere
-        # on this peer's surface (cell.py exposes create_collection/insert/
-        # read/update/delete/transact only -- confirmed by source
-        # inspection, and `capabilities()` itself declares
-        # `application_catalog: unavailable`, cell.py's own comment: "No
-        # public 'list collections' operation exists on this peer"). This
-        # is a structural absence, not a denial this adapter observed from
-        # a real call, so per the port's contract this returns the
-        # sentinel rather than assembling a `CatalogDocument`-shaped dict
-        # out of `entities()`'s own internal sqlite_master reach-around
-        # (which exists only to serve this adapter's own `entities()`
-        # port method, not as a peer-provided discovery surface an
-        # application caller could reach).
-        return CATALOG_SURFACE_ABSENT
+    def catalog_document(self, session) -> "Mapping[str, Any] | str":
+        # Phase 6 WP-3 (design D-3): `application_catalog: enabled` --
+        # `ApplicationRuntime.catalog()` (`cell.py`, inherited by
+        # `ApplicationDeveloper` too) is now a real, public operation.
+        # Shape mirrors `http.py::get_catalog`'s own response exactly
+        # (`CatalogDocument`: `application_scope` + `entities`) -- never a
+        # second, independently-built dict.
+        def op() -> Mapping[str, Any]:
+            return {"application_scope": session.principal.application_id, "entities": session.catalog()}
+        return self._call(op)
 
     # port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
     # V1.md section 6.1 item 3, D-3). Presents the contract's own
@@ -980,29 +1034,23 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     def create_entity_with_declared_types(
         self, session, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
     ) -> None:
-        declared = dict(field_types or {})
-        # Review F5 (2026-09-04): `fields` (the NAME list) must reach the
-        # real entry point for every name it lists -- dropping an
-        # undeclared name here (the prior form only ever passed `declared`
-        # itself) silently lost that field from the created entity instead
-        # of creating it with the D-3(ii) default, unlike the other three
-        # plugs' own wire-shaped request, which always carries `fields`
-        # and (partial) `field_types` TOGETHER. This peer's real `create_
-        # collection` has no separate "name exists, type undeclared" slot
-        # (one combined name->type dict, every value required) unlike the
-        # wire-shaped `SchemaOperationRequest`, so the D-3(ii) default
-        # (`json`) is filled in locally for any name `field_types` omits
-        # -- `cell.py`'s own pre-1.6.0 `_FIELD_TYPE_VOCABULARY` already
-        # accepts `"json"` as a real, working member today (unlike
-        # `string`/`number`/`object`/`array`), so this applies the
-        # CONTRACT's own default through the one entry point this backend
-        # actually has, not a workaround.
-        full_fields = {name: declared.get(name, "json") for name in fields}
+        # Phase 6 WP-3 (design D-3): `ApplicationCell.create_collection`
+        # now carries a REAL, separate `field_types` parameter (the
+        # contract's own 7-word vocabulary, written to the declared-type
+        # registry) -- `fields` itself stays this peer's own FOUNDATION
+        # vocabulary (`cell._FIELD_TYPE_VOCABULARY`, physical/DDL-facing),
+        # mapped from the contract word via `field_types.CONTRACT_TYPE_TO_
+        # FOUNDATION_TYPE`. This replaces the pre-WP-3 workaround (passing
+        # the contract word directly as if it were a foundation type,
+        # which only ever worked for the one word the two vocabularies
+        # happen to share verbatim, `json`).
+        declared = {name: field_types.get(name, "json") if field_types else "json" for name in fields}
+        full_fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[contract_type] for name, contract_type in declared.items()}
 
         def op() -> None:
             if not hasattr(session, "create_collection"):
                 raise AuthorizationError("developer authority required")
-            session.create_collection(entity, full_fields)
+            session.create_collection(entity, full_fields, field_types=declared)
         self._call(op)
 
     # port v1.10 (same WP as above). `field_type` is the contract's own
@@ -1011,7 +1059,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         def op() -> None:
             if not hasattr(session, "add_field"):
                 raise AuthorizationError("developer authority required")
-            session.add_field(entity, field, field_type)
+            session.add_field(entity, field, CONTRACT_TYPE_TO_FOUNDATION_TYPE[field_type], contract_type=field_type)
         self._call(op)
 
     def _attempt_mutation_outcome(
@@ -1446,6 +1494,10 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # report a real, observable value instead of a hardcoded
             # placeholder.
             ApplicationRuntime.schema_revision,
+            # Phase 6 WP-3 (design D-3): `application_catalog` flipped to
+            # `enabled` -- `catalog()` is a new, real public method, same
+            # commit.
+            ApplicationRuntime.catalog,
             ApplicationDeveloper.create_collection,
             ApplicationDeveloper.create_entity,
             ApplicationDeveloper.add_field,
@@ -1554,7 +1606,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # raise `ConformanceDenial` -- `must_deny`'s own contract.
             control_actor = self.control_credential()
             self._call(lambda: self._control_service.set_credential_enabled(
-                control_actor.credential_ref, control_actor.secret, handle.credential_ref, True))
+                control_actor.secret, handle.credential_ref, True))
             self.authenticate(handle)
 
         return [

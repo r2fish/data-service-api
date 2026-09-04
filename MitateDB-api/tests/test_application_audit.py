@@ -67,6 +67,12 @@ ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
 ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 _APP_PEPPER = "application-audit-postgres-app-pepper-x"
+# Phase 6 WP-3 (design D-2): `MITATEDB_DATA_BASE_URL`/`_CONTROL_BASE_URL`
+# are required unconditionally/conditionally from here on -- see
+# `config.FoundationConfig.from_env`/`control_composition.
+# build_control_service`.
+_DATA_BASE_URL = "http://mitatedb-app-audit-test.example.invalid/v1"
+_CONTROL_BASE_URL = "http://mitatedb-app-audit-test.example.invalid/control/v1"
 
 MIGRATION_NAMES = (
     "0001_bootstrap_platform.sql",
@@ -686,6 +692,7 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
         }
         base.update(overrides)
         return base
@@ -737,6 +744,8 @@ def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_con
             "MITATEDB_CONTROL_CREDENTIAL_PEPPER": "control-audit-postgres-ctl-pepper-x",
             "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
             "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+            "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
         }
         base.update(overrides)
         return base
@@ -800,6 +809,7 @@ def test_main_wires_the_audit_router_into_both_the_credential_store_and_every_ce
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
         })
     finally:
         monkeypatch.setattr(main_module.ApplicationCell, "__init__", real_cell_init)
@@ -2043,7 +2053,9 @@ def test_http_response_request_id_matches_the_durable_audit_row(
     clean_application_audit(platform)
     write_store = PostgresCredentialStore(platform.controlplane_dsn, pepper=_APP_PEPPER, schema=platform.schema)
     try:
-        credential_id, secret = write_store.issue(timeout_probe_app.app_id, Role.DEVELOPER)
+        # Phase 6 WP-3 (design D-1(d)): `issue`'s second element is now
+        # the complete bearer -- used verbatim.
+        credential_id, bearer = write_store.issue(timeout_probe_app.app_id, Role.DEVELOPER)
     finally:
         write_store.close()
 
@@ -2054,6 +2066,7 @@ def test_http_response_request_id_matches_the_durable_audit_row(
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
     }
     collection_name = "reqidprobe" + secrets.token_hex(3)
 
@@ -2062,7 +2075,7 @@ def test_http_response_request_id_matches_the_durable_audit_row(
             return await client.post(
                 "/v1/schema/operations",
                 json={"operation": "create_entity", "entity": collection_name, "fields": ["id"]},
-                headers={"authorization": f"Bearer {credential_id}.{secret}"},
+                headers={"authorization": f"Bearer {bearer}"},
             )
 
     with _closing_build_app(main_module, env, monkeypatch) as app:
@@ -2076,6 +2089,71 @@ def test_http_response_request_id_matches_the_durable_audit_row(
     schema_rows = [e for e in events if e[APPLICATION_AUDIT_FIELDS.index("event_class")] == "schema_change"]
     assert len(schema_rows) == 1
     assert schema_rows[0][APPLICATION_AUDIT_FIELDS.index("request_id")] == http_request_id
+    clean_application_audit(platform)
+
+
+def test_http_service_durably_audits_a_nul_locator_as_auth_invalid_not_503(
+    platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
+    main_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定 3,
+    review F4), mirroring `r2db-api/tests/test_credential_persistence.py::
+    test_nul_locator_over_real_http_is_401_and_durably_audited_not_503_
+    silent` one-for-one: before `credential_wire.split_bearer_locator`'s
+    own NUL-byte check existed, a bearer with a NUL (U+0000) byte in
+    either locator half would have reached `psycopg` as a real query
+    parameter deep inside `credential_store_postgres.
+    PostgresCredentialStore.authenticate` -- psycopg refuses a NUL-bearing
+    `text` parameter outright, which that method's own generic `except
+    psycopg.Error` maps to `AuthorizationStateUnavailable` (503,
+    `AUTH_STATE_UNAVAILABLE`), a client-triggerable state-unavailable
+    response `audit_dispatch.DURABLE_DENIAL_CODES` does not include -- so
+    the denial would never reach the durable sink at all (SI-14
+    regression). `split_bearer_locator` now rejects a NUL in either half
+    BEFORE any lookup, exactly like the other 3 malformed shapes -- this
+    test fixes both halves of that regression over REAL HTTP (`main.
+    build_app`'s own composition, not `HttpService` built by hand) + REAL
+    PostgreSQL: (1) the response is `401 AUTH_INVALID`, never `503`; (2)
+    the denial reaches the durable `application_audit` sink as exactly
+    ONE `authentication_denied`/`AUTH_INVALID` row -- both NUL-bearing
+    locators route through `credential_store_postgres.py`'s own pre-auth
+    `_route_denial(application_id=None, credential_id=None,
+    operation="authenticate", ...)` branch, so (unlike two DIFFERENT
+    malformed credential ids) they coalesce into the SAME durable-denial
+    key within one coalescing window (`test_postgres_credential_store_
+    authentication_denial_is_durably_coalesced`'s own established
+    property, exercised here over real HTTP instead of the store
+    directly) -- hence a clean-slate delta of exactly +1, not +2; (3)
+    `actor_id`/`target_id` stay `None` (review B-1's "never record the
+    client-claimed id" discipline, unaffected by this fix)."""
+    clean_application_audit(platform)
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+        "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+    }
+
+    async def _call(app: Any, locator: str) -> httpx.Response:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nul-probe.invalid") as client:
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {locator}"})
+
+    with _closing_build_app(main_module, env, monkeypatch) as app:
+        for locator in ("crd_\x00nulid.secret", "crd_nulid.sec\x00ret"):
+            response = asyncio.run(_call(app, locator))
+            assert response.status_code == 401, f"NUL locator {locator!r} returned {response.status_code}, not 401: {response.text}"
+            assert response.json()["code"] == "AUTH_INVALID"
+
+    reader = PostgresApplicationAuditSink(platform.provision_dsn, schema=platform.schema)
+    events = reader.events()
+    denial_rows = [e for e in events if e[APPLICATION_AUDIT_FIELDS.index("event_class")] == "authentication_denied"]
+    assert len(denial_rows) == 1, f"expected exactly one coalesced durable denial row, got {denial_rows!r}"
+    assert denial_rows[0][APPLICATION_AUDIT_FIELDS.index("reason_code")] == "AUTH_INVALID"
+    assert denial_rows[0][APPLICATION_AUDIT_FIELDS.index("actor_id")] is None
+    assert denial_rows[0][APPLICATION_AUDIT_FIELDS.index("target_id")] is None
     clean_application_audit(platform)
 
 
@@ -2153,7 +2231,7 @@ def test_in_memory_credential_store_authentication_denial_is_durably_coalesced()
     store.provision_application("appone")
     for _ in range(5):
         with pytest.raises(AuthenticationError):
-            store.authenticate("unknown-cred", "wrong-secret")
+            store.authenticate("unknown-cred.wrong-secret")
     events = sink.events()
     assert len(events) == 1
     assert events[0].reason_code == "AUTH_INVALID"
@@ -2173,7 +2251,7 @@ def test_postgres_credential_store_authentication_denial_is_durably_coalesced(pl
     store = PostgresCredentialStore(platform.api_dsn, pepper=_APP_PEPPER, schema=platform.schema, audit_router=router)
     for _ in range(5):
         with pytest.raises(AuthenticationError):
-            store.authenticate("unknown-cred", "wrong-secret")
+            store.authenticate("unknown-cred.wrong-secret")
     events = durable.events()
     assert len(events) == 1
     assert events[0][APPLICATION_AUDIT_FIELDS.index("reason_code")] == "AUTH_INVALID"
@@ -2194,7 +2272,7 @@ def test_rotating_unknown_credential_ids_still_coalesce_into_one_durable_row_in_
     store.provision_application("appone")
     for i in range(500):
         with pytest.raises(AuthenticationError):
-            store.authenticate(f"rotating-cred-{i}", "wrong-secret")
+            store.authenticate(f"rotating-cred-{i}.wrong-secret")
     events = sink.events()
     # First-occurrence row (count=None) only -- the window has not been
     # flushed, so the window-end summary row does not exist yet either;
@@ -2216,7 +2294,7 @@ def test_rotating_unknown_credential_ids_still_coalesce_into_one_durable_row_pos
     store = PostgresCredentialStore(platform.api_dsn, pepper=_APP_PEPPER, schema=platform.schema, audit_router=router)
     for i in range(500):
         with pytest.raises(AuthenticationError):
-            store.authenticate(f"rotating-cred-{i}", "wrong-secret")
+            store.authenticate(f"rotating-cred-{i}.wrong-secret")
     events = durable.events()
     assert len(events) <= 2
     for row in events:
@@ -2241,7 +2319,7 @@ def test_an_over_long_credential_id_does_not_suppress_the_durable_denial_row(pla
     store = PostgresCredentialStore(platform.api_dsn, pepper=_APP_PEPPER, schema=platform.schema, audit_router=router)
     over_long_id = "x" * 300
     with pytest.raises(AuthenticationError):
-        store.authenticate(over_long_id, "wrong-secret")
+        store.authenticate(f"{over_long_id}.wrong-secret")
     events = durable.events()
     assert len(events) == 1
     assert events[0][APPLICATION_AUDIT_FIELDS.index("reason_code")] == "AUTH_INVALID"
@@ -2260,7 +2338,7 @@ def test_an_over_long_credential_id_does_not_flip_the_response_to_service_unavai
     store.provision_application("appone")
     over_long_id = "x" * 300
     with pytest.raises(AuthenticationError):
-        store.authenticate(over_long_id, "wrong-secret")
+        store.authenticate(f"{over_long_id}.wrong-secret")
     events = sink.events()
     assert len(events) == 1
     assert events[0].actor_id is None
@@ -2356,7 +2434,9 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
     clean_application_audit(platform)
     write_store = PostgresCredentialStore(platform.controlplane_dsn, pepper=_APP_PEPPER, schema=platform.schema)
     try:
-        credential_id, secret = write_store.issue(timeout_probe_app.app_id, Role.DEVELOPER)
+        # Phase 6 WP-3 (design D-1(d)): `issue`'s second element is now
+        # the complete bearer -- used verbatim.
+        credential_id, bearer = write_store.issue(timeout_probe_app.app_id, Role.DEVELOPER)
     finally:
         write_store.close()
 
@@ -2367,6 +2447,7 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
     }
     collection_name = "bufreqid" + secrets.token_hex(3)
 
@@ -2390,7 +2471,7 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
                 schema_response = await client.post(
                     "/v1/schema/operations",
                     json={"operation": "create_entity", "entity": collection_name, "fields": ["id"]},
-                    headers={"authorization": f"Bearer {credential_id}.{secret}"},
+                    headers={"authorization": f"Bearer {bearer}"},
                 )
                 mutate_response = await client.post(
                     f"/v1/data/{collection_name}/mutations",
@@ -2398,7 +2479,7 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
                     # mapping (http.py) means `id` here is a TEXT column,
                     # not integer -- a string value matches its real type.
                     json={"operations": [{"operation": "insert", "values": {"id": "1"}}]},
-                    headers={"authorization": f"Bearer {credential_id}.{secret}"},
+                    headers={"authorization": f"Bearer {bearer}"},
                 )
                 return schema_response, mutate_response
 

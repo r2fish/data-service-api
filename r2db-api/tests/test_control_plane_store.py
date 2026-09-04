@@ -2435,6 +2435,30 @@ def test_in_process_adapter_never_composes_the_bearer_itself() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 WP-3 追補 (isomorphism table extension, supervisor ruling
+# 2026-09-04): `test_authenticate_methods_use_the_shared_dummy_verifier_
+# for_unconditional_compare_digest` below is now a row in `tests/test_
+# audit_query.py::_ISOMORPHIC_TARGETS` (pinned isomorphic to MitateDB-
+# api's own same-named test in its own `tests/test_control_plane_store.
+# py`). The two peers' `authenticate` implementations live under
+# DIFFERENT file/class names -- this peer's 4 live across 2 files
+# (`auth.py`'s 2 in-memory classes, `credential_store.py`'s 2 Postgres
+# classes), MitateDB-api's own 4 live across 4 files (one class per file:
+# `auth.py`, `control_auth.py`, `credential_store_postgres.py`,
+# `control_credential_store_postgres.py`) -- a real per-peer module-
+# layout difference, not a naming accident, and NOT something package-
+# name substitution alone can normalize away. This {filename: {class
+# names}} map is therefore kept HERE, at module level, OUTSIDE the pinned
+# function body, so the function itself stays byte-identical (after
+# normalization) across both peers; only this table differs per peer.
+# ---------------------------------------------------------------------------
+_TIMING_PIN_TARGETS: dict[str, set[str]] = {
+    "auth.py": {"CredentialStore", "ControlCredentialStore"},
+    "credential_store.py": {"PostgresCredentialStore", "PostgresControlCredentialStore"},
+}
+
+
 def test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest() -> None:
     """Coordinator item 7(i) (reviewer O3): a structural pin for a property
     a functional-outcome test cannot express without flaky timing
@@ -2463,10 +2487,7 @@ def test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_co
     import ast
 
     src_root = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
-    targets = {
-        "auth.py": {"CredentialStore", "ControlCredentialStore"},
-        "credential_store.py": {"PostgresCredentialStore", "PostgresControlCredentialStore"},
-    }
+    targets = _TIMING_PIN_TARGETS
     row_names = {"record", "row"}
 
     def _mentions_row(node: ast.AST) -> bool:

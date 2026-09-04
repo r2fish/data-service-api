@@ -263,11 +263,25 @@ def _lock_ritual(conn: "psycopg.Connection") -> None:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", [_RITUAL_ADVISORY_LOCK_KEY])
 
 
-def _print_secret_once(credential_id: str, secret: str) -> None:
+def _print_secret_once(credential_id: str, bearer: str) -> None:
     # The secret is shown exactly once, here, and is never written anywhere
     # by this process -- copy it now, it cannot be recovered later.
+    #
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item A): every
+    # caller of this function (`cmd_bootstrap`/`cmd_reset` via `_print_
+    # issued`, `cmd_issue_audit_credential`, `cmd_rotate_credential`) now
+    # hands it the already-COMPOSED bearer its own ceremony/service call
+    # returned (`bootstrap_control_credential`/`reset_control_credentials`/
+    # `issue_audit_credential_ceremony`/`ControlPlaneService.rotate_
+    # credential` all compose at their own store/service layer now,
+    # reversing this function's earlier WP-3 role as the single
+    # composition choke point -- see those functions' own docstrings).
+    # This function prints it VERBATIM; no composition happens here any
+    # more. `credential_id:` stays a separate line -- an operator who
+    # only needs the id (e.g. to build a rotate URL) never has to parse
+    # it back out of the bearer.
     print(f"credential_id: {credential_id}")
-    print(f"secret: {secret}")
+    print(f"secret: {bearer}")
     print("(the secret above is shown once and is not stored anywhere -- save it now)")
 
 
@@ -321,15 +335,35 @@ def _build_service():
         _die(str(exc))
 
 
-def _actor_credential() -> tuple[str, str]:
+def _actor_credential() -> str:
     """The operator's own currently-live control credential -- stands in
     for the `Authorization` header a real `/control/v1` HTTP request would
     carry. Every break-glass command below authenticates through
     `ControlPlaneService` with this SAME credential; a `must_rotate`
     credential can do nothing here besides self-`rotate-credential`
     (`ControlPlaneService._gate_must_rotate`'s own allow-list -- unchanged,
-    not re-implemented, by this module)."""
-    return _require_env("MITATEDB_CONTROL_CREDENTIAL_ID"), _require_env("MITATEDB_CONTROL_CREDENTIAL_SECRET")
+    not re-implemented, by this module).
+
+    Phase 6 WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04, 裁定
+    1): `MITATEDB_CONTROL_CREDENTIAL_SECRET` holds the operator's own
+    saved, COMPOSED bearer -- the exact `secret:` value `bootstrap`/
+    `reset`/`rotate-credential` printed (this module's own runbook,
+    cloud-run-cloud-sql.md §7: "the operator's own live, already-rotated
+    control credential", the SAME value shape a real `Authorization`
+    header would carry). This CLI never splits the bearer itself --
+    exactly like `control_http.py`'s own HTTP boundary, it passes the
+    presented bearer straight through to `ControlPlaneService`, which
+    forwards it unchanged to `control_auth.ControlCredentialStore.
+    authenticate`/`control_credential_store_postgres.
+    PostgresControlCredentialStore.authenticate`, the single choke point
+    that calls `split_bearer_locator` exactly once. `MITATEDB_CONTROL_
+    CREDENTIAL_ID` is still required here (an early, operator-facing
+    sanity check -- a saved secret with no matching saved id most likely
+    means the operator's own record-keeping drifted) even though its
+    value is no longer read: the bearer's own locator half already names
+    the credential_id the store actually authenticates against."""
+    _require_env("MITATEDB_CONTROL_CREDENTIAL_ID")
+    return _require_env("MITATEDB_CONTROL_CREDENTIAL_SECRET")
 
 
 def _provision_dsn() -> str:
@@ -347,29 +381,29 @@ def _print_json(payload) -> None:
 
 def cmd_list_applications(_args: argparse.Namespace) -> int:
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.list_applications(credential_id, secret))
+    secret = _actor_credential()
+    _print_json(service.list_applications(secret))
     return 0
 
 
 def cmd_list_credentials(_args: argparse.Namespace) -> int:
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.list_credentials(credential_id, secret))
+    secret = _actor_credential()
+    _print_json(service.list_credentials(secret))
     return 0
 
 
 def cmd_enable_application(args: argparse.Namespace) -> int:
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.set_application_enabled(credential_id, secret, args.application_id, True))
+    secret = _actor_credential()
+    _print_json(service.set_application_enabled(secret, args.application_id, True))
     return 0
 
 
 def cmd_disable_application(args: argparse.Namespace) -> int:
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.set_application_enabled(credential_id, secret, args.application_id, False))
+    secret = _actor_credential()
+    _print_json(service.set_application_enabled(secret, args.application_id, False))
     return 0
 
 
@@ -381,15 +415,15 @@ def cmd_enable_credential(args: argparse.Namespace) -> int:
     row simply stays revoked, `enabled` toggling only what `revoked` has not
     already made terminal."""
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.set_credential_enabled(credential_id, secret, args.credential_id, True))
+    secret = _actor_credential()
+    _print_json(service.set_credential_enabled(secret, args.credential_id, True))
     return 0
 
 
 def cmd_disable_credential(args: argparse.Namespace) -> int:
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    _print_json(service.set_credential_enabled(credential_id, secret, args.credential_id, False))
+    secret = _actor_credential()
+    _print_json(service.set_credential_enabled(secret, args.credential_id, False))
     return 0
 
 
@@ -400,8 +434,8 @@ def cmd_rotate_credential(args: argparse.Namespace) -> int:
     `must_rotate` flag without needing any other operation to already be
     permitted."""
     service = _build_service()
-    credential_id, secret = _actor_credential()
-    result = service.rotate_credential(credential_id, secret, args.credential_id)
+    secret = _actor_credential()
+    result = service.rotate_credential(secret, args.credential_id)
     _print_secret_once(result["credential_id"], result["secret"])
     return 0
 
@@ -417,10 +451,10 @@ def cmd_revoke_credential(args: argparse.Namespace) -> int:
     `confirmation` (`None` if omitted, which never matches a real phrase).
     """
     service = _build_service()
-    credential_id, secret = _actor_credential()
+    secret = _actor_credential()
     try:
         result = service.revoke_credential(
-            credential_id, secret, args.credential_id, destructive=True, confirmation=args.confirm)
+            secret, args.credential_id, destructive=True, confirmation=args.confirm)
     except DestructiveConfirmationRequired as exc:
         _print_denial_and_exit(exc)
     _print_json(result)

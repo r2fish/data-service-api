@@ -90,6 +90,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    fresh_identifier,
     load_contract_error_codes,
     resolve_valid_confirmation,
 )
@@ -716,9 +717,13 @@ _PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
 # V1.md D-2): this HTTP plug's own declared `surfaces` -- same synthetic,
 # non-dialable, DIFFERENT-origin convention as `conformance_adapter_r2db.
 # py`'s own `_SURFACES` (see that constant's docstring for why the two
-# hosts must stay different: `control_surface_cohosted_with_data_plane()`
-# below declares `False`, and C-19/test_c09's own declare-and-echo/
-# cohosting vectors are realized as repeated real calls to this SAME
+# hosts must stay different: `adapter.surfaces_cohosted`'s own origin
+# comparison over these two different-host `surfaces` values resolves
+# `False` structurally (Phase 6 WP-3 追補, supervisor ruling 2026-09-04:
+# the topology-declaration method that once stated this explicitly is
+# removed), and
+# C-19/test_c09's own declare-and-echo/cohosting vectors are realized as
+# repeated real calls to this SAME
 # running app, not a literal dial against these strings -- design section
 # 6.2 item 2(iii)'s own scope decision, `test_c19_client_self_sufficiency.
 # py`'s module docstring).
@@ -1480,6 +1485,19 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # WP-5 C-08 upgrade: real in-band `POST .../credentials/{id}/revoke`.
         self._privileged_control_send("POST", f"/control/v1/credentials/{quote(handle.credential_ref, safe='')}/revoke")
 
+    def tampered_bearer(self, handle: "CredentialHandle | ControlCredentialHandle") -> str:
+        """port v1.10 追補 (supervisor ruling 2026-09-04, brief item C):
+        this peer's own locator bearer shape (`auth.split_bearer_locator`'s
+        own inverse) is `<credential_id>.<secret>` -- a bearer naming the
+        SAME real `credential_id` with a fresh, never-issued secret
+        authenticates as `credential_id`-known-but-digest-mismatched,
+        exactly the "bogus secret on a real credential_ref" vector
+        `test_c15` needs. Composition ALLOWLISTED at this one line
+        (test_c19_client_self_sufficiency.py's own `_COMPOSITION_
+        ALLOWLIST`, port docstring's own "the ONLY place ANY adapter
+        composes a bearer" rule)."""
+        return f"{handle.credential_ref}.{fresh_identifier('tampered')}"
+
     def disable_application(self, application_id: str) -> None:
         self._set_registry_application_enabled(application_id, False)
 
@@ -1894,12 +1912,11 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         return self._data_send_with_actor("POST", "/v1/audit/query", actor, json_body=dict(request))
 
-    # port v1.9 fix-round (F-2/F-3): declares this HTTP plug's own topology
-    # fact -- the control app (`self._control_client`) and the data-plane
-    # app (`self._client`) are two genuinely separate `Starlette` ASGI
-    # instances behind two separate httpx clients -- never co-hosted.
-    def control_surface_cohosted_with_data_plane(self) -> bool:
-        return False
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 topology-declaration method this adapter once implemented
+    # here is removed -- the port's own `surfaces_cohosted` free function
+    # is now surfaces-derived only (both peers declare 1.6.0
+    # unconditionally).
 
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.

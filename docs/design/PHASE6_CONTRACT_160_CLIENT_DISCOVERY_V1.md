@@ -1,6 +1,6 @@
 # フェーズ6 実施設計: 契約 1.6.0 (credential の完全 bearer 化 + surface 発見 + 型付き catalog) + 衛生 2 件
 
-- 版数: **v1.4 (2026-09-04、作業指示書 v1.0 起草者との突合 8 件を監督裁定のうえ反映)** — **§5 の引用英文は依頼者確定済みであり 1 語も変えていない。** 変更点: **(1)** §6.2 vector 3 (iv) の否定側を「7 語それぞれ」→**「`json` を除く 6 語」**へ (json = any JSON value には違反値が存在せず、書けば空振りになる)。§3 D-3 の choke point 記述にも同旨を追記。**(2)** §8 の 1 の書式例を v1.2 残骸 (`conditional on control_plane being provided`) から **`unconditional -- versioning.version_binding`** へ (G6 の分類に整合。既存同型例 `reserved_entity_names_note` に揃えた)。**(3)** Dockerfile の実体パスを **`MitateDB-api/docker/Dockerfile`** (コメント :85-125、`COPY` :111) へ訂正 (§1.4、§3 D-4(b)、§9 WP-0)。**(4)** §3 D-4(b) に「MitateDB の `pyproject.toml` には `[tool.setuptools.*]` 節が無いので **`[tool.setuptools.package-data]` 節の新設**が要る」を明記。**(5)** **§3 に D-4(c) を新設** — 同型性テストの機構を **(相対パス, シンボル名) の対応表駆動**へ一般化し、既存 11 ヘルパを初期行として維持したうえで `_optional_float` と byte 同一テスト関数を追加、ソース取得方式を両 peer `ast.get_source_segment` に統一する。これで **L5-6 は閉止**、**L5-5 は「走査範囲の拡張で部分的に閉止 — 兄弟 peer に対応物が無いヘルパは表に載せない (表が対象の全数定義)」**として §11 に記録。§9 WP-0 の成果物と §11 の実測事項の矛盾が解けた。**(6)** §9 WP-1 セルの静的固定テストを **(a) 合成不在 + (b) 分解不在**の 2 性質へ訂正 (G1 と整合)。**(7)** **§2 に制約 8 を新設** — 一回適用の migration (platform 単発と per-application upgrade script) は適用後 in-place で編集しない / provisioning script (`0003`/`0004`) は毎回実行されるテンプレートなので改訂してよい / 既存 application DB は upgrade script で同じ終状態へ揃える (テンプレート改訂と upgrade script は対で出す)。以降の制約番号を繰り下げ、参照を追随。**(8)** `contract_version` の実位置を **r2db `service.py:882` / `control_plane.py:714`、MitateDB `cell.py:1280` / `control_plane.py:1364`** へ訂正 (§1.5 の 7)。版数 flip の対象が 4 行であることを明記
+- 版数: **v1.5 (2026-09-04、WP-4 記録整理)** — §10 実施記録を全 WP について確定し (WP-0 `18bd0a0` / WP-1 `bb86a37` / WP-2 `36e6d35` / WP-3 / WP-4 の集計行と受理境界、実バグ 3 件、suite 高速化の実測)、§11 の L6-1〜L6-17 に状態を付し L6-18〜L6-20 を新設した。§1〜§9 と §5 の確定英文は v1.4 から不変。旧 v1.4 (2026-09-04、作業指示書 v1.0 起草者との突合 8 件を監督裁定のうえ反映) — **§5 の引用英文は依頼者確定済みであり 1 語も変えていない。** 変更点: **(1)** §6.2 vector 3 (iv) の否定側を「7 語それぞれ」→**「`json` を除く 6 語」**へ (json = any JSON value には違反値が存在せず、書けば空振りになる)。§3 D-3 の choke point 記述にも同旨を追記。**(2)** §8 の 1 の書式例を v1.2 残骸 (`conditional on control_plane being provided`) から **`unconditional -- versioning.version_binding`** へ (G6 の分類に整合。既存同型例 `reserved_entity_names_note` に揃えた)。**(3)** Dockerfile の実体パスを **`MitateDB-api/docker/Dockerfile`** (コメント :85-125、`COPY` :111) へ訂正 (§1.4、§3 D-4(b)、§9 WP-0)。**(4)** §3 D-4(b) に「MitateDB の `pyproject.toml` には `[tool.setuptools.*]` 節が無いので **`[tool.setuptools.package-data]` 節の新設**が要る」を明記。**(5)** **§3 に D-4(c) を新設** — 同型性テストの機構を **(相対パス, シンボル名) の対応表駆動**へ一般化し、既存 11 ヘルパを初期行として維持したうえで `_optional_float` と byte 同一テスト関数を追加、ソース取得方式を両 peer `ast.get_source_segment` に統一する。これで **L5-6 は閉止**、**L5-5 は「走査範囲の拡張で部分的に閉止 — 兄弟 peer に対応物が無いヘルパは表に載せない (表が対象の全数定義)」**として §11 に記録。§9 WP-0 の成果物と §11 の実測事項の矛盾が解けた。**(6)** §9 WP-1 セルの静的固定テストを **(a) 合成不在 + (b) 分解不在**の 2 性質へ訂正 (G1 と整合)。**(7)** **§2 に制約 8 を新設** — 一回適用の migration (platform 単発と per-application upgrade script) は適用後 in-place で編集しない / provisioning script (`0003`/`0004`) は毎回実行されるテンプレートなので改訂してよい / 既存 application DB は upgrade script で同じ終状態へ揃える (テンプレート改訂と upgrade script は対で出す)。以降の制約番号を繰り下げ、参照を追随。**(8)** `contract_version` の実位置を **r2db `service.py:882` / `control_plane.py:714`、MitateDB `cell.py:1280` / `control_plane.py:1364`** へ訂正 (§1.5 の 7)。版数 flip の対象が 4 行であることを明記
 - 旧 v1.3 (2026-09-04、第 2 回独立レビュー 20 件を反映) — 発行を `(credential_id, bearer)` 2 値へ、`field_domains` を registry 由来へ、値検証を cell 層 choke point へ、`upsert` 補筆を 2 義務の全文へ、registry を per-application `0006` + backfill 規則へ
 - 旧 v1.2 (2026-09-04、第 1 回独立レビュー 14 件を反映) — SI-14 の帰属根拠を撤回、`json` の読み出し表現と `boolean` の wire を WP-3 射程へ、合成撤去と port 申告メソッド削除を WP-3 へ、`upsert` 句の同ラベル補筆 (D-3 (vii)) を追加
 - 旧 v1.1 (2026-09-04、起草報告に対する監督裁定 10 件を反映) — `field_types` を任意とし型語彙に `json` を追加、migration 番号の裁定、新条件を C-19 へ、L6-3 を閉止
@@ -598,39 +598,176 @@ control プロセスの入口は `r2db-api/src/r2db_api/control_main.py` (既に
 
 **追補 (2026-09-04、監督裁定・依頼者承認)**: 作業指示書 v1.2 は **WP-1 に suite 高速化 2 件を同梱**する — (A) C-14 vector 5 (`test_c14_resource_bounds_published_and_enforced`) の位置算術を構成値に比例しない形へ作り替える (フェーズ5 L5-7 の閉止)、(B) conformance を adapter 単位の `xdist_group` で並列化し完了ゲートを `-n 5 --dist loadgroup` にする (監督実験 2026-09-04: 422 passed in 117.17s、従来 373s)。いずれも契約不変・製品不変であり、本設計の D-1〜D-5 に影響しない。ローカル PostgreSQL の `max_connections` は 100 → 300 に変更済み (開発機の設定)。
 
-## 10. 実施記録
+## 10. 実施記録 (WP-4 記録整理、2026-09-04)
 
-*(本節は WP-4 の記録整理で埋める。WP ごとに、実装コミット / merge コミット / root suite の単独実行値 / レビュー往復の閉じ方 / 変異注入の結果 / 受け入れ境界 (この WP で「固定しない」と決めた点) を書く — フェーズ5 設計 §10 と同じ構成。)*
+**本節の完成度**: WP-0〜WP-3 は完了しており、各 WP について**実装記録・レビュー往復の閉じ方・変異注入の結果・受理境界 (この WP で「固定しない」と決めた点)** を書いた。残るプレースホルダは **WP-3 / WP-4 のコミットハッシュ (`{WP-3}` / `{WP-4}`) だけ**であり、これは監督がコミット後に埋める欄である — **本文中の事実に未確定は無い**。構成はフェーズ5 設計 §10 を踏襲する。
 
 ### 10.1 集計行
 
+**集計行の出所**: 下表の集計行は、**監督が完了ゲートで単独実行して得た実測値**である (`scratchpad/wp0-160-gate.log` / `wp1-160-gate2.log` / `wp2-160-gate3.log` / `wp3-160-gate2.log` の末尾行。各 WP のコミットメッセージ末尾の `Root suite alone:` 行にも転記してあり `git log` で照合できる)。**本節の起草者はテストを実行していない** — レビュー・監査・変異の各ログからの引用である。
+
 | WP | 内容 | 実装コミット | merge コミット | root suite (単独実行) |
 |---|---|---|---|---|
-| **WP-0** | 衛生 (D-4) | `{WP-0 後に確定}` | `{WP-0 後に確定}` | `{WP-0 後に確定}` (基準 **1611 passed / 0 failed / 0 skipped / 0 xfailed**) |
-| **WP-1** | 契約 1.6.0 公開 + port v1.10 + 共通 vector | `{WP-1 後に確定}` | `{WP-1 後に確定}` | `{WP-1 後に確定}` |
-| **WP-2** | r2db の 1.6.0 出荷 | `{WP-2 後に確定}` | `{WP-2 後に確定}` | `{WP-2 後に確定}` |
-| **WP-3** | MitateDB の 1.6.0 出荷 | `{WP-3 後に確定}` | `{WP-3 後に確定}` | `{WP-3 後に確定}` |
-| **WP-4** | 記録整理 | `{WP-4 後に確定}` | `{WP-4 後に確定}` | `{WP-4 後に確定}` |
+| **WP-0(docs)** | 設計 v1.4 + 作業指示書 v1.1 | `488e8d3` | `62e3099` | 文書のみ (基準 **1611 passed / 0 failed / 0 skipped / 0 xfailed**) |
+| **WP-0** | 衛生 (D-4) | `18bd0a0` | `c1c5c7c` | **1626 passed / 0 failed / 0 skipped / 0 xfailed** (497.46s、逐次) |
+| **WP-1** | 契約 1.6.0 公開 + port v1.10 + C-19 + 追補 A/B | `bb86a37` | `99276a8` | **1675 passed / 0 / 0 / 2 xfailed** (132.38s、`-n 5 --dist loadgroup`) |
+| **WP-2** | r2db の 1.6.0 出荷 | `36e6d35` | `1bc7b36` | **1757 passed / 0 / 0 / 2 xfailed** (180.18s) |
+| **WP-3** | MitateDB の 1.6.0 出荷 | `{WP-3}` | `{WP-3 の merge}` | **1800 passed / 0 / 0 / 0** (142.82s) |
+| **WP-4** | 記録整理 | `{WP-4}` | `{WP-4 の merge}` | 文書のみ (**1800** のまま) |
 
-### 10.2 WP-0 (衛生)
+**ディレクトリ別内訳 (収集件数)**:
 
-*(未実施)*
+| WP | `r2db-api/tests` | `MitateDB-api/tests` | `conformance-tests` | 計 |
+|---|---|---|---|---|
+| 基準 (フェーズ5 末) | 701 | 488 | 422 | **1611** |
+| WP-0 | 708 | 496 | 422 | **1626** |
+| WP-1 | 708 | 496 | 473 | **1677** (= 1675 + 2 xfailed) |
+| WP-2 | **790** | 496 | 473 | **1759** (= 1757 + 2 xfailed) |
+| WP-3 | 790 | **535** | **475** | **1800** |
 
-### 10.3 WP-1 (契約 1.6.0 公開)
+**増減の内訳**:
 
-*(未実施)*
+- **WP-0 = +15**: r2db +7 (fail-fast 5 parametrize + 既定値経路 1 + 対応表 pin 1)、MitateDB +8 (同 5 + 1 + byte 同一 1 + pin 1)。conformance 不変。受け入れ監査が新規収集 id を全数列挙して `1611 + 15 = 1626` を確認した。
+- **WP-1 = +51 (すべて conformance)**: 新規ファイル `test_c19_client_self_sufficiency.py` と `test_contract.py` の新規 1 本、および差し戻しで足した検査。**peer suite の収集は 1 件も動いていない** (契約コピー 2 本以外に peer `src/` の差分が無いことを監査が確認)。第 1 ラウンドのゲートは `1671 passed, 2 xfailed`、差し戻し後が `1675 passed, 2 xfailed` (+4)。
+- **WP-2 = +82 (すべて r2db)**: 第 1 ラウンドで +51 (`test_surfaces_env.py` 新設 19 を含む)、差し戻し後にさらに +31 (NUL locator / 非文字列 `field_types` / 合成の置き場所 / 相互排他検査などの新設テスト)。conformance の収集件数は**発注どおり不変**であり、増えたのは観測 (r2db 2 plug で 1.6.0 分岐に入る) だけである。
+- **WP-3 = +41**: MitateDB +39、conformance +2 (`test_c09_audit_evidence.py` の `surfaces_cohosted` 単体テストほか)、r2db ±0。第 1 ラウンドのゲートは `1777 passed`、差し戻し最終ラウンドで `1800 passed`。
 
-### 10.4 WP-2 (r2db の 1.6.0 出荷)
+**`xfailed` の推移**: WP-0 で 0、**WP-1 で 2** (全体 vacuity guard `test_c19_every_control_surface_adapter_declares_1_6_0` と静的固定テスト `test_c19_adapters_never_compose_or_decompose_the_bearer_secret`)、WP-2 で 2 のまま (r2db だけでは 4 plug 全数にならないため)、**WP-3 で 0** — 2 本とも最後の flip と同一差分で `xfail` デコレータ行だけを削除した。**フェーズ6 は xfail を 1 本も残していない。**
 
-*(未実施)*
+**suite 高速化の実測 (WP-1 追補 A / B)**: 完了ゲートは **8 分 17 秒 (WP-0、逐次) → 2 分 22 秒 (WP-3、`-n 5 --dist loadgroup`)** になった。内訳は 2 つである。**(A)** C-14 vector 5 を `isolated_control_surface()` の上に作り替え、`sleep(61)` を撤去した — 監督の並列実験ログ (`scratchpad/xdist-experiment.log`) では当該 vector が 4 plug で **61.01〜63.88 秒/plug** を占めていたのに対し、作り替え後は最遅 plug が **1.53 秒**であり 4 plug 合計でも約 6 秒である (フェーズ5 の参考実測 248.68 秒に対する上界の更新でもある)。**(B)** conformance を adapter 単位の `xdist_group` で並列化した — 逐次 `466 passed, 2 xfailed in 386.67s` と並列 `466 passed, 2 xfailed in 129.42s` が**同一の集計行**であること、`1 adapter = 1 worker` (`registry-guards` を含めて 5 worker)、残骸 DB / role が 0 件であることを実測済みである。ローカル PostgreSQL の `max_connections` は **100 → 300** に変更した (開発機の設定。並列 5 worker × adapter ごとの pool を吸収するため)。
 
-### 10.5 WP-3 (MitateDB の 1.6.0 出荷)
+**速度規律 (本フェーズで確立し、以降も継続する 5 項目)**: (1) **完了ゲートは監督が単独実行し、その集計行だけを正本にする** (subagent の報告値は突合対象であって正本ではない)。(2) **subagent には suite 全体を回させず、対象ファイル・対象テストの前景直列実行に限る** (`timeout` 600000 明示)。(3) **レビュー・監査は `--collect-only -q` と静的照合を主とし、変異は自作分のみ最小回数**にする。(4) **時間を食う vector は「構成値に比例しない形」へ作り替える** — 比例したままだと変異注入が実用外になる (フェーズ5 L5-7 がその実例)。(5) **並列化は集計行が逐次と一致することを実測してから採る。**
 
-*(未実施)*
+### 10.2 WP-0 — 衛生 (D-4、契約不変、両 peer 同時 1 コミット。`18bd0a0` → merge `c1c5c7c`)
 
-### 10.6 WP-4 (記録整理)
+**実際に採った形** (発注時の予定と食い違った点は**実装が正**として記す):
 
-*(未実施)*
+- **D-4(a) flush 間隔の fail-fast**: 両 peer の `_optional_float` が、空でない値について `float()` の失敗と `math.isfinite(value) and value > 0` の両方を検査し、**変数名を含む `ValueError`** を `build_app` の実経路で送出する。`0` / `-1` / `nan` / `inf` / `not-a-number` の **5 形が個別ケース**であり、既定値経路 (不在 `{}` と空文字 `""`) の非後退テストを別に置いた。**`_optional_int` と `audit_dispatch.py` は 1 行も触っていない** (L6-4 のとおり据え置き)。
+- **D-4(b) MitateDB の契約同梱**: `pyproject.toml` に **`[tool.setuptools.package-data]` 節を新設**し、`mitatedb_api/contract/data-service-api.v1.json` を `importlib.resources` で読む形にした。byte 同一テストは r2db の双子として `MitateDB-api/tests/test_http.py` に置き、`parents[2]` の深さが一致することを利用している。`docker/Dockerfile` の手動 `COPY spec/...` と `.parents[3]` 算術の注記を削除し、`cloud-run-cloud-sql.md` を packaged copy 形へ書き換えた。
+- **発注を超えた点 (監督裁定 (i)、peer 対称)**: `parents[3]` の除去は MitateDB `http.py` だけでなく **`control_http.py` (`_SCHEMAS` を `.http` から import する形へ) と r2db 側のリポジトリ相対フォールバック**にも及んだ。`grep -rn "parents\[3\]" */src` = **0 行**であり、**両 peer とも packaged copy のみを読む**。
+- **D-4(c) 同型性テストの一般化 (監督裁定 (ii))**: 機構を **(相対パス, シンボル名) の対応表駆動**へ改め、既存 11 ヘルパに 4 行 (`main.py::_optional_float` / byte 同一テスト関数 / `_isomorphic_symbol_source` / 対応表 pin テスト自身) を足して **15 行**とした。ソース取得は両 peer とも `ast.get_source_segment` に統一し (`inspect.getsource` はコードとして 0 件)、正規化は行頭インデントを保存する。対応表は**タプル全内容を逐語 assert する pin テスト**で固定した。**L5-6 は閉止**、**L5-5 は部分閉止** (兄弟 peer に対応物が無いヘルパは表に載せない = 表が対象の全数定義)。
+
+**レビューと差し戻し**: 独立レビューの指摘 **7 件 (中 3 / 小 4)**、差し戻し **1 回**。中-1 (削除した `COPY` を指す注記の残存) と小-1 / 小-2 / 小-4 は閉じた。**中-2 (機構が自分自身を固定していない)** は 15 行化で部分的に閉じ、**中-3 (デコレータ差が両側とも見えない)** は「記載のみで可」の裁定を受けて **L6-11** として台帳化した (受け入れ監査は「リポジトリ内の記録としては未達」と判定しており、本 WP-4 の §11 でその宿題を閉じている)。**小-3 (作業指示書 WP-0 のテストコマンドが存在しないファイル `r2db-api/tests/test_main.py` を指す)** は指示書側の誤りであり、本 WP-4 で訂正註を置いた (L6-18)。
+
+**受け入れ監査**: 完了条件 **11/11** と監督裁定 (i)(ii)(iii) の**すべてを充足**と判定。対応表 15 行 × 両 peer = 30 箇所を AST で解決し、**全 30 箇所が実在シンボルを指す** (空振りでない) ことと正規化後の左右一致を確認した。秘密・実データ・実ドメインの混入なし。
+
+**変異注入の結果**: 変異 1 (fail-fast の巻き戻し) = **赤** (r2db 5 ケース)、2 (既定値経路の欠落) = **赤**、3 (packaged copy の 1 バイト改変) = **赤** (当該 peer の byte 同一テストのみ、2 本の独立性を実測)、4 (packaged copy の退避) = **収集エラー** (loader が packaged copy を実読している実測)、4′ (対照: `spec/` の退避) = byte 同一テストのみ赤で他 46 本は緑 (`parents[3]` 結合の消滅の実測)、5 (package-data 行の脱落) = ホイールに `contract/*.json` が入らないことを `pip wheel` で確認、6 (対応表 1 行削除) = **pin テストのみ赤** (同型性テスト本体は緑 = pin が唯一の検出手段であることの実測)、7 (同型性の片側崩し) = **両 peer 赤**。
+
+**受理境界 (この WP で「固定しない」と決めた点)**:
+
+- **同型性機構は自分自身を完全には固定できない**。対応表の駆動関数とその入れ子 `_normalize` は peer 名リテラルを持つため原理的に表へ載らず、**片側 `_normalize` の弱化は不可視**である。15 行化はレビュー変異 B (片側の byte 同一 assert の弱化) を両 peer 赤にする程度には効いているが、「自己固定した」と書くと実際より強い保証に読める。
+- **デコレータ差は両側とも見えない (L6-11)**。`ast.get_source_segment` への統一で L5-6 の「取得方式差によるぶれ」は閉じたが、片 peer だけにデコレータが付く変化は検出できない (`@pytest.mark.skip` は完了ゲートの `skipped 0` が拾うが、skip しないデコレータは何も拾わない)。
+- **変異 5 だけが生ログでない** (監督裁定により再実施不要とした書き起こし)。ただし完了条件 6 (package-data の存在) 自体は監査が `pyproject.toml` で直接確認しており、条件の充足判定は当該変異ログに依存しない。**変異 1 / 2 / 6 の 15 行版での再実測は片 peer に閉じている** — 対応表が両 peer で同一内容であることを AST で確認済みのため実害は低いと判定した。
+- **変異 4 は「byte 同一 assert の load-bearing」を測っていない** (import 時ロードのためファイル全体が落ちる)。その分は変異 3 が担う。
+
+### 10.3 WP-1 — 契約 1.6.0 の公開 + port v1.10 + C-19 + 追補 A/B (`bb86a37` → merge `99276a8`)
+
+**実際に採った形**:
+
+- **契約**: `contract_version` 1.6.0。**項目 1 (D-1)** を `security.schemes.*` 2 箇所と `CredentialIssued.secret` / `CredentialRotated.secret` の description に、**項目 2 (D-2)** を `CapabilityDocument.properties.surfaces` に、**項目 3 (D-3)** を `EntityDescriptor.field_types` / `SchemaOperationRequest.field_types` と `field_type` enum の 7 語目 `json` に、**項目 4** を `structured_operations.upsert` の同ラベル補筆として置き、`versioning.version_binding` に 1.6.0 段落を、遡及否認の既存 4 行それぞれに `1.6.0-only` を足した。書式は既存前例と同型 (`unconditional -- versioning.version_binding` / `conditional on <capability> being provided`)。`spec/CCR_DISPOSITION.md` に**従属判断 11** (項目 1〜4、(a)〜(d) + 義務の条件付き性の独立段落)。
+- **確定文の逐語性**: `scratchpad/phase6-contract-prose.md` (依頼者確定済み) から複製し、**5 ブロック・9 箇所**について監督・レビュー・監査が**それぞれ独立の正規化器**で照合して全件一致を得た。文字列ピン `test_contract_pins_the_requester_finalized_1_6_0_prose` を新設した。
+- **additive 性の機械確認**: 1.5.0 との再帰 diff で **削除 0 / 型変更 0 / 狭化 0**、**追加 6** (新規キー 5 + enum 追加 1)、**変更スカラー 5**。**列挙外の差分 0 件**。`required` / `additionalProperties` の変更は 1 件も無い (`surfaces.*` の nested `required: ["base_url"]` は新規部分木の内側であって退行ではない)。3 者 (`spec/` + 両 peer の packaged copy) の sha256 が同一。
+- **port v1.10**: 抽象メソッドは発注の 2 本 (`create_entity_with_declared_types` / `add_field_with_declared_type`) に**追補 A の `isolated_control_surface` を加えた 3 本**になった。同居判定は **module-level の自由関数 `surfaces_cohosted(document, *, fallback)`** として置き、`surfaces` 不在時は申告メソッドへフォールバックする (申告メソッドの削除は WP-3)。credential handle には **verbatim 規約** (合成しない・分割しない) を docstring として置いた。`CONFORMANCE_ADAPTER_V1.md` §20 は §19 と同構成で、「**メソッドを削除する初めての port 改訂であり、それを 1 つでなく 2 つの WP に跨って行う**」ことを明記している。
+- **新条件 C-19**: credential verbatim (4 plug)、`surfaces` の 2 文書一致 (4 plug) と declare-and-echo (HTTP plug のみ)、`field_types` の宣言 / 既定 / 値 round-trip (4 plug)、否定側は**契約 enum から導いた `json` を除く 6 語 × 4 plug = 24 件**である。すべて `contract_version >= 1.6.0` の declare-first 分岐であり、本 WP 時点ではどの peer も 1.6.0 を宣言していない。
+- **`xfail(strict=True)` 2 本を先置き**: 全体 vacuity guard と、adapter が bearer を**合成も分解もしない**ことの静的固定テスト。後者は逐語プロトタイプ (`scratchpad/wp1y/static_proto.py`) を先に置いてから確定した (常設規律 5)。
+
+**レビューと差し戻し**: 独立レビューの指摘 **10 件 (中 6 / 低 3 / nit 1)**、差し戻し **1 回**。レビューは**報告に無い変異 3 種 (α / β / γ) を自作**し、いずれも「検出されない」ことを実測して指摘の根拠にした。主な閉じ方:
+
+- **F1** — 「項目 4 を 1.6.0 段落へ置いていない」の検査が**テスト自身のリテラル定数**を見ていた → 契約現物 (`version_binding` の実文字列) を見る形へ。
+- **F2 (変異 α)** — `surfaces` の**構造**が一切ピンされていなかった (nested `required: ["base_url"]` を spec と両コピーから同時に落としても `52 passed`) → 構造 assert を追加。
+- **F3** — 合成箇所は 4 ではなく **5** (追補 A の `isolated_control_surface` が 5 番目を新設していた) → `xfail` reason と §20 の記述を 5 件へ訂正。
+- **F4** — 追補 A-2 の変異 A′ が字義どおり成立しない (`limit_class` は C-14 に元から 1 件も無い) → **C-14 に `limit_class` の assert を足して**から literal A′ を再実測し、赤を得た。
+- **F5** — in-process MitateDB plug の `create_entity_with_declared_types` が `fields` 引数を捨てていた → 他 3 plug と同じ意味論へ。
+- **F6** — `json` 値 round-trip の比較が `==` で、Python の `1 == True` / `3 == 3.0` を通していた (WP-3 (γ) が是正しようとしている欠陥をちょうど見逃す比較) → 型込みの比較へ。
+- **F7 / F8 / F9 / F10 (低・nit)** — 分解検出が**受け手の変数名依存**である限界の開示 (C-19 の限界 (e))、否定側 6 語が契約語彙 − `json` と**ちょうど一致する**ことの assert、`isolated_control_surface` の close 規律が観測されていないこと (**L6-13**)、簡体字 1 字ほか。
+
+**受け入れ監査**: 完了条件 **20 項目 + 追補 A-1〜A-3 / B-1〜B-3** を判定し、差し戻し後に**全項目を充足**と判定した (監査自身の再帰 diff・逐語照合器・`cmp` / sha256・AST 再現・収集数突合による)。
+
+**変異注入の結果**: X (契約側) 1 / 2 / 3 / 4 / 4b、Y (conformance 側) 5 / 6 / 7 / 7′ / 8 / 9 / 10 / A / A′、および監督実施の literal A′ が**すべて発注どおりの赤 (または「XPASS へ移らない」対照)** になった。特筆は **7 と 7′ の対比** — 合成 5 箇所を撤去すると `XPASS(strict)` で赤、撤去したうえで `credential_ref` を bearer の `split(".")` で得る形にすると **xfail のまま = 分解不在 (b) が単独で load-bearing** であることの実測である。
+
+**受理境界**:
+
+- **declare-and-echo は「宣言 URL への実ダイヤル」ではない (L6-12)**。4 plug とも `*.conformance.invalid` の合成 base_url を申告し、HTTP plug も `httpx.ASGITransport` で実ソケットを持たない。検証しているのは**同一 adapter への 2 回呼びの自己整合**である。
+- **declare-and-echo vector は 4 件収集され、in-process 2 plug は本文内 early-return で戻る**。発注は「HTTP plug 2 件に限定」だったが、実装は id 形を他 vector と揃えるために収集レベルでは絞らなかった。**この 2 件は WP-3 以後も恒久的に無 assert のまま緑**である。
+- **変異 8 の赤は 4 plug ではなく 1 plug**である。当該 vector は `form == "provided"` の枝でのみ同居判定に到達し、その枝へ入る plug が 1 つしかないためで、**発注の対応表の「4 plug で赤」は誤り**である (L6-18)。
+- **本 WP には「この WP が新しく生んだ値に緑が依存する vector」が 1 本も無い** — declare-first の設計どおりであり、C-19 の全 vector は WP-2 / WP-3 の flip まで vacuous である。この事実は `CONDITIONS.md` の C-19 行に開示した。
+- **`CCR_DISPOSITION.md` に D-4 (衛生) の却下案は書かない**。同ファイルは**契約変更の従属判断**を記録する場所であり、契約に触れない衛生決定の却下案は射程外である — 発注文の「(d) D-4 却下 2 件」は項目 4 (D-3 (vii)) の却下と取り違えた誤りとして訂正した (L6-18)。
+- **C-14 の `limit_class` assert は soft-assert である** (値が `None` のときは何も要求しない)。C-16 の同型の検査と同じ形であり、`limit_class` は契約が保証する項目ではないためだが、**「宣言しない peer に対しては空振りする」**性質は残る (L6-19)。
+
+### 10.4 WP-2 — r2db の 1.6.0 出荷 (`36e6d35` → merge `1bc7b36`)
+
+**実際に採った形**:
+
+- **D-1 (locator 形 credential)**: **すべての発行点** (in-band issue / rotate、bootstrap、reset、audit ceremony、ops CLI、conformance adapter が使う store 層の add / rotate) が `<credential_id>.<secret_part>` を **`secret` として返し**、`credential_id` は別フィールドとして残る。**すべての認証点** (in-memory / Postgres の application store、control store、`authenticate_application`) が locator を分割し、**credential_id で行を引いてから `compare_digest` を state 検査より先に**行う。`_SELECT_BY_VERIFIER` は定数ごと削除し、`verifier` 列と `UNIQUE` は**衝突不能性の構造保証**として存置した (DDL 無変更 = migration 番号を取らない)。不正形 locator (ドット無し / 片側空 / **NUL バイト**) は DB に触れずに `AUTH_INVALID` で fail closed。未知・不一致・不正形は**同一応答** (SI-10) で、未知 id でも**ダミー verifier に対して `compare_digest` を実行**する (タイミングオラクルの除去)。否認は不帰属 (B-1 / SI-14) のまま耐久記録される。**互換シムは置かず、既存 credential は再発行**する (runbook §12a)。
+- **D-2 (surfaces)**: `R2DB_DATA_BASE_URL` / `R2DB_CONTROL_BASE_URL` を**配備者の表明**として両 capability 文書へ逐語 echo する (リクエスト host から導出しない / プロセス間で相互検証しない)。相対 URL・誤終端・末尾スラッシュ・不在・**相互に取り違えた終端**を起動時に拒否する。
+- **D-3 (typed catalog)**: catalog が全 field について `field_types` を返し (in-memory / Postgres とも `fields` を走査キーにするので総覧性が構造的に成り立つ)、型無し field は `json`、`create_entity` は任意の部分 `field_types` を受け、`add_field` は `json` を受ける。非文字列・語彙外・`fields` に無い名前は `VALIDATION_FAILED`。宣言 `json` は JSONB へ写り、`object` / `array` は `json` へ丸められない。**1.5.0 のリクエストはそのまま有効**である。
+- **flip**: `service.py` / `control_plane.py` の 2 箇所が同一差分で 1.6.0 を宣言し、C-19 の各 vector が **r2db 2 plug で初めて実行される**。
+
+**レビューと差し戻し**: 独立レビューの指摘 **2 件 (重大 1 / 中 1) + 観測 5 件**、差し戻し **1 回** (監督裁定 8 項目)。
+
+- **F1 (重大、実バグ)** — **locator の credential_id 半分に NUL があると 401 が 503 へ反転し、その否認が耐久監査に 1 行も残らない**。クライアント由来のバイトがそのまま SQL パラメータへ渡り、psycopg の拒否が `AUTH_STATE_UNAVAILABLE` へ写り、当該コードが `_DURABLE_DENIAL_CODES` に無いため早期 return するためである。**WP-2 以前はバインドされる値が常に 64 hex 桁の verifier だったので、この経路自体が存在しなかった** — locator 形にしたことが新しく開いた穴である。実測 (実 PG + 実 HTTP): 通常の不正 credential 2 回で耐久行 +2、NUL locator 2 回で **+0**。**閉じ方**: `split_bearer_locator` がどちらの半分の NUL でも `None` を返す (lookup 前に fail closed)。監査が同じ probe を独立に再走させ **`(+0)` → `(+2)`** を実測、`AUTH_STATE_UNAVAILABLE` は 1 度も現れないことを確認した。
+- **F2 (中)** — `field_types` の値が JSON 配列 / オブジェクトだと `VALIDATION_FAILED` ではなく **503** になる (`in FIELD_TYPES` が unhashable で `TypeError`)。**閉じ方**: `isinstance(str)` ガードを **`add_field` のスカラ `field_type` 側 (WP-2 以前からの同型の穴) と同一修正で**閉じ、実 HTTP のテストを足した。
+- **観測 O1〜O5** — O2 (`compose_bearer_locator` が `.` を検査しない) と O4 (data / control の終端取り違えを通す) は裁定 7(ii)(iii) で閉じた。O1 (adapter 側の合成) は**裁定 3** で閉じた — 合成を store / service 層へ移し、`grep -rn compose_bearer_locator r2db-api/conformance/` = **0 件**にした。O3 (credential_id 存在のタイミングオラクル) は裁定 7(i) の**ダミー verifier**で閉じた。
+
+**受け入れ監査**: 1 回目は完了条件 22 項目のうち **充足 20 / 証拠不足 1 / 設計疑義 2**、差し戻し後の 2 回目を経て**監督は 22/22 を充足と判定した** (コミットメッセージ `audit 22/22 after rework`)。
+
+**変異注入の結果**: 発注の対応表 **1〜16** に加え、差し戻し裁定 8 項目に対する変異 (NUL 検査の除去 / `isinstance` ガードの除去 / 合成の adapter への差し戻し / control 文書側の `surfaces` 破壊 / `json` 列の TEXT 化 / 終端の相互排他ガード除去 / `.` 検査の除去)、およびレビュー自作の M-α / M-β / M-γ が**すべて赤**になった。M-β (capability 文書の `surfaces.data.base_url` をリクエスト host から組み立てる) が実 HTTP を通る 2 本だけを赤にしたこと、M-γ (Postgres の per-field DDL 無視) が `information_schema` を直接読むテストを赤にしたことは、それぞれ**空振りしていないことの実測**である。
+
+**受理境界**:
+
+- **発注どおりでない変異が 1 件ある**。条件 11 (`surfaces` の 2 文書) の変異 8 は「control 文書から `surfaces` を落とす」ものだったが、実施されたのは adapter の `_SURFACES` を落とす操作 (= 変異 16 と同一実験) だった。差し戻し後に**製品コード `control_plane.py` 側を壊す変異**を別途実施し、実 ASGI の 2 アプリを突き合わせるテストで赤を得ている。
+- **`json` 内部写像の Postgres 側は独立には固定されていない**。宣言 `json` → 内部 `None` の写像を壊しても、`_FIELD_TYPE_SQL["json"]` と `_column_type_sql` の既定がともに JSONB を返すため PG 側は緑のままである (防御多重化の裏返し)。代替変異 (`field_type is None` 分岐を TEXT へ) が「明示 `json` 列が JSONB であること」を実際に固定している。
+- **タイミング安全化の pin が空振りしている**。実装は 4 つの `authenticate` すべてで無条件に `compare_digest` を実行しているが、それを固定するテストは `source.count("_DUMMY_VERIFIER") >= 2` であり、**使用箇所 2 つを短絡形へ戻しても定義行・コメント行だけで閾値を満たす** (監査がスクラッチ上の文字列置換で実測)。実装は正しく、**固定だけが弱い**。
+- **ops CLI の rotate 2 経路は自分で合成している**。4 つの `rotate` が `-> None` で合成済み bearer を返さないためであり、「発行点は store / service 層」という原則の**射程内の逸脱**である。挙動面の害は現時点で無い (印字された secret がそのまま認証を通ることを CLI テストが実測)。
+- **`CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` は wire 形を一度も書いていない**ため掃討対象ではなかったが、再発行手順への参照 2 箇所を足した (裁定 6)。
+
+### 10.5 WP-3 — MitateDB の 1.6.0 出荷 (`{WP-3}` → merge `{WP-3 の merge}`)
+
+**実際に採った形**:
+
+- **D-1**: **発行点 9 箇所すべてが store / service 層で合成**する (in-process の issue / rotate、control 側の同 2 経路、Postgres の application / control 各 store、in-band issue と rotate 2 経路)。`ops.py` は返却値を verbatim print、HTTP 境界と adapter の合成は**撤去**した。**受理側は 4 store とも完全 bearer を受ける形へ統一**し (`authenticate(secret)`)、分割は各境界で 1 回だけ行われる。`credential_wire.py` を新設して `compose_bearer_locator` / `split_bearer_locator` を置き、**NUL を含む locator は不正形**として lookup 前に落とす (r2db WP-2 の F1 と同型)。不正形 bearer も未知 id と同じく `authentication_denied` として耐久記録し、申告文字列は coalescing key に入れない。未知 id でもダミー digest に `compare_digest` する。
+- **D-2**: `surfaces.py` を新設し、data / control の両文書が同一の `surfaces` を返す。**`control_plane` が `unavailable` の配備では `surfaces.control` を出さない** (r2db と同型)。`MITATEDB_DATA_BASE_URL` / `MITATEDB_CONTROL_BASE_URL` の 4 形を起動時に拒否する。
+- **D-3**: **宣言型 registry `_mdb_field_types`** を application データベースに置いた — 新規 provisioning は `0003_provision_application.sql` の改訂 (テンプレート) が作り、**既存 DB には per-application の upgrade script `0006_declared_field_types_upgrade.sql`** が当たる。契約 7 語 ↔ foundation 内部語彙の対応は `field_types.py` の**1 箇所の表**に固定し、値検証を `cell` 層の choke point (`check_declared_value`) へ引き上げた (backend 非依存 = sqlite backed の in-process plug でも効く)。`application_catalog` を `enabled` へ flip し `GET /v1/catalog` を実装、`EntityDescriptor` は `entity` / `fields` / `field_types` の **3 キーのみ**を返す (`row_addressability: unavailable` なので `mutation_class` 等は省略)。**挙動変更 3 件** — (α) 型無し既定 `text` → `json`、(β) `json` / `object` / `array` の受理範囲と読み出し表現を any JSON 値へ、(γ) 宣言 `boolean` の wire を 0/1 → JSON boolean — はすべて flip と同一差分に入れた。
+- **撤去 3 点 (同一差分)**: 全体 vacuity guard の `xfail`、静的固定テストの `xfail` と 4 adapter の合成、port の申告メソッド `control_surface_cohosted_with_data_plane()` と 4 plug の実装・フォールバック分岐。**`grep -rn "control_surface_cohosted_with_data_plane"` = 0 行**であり、同居判定は `surfaces` 由来の `surfaces_cohosted()` だけになった。`MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` :22 には**原文を残したまま日付付きの否定注記**を添えた。
+- **監督追補 (A〜G)**: 合成の置き場所、不正形 bearer の監査、C-15 の bogus vector を port の新 primitive `tampered_bearer()` へ、最終ステップ (撤去 3 点)、未実施変異の全数実施、同型性表の拡張、配備文書。
+
+**レビューと差し戻し**: 独立レビューの指摘 **12 件 (重大 1 / 中 6 / 中〜低 2 / 低 3)**、差し戻し **1 回 + 最終ラウンド 1 回**。レビューは**自作変異 R1 / R2 / R3** で「検出されない」ことを実測した。主な閉じ方:
+
+- **F1 (重大、実バグ)** — 同一 duck-type interface の 2 実装が `secret` の形を取り違えていた (in-process store は合成済み bearer を受け、Postgres store は生の secret 部を受ける)。**この組み合わせでは認証が 100% 失敗する**。**閉じ方 (監督裁定 1)**: レビューの提案 (in-process 側を raw へ戻す) ではなく**逆向き** — **4 store すべてを完全 bearer 受けへ統一**し、分割の choke point を store 内 1 箇所にした。peer 対称性はこの形の方が高い。
+- **F2 / F3 (中)** — 静的固定テストの合成側が**変数名依存**で、`_COMPOSITION_ALLOWLIST` の 4 行は**1 件も抑止していなかった** (行番号 2 件も陳腐化)。**閉じ方 (最終ラウンド)**: 走査を受け手名に依存しない形へ広げ、実測で裏を取った — **allowlist を空にすると 4 plug で 4 件の finding が出る** (= 実効している)、**`token = handle.secret; return f"{...}.{token}"` 形の注入で赤になる** (= 名前依存が消えた)。
+- **F4 (中)** — `split_bearer_locator` の NUL 検査が 1 本も pin されていなかった (検査を外しても関連 suite が全緑)。**閉じ方**: 単体 11 本 + 実 PG 経路 1 本を新設。
+- **F5 / F6 (中)** — `MITATEDB_CONTROL_BASE_URL` の否定側テストが皆無だった / `control_plane: unavailable` でも `surfaces.control` が出ていた (契約違反かつ r2db との非対称)。**閉じ方**: `test_config.py` を 19 件へ拡張し、`unavailable` では採用しない形へ。
+- **F9 (中〜低)** — `0006` 未適用の application DB で**全 read/write** がクライアント過失コード `VALIDATION_FAILED` で落ちる。**閉じ方**: `UndefinedTable` を個別に捕捉して `StorageConfigurationError` (SERVICE 系) へ。
+- **F7 / F8 (中)** — backfill 規則の逸脱と `_check_domain` の 4 語畳み込みは**実装変更ではなく報告**として上げ、監督裁定で**実装どおりを正**とした (下記 受理境界、L6-16 / L6-14)。
+- **F11 / F12 (低)** — 陳腐化した docstring 2 件、および `CONDITIONS.md` C-09 行と `security/CONTROL_MAPPING.md` の**現在形の誤記** (申告メソッドを現存として列挙、L5-4 を未閉止として記述)。**閉じ方 (裁定 7)**: 両ファイルを WP-3 の同一差分で訂正した (WP-4 の予定から前倒し)。
+- **実バグ 2 件目** — `reset_control_credentials` が `issue()` の返り値を捨てて**生成前の raw secret をそのまま返していた**ため、`bootstrap` は合成済みを返すのに `reset` の CLI / HTTP 呼び出し側だけ raw を受け取っていた (「in-band と帯域外の混在」そのもの)。返り値を受け取る 1 行で閉じた。
+- **実バグ 3 件目** — in-process adapter の control credential **生存確認**が bearer を分割してから `authenticate` へ渡していたため、確認が必ず失敗し、**呼ばれるたびに control credential を reset していた** (誤 reset)。裁定 1 の完全 bearer 受け統一と、adapter が分割をやめたことで消えた。
+
+**受け入れ監査**: 1 回目は完了条件 **26 項目**を判定し、**充足 22 / 一部未充足・未充足 3 / 証拠不足 1**。指摘は (A) backfill 規則、(B) in-process plug が `split_bearer_locator` で 2 箇所分解している (静的走査はヘルパ経由を見ない)、(C) `_COMPOSITION_ALLOWLIST` の空振り、(D) 同型性表に `surfaces` 検証ヘルパが載っていない、(E) `CONDITIONS.md` C-19 行が中間状態のまま、(F) **未追跡ファイル 1 件** (`MitateDB-api/tests/test_control_plane_store.py` — `git add` されないままコミットすると同型性テストが解決先不在で赤になる) である。監査は実 PostgreSQL に対して `SELECT` を実行し、**registry 19 行 (integer 7 / string 12)、行の無い既存 field は 0 件**を確認した。最終ラウンドで (B)(C)(E) は閉じ、(A)(D) は台帳項目として受理した。
+
+**変異注入の結果**: 発注の対応表 **1〜18′** (18 行) に加え、**追補 A〜D の 4 変異**、**同型性 A / B / C の 3 変異**、および最終ラウンドの **R1 / R2 / F5 / F6 / F9 / allowlist 空**の各変異が、いずれも指定どおりの赤になった。特筆:
+
+- **変異 5** (sqlite 側の registry 書き込みを落とす) は **sqlite 3 本だけが赤で Postgres 側は巻き込まれない** — 両 backend 分が独立に固定されていることの実測。
+- **変異 14** (読み出しの逆直列化を外す) が round-trip vector を赤にした — 「**書けるだけでは緑になる**」ことの対照。
+- **変異 16** (片方の plane だけ 1.5.0 へ戻す) は **data 面 (`cell.py`) を戻して**ローカル版数テストと**全体 vacuity guard の両方**を赤にした。フェーズ5 の C-09 guard は control 面の宣言のみを見ていたが、**C-19 の guard は adapter の `contract_version()` = data 面の capability 文書を読む** — 発注の対応表は「片方の plane だけ」としか書いておらず、どちらの面かで結果が変わる (L6-18)。
+- **変異 17** は 1 回目 (`42 passed`) で**未検出**であり、`surfaces_cohosted` を直接固定する単体テストを新設して赤を得た。
+
+**受理境界**:
+
+- **`0006` の backfill は物理 TEXT 列を一律 `string` に写す (L6-16)**。作業指示書 完了条件 8 の「`object` / `array` 既存列は `json`」と「型無し既存列は `string`」は、MitateDB では `string` / `object` / `array` / `json` の 4 契約型がすべて物理 TEXT であるため**同時には満たせない自己矛盾**である。監督は実装どおり `string` を正とし、`object` / `array` として使っていた既存列は `add_field` で型付き列を足して移行する形にした (script の KNOWN LIMITATION と runbook に開示)。実 DB では対象列が 0 件であることを確認済みである。
+- **store の受理形を (id, secret) から完全 bearer へ変えた**。分割の choke point を store 内 1 箇所に集約する裁定であり、結果として **in-process adapter からも分解が消えた** (`split_bearer_locator` の呼び出しは 4 adapter で 0 件、残るのは散文のみ)。
+- **Postgres backend のドメイン検査は名目のみで、形状の防御は cell 層が担う (L6-14)**。値は cell 層で JSON 文字列化されてから backend へ渡るため、`json` / `object` / `array` / `string` の 4 ドメインは**名前だけが 4 つで検査は同一の `isinstance(str)`** である。設計 D-3 の「3 語を 1 ドメインに畳まない」は名目上満たされている。
+- **in-process plug は in-memory sqlite、HTTP plug は `httpx.ASGITransport` であり、どちらも実ソケットを持たない (L6-12)**。「宣言された URL に実際に到達できる」ことは共通 suite の射程外である。
+- **registry 参照が insert 2 回・query 3 回の往復を足し、キャッシュが無い (L6-15)**。正しさには影響しないが application-plane の遅延として記録する。
+- **`surfaces` 検証ヘルパの同型性は未固定 (L6-17)**。MitateDB は `surfaces.py` の 1 モジュールへ集約したが、r2db 側は `main.py` と `control_main.py` に重複コピーを持つため、(相対パス, シンボル名) の対応表に載せられない。**r2db 無変更という WP-3 の制約と衝突した**ため保留した。対応表は 15 行 → **18 行** (bearer 合成 / 分解 / timing pin) になった。
+
+### 10.6 WP-4 — 記録整理 (`{WP-4}`)
+
+**状態**: 本記録コミット。**契約・製品コード・テストは 1 バイトも変更していない** — root suite は WP-3 の **1800 passed / 0 failed / 0 skipped / 0 xfailed** のままである。
+
+**運ぶもの**: 本設計の **§10 (本節) と §11 の状態更新 + 新規台帳 L6-18〜L6-20**、作業指示書 **v1.3** (訂正註 6 件と §11 実施記録)、**`docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4** と**第 12 次引き継ぎ §4-2** への日付付き注記 (migration 番号 — §8 の 5、L6-2)、および**引き継ぎ第 13 次** (`docs/work-orders/HANDOVER_20260904_FABLE2.md`)。
+
+**§9 の WP-4 の予定から前倒しされた分**: `conformance-tests/CONDITIONS.md` (C-09 / C-19 行) と `security/CONTROL_MAPPING.md` (SI-00 / SI-14 行ほか) は、**WP-3 の差し戻し最終ラウンド (裁定 7 / レビュー F12) で先に更新済み**である — 両ファイルが申告メソッドの現存や L5-4 の未閉止を**現在形で断言していた**ため、WP-3 の撤去と同一コミットで訂正する必要があった。
 
 ---
 
@@ -644,27 +781,73 @@ control プロセスの入口は `r2db-api/src/r2db_api/control_main.py` (既に
   - **(iii) 本項 (L6-1) 自体** — 「migration ファイルの記述は当時のものとして残り、現行の正は上記 (i)(ii) にある」ことの記録。
   - **(iv) `r2db-api/src/r2db_api/credential_store.py:265-270` (v1.3、G17。最も load-bearing)** — 逐語で「The lookup above is already an exact-equality index match on `verifier` … this `compare_digest` is deliberate defence-in-depth, **not the authoritative check**」と書く。**D-1 後はこの `compare_digest` が権威ある検査そのものになる** — §3 D-1 の実装拘束 1 (digest 比較を state 検査より先に) が依存する当の性質を、コード内のコメントが否定したまま残ってはならない。**WP-2 で訂正する。**
   - **(v) `MitateDB-api/src/mitatedb_api/backend_postgres.py:122-129` (v1.3、G2/G17)** — 逐語で「`text` covers both this foundation's own `text` AND `json` field types … nothing downstream needs to recover **which of the two** a column was originally declared as」と書く。**D-3 後は「どちらとして宣言されたか」を復元する必要がある** (受理・読み出し・catalog の 3 面、§3 D-3)。`field_domains` の情報源を registry へ切り替えるのと同一コミット (**WP-3**) で訂正する。
+  - **【状態 2026-09-04 (WP-4)】** **(i) と (iv) は WP-2 で、(v) は WP-3 で閉じた** — (i) は `credential_store.py` の `PostgresCredentialStore.authenticate` の docstring が「locator 参照 / `UNIQUE` は衝突不能性の構造保証 / `compare_digest` が権威ある検査」の 3 点を書く形になり、(iv) の逐語「not the authoritative check」は追跡ソースから **0 件**になった (WP-2 監査が照合)。(v) は `backend_postgres.py` の「どちらとして宣言されたかを復元する必要がない」が registry 由来へ訂正済み (WP-3 監査が照合)。**(ii) は半分だけ済んでいる** — `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md` は WP-2 が §12a (locator 形の既存 credential 再発行手順) を足して更新したが、**`security/CONTROL_MAPPING.md` の SI-06 / SI-07 の r2db cell は未了**である (本記録コミットは同ファイルに触れていない。次に同ファイルを触るときに行う)。(iii) は本項自身の記録であり、**以後も記録のまま**残す。
 - **L6-2 migration 番号は「予約は割当ではない」— 先に出荷するフェーズ6 が次の空き番号を取る (監督裁定済み 2026-09-04)**。`PHASE4_DURABLE_AUDIT_SINK_V1.md:1072` と第 12 次引き継ぎ §4-2 が Q4 案 B のために「r2db 0008 / MitateDB 0006」と書いているのは**文書上の予約**であり、Q4 は未着手である。**フェーズ6 が先に出荷するので、必要なら MitateDB は 0006 を取り、Q4 はその次 (0007) を取る。** r2db は D-1 が DDL を要さないため番号を取らない (§1.5 の 3)。**MitateDB の宣言型 registry は DDL を要すると確定した (v1.2、F2)** — catalog / 読み出し / 受理の 3 面で宣言型が要り、物理 TEXT 列からは復元できないからである (§1.5 の 1b / 2a)。**それは per-application 系列の upgrade script であり、番号は `0006` である (v1.3、G12)** — platform 単発の `0006` にすると既存 application データベースに何も作らない。したがって **MitateDB は 0006 を取り、Q4 は 0007 を取る**。**WP-4 で Q4 の正本 2 文書へ日付付き注記を置く** (§8 の 5、§9 の WP-4)。
+  - **【状態 2026-09-04 (WP-4)】** **閉じた。** MitateDB は per-application upgrade script **`0006_declared_field_types_upgrade.sql`** を取り (WP-3)、r2db は D-1 が DDL を要さないため番号を取らなかった (WP-2 で `git diff -- r2db-api/migrations/` が空であることを監査が照合)。**Q4 は次の空き番号 (MitateDB `0007` / r2db `0008`) を取る。** WP-4 で `PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4 と第 12 次引き継ぎ §4-2 に日付付き注記を置いた。
 - **L6-3 (閉じた) r2db の既存の型無し (JSONB) 列の扱い**。v1.0 はこれを「残存する `None` は fail-closed とし、移行手順の要否を WP-2 で確定する」課題として起票していた。**裁定 R1 (2026-09-04) で閉じた** — 型語彙に `json` (any JSON value) が入り、型を宣言せずに作られた field の型は `json` であると契約が定めるため、r2db の内部表現 `None` は **catalog で `json` として正しく報告される**。fail-closed も移行手順も要らない。本項は「起票して同日に閉じた」記録として残す。
+  - **【状態 2026-09-04 (WP-4)】** **閉じたまま。** WP-2 の実測が裏づけた — 内部表現 `None` は catalog で `json` として報告され、fail-closed も移行手順も要らなかった (`test_foundation.py` が `fields` のみの `create_entity` で `field_types` が全 `json` になることを固定)。**記録のまま**残す。
 - **L6-4 `_optional_int` の degrade-to-default 規律は揃えていない**。D-4(a) は `_optional_float` のみを fail-fast にした。理由は「唯一の消費者が flush 間隔であり、誤設定の帰結が無音のホットループだから」であって (§3 D-4)、`_optional_int` の消費者にはその性質が無い。だが**同じ形の関数が隣り合って別々の規律を持つ**状態が残る。揃えるなら「既存配備が非数値・0・負値を渡していないこと」を先に確かめる必要がある (後方非互換になりうる) — フェーズ5 の **L5-8** (下限検査の peer 非対称) と同型の判断である。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** 本フェーズでは触れていない — WP-0 監査が `_optional_int` と `audit_dispatch.py` が 1 行も変更されていないことを `git diff` で照合済みである。
 - **L6-5 `surfaces` は配備者の表明であり、宣言された URL が実在することは declare-and-echo でしか検証していない**。conformance の in-process plug は実 URL を持たないため合成の偽ドメインを申告する (§6.4)。**「宣言された URL に本当に到達できる」ことを独立に検証できるのは HTTP plug だけ**であり、この射程を CONDITIONS.md に開示する。L5-4 (申告を独立検証できない) は port v1.10 の改訂 (削除は WP-3) で閉じるが、**その代わりに「宣言が実在を保証しない」という別種の射程が入る** — 閉じたのではなく、検証の位置が adapter の申告から配備者の宣言へ移った。
+  - **【状態 2026-09-04 (WP-4)】** **WP-1 で開示済み** (`CONDITIONS.md` の C-19 行に限界 (a)〜(e))。検証の位置は adapter の申告から配備者の宣言へ移り、**L5-4 は WP-3 の申告メソッド撤去で閉じた** (`grep -rn "control_surface_cohosted_with_data_plane"` = 0 行)。「宣言が実在を保証しない」という射程は**残る** — 実ソケットを持つ HTTP plug はフェーズ7 候補である (L6-12 / L6-20)。
 - **L6-5a `surfaces` の 2 プロセス間ドリフトは実装が検出できない (v1.2、F9 で起票)**。data / control は別プロセスであり、どちらも相手のホストへ接続しない (§1.5 の 7)。したがって「両文書が同じ `surfaces` を返す」という 1.6.0 義務を、**どちらのプロセスも単独では確認できない**。実装が起動時に検査できるのは自プロセスに与えられた 2 変数の**形**だけである (§3 D-2 の (a))。配備者が control プロセスにだけ古い `*_DATA_BASE_URL` を渡すと、control 文書から data へ辿ったクライアントが別配備へ行き、**実装は何も検出しない**。検出は配備後チェックと HTTP plug の declare-and-echo vector だけが担う。**これは `visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合 (Q4、`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2) と同族の構造**であり、**Q4 案 B (DB 側を単一の真実にする) が成立する際に `surfaces` も同じ機構へ載せる**のが手当てである。それまでは配備者責任として runbook に書く。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** 両 peer とも「自プロセスに与えられた 2 変数の形だけを起動時に検査する」形で出荷し、リクエスト host からの導出も 2 プロセス間の相互検証も発明していないことを WP-2 / WP-3 のレビューが照合した。2 プロセス間ドリフトの検出は配備後チェックと HTTP plug の declare-and-echo だけが担う (その declare-and-echo 自体の射程は L6-12)。
 - **L6-6 `field_types` は型のみを宣言し、値の制約を宣言しない**。D-3 (v) の原則 (catalog は schema operations で定義できる事実のみを返す) に従った結果であり、意図した射程である。将来 schema operations が nullability / 既定値 / 一意性以外の制約を得たとき、catalog も**同じ版で**得る — 片方だけ先行させない。この対応関係を契約文に置く (§5 の (3))。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま (意図した射程)。** 両 peer とも `field_types` は型のみを返す形で出荷した。
 - **L6-7 MitateDB の catalog は `mutation_class` を宣言しない**。§1.5 の 4 のとおり契約上正しい形だが、**クライアントから見ると「この entity に update できるか」を catalog からは読めない** — `capabilities().atomic_mutation.operations` から読むことになる。`row_addressability` を将来 enabled にするなら mutation_class の宣言が要り、そのとき `address_fields` をどう定めるか (MitateDB には server-assigned address が無い) が設計事項になる。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** WP-3 の catalog は `EntityDescriptor` を `entity` / `fields` / `field_types` の 3 キーのみで返し、`mutation_class` を宣言しない (契約上正しい形) ことを受け入れ監査が照合した。
 - **L6-8 (閉じた) MitateDB の既存 field の型報告**。v1.2 はこれを「宣言型 registry に行を持たない既存 field をどう報告するか未確定」として起票していた。**v1.3 で backfill 規則を決めて閉じた (G12)** — upgrade script が既存列を物理型から registry へ写すので (`text`→`string` / `integer`→`integer` / `real`→`number` / `boolean`→`boolean` / `json`→`json`、`object` と `array` は物理的に区別できないため既存列は `json` として登録)、**行が無い field は構造的に生じない**。型無しで作られた既存列は `string` と報告する — それが現物の型である (§1.5 の 2a、§8 の 4)。**残る実測事項は「upgrade script が既存 application データベースすべてに当たったこと」の運用確認だけ**であり、WP-3 / WP-4 の runbook 手順で担保する。
+  - **【状態 2026-09-04 (WP-4)】** **閉じた (実測で裏づけ済み)。** WP-3 の受け入れ監査が実 PostgreSQL に対して `SELECT` を実行し、**registry 19 行 = 全 19 列に行があり、行の無い既存 field は 0 件**であることを確認した。ただし backfill 規則そのものは物理 TEXT を一律 `string` に写す形になった (**L6-16**) ので、「型無しで作られた既存列は `string`」は成立するが「`object` / `array` 既存列は `json`」は成立しない。
 - **L6-9 宣言型に対する値検証を `cell` 層へ引き上げたことで、backend のドメイン機構が二重になる (v1.3、G3 の副作用)**。§3 D-3 は MitateDB の値検証を `_prepare_values` 系の choke point へ置き、backend の `_check_domain` / `field_domains` は defence-in-depth として残す。**2 層が同じ性質を別の語彙 (契約 7 語 / 内部ドメイン `text`・`int32`・`int64`・`float`) で判定する**状態になり、片方だけ更新される危険が残る。r2db は `_check_type` (共有) と PostgreSQL の列型という同型の 2 層を既に持つので**新しい形ではない**が、MitateDB では registry が 3 面 (catalog / 読み出し / 受理) を担うぶん結合が強い。**2 層の語彙対応を 1 箇所の表に固定し、変異注入で両層の load-bearing を確かめる**のが WP-3 の手当てである。
+  - **【状態 2026-09-04 (WP-4)】** **WP-3 で手当てを実施し、残りを L6-14 へ引き継いだ。** 語彙対応は `field_types.py` の 1 表に固定し、変異 13 (対応表から 1 語を落とす) が 9 本を赤にすることで load-bearing を実測した。**backend 側の 4 ドメインの検査ロジックが同一である**点だけが L6-14 として残る。
 - **L6-10 `row_addressability` の限定句の語法が契約内で不揃いになる (v1.3、G8)**。D-3 (vii) の補筆は `other than unavailable` を使う (`partial` を落とさないため) が、**`mutation_classes.rule` の側は `Where row_addressability is enabled` のままである**。本版では rule 側を変えない — D-3 (vii) の射程は `upsert` 節の 1 文であり、rule 側の変更は別の判断だからである。結果として、同じ前提が契約内で 2 つの語法で書かれる。**`row_addressability: partial` を宣言する実装が現れたとき、rule 側の宣言義務が掛からない**という既存の穴もそのまま残る (D-3 (vii) はそれを `upsert` 側へ広げないだけで、閉じてはいない)。次に契約文を触るときに rule 側を `other than unavailable` へ揃えるかどうかの判断材料として記録する。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** WP-1 は `upsert` 節の 1 文だけを補筆し、`mutation_classes.rule` が**再帰 diff で無変更**であることを監査が確認した。語法の不揃い (`other than unavailable` と `Where ... is enabled`) は残る。
 
 
 **フェーズ5 から持ち越している項目 (本フェーズで触れないもの)**
 
 - **L5-5 / L5-6 は本フェーズ WP-0 で処置する (v1.4、裁定 5)**。§3 **D-4(c)** のとおり、同型性テストの機構を **(相対パス, シンボル名) の対応表駆動**へ一般化し、既存 11 ヘルパを初期行として維持したうえで `src/<peer>/main.py::_optional_float` と `tests/test_http.py` の byte 同一テスト関数を行として追加する。**L5-6 (ソース取得方式の左右非対称) は閉じる** — 両 peer とも `ast.get_source_segment` (デコレータを含まない側) に統一する。**L5-5 (兄弟ファイル外の同名ヘルパを対象にできない) は部分的に閉じる** — 取りうる手当て (ii)「走査範囲の拡張」を採り、**兄弟 peer に対応物が無いヘルパは表に載せない**と決めた (表が対象の全数定義であるため、L5-5 が未決としていた「欠落を赤とするか対象から外すか」は「載せなければ対象外」として解ける)。`_ms_from_pg_timeout_text` (MitateDB 側にのみ存在) は載せない — **フェーズ5 WP-3 完了条件 17 が字義どおりには満たされていない**という L5-5 の記録はそのまま残る。
+  - **【状態 2026-09-04 (WP-4)】** **WP-0 で実施済み** — **L5-6 は閉止** (両 peer とも `ast.get_source_segment`、`inspect.getsource` はコードとして 0 件)、**L5-5 は部分閉止**。対応表は WP-0 の **15 行**から WP-3 で **18 行** (bearer 合成 / 分解 / timing pin) になった。閉じ方に伴って新たに **L6-11** (デコレータ差が両側とも見えない) を起票している。
 - **L5-7 (WP-4 変異 6/7 の実測コスト)** と **L5-8 (下限検査の peer 非対称)** は本フェーズの射程外である。
+  - **【状態 2026-09-04 (WP-4)】** **L5-7 は機構としては閉じたが、変異の実測は未了である。** WP-1 追補 A が C-14 vector 5 を構成値に比例しない形へ作り替え、当該 vector の所要は 4 plug 合計で約 6 秒 (最遅 plug 1.53 秒) になった — 「駆動コストが構成値に比例するため変異 6 / 7 が実用外」という L5-7 の前提そのものは消えた。**ただし変異 6 / 7 を実際に再実測してはいない** (WP-1 受け入れ監査 A-3 の証拠不足として記録済み)。**L5-8 は射程外のまま**である。
 - **Q4 (`visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合)** は独立の設計フェーズとして残る (`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4)。本フェーズは migration 番号の点でのみ Q4 と接する (L6-2)。
+  - **【状態 2026-09-04 (WP-4)】** **未着手のまま。** 本フェーズが Q4 と接するのは migration 番号だけであり (L6-2)、WP-4 で正本 2 文書 (`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4 / 第 12 次引き継ぎ §4-2) へ日付付き注記を置いた。
 - **外部評価の指摘 1 (conformance の資源管理) と指摘 7 (共通証拠・CI・lock)** は**フェーズ7**、**指摘 6 (実機適用)** は引き継ぎ §4-1 のままである。
+  - **【状態 2026-09-04 (WP-4)】** **指摘 2 / 3a / 3b / 4 / 5 は本フェーズで閉じた。** 指摘 1 (conformance の資源管理) と指摘 7 (共通証拠・CI・lock) はフェーズ7 候補として **L6-20** に整理した。指摘 6 (実機適用) は引き継ぎ §4-1 のままである。
 - **1.4.0 alias の除去** (従属判断 9 項目 7 の再検討条件): `endpoints.audit_query` (`POST /v1/audit/query`) の alias を除去するかは別途裁定であり、**本フェーズでは除去しない** — D-2 の `surfaces` は alias を surface として扱わない (§3 D-2) が、alias の存在自体には触れない。
+  - **【状態 2026-09-04 (WP-4)】** **本フェーズでも除去していない。** `surfaces` は alias を surface として扱わないが、alias の存在自体には触れていない。
 
 - **L6-11 同型性テストはデコレータ差を両側とも見ない (WP-0 レビュー 中-3、2026-09-04 起票)**。D-4(c) で自分側・兄弟側とも `ast.get_source_segment` (`FunctionDef.lineno` 起点、デコレータを含まない) に統一した結果、L5-6 の「取得方式差による赤/緑のぶれ」は閉じたが、**片 peer だけにデコレータが付く変化はこの機構では検出できない** (レビューの対照実験: MitateDB の byte 同一テストにのみ `@pytest.mark.skip` を付けても同型性テストは両 peer とも緑。`skip` 自体は完了ゲートの `skipped 0` が拾うが、skip しないデコレータは何も拾わない)。あわせて、対応表の駆動関数と入れ子 `_normalize` は peer 名リテラルを持つため原理的に表へ載らず、片側 `_normalize` の弱化も不可視である (機構の完全な自己固定は不可能)。手当て候補: デコレータ列を `FunctionDef.decorator_list` から別途正規化して突き合わせる、または対応表の各行に「デコレータ無し」を assert する。本フェーズでは記録に留める。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** WP-0 受け入れ監査が「残存ギャップの記録がリポジトリ内に無い」と判定した宿題は、**本項の起票そのもので閉じている**。手当て (デコレータ列の突き合わせ) は未実施。
 
 - **L6-12 D-2 (iii) declare-and-echo は「宣言 URL への実ダイヤル」ではなく「同一 adapter への 2 回呼びの自己整合」で実装されている (WP-1、2026-09-04 起票)**。4 plug とも `*.conformance.invalid` 系の合成 base_url を申告し、HTTP plug も `httpx.ASGITransport` で実ソケットを持たないため、宣言された URL に実際に到達できることは共通 suite では検証されない (CONDITIONS C-19 に開示済み。収集は HTTP plug 2 件のみ)。実ソケットを持つ HTTP plug (実サーバを起動して TCP で叩く形) はフェーズ7 (CI・再現性) の候補であり、そこで初めて「宣言 URL の実在」が load-bearing になる。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** WP-3 でも実ソケットは持たない (in-process plug は in-memory sqlite、HTTP plug は `httpx.ASGITransport`)。フェーズ7 候補 (**L6-20**)。
 - **L6-13 `isolated_control_surface()` の HTTP plug 実装が旧 pool / client を確実に閉じていることを検査するテストが無い (WP-1 レビュー F9、2026-09-04 起票)**。close を外す変異でも `4 passed`、接続数ピークは雑音の範囲 (24 vs 26)。実害は `max_connections = 300` の下では小さいが、接続リーク検査 (呼び出し前後の `pg_stat_activity` 件数、または `SharedPoolManager` の live pool 数) を置く余地がある。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** 本フェーズでは手当てしていない。フェーズ7 候補 (**L6-20**)。
+
+- **L6-14 MitateDB の Postgres backend は `json` / `object` / `array` / `string` を別ドメイン名に分けたが検査ロジックは同一 (`isinstance(str)`) であり、形状の防御は cell 層のみ (WP-3 レビュー F8、2026-09-04 起票)**。値は cell 層で JSON 文字列化されてから backend へ渡るため、backend 単独では object と array を区別できない。設計 D-3 の「3 語を 1 ドメインに畳まない」は名目上満たされ、実効的な形状検証は `cell.py` の choke point (`field_types.check_declared_value`) が担う。将来の選択肢: Postgres 側で `json`/`object`/`array` 列を物理 JSONB (r2db の `_r2db_json_object` / `_r2db_json_array` ドメインと同型の `jsonb_typeof` CHECK) にして defence-in-depth を実体化する。挙動変更を伴うため別 WP。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** WP-3 の監督裁定で「実装どおりを正」とし、形状の防御は `cell` 層が担うことを設計 §10.5 の受理境界に記録した。実体化 (物理 JSONB + `jsonb_typeof` CHECK) は挙動変更を伴うため別 WP。
+- **L6-15 MitateDB の宣言型 registry 参照が insert 2 回・query 3 回の往復を増やし、キャッシュが無い (WP-3 レビュー F10、2026-09-04 起票)**。正しさには影響しないが、application-plane の遅延として計測対象。cell 単位のキャッシュ (registry は schema operation でしか変わらないので schema revision で無効化できる) が自然な手当て。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** 本フェーズでは手当てしていない。
+- **L6-16 0006 backfill は物理 TEXT 列を一律 `string` に写す (WP-3 レビュー F7 / 監査 A、監督裁定 2026-09-04)**。作業指示書 WP-3 完了条件 8 の「object/array 既存列は `json`」は物理型が同じ TEXT で区別不能なため同時に満たせない自己矛盾であり、実装どおり `string` を正とする。object/array として使っていた既存列は `add_field` で型付き列を足して移行する (runbook に注記)。
+  - **【状態 2026-09-04 (WP-4)】** **監督裁定で確定 (実装どおり `string` 一律が正)。記録のまま。** 根拠と手動 `UPDATE` の remediation は `0006` の KNOWN LIMITATION 節と runbook に開示済みであり、実 DB では対象列 0 件であることを WP-3 監査が `SELECT` で確認した。あわせて作業指示書 WP-3 完了条件 8 の自己矛盾を **L6-18** に記録した。
+
+- **L6-17 `surfaces` 検証ヘルパの同型性が未固定 (WP-3 最終ラウンド、2026-09-04 起票)**。MitateDB は `surfaces.py::_validate_surface_base_url` に集約し r2db と同名同 signature にしたが、r2db 側は `main.py` と `control_main.py` に**コメントの異なる重複コピー**を持つため、対応表 (r2db パス 1 つ) に載せられない。手当ては r2db 側を単一モジュールへ寄せる (重複解消) こと。r2db 無変更の WP-3 制約と衝突したため保留。
+  - **【状態 2026-09-04 (WP-4)】** **記録のまま。** 手当て (r2db 側 `main.py` / `control_main.py` の重複解消) はフェーズ7 候補 (**L6-20**)。
+
+**フェーズ6 WP-4 (記録整理) で起票した項目**
+
+- **L6-18 作業指示書 (`WORK_ORDER_PHASE6_CONTRACT_160_V1.md`) の誤り 6 件 — 実装・レビュー・監査が実測で見つけたもの (2026-09-04 起票、指示書 v1.3 に訂正註として反映済み)**。いずれも**実装物の欠陥ではなく発注文書側の誤り**であり、指示書 §0 の規律 (「設計と本書が食い違ったら設計が正、本書の誤りとして監督へ差し戻す」) が実際に発動した例である。
+  - **(a) WP-0 のテストコマンドが存在しないファイルを指す** — `r2db-api/tests/test_main.py` は存在せず、r2db 側の該当テストは `tests/test_credential_persistence.py` にある (WP-0 レビュー 小-3、監査が実在を照合)。
+  - **(b) WP-3 完了条件 8 (backfill 規則) が自己矛盾している** — 「`object` / `array` 既存列は `json`」と「型無し既存列は `string`」は、MitateDB では 4 契約型がすべて物理 TEXT であるため同時には満たせない (L6-16)。
+  - **(c) WP-1 の変異 8 の期待「4 plug で赤」が誤り** — 当該 vector は `form == "provided"` の枝でのみ同居判定に到達し、その枝へ入る plug は 1 つだけなので、**赤にできる上限が 1 plug** である。
+  - **(d) WP-3 の変異 16「片方の plane だけ 1.5.0 へ戻す」は、どちらの面かで結果が変わる** — 全体 vacuity guard を赤にするには **data 面 (`cell.py`) の flip が要る** (C-19 の guard は adapter の `contract_version()` = data 面の capability 文書を読むため)。フェーズ5 の C-09 guard が control 面の宣言だけを見ていたのとは source が異なる。
+  - **(e) WP-1 完了条件 7 (d) が「D-4 却下 2 件」を要求している** — `spec/CCR_DISPOSITION.md` は**契約変更の従属判断**を記録する場所であり、契約に触れない衛生決定 (D-4) の却下案は射程外である。項目 4 (D-3 (vii)) の却下と取り違えた誤りであり、書くべきは後者だった。
+  - **(f) 版数参照の取り残し** — 指示書 v1.2 の冒頭が正本設計を「v1.3、確定」と引いていたが、設計ファイルは **v1.4** である (WP-1 監査 疑義 (vii))。
+- **L6-19 C-14 の `limit_class` assert は soft-assert であり、宣言しない peer に対しては空振りする (WP-1 追補 A-2 / レビュー F4 の帰結、2026-09-04 起票)**。`limit_class` は契約が保証する項目ではないため、`exc.details.get("limit_class")` が `None` のときは何も要求しない形にした — これは `test_c16_cross_entity_atomicity.py` の同型の検査と**同じ形**である。現況は両 peer とも実際に `limit_class` を出しているので load-bearing だが (変異 A′ が字義どおり赤になる根拠)、**将来 `limit_class` を出さない実装が現れると 2 条件とも静かに空振りに戻る**。手当ての候補は (i) 契約側で `limit_class` を義務化する、(ii) 「出す peer に対しては必ず一致する」ことを別の非空虚 assert で担保する、のいずれかであり、どちらも契約判断を伴うため本フェーズでは採らなかった。
+- **L6-20 フェーズ7 の候補 (2026-09-04 時点の一覧。優先順の裁定は次フェーズの枠で行う)**。
+  - **(a) 共通 suite に載っていない条件の共通化** — `C-00` / `C-02` / `C-04` / `C-05` / `C-07` / `C-10` は `CONDITIONS.md` 上で **not yet executable (common suite) — peer-local evidence only** のままである。外部評価の**指摘 1 (conformance の資源管理)** と同じ工程で扱うのが自然である。
+  - **(b) 共通証拠・CI・lock (外部評価 指摘 7)** — 依存の pin と再現可能な実行環境。本フェーズで `pytest-xdist` を両 peer の dev extras に足したことで、実行環境の差が集計行に効く余地が増えている。
+  - **(c) 実ソケットを持つ HTTP plug** — L6-12 の手当て。ここで初めて `surfaces` の「宣言 URL の実在」が load-bearing になる。
+  - **(d) r2db の `surfaces` 検証ヘルパの重複解消** — L6-17 の手当て。`main.py` / `control_main.py` の 2 コピーを 1 モジュールへ寄せれば、同型性の対応表に載る。
+  - **(e) `isolated_control_surface()` の pool close 検査** — L6-13 の手当て。

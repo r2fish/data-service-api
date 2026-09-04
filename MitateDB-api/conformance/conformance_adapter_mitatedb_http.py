@@ -94,6 +94,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    fresh_identifier,
     resolve_valid_confirmation,
 )
 
@@ -114,6 +115,13 @@ from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, create_app  # n
 
 BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 
+# Phase 6 WP-3 (design D-2): the `surfaces` this plug declares -- built
+# from the SAME `BASE_URL` its own `self._client`/`self._control_client`
+# are constructed against (`versioning.base_path`/`control_base_path`
+# suffixed on), never a second, independently-chosen pair of strings.
+_DATA_SURFACE_BASE_URL = BASE_URL + "/v1"
+_CONTROL_SURFACE_BASE_URL = BASE_URL + "/control/v1"
+
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
 # WP-5 (design v1.2 R-8): `MitateDB-api` is not pip-installed anywhere this
@@ -129,6 +137,14 @@ ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
 ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 
 _SCHEMA_REVISION_TABLE = "_mdb_schema_revision"
+# Phase 6 WP-3 (design D-3): the declared-type registry table itself --
+# `backend_postgres._FIELD_TYPES_TABLE`'s own identical name, kept as a
+# separate literal here rather than importing that module-private
+# constant (this file already has its own, deliberately independent copy
+# of `_SCHEMA_REVISION_TABLE` above, for the same reason -- an adapter
+# does not reach into a peer's own module internals for a bookkeeping
+# name it needs to exclude from its own privileged reach-around).
+_FIELD_TYPES_TABLE = "_mdb_field_types"
 
 # port's own two-member field-type vocabulary (`adapter.COMMON_FIELD_TYPES`)
 # -> this peer's real `SchemaOperationRequest.field_type` wire enum member
@@ -496,10 +512,10 @@ class _AuthGate:
         self._store = store
         self.available = True
 
-    def authenticate(self, credential_id: str, secret: str, *, request_id=None):
+    def authenticate(self, secret: str, *, request_id=None):
         if not self.available:
             raise AuthorizationStateUnavailable("authorization unavailable")
-        return self._store.authenticate(credential_id, secret, request_id=request_id)
+        return self._store.authenticate(secret, request_id=request_id)
 
     def assert_active(self, principal, *, request_id=None) -> None:
         if not self.available:
@@ -683,6 +699,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # `idle_in_transaction_session_timeout_ms` passed to
                 # `PostgresApplicationAuditSink` above, both DEFAULT_*).
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
+                # Phase 6 WP-3 (design D-2): both required from here on
+                # (`control_composition.build_control_service`). This is
+                # one of the two HTTP plugs (design §6.2 (2)(iii)) -- the
+                # SAME `BASE_URL` this adapter's own `self._client`/
+                # `self._control_client` are built against, below.
+                "MITATEDB_DATA_BASE_URL": _DATA_SURFACE_BASE_URL,
+                "MITATEDB_CONTROL_BASE_URL": _CONTROL_SURFACE_BASE_URL,
             }
             # Port v1.10 addendum A: kept on the instance (not just this
             # local `control_env`) so `isolated_control_surface()` can
@@ -814,7 +837,15 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         info = _provision_pg_app(self._platform, application_id)
         self._app_pg[application_id] = info
         self._cells[application_id] = ApplicationCell(
-            application_id, FoundationConfig(control_plane_status="enabled"),
+            application_id, FoundationConfig(
+                control_plane_status="enabled",
+                # Phase 6 WP-3 (design D-2): the SAME pair `control_env`
+                # above declares to the control-plane process -- one
+                # Python module constant, never two independently-
+                # configured copies (this plug's own analogue of "the
+                # deployer configured both processes consistently").
+                data_base_url=_DATA_SURFACE_BASE_URL, control_base_url=_CONTROL_SURFACE_BASE_URL,
+            ),
             backend=PostgresBackend(info.runtime_dsn, info.developer_dsn),
             audit_router=self._audit_router,
         )
@@ -837,15 +868,33 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         _deprovision_pg_app(self._platform, application_id)
 
     def issue_credential(self, application_id: str, role: str) -> CredentialHandle:
+        # Phase 6 WP-3 (design D-1(d)): `PostgresCredentialStore.issue`
+        # itself now returns the complete, ready-to-present bearer as its
+        # second element -- this adapter presents it verbatim (port
+        # v1.10's own regulation), never composing it from `credential_id`
+        # + a bare secret itself.
         role_enum = role if isinstance(role, Role) else Role(role)
-        credential_id, secret = self._write_store.issue(application_id, role_enum)
+        credential_id, bearer = self._write_store.issue(application_id, role_enum)
         return CredentialHandle(
             credential_ref=credential_id, application_id=application_id, role=role_enum.value,
-            secret=f"{credential_id}.{secret}",
+            secret=bearer,
         )
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
         self._write_store.revoke(handle.credential_ref)
+
+    def tampered_bearer(self, handle: "CredentialHandle | ControlCredentialHandle") -> str:
+        """port v1.10 追補 (supervisor ruling 2026-09-04, brief item C):
+        this peer's own locator bearer shape (`credential_wire.split_bearer_locator`, called once inside
+        each store's authenticate; HTTP boundaries pass the bearer verbatim) is `<credential_id>.<secret>` --
+        a bearer naming the SAME real `credential_id` with a fresh,
+        never-issued secret authenticates as `credential_id`-known-but-
+        digest-mismatched, exactly the "bogus secret on a real
+        credential_ref" vector `test_c15` needs. Composition ALLOWLISTED
+        at this one line (test_c19_client_self_sufficiency.py's own
+        `_COMPOSITION_ALLOWLIST`, port docstring's own "the ONLY place
+        ANY adapter composes a bearer" rule)."""
+        return f"{handle.credential_ref}.{fresh_identifier('tampered')}"
 
     def disable_application(self, application_id: str) -> None:
         self._write_store.disable_application(application_id)
@@ -931,24 +980,17 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         self, method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # Phase 4 WP-3(b) (design D-5, C-09 vector 3): `audit_query` is the
-        # FIRST control-plane port operation this adapter ever presents a
-        # plain application `CredentialHandle` to (every other `_control_
-        # send` caller only ever passes a `ControlCredentialHandle`, whose
-        # own `.secret` is bare -- `issue_credential`/`bootstrap`/`reset`'s
-        # own `secret=` field, never prefixed). `CredentialHandle.secret`
-        # on THIS adapter is already the FULL composite bearer form
-        # (`"<credential_id>.<secret>"`, `issue_credential`'s own docstring
-        # and `_Session.bearer`'s identical convention -- what `/v1/*`
-        # data-plane routes expect verbatim) -- re-prepending `credential_
-        # ref` again here would double it (`"id.id.secret"`), corrupting
-        # the secret half and turning a genuine FORBIDDEN probe into a
-        # false AUTH_INVALID. Composing a NEW bearer from `credential_ref`
-        # + `secret` is only correct for a `ControlCredentialHandle`.
-        if isinstance(actor, CredentialHandle):
-            bearer = actor.secret
-        else:
-            bearer = f"{actor.credential_ref}.{actor.secret}"
+        # Phase 6 WP-3 (design D-1(d), port v1.10 (a)): `.secret` on
+        # EITHER handle type is now already the complete, ready-to-present
+        # bearer -- every real issuance point (`PostgresCredentialStore.
+        # issue`, the `/control/v1` issue/rotate JSON response, `ops.py`'s
+        # own CLI output for bootstrap/reset/self-rotate) hands one back
+        # pre-composed. This adapter presents it verbatim; it never
+        # composes a bearer from `credential_ref` + `secret` itself
+        # (port v1.10's own regulation -- the static fixture this same WP
+        # un-xfails on this file scans for exactly this kind of
+        # composition).
+        bearer = actor.secret
         headers = {"authorization": f"Bearer {bearer}"}
         request = self._control_client.build_request(method, path, json=json_body, headers=headers)
         response = self._run(self._control_client.send(request))
@@ -989,9 +1031,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             "POST", "/control/v1/credentials", actor, json_body={"application_id": application_id, "role": role})
         return CredentialHandle(
             credential_ref=result["credential_id"], application_id=result["application_id"], role=result["role"],
-            # http.py's own composite bearer form ("<credential_id>.<secret>"),
-            # matching this adapter's own out-of-band `issue_credential`.
-            secret=f"{result['credential_id']}.{result['secret']}",
+            # Phase 6 WP-3 (design D-1(d)): `POST /control/v1/credentials`
+            # itself now returns the complete bearer as `secret`
+            # (`control_http.py::_with_composed_secret`) -- used verbatim.
+            secret=result["secret"],
         )
 
     def list_credentials(self, actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
@@ -1198,14 +1241,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # call, mirrored from this peer's own established convention, per
     # that function's own docstring) -- only the fresh httpx client.
     #
-    # Composition note (pre-1.6.0, unchanged by this addendum): this
-    # peer's real `/control/v1` wire protocol still requires the
-    # composite `"<credential_id>.<secret>"` bearer form on THIS
-    # revision -- the SAME requirement `_control_send`'s own comment
-    # documents. This is this file's 5th such site (the other 4:
-    # `issue_credential`/`issue_credential_inband`/`_control_send`/
-    # `audit_query_on_data_plane_host`); all 5 are removed together in
-    # WP-3, same commit as this plug's own 1.6.0 flip.
+    # Phase 6 WP-3 (design D-1(d)): `.secret` on either handle type is
+    # already the complete bearer (this file's own module-level note) --
+    # presented verbatim, never recomposed here.
     @contextmanager
     def isolated_control_surface(self):
         service = build_control_service(self._control_env)
@@ -1213,10 +1251,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
         try:
             def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-                if isinstance(actor, CredentialHandle):
-                    bearer = actor.secret
-                else:
-                    bearer = f"{actor.credential_ref}.{actor.secret}"
+                bearer = actor.secret
                 request = client.build_request(
                     "GET", "/control/v1/capabilities", headers=[("authorization", f"Bearer {bearer}")]
                 )
@@ -1310,22 +1345,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # `audit_query_on_data_plane_host` -- reaches this adapter's OWN
     # DATA-plane app/client (`self._client`), never the control one (the
     # mirror image of `audit_query` above, which never reaches the data-
-    # plane client). Bearer composition mirrors `_control_send`'s own
-    # `CredentialHandle`/`ControlCredentialHandle` split exactly (the
-    # data-plane host's own `_split_bearer`/`CredentialStore.authenticate`
-    # expects the identical "<credential_id>.<secret>" composite form
-    # `_control_send`'s comment already documents). No declare-first
-    # `SurfaceAbsent` gate here: `/v1/audit/query` is unconditionally
-    # mounted on the data-plane app regardless of `audit_query`'s own
-    # declared status (`http.py`'s own `_ROUTES`), so a real request
-    # always reaches a real handler.
+    # plane client). Phase 6 WP-3 (design D-1(d)): `.secret` on either
+    # handle type is already the complete bearer, presented verbatim
+    # (the data-plane host's own store-internal `split_bearer_locator`/`CredentialStore.
+    # authenticate` still expects the identical composite wire form, but
+    # that form now arrives pre-composed, never assembled here). No
+    # declare-first `SurfaceAbsent` gate here: `/v1/audit/query` is
+    # unconditionally mounted on the data-plane app regardless of
+    # `audit_query`'s own declared status (`http.py`'s own `_ROUTES`), so
+    # a real request always reaches a real handler.
     def audit_query_on_data_plane_host(
         self, actor: "CredentialHandle | ControlCredentialHandle", request: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        if isinstance(actor, CredentialHandle):
-            bearer = actor.secret
-        else:
-            bearer = f"{actor.credential_ref}.{actor.secret}"
+        bearer = actor.secret
         headers = {"authorization": f"Bearer {bearer}"}
         req = self._client.build_request("POST", "/v1/audit/query", json=dict(request), headers=headers)
         response = self._run(self._client.send(req))
@@ -1339,12 +1371,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             return {}
         return response.json()
 
-    # port v1.9 fix-round (F-2/F-3): declares this HTTP plug's own topology
-    # fact -- the control app (`self._control_client`) and the data-plane
-    # app (`self._client`) are two genuinely separate `Starlette` ASGI
-    # instances behind two separate httpx clients -- never co-hosted.
-    def control_surface_cohosted_with_data_plane(self) -> bool:
-        return False
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 topology-declaration method this adapter once implemented
+    # here is removed -- the port's own `surfaces_cohosted` free function
+    # is now surfaces-derived only (both peers declare 1.6.0
+    # unconditionally).
 
     # ------------------------------------------------------------------
     # application plane
@@ -1439,14 +1470,22 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def entities(self, session: object) -> set[str]:
         assert isinstance(session, _Session)
-        # No public "list collections" HTTP entry point exists on this
-        # peer at all (`application_catalog: unavailable`) -- mirrors the
-        # in-process adapter's own privileged reach-around, here via a
-        # direct, adapter-privileged Postgres connection to this
-        # application's own developer role/database (never through the
-        # real API), after an explicit re-authentication check so a
-        # revoked/disabled/unavailable session is denied here exactly as
-        # it would be for any other session operation.
+        # Phase 6 WP-3 (design D-3): `application_catalog` is now
+        # `enabled` and `GET /v1/catalog` is real, but THIS method stays a
+        # privileged, direct-Postgres reach-around deliberately -- several
+        # callers (this file's own C-01 scope-binding use in particular)
+        # need a ground truth independent of the peer's own self-reported
+        # catalog, precisely so a bug in the peer's own catalog reporting
+        # cannot mask a real scope-binding leak by omission. Via a direct,
+        # adapter-privileged Postgres connection to this application's own
+        # developer role/database (never through the real API), after an
+        # explicit re-authentication check so a revoked/disabled/
+        # unavailable session is denied here exactly as it would be for
+        # any other session operation. Excludes BOTH this peer's own
+        # bookkeeping tables -- `_mdb_schema_revision` (schema-revision
+        # counter) and `_mdb_field_types` (the declared-type registry
+        # itself, this same WP) -- neither of which is a real entity a
+        # `create_entity`/`create_collection` caller ever created.
         self._send("GET", "/v1/capabilities", session)
         info = self._app_pg[session.application_id]
         conn = psycopg.connect(info.developer_dsn, connect_timeout=5)
@@ -1454,8 +1493,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name <> %s",
-                    [_SCHEMA_REVISION_TABLE],
+                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s)",
+                    [_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE],
                 )
                 return {row[0] for row in cur.fetchall()}
         finally:

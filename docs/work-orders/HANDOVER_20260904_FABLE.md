@@ -118,6 +118,7 @@ N の各要素には「耐久表へ届かない根拠」をコメントで付し
 ### 4-2. 依頼者判断待ちと台帳
 
 - **Q4 (`visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合の構造化)** — **本フェーズに入っておらず、未着手のまま**である。正本は `PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4。監督推奨は**案 B (DB 側を単一の真実にする — 書き手 role の timeout を `ALTER ROLE ... SET` で固定し、control は `pg_db_role_setting` から導出)** を**独立の設計フェーズとして起票する**ことである。migration 新番号 (r2db 0008 / MitateDB 0006) と起動シーケンスに触る両 peer 同時の変更であり、台帳項目として抱え続ける形ではない。**`coalescing_window_ms` も同型なので同じフェーズで扱う**
+  - **【注記 2026-09-04 (フェーズ6 WP-4)】 MitateDB 側の番号は `0006` ではなく `0007` になる — 予約は割当ではない。** 監督裁定 (2026-09-04、`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §8 の 5 / §11 L6-2) のとおり**先に出荷したフェーズが次の空き番号を取る**ため、フェーズ6 WP-3 が宣言型 registry の per-application upgrade script として **`0006_declared_field_types_upgrade.sql`** を取った。**r2db 側は `0008` のまま**である (フェーズ6 の r2db 出荷は DDL を要さず番号を取っていない)。本行の本文は当時の記述として残す
 - **L4-12 (記録のみ、実機未検証)** — `cloud-run-cloud-sql.md` §6.3 の `gcloud auth print-identity-token --audiences=<mitatedb-ctrl URL>` がユーザーアカウント principal に対して拒否され得る件。**対応は実配備時 (§4-1) に行う**
 - **L4-13 (OPEN、記録のみ)** — data-plane プロセスの環境に control-credential pepper が存在するのは MitateDB のみという peer 非対称。**本フェーズでも変更していない**
 - **L4-8 (据え置き、CLOSED ではない)** — C-09 vector 4 の射程明示のまま。本フェーズは触れていない

@@ -54,6 +54,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    fresh_identifier,
     resolve_valid_confirmation,
 )
 
@@ -90,10 +91,14 @@ _PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
 # structural vectors (presence, cross-document consistency, declare-and-
 # echo via a second real `capability_document()` call) have a real value
 # to compare. `data`/`control` use DELIBERATELY DIFFERENT hosts -- this
-# adapter's own `control_surface_cohosted_with_data_plane()` below
-# declares `False` (two genuinely separate `DataService`/
-# `ControlPlaneService` objects, no shared credential store), and `adapter.
-# surfaces_cohosted`'s origin comparison must keep resolving the SAME
+# adapter's own `DataService`/`ControlPlaneService` are two genuinely
+# separate objects with no shared credential store (Phase 6 WP-3 追補,
+# supervisor ruling 2026-09-04: the topology-declaration method that once
+# stated this explicitly, is
+# removed -- `adapter.surfaces_cohosted`'s own origin comparison over
+# THESE two different-host `surfaces` values resolves `False` structurally
+# instead), and `adapter.surfaces_cohosted`'s origin comparison must keep
+# resolving the SAME
 # `False` once this plug declares 1.6.0 `surfaces` -- same-origin values
 # here would silently flip that resolution and break `test_c09_audit_
 # evidence.py`'s own "replacement does not change the outcome" vector.
@@ -282,6 +287,27 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
         self._control.set_credential_state(handle.credential_ref, revoked=True)
+
+    def tampered_bearer(self, handle: "CredentialHandle | ControlCredentialHandle") -> str:
+        """port v1.10 追補 (supervisor ruling 2026-09-04, brief item C):
+        this peer's own locator bearer shape (`auth.split_bearer_locator`'s
+        own inverse) is `<credential_id>.<secret>` -- a bearer naming the
+        SAME real `credential_id` with a fresh, never-issued secret
+        authenticates as `credential_id`-known-but-digest-mismatched,
+        exactly the "bogus secret on a real credential_ref" vector
+        `test_c15` needs. Composition ALLOWLISTED at this one line
+        (test_c19_client_self_sufficiency.py's own `_COMPOSITION_
+        ALLOWLIST`, port docstring's own "the ONLY place ANY adapter
+        composes a bearer" rule) -- this repository's own local
+        `test_in_process_adapter_never_composes_the_bearer_itself` text
+        pin (`test_control_plane_store.py`) is a narrower, DIFFERENT-
+        named-helper check (coordinator item 3's own concern: this
+        adapter's `issue_credential` must never call the store-layer
+        composer itself) and is unaffected -- this method never calls
+        that helper, it builds the tampered string directly, by design
+        (a real client never does this at all; only the test harness's
+        own designated primitive does)."""
+        return f"{handle.credential_ref}.{fresh_identifier('tampered')}"
 
     def disable_application(self, application_id: str) -> None:
         self._control.set_application_enabled(application_id, enabled=False)
@@ -636,14 +662,11 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         ))
         raise AssertionError("unreachable")  # deny_unsupported always raises
 
-    # port v1.9 fix-round (F-2/F-3): declares this in-process plug's own
-    # topology fact -- `DataService` (data plane) and `ControlPlaneService`
-    # (control plane) are two genuinely separate objects on this adapter,
-    # constructed with no shared credential store (`self._credentials` is
-    # application-only; the control plane's own credential store is a
-    # separate object entirely) -- never co-hosted.
-    def control_surface_cohosted_with_data_plane(self) -> bool:
-        return False
+    # Phase 6 WP-3 追補 (supervisor ruling 2026-09-04, brief item D): the
+    # pre-1.6.0 topology-declaration method this adapter once implemented
+    # here is removed -- the port's own `surfaces_cohosted` free function
+    # is now surfaces-derived only (both peers declare 1.6.0
+    # unconditionally).
 
     # port v1.5 (fix-round): the inverse of `provision_application` --
     # operator-privileged test-harness cleanup, never a public capability.

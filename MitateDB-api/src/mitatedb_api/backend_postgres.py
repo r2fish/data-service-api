@@ -84,8 +84,10 @@ import psycopg
 from psycopg import sql
 
 from .backend import SQL_OPERATOR_TOKENS
-from .errors import AuditSinkUnavailable, ConflictError, NotFoundError, ValidationError
+from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
+                     StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
+from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 
 # R-3 (design v1.1 §0/R-4 WP-0 m-7): backend-specific reserved names.
 # `audit_events` mirrors the SQLite backend's own defensive reservation
@@ -121,17 +123,45 @@ _TYPE_SQL = {name: sql.SQL(native) for name, native in _TYPES.items()}
 
 # B-1 (i): reverse map from PostgreSQL's own `information_schema.columns.
 # data_type` string back to a DOMAIN category `encode_value` validates
-# against. `text` covers both this foundation's own `text` AND `json`
-# field types (both physically `TEXT` columns, per `_TYPES` above) --
-# `encode_value`'s own `"text"` domain (str-shaped, NUL-free) is identical
-# for either declared vocabulary word, so the two-way ambiguity here is
-# harmless: nothing downstream needs to recover which of the two a column
-# was originally declared as, only what VALUE SHAPE it accepts.
+# against, for the three UNAMBIGUOUS physical types (`bigint`/`integer`/
+# `double precision` each correspond to exactly one foundation type --
+# `integer`/`boolean`/`real` respectively). A physical `text` column does
+# NOT get its domain from this table any more (Phase 6 WP-3, design D-3,
+# L6-1 (v) correction of this comment's own prior claim): `text` covers
+# FOUR distinct contract-vocabulary declared types on this backend
+# (`string`/`object`/`array`/`json`, all physically TEXT) that a value
+# declared `object` must NOT be treated as interchangeable with one
+# declared `array` -- see `field_domains` below, which now sources a
+# `text`-physical column's own domain from the declared-type REGISTRY
+# (`_mdb_field_types`), never from `information_schema` alone. What
+# nothing downstream needs to recover is a column's PHYSICAL storage
+# class (still just TEXT either way) -- but it very much needs to recover
+# WHICH declared contract type that physical TEXT column carries, and
+# `information_schema` alone cannot answer that question.
 _DOMAIN_BY_DATA_TYPE = {
     "bigint": "int64",           # this foundation's own `integer`
     "integer": "int32",          # this foundation's own `boolean`
     "double precision": "float",  # this foundation's own `real`
-    "text": "text",              # this foundation's own `text` or `json`
+}
+
+# Phase 6 WP-3 (design D-3): declared contract type (from the registry) ->
+# this backend's own `_check_domain` category, for every declared type
+# whose physical column is `text`. Kept as three DISTINCT domain names
+# (never folded into one shared `"text"`) so `_check_domain` can, in
+# principle, tell them apart -- even though, by the time a value reaches
+# `encode_value`, `cell.ApplicationCell._normalize_value_for_storage` has
+# already turned an `object`/`array`/`json`-declared value into a plain
+# JSON-text `str` (the PRIMARY object-vs-array-vs-json shape check
+# already ran, backend-independently, at that cell-layer choke point,
+# design G3) -- so this backend's own check is `isinstance(value, str)`
+# for all three, exactly as for `string`, and stays real defence-in-depth
+# against anything that reaches this backend without going through that
+# choke point.
+_TEXT_DOMAIN_BY_DECLARED_TYPE = {
+    "string": "string",
+    "object": "object",
+    "array": "array",
+    "json": "json",
 }
 _INT_DOMAIN_RANGES = {
     "int32": (-2147483648, 2147483647),
@@ -244,7 +274,12 @@ def _check_domain(value, domain):
     backstop's own generic "storage backend rejected the request" (every
     DML/DDL method's final `except psycopg.Error` branch), so a test can
     tell WHICH layer actually caught a given case (m-8 (ii))."""
-    if domain == "text":
+    if domain in ("string", "object", "array", "json"):
+        # See `_TEXT_DOMAIN_BY_DECLARED_TYPE`'s own comment: the real
+        # object-vs-array-vs-json shape check already ran at the cell
+        # layer (design G3) -- by this point every one of these four
+        # declared types is physically a plain `str` (JSON text for the
+        # three non-`string` members).
         if not isinstance(value, str):
             raise ValidationError("value does not match the declared field type")
         return value
@@ -292,6 +327,15 @@ _DIRECTION_SQL = {"asc": sql.SQL("ASC"), "desc": sql.SQL("DESC")}
 # it) -- `tests/test_postgres.py`'s own dedicated tests exercise both of
 # these directly.
 _SCHEMA_REVISION_TABLE = "_mdb_schema_revision"
+
+# Phase 6 WP-3 (design D-3, §1.5 finding 2a): the declared-type registry
+# itself -- provisioned by `migrations/0003_provision_application.sql`
+# for a new application, retrofitted onto an existing one by
+# `migrations/0006_declared_field_types_upgrade.sql`. Same access-pattern
+# reasoning as `_SCHEMA_REVISION_TABLE` immediately above (developer-
+# connection only; the runtime role gets no grant on it at all -- created
+# before `ALTER DEFAULT PRIVILEGES` in both migrations).
+_FIELD_TYPES_TABLE = "_mdb_field_types"
 
 
 def _execute(cursor, statement, params=()):
@@ -342,8 +386,8 @@ class PostgresBackend:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name <> %s"
-                ), [_SCHEMA_REVISION_TABLE])
+                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s)"
+                ), [_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE])
                 count = cur.fetchone()[0]
         except psycopg.Error as exc:
             self._developer.rollback()
@@ -356,10 +400,22 @@ class PostgresBackend:
         """Live catalog lookup (R-2 stage 2) doubling as the value-domain
         source B-1 (i) needs: for every column of `collection`, this
         database's own `information_schema.columns.data_type` is mapped
-        back to a domain category (`_DOMAIN_BY_DATA_TYPE`) `encode_value`
-        can validate a bound value against. Raises `errors.NotFoundError`
-        if `collection` does not exist -- the same existence-check role
-        the pre-B-1 `field_names` method played.
+        back to a domain category `encode_value` can validate a bound
+        value against. Raises `errors.NotFoundError` if `collection` does
+        not exist -- the same existence-check role the pre-B-1
+        `field_names` method played.
+
+        Phase 6 WP-3 (design D-3, L6-1 (v)): a physical `text` column's
+        own domain is no longer a single shared `"text"` bucket
+        (`_DOMAIN_BY_DATA_TYPE`'s own corrected comment above) -- it is
+        looked up in the declared-type REGISTRY instead
+        (`_TEXT_DOMAIN_BY_DECLARED_TYPE`), which is the only place that
+        can recover which of `string`/`object`/`array`/`json` the column
+        actually is. A `text`-physical column absent from the registry
+        (should not occur for any field this peer's own `create_
+        collection`/`add_field` created after this WP -- see
+        `create_collection`'s own registry-write below) degrades to
+        `"string"`, never a crash.
         """
         validate_identifier(collection, "collection")
         try:
@@ -370,6 +426,25 @@ class PostgresBackend:
                     "ORDER BY ordinal_position"
                 ), [collection])
                 rows = cur.fetchall()
+                declared = self._field_types_locked(cur, collection) if rows else {}
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
+            # 裁定 6, review F9): `_mdb_field_types` missing entirely means
+            # migration 0006 was never applied to this application DB -- an
+            # OPERATOR/DEPLOYMENT defect, never a client mistake. Before
+            # this fix every read/write on an un-migrated DB surfaced as
+            # `ValidationError` (contract `VALIDATION_FAILED`, a CLIENT
+            # fault code) -- fail-closed either way, but the wrong fault
+            # attribution. `StorageConfigurationError` is this peer's own
+            # existing "permanent misconfiguration, not a client mistake"
+            # class (`credential_store_postgres.py`'s identical `
+            # InsufficientPrivilege` precedent), mapping to `SERVICE_
+            # UNAVAILABLE` at the HTTP boundary instead.
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
         except psycopg.Error as exc:
             self._developer.rollback()
             raise ValidationError("storage backend rejected the request") from exc
@@ -377,7 +452,82 @@ class PostgresBackend:
             self._developer.commit()
         if not rows:
             raise NotFoundError("collection not found")
-        return {name: _DOMAIN_BY_DATA_TYPE.get(data_type, "text") for name, data_type in rows}
+        domains = {}
+        for name, data_type in rows:
+            if data_type in _DOMAIN_BY_DATA_TYPE:
+                domains[name] = _DOMAIN_BY_DATA_TYPE[data_type]
+            else:
+                domains[name] = _TEXT_DOMAIN_BY_DECLARED_TYPE.get(declared.get(name), "string")
+        return domains
+
+    def _field_types_locked(self, cur, collection):
+        """Reads `_mdb_field_types` over an ALREADY-OPEN cursor (shares
+        the caller's own transaction/commit-or-rollback, `field_domains`/
+        `field_types` alike -- never a second, independent connection
+        round trip)."""
+        _execute(cur, sql.SQL("SELECT field, declared_type FROM {} WHERE entity = %s")
+                  .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
+        return {field: declared_type for field, declared_type in cur.fetchall()}
+
+    def field_types(self, collection):
+        """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
+        field_types`'s own contract -- the single source of truth `GET
+        /v1/catalog` (`http.py::get_catalog`) and the cell-layer choke
+        point (`cell.py::_prepare_values`/`_bind_filters`) both read.
+        Existence-checked the same way `field_domains` is (an entity with
+        no columns at all cannot exist on this backend)."""
+        validate_identifier(collection, "collection")
+        try:
+            with self._developer.cursor() as cur:
+                _execute(cur, sql.SQL(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s"
+                ), [collection])
+                (exists,) = cur.fetchone()
+                declared = self._field_types_locked(cur, collection) if exists else {}
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            # See `field_domains`'s own identical rework above -- same
+            # operator/deployment-fault attribution, same class.
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._developer.commit()
+        if not exists:
+            raise NotFoundError("collection not found")
+        return declared
+
+    def all_field_types(self):
+        """Phase 6 WP-3 (design D-3): see `backend_sqlite.SQLiteBackend.
+        all_field_types`'s identical docstring -- `GET /v1/catalog`'s
+        sole data source."""
+        try:
+            with self._developer.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT entity, field, declared_type FROM {}")
+                          .format(sql.Identifier(_FIELD_TYPES_TABLE)))
+                rows = cur.fetchall()
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            # See `field_domains`'s own identical rework above -- same
+            # operator/deployment-fault attribution, same class.
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._developer.commit()
+        result: dict = {}
+        for entity, field, declared_type in rows:
+            result.setdefault(entity, {})[field] = declared_type
+        return result
 
     def schema_revision(self):
         try:
@@ -399,7 +549,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
-    def create_collection(self, name, fields, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -408,6 +558,17 @@ class PostgresBackend:
         statement = sql.SQL("CREATE TABLE {} ({})").format(
             sql.Identifier(name), sql.SQL(", ").join(definitions)
         )
+        # Phase 6 WP-3 (design D-3): robust to a direct caller that
+        # bypasses `cell.py` (e.g. this repository's own tests, which call
+        # this method straight against the backend) and supplies no
+        # `field_types` at all, or only a partial one -- every name in
+        # `fields` not covered gets the SAME backfill-rule fallback
+        # `cell.ApplicationCell.create_collection` itself applies.
+        field_types = dict(field_types or {})
+        for field, physical_type in fields.items():
+            field_types.setdefault(field, _FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
+        field_types_statement = sql.SQL("INSERT INTO {} (entity, field, declared_type) VALUES (%s, %s, %s)") \
+            .format(sql.Identifier(_FIELD_TYPES_TABLE))
         # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2, review M-6):
         # `commit()` moved INSIDE this `try` (it used to run in an `else:`
         # clause, OUTSIDE the try/except -- a raise from `commit()` itself
@@ -429,6 +590,12 @@ class PostgresBackend:
             with self._developer.cursor() as cur:
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
+                # Phase 6 WP-3 (design D-3): the declared-type registry
+                # write lands in the SAME transaction as the DDL above --
+                # atomic by construction (a failure/rollback below undoes
+                # both together, never one without the other).
+                for field in fields:
+                    _execute(cur, field_types_statement, [name, field, field_types[field]])
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True
@@ -453,12 +620,19 @@ class PostgresBackend:
             self._developer.rollback()
             raise
 
-    def add_field(self, collection, field, field_type, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
             sql.Identifier(collection), sql.Identifier(field), _TYPE_SQL[field_type]
         )
+        # Phase 6 WP-3 (design D-3): same robustness fallback as
+        # `create_collection` above, for a direct caller supplying no
+        # `contract_type`.
+        if contract_type is None:
+            contract_type = _FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+        field_types_statement = sql.SQL("INSERT INTO {} (entity, field, declared_type) VALUES (%s, %s, %s)") \
+            .format(sql.Identifier(_FIELD_TYPES_TABLE))
         # Phase 4: same `commit()`-inside-`try` + pre-commit-hook structure
         # as `create_collection` above -- see that method's own comment.
         hook_fired = False
@@ -466,6 +640,9 @@ class PostgresBackend:
             with self._developer.cursor() as cur:
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
+                # Phase 6 WP-3 (design D-3): same-transaction registry
+                # write as `create_collection` above.
+                _execute(cur, field_types_statement, [collection, field, contract_type])
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True

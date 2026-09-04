@@ -2244,119 +2244,163 @@ def test_mutating_an_ops_py_event_class_literal_to_an_undeclared_value_turns_the
 #
 # Phase 6 WP-0 (design D-4(c), L5-5/L5-6): the single-file/named-tuple
 # mechanism this section describes is generalized below into the
-# `_ISOMORPHIC_TARGETS` (relative path, symbol name) table, which now also
-# covers `src/r2db_api/main.py::_optional_float` and `tests/test_http.py`'s
-# byte-identical-contract test function, not only this file's own 11
-# scanner-support helpers -- see that table's own comment for the full
-# rationale.
+# `_ISOMORPHIC_TARGETS` (r2db relative path, MitateDB relative path,
+# symbol name) table, which now also covers `src/r2db_api/main.py::
+# _optional_float` and `tests/test_http.py`'s byte-identical-contract test
+# function, not only this file's own 11 scanner-support helpers -- see
+# that table's own comment for the full rationale.
+#
+# Phase 6 WP-3 追補 (isomorphism table extension, supervisor ruling
+# 2026-09-04): the table widens from a (relative path, symbol name) PAIR
+# to a (r2db relative path, MitateDB relative path, symbol name) TRIPLE --
+# the earlier `{package}` template slot only ever solved the ONE row whose
+# two peers' source trees differ by package name alone (`main.py`); it had
+# no way to name a row whose two peers keep the same symbol under
+# DIFFERENT relative paths (`compose_bearer_locator`/`split_bearer_
+# locator` live in `src/r2db_api/auth.py` on this peer, `src/mitatedb_api/
+# credential_wire.py` on MitateDB-api -- a real, intentional per-peer
+# module split, not a naming accident). The 15 pre-existing rows migrate
+# MECHANICALLY: every row whose path was peer-name-independent repeats
+# that same literal path in both slots; the `main.py` row's `{package}`
+# template resolves to its two now-literal paths.
 # ===========================================================================
 
 
 # ---------------------------------------------------------------------------
 # Phase 6 WP-0 (design D-4(c), work order §4 WP-0 変更対象 C, L5-5/L5-6):
 # the mechanism above (WP-2/WP-3, "1 file + a tuple of helper names") is
-# generalized into a (relative path, symbol name) TABLE -- the pair-per-row
-# form is the object that now defines the full set of peer-local symbols
-# this repository pins isomorphic, rather than one hardcoded sibling file.
-# The 11 rows below are the WP-2/WP-3 helpers, carried over UNCHANGED (not
-# one dropped); 4 rows are new this WP: `main.py::_optional_float` and
-# `tests/test_http.py`'s byte-identical-contract test function (design
-# D-4(a)/(b)), plus the mechanism's OWN two new pieces of test-support code
-# -- `_isomorphic_symbol_source` (the row resolver below) and this table's
-# own pin test -- added by supervisor review ruling (2026-09-04) so the
-# generalized mechanism pins itself the same way it pins everything else it
-# was built to check, rather than being exempt from its own guarantee.
-# `{package}` is a template slot resolved per side (this peer's own package
-# name on the self side, the sibling's on the sibling side) -- the ONLY row
-# that needs it is the `main.py` one, since the two peers' package names
-# differ but both source trees are `src/<package>/main.py`; every other
-# relative path here is peer-name-independent (`tests/test_audit_query.py`,
-# `tests/test_http.py` name the same file in both peer checkouts). This
-# tuple's own literal text is peer-name-free, so it is intended to read
-# identically in MitateDB-api's own copy of this file.
+# generalized below into a table -- the row form is the object that now
+# defines the full set of peer-local symbols this repository pins
+# isomorphic, rather than one hardcoded sibling file. The 11 rows below
+# are the WP-2/WP-3 helpers, carried over UNCHANGED (not one dropped); 4
+# rows are the Phase 6 WP-0 additions (`main.py::_optional_float`, `tests/
+# test_http.py`'s byte-identical-contract test function, plus the
+# mechanism's OWN two pieces of test-support code -- `_isomorphic_symbol_
+# source`, the row resolver below, and this table's own pin test -- added
+# by supervisor review ruling 2026-09-04 so the generalized mechanism pins
+# itself the same way it pins everything else it was built to check,
+# rather than being exempt from its own guarantee). 3 rows are the Phase 6
+# WP-3 追補 additions (supervisor ruling 2026-09-04): `compose_bearer_
+# locator`/`split_bearer_locator` (contract 1.6.0 subordinate ruling 11
+# item 1's shared bearer-locator realization, WP-2 on this peer / WP-3 追補
+# on MitateDB-api), and the unconditional-`compare_digest` timing-pin
+# test (coordinator item 7(i)) -- each peer's 4 `authenticate` methods live
+# under DIFFERENT file/class names, so that test's own per-peer {filename:
+# {class names}} map is kept OUTSIDE the pinned function body (module-level
+# `_TIMING_PIN_TARGETS` in `tests/test_control_plane_store.py`, not
+# isomorphism-checked) precisely so the pinned function ITSELF stays
+# byte-identical after normalization. This tuple's own literal text is
+# peer-name-free (both path slots are now literal per-peer paths, no
+# `{package}` template survives), so it is intended to read identically in
+# MitateDB-api's own copy of this file.
 # ---------------------------------------------------------------------------
 
-_ISOMORPHIC_TARGETS: tuple[tuple[str, str], ...] = (
-    ("tests/test_audit_query.py", "_iter_src_files"),
-    ("tests/test_audit_query.py", "_literal_leaves"),
-    ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
-    ("tests/test_audit_query.py", "_is_field_assignment_target"),
-    ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
-    ("tests/test_audit_query.py", "_analyze_field_scope"),
-    ("tests/test_audit_query.py", "_FieldForwardResolver"),
-    ("tests/test_audit_query.py", "_scan_source_field_sites"),
+_ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_src_files"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_literal_leaves"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_is_field_assignment_target"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_collect_direct_shadow_names"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_analyze_field_scope"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_FieldForwardResolver"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_scan_source_field_sites"),
     # WP-3 fix-round L-4 (Opus review): completion condition 17 names the
     # exclusion-list validators ((i)/(ii') judgment) as part of this same
     # isomorphism check -- omitting them let a peer change (ii')'s own
     # judgment (e.g. dropping the safe-forward id check) go undetected.
-    ("tests/test_audit_query.py", "_iter_field_definitions"),
-    ("tests/test_audit_query.py", "_field_positional_definitions"),
-    ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
     # Phase 6 WP-0 additions (design D-4(a)/(b)):
-    ("src/{package}/main.py", "_optional_float"),
-    ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+    ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
+    ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
     # Phase 6 WP-0 additions, round 2 (supervisor review ruling
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
-    ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+    # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
+    # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
+    # coordinator item 7(i)'s timing-pin test):
+    ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
+    ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
+    (
+        "tests/test_control_plane_store.py",
+        "tests/test_control_plane_store.py",
+        "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_15_rows() -> None:
-    """WP-0 completion condition 8: a bare `len(_ISOMORPHIC_TARGETS) == 15`
-    check would not catch a row silently DROPPED and a different,
-    coincidentally-same-length row added in its place -- only pinning the
-    table's own full CONTENT (not merely its length) catches that. One-time
-    human fixation, same character as Phase 5's "走査対象フィールド集合を
-    pin する" test -- a future WP that adds/removes a row edits this
-    assertion deliberately, not by accident.
+def test_isomorphic_target_table_is_pinned_to_its_current_18_rows() -> None:
+    """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
+    ruling 2026-09-04): a bare `len(_ISOMORPHIC_TARGETS) == 18` check
+    would not catch a row silently DROPPED and a different, coincidentally
+    -same-length row added in its place -- only pinning the table's own
+    full CONTENT (not merely its length) catches that. One-time human
+    fixation, same character as Phase 5's "走査対象フィールド集合を pin
+    する" test -- a future WP that adds/removes a row edits this assertion
+    deliberately, not by accident.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
     the table fixes its own driving code isomorphic too, rather than
     treating the mechanism as exempt from the guarantee it enforces on
     every other row. This is not circular: the assertion below is a NAME
-    pinned as data (a 2-tuple of strings), evaluated once at call time
+    pinned as data (a 3-tuple of strings), evaluated once at call time
     against the already-fully-defined `_ISOMORPHIC_TARGETS` above -- it
     does not recurse into calling itself."""
     assert _ISOMORPHIC_TARGETS == (
-        ("tests/test_audit_query.py", "_iter_src_files"),
-        ("tests/test_audit_query.py", "_literal_leaves"),
-        ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
-        ("tests/test_audit_query.py", "_is_field_assignment_target"),
-        ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
-        ("tests/test_audit_query.py", "_analyze_field_scope"),
-        ("tests/test_audit_query.py", "_FieldForwardResolver"),
-        ("tests/test_audit_query.py", "_scan_source_field_sites"),
-        ("tests/test_audit_query.py", "_iter_field_definitions"),
-        ("tests/test_audit_query.py", "_field_positional_definitions"),
-        ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
-        ("src/{package}/main.py", "_optional_float"),
-        ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
-        ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_src_files"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_literal_leaves"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_is_field_assignment_target"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_collect_direct_shadow_names"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_analyze_field_scope"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_FieldForwardResolver"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_scan_source_field_sites"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_iter_field_definitions"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_field_positional_definitions"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+        ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
+        ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+        ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
+        ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
+        (
+            "tests/test_control_plane_store.py",
+            "tests/test_control_plane_store.py",
+            "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 15
+    assert len(_ISOMORPHIC_TARGETS) == 18
 
 
-def _isomorphic_symbol_source(peer_root: Path, relative_path_template: str, package: str, symbol: str) -> str | None:
-    """Resolves ONE `_ISOMORPHIC_TARGETS` row against `peer_root` (either
-    this peer's own root or the sibling's) via a plain TEXT read + `ast.
-    parse` -- used for BOTH sides now (WP-0's own L5-6 fix: previously this
-    peer's own side used `inspect.getsource` -- which includes any
-    decorator line -- while the sibling side used `ast.get_source_segment`
-    -- whose `FunctionDef.lineno` starts at the `def`/`class` keyword,
-    never the decorator, per CPython's own AST docs -- so a future
-    decorator on either side alone would have flipped this test red/green
-    on THAT ASYMMETRY, not on an actual implementation difference. Only
-    top-level (`tree.body`) definitions are matched, same restriction the
-    WP-2/WP-3 mechanism already applied -- deliberately not `ast.walk`,
-    which would also match a same-named symbol nested inside an unrelated
-    class/function and silently diff the wrong one. Returns `None` if the
-    file does not exist or does not define `symbol` at module level (the
-    caller decides what that means for each side)."""
-    path = peer_root / relative_path_template.format(package=package)
+def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
+    """Resolves ONE `_ISOMORPHIC_TARGETS` row's own per-side relative path
+    against `peer_root` (either this peer's own root or the sibling's) via
+    a plain TEXT read + `ast.parse` -- used for BOTH sides now (WP-0's own
+    L5-6 fix: previously this peer's own side used `inspect.getsource` --
+    which includes any decorator line -- while the sibling side used
+    `ast.get_source_segment` -- whose `FunctionDef.lineno` starts at the
+    `def`/`class` keyword, never the decorator, per CPython's own AST docs
+    -- so a future decorator on either side alone would have flipped this
+    test red/green on THAT ASYMMETRY, not on an actual implementation
+    difference. Only top-level (`tree.body`) definitions are matched, same
+    restriction the WP-2/WP-3 mechanism already applied -- deliberately
+    not `ast.walk`, which would also match a same-named symbol nested
+    inside an unrelated class/function and silently diff the wrong one.
+    Returns `None` if the file does not exist or does not define `symbol`
+    at module level (the caller decides what that means for each side).
+
+    Phase 6 WP-3 追補 (supervisor ruling 2026-09-04): takes the row's own
+    already-resolved relative path directly -- no `package`/`{package}`
+    template parameter -- now that `_ISOMORPHIC_TARGETS` carries one
+    literal path per side (a (r2db path, MitateDB path, symbol) triple)
+    rather than a single peer-name-independent path plus a template slot
+    only one row ever needed."""
+    path = peer_root / relative_path
     if not path.exists():
         return None
     source = path.read_text()
@@ -2372,20 +2416,23 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path_template: str, pack
 
 def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     """常設規律6: diffs this peer's own `_ISOMORPHIC_TARGETS` symbols
-    against MitateDB-api's own same-named symbols at the same relative
-    paths, after normalizing peer package name / trailing whitespace /
-    blank-line runs -- proving the two independently (never shared-module)
+    against MitateDB-api's own same-named symbols at each row's own
+    MitateDB-side relative path, after normalizing peer package name /
+    the symbol's own leading docstring / trailing whitespace / blank-line
+    runs -- proving the two independently (never shared-module)
     implementations agree, without sharing code between peers.
 
     Table-driven generalization of the WP-2/WP-3 mechanism (design D-4(c),
     L5-5/L5-6): the prior form read one hardcoded sibling file
     (`tests/test_audit_query.py`) and diffed 11 named helpers found inside
-    it; `_ISOMORPHIC_TARGETS` above widens that to 15 rows spanning THREE
-    files (`tests/test_audit_query.py`, `src/<package>/main.py`,
-    `tests/test_http.py`), so this WP's own new same-named symbols
-    (`_optional_float`, the byte-identical-contract test function) fall
-    under the SAME peer-symmetry guarantee `_optional_float` (a product
-    file, not a test-support helper) would otherwise have had none of.
+    it; `_ISOMORPHIC_TARGETS` above widens that to 18 rows spanning FOUR
+    files per side (`tests/test_audit_query.py`, `src/<package>/main.py`,
+    `tests/test_http.py`, and -- Phase 6 WP-3 追補 -- the bearer-locator
+    module (`auth.py` on this peer, `credential_wire.py` on MitateDB-api)
+    and `tests/test_control_plane_store.py`), so each WP's own new
+    same-named symbols fall under the SAME peer-symmetry guarantee a
+    product file (not just a test-support helper) would otherwise have had
+    none of.
 
     Fix-round M-2 (Opus review, WP-2/WP-3): the sibling side is read as
     TEXT from its real file path (never `importlib.import_module` -- the
@@ -2399,26 +2446,76 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     accidentally make this a self-comparison."""
     import re
 
-    def _normalize(source: str, *, package: str) -> str:
-        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) this
-        peer's own package name (substituted for a neutral placeholder),
-        (b) TRAILING whitespace at the end of each line, and (c) the
-        number of consecutive blank lines (collapsed to none) -- NEVER
-        leading indentation and NEVER in-line token spacing. The PRIOR
-        form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
-        spaces/tabs ANYWHERE, including a line's own leading indentation --
-        which made a nesting-depth-only mutation (moving a branch one
-        `if`/`else` level deeper, or shallower, with the exact same token
+    def _strip_leading_docstring(source: str) -> str:
+        """Phase 6 WP-3 追補 (isomorphism table extension, supervisor
+        ruling 2026-09-04): removes the function/class body's own leading
+        docstring (a bare `Expr(Constant(str))` as the first body
+        statement) BEFORE comparison -- prose is not shape, and the two
+        peers' own docstrings for the same symbol legitimately differ (one
+        names itself "this peer's own X", the other "MitateDB-api's own
+        X"; see e.g. `compose_bearer_locator`'s two docstrings). Located
+        via `ast` (the docstring statement's own `lineno`/`end_lineno`
+        against THIS already-extracted, syntactically self-contained
+        segment), then deleted as TEXT -- never `ast.unparse`, which would
+        also reformat everything else the docstring did not touch (quote
+        style, line wrapping, trailing commas) and so could paper over a
+        real shape difference this comparison exists to catch. A symbol
+        with no leading docstring is returned unchanged."""
+        tree = _ast.parse(source)
+        target = tree.body[0]
+        body = getattr(target, "body", None)
+        if not body:
+            return source
+        first = body[0]
+        if not (isinstance(first, _ast.Expr) and isinstance(first.value, _ast.Constant) and isinstance(first.value.value, str)):
+            return source
+        lines = source.splitlines(keepends=True)
+        del lines[first.lineno - 1 : first.end_lineno]
+        return "".join(lines)
+
+    def _normalize(source: str) -> str:
+        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) the
+        symbol's own leading docstring (dropped entirely -- WP-3 追補,
+        supervisor ruling 2026-09-04), (b) BOTH peers' own package names
+        (each substituted for the SAME neutral placeholder), (c) TRAILING
+        whitespace at the end of each line, and (d) the number of
+        consecutive blank lines (collapsed to none) -- NEVER leading
+        indentation and NEVER in-line token spacing. The PRIOR form
+        (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of spaces/
+        tabs ANYWHERE, including a line's own leading indentation -- which
+        made a nesting-depth-only mutation (moving a branch one `if`/
+        `else` level deeper, or shallower, with the exact same token
         sequence and no operator/condition change at all) invisible to
         this comparison: Python's own semantics are indentation-sensitive,
         so an indentation-only edit is a REAL logic change this test must
         catch, not whitespace noise to discard. WP-0 drops the separate
         `peer_module` substitution the WP-2/WP-3 form also took: none of
-        the 15 target symbols' own source text (verified when this table
-        was assembled) references either peer's test-module name at all,
-        only (occasionally) its own package name, so a second substitution
-        parameter that never fires is dead generality, not a real need."""
-        text = source.replace(package, "<PEER_PACKAGE>")
+        the target symbols' own source text (verified when this table was
+        assembled) references either peer's test-module name at all, only
+        (occasionally) its own package name, so a second substitution
+        parameter that never fires is dead generality, not a real need.
+
+        WP-3 追補 round 2 (empirical finding, supervisor ruling
+        2026-09-04): switched from a single "this side's own package
+        name" substitution to BOTH known package names, symmetrically, on
+        EITHER side. A one-name-per-side substitution worked fine while
+        every pinned symbol's own text mentioned at most its OWN peer's
+        package name -- but this WP's new `_ISOMORPHIC_TARGETS` rows for
+        `compose_bearer_locator`/`split_bearer_locator`/the main.py row
+        each carry BOTH peers' package names as literal path DATA in the
+        SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
+        mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
+        pinned_to_its_current_18_rows` literally asserts that whole table
+        -- so its own body mentions both names too. A single-name
+        substitution leaves the OTHER peer's name untouched differently
+        on each side (r2db's own normalization leaves "mitatedb_api"
+        alone, MitateDB-api's own leaves "r2db_api" alone), so two
+        raw-identical texts would normalize to two DIFFERENT strings --
+        a false mismatch this fix removes, without weakening the check
+        (both substitutions still collapse to the exact same placeholder,
+        so a REAL difference elsewhere in the text is still caught)."""
+        text = _strip_leading_docstring(source)
+        text = text.replace("r2db_api", "<PEER_PACKAGE>").replace("mitatedb_api", "<PEER_PACKAGE>")
         text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
         text = re.sub(r"\n\s*\n+", "\n", text)
         return text.strip()
@@ -2429,19 +2526,19 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     assert "r2db-api" not in sibling_root.parts, f"sibling root must never resolve back into r2db-api: {sibling_root}"
 
     mismatches: list[str] = []
-    for relative_path_template, symbol in _ISOMORPHIC_TARGETS:
-        self_src = _isomorphic_symbol_source(self_root, relative_path_template, "r2db_api", symbol)
+    for self_relative_path, sibling_relative_path, symbol in _ISOMORPHIC_TARGETS:
+        self_src = _isomorphic_symbol_source(self_root, self_relative_path, symbol)
         if self_src is None:
             raise AssertionError(
                 f"this peer's own table row does not resolve against its own tree -- a table bug, not a sibling "
-                f"mismatch: {relative_path_template}::{symbol}"
+                f"mismatch: {self_relative_path}::{symbol}"
             )
-        sibling_src = _isomorphic_symbol_source(sibling_root, relative_path_template, "mitatedb_api", symbol)
+        sibling_src = _isomorphic_symbol_source(sibling_root, sibling_relative_path, symbol)
         if sibling_src is None:
-            mismatches.append(f"{relative_path_template}::{symbol}")  # not (yet) present on the sibling side
+            mismatches.append(f"{sibling_relative_path}::{symbol}")  # not (yet) present on the sibling side
             continue
-        if _normalize(self_src, package="r2db_api") != _normalize(sibling_src, package="mitatedb_api"):
-            mismatches.append(f"{relative_path_template}::{symbol}")
+        if _normalize(self_src) != _normalize(sibling_src):
+            mismatches.append(f"{sibling_relative_path}::{symbol}")
     assert not mismatches, f"peer-local symbol(s) not isomorphic after normalization (or missing on the sibling side): {mismatches!r}"
 
 

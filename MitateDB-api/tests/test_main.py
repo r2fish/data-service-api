@@ -47,6 +47,10 @@ _CONTROL_PEPPER = "synthetic-test-pepper-mitatedb-main-ctl-0000"
 _PROBE_APP_ID = "main_import_probe"
 
 
+_DATA_BASE_URL = "http://mitatedb-main-test.example.invalid/v1"
+_CONTROL_BASE_URL = "http://mitatedb-main-test.example.invalid/control/v1"
+
+
 def _base_env(platform, probe_app) -> dict[str, str]:
     return {
         "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
@@ -56,6 +60,13 @@ def _base_env(platform, probe_app) -> dict[str, str]:
         "MITATEDB_SERVE_APPS": probe_app.app_id,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_RUNTIME_DSN": probe_app.runtime_dsn,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_DEVELOPER_DSN": probe_app.developer_dsn,
+        # Phase 6 WP-3 (design D-2): `MITATEDB_DATA_BASE_URL` is required
+        # unconditionally from here on (contract 1.6.0's own `surfaces.
+        # data` obligation); `MITATEDB_CONTROL_BASE_URL` is only required
+        # when `MITATEDB_CONTROL_PLANE_STATUS=enabled` (unset by default
+        # here) but is harmless to always supply.
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
 
 
@@ -119,7 +130,9 @@ def test_build_app_serves_a_real_authenticated_request(main_module, platform, pr
         platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
     )
     try:
-        credential_id, secret = write_store.issue(probe_app.app_id, Role.RUNTIME)
+        # Phase 6 WP-3 (design D-1(d)): `issue`'s second element is now
+        # the complete bearer -- used verbatim.
+        credential_id, bearer = write_store.issue(probe_app.app_id, Role.RUNTIME)
     finally:
         write_store.close()
 
@@ -127,7 +140,7 @@ def test_build_app_serves_a_real_authenticated_request(main_module, platform, pr
 
     async def _call():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
-            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {credential_id}.{secret}"})
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
 
     response = asyncio.run(_call())
     assert response.status_code == 200, response.text
@@ -214,6 +227,8 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
         f"MITATEDB_APP_{flip_app.app_id.upper()}_RUNTIME_DSN": flip_app.runtime_dsn,
         f"MITATEDB_APP_{flip_app.app_id.upper()}_DEVELOPER_DSN": flip_app.developer_dsn,
         "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     app = main_module.build_app(env)
 
@@ -221,7 +236,7 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
         platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
     )
     try:
-        credential_id, secret = write_store.issue(flip_app.app_id, Role.RUNTIME)
+        credential_id, bearer = write_store.issue(flip_app.app_id, Role.RUNTIME)
     finally:
         write_store.close()
 
@@ -229,7 +244,7 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
 
     async def _call():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
-            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {credential_id}.{secret}"})
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
 
     response = asyncio.run(_call())
     assert response.status_code == 200, response.text
@@ -309,15 +324,21 @@ def test_control_service_factory_builds_a_real_working_service(main_module, plat
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     service = main_module.build_control_service(env)
 
+    from mitatedb_api.credential_wire import split_bearer_locator
+
     backend = service._backend  # test-only reach-in, mirroring this file's own existing conventions
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     try:
-        rotated = service.rotate_credential(credential_id, secret, credential_id)
-        document = service.control_capabilities(credential_id, rotated["secret"])
+        secret = bearer
+        rotated = service.rotate_credential(secret, credential_id)
+        rotated_secret = rotated["secret"]
+        document = service.control_capabilities(rotated_secret)
         assert document["capabilities"]["control_plane"]["status"] == "enabled"
     finally:
         # Clean up so this factory-only credential does not linger in the
@@ -337,6 +358,8 @@ def test_control_service_factory_rejects_identical_peppers(main_module, platform
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     with pytest.raises(ValueError):
         main_module.build_control_service(env)

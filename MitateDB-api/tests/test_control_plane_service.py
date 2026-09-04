@@ -18,6 +18,7 @@ from mitatedb_api.control_plane import (_AUDIT_ROLE_ALLOWED_OPERATIONS, ControlP
                                         ControlPlaneService, InMemoryControlBackend,
                                         bootstrap_control_credential,
                                         issue_audit_credential_ceremony)
+from mitatedb_api.credential_wire import split_bearer_locator
 from mitatedb_api.errors import (AuthenticationError, AuthenticationRequiredError,
                                  AuthorizationError, CapabilityError, ConflictError,
                                  DestructiveConfirmationRequired, NotFoundError,
@@ -70,12 +71,22 @@ def _limits(**overrides) -> ControlPlaneLimits:
 def _bootstrapped(limits=None):
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    # Phase 6 WP-3 追補, round 2 (supervisor ruling 2026-09-04, corrected
+    # after empirical finding): `control_auth.ControlCredentialStore.
+    # authenticate` takes the RAW secret only now (it can also be reached
+    # via a real HTTP boundary that always pre-splits, `tests/test_
+    # control_http_unmounted.py`'s own topology) -- this file's own
+    # helper is a direct in-process `ControlPlaneService` caller, so it
+    # splits the COMPOSED bearer ONCE here, the same discipline every
+    # other real receiving boundary on this peer now follows.
+    secret = bearer
     service = ControlPlaneService(backend, limits=limits or _limits())
     # Clear must_rotate via self-rotate so ordinary tests do not have to
     # thread the must_rotate allow-list through every call site.
-    rotated = service.rotate_credential(credential_id, secret, credential_id)
-    return service, backend, credential_id, rotated["secret"]
+    rotated = service.rotate_credential(secret, credential_id)
+    rotated_secret = rotated["secret"]
+    return service, backend, credential_id, rotated_secret
 
 
 # --------------------------------------------------------------------------
@@ -164,7 +175,7 @@ def test_missing_credential_raises_auth_required_and_is_durably_recorded() -> No
     service, backend, _cid, _secret = _bootstrapped()
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(AuthenticationRequiredError):
-        service.control_capabilities(None, None)
+        service.control_capabilities(None)
     after = backend.audit_sink.snapshot()
     assert len(after) == before + 1
     assert after[-1].reason_code == "AUTH_REQUIRED"
@@ -175,7 +186,7 @@ def test_wrong_secret_raises_auth_invalid_and_is_durably_recorded() -> None:
     service, backend, cid, _secret = _bootstrapped()
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(AuthenticationError):
-        service.control_capabilities(cid, "not-the-real-secret")
+        service.control_capabilities("not-the-real-secret")
     after = backend.audit_sink.snapshot()
     assert len(after) == before + 1
     assert after[-1].reason_code == "AUTH_INVALID"
@@ -194,13 +205,13 @@ def test_auth_state_unavailable_is_never_durably_audited() -> None:
         def __getattr__(self, name):
             return getattr(backend, name)
 
-        def authenticate_control(self, credential_id, secret):
+        def authenticate_control(self, secret):
             raise AuthorizationStateUnavailable("simulated store outage")
 
     service._backend = _DeadBackend()
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(AuthorizationStateUnavailable):
-        service.control_capabilities(cid, secret)
+        service.control_capabilities(secret)
     assert len(backend.audit_sink.snapshot()) == before
 
 
@@ -213,10 +224,10 @@ def test_rate_limit_denial_is_never_durably_audited() -> None:
     # the request which actually trips LIMIT_EXCEEDED adds no audit row.
     for _ in range(77):
         with pytest.raises(AuthenticationRequiredError):
-            service.control_capabilities(None, None)
+            service.control_capabilities(None)
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(ResourceLimitError) as excinfo:
-        service.control_capabilities(None, None)
+        service.control_capabilities(None)
     assert excinfo.value.details["limit_class"] == "control_requests_per_minute"
     assert len(backend.audit_sink.snapshot()) == before  # unchanged: no new audit row
 
@@ -239,9 +250,9 @@ def test_rate_window_recovers_a_token_after_60_seconds_of_injected_clock_time() 
 
     for _ in range(77):
         with pytest.raises(AuthenticationRequiredError):
-            service.control_capabilities(None, None)
+            service.control_capabilities(None)
     with pytest.raises(ResourceLimitError):
-        service.control_capabilities(None, None)
+        service.control_capabilities(None)
 
     # Advance the injected clock by 61 seconds -- every one of the 77
     # earlier timestamps must now have aged out of the window.
@@ -250,7 +261,7 @@ def test_rate_window_recovers_a_token_after_60_seconds_of_injected_clock_time() 
         # Not a ResourceLimitError: the window recovered, so this request
         # is charged successfully and fails only on the (still-missing)
         # credential, exactly as the very first call of this test did.
-        service.control_capabilities(None, None)
+        service.control_capabilities(None)
 
 
 # --------------------------------------------------------------------------
@@ -261,31 +272,33 @@ def test_rate_window_recovers_a_token_after_60_seconds_of_injected_clock_time() 
 def test_must_rotate_forbids_every_operation_except_capabilities_and_self_rotate() -> None:
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
     service = ControlPlaneService(backend, limits=_limits())
 
     # Allowed while must_rotate:
-    service.control_capabilities(cid, secret)
+    service.control_capabilities(secret)
 
     # Forbidden while must_rotate:
     with pytest.raises(AuthorizationError):
-        service.register_application(cid, secret, "someapp")
+        service.register_application(secret, "someapp")
     with pytest.raises(AuthorizationError):
-        service.list_applications(cid, secret)
+        service.list_applications(secret)
 
     # Self-rotate is allowed and clears must_rotate.
-    rotated = service.rotate_credential(cid, secret, cid)
+    rotated = service.rotate_credential(secret, cid)
     new_secret = rotated["secret"]
-    service.register_application(cid, new_secret, "someapp")  # no longer forbidden
+    service.register_application(new_secret, "someapp")  # no longer forbidden
 
 
 def test_must_rotate_forbidden_is_durably_audited_with_reason_forbidden() -> None:
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
     service = ControlPlaneService(backend, limits=_limits())
     with pytest.raises(AuthorizationError):
-        service.list_applications(cid, secret)
+        service.list_applications(secret)
     last = backend.audit_sink.snapshot()[-1]
     assert last.reason_code == "FORBIDDEN"
     assert last.outcome == "deny"
@@ -298,7 +311,7 @@ def test_must_rotate_forbidden_is_durably_audited_with_reason_forbidden() -> Non
 
 def test_register_application_result_matches_schema_exactly() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    result = service.register_application(cid, secret, "shopapp")
+    result = service.register_application(secret, "shopapp")
     _assert_schema_exact("ApplicationStateResult", result)
     assert result == {"application_id": "shopapp", "enabled": True}
 
@@ -306,44 +319,44 @@ def test_register_application_result_matches_schema_exactly() -> None:
 def test_register_application_rejects_bad_identifier_shape() -> None:
     service, _backend, cid, secret = _bootstrapped()
     with pytest.raises(ValidationError):
-        service.register_application(cid, secret, "NotLowercase")
+        service.register_application(secret, "NotLowercase")
     with pytest.raises(ValidationError):
-        service.register_application(cid, secret, "")
+        service.register_application(secret, "")
 
 
 def test_register_application_duplicate_is_conflict() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "dupapp")
+    service.register_application(secret, "dupapp")
     with pytest.raises(ConflictError):
-        service.register_application(cid, secret, "dupapp")
+        service.register_application(secret, "dupapp")
 
 
 def test_register_application_enforces_the_applications_bound() -> None:
     service, _backend, cid, secret = _bootstrapped(limits=_limits(applications=2))
-    service.register_application(cid, secret, "app1")
-    service.register_application(cid, secret, "app2")
+    service.register_application(secret, "app1")
+    service.register_application(secret, "app2")
     with pytest.raises(ResourceLimitError) as excinfo:
-        service.register_application(cid, secret, "app3")
+        service.register_application(secret, "app3")
     assert excinfo.value.details["limit_class"] == "applications"
 
 
 def test_list_applications_and_enable_disable_round_trip() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "toggled")
-    listing = service.list_applications(cid, secret)
+    service.register_application(secret, "toggled")
+    listing = service.list_applications(secret)
     _assert_schema_exact("ApplicationsResult", listing)
     for item in listing["applications"]:
         _assert_schema_exact_item("ApplicationsResult", item)
-    disabled = service.set_application_enabled(cid, secret, "toggled", False)
+    disabled = service.set_application_enabled(secret, "toggled", False)
     assert disabled == {"application_id": "toggled", "enabled": False}
-    enabled = service.set_application_enabled(cid, secret, "toggled", True)
+    enabled = service.set_application_enabled(secret, "toggled", True)
     assert enabled == {"application_id": "toggled", "enabled": True}
 
 
 def test_set_application_enabled_unknown_application_is_not_found() -> None:
     service, _backend, cid, secret = _bootstrapped()
     with pytest.raises(NotFoundError):
-        service.set_application_enabled(cid, secret, "nope", False)
+        service.set_application_enabled(secret, "nope", False)
 
 
 # --------------------------------------------------------------------------
@@ -356,48 +369,48 @@ def test_set_application_enabled_unknown_application_is_not_found() -> None:
 def test_role_control_is_refused_uniformly_regardless_of_target_state(application_id) -> None:
     service, _backend, cid, secret = _bootstrapped(limits=_limits(credentials_per_application=1))
     if application_id == "disabledapp":
-        service.register_application(cid, secret, application_id)
-        service.set_application_enabled(cid, secret, application_id, False)
+        service.register_application(secret, application_id)
+        service.set_application_enabled(secret, application_id, False)
     elif application_id == "fullapp":
-        service.register_application(cid, secret, application_id)
-        service.issue_credential(cid, secret, application_id, "runtime")  # saturates the bound (limit=1)
+        service.register_application(secret, application_id)
+        service.issue_credential(secret, application_id, "runtime")  # saturates the bound (limit=1)
     # "does-not-exist" is registered nowhere at all.
     with pytest.raises(CapabilityError):
-        service.issue_credential(cid, secret, application_id, "control")
+        service.issue_credential(secret, application_id, "control")
 
 
 def test_issue_credential_role_shape_is_validated_before_capability_check() -> None:
     service, _backend, cid, secret = _bootstrapped()
     with pytest.raises(ValidationError):
-        service.issue_credential(cid, secret, "someapp", "not-a-real-role")
+        service.issue_credential(secret, "someapp", "not-a-real-role")
 
 
 def test_issue_credential_result_matches_schema_exactly() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "issuertest")
-    result = service.issue_credential(cid, secret, "issuertest", "runtime")
+    service.register_application(secret, "issuertest")
+    result = service.issue_credential(secret, "issuertest", "runtime")
     _assert_schema_exact("CredentialIssued", result)
     assert result["role"] == "runtime"
 
 
 def test_issue_credential_enforces_credentials_per_application_bound_excluding_revoked() -> None:
     service, _backend, cid, secret = _bootstrapped(limits=_limits(credentials_per_application=1))
-    service.register_application(cid, secret, "boundedapp")
-    first = service.issue_credential(cid, secret, "boundedapp", "runtime")
+    service.register_application(secret, "boundedapp")
+    first = service.issue_credential(secret, "boundedapp", "runtime")
     with pytest.raises(ResourceLimitError) as excinfo:
-        service.issue_credential(cid, secret, "boundedapp", "runtime")
+        service.issue_credential(secret, "boundedapp", "runtime")
     assert excinfo.value.details["limit_class"] == "credentials_per_application"
     # R-6: revoked rows are NOT counted -- revoking the one existing
     # credential must free up headroom for a new one.
-    service.revoke_credential(cid, secret, first["credential_id"])
-    second = service.issue_credential(cid, secret, "boundedapp", "runtime")
+    service.revoke_credential(secret, first["credential_id"])
+    second = service.issue_credential(secret, "boundedapp", "runtime")
     assert second["credential_id"] != first["credential_id"]
 
 
 def test_issue_credential_unknown_application_is_not_found() -> None:
     service, _backend, cid, secret = _bootstrapped()
     with pytest.raises(NotFoundError):
-        service.issue_credential(cid, secret, "ghostapp", "runtime")
+        service.issue_credential(secret, "ghostapp", "runtime")
 
 
 # --------------------------------------------------------------------------
@@ -408,10 +421,10 @@ def test_issue_credential_unknown_application_is_not_found() -> None:
 
 def test_list_credentials_merges_application_and_control_rows() -> None:
     service, backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "listedapp")
-    issued = service.issue_credential(cid, secret, "listedapp", "runtime")
+    service.register_application(secret, "listedapp")
+    issued = service.issue_credential(secret, "listedapp", "runtime")
 
-    listing = service.list_credentials(cid, secret)
+    listing = service.list_credentials(secret)
     _assert_schema_exact("CredentialsResult", listing)
     by_id = {row["credential_id"]: row for row in listing["credentials"]}
     for row in listing["credentials"]:
@@ -441,18 +454,18 @@ def test_list_credentials_merges_application_and_control_rows() -> None:
 
 def test_rotate_credential_refuses_a_revoked_credential() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "rotapp")
-    issued = service.issue_credential(cid, secret, "rotapp", "runtime")
-    service.revoke_credential(cid, secret, issued["credential_id"])
+    service.register_application(secret, "rotapp")
+    issued = service.issue_credential(secret, "rotapp", "runtime")
+    service.revoke_credential(secret, issued["credential_id"])
     with pytest.raises(ValidationError):
-        service.rotate_credential(cid, secret, issued["credential_id"])
+        service.rotate_credential(secret, issued["credential_id"])
 
 
 def test_rotate_credential_result_matches_schema_exactly() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "rotapp2")
-    issued = service.issue_credential(cid, secret, "rotapp2", "runtime")
-    result = service.rotate_credential(cid, secret, issued["credential_id"])
+    service.register_application(secret, "rotapp2")
+    issued = service.issue_credential(secret, "rotapp2", "runtime")
+    result = service.rotate_credential(secret, issued["credential_id"])
     _assert_schema_exact("CredentialRotated", result)
 
 
@@ -464,9 +477,9 @@ def test_rotate_credential_result_matches_schema_exactly() -> None:
 
 def test_revoke_application_credential_is_never_gated() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "ungated")
-    issued = service.issue_credential(cid, secret, "ungated", "runtime")
-    result = service.revoke_credential(cid, secret, issued["credential_id"])
+    service.register_application(secret, "ungated")
+    issued = service.issue_credential(secret, "ungated", "runtime")
+    result = service.revoke_credential(secret, issued["credential_id"])
     _assert_schema_exact("CredentialStateResult", result)
     assert result["revoked"] is True
 
@@ -474,7 +487,7 @@ def test_revoke_application_credential_is_never_gated() -> None:
 def test_revoke_last_active_control_credential_requires_exact_confirmation() -> None:
     service, backend, cid, secret = _bootstrapped()
     with pytest.raises(DestructiveConfirmationRequired) as excinfo:
-        service.revoke_credential(cid, secret, cid)
+        service.revoke_credential(secret, cid)
     details = excinfo.value.details
     for key in ("required_confirmation", "consequence", "reversible_alternative", "recovery"):
         assert key in details
@@ -482,30 +495,30 @@ def test_revoke_last_active_control_credential_requires_exact_confirmation() -> 
     # A well-shaped but non-matching confirmation must NOT satisfy the gate
     # (no prefix/substring acceptance).
     with pytest.raises(DestructiveConfirmationRequired):
-        service.revoke_credential(cid, secret, cid, destructive=True, confirmation="yes")
+        service.revoke_credential(secret, cid, destructive=True, confirmation="yes")
     with pytest.raises(DestructiveConfirmationRequired):
-        service.revoke_credential(cid, secret, cid, destructive=True,
+        service.revoke_credential(secret, cid, destructive=True,
                                   confirmation=details["required_confirmation"][:-1])
     # A non-bool `destructive` (even a truthy-looking string) is a SHAPE
     # defect, not a confirmation mismatch -- rejected before the
     # confirmation comparison is even reached (no truthy coercion anywhere
     # in this gate).
     with pytest.raises(ValidationError):
-        service.revoke_credential(cid, secret, cid, destructive="true", confirmation=details["required_confirmation"])
+        service.revoke_credential(secret, cid, destructive="true", confirmation=details["required_confirmation"])
 
-    result = service.revoke_credential(cid, secret, cid, destructive=True, confirmation=details["required_confirmation"])
+    result = service.revoke_credential(secret, cid, destructive=True, confirmation=details["required_confirmation"])
     assert result["revoked"] is True
 
     # Authentication now fails -- no un-revoke path exists anywhere.
     with pytest.raises(AuthenticationError):
-        service.control_capabilities(cid, secret)
+        service.control_capabilities(secret)
 
 
 def test_revoke_credential_confirmation_denial_is_durably_audited() -> None:
     service, backend, cid, secret = _bootstrapped()
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(DestructiveConfirmationRequired):
-        service.revoke_credential(cid, secret, cid)
+        service.revoke_credential(secret, cid)
     after = backend.audit_sink.snapshot()
     assert len(after) == before + 1
     assert after[-1].reason_code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
@@ -513,21 +526,21 @@ def test_revoke_credential_confirmation_denial_is_durably_audited() -> None:
 
 def test_enable_credential_never_resurrects_a_revoked_credential() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "unrevokeable")
-    issued = service.issue_credential(cid, secret, "unrevokeable", "runtime")
-    service.revoke_credential(cid, secret, issued["credential_id"])
-    state = service.set_credential_enabled(cid, secret, issued["credential_id"], True)
+    service.register_application(secret, "unrevokeable")
+    issued = service.issue_credential(secret, "unrevokeable", "runtime")
+    service.revoke_credential(secret, issued["credential_id"])
+    state = service.set_credential_enabled(secret, issued["credential_id"], True)
     assert state["revoked"] is True
     # Still cannot rotate (store-level gate proves it is actually dead).
     with pytest.raises(ValidationError):
-        service.rotate_credential(cid, secret, issued["credential_id"])
+        service.rotate_credential(secret, issued["credential_id"])
 
 
 def test_set_credential_enabled_result_matches_schema_exactly() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "toggleapp")
-    issued = service.issue_credential(cid, secret, "toggleapp", "runtime")
-    disabled = service.set_credential_enabled(cid, secret, issued["credential_id"], False)
+    service.register_application(secret, "toggleapp")
+    issued = service.issue_credential(secret, "toggleapp", "runtime")
+    disabled = service.set_credential_enabled(secret, issued["credential_id"], False)
     _assert_schema_exact("CredentialStateResult", disabled)
     assert disabled == {"credential_id": issued["credential_id"], "enabled": False, "revoked": False}
 
@@ -540,7 +553,7 @@ def test_set_credential_enabled_result_matches_schema_exactly() -> None:
 
 def test_control_capabilities_result_matches_schema_exactly_and_declares_request_bytes() -> None:
     service, _backend, cid, secret = _bootstrapped()
-    result = service.control_capabilities(cid, secret)
+    result = service.control_capabilities(secret)
     _assert_schema_exact("CapabilityDocument", result)
     assert "request_bytes" in result["limits"]
     assert result["limit_enforcement"]["request_bytes"] == "unavailable"
@@ -549,7 +562,7 @@ def test_control_capabilities_result_matches_schema_exactly_and_declares_request
     # control plane, so the flip lands in this same commit as the audit_
     # query bundle it accompanies. Phase 5 WP-3: re-flipped to 1.5.0 in the
     # same commit as the `operations`/`target_kinds` declaration keys.
-    assert result["contract_version"] == "1.5.0"
+    assert result["contract_version"] == "1.6.0"
     assert result["role"] == "control"
 
 
@@ -565,26 +578,26 @@ def test_audit_write_fault_rolls_back_an_accompanying_application_registration()
     backend.audit_sink.inject_fault(RuntimeError("simulated durable-audit outage"))
     try:
         with pytest.raises(Exception):
-            service.register_application(cid, secret, "shouldnotexist")
+            service.register_application(secret, "shouldnotexist")
     finally:
         backend.audit_sink.inject_fault(None)
     # The application row must NOT exist -- if it did, the audit write and
     # the state change would have detached from each other.
     assert backend.application_exists("shouldnotexist") is False
     # A retry (audit healthy again) succeeds normally.
-    result = service.register_application(cid, secret, "shouldnotexist")
+    result = service.register_application(secret, "shouldnotexist")
     assert result["enabled"] is True
 
 
 def test_audit_write_fault_rolls_back_an_accompanying_credential_revoke() -> None:
     service, backend, cid, secret = _bootstrapped()
-    service.register_application(cid, secret, "faultapp")
-    issued = service.issue_credential(cid, secret, "faultapp", "runtime")
+    service.register_application(secret, "faultapp")
+    issued = service.issue_credential(secret, "faultapp", "runtime")
 
     backend.audit_sink.inject_fault(RuntimeError("simulated durable-audit outage"))
     try:
         with pytest.raises(Exception):
-            service.revoke_credential(cid, secret, issued["credential_id"])
+            service.revoke_credential(secret, issued["credential_id"])
     finally:
         backend.audit_sink.inject_fault(None)
     # The credential must still be usable (revoke never durably happened) --
@@ -599,8 +612,8 @@ def test_audit_write_fault_rolls_back_the_reset_ceremony_atomically() -> None:
 
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
-
+        cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    secret = bearer
     rows = backend.control_credential_store.list_all()
     phrase_active = [row[0] for row in rows if row[1] and not row[2]]
     from mitatedb_api.control_plane import _reset_confirmation_phrase
@@ -619,7 +632,7 @@ def test_audit_write_fault_rolls_back_the_reset_ceremony_atomically() -> None:
     # issue pair rolled back together with the failed audit write, not
     # partially applied.
     service = ControlPlaneService(backend)
-    result = service.control_capabilities(cid, secret)
+    result = service.control_capabilities(secret)
     assert result["role"] == "control"
 
 
@@ -684,10 +697,13 @@ def _seed_audit_credential(backend, *, must_rotate: bool = False):
     """Issues a `role="audit"` control-table credential directly against
     this backend's own store -- the same shape `issue_audit_credential_
     ceremony` uses internally, without going through the CLI. Returns
-    `(credential_id, secret)`."""
+    `(credential_id, secret)` -- the RAW secret (Phase 6 WP-3 追補, round
+    2: `.issue()` returns a COMPOSED bearer; this helper's own callers
+    pass the result straight into direct `ControlPlaneService` calls)."""
     store = backend.control_credential_store
     with backend.unit_of_work() as work:
-        credential_id, secret = store.issue(must_rotate=must_rotate, role="audit", work=work)
+        credential_id, bearer = store.issue(must_rotate=must_rotate, role="audit", work=work)
+    secret = bearer
     return credential_id, secret
 
 
@@ -699,25 +715,25 @@ def test_target_id_populated_for_application_and_credential_lifecycle_events() -
     service, backend, cid, secret = _bootstrapped()
     app_id = "tidapp"
 
-    service.register_application(cid, secret, app_id)
+    service.register_application(secret, app_id)
     assert backend.audit_sink.snapshot()[-1].target_id == app_id
 
-    service.set_application_enabled(cid, secret, app_id, False)
+    service.set_application_enabled(secret, app_id, False)
     assert backend.audit_sink.snapshot()[-1].target_id == app_id
-    service.set_application_enabled(cid, secret, app_id, True)
+    service.set_application_enabled(secret, app_id, True)
     assert backend.audit_sink.snapshot()[-1].target_id == app_id
 
-    issued = service.issue_credential(cid, secret, app_id, "runtime")
+    issued = service.issue_credential(secret, app_id, "runtime")
     app_cred_id = issued["credential_id"]
     assert backend.audit_sink.snapshot()[-1].target_id == app_cred_id
 
-    service.rotate_credential(cid, secret, app_cred_id)
+    service.rotate_credential(secret, app_cred_id)
     assert backend.audit_sink.snapshot()[-1].target_id == app_cred_id
 
-    service.set_credential_enabled(cid, secret, app_cred_id, False)
+    service.set_credential_enabled(secret, app_cred_id, False)
     assert backend.audit_sink.snapshot()[-1].target_id == app_cred_id
 
-    service.revoke_credential(cid, secret, app_cred_id)
+    service.revoke_credential(secret, app_cred_id)
     assert backend.audit_sink.snapshot()[-1].target_id == app_cred_id
 
 
@@ -725,13 +741,13 @@ def test_target_id_populated_for_control_credential_lifecycle_events() -> None:
     service, backend, cid, secret = _bootstrapped()
     other_id, other_secret = _seed_audit_credential(backend, must_rotate=False)
 
-    service.rotate_credential(cid, secret, other_id)
+    service.rotate_credential(secret, other_id)
     assert backend.audit_sink.snapshot()[-1].target_id == other_id
 
-    service.set_credential_enabled(cid, secret, other_id, False)
+    service.set_credential_enabled(secret, other_id, False)
     assert backend.audit_sink.snapshot()[-1].target_id == other_id
 
-    service.revoke_credential(cid, secret, other_id)
+    service.revoke_credential(secret, other_id)
     assert backend.audit_sink.snapshot()[-1].target_id == other_id
 
 
@@ -762,13 +778,13 @@ def test_audit_role_accepted_on_exactly_the_three_read_endpoints() -> None:
     service, backend, _cid, _secret = _bootstrapped()
     audit_id, audit_secret = _seed_audit_credential(backend, must_rotate=False)
 
-    caps = service.control_capabilities(audit_id, audit_secret)
+    caps = service.control_capabilities(audit_secret)
     assert caps["role"] == "audit"
 
-    apps = service.list_applications(audit_id, audit_secret)
+    apps = service.list_applications(audit_secret)
     assert isinstance(apps["applications"], list)
 
-    creds = service.list_credentials(audit_id, audit_secret)
+    creds = service.list_credentials(audit_secret)
     assert any(row["credential_id"] == audit_id and row["role"] == "audit" for row in creds["credentials"])
 
 
@@ -791,20 +807,20 @@ def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint() -> N
     audit_id, audit_secret = _seed_audit_credential(backend, must_rotate=False)
 
     app_id = "auditwriteapp"
-    service.register_application(owner_id, owner_secret, app_id)
-    issued = service.issue_credential(owner_id, owner_secret, app_id, "runtime")
+    service.register_application(owner_secret, app_id)
+    issued = service.issue_credential(owner_secret, app_id, "runtime")
     cred_id = issued["credential_id"]
 
     attempts = {
-        "register_application": lambda: service.register_application(audit_id, audit_secret, "auditwriteapp2"),
-        "disable_application": lambda: service.set_application_enabled(audit_id, audit_secret, app_id, False),
-        "enable_application": lambda: service.set_application_enabled(audit_id, audit_secret, app_id, True),
-        "issue_credential": lambda: service.issue_credential(audit_id, audit_secret, app_id, "runtime"),
-        "rotate_credential (other)": lambda: service.rotate_credential(audit_id, audit_secret, cred_id),
-        "rotate_credential (self)": lambda: service.rotate_credential(audit_id, audit_secret, audit_id),
-        "revoke_credential": lambda: service.revoke_credential(audit_id, audit_secret, cred_id),
-        "disable_credential": lambda: service.set_credential_enabled(audit_id, audit_secret, cred_id, False),
-        "enable_credential": lambda: service.set_credential_enabled(audit_id, audit_secret, cred_id, True),
+        "register_application": lambda: service.register_application(audit_secret, "auditwriteapp2"),
+        "disable_application": lambda: service.set_application_enabled(audit_secret, app_id, False),
+        "enable_application": lambda: service.set_application_enabled(audit_secret, app_id, True),
+        "issue_credential": lambda: service.issue_credential(audit_secret, app_id, "runtime"),
+        "rotate_credential (other)": lambda: service.rotate_credential(audit_secret, cred_id),
+        "rotate_credential (self)": lambda: service.rotate_credential(audit_secret, audit_id),
+        "revoke_credential": lambda: service.revoke_credential(audit_secret, cred_id),
+        "disable_credential": lambda: service.set_credential_enabled(audit_secret, cred_id, False),
+        "enable_credential": lambda: service.set_credential_enabled(audit_secret, cred_id, True),
     }
     for label, attempt in attempts.items():
         before = len(backend.audit_sink.snapshot())
@@ -818,7 +834,7 @@ def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint() -> N
 
     # The audit credential itself was never touched by any refused attempt
     # above -- still enabled, not revoked (confirmed by a 4th read).
-    still_alive = service.control_capabilities(audit_id, audit_secret)
+    still_alive = service.control_capabilities(audit_secret)
     assert still_alive["role"] == "audit"
 
 
@@ -832,15 +848,15 @@ def test_audit_role_must_rotate_gate_allows_only_capabilities() -> None:
     service, backend, _cid, _secret = _bootstrapped()
     audit_id, audit_secret = _seed_audit_credential(backend, must_rotate=True)
 
-    caps = service.control_capabilities(audit_id, audit_secret)
+    caps = service.control_capabilities(audit_secret)
     assert caps["role"] == "audit"
 
     with pytest.raises(AuthorizationError):
-        service.rotate_credential(audit_id, audit_secret, audit_id)
+        service.rotate_credential(audit_secret, audit_id)
     with pytest.raises(AuthorizationError):
-        service.list_applications(audit_id, audit_secret)
+        service.list_applications(audit_secret)
     with pytest.raises(AuthorizationError):
-        service.list_credentials(audit_id, audit_secret)
+        service.list_credentials(audit_secret)
 
 
 # --------------------------------------------------------------------------
@@ -856,9 +872,10 @@ def test_issue_audit_credential_ceremony_distributes_a_must_rotate_false_audit_c
     complete the rotate half)."""
     backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with backend.unit_of_work() as work:
-        credential_id, secret = issue_audit_credential_ceremony(
+        credential_id, bearer = issue_audit_credential_ceremony(
             backend.control_credential_store, backend.append_audit, work=work)
-    principal = backend.control_credential_store.authenticate(credential_id, secret)
+    secret = bearer
+    principal = backend.control_credential_store.authenticate(secret)
     assert principal.credential_id == credential_id
     assert principal.must_rotate is False
     assert principal.role == "audit"
@@ -879,20 +896,20 @@ def test_issue_audit_credential_ceremony_distributes_a_must_rotate_false_audit_c
 def test_issuance_freeze_forbids_then_unfreeze_allows_again() -> None:
     service, backend, cid, secret = _bootstrapped()
     app_id = "fzapp"
-    service.register_application(cid, secret, app_id)
+    service.register_application(secret, app_id)
 
     with backend.unit_of_work() as work:
         backend.set_application_issuance_frozen(app_id, True, work=work)
     before = len(backend.audit_sink.snapshot())
     with pytest.raises(AuthorizationError):
-        service.issue_credential(cid, secret, app_id, "runtime")
+        service.issue_credential(secret, app_id, "runtime")
     after = backend.audit_sink.snapshot()
     assert len(after) == before + 1
     assert after[-1].reason_code == "FORBIDDEN"
 
     with backend.unit_of_work() as work:
         backend.set_application_issuance_frozen(app_id, False, work=work)
-    issued = service.issue_credential(cid, secret, app_id, "runtime")
+    issued = service.issue_credential(secret, app_id, "runtime")
     assert issued["application_id"] == app_id
 
 
@@ -905,12 +922,12 @@ def test_issuance_freeze_precedence_role_control_refused_before_freeze_check() -
     for a `role="control"` issuance request."""
     service, backend, cid, secret = _bootstrapped()
     app_id = "fzprecapp"
-    service.register_application(cid, secret, app_id)
+    service.register_application(secret, app_id)
     with backend.unit_of_work() as work:
         backend.set_application_issuance_frozen(app_id, True, work=work)
 
     with pytest.raises(CapabilityError):
-        service.issue_credential(cid, secret, app_id, "control")
+        service.issue_credential(secret, app_id, "control")
 
 
 def test_issuance_freeze_does_not_affect_already_issued_credentials() -> None:
@@ -920,8 +937,8 @@ def test_issuance_freeze_does_not_affect_already_issued_credentials() -> None:
     credentials")."""
     service, backend, cid, secret = _bootstrapped()
     app_id = "fzliveapp"
-    service.register_application(cid, secret, app_id)
-    issued = service.issue_credential(cid, secret, app_id, "runtime")
+    service.register_application(secret, app_id)
+    issued = service.issue_credential(secret, app_id, "runtime")
     app_cred_id = issued["credential_id"]
 
     with backend.unit_of_work() as work:
@@ -931,7 +948,7 @@ def test_issuance_freeze_does_not_affect_already_issued_credentials() -> None:
     assert state is not None and state[0] is True and state[1] is False  # enabled, not revoked
 
     with pytest.raises(AuthorizationError):
-        service.issue_credential(cid, secret, app_id, "runtime")
+        service.issue_credential(secret, app_id, "runtime")
 
     # Still live after the freeze-time NEW-issuance refusal above.
     state_again = backend.credential_state(app_cred_id)
@@ -947,7 +964,7 @@ def test_in_memory_issuance_freeze_rolls_back_with_its_own_unit_of_work() -> Non
     separate snapshot list that could forget this one piece of state."""
     service, backend, cid, secret = _bootstrapped()
     app_id = "fzrollbackapp"
-    service.register_application(cid, secret, app_id)
+    service.register_application(secret, app_id)
     assert backend._applications.issuance_frozen(app_id) is False  # noqa: SLF001
 
     class _InjectedFault(Exception):
@@ -982,12 +999,12 @@ def test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_c
     audit_id, audit_secret = _seed_audit_credential(backend, must_rotate=False)
 
     with pytest.raises(DestructiveConfirmationRequired):
-        service.revoke_credential(cid, secret, cid)
+        service.revoke_credential(secret, cid)
 
     # Still live -- the unconfirmed probe never executed.
-    caps = service.control_capabilities(cid, secret)
+    caps = service.control_capabilities(secret)
     assert caps["role"] == "control"
-    still_alive = service.control_capabilities(audit_id, audit_secret)
+    still_alive = service.control_capabilities(audit_secret)
     assert still_alive["role"] == "audit"
 
 
@@ -1002,13 +1019,13 @@ def test_revoke_gate_revoking_the_audit_credential_itself_is_never_gated() -> No
     service, backend, cid, secret = _bootstrapped()
     audit_id, audit_secret = _seed_audit_credential(backend, must_rotate=False)
 
-    result = service.revoke_credential(cid, secret, audit_id)
+    result = service.revoke_credential(secret, audit_id)
     assert result == {"credential_id": audit_id, "enabled": True, "revoked": True}
 
     with pytest.raises(AuthenticationError):
-        service.control_capabilities(audit_id, audit_secret)
+        service.control_capabilities(audit_secret)
 
     # The control credential (the actual gate target) was untouched by
     # revoking the audit credential.
-    caps = service.control_capabilities(cid, secret)
+    caps = service.control_capabilities(secret)
     assert caps["role"] == "control"
