@@ -676,6 +676,28 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # observes.
         return [event.as_dict() for event in self._control_audit.snapshot()]
 
+    # port v1.10 addendum A (supervisor ruling 2026-09-04, C-14 vector 5's
+    # own test primitive -- mirrors conformance_adapter_r2db.py's identical
+    # method). A fresh `ControlPlaneService` sharing THIS adapter's own real
+    # `self._control_backend`/`self._control_limits`/`self._audit_reader`
+    # (the same objects `self._control_service` -- the SHARED surface -- is
+    # built from), so the SAME credentials/applications authenticate
+    # against it, but its own `_rate_window` starts empty. No real resource
+    # to release on exit (in-memory construction only).
+    @contextmanager
+    def isolated_control_surface(self):
+        fresh_service = ControlPlaneService(
+            self._control_backend, limits=self._control_limits,
+            audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+            audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
+        )
+
+        def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+            credential_id, secret = self._actor_id_secret(actor)
+            return self._call(lambda: fresh_service.control_capabilities(credential_id, secret))
+
+        yield call
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
     # `ControlPlaneService.control_capabilities()` now declares `audit_
@@ -933,6 +955,64 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # port method, not as a peer-provided discovery surface an
         # application caller could reach).
         return CATALOG_SURFACE_ABSENT
+
+    # port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+    # V1.md section 6.1 item 3, D-3). Presents the contract's own
+    # `fields`/`field_types` -- CONTRACT vocabulary words (`string`/
+    # `integer`/`number`/`boolean`/`object`/`array`/`json`), verbatim and
+    # PARTIAL where the caller gave a partial `field_types` -- to this
+    # peer's real `session.create_collection()`, the same real entry
+    # point `create_entity` above already uses. This method never fills
+    # in `json` for an undeclared name itself (mirrors `conformance_
+    # adapter_r2db.py`'s identical method and its own reasoning: D-3(ii)'s
+    # default is the PEER's own job to apply on a partial request; this
+    # in-process plug's real `create_collection` has no partial-fields
+    # concept of its own yet, so as of THIS WP it is presented the raw
+    # `field_types` mapping AS GIVEN via a synthetic dict -- WP-3 is where
+    # this peer's own product code gains the real "partial field_types,
+    # server fills json" behavior this method targets). Unreachable as of
+    # this WP (declare-first gated at 1.6.0; `cell.py`'s own pre-1.6.0
+    # `_FIELD_TYPE_VOCABULARY` is a DIFFERENT five-word set -- `text`/
+    # `integer`/`real`/`boolean`/`json`, not the contract's seven -- so a
+    # real call presenting `string`/`number`/`object`/`array` today denies
+    # with `ValidationError`, surfaced as `VALIDATION_FAILED` by
+    # `classify()`); written for WP-3's real eventual shape, not a stub.
+    def create_entity_with_declared_types(
+        self, session, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
+    ) -> None:
+        declared = dict(field_types or {})
+        # Review F5 (2026-09-04): `fields` (the NAME list) must reach the
+        # real entry point for every name it lists -- dropping an
+        # undeclared name here (the prior form only ever passed `declared`
+        # itself) silently lost that field from the created entity instead
+        # of creating it with the D-3(ii) default, unlike the other three
+        # plugs' own wire-shaped request, which always carries `fields`
+        # and (partial) `field_types` TOGETHER. This peer's real `create_
+        # collection` has no separate "name exists, type undeclared" slot
+        # (one combined name->type dict, every value required) unlike the
+        # wire-shaped `SchemaOperationRequest`, so the D-3(ii) default
+        # (`json`) is filled in locally for any name `field_types` omits
+        # -- `cell.py`'s own pre-1.6.0 `_FIELD_TYPE_VOCABULARY` already
+        # accepts `"json"` as a real, working member today (unlike
+        # `string`/`number`/`object`/`array`), so this applies the
+        # CONTRACT's own default through the one entry point this backend
+        # actually has, not a workaround.
+        full_fields = {name: declared.get(name, "json") for name in fields}
+
+        def op() -> None:
+            if not hasattr(session, "create_collection"):
+                raise AuthorizationError("developer authority required")
+            session.create_collection(entity, full_fields)
+        self._call(op)
+
+    # port v1.10 (same WP as above). `field_type` is the contract's own
+    # seven-word vocabulary word, verbatim.
+    def add_field_with_declared_type(self, session, entity: str, field: str, field_type: str) -> None:
+        def op() -> None:
+            if not hasattr(session, "add_field"):
+                raise AuthorizationError("developer authority required")
+            session.add_field(entity, field, field_type)
+        self._call(op)
 
     def _attempt_mutation_outcome(
         self,

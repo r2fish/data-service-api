@@ -75,20 +75,20 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_5_0():
-    # Phase 5 WP-1 (docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md
-    # §3 D-1/D-2, CCR_DISPOSITION.md subordinate ruling 10): the version
-    # bump itself, pinned so a future revert of just this one line is
-    # caught here rather than only by whichever other test happens to
-    # touch contract_version. Supersedes the 1.4.0 pin (phase 4 WP-1,
-    # subordinate ruling 9) this test itself carried before -- 1.4.0 is
+def test_contract_declares_1_6_0():
+    # Phase 6 WP-1 (docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md
+    # §3 D-1/D-2/D-3/D-3(vii), CCR_DISPOSITION.md subordinate ruling 11):
+    # the version bump itself, pinned so a future revert of just this one
+    # line is caught here rather than only by whichever other test happens
+    # to touch contract_version. Supersedes the 1.5.0 pin (phase 5 WP-1,
+    # subordinate ruling 10) this test itself carried before -- 1.5.0 is
     # already published, so this file never re-adds a standalone
-    # "declares 1.4.0" test: any implementation still declaring 1.4.0 or
+    # "declares 1.5.0" test: any implementation still declaring 1.5.0 or
     # earlier is exercised by version_binding's own retroactivity rule,
     # not by a dedicated pin here for a version this document no longer
     # declares.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.5.0"
+    assert contract["contract_version"] == "1.6.0"
 
 
 def test_contract_audit_fields_include_optional_target_id_and_it_is_not_forbidden():
@@ -383,7 +383,15 @@ def test_version_binding_1_4_0_unconditional_and_conditional_counts_agree():
 
     requires_marker = "1.4.0 additionally requires"
     assert requires_marker in version_binding, f"expected marker phrase {requires_marker!r} not found"
-    conditional_section = version_binding[version_binding.index(requires_marker):]
+    # Phase 6 WP-1: bound the 1.4.0 conditional section at the START of the
+    # NEXT version paragraph (1.5.0's own "Only an implementation declaring
+    # ... additionally claims conformance" opener), not at the end of the
+    # whole version_binding string -- otherwise a later version's own
+    # "(1)"/"(2)"-style markers (e.g. the 1.6.0 paragraph's conditional
+    # items (1)/(2), added subordinate ruling 11) would double-count here.
+    next_paragraph_marker = "Only an implementation declaring 1.5.0"
+    assert next_paragraph_marker in version_binding, f"expected marker phrase {next_paragraph_marker!r} not found"
+    conditional_section = version_binding[version_binding.index(requires_marker):version_binding.index(next_paragraph_marker)]
     # Only a "(N)" immediately preceded by a list separator (": ", "; ", or
     # "and ") counts as a real list-item marker -- item (1)'s own body text
     # contains a forward cross-reference ("the ordering in (2)") that is a
@@ -520,3 +528,208 @@ def test_contract_pins_the_requester_finalized_1_4_0_and_1_5_0_prose():
         assert normalized_sentence in query_target_kind_vocabulary, (
             f"audit.query_target_kind_vocabulary no longer contains the requester-finalized 1.5.0 {name} verbatim"
         )
+
+# ---------------------------------------------------------------------------
+# Phase 6 WP-1 (docs/work-orders/WORK_ORDER_PHASE6_CONTRACT_160_V1.md v1.2 WP-1
+# item 9, standing discipline 4; CCR_DISPOSITION.md subordinate ruling 11):
+# literal string pins for the requester-finalized English of confirmed-prose
+# blocks (1)-(5) (scratchpad/phase6-contract-prose.md, section headings
+# reproduced in the comments below) plus the 1.6.0-only extension of the 4
+# pre-existing retroactive-denial sentences in versioning.version_binding.
+# Normalization mirrors _normalize_prose_for_pin above (backtick / "**" /
+# em-dash-to-"--" / whitespace collapse only -- no case-folding, no other
+# punctuation removal). Each assertion below extracts from a SPECIFIC JSON
+# path (never a raw whole-file grep), per standing discipline 1 (no vacuous
+# pin): a pin that only matched somewhere in the raw file text could pass
+# even if the confirmed prose ended up in the wrong schema location.
+# ---------------------------------------------------------------------------
+
+# (1) security.schemes.* description / CredentialIssued.secret / CredentialRotated.secret (D-1)
+PIN_1_6_0_ITEM_1_SECRET_IS_BEARER = """`CredentialIssued.secret` — and the `secret` a rotate response returns, wherever this contract defines one — **is the complete bearer token for the surface that credential is for**: a client presents that exact string, verbatim, as `Authorization: Bearer <secret>`; an application credential on the application surface, a control or audit credential on the control surface (`security.schemes.control_credential` continues to state that application credentials are not accepted there). A client MUST NOT compose it from, split it into, or derive it from any other field of the response — `credential_id` is returned as its own field, for naming the credential in later control operations, and is never something a client extracts from the secret. Its internal structure is opaque; an implementation may change that structure without a contract change, and no client may depend on it. The service still stores only a verifier/digest and never returns the secret again."""
+
+# (2) CapabilityDocument.surfaces description (D-2)
+PIN_1_6_0_ITEM_2_SURFACES = """`surfaces` names the absolute base URLs at which this deployment's own surfaces are reached, **as declared by the deployer** — never derived, and never to be inferred by a client from the URL it happened to use. `surfaces.data.base_url` ends at `versioning.base_path`; `surfaces.control.base_url` ends at `versioning.control_base_path`. **The data surface's capability document and the control surface's own capability document return the same `surfaces` object**, so a client holding either base URL can reach the other surface, and either document, fetched again at its own declared URL, answers with the same `contract_version` and the same `surfaces` — the rest of each document remains scoped to the credential presented. A deployment declaring `control_plane` as `unavailable` omits `surfaces.control`. Neither URL ends in a trailing slash, so that appending a path to it yields exactly one separator. Whether the two surfaces share a host is read from the **origins** (scheme, host and port — not the path) of these two URLs — the co-hosting `versioning.control_discovery` permits — and is never assumed; where `surfaces.control` is absent, the surfaces are not co-hosted. **Where the two surfaces run as separate processes, both are configured from the same declaration**: neither can verify the other's document, so a deployment whose two documents disagree is non-conformant, and a client is given no rule for preferring one over the other."""
+
+# (3) field-type vocabulary json + EntityDescriptor.field_types + SchemaOperationRequest.field_types (D-3)
+PIN_1_6_0_ITEM_3_FIELD_TYPES = """The field-type vocabulary gains a seventh member, `json`, meaning **any JSON value**. **A field created without a declared type has type `json`** — this names an existing default rather than introducing a new one, and there is no "unknown" member of the vocabulary: every field carries a real type.
+
+`EntityDescriptor.field_types` maps every name in `fields` to that field's type, drawn from that same vocabulary. What a client declared — through `SchemaOperationRequest.field_types` on `create_entity`, or `field_type` on `add_field` — is what the catalog reports back, and a field for which no type was declared reports `json`. Where a schema operation later redeclares a field's type, the catalog reports the type most recently declared. **The catalog reports only facts this contract's own schema operations can establish**: it declares neither nullability, nor default values, nor whether a field is required, because no schema operation defined here establishes any of them; a later version that gives schema operations such a notion gives it to the catalog in that same version.
+
+`object` and `array` are narrower than `json`: a field declared `json` accepts **any** JSON value, including but not limited to objects and arrays, while a field declared `object` or `array` accepts only that shape — and the catalog reports the narrower word it was declared with, never rounding it up to `json`.
+
+`SchemaOperationRequest.field_types` and `EntityDescriptor.field_types` share one object shape but not one coverage rule: **the request's object may be partial** — any name in `fields` that it omits is created with type `json` — while **the catalog's object is always total over that entity's own `fields`**. `SchemaOperationRequest.field_types` is **never required**: a `create_entity` naming only `fields` remains a valid request, creating `json` fields. A `field_types` naming a field the request's own `fields` does not name, a `field_types` value outside this vocabulary, or a `field_types` sent without `fields`, each fails `VALIDATION_FAILED`; none of the three is silently ignored. `add_field` continues to carry a single `field_type` for the single field it adds."""
+
+# (4) versioning.version_binding 1.6.0 paragraph
+PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only obligation retroactively."""
+
+# (5-current) structured_operations.upsert sentence BEFORE the D-3(vii) edit
+# -- pinned so the manual "obligation count unchanged (2)" audit trail (WP-1
+# completion condition 5) has a machine-checkable anchor for what the FIRST
+# obligation's wording was, and so this test fails loudly if a future edit
+# silently drops the untouched first half of the sentence.
+PIN_1_6_0_UPSERT_SENTENCE_BEFORE = """upsert on an entity without a declared uniqueness key, and upsert or update on an entity not declaring the mutable class, fail with CAPABILITY_UNSUPPORTED."""
+
+# (5) structured_operations.upsert sentence AFTER the D-3(vii) same-label
+# addendum (item 4; not placed in the 1.6.0 version_binding paragraph).
+PIN_1_6_0_UPSERT_SENTENCE_AFTER = """upsert on an entity without a declared uniqueness key fails with `CAPABILITY_UNSUPPORTED`; and, where `row_addressability` is provided (other than `unavailable`) — the same precondition `mutation_classes.rule` carries for the declaration itself — upsert or update on an entity not declaring the mutable class fails with `CAPABILITY_UNSUPPORTED` as well. An implementation that does not provide `row_addressability` does not thereby declare a mutation class for any entity, and this sentence does not refuse the mutations its own `atomic_mutation` capability declares."""
+
+# The 4 pre-existing retroactive-denial sentences (1.1.0 / 1.2.0 / 1.3.0 /
+# 1.4.0 rows), each extended with a ", or 1.6.0-only" / " or 1.6.0-only"
+# member per work order v1.2 WP-1 item 1 / G19 -- the 5th row (1.5.0 vs
+# 1.6.0-only) is supplied by confirmed-prose block (4) itself (its own last
+# sentence) and is covered by PIN_1_6_0_VERSION_BINDING_PARAGRAPH above, not
+# repeated here.
+PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_1_0 = (
+    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+)
+PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_2_0 = (
+    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+)
+PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_3_0 = (
+    "is not held to any 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+)
+PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_4_0 = (
+    "is not held to any 1.5.0-only or 1.6.0-only obligation retroactively"
+)
+
+
+def test_contract_pins_the_requester_finalized_1_6_0_prose():
+    """Phase 6 WP-1 completion conditions 1, 2, 3, 17: the requester-finalized
+    confirmed-prose blocks (1)-(5) are present verbatim (normalized) at their
+    specific contract JSON paths, and the 4 pre-existing retroactive-denial
+    sentences each gained their 1.6.0-only member."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+    # --- (1): 4 locations, all identical (mirrors the existing precedent of
+    # audit.query_operation_vocabulary / query_target_kind_vocabulary sharing
+    # one identical block verbatim). ---
+    pin1_normalized = _normalize_prose_for_pin(PIN_1_6_0_ITEM_1_SECRET_IS_BEARER)
+    application_credential_description = contract["security"]["schemes"]["application_credential"]["description"]
+    control_credential_description = contract["security"]["schemes"]["control_credential"]["description"]
+    credential_issued_secret_description = contract["schemas"]["CredentialIssued"]["properties"]["secret"]["description"]
+    credential_rotated_secret_description = contract["schemas"]["CredentialRotated"]["properties"]["secret"]["description"]
+    for name, extracted in (
+        ("security.schemes.application_credential.description", application_credential_description),
+        ("security.schemes.control_credential.description", control_credential_description),
+        ("schemas.CredentialIssued.properties.secret.description", credential_issued_secret_description),
+        ("schemas.CredentialRotated.properties.secret.description", credential_rotated_secret_description),
+    ):
+        assert extracted, f"{name} is empty -- item 1 prose was not placed there"
+        assert pin1_normalized in _normalize_prose_for_pin(extracted), (
+            f"{name} no longer contains the requester-finalized item 1 (D-1) prose verbatim"
+        )
+
+    # --- (2): CapabilityDocument.surfaces, an ADDED optional property -- also
+    # confirms `required` was not touched (item 2's own "required は変えない"). ---
+    capability_document = contract["schemas"]["CapabilityDocument"]
+    assert "surfaces" not in capability_document["required"], (
+        "CapabilityDocument.required must not gain 'surfaces' -- it is an optional key (D-2)"
+    )
+    surfaces_schema = capability_document["properties"]["surfaces"]
+    surfaces_description = surfaces_schema["description"]
+    assert surfaces_description, "CapabilityDocument.properties.surfaces.description is empty"
+    assert _normalize_prose_for_pin(PIN_1_6_0_ITEM_2_SURFACES) in _normalize_prose_for_pin(surfaces_description), (
+        "CapabilityDocument.properties.surfaces.description no longer contains the requester-finalized "
+        "item 2 (D-2) prose verbatim"
+    )
+    # Review fix F2 (WP-1 code review): the STRUCTURE of `surfaces` was
+    # entirely unpinned -- only its description string was checked above.
+    # Review mutation alpha (dropping the nested `required: ["base_url"]`
+    # from surfaces.data / surfaces.control in spec + both packaged copies
+    # simultaneously) passed undetected through this file plus
+    # test_schema_check.py plus test_c11_document_conformance.py (52
+    # passed) before this fix. Pin the shape directly, including the
+    # supervisor-directed addition of `surfaces.required == ["data"]`
+    # (surfaces.data.base_url is an UNCONDITIONAL 1.6.0 obligation per
+    # version_binding's own item (a); confirmed prose is unchanged by this
+    # -- it already says a control_plane: unavailable deployment omits
+    # ONLY surfaces.control, never surfaces.data).
+    assert surfaces_schema["type"] == "object"
+    assert surfaces_schema["additionalProperties"] is False
+    assert surfaces_schema["required"] == ["data"], (
+        "CapabilityDocument.properties.surfaces.required must be exactly ['data'] -- surfaces.data.base_url "
+        "is unconditional wherever surfaces itself is present, while surfaces.control stays omittable"
+    )
+    assert set(surfaces_schema["properties"]) == {"data", "control"}
+    for surface_name in ("data", "control"):
+        surface_entry_schema = surfaces_schema["properties"][surface_name]
+        assert surface_entry_schema["type"] == "object"
+        assert surface_entry_schema["additionalProperties"] is False
+        assert surface_entry_schema["required"] == ["base_url"], (
+            f"CapabilityDocument.properties.surfaces.properties.{surface_name}.required must be ['base_url']"
+        )
+        assert surface_entry_schema["properties"]["base_url"]["type"] == "string"
+
+    # --- (3): field_type enum gains json (7th member); EntityDescriptor.field_types
+    # and SchemaOperationRequest.field_types both carry the identical item 3 prose. ---
+    seven_word_vocabulary = ["string", "integer", "number", "boolean", "object", "array", "json"]
+    field_type_enum = contract["schemas"]["SchemaOperationRequest"]["properties"]["field_type"]["enum"]
+    assert field_type_enum == seven_word_vocabulary, (
+        f"SchemaOperationRequest.field_type enum is no longer the 7-word vocabulary: {field_type_enum!r}"
+    )
+    entity_descriptor_field_types = contract["definitions"]["EntityDescriptor"]["properties"]["field_types"]
+    schema_operation_request_field_types = contract["schemas"]["SchemaOperationRequest"]["properties"]["field_types"]
+    assert entity_descriptor_field_types["additionalProperties"]["enum"] == seven_word_vocabulary
+    assert schema_operation_request_field_types["additionalProperties"]["enum"] == seven_word_vocabulary
+    pin3_normalized = _normalize_prose_for_pin(PIN_1_6_0_ITEM_3_FIELD_TYPES)
+    for name, schema in (
+        ("definitions.EntityDescriptor.properties.field_types", entity_descriptor_field_types),
+        ("schemas.SchemaOperationRequest.properties.field_types", schema_operation_request_field_types),
+    ):
+        description = schema["description"]
+        assert description, f"{name}.description is empty"
+        assert pin3_normalized in _normalize_prose_for_pin(description), (
+            f"{name}.description no longer contains the requester-finalized item 3 (D-3) prose verbatim"
+        )
+    # `fields` itself (string array) is untouched by item 3 (D-3 keeps it a
+    # plain string-array; only `field_types` is new).
+    assert contract["schemas"]["SchemaOperationRequest"]["properties"]["fields"]["type"] == "array"
+
+    # --- (4): the 1.6.0 version_binding paragraph, verbatim. ---
+    version_binding = contract["versioning"]["version_binding"]
+    assert _normalize_prose_for_pin(PIN_1_6_0_VERSION_BINDING_PARAGRAPH) in _normalize_prose_for_pin(version_binding), (
+        "versioning.version_binding no longer contains the requester-finalized 1.6.0 paragraph verbatim"
+    )
+
+    # --- 1.6.0-only retroactive-denial extension: the 4 pre-existing rows. ---
+    for name, row in (
+        ("1.1.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_1_0),
+        ("1.2.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_2_0),
+        ("1.3.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_3_0),
+        ("1.4.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_4_0),
+    ):
+        assert row in version_binding, (
+            f"versioning.version_binding's retroactive-denial {name} does not carry its 1.6.0-only member: {row!r}"
+        )
+
+    # --- item 4 (D-3 (vii)): the upsert same-label addendum, NOT placed in
+    # the 1.6.0 paragraph -- pinned separately (WP-1 completion condition 2). ---
+    upsert = contract["structured_operations"]["upsert"]
+    upsert_normalized = _normalize_prose_for_pin(upsert)
+    assert _normalize_prose_for_pin(PIN_1_6_0_UPSERT_SENTENCE_BEFORE) not in upsert_normalized, (
+        "structured_operations.upsert still contains the PRE-edit sentence verbatim -- "
+        "the D-3(vii) same-label addendum was not applied"
+    )
+    assert _normalize_prose_for_pin(PIN_1_6_0_UPSERT_SENTENCE_AFTER) in upsert_normalized, (
+        "structured_operations.upsert does not contain the requester-finalized D-3(vii) replacement sentence verbatim"
+    )
+    # The addendum lives in the upsert section body, never duplicated into
+    # the 1.6.0 version_binding paragraph (item 4 is same-label, not a new
+    # 1.6.0-labelled obligation) -- WP-1 completion condition 2. Review fix
+    # F1 (WP-1 code review, scratchpad/review-wp1/review-wp1-160.md): this
+    # MUST check the real contract text (`version_binding`, already
+    # extracted above), not the test's own PIN_1_6_0_VERSION_BINDING_
+    # PARAGRAPH literal -- the literal is what THIS test expects to find
+    # inside version_binding, so asserting against it can never detect a
+    # future revision that duplicates the row_addressability qualifier
+    # INTO version_binding as well (the pin's own `in` substring check
+    # would stay green either way).
+    assert "row_addressability" not in version_binding, (
+        "versioning.version_binding must not carry the D-3(vii) row_addressability qualifier -- "
+        "it is a same-label addendum to structured_operations.upsert only (completion condition 2), "
+        "never a new 1.6.0-labelled obligation"
+    )
+    assert "atomic_mutation" not in version_binding
+    assert "mutation_classes.declaration_required" not in upsert, (
+        "the D-3(vii) addendum must not cite mutation_classes.declaration_required as its authority (v1.3 G9)"
+    )

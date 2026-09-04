@@ -33,6 +33,65 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
+    """Phase 6 WP-1 addendum B (docs/work-orders/WORK_ORDER_PHASE6_
+    CONTRACT_160_V1.md): tags every collected item with an `xdist_group`
+    marker equal to its OWN `adapter` fixture param id, so `pytest -n 5
+    --dist loadgroup` schedules every test sharing one adapter param onto
+    the SAME worker process -- the session-scoped `adapter` fixture (and
+    each HTTP+PostgreSQL plug's own real platform database/connection
+    pools) stays confined to one process exactly as in a solo run, rather
+    than being torn down and rebuilt (or, worse, raced) across workers.
+    An item with no `adapter` param at all (a whole-registry vacuity
+    guard, e.g. `test_c19_every_control_surface_adapter_declares_1_6_0`,
+    which calls `registered_adapters()` directly instead of taking the
+    parametrized fixture) goes to one shared, fixed group -- these guards
+    read already-built adapter state and do not themselves provision
+    anything, so co-scheduling them together (never splitting one such
+    guard's own single collected item across workers, which `xdist_
+    group` cannot do anyway) is safe.
+
+    Adapted from a disposable, outside-the-repository review prototype
+    (supervisor experiment, 2026-09-04, `scratchpad/xdist_by_adapter.py`,
+    log `scratchpad/xdist-experiment.log`: conformance suite 422 passed
+    in 117.17s under this exact grouping, 0 leftover databases/roles)
+    -- this hook is deliberately no more than that prototype's own
+    mechanism, placed where the shared adapter/conftest machinery it
+    depends on (`request.node.callspec`) already lives.
+
+    Harmless with no `xdist` installed at all (`pytest-xdist` not on
+    `sys.path`): `pytest.mark.xdist_group` is accepted by plain pytest
+    like any other custom marker (unregistered markers only WARN, never
+    fail collection) and is simply ignored by a sequential run -- this
+    hook adds a marker, it never imports `xdist` itself.
+
+    `@pytest.hookimpl(tryfirst=True)` is load-bearing, not decoration
+    (measured empirically, WP-1 completion report): `xdist_group`'s own
+    grouping is implemented by `xdist.remote.WorkerInteractor`'s OWN
+    `pytest_collection_modifyitems`, which runs on each worker's own
+    local collection and encodes every item's group by APPENDING
+    `@<group>` to that item's nodeid (`xdist/remote.py`) -- the master's
+    `LoadGroupScheduling` scheduler (`xdist/scheduler/loadgroup.py`)
+    then groups purely by that nodeid SUFFIX. Without `tryfirst=True`,
+    pytest's default (LIFO-by-registration) hook order let xdist's own
+    hook run BEFORE this one on at least one measured run, reading NO
+    `xdist_group` marker yet (this hook had not added it) and therefore
+    appending no `@group` suffix at all -- `--dist loadgroup` then
+    degraded silently to plain `load` (round-robin across all `-n`
+    workers), scattering one adapter's own session-scoped state, real
+    Postgres connections included, across every worker. `tryfirst=True`
+    forces this hook first regardless of registration order, so every
+    item already carries its `xdist_group` marker by the time xdist's
+    own hook reads it.
+    """
+    for item in items:
+        callspec = getattr(item, "callspec", None)
+        adapter_param = callspec.params.get("adapter") if callspec is not None else None
+        group = str(adapter_param) if adapter_param else "registry-guards"
+        item.add_marker(pytest.mark.xdist_group(name=group))
+
+
 def _load_registry() -> list[dict]:
     import json
 

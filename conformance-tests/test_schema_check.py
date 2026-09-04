@@ -260,3 +260,126 @@ def test_catalog_document_schema_from_real_contract():
     }
     violations = validate(invalid_entity_descriptor, schema, contract)
     assert violations, "an entity with an incomplete mutable declaration must be rejected via $ref"
+
+
+# --- Phase 6 WP-1 review fix F2 (test): CapabilityDocument.surfaces STRUCTURE,
+# and EntityDescriptor/SchemaOperationRequest.field_types VOCABULARY, against
+# the real contract's own schemas. Review mutation alpha (dropping the nested
+# `required: ["base_url"]` from surfaces.data / surfaces.control in spec plus
+# both packaged copies simultaneously) went undetected by this file, by
+# test_contract.py, and by test_c11_document_conformance.py alike (52 passed)
+# before this fix -- these tests close that gap at the schema_check.py /
+# real-contract level, independent of any adapter ever emitting a `surfaces`
+# key (peers have not flipped to 1.6.0 yet). ---------------------------------
+
+
+def test_capability_document_schema_accepts_a_valid_surfaces_document():
+    contract = _contract()
+    schema = contract["schemas"]["CapabilityDocument"]
+    document = {
+        "contract_version": "1.6.0",
+        "capabilities": {"structured_query": {"status": "enabled"}},
+        "limits": {"batch_items": 100},
+        "limit_enforcement": {"batch_items": "enforced"},
+        "authorization_propagation_bound_ms": 0,
+        "surfaces": {
+            "data": {"base_url": "https://data.conformance.invalid/v1"},
+            "control": {"base_url": "https://control.conformance.invalid/control/v1"},
+        },
+    }
+    assert validate(document, schema, contract) == []
+
+    # A control_plane: unavailable deployment omits ONLY surfaces.control
+    # (confirmed prose (2)); surfaces.data alone remains valid.
+    data_only_document = dict(document, surfaces={"data": {"base_url": "https://data.conformance.invalid/v1"}})
+    assert validate(data_only_document, schema, contract) == []
+
+
+def test_capability_document_schema_rejects_surfaces_missing_data():
+    # Supervisor ruling F2: surfaces.required == ["data"] -- surfaces.data.
+    # base_url is version_binding's own UNCONDITIONAL 1.6.0 obligation
+    # wherever `surfaces` itself is present at all.
+    contract = _contract()
+    schema = contract["schemas"]["CapabilityDocument"]
+    document = {
+        "contract_version": "1.6.0",
+        "capabilities": {"structured_query": {"status": "enabled"}},
+        "limits": {"batch_items": 100},
+        "limit_enforcement": {"batch_items": "enforced"},
+        "authorization_propagation_bound_ms": 0,
+        "surfaces": {},
+    }
+    violations = validate(document, schema, contract)
+    assert violations, "an empty surfaces object (missing the required 'data' key) must be rejected"
+
+
+def test_capability_document_schema_rejects_surfaces_data_missing_base_url():
+    contract = _contract()
+    schema = contract["schemas"]["CapabilityDocument"]
+    document = {
+        "contract_version": "1.6.0",
+        "capabilities": {"structured_query": {"status": "enabled"}},
+        "limits": {"batch_items": 100},
+        "limit_enforcement": {"batch_items": "enforced"},
+        "authorization_propagation_bound_ms": 0,
+        "surfaces": {"data": {}},
+    }
+    violations = validate(document, schema, contract)
+    assert violations, "surfaces.data without base_url (its own required property) must be rejected"
+
+
+def test_capability_document_schema_rejects_surfaces_control_base_url_non_string():
+    contract = _contract()
+    schema = contract["schemas"]["CapabilityDocument"]
+    document = {
+        "contract_version": "1.6.0",
+        "capabilities": {"structured_query": {"status": "enabled"}},
+        "limits": {"batch_items": 100},
+        "limit_enforcement": {"batch_items": "enforced"},
+        "authorization_propagation_bound_ms": 0,
+        "surfaces": {
+            "data": {"base_url": "https://data.conformance.invalid/v1"},
+            "control": {"base_url": 12345},
+        },
+    }
+    violations = validate(document, schema, contract)
+    assert violations, "surfaces.control.base_url must be rejected when it is not a string"
+
+
+def test_entity_descriptor_field_types_rejects_a_value_outside_the_seven_word_vocabulary():
+    schema, contract = _entity_descriptor()
+    valid_instance = {
+        "entity": "notes",
+        "fields": ["id", "body"],
+        "field_types": {"id": "integer", "body": "json"},
+    }
+    assert validate(valid_instance, schema, contract) == []
+
+    invalid_instance = {
+        "entity": "notes",
+        "fields": ["id", "body"],
+        "field_types": {"id": "integer", "body": "unknown"},
+    }
+    violations = validate(invalid_instance, schema, contract)
+    assert violations, "EntityDescriptor.field_types must reject a value outside the 7-word type vocabulary"
+
+
+def test_schema_operation_request_field_types_rejects_a_value_outside_the_seven_word_vocabulary():
+    contract = _contract()
+    schema = contract["schemas"]["SchemaOperationRequest"]
+    valid_instance = {
+        "operation": "create_entity",
+        "entity": "notes",
+        "fields": ["id", "body"],
+        "field_types": {"body": "json"},
+    }
+    assert validate(valid_instance, schema, contract) == []
+
+    invalid_instance = {
+        "operation": "create_entity",
+        "entity": "notes",
+        "fields": ["id", "body"],
+        "field_types": {"body": "unknown"},
+    }
+    violations = validate(invalid_instance, schema, contract)
+    assert violations, "SchemaOperationRequest.field_types must reject a value outside the 7-word type vocabulary"

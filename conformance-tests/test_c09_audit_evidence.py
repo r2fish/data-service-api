@@ -149,6 +149,7 @@ from adapter import (
     fresh_identifier,
     load_contract,
     signature_forbids_parameters,
+    surfaces_cohosted,
 )
 from conftest import registered_adapters
 
@@ -839,43 +840,63 @@ def test_c09_data_plane_host_audit_query_alias_rejects_control_credential_unless
     branches on `contract_version`/`audit_query` status: both currently-
     registered peers already declare 1.4.0 and are already conformant.
 
-    Fix-round F-2/F-3: dispatch is judged against this adapter's OWN
-    declared topology fact, `control_surface_cohosted_with_data_plane()`
-    (port v1.9) -- never against a live cross-check of returned event
-    content (the prior revision's "overlap with a real control-host
-    query" mechanism is REMOVED: it could not distinguish a genuinely
-    co-hosted acceptance from one that happened to overlap by
+    Fix-round F-2/F-3: dispatch is judged against this deployment's OWN
+    declared topology fact -- never against a live cross-check of
+    returned event content (the prior revision's "overlap with a real
+    control-host query" mechanism is REMOVED: it could not distinguish a
+    genuinely co-hosted acceptance from one that happened to overlap by
     coincidence, and inspected response CONTENT rather than the
     deployment's own declared TOPOLOGY, the property this obligation is
     actually about).
 
-    - `provided`: conformant ONLY when this adapter declares
-      `control_surface_cohosted_with_data_plane() == True` (a deployment
-      that co-hosts both surfaces, `versioning.control_discovery`'s own
-      "convenience, not a requirement"). Under a NON-cohosted declaration
-      (every currently-registered adapter), `provided` is RED -- this is
-      what catches a port-level identity mistake, e.g. an implementation
-      that accidentally forwards to `audit_query`'s own control-host call
-      instead of genuinely presenting to the data host (mutation-verified
-      below: `return self.audit_query(actor, request)` in place of a real
-      data-host call turns this red on both r2db plugs).
+    **Port v1.10 (phase 6 WP-1, design docs/design/
+    PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md §6.1 item 2, D-2,
+    `docs/design/CONFORMANCE_ADAPTER_V1.md` §20.3)**: the topology fact
+    itself now comes from `adapter.surfaces_cohosted(adapter.capability_
+    document(), fallback=adapter.control_surface_cohosted_with_data_
+    plane)` -- a 1.6.0+ peer's own declared `surfaces.data`/`surfaces.
+    control` origins where it has them, falling back to the pre-1.6.0
+    topology declaration (port v1.9, unchanged, still required on every
+    plug) where it does not. **This is a REPLACEMENT of the judgment
+    SOURCE, not of the observed OUTCOME**: no currently-registered
+    adapter declares `surfaces` yet, so every one of them still takes the
+    fallback branch and still resolves to `False`, exactly as before this
+    WP (work order WP-1 completion condition 11's own "置換が挙動を変え
+    ないことの実測" -- see the WP-1 completion report's mutation 8 for
+    the measured proof that the fallback branch is load-bearing, not
+    merely present). `control_surface_cohosted_with_data_plane`'s own
+    removal is WP-3's job, same commit as the last 1.6.0 flip -- this WP
+    changes only which function this ONE call site asks.
+
+    - `provided`: conformant ONLY when `surfaces_cohosted(...)` resolves
+      `True` (a deployment that co-hosts both surfaces, `versioning.
+      control_discovery`'s own "convenience, not a requirement"). Under a
+      NON-cohosted resolution (every currently-registered adapter today),
+      `provided` is RED -- this is what catches a port-level identity
+      mistake, e.g. an implementation that accidentally forwards to
+      `audit_query`'s own control-host call instead of genuinely
+      presenting to the data host (mutation-verified below: `return
+      self.audit_query(actor, request)` in place of a real data-host call
+      turns this red on both r2db plugs).
     - `denied`: must be EXACTLY `AUTH_INVALID` (this deployment's data
       host holds no control-credential store) regardless of the cohosted
-      declaration -- a cohosted deployment MAY still keep separate
-      stores. `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/any other denial code
-      is non-conformant either way.
+      resolution -- a cohosted deployment MAY still keep separate stores.
+      `CAPABILITY_UNSUPPORTED`/`FORBIDDEN`/any other denial code is
+      non-conformant either way.
     """
-    cohosted = adapter.control_surface_cohosted_with_data_plane()
+    cohosted = surfaces_cohosted(
+        adapter.capability_document(), fallback=adapter.control_surface_cohosted_with_data_plane
+    )
     control_actor = adapter.control_credential()
     form, outcome = _dispatch_audit_query_on_data_plane_host(adapter, control_actor, {"limit": 1})
     if form == "surface_absent":
         return
     if form == "provided":
         assert cohosted, (
-            f"{adapter.name}: audit_query_on_data_plane_host returned PROVIDED, but this adapter declares "
-            "control_surface_cohosted_with_data_plane() == False -- a non-cohosted deployment's data-plane "
-            "host must never answer a control/audit credential (a PROVIDED outcome is conformant only when "
-            "the adapter's own declared topology says both surfaces are genuinely co-hosted)"
+            f"{adapter.name}: audit_query_on_data_plane_host returned PROVIDED, but surfaces_cohosted(...) "
+            "resolves False -- a non-cohosted deployment's data-plane host must never answer a control/audit "
+            "credential (a PROVIDED outcome is conformant only when the deployment's own declared topology "
+            "says both surfaces are genuinely co-hosted)"
         )
         return
     _require_denied_with(adapter, form, outcome, "AUTH_INVALID")

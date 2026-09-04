@@ -55,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -1705,6 +1706,46 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         )
         return [{col: value for col, value in zip(columns, row) if value is not None} for row in rows]
 
+    # port v1.10 addendum A (supervisor ruling 2026-09-04, C-14 vector 5's
+    # own test primitive -- see adapter.py's own docstring for the full
+    # rationale). Real HTTP `/control/v1` app/client, built via THIS
+    # adapter's own `_build_control_stack()` (the SAME real product
+    # assembly `__init__`/`_privileged_control_send`'s own rebuild path
+    # already use) against the SAME real Postgres `controlplane_dsn`/
+    # `schema` -- so the same registered applications/credentials
+    # authenticate -- but a genuinely fresh `ControlPlaneService`, whose
+    # own `_rate_window` starts empty. On exit: closes the fresh client
+    # and every one of the 4 fresh stores `_build_control_stack()` opened
+    # (mirrors `_privileged_control_send`'s own rebuild-path cleanup
+    # exactly, including its `store is not None` guard) -- never touches
+    # `self._control_app`/`self._control_client`/`self._control_stores`,
+    # the SHARED surface every other control-plane method on this adapter
+    # still targets.
+    @contextmanager
+    def isolated_control_surface(self):
+        app, stores = self._build_control_stack()
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        try:
+            def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+                request = client.build_request(
+                    "GET", "/control/v1/capabilities", headers=[("authorization", f"Bearer {actor.secret}")]
+                )
+                response = self._run(client.send(request))
+                if response.status_code >= 400:
+                    failure = _HttpFailure(response)
+                    raise ConformanceDenial(
+                        code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                        details=_failure_details(failure),
+                    ) from failure
+                return response.json()
+
+            yield call
+        finally:
+            self._run(client.aclose())
+            for store in stores:
+                if store is not None:
+                    store.close()
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
@@ -2020,6 +2061,32 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # whole document instead of projecting it down to an entity-name
         # set.
         return self._send("GET", "/v1/catalog", session)
+
+    # port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+    # V1.md section 6.1 item 3, D-3). Real HTTP POST to this peer's real
+    # schema-operation endpoint, carrying the contract's own `field_types`
+    # object verbatim -- mirrors `conformance_adapter_r2db.py`'s identical
+    # in-process twin. Unreachable as of this WP (declare-first gated at
+    # 1.6.0, no peer there yet); a real call today would get a real
+    # `VALIDATION_FAILED` from this peer's pre-1.6.0 schema-operation
+    # validation, which does not yet recognize `field_types` -- written
+    # for WP-2's real eventual shape, not a stub.
+    def create_entity_with_declared_types(
+        self, session: object, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
+    ) -> None:
+        assert isinstance(session, _Session)
+        body: dict[str, Any] = {"operation": "create_entity", "entity": entity, "fields": list(fields)}
+        if field_types:
+            body["field_types"] = dict(field_types)
+        self._send("POST", self._schema_path(), session, json_body=body)
+
+    # port v1.10 (same WP as above).
+    def add_field_with_declared_type(self, session: object, entity: str, field: str, field_type: str) -> None:
+        assert isinstance(session, _Session)
+        self._send(
+            "POST", self._schema_path(), session,
+            json_body={"operation": "add_field", "entity": entity, "field": field, "field_type": field_type},
+        )
 
     def _build_mutation_item(
         self,

@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -442,6 +443,26 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # which is not the R-6 durable audit this port operation observes.
         return list(self._control_audit.events())
 
+    # port v1.10 addendum A (supervisor ruling 2026-09-04, C-14 vector 5's
+    # own test primitive -- see adapter.py's own docstring for the full
+    # rationale). A fresh `ControlPlaneService` sharing THIS adapter's own
+    # real `self._control_backend`/`self._control_audit`/`self._control_
+    # limits` (the same objects `self._control_service` -- the SHARED
+    # surface -- is built from), so the SAME credentials/applications
+    # authenticate against it, but its own `_rate_window` starts empty.
+    # No real resource to release on exit (in-memory construction only).
+    @contextmanager
+    def isolated_control_surface(self):
+        fresh_service = ControlPlaneService(
+            self._control_backend, audit=self._control_audit, limits=self._control_limits,
+            audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+        )
+
+        def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+            return self._call(lambda: fresh_service.capabilities(self._actor_secret(actor)))
+
+        yield call
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # `ControlPlaneService` now declares `audit_query: {"status":
@@ -733,6 +754,34 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # capability `application_catalog: enabled`), never a fabricated
         # document.
         return self._call(lambda: self._service.catalog(session))
+
+    # port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+    # V1.md section 6.1 item 3, D-3). Presents the contract's own
+    # `field_types` object (contract vocabulary, verbatim -- never
+    # translated through `_PORT_FIELD_TYPE_TO_R2DB`) to this peer's real
+    # `DataService.schema()` dispatcher, the same real entry point
+    # `create_entity` above already uses. Unreachable as of this WP (no
+    # peer declares 1.6.0 yet, `test_c19_client_self_sufficiency.py`'s own
+    # declare-first gate on every caller); `structured.py`'s own pre-1.6.0
+    # `_SCHEMA_KEYS`/`bind_schema_operation` does not yet recognize
+    # `field_types` at all, so a real call here today would deny with
+    # `VALIDATION_FAILED` -- written for WP-2's real eventual shape, not a
+    # stub (mirrors every other declare-first method already on this ABC).
+    def create_entity_with_declared_types(
+        self, session, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
+    ) -> None:
+        operation: dict[str, Any] = {"operation": "create_entity", "entity": entity, "fields": list(fields)}
+        if field_types:
+            operation["field_types"] = dict(field_types)
+        self._call(lambda: self._service.schema(session, operation))
+
+    # port v1.10 (same WP as above). `field_type` here is the contract's
+    # own seven-word vocabulary word, verbatim -- distinct from `create_
+    # entity`'s own `_PORT_FIELD_TYPE_TO_R2DB`-mapped, two-word `add_field`
+    # calls it already issues internally.
+    def add_field_with_declared_type(self, session, entity: str, field: str, field_type: str) -> None:
+        operation = {"operation": "add_field", "entity": entity, "field": field, "field_type": field_type}
+        self._call(lambda: self._service.schema(session, operation))
 
     def _build_mutation_item(
         self,
