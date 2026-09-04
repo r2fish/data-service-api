@@ -655,8 +655,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # Limits: mirrors the in-process adapter's own measured
             # rationale (`conformance_adapter_mitatedb.py`'s identical
             # comment) -- `applications=100/credentials_per_application=5/
-            # control_requests_per_minute=200` satisfies R-6's numeric
-            # constraints with the same margin r2db-api measured
+            # control_requests_per_minute=200` are this adapter's own
+            # CONFIGURED construction values, not an upper bound the
+            # product enforces (Phase 5 D-3, Q3 案A, WP-4 removed
+            # `ControlPlaneLimits`' former `[1, 200]` ceiling on all four
+            # request-count classes). They still satisfy R-6's own
+            # relational check with the same margin r2db-api measured
             # sufficient for its own combined suite.
             # ------------------------------------------------------------
             self._control_app_pepper = "synthetic-conformance-pepper-mitatedb-http-0000"

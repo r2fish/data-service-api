@@ -363,12 +363,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # also registering a real application against this SAME adapter
         # instance's shared state for the rest of the session.
         # `applications=100/credentials_per_application=5/
-        # control_requests_per_minute=200` satisfies R-6's numeric
-        # constraints (each <=200; `200 > 100 + 2*5 + 67`) with the SAME
-        # margin r2db-api measured sufficient for its own, larger combined
-        # suite; WP-5's own completion condition requires recording this
-        # adapter's real measured `n_existing` (both at C-14 vector 5 and
-        # at session end) -- see the WP-5 completion report.
+        # control_requests_per_minute=200` are this adapter's own
+        # CONFIGURED construction values, not an upper bound the product
+        # enforces (Phase 5 D-3, Q3 案A, WP-4 removed `ControlPlaneLimits`'
+        # former `[1, 200]` ceiling on all four request-count classes --
+        # these numbers are a still-valid choice, no longer the only legal
+        # one). They still satisfy R-6's own relational check
+        # (`200 > 100 + 2*5 + 67`, unaffected by the ceiling removal) with
+        # the SAME margin r2db-api measured sufficient for its own, larger
+        # combined suite; WP-5's own completion condition requires
+        # recording this adapter's real measured `n_existing` (both at
+        # C-14 vector 5 and at session end) -- see the WP-5 completion
+        # report.
         # ------------------------------------------------------------
         self._control_credential_pepper = "synthetic-conformance-pepper-mitatedb-ctl-0000000"
         self._control_credentials = ControlCredentialStore(self._control_credential_pepper)
