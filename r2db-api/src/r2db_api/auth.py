@@ -11,6 +11,94 @@ from typing import Iterator, Mapping
 
 from .errors import FoundationError, fail
 
+# Coordinator item 7(i) (reviewer O2): a fixed-shape stand-in for a real
+# stored `verifier` (both are `hmac.new(pepper, secret, sha256).hexdigest()`
+# -- 64 hex characters), compared against UNCONDITIONALLY by every
+# `authenticate` below, whether or not a record was actually found for the
+# presented `credential_id`. Without this, an unknown `credential_id`
+# short-circuits before ever calling `hmac.compare_digest` while a known
+# one always calls it -- a timing oracle for "does this credential_id
+# exist" (SI-10). `credential_id` is itself non-secret (it appears in
+# `list_credentials` responses), so this is a hardening measure, not a
+# secrecy boundary; mirrors MitateDB-api's own `auth.py::_DUMMY_DIGEST`.
+_DUMMY_VERIFIER = "0" * 64
+
+
+def split_bearer_locator(token: str | None) -> tuple[str, str] | None:
+    """Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+    DISCOVERY_V1.md D-1(c)): splits a presented bearer token into its
+    `(credential_id, secret_part)` locator pair -- this repository's own
+    common realization of contract 1.6.0's "the secret is a complete,
+    opaque bearer token" obligation (`<credential_id>.<secret_part>`,
+    joined by a single `.`; MitateDB-api's `http.py::_split_bearer` uses
+    the identical shape). Returns `None` for any malformed shape -- no
+    token at all, no `.` separator, an empty locator half, or an empty
+    secret half -- so every caller can fail closed (`AUTH_INVALID`,
+    SI-15) WITHOUT ever looking anything up: a malformed token names no
+    row to query in the first place, and querying on a value that cannot
+    possibly match would only cost a round trip for the same outcome.
+
+    Never used by an issuance path (see `compose_bearer_locator` below,
+    its inverse) -- only by an authentication path, and only ONCE per
+    presented token (never re-split downstream: `AuthContext`/
+    `ControlAuthContext` carry the resolved `credential_id`, not the raw
+    token, past this point).
+
+    Rework (coordinator F1, 2026-09-04 review): a NUL (U+0000) byte in
+    EITHER half is malformed too, not just an empty half. Before this
+    check existed, a locator like `crd_x\\x00y.secret` split "successfully"
+    into a `credential_id` half carrying a NUL byte, which every caller
+    then bound as a real SQL query parameter (`credential_store.py`'s
+    `_fetch_or_503`) -- psycopg refuses a NUL-bearing text parameter
+    outright, which `_fetch_or_503` maps to `AUTH_STATE_UNAVAILABLE` (503),
+    not `AUTH_INVALID` (401): a client-triggerable state-unavailable
+    response, AND (worse) that denial was never durable-audited at all
+    (`AUTH_STATE_UNAVAILABLE` is not in `service._DURABLE_DENIAL_CODES`).
+    Rejecting the NUL byte HERE -- before any lookup, matching this
+    function's own "fail closed WITHOUT ever looking anything up"
+    contract above -- closes both holes at the single choke point every
+    caller already goes through, rather than patching each store's SQL
+    boundary separately. The same judgment this repository already made
+    for `expected_revision`/mutation values (`structured.py`'s own
+    `_contains_nul`/`require_destructive_confirmation` callers: "a
+    database error must not be how this gets discovered").
+    """
+    if not token or "." not in token:
+        return None
+    credential_id, _, secret = token.partition(".")
+    if not credential_id or not secret:
+        return None
+    if "\x00" in credential_id or "\x00" in secret:
+        return None
+    return credential_id, secret
+
+
+def compose_bearer_locator(credential_id: str, secret: str) -> str:
+    """The inverse of `split_bearer_locator` -- used ONLY at issuance time
+    (every application/control credential issue/rotate/bootstrap/reset
+    response, `control_plane.py`/`ops.py`), never by an authentication
+    path. Contract 1.6.0 (subordinate ruling 11, item 1): the resulting
+    string is the complete bearer token `CredentialIssued.secret`/a
+    rotate response's `secret` returns to the client -- opaque, to be
+    presented verbatim as `Authorization: Bearer <secret>`, never
+    composed/split/derived by a client. `credential_id` (`crd_`/`ctl_` +
+    16 hex chars, this module's own/`control_plane.py`'s own minters) and
+    `secret` (`secrets.token_urlsafe(32)`, base64url alphabet) never
+    contain `.`, so this join is always unambiguous to `split_bearer_
+    locator` above.
+
+    Rework (coordinator item 7(iii), reviewer O2): that "never contain
+    `.`" claim was, before this change, a documented convention of this
+    module's own minters, never a checked invariant of THIS function
+    itself -- a future caller (or a minter this module does not control)
+    could silently produce an ambiguous locator. Turned into a real
+    precondition here: either half containing `.` is a `ValueError` at
+    the issuance boundary, not a silently-wrong token handed to a client.
+    """
+    if "." in credential_id or "." in secret:
+        raise ValueError("compose_bearer_locator: credential_id/secret must not contain '.'")
+    return f"{credential_id}.{secret}"
+
 
 def _fail_identified(code: str, message: str, *, status: int, credential_id: str, role: str | None = None) -> None:
     """Like `errors.fail`, but attaches the store's own identified
@@ -150,7 +238,7 @@ class CredentialStore:
             self._records = snapshot
             raise
 
-    def add(self, credential_id: str, application_id: str, role: str, secret: str, *, work: _InMemoryWork) -> None:
+    def add(self, credential_id: str, application_id: str, role: str, secret: str, *, work: _InMemoryWork) -> str:
         """`work` is a required keyword-only argument (R-6/§8 B-2, round-2
         review ruling (A)): every caller must hold a handle from `self.
         unit_of_work()` before calling this. Omitting it is a `TypeError`
@@ -167,10 +255,20 @@ class CredentialStore:
         `test_foundation.py`) specifically so this could be fixed properly
         instead of worked around -- see the WP-2 implementation report's
         Round 2 section for the full history and the call-site follow-up.
+
+        Rework (coordinator item 3, 2026-09-04 review): returns the
+        composed bearer (`compose_bearer_locator(credential_id, secret)`)
+        -- this is now this store's own issuance point (design D-1(c)'s
+        "合成は store/service 層のみ" principle): every caller (`service.
+        ControlAuthority.issue_credential`, `ops.py cmd_issue_credential`)
+        gets the ready-to-present bearer from here instead of composing it
+        itself at the call site. The stored `verifier` is still computed
+        from the RAW `secret` -- only the RETURN value is composed.
         """
         if role not in {"runtime", "developer"}:
             fail("VALIDATION_FAILED", "Application credentials require runtime or developer role.")
         self._records[credential_id] = CredentialRecord(credential_id, application_id, role, self.verifier(secret))
+        return compose_bearer_locator(credential_id, secret)
 
     def set_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: _InMemoryWork) -> None:
         if enabled is not None and not isinstance(enabled, bool):
@@ -190,7 +288,7 @@ class CredentialStore:
             fail("VALIDATION_FAILED", "Revocation is terminal; a revoked credential cannot be un-revoked.")
         self._records[credential_id] = CredentialRecord(record.credential_id, record.application_id, record.role, record.verifier, record.enabled if enabled is None else enabled, record.revoked if revoked is None else revoked)
 
-    def rotate(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> None:
+    def rotate(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> str:
         """§8 M-2's remediation: the in-memory store had no `rotate` at all
         before this WP -- only `PostgresCredentialStore.rotate` existed.
         Semantics deliberately match that existing Postgres implementation
@@ -204,25 +302,70 @@ class CredentialStore:
         HTTP `rotate` endpoint's semantics (WP-3), not a retrofit onto this
         pre-existing application-credential store method. `work` is required
         (see `add`'s docstring above for the round-2 ruling this follows).
+
+        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
+        returns the composed bearer (`compose_bearer_locator(credential_id,
+        secret)`), same "issuance point returns the ready-to-present
+        bearer, never the caller" discipline `add` above already follows
+        -- `rotate` is a re-issuance of the same `credential_id` under a
+        new secret, so it is an issuance point too. `ops.py`'s two rotate
+        subcommands now use this return value verbatim instead of
+        composing it themselves.
         """
         record = self._records.get(credential_id)
         if record is None:
             fail("NOT_FOUND", "Credential was not found.", status=404)
         self._records[credential_id] = CredentialRecord(record.credential_id, record.application_id, record.role, self.verifier(secret), record.enabled, record.revoked)
+        return compose_bearer_locator(credential_id, secret)
 
     def authenticate(self, secret: str | None) -> AuthContext:
+        # Phase 6 WP-2 (design D-1(c)): `secret` here is the FULL bearer
+        # token a caller presented (`http.py::_extract_bearer`'s return
+        # value, unchanged -- this store has always received the whole
+        # `Authorization: Bearer <...>` value, never a pre-trimmed one).
+        # It is now the locator form `<credential_id>.<secret_part>` --
+        # this method locates the record by `credential_id` (O(1) dict
+        # lookup, replacing the previous full-table `compare_digest` scan
+        # keyed on the digest itself) and THEN verifies the digest.
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
         if not secret:
             fail("AUTH_REQUIRED", "Authentication is required.", status=401)
-        for record in self._records.values():
-            if hmac.compare_digest(record.verifier, self.verifier(secret)):
-                if record.revoked:
-                    fail("AUTH_REVOKED", "Credential is not active.", status=401)
-                if not record.enabled:
-                    fail("AUTH_INVALID", "Credential is not active.", status=401)
-                return AuthContext(record.credential_id, record.application_id, record.role)
-        fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            # SI-15 fail-closed: an unparseable locator never reaches a
+            # lookup at all -- see `split_bearer_locator`'s own docstring.
+            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        credential_id, secret_part = locator
+        record = self._records.get(credential_id)
+        # Design implementation constraint 1 (B-1 ruling maintained):
+        # `compare_digest` is evaluated -- and must succeed -- BEFORE any
+        # `revoked`/`enabled` state check below, exactly as the pre-WP-2
+        # scan-then-compare order did.
+        #
+        # Coordinator item 7(i): `compare_digest` is now called
+        # UNCONDITIONALLY -- against `record.verifier` when a row was
+        # found, against the fixed-shape `_DUMMY_VERIFIER` otherwise --
+        # so an unknown `credential_id` costs the same one HMAC comparison
+        # a known-but-mismatched one does (no timing oracle for "does this
+        # credential_id exist"). `digest_matches` is computed either way;
+        # `record is None` still gates the final outcome (a match against
+        # the dummy is never possible in practice, but the check is
+        # explicit rather than relied upon).
+        digest_matches = hmac.compare_digest(record.verifier if record is not None else _DUMMY_VERIFIER, self.verifier(secret_part))
+        if record is None or not digest_matches:
+            # Constraint 2: uniform AUTH_INVALID -- an unknown locator and
+            # a known locator with a mismatched secret are indistinguishable
+            # in the response (SI-10). Constraint 3: the client-declared
+            # `credential_id` above is never attached to this denial (no
+            # `_fail_identified` here, matching the pre-WP-2 code's own
+            # plain `fail()` on the "nothing matched" path).
+            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        if record.revoked:
+            fail("AUTH_REVOKED", "Credential is not active.", status=401)
+        if not record.enabled:
+            fail("AUTH_INVALID", "Credential is not active.", status=401)
+        return AuthContext(record.credential_id, record.application_id, record.role)
 
     def assert_active(self, context: AuthContext) -> AuthContext:
         if not self.available:
@@ -381,7 +524,7 @@ class ControlCredentialStore:
             record.role,
         )
 
-    def rotate(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> None:
+    def rotate(self, credential_id: str, secret: str, *, work: _InMemoryWork) -> str:
         """R-5/§2 M-2: verifier replacement + `must_rotate=False` +
         (Postgres side) `updated_at` refresh, in one step. Unlike
         `CredentialStore.rotate` above, a revoked control credential
@@ -396,6 +539,11 @@ class ControlCredentialStore:
         secret is ever printed (design §4 M-1: no in-band self-rotate exists
         for an audit principal, so the ceremony itself must complete the
         rotate half before distribution).
+
+        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
+        returns the composed bearer, same discipline as `CredentialStore.
+        rotate` above -- `ops.py cmd_rotate_control_credential` now uses
+        this return value verbatim.
         """
         record = self._records.get(credential_id)
         if record is None:
@@ -403,6 +551,7 @@ class ControlCredentialStore:
         if record.revoked:
             fail("VALIDATION_FAILED", "A revoked control credential cannot be rotated.")
         self._records[credential_id] = ControlCredentialRecord(record.credential_id, self.verifier(secret), record.enabled, record.revoked, False, record.role)
+        return compose_bearer_locator(credential_id, secret)
 
     def has_any(self, *, include_revoked: bool = True, work: _InMemoryWork | None = None) -> bool:
         """§8 M-6: bootstrap's existence check must count revoked rows too
@@ -439,18 +588,34 @@ class ControlCredentialStore:
             self._records[credential_id] = ControlCredentialRecord(record.credential_id, record.verifier, record.enabled, True, record.must_rotate, record.role)
 
     def authenticate(self, secret: str | None) -> ControlAuthContext:
+        # Phase 6 WP-2 (design D-1(c)): identical locator-then-digest
+        # discipline as `CredentialStore.authenticate` above -- see that
+        # method's own comments for the full rationale. `_fail_identified`
+        # below (unchanged from before this WP) still only ever attaches
+        # `record.credential_id` -- the STORE's own resolved id, never the
+        # client-declared locator string -- and only once digest/state
+        # have genuinely identified a real, matched credential (B-1: an
+        # unmatched digest keeps using plain `fail()`, never `_fail_
+        # identified`).
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
         if not secret:
             fail("AUTH_REQUIRED", "Authentication is required.", status=401)
-        for record in self._records.values():
-            if hmac.compare_digest(record.verifier, self.verifier(secret)):
-                if record.revoked:
-                    _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
-                if not record.enabled:
-                    _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
-                return ControlAuthContext(record.credential_id, record.must_rotate, record.role)
-        fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        credential_id, secret_part = locator
+        record = self._records.get(credential_id)
+        # Coordinator item 7(i): unconditional compare_digest -- see
+        # `CredentialStore.authenticate`'s identical comment above.
+        digest_matches = hmac.compare_digest(record.verifier if record is not None else _DUMMY_VERIFIER, self.verifier(secret_part))
+        if record is None or not digest_matches:
+            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        if record.revoked:
+            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
+        if not record.enabled:
+            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=record.credential_id, role=record.role)
+        return ControlAuthContext(record.credential_id, record.must_rotate, record.role)
 
     def assert_active(self, context: ControlAuthContext) -> ControlAuthContext:
         if not self.available:

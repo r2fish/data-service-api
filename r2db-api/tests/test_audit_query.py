@@ -39,7 +39,7 @@ from r2db_api.audit_query import (
     DECLARED_COALESCING_WINDOW_MS,
     InMemoryAuditQueryStore,
 )
-from r2db_api.auth import AuthContext, ControlCredentialStore, CredentialStore
+from r2db_api.auth import AuthContext, ControlCredentialStore, CredentialStore, compose_bearer_locator
 
 # `r2db_api.control_main` ends with a module-level `app = build_control_
 # app()` (design §8 m-10) that reads `os.environ` the instant it is first
@@ -50,6 +50,12 @@ from r2db_api.auth import AuthContext, ControlCredentialStore, CredentialStore
 os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_audit_query_test_import_placeholder")
 os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-ctl-pepper")
 os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-app-pepper")
+# Phase 6 WP-2 (design D-2): `build_control_app` unconditionally requires
+# both surfaces vars now -- same `setdefault` guard, same reasoning as the
+# three lines above (this file's own module-level import must not fail on
+# this pytest process' unrelated ambient environment).
+os.environ.setdefault("R2DB_DATA_BASE_URL", "https://r2db-audit-query-test.example.invalid/v1")
+os.environ.setdefault("R2DB_CONTROL_BASE_URL", "https://r2db-audit-query-control-test.example.invalid/control/v1")
 
 import r2db_api.control_main as control_main  # noqa: E402 -- module object itself (not just `assemble_control_stack`), see `test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env` below
 from r2db_api.control_http import _ROUTES, create_control_app  # noqa: E402
@@ -236,7 +242,10 @@ def _memory_harness(*, clock=None) -> types.SimpleNamespace:
 
     return types.SimpleNamespace(
         kind="memory", service=service, data_service=data_service, authority=authority, credentials=credentials,
-        control_credential_secret=control_secret, control_credential_id=control_credential_id,
+        # Composed locator form (Phase 6 WP-2, design D-1(c)) -- every
+        # caller below presents this straight as a bearer.
+        control_credential_secret=compose_bearer_locator(control_credential_id, control_secret),
+        control_credential_id=control_credential_id,
         seed_audit_credential=seed_audit_credential, cleanup=lambda: None,
     )
 
@@ -291,7 +300,10 @@ def _postgres_harness(platform: types.SimpleNamespace, *, clock=None, audit_stat
 
     return types.SimpleNamespace(
         kind="postgres", service=service, data_service=data_service, credentials=credentials,
-        control_credential_secret=control_secret, control_credential_id=control_credential_id,
+        # Composed locator form (Phase 6 WP-2, design D-1(c)) -- every
+        # caller below presents this straight as a bearer.
+        control_credential_secret=compose_bearer_locator(control_credential_id, control_secret),
+        control_credential_id=control_credential_id,
         seed_audit_credential=seed_audit_credential, cleanup=cleanup, platform=platform,
     )
 
@@ -763,7 +775,7 @@ def test_control_and_audit_credentials_are_accepted_on_audit_query(kind, platfor
         audit_id = "ctl_" + secrets.token_hex(8)
         audit_secret = "audit-role-" + secrets.token_urlsafe(8)
         h.seed_audit_credential(audit_id, audit_secret)
-        audit_result = h.service.audit_query(audit_secret, {"limit": 1})
+        audit_result = h.service.audit_query(compose_bearer_locator(audit_id, audit_secret), {"limit": 1})
         assert "events" in audit_result
     finally:
         h.cleanup()
@@ -787,10 +799,10 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
         control_credentials.rotate(credential_id, secret, work=work)
 
     with pytest.raises(FoundationError) as exc:
-        service.audit_query(secret, {"limit": 1})
+        service.audit_query(compose_bearer_locator(credential_id, secret), {"limit": 1})
     assert exc.value.code == "CAPABILITY_UNSUPPORTED"
 
-    document = service.capabilities(secret)
+    document = service.capabilities(compose_bearer_locator(credential_id, secret))
     assert document["capabilities"]["audit_query"] == {"status": "unavailable"}
 
     # WP-2(b) fix round 2 (coordinator item G): contract 1.4.0 unconditional
@@ -806,7 +818,7 @@ def test_audit_query_without_audit_dsn_refuses_with_capability_unsupported_not_4
         control_credentials.add(audit_credential_id, audit_secret, role="audit", work=work)
         control_credentials.rotate(audit_credential_id, audit_secret, work=work)
     with pytest.raises(FoundationError) as exc:
-        service.audit_query(audit_secret, {"limit": 1})
+        service.audit_query(compose_bearer_locator(audit_credential_id, audit_secret), {"limit": 1})
     assert exc.value.code == "CAPABILITY_UNSUPPORTED"
     assert exc.value.code not in ("FORBIDDEN", "NOT_FOUND")
 
@@ -1857,8 +1869,8 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
     secret = "m1-must-rotate-" + secrets.token_urlsafe(8)
     with control_credentials.unit_of_work() as work:
         control_credentials.add(credential_id, secret, work=work)  # must_rotate=True by construction; deliberately never rotated
-    document = service.capabilities(secret)  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.5.0"
+    document = service.capabilities(compose_bearer_locator(credential_id, secret))  # must NOT raise FORBIDDEN -- the observable half of _gate_must_rotate's early return
+    assert document["contract_version"] == "1.6.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -2594,7 +2606,7 @@ def test_control_capabilities_declares_contract_version_1_5_0(kind, platform):
     h = _build_harness(kind, platform)
     try:
         document = h.service.capabilities(h.control_credential_secret)
-        assert document["contract_version"] == "1.5.0"
+        assert document["contract_version"] == "1.6.0"
     finally:
         h.cleanup()
 
@@ -2604,12 +2616,18 @@ def _seed_application_credential(credentials: CredentialStore, application_id: s
     credential`, which requires an already-generated `credential_id`/
     `secret` pair -- `ControlPlaneService.issue_credential` is what
     normally generates those; these tests only need a real, authenticable
-    application credential to exist, not the full issuance flow)."""
+    application credential to exist, not the full issuance flow).
+
+    Phase 6 WP-2 (design D-1(c)): the second element returned is the
+    COMPOSED `<credential_id>.<secret_part>` locator, not the raw secret
+    half `.add` was seeded with -- every caller below presents it straight
+    as a bearer.
+    """
     credential_id = "crd_" + secrets.token_hex(8)
     secret = "audit-query-app-cred-" + secrets.token_urlsafe(8)
     with credentials.unit_of_work() as work:
         credentials.add(credential_id, application_id, role, secret, work=work)
-    return AuthContext(credential_id, application_id, role), secret
+    return AuthContext(credential_id, application_id, role), compose_bearer_locator(credential_id, secret)
 
 
 def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query_unavailable():
@@ -2622,7 +2640,7 @@ def test_data_plane_capabilities_declares_contract_version_1_5_0_and_audit_query
     authority.register_application(application_id)
     context, _secret = _seed_application_credential(credentials, application_id, "runtime")
     document = service.capabilities(context)
-    assert document["contract_version"] == "1.5.0"
+    assert document["contract_version"] == "1.6.0"
     assert document["capabilities"]["audit_query"] == {"status": "unavailable", "authority": "control_or_audit"}
 
 
@@ -2830,8 +2848,12 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            # Phase 6 WP-2 (design D-2): unconditionally required by
+            # `build_control_app` now.
+            "R2DB_DATA_BASE_URL": "https://r2db-audit-query-test.example.invalid/v1",
+            "R2DB_CONTROL_BASE_URL": "https://r2db-audit-query-control-test.example.invalid/control/v1",
         }
-        headers = {"authorization": f"Bearer {secret}"}
+        headers = {"authorization": f"Bearer {compose_bearer_locator(credential_id, secret)}"}
 
         # R2DB_AUDIT_DSN unset entirely -- the D-5 M-4 default.
         unavailable_app = control_main.build_control_app(dict(base_env))
@@ -2891,12 +2913,16 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform
             seed_store.add(credential_id, secret, work=work)
             seed_store.rotate(credential_id, secret, work=work)  # clears must_rotate (R-5)
 
-        headers = {"authorization": f"Bearer {secret}"}
+        headers = {"authorization": f"Bearer {compose_bearer_locator(credential_id, secret)}"}
         base_env = {
             "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            # Phase 6 WP-2 (design D-2): unconditionally required by
+            # `build_control_app` now.
+            "R2DB_DATA_BASE_URL": "https://r2db-audit-query-test.example.invalid/v1",
+            "R2DB_CONTROL_BASE_URL": "https://r2db-audit-query-control-test.example.invalid/control/v1",
         }
 
         # (i) declaration: env unset -> the untouched default (1_048_576,

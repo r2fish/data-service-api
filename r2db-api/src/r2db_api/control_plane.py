@@ -73,7 +73,7 @@ from .audit_query import (
     decode_cursor,
     encode_cursor,
 )
-from .auth import AuthContext, ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork
+from .auth import AuthContext, ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork, compose_bearer_locator
 from .errors import FoundationError, fail
 from .limits import ControlPlaneLimits
 from .service import ControlAuthority
@@ -634,9 +634,16 @@ class ControlPlaneService:
         audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
         audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
         audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
+        surfaces: dict[str, Any] | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit
+        # Phase 6 WP-2 (design D-2): same constructor-injected, echo-only
+        # discipline as `DataService.__init__`'s own `surfaces` parameter --
+        # see that class's comment. `control_main.py` (the real composition
+        # root) assembles this from the same two `R2DB_*_BASE_URL`
+        # environment variables `main.py` reads.
+        self._surfaces = surfaces
         self._limits = limits or ControlPlaneLimits()
         self._clock = clock or time.monotonic
         self._rate_lock = threading.Lock()
@@ -703,15 +710,19 @@ class ControlPlaneService:
         # `audit_query` itself is `enabled`, exactly like every other
         # `ControlPlaneLimits` field the generic comprehension above already
         # marks "enforced".
-        return {
+        document: dict[str, Any] = {
             # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
-            # version_binding`): the flip lands in the SAME commit as the
-            # real `audit_query` behavior below -- unconditional (every
-            # instance of this service declares 1.4.0 now, whether or not
-            # `audit_query` itself is `enabled` on this deployment; the
-            # 1.4.0 obligations that are conditional on `audit_query` being
-            # provided stay conditional per version_binding's own text).
-            "contract_version": "1.5.0",
+            # version_binding`), flipped to 1.5.0 in phase 5 WP-3, flipped
+            # to 1.6.0 in phase 6 WP-2 (design docs/design/
+            # PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md, subordinate
+            # ruling 11): the flip lands in the SAME commit as the real
+            # `audit_query`/locator-credential/`surfaces` behavior --
+            # unconditional (every instance of this service declares 1.6.0
+            # now, whether or not `audit_query` itself is `enabled` on this
+            # deployment; the 1.4.0 obligations that are conditional on
+            # `audit_query` being provided stay conditional per version_
+            # binding's own text).
+            "contract_version": "1.6.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -721,6 +732,15 @@ class ControlPlaneService:
             "authorization_propagation_bound_ms": 0,
             "role": context.role,
         }
+        # Phase 6 WP-2 (design D-2): optional key, present only when this
+        # instance was constructed with one (`__init__`'s own comment on
+        # `self._surfaces`). A live control-plane process' own control
+        # surface is, by definition, provided (this method answering at all
+        # means so) -- the composition root only ever constructs this class
+        # with both `surfaces.data`/`surfaces.control` present together.
+        if self._surfaces is not None:
+            document["surfaces"] = self._surfaces
+        return document
 
     def _audit_capability_declaration(self) -> dict[str, Any]:
         """Phase 4 WP-2(b) (design D-5's own JSON shape). `status`'s
@@ -913,9 +933,14 @@ class ControlPlaneService:
         secret_value = _new_secret()
 
         def _body(work: Any) -> dict[str, Any]:
+            # Phase 6 WP-2 (design D-1(c), item 1): the STORE receives the
+            # raw, freshly-generated `secret_value` (its own verifier is
+            # computed from exactly that value) -- only the RESPONSE's
+            # `secret` is the composed bearer (`compose_bearer_locator`).
+            # `credential_id` stays a separate response field, unchanged.
             self._backend.issue_credential(credential_id, application_id, role, secret_value, work=work)
             self._write_state_audit(work, event_class="credential_lifecycle", operation="issue_credential", target_kind="credential", application_id=application_id, target_id=credential_id, actor=context, request_id=request_id)
-            return {"credential_id": credential_id, "application_id": application_id, "role": role, "secret": secret_value}
+            return {"credential_id": credential_id, "application_id": application_id, "role": role, "secret": compose_bearer_locator(credential_id, secret_value)}
 
         return self._run_state_change(self._backend.credentials_unit_of_work, _body)
 
@@ -966,18 +991,21 @@ class ControlPlaneService:
             fail("VALIDATION_FAILED", "A revoked credential cannot be rotated.")
         new_secret = _new_secret()
 
+        # Phase 6 WP-2 (design D-1(c), item 1): same raw-to-store/composed-
+        # in-response split as `issue_credential` above, for both the
+        # application and control branches below.
         if kind == "application":
             def _body(work: Any) -> dict[str, Any]:
                 self._backend.rotate_credential(credential_id, new_secret, work=work)
                 self._write_state_audit(work, event_class="credential_lifecycle", operation="rotate_credential", target_kind="credential", target_id=credential_id, actor=context, request_id=request_id)
-                return {"credential_id": credential_id, "secret": new_secret}
+                return {"credential_id": credential_id, "secret": compose_bearer_locator(credential_id, new_secret)}
 
             return self._run_state_change(self._backend.credentials_unit_of_work, _body)
 
         def _control_body(work: Any) -> dict[str, Any]:
             self._backend.rotate_control_credential(credential_id, new_secret, work=work)
             self._write_state_audit(work, event_class="control_credential_lifecycle", operation="rotate_credential", target_kind="control_credential", target_id=credential_id, actor=context, request_id=request_id)
-            return {"credential_id": credential_id, "secret": new_secret}
+            return {"credential_id": credential_id, "secret": compose_bearer_locator(credential_id, new_secret)}
 
         return self._run_state_change(self._backend.control_credentials_unit_of_work, _control_body)
 
@@ -1657,8 +1685,18 @@ def bootstrap_control_credential(
     enclosing `unit_of_work()` rollback, not through any handling here.
 
     Returns `(credential_id, secret)`. `credential_id`/`secret` may be
-    supplied by the caller (parity/replay tests); by default both are
-    freshly generated.
+    supplied by the caller (parity/replay tests) -- when supplied, `secret`
+    is the RAW value the store is asked to record (matching this function's
+    pre-WP-2 contract for those callers); by default both are freshly
+    generated. Phase 6 WP-2 (design D-1(c), r2db decision (c): "control
+    credential = bootstrap / reset / rotate" among this repository's own
+    issuance points that must return a composed bearer): the STORE always
+    receives the raw secret (its own verifier is computed from exactly that
+    value); the RETURNED `secret` is the composed bearer
+    (`compose_bearer_locator`) -- this is this ceremony's own issuance
+    point, so composition happens here, once, rather than at each of this
+    function's two callers (`ops.py cmd_bootstrap`'s `_print_issued`, and
+    the in-process conformance adapter's `bootstrap()`).
     """
     credential_id = credential_id or _new_control_credential_id()
     secret = secret or _new_secret()
@@ -1670,7 +1708,7 @@ def bootstrap_control_credential(
         actor_type=actor_type, actor_id=None, role=None, operation="bootstrap_control_credential",
         target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id, work=work,
     )
-    return credential_id, secret
+    return credential_id, compose_bearer_locator(credential_id, secret)
 
 
 def reset_control_credentials(
@@ -1698,7 +1736,9 @@ def reset_control_credentials(
         actor_type=actor_type, actor_id=None, role=None, operation="reset_control_credentials",
         target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id, work=work,
     )
-    return credential_id, secret
+    # Phase 6 WP-2 (design D-1(c)): same raw-to-store/composed-in-response
+    # split as `bootstrap_control_credential` above.
+    return credential_id, compose_bearer_locator(credential_id, secret)
 
 
 def issue_audit_credential_ceremony(
@@ -1733,6 +1773,9 @@ def issue_audit_credential_ceremony(
 
     Returns `(credential_id, secret)` -- `secret` is the one that actually
     authenticates (post-rotation); `must_rotate` is `false` for it already.
+    Phase 6 WP-2 (design D-1(c)): `secret` is the composed bearer
+    (`compose_bearer_locator`) -- the store itself still receives/rotates
+    on the raw `distributed_secret`.
     """
     credential_id = credential_id or _new_control_credential_id()
     issuance_secret = _new_secret()
@@ -1744,7 +1787,7 @@ def issue_audit_credential_ceremony(
         actor_type=actor_type, actor_id=None, role=None, operation="issue_audit_credential",
         target_kind="control_credential", outcome="allow", reason_code=None, target_id=credential_id, work=work,
     )
-    return credential_id, distributed_secret
+    return credential_id, compose_bearer_locator(credential_id, distributed_secret)
 
 
 __all__ = [

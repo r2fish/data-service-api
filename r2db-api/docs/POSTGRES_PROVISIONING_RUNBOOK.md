@@ -584,6 +584,8 @@ not a partial startup:
 | `R2DB_PLATFORM_POOL_SIZE` | no, default `4` | The platform pool's own cap -- see §4's "+ platform pool" note. |
 | `R2DB_PLATFORM_SCHEMA` | no, default `r2dbsvc_registry` | **TEST-ONLY -- never set this in a real deployment.** Overrides the registry schema name `PostgresCredentialStore`/`r2db_api.main` look `applications`/`credentials` up under. Its only reason to exist is so this repository's own test suite and the conformance adapter -- which run the real migration files with `r2dbsvc` textually rewritten to a random throwaway prefix, to avoid colliding with anything else in a shared local cluster -- can point a built app at their own rewritten schema. A real deployment always uses the literal schema `0005_credential_store.sql` creates and must leave this unset. |
 | `R2DB_CONTROL_PLANE_STATUS` | no, default `unavailable` | CCR-14 (R-9, `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`). Allowed values are exactly `enabled`/`unavailable`; anything else is a startup failure, never a silent fallback. This is a **deployer declaration**, not a detected fact -- this process cannot verify on its own whether a `/control/v1` control-plane process (`r2db_api.control_main`) is actually reachable. Set it to `enabled` only once that process is genuinely deployed and reachable (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7); the authoritative check for "is a control plane actually reachable" in a separated deployment is always the control plane's own `GET /control/v1/capabilities`, never this declaration. |
+| `R2DB_DATA_BASE_URL` | yes (Phase 6 WP-2, design `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2) | This deployment's own absolute data-surface base URL, declared as `CapabilityDocument.surfaces.data.base_url` (contract 1.6.0, unconditional obligation). Checked at startup for SHAPE only -- must be an absolute URL, must end with `/v1`, must not end with a trailing slash; a relative value, a wrong suffix, or a trailing slash is a startup failure naming this variable. **A deployer-stated fact, never derived from a request's Host header.** |
+| `R2DB_CONTROL_BASE_URL` | yes, whenever `R2DB_CONTROL_PLANE_STATUS` is other than `unavailable`; unread otherwise | This deployment's own absolute control-surface base URL, declared as `surfaces.control.base_url`. Same shape check as `R2DB_DATA_BASE_URL` above, except the required suffix is `/control/v1`. **Read by BOTH `r2db_api.main` and `r2db_api.control_main`** -- the same variable name, so both processes' capability documents can return the identical `surfaces` object (§7 of the deployment runbook has the control-plane process' own copy of this variable, which is unconditionally required there). Checking only the SHAPE of each process' own value is a structural limit, not an oversight: neither process can verify that the OTHER process was actually configured with the matching value -- see `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §3 D-2 and ledger item L6-5a. Verify agreement manually after any change to either `api.env`/`control.env` (§15's own "配備後チェック" precedent): `curl` both `.../v1/capabilities` and `.../control/v1/capabilities` and diff their `surfaces` objects. |
 
 The corresponding synthetic entries already exist in `deploy/env/api.env.example`
 (P3-D8), following the existing repository-root `.env.example` pattern --
@@ -752,6 +754,62 @@ python -m r2db_api.ops rotate-control-credential <credential_id>   # replace its
 Neither offers an *un-revoke* -- revocation stays terminal by design (SI-13:
 un-revoking would make a durably-recorded revocation event false); the only
 recovery from a revoked control credential is `reset`.
+
+## 12a. Phase 6 WP-2: existing-credential re-issuance for the locator wire form (D-1)
+
+Contract 1.6.0 (subordinate ruling 11, item 1) requires that a credential's
+`secret` be presented **verbatim, whole**, as `Authorization: Bearer
+<secret>`. This peer's common realization (design docs/design/
+PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md D-1(c)) is a locator token,
+`<credential_id>.<secret>`, joined by a single `.` -- authentication now
+resolves the row by `credential_id` (a `credential_id`-keyed lookup,
+`credential_store.py`'s `_SELECT_BY_ID`) and THEN checks the secret's digest,
+rather than the pre-1.6.0 digest-keyed lookup alone.
+
+**No migration and no re-hash is required at the database level** -- the
+stored `verifier` column is unchanged in shape and content (still `HMAC-
+SHA256(pepper, secret)` of the same *secret* value each credential was
+issued with); only the WIRE form the client presents has changed, from the
+bare secret to the composed locator. **This means every credential issued
+before this peer's own 1.6.0 flip -- both application credentials
+(`r2dbsvc_registry.credentials`) and control credentials (`control_
+credentials`) -- can no longer authenticate as-is**: a client presenting
+only the old bare secret (no `credential_id.` prefix) now fails closed with
+`AUTH_INVALID` (SI-15's own fail-closed-on-malformed-locator rule), the
+identical response an unknown credential produces (SI-10: the response
+never distinguishes the two).
+
+**There is no compatibility shim and none is planned** (design's own
+"互換シムを置かない" ruling) -- there is no dual-form transitional period.
+**Operator action required, once, at or before this peer's 1.6.0 rollout**:
+every application and control credential that must keep working needs a
+fresh secret, via the ordinary rotation path, not a new provisioning step
+(the row/`credential_id`/scope are unchanged -- only the secret half):
+
+```
+# Application credentials (repeat per credential_id that must keep working):
+R2DB_CONTROL_DSN=... R2DB_CREDENTIAL_PEPPER=... \
+  python -m r2db_api.ops rotate-credential <credential_id>
+
+# Control credentials (break-glass, works even with /control/v1 down):
+R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... \
+  python -m r2db_api.ops rotate-control-credential <credential_id>
+```
+
+Each command prints the SAME two lines as issuance (`credential_id:` /
+`secret:`) -- the printed `secret:` is now the complete, composed bearer
+token; copy it whole (never split it, never re-derive a locator from a
+`credential_id` you already know and an old bare secret you happen to
+still have -- both are contract violations a conformant client must not
+make, and this peer's own store no longer has a row keyed on the old bare
+secret's digest to match against regardless). This is a Stage 1 concern
+only in the sense that Stage 1 (`DEPLOYMENT_RUNBOOK.md` §0) carries no
+production traffic yet -- there is no live client to coordinate a rotation
+window with. A deployment that has already taken production traffic before
+adopting 1.6.0 must treat this rotation as a **breaking, coordinated
+credential-rollover event**, not a background operation: every holder of an
+affected credential needs the new composed secret before (or immediately
+after) the flip, or their next request fails closed.
 
 ## 13. Control-plane lockout paths and recovery
 

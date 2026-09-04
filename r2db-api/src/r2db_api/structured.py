@@ -545,11 +545,23 @@ def require_destructive_confirmation(
         )
 
 
-FIELD_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-3(i)): the contract's field-type vocabulary gains a 7th member,
+# `json` (any JSON value) -- the honest name for what an untyped field
+# already was (`_check_type` below, `field_type is None`: JSONB-equivalent,
+# any JSON value accepted). `json` is a real, declarable word in THIS set
+# (accepted by `add_field`'s `field_type` and `create_entity`'s new
+# `field_types`, below) -- it is translated to the pre-existing internal
+# `None` representation at bind time (see `bind_schema_operation` below),
+# never stored as the literal string "json", so every existing `field_type
+# is None` code path (this file's own `_check_type` NUL-check inclusion,
+# `postgres.py`'s own JSONB-default DDL) keeps working unchanged for a
+# field whose type was explicitly declared `json`.
+FIELD_TYPES = {"string", "integer", "number", "boolean", "object", "array", "json"}
 MAX_INDEX_FIELDS = 16
 
 SCHEMA_OPERATIONS = {"create_entity", "add_field", "drop_entity", "create_index", "drop_index"}
-_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "destructive", "confirmation", "revision", "index", "unique", "field_type"}
+_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type"}
 
 
 @dataclass(frozen=True)
@@ -564,6 +576,14 @@ class BoundSchemaOperation:
     index: str | None = None
     index_fields: tuple[str, ...] = ()
     unique: bool = False
+    # Phase 6 WP-2 (design D-3(iv)): `create_entity`'s own optional,
+    # per-field type declarations (`SchemaOperationRequest.field_types`) --
+    # a `{field_name: declared_type}` map, ALREADY translated (`json` ->
+    # `None`, see `bind_schema_operation` below) to this file's own internal
+    # vocabulary. Only ever populated for `create_entity`; empty (never
+    # `None`) for every other operation, so a caller never needs an
+    # `is None` check before `.get(...)`-ing it.
+    field_types: dict[str, str | None] = field(default_factory=dict)
 
 
 def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOperation:
@@ -595,6 +615,11 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # this contract version did (this key simply didn't exist in
         # `_SCHEMA_KEYS` then), so this is not new external behaviour.
         fail("VALIDATION_FAILED", "field_type is only supported by add_field.")
+    if name != "create_entity" and "field_types" in operation:
+        # Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map)
+        # is accepted only by `create_entity` -- symmetric with `field_
+        # type`'s (the scalar) `add_field`-only rule immediately above.
+        fail("VALIDATION_FAILED", "field_types is only supported by create_entity.")
     if name != "create_index":
         # WP-2 review M-3: `index`/`unique` are meaningful only to
         # `create_index` (`drop_index` additionally accepts `index` as the
@@ -618,6 +643,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     fields: tuple[str, ...] = ()
     field_name: str | None = None
     field_type: str | None = None
+    field_types: dict[str, str | None] = {}
     index_name: str | None = None
     index_fields: tuple[str, ...] = ()
     unique = False
@@ -634,13 +660,66 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 fail("CONFLICT", "Field already exists.", status=409)
             validated.append(candidate)
         fields = tuple(validated)
+        # Phase 6 WP-2 (design D-3(iv)): `field_types` is an OPTIONAL,
+        # never-required key -- a `create_entity` carrying only `fields`
+        # (1.5.0's own shape) stays valid unchanged (every field it creates
+        # gets `field_types.get(name)` == `None` == `json`, decision (ii)'s
+        # default). Three invalid shapes are `VALIDATION_FAILED` (design's
+        # own enumeration, all three checked here so the field-name/word
+        # checks below never run against a request this repository already
+        # knows is malformed at a higher level):
+        if "field_types" in operation:
+            # (c) `field_types` sent without `fields` at all -- checked
+            # against the RAW request key, not the (always-present, maybe-
+            # empty) `raw_fields` local above, so a request that omits
+            # `fields` entirely is caught here even though `operation.get(
+            # "fields", [])` already defaulted it to `[]` for the loop
+            # above.
+            if "fields" not in operation:
+                fail("VALIDATION_FAILED", "field_types requires fields.")
+            raw_field_types = operation["field_types"]
+            if not isinstance(raw_field_types, dict):
+                fail("VALIDATION_FAILED", "field_types must be an object.")
+            declared_types: dict[str, str | None] = {}
+            for declared_field, declared_type in raw_field_types.items():
+                # (a) a name field_types declares that `fields` never named.
+                if declared_field not in fields:
+                    fail("VALIDATION_FAILED", "field_types names a field that is not present in fields.", details={"field": declared_field})
+                # (b) a value outside the 7-word vocabulary. `isinstance`
+                # checked FIRST (coordinator F2, 2026-09-04 review): `in`
+                # against `FIELD_TYPES` (a `set`) raises `TypeError` for an
+                # unhashable value (a list/dict) rather than returning
+                # `False`, and `_endpoint` (http.py) maps an uncaught
+                # `TypeError` to a bare 503 -- `_check_object_shape`'s own
+                # JSON-Schema check does not constrain `field_types`'
+                # VALUES (only that the object's own top-level shape
+                # matches), so a list/dict/int/bool/null value reaches this
+                # line from real HTTP input, not merely from a
+                # bind_schema_operation direct call.
+                if not isinstance(declared_type, str) or declared_type not in FIELD_TYPES:
+                    fail("VALIDATION_FAILED", "Unsupported field type.", details={"field": declared_field})
+                # Decision (v1.3 G11): an explicitly declared `json` is the
+                # SAME internal representation as untyped (`None`) -- see
+                # `FIELD_TYPES`'s own module-level comment above for why
+                # (NUL-check inclusion, JSONB-default DDL).
+                declared_types[declared_field] = None if declared_type == "json" else declared_type
+            field_types = declared_types
     elif name == "add_field":
         field_name = validate_identifier(operation.get("field", ""))
         _reject_reserved_field(field_name)
         if "field_type" in operation:
             field_type = operation["field_type"]
-            if field_type not in FIELD_TYPES:
+            # Coordinator F2: same isinstance-first guard as create_entity's
+            # field_types values above -- closes the identical, pre-existing
+            # (not a WP-2 regression) hole on this scalar sibling in the
+            # same fix, per the review's own instruction not to leave a new
+            # vocabulary/peer asymmetry by fixing only one of the two.
+            if not isinstance(field_type, str) or field_type not in FIELD_TYPES:
                 fail("VALIDATION_FAILED", "Unsupported field type.", details={"field": field_name})
+            if field_type == "json":
+                # Decision (v1.3 G11): same json->None translation as
+                # create_entity's `field_types` values above.
+                field_type = None
     elif name == "create_index":
         # R-5: the physical index name is `{entity}__{index}` (double
         # underscore separated), so a client index name containing `__`
@@ -680,7 +759,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         _reject_reserved_prefix(index_name)
     elif name != "drop_entity":
         fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.")
-    return BoundSchemaOperation(name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique)
+    return BoundSchemaOperation(name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique, field_types=field_types)
 
 
 # --- CCR-13 return shapes (design R2DB_CCR13_STORAGE_V1.md §3, revised per
@@ -1136,10 +1215,16 @@ class ApplicationCell:
                 for index_name, info in sorted(self.indexes.get(name, {}).items())
                 if info["unique"]
             ]
+            # Phase 6 WP-2 (design D-3(iii)): every name in `fields` maps to
+            # its real type, drawn from the same 7-word vocabulary --
+            # `self.schema[name]`'s internal `None` (untyped) reports as
+            # `json`, decision (ii)'s own default, never left un-translated.
+            declared_field_types = self.schema.get(name, {})
             result.append(
                 {
                     "entity": name,
                     "fields": fields,
+                    "field_types": {field_name: declared_field_types.get(field_name) or "json" for field_name in fields},
                     "mutation_class": "mutable",
                     "address_fields": ["id"],
                     "address_reuse": "never",
@@ -1402,7 +1487,11 @@ class ApplicationCell:
             if bound.entity in self.entities:
                 fail("CONFLICT", "Entity already exists.", status=409)
             self.entities[bound.entity] = []
-            self.schema[bound.entity] = {name: None for name in bound.fields}
+            # Phase 6 WP-2 (design D-3(iv)): a name present in `bound.
+            # field_types` gets its declared type; every other name in
+            # `bound.fields` keeps the pre-WP-2 default (`None` == `json`,
+            # decision (ii)) via `dict.get`'s own implicit fallback.
+            self.schema[bound.entity] = {name: bound.field_types.get(name) for name in bound.fields}
             self.schema[bound.entity]["id"] = "integer"
             self.indexes[bound.entity] = {}
         elif bound.operation == "drop_entity":

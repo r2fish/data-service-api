@@ -43,6 +43,20 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "conformance"))
 
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-2): `conformance_adapter_r2db_http` imports `r2db_api.control_
+# main`, whose module-level `app = build_control_app()` reads real
+# `os.environ` the instant that module is first imported in this process
+# -- `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_URL` are now required there.
+# `setdefault` (never overwriting an already-set value) mirrors `test_
+# audit_query.py`'s own identical placeholder pattern for the SAME
+# import-order hazard -- these values are never actually read by anything
+# this test constructs (the real adapter builds its own control stack via
+# `assemble_control_stack(..., surfaces=_SURFACES)`, not `build_control_
+# app`), they exist only to satisfy the module-level side effect.
+os.environ.setdefault("R2DB_DATA_BASE_URL", "https://r2db-http-writer-timeouts-test.example.invalid/v1")
+os.environ.setdefault("R2DB_CONTROL_BASE_URL", "https://r2db-http-writer-timeouts-control-test.example.invalid/control/v1")
+
 import psycopg  # noqa: E402
 
 import conformance_adapter_r2db_http as _http_module  # noqa: E402

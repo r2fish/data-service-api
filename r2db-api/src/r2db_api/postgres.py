@@ -156,6 +156,7 @@ _RESERVED_INTERNAL_PREFIX = "_r2db"
 # which of the two a column was declared as. `sql.Identifier` (not
 # `sql.SQL`) is used for these two: they are catalog objects (domain
 # names), not built-in type keywords.
+_JSONB_SQL = sql.SQL("JSONB")
 _FIELD_TYPE_SQL: dict[str, "sql.SQL | sql.Identifier"] = {
     "string": sql.SQL("TEXT"),
     "integer": sql.SQL("BIGINT"),
@@ -163,8 +164,28 @@ _FIELD_TYPE_SQL: dict[str, "sql.SQL | sql.Identifier"] = {
     "boolean": sql.SQL("BOOLEAN"),
     "object": sql.Identifier("_r2db_json_object"),
     "array": sql.Identifier("_r2db_json_array"),
+    # Phase 6 WP-2 (design D-3, r2db decision (c)): `json` maps to the same
+    # bare JSONB every untyped field already used -- `bind_schema_operation`
+    # (structured.py) translates a declared `json` to the internal `None`
+    # representation before this dict is ever consulted for it, so this
+    # entry is not reached by that path; it exists so a per-field DDL
+    # applier that looks a type word up here directly (rather than
+    # special-casing `None` first) never hits a `KeyError` for `json`.
+    "json": _JSONB_SQL,
 }
-_JSONB_SQL = sql.SQL("JSONB")
+
+
+def _column_type_sql(field_type: str | None) -> "sql.SQL | sql.Identifier":
+    """Shared by `_add_field` and `_create_entity`'s own per-field DDL
+    (Phase 6 WP-2, design D-3): `None` (untyped/json) is the pre-CCR-13
+    JSONB default; any other value is looked up in `_FIELD_TYPE_SQL`
+    (falling back to JSONB defensively, never `KeyError`, for a value this
+    dict does not carry -- `bind_schema_operation` is the real gate that
+    already restricts values to the 7-word vocabulary before either caller
+    is reached)."""
+    if field_type is None:
+        return _JSONB_SQL
+    return _FIELD_TYPE_SQL.get(field_type, _JSONB_SQL)
 
 # The two DOMAIN types' own bare names (as `information_schema.columns.
 # domain_name` reports them -- unqualified, WP-3 review confirmed
@@ -791,6 +812,11 @@ class PostgresCell:
                 {
                     "entity": name,
                     "fields": sorted(table_info.columns),
+                    # Phase 6 WP-2 (design D-3(iii)): `table_info.columns`
+                    # is already `{field_name: declared_type_or_None}` --
+                    # `None` (untyped/JSONB) reports as `json`, decision
+                    # (ii)'s own default.
+                    "field_types": {field_name: (declared_type or "json") for field_name, declared_type in table_info.columns.items()},
                     # R-1/R-2/§2: every entity this backend provisions is
                     # server-addressed, mutable, and never reuses an
                     # address within one entity's lifetime -- there is no
@@ -1576,7 +1602,7 @@ class PostgresCell:
                         _reject_reserved_entity_name(bound.entity)
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
-                        self._create_entity(conn, bound.entity, bound.fields)
+                        self._create_entity(conn, bound.entity, bound.fields, bound.field_types)
                     elif bound.operation == "drop_entity":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1650,21 +1676,32 @@ class PostgresCell:
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
         return revision
 
-    def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...]) -> None:
+    def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...], field_types: dict[str, str | None] | None = None) -> None:
         # R-1/R-4: every entity table gets a server-assigned `id` address
         # (`GENERATED ALWAYS AS IDENTITY`, so the sequence is never
         # rewound by any statement reachable through this public API -- see
         # R-1's "採番識別子の非推論条項"/property-5 note) and an invisible,
         # per-row `_r2db_revision` (PostgreSQL 13+'s built-in
-        # `gen_random_uuid()`), ahead of the caller's own declared fields
-        # (always JSONB -- `create_entity` never carries a `field_type`,
-        # R-2). `"id"`/`"_r2db_revision"` are hardcoded server literals
-        # here, never client input, so composing them as fixed SQL text
-        # (rather than through `sql.Identifier`) does not reopen the
+        # `gen_random_uuid()`), ahead of the caller's own declared fields.
+        # `"id"`/`"_r2db_revision"` are hardcoded server literals here,
+        # never client input, so composing them as fixed SQL text (rather
+        # than through `sql.Identifier`) does not reopen the
         # identifier-injection surface D-4 closes for client-supplied names.
+        #
+        # Phase 6 WP-2 (design D-3, r2db decision (c)): a field named in
+        # `field_types` gets that declared type's real PostgreSQL column
+        # type (the same `_FIELD_TYPE_SQL` mapping `_add_field` below
+        # already uses); every other field keeps the pre-WP-2 default,
+        # JSONB (`field_types` defaults to `None`/empty, so an ordinary
+        # 1.5.0-shaped `create_entity` -- `fields` only, no `field_types` --
+        # creates every column JSONB, unchanged).
+        field_types = field_types or {}
         id_column = sql.SQL("id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY")
         revision_column = sql.SQL("{col} uuid NOT NULL DEFAULT gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
-        declared_columns = [sql.SQL("{col} JSONB").format(col=sql.Identifier(f)) for f in fields]
+        declared_columns = [
+            sql.SQL("{col} {type}").format(col=sql.Identifier(f), type=_column_type_sql(field_types.get(f)))
+            for f in fields
+        ]
         all_columns = sql.SQL(", ").join([id_column, revision_column] + declared_columns)
         statement = sql.SQL("CREATE TABLE {table} ({columns})").format(table=sql.Identifier(entity), columns=all_columns)
         with conn.cursor() as cur:
@@ -1780,8 +1817,7 @@ class PostgresCell:
     def _add_field(self, conn: "psycopg.Connection[Any]", entity: str, field: str, field_type: str | None) -> None:
         # R-2: `field_type` maps to a real typed column; omitted keeps the
         # pre-CCR-13 default, JSONB.
-        column_type = _FIELD_TYPE_SQL.get(field_type, _JSONB_SQL) if field_type is not None else _JSONB_SQL
-        statement = sql.SQL("ALTER TABLE {table} ADD COLUMN {col} {type}").format(table=sql.Identifier(entity), col=sql.Identifier(field), type=column_type)
+        statement = sql.SQL("ALTER TABLE {table} ADD COLUMN {col} {type}").format(table=sql.Identifier(entity), col=sql.Identifier(field), type=_column_type_sql(field_type))
         with conn.cursor() as cur:
             _run(cur, statement)
 

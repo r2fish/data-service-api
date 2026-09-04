@@ -41,7 +41,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from r2db_api.audit import ApplicationAuditSink, AuditEvent
 from r2db_api.audit_hook import ApplicationAuditHook
-from r2db_api.auth import CredentialStore
+from r2db_api.auth import CredentialStore, compose_bearer_locator
 from r2db_api.credential_store import PostgresApplicationAuditSink, PostgresControlAuditSink
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
@@ -587,6 +587,8 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
             "R2DB_SERVE_APPS": app_a.slug,
             f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
             f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+            # Phase 6 WP-2 (design D-2): unconditionally required now.
+            "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
         }
         if statement_ms is not None:
             env["R2DB_AUDIT_STATEMENT_TIMEOUT_MS"] = statement_ms
@@ -632,6 +634,9 @@ def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_wri
             "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-ctl",
             "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-app",
             "R2DB_PLATFORM_SCHEMA": platform.schema,
+            # Phase 6 WP-2 (design D-2): unconditionally required now.
+            "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
+            "R2DB_CONTROL_BASE_URL": "https://r2db-application-audit-control-test.example.invalid/control/v1",
         }
         if statement_ms is not None:
             env["R2DB_AUDIT_STATEMENT_TIMEOUT_MS"] = statement_ms
@@ -686,6 +691,8 @@ def test_both_composition_roots_share_one_audit_timeout_default_definition(
         "R2DB_SERVE_APPS": app_a.slug,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+        # Phase 6 WP-2 (design D-2): unconditionally required now.
+        "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
     }
     main_module = _reload_module_with_env("r2db_api.main", main_env, monkeypatch)
 
@@ -694,6 +701,9 @@ def test_both_composition_roots_share_one_audit_timeout_default_definition(
         "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-control-ctl",
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-control-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
+        # Phase 6 WP-2 (design D-2): unconditionally required now.
+        "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
+        "R2DB_CONTROL_BASE_URL": "https://r2db-application-audit-control-test.example.invalid/control/v1",
     }
     control_main_module = _reload_module_with_env("r2db_api.control_main", control_env, monkeypatch)
 
@@ -785,11 +795,11 @@ def build_service(
 
 
 def runtime_context(service: DataService):
-    return service.authenticate("secret-a")
+    return service.authenticate(compose_bearer_locator("cred-a", "secret-a"))
 
 
 def developer_context(service: DataService):
-    return service.authenticate("dev-secret-a")
+    return service.authenticate(compose_bearer_locator("dev-a", "dev-secret-a"))
 
 
 def durable_events(durable_audit: Any) -> list[dict]:
@@ -1056,8 +1066,8 @@ def test_failed_data_commit_through_dataservice_writes_exactly_two_durable_rows(
     control = ControlAuthority(service)
     control.register_application(app_a.slug)
     try:
-        ctx = service.authenticate("secret-b1-runtime")
-        dev = service.authenticate("secret-b1-developer")
+        ctx = service.authenticate(compose_bearer_locator("cred-b1-runtime", "secret-b1-runtime"))
+        dev = service.authenticate(compose_bearer_locator("cred-b1-developer", "secret-b1-developer"))
         service.schema(dev, {"operation": "create_entity", "entity": "notes", "fields": ["body"]})
         service.mutate(ctx, "notes", [{"operation": "insert", "values": {"body": "a"}}])
 

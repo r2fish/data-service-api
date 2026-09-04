@@ -150,6 +150,17 @@ object-name prefix.
    identical between this file and `control.env` -- both derive the same
    declared `audit_query.visibility_lag_ms` (§7's table,
    `POSTGRES_PROVISIONING_RUNBOOK.md` §15).
+6. **Set `R2DB_DATA_BASE_URL`** (Phase 6 WP-2, design
+   `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2) to this deployment's
+   own real, absolute data-surface base URL (ending `/v1`, no trailing
+   slash) -- this process fails to start without it (§10 of the
+   provisioning runbook has the exact shape checks). **If this deployment
+   also runs the control-plane process (§7), `R2DB_CONTROL_BASE_URL` must
+   be set here too, to the IDENTICAL value §7's `control.env` uses** --
+   both processes' capability documents must return the same `surfaces`
+   object; neither process can detect a mismatch on its own (§10's own
+   note, ledger item L6-5a). Leave `R2DB_CONTROL_BASE_URL` unset here only
+   when `R2DB_CONTROL_PLANE_STATUS` stays `unavailable`.
 
 ### Step 3 -- choose and verify the internal port
 
@@ -511,6 +522,8 @@ see that module's docstring for the authoritative list):**
 |---|---|
 | `R2DB_CONTROLPLANE_DSN` | The `r2dbsvc_controlplane` role's DSN against `r2dbsvc_platform` (§11 of the provisioning runbook). Never `r2dbsvc_control` -- this process must not hold provisioning authority. |
 | `R2DB_CONTROL_CREDENTIAL_PEPPER` | Control-credential verifier HMAC pepper. **Must differ from `R2DB_CREDENTIAL_PEPPER`** (R-2) -- this process refuses to start if the two are equal. |
+| `R2DB_DATA_BASE_URL` | Required (Phase 6 WP-2, design `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2). This deployment's absolute data-surface base URL (must end `/v1`, no trailing slash) -- declared as `surfaces.data.base_url`. **Same variable name as the application-plane process' own `api.env`** -- both processes must be configured with the identical value (§10 of the provisioning runbook has the shape-check detail; neither process can verify the other agrees). |
+| `R2DB_CONTROL_BASE_URL` | Required (design D-2). This deployment's absolute control-surface base URL (must end `/control/v1`, no trailing slash) -- declared as `surfaces.control.base_url`. Unlike the application-plane process (where this variable is conditional on `R2DB_CONTROL_PLANE_STATUS`), this process is unconditionally required to set it: a running control-plane process' own control surface is, by definition, provided. |
 | `R2DB_CREDENTIAL_PEPPER` | The same application-plane pepper `r2db_api.main` uses -- required here too (not merely "if configured"), because this process also issues/rotates *application* credentials in-band; see `control_main`'s own module docstring for why this departs from an earlier design-table reading. |
 | `R2DB_CONTROL_LIMIT_APPLICATIONS` / `R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION` / `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE` | Optional, SI-08 resource bounds (R-7); default to the contract's `example_profile` values if unset. |
 | `R2DB_PLATFORM_SCHEMA` / `R2DB_PLATFORM_POOL_SIZE` | Optional -- identical escape hatch/tuning knob to the application-plane process' own (§10 of the provisioning runbook); a real deployment leaves `R2DB_PLATFORM_SCHEMA` unset. |
@@ -582,7 +595,7 @@ placeholder values and the same style as `deploy/env/api.env.example`, is
      https://control.example.invalid:<internal port>/control/v1/capabilities
    ```
    Expected: `200 application/json`, `capabilities.control_plane.status ==
-   "enabled"`, `capabilities.contract_version == "1.5.0"`, and the SI-08
+   "enabled"`, `capabilities.contract_version == "1.6.0"`, and the SI-08
    `limits`/`limit_enforcement` (all three classes `enforced`). When
    `R2DB_AUDIT_DSN` is wired, `capabilities.audit_query.status` is `enabled`
    and the entry carries three NON-EMPTY declared vocabularies:
@@ -592,7 +605,17 @@ placeholder values and the same style as `deploy/env/api.env.example`, is
    toggle, not a failure (`POSTGRES_PROVISIONING_RUNBOOK.md` §15). A build
    predating contract 1.5.0 declares `1.4.0` and has neither new key, which is
    conformant for THAT version -- what must never disagree is the declared
-   version and the declared keys. **Unlike the application plane's own `/v1/capabilities`
+   version and the declared keys. Also new in contract 1.6.0: the response
+   carries a `surfaces` object (`{"data": {"base_url": ...}, "control":
+   {"base_url": ...}}`, from this process' own `R2DB_DATA_BASE_URL`/
+   `R2DB_CONTROL_BASE_URL` above) that must be byte-identical to the SAME
+   key in the application plane's own `GET /v1/capabilities` response --
+   diff the two if you have any doubt they were configured from the same
+   values (`POSTGRES_PROVISIONING_RUNBOOK.md` §10's own note on this).
+   **A credential issued by a build predating this peer's own 1.6.0 flip
+   will not authenticate here (or on the application plane) until it is
+   rotated** -- see `POSTGRES_PROVISIONING_RUNBOOK.md` §12a for why (D-1's
+   locator wire form) and the exact rotation commands. **Unlike the application plane's own `/v1/capabilities`
    check (§2 step 6), there is no no-credential variant of this check that
    returns `200`** -- `GET /control/v1/capabilities` authenticates the
    caller exactly like every other `/control/v1` endpoint (`Control

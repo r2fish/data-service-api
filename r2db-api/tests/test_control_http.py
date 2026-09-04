@@ -29,7 +29,7 @@ import pytest
 
 from r2db_api.audit import ControlAuditSink
 from r2db_api.audit_query import InMemoryAuditQueryStore
-from r2db_api.auth import ControlCredentialStore, CredentialStore
+from r2db_api.auth import ControlCredentialStore, CredentialStore, compose_bearer_locator
 from r2db_api.control_http import _ROUTES, create_control_app
 from r2db_api.control_plane import _AUDIT_ROLE_ALLOWED_OPERATIONS, ControlPlaneService, InMemoryControlBackend
 from r2db_api.http import create_app
@@ -92,7 +92,11 @@ def _build_control_harness(limits: ControlPlaneLimits | None = None) -> types.Si
         service=service,
         control_credentials=control_credentials,
         audit=audit,
-        secret=_SEED_SECRET,
+        # Phase 6 WP-2 (design D-1(c)): every caller of this harness uses
+        # `.secret` as a `Bearer` value straight into `_auth()` -- the
+        # composed locator form, not the raw secret half `.add`/`.rotate`
+        # above were seeded with.
+        secret=compose_bearer_locator(_SEED_CREDENTIAL_ID, _SEED_SECRET),
         credential_id=_SEED_CREDENTIAL_ID,
         data_service=data_service,
         authority=authority,
@@ -537,7 +541,7 @@ async def test_audit_query_without_reader_answers_an_audit_role_credential_with_
 
     transport = httpx.ASGITransport(app=create_control_app(service))
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
-        response = await client.post("/control/v1/audit/query", headers=_auth(audit_secret), json={"limit": 1})
+        response = await client.post("/control/v1/audit/query", headers=_auth(compose_bearer_locator(audit_credential_id, audit_secret)), json={"limit": 1})
     assert response.status_code != 404
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
     assert response.json()["code"] not in ("FORBIDDEN", "NOT_FOUND")
@@ -680,6 +684,10 @@ _VALID_ENV = {
     "R2DB_CONTROLPLANE_DSN": "host=/tmp port=1 dbname=r2db_control_http_test_unreachable",
     "R2DB_CONTROL_CREDENTIAL_PEPPER": "control-main-test-control-pepper-0000",
     "R2DB_CREDENTIAL_PEPPER": "control-main-test-app-pepper-0000",
+    # Phase 6 WP-2 (design D-2): `build_control_app` unconditionally
+    # requires both surfaces vars now.
+    "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
+    "R2DB_CONTROL_BASE_URL": "https://r2db-control-test.example.invalid/control/v1",
 }
 
 
@@ -796,7 +804,7 @@ def test_application_plane_still_declares_control_plane_unavailable():
     authority.register_application("app_single_commit_check")
     with credentials.unit_of_work() as work:
         credentials.add("cred-single-commit", "app_single_commit_check", "runtime", "secret-single-commit", work=work)
-    context = data_service.authenticate("secret-single-commit")
+    context = data_service.authenticate(compose_bearer_locator("cred-single-commit", "secret-single-commit"))
     document = data_service.capabilities(context)
     assert document["capabilities"]["control_plane"] == {"status": "unavailable"}
 
@@ -866,7 +874,7 @@ async def test_audit_role_http_authorization_matrix_all_13_endpoints(control_har
     transport = httpx.ASGITransport(app=create_control_app(control_harness.service))
     control_headers = _auth(control_harness.secret)
     audit_id, audit_secret = _seed_audit_credential(control_harness)
-    audit_headers = _auth(audit_secret)
+    audit_headers = _auth(compose_bearer_locator(audit_id, audit_secret))
 
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
         registered = await client.post("/control/v1/applications", headers=control_headers, json={"application_id": "app_audit_matrix"})

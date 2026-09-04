@@ -28,7 +28,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from r2db_api.audit import ControlAuditSink
-from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore
+from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore, compose_bearer_locator
 from r2db_api.control_plane import (
     ControlPlaneService,
     InMemoryControlBackend,
@@ -226,12 +226,22 @@ def _memory_harness(limits: ControlPlaneLimits) -> types.SimpleNamespace:
     audit = ControlAuditSink()
     service = ControlPlaneService(backend, audit=audit, limits=limits, clock=lambda: _clock_state["now"])
 
-    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> None:
+    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> str:
+        # Phase 6 WP-2 (design D-1(c)): the store's own `verifier` is still
+        # computed from the RAW `secret` this function is given -- what
+        # changes is that authenticating against this store now requires
+        # the LOCATOR bearer (`credential_id.secret`), not the raw secret
+        # alone. Returning that composed bearer (rather than leaving every
+        # call site to compose it by hand) is what every caller below now
+        # reassigns its own `secret`-named local to, immediately after
+        # seeding -- see the call sites' own `secret = h.seed_control_
+        # credential(...)` form.
         with control_credentials.unit_of_work() as work:
             control_credentials.add(credential_id, secret, role=role, work=work)
         if not must_rotate:
             with control_credentials.unit_of_work() as work:
                 control_credentials.rotate(credential_id, secret, work=work)
+        return compose_bearer_locator(credential_id, secret)
 
     def revoke_control_credential_directly(credential_id: str) -> None:
         with control_credentials.unit_of_work() as work:
@@ -296,12 +306,15 @@ def _postgres_harness(platform: types.SimpleNamespace, limits: ControlPlaneLimit
     seed_store = PostgresControlCredentialStore(platform.control_dsn, pepper=CONTROL_PEPPER, schema=platform.schema)
     read_sink = PostgresControlAuditSink(platform.control_dsn, schema=platform.schema)
 
-    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> None:
+    def seed_control_credential(credential_id: str, secret: str, *, must_rotate: bool = True, role: str = "control") -> str:
+        # Phase 6 WP-2 (design D-1(c)): same raw-store/composed-return split
+        # as `_memory_harness`'s own identically-named function above.
         with seed_store.unit_of_work() as work:
             seed_store.add(credential_id, secret, role=role, work=work)
         if not must_rotate:
             with seed_store.unit_of_work() as work:
                 seed_store.rotate(credential_id, secret, work=work)
+        return compose_bearer_locator(credential_id, secret)
 
     def revoke_control_credential_directly(credential_id: str) -> None:
         with seed_store.unit_of_work() as work:
@@ -480,7 +493,7 @@ def test_role_control_issuance_refused_regardless_of_application_state(kind, pla
     try:
         cred_id = _fresh_id("ctl_")
         secret = "actor-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         # (i) application does not exist at all.
         with pytest.raises(FoundationError) as exc:
@@ -512,7 +525,7 @@ def test_must_rotate_gate_precedes_target_resolution(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "mr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=True)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=True)
 
         with pytest.raises(FoundationError) as exc:
             h.service.set_application_enabled(secret, "definitely_absent_app", True)
@@ -533,7 +546,7 @@ def test_must_rotate_allow_list_and_full_access_after_self_rotate(kind, platform
     try:
         cred_id = _fresh_id("ctl_")
         secret = "gate-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=True)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=True)
 
         # Allowed while must_rotate: capabilities.
         caps = h.service.capabilities(secret)
@@ -608,7 +621,7 @@ def test_each_state_change_adds_exactly_one_audit_row(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "audit-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         before = len(h.audit_events())
         app_id = _fresh_id("ad")
@@ -635,7 +648,7 @@ def test_each_state_change_adds_exactly_one_audit_row(kind, platform):
         # *second* control credential, distinct from the actor).
         target_id = _fresh_id("ctl_")
         target_secret = "audit-target-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(target_id, target_secret, must_rotate=False)
+        target_secret = h.seed_control_credential(target_id, target_secret, must_rotate=False)
         after_seed = len(h.audit_events())  # seeding itself is out-of-band, not via the service -- no row expected
 
         h.service.rotate_credential(secret, target_id)
@@ -666,7 +679,7 @@ def test_state_change_sink_fault_injection_aborts_the_state_change(kind, platfor
     try:
         cred_id = _fresh_id("ctl_")
         secret = "fault-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         def _assert_authority_trail_unchanged(before: int) -> None:
             # MI-1: checked immediately after the faulted call, BEFORE any
@@ -726,7 +739,7 @@ def test_state_change_sink_fault_injection_aborts_the_state_change(kind, platfor
         else:  # set_credential_enabled_control
             target_id = _fresh_id("ctl_")
             target_secret = "fault-target-secret-" + secrets.token_urlsafe(8)
-            h.seed_control_credential(target_id, target_secret, must_rotate=False)
+            target_secret = h.seed_control_credential(target_id, target_secret, must_rotate=False)
             with _faulted_audit_sink(h, kind, platform):
                 with pytest.raises(FoundationError) as exc:
                     h.service.set_credential_enabled(secret, target_id, False)
@@ -754,11 +767,11 @@ def test_denial_audit_insert_failure_becomes_503_for_every_denial_kind(kind, pla
     try:
         cred_id = _fresh_id("ctl_")
         secret = "denyfault-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         mr_cred_id = _fresh_id("ctl_")
         mr_secret = "denyfault-mr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
+        mr_secret = h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
 
         app_id = _fresh_id("df")
         h.service.register_application(secret, app_id)
@@ -808,11 +821,11 @@ def test_authentication_denials_are_durably_audited_with_truthful_attribution(ki
 
         cred_id = _fresh_id("ctl_")
         secret = "attr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         disabled_id = _fresh_id("ctl_")
         disabled_secret = "attr-disabled-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(disabled_id, disabled_secret, must_rotate=False)
+        disabled_secret = h.seed_control_credential(disabled_id, disabled_secret, must_rotate=False)
         h.disable_control_credential_directly(disabled_id)
 
         # (MA-1) AUTH_REQUIRED -- no secret at all -- unattributed, recorded.
@@ -883,7 +896,7 @@ def test_applications_limit_at_exact_bound(kind, platform):
     seed_secret = "applim-seed-secret-" + secrets.token_urlsafe(8)
     seed_harness = _build_harness(kind, platform)
     try:
-        seed_harness.seed_control_credential(seed_credential_id, seed_secret, must_rotate=False)
+        seed_secret = seed_harness.seed_control_credential(seed_credential_id, seed_secret, must_rotate=False)
         baseline = len(seed_harness.service.list_applications(seed_secret)["applications"])
     finally:
         seed_harness.cleanup()
@@ -893,7 +906,7 @@ def test_applications_limit_at_exact_bound(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "applim-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         h.service.register_application(secret, _fresh_id("al"))
         h.service.register_application(secret, _fresh_id("al"))
@@ -919,7 +932,7 @@ def test_credentials_per_application_limit_ignores_revoked_rows(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "credlim-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("cl")
         h.service.register_application(secret, app_id)
 
@@ -947,7 +960,7 @@ def test_control_requests_per_minute_limit_and_window_recovery(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "ratelim-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         h.service.capabilities(secret)
         h.service.capabilities(secret)
@@ -978,7 +991,7 @@ def test_issued_secret_appears_only_in_the_response(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "sem-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("sm")
         h.service.register_application(secret, app_id)
         req_id = _fresh_id("req")
@@ -1036,12 +1049,121 @@ def test_issued_secret_appears_only_in_the_response(kind, platform):
 
 
 @pytest.mark.parametrize("kind", BACKENDS)
+def test_in_band_issue_and_rotate_return_a_verbatim_composed_bearer_for_both_credential_kinds(kind, platform):
+    """Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+    DISCOVERY_V1.md D-1(c)): `ControlPlaneService.issue_credential`'s
+    (application) and `.rotate_credential`'s (both application and
+    control) real in-band responses carry a `secret` that authenticates
+    VERBATIM -- no adapter-side, no test-side composition -- against the
+    real store each backend actually uses. This is the r2db in-band
+    issuance point's own positive control; the store-level verbatim/
+    malformed/uniform/order tests live in `test_control_plane_store.py`."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "verbatim-issue-secret-" + secrets.token_urlsafe(8)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("vi")
+        h.service.register_application(secret, app_id)
+
+        # (1) issue_credential's own response `secret`, presented verbatim,
+        # authenticates on the DATA surface (the application credential
+        # store, `h.credentials_store`).
+        issued = h.service.issue_credential(secret, app_id, "runtime")
+        app_context = h.credentials_store.authenticate(issued["secret"])
+        assert app_context.application_id == app_id
+        assert app_context.credential_id == issued["credential_id"]
+
+        # (2) rotate_credential's own response `secret` (application kind),
+        # presented verbatim, authenticates -- and the OLD verbatim secret
+        # no longer does.
+        rotated_app = h.service.rotate_credential(secret, issued["credential_id"])
+        with pytest.raises(FoundationError):
+            h.credentials_store.authenticate(issued["secret"])
+        app_context_2 = h.credentials_store.authenticate(rotated_app["secret"])
+        assert app_context_2.credential_id == issued["credential_id"]
+
+        # (3) rotate_credential's own response `secret` (control kind, this
+        # very credential self-rotating), presented verbatim, authenticates
+        # on the CONTROL surface.
+        rotated_control = h.service.rotate_credential(secret, cred_id)
+        caps = h.service.capabilities(rotated_control["secret"])
+        assert caps["role"] == "control"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_known_locator_wrong_secret_denial_stays_unattributed_despite_the_visible_id(kind, platform):
+    """Phase 6 WP-2 (design D-1(c), implementation constraint 3, B-1
+    ruling maintained): the locator now carries a `credential_id` in
+    plain sight inside the presented bearer -- this test pins that the
+    denial audit row for a KNOWN id / WRONG secret still attributes
+    `actor_id=None`, exactly like an entirely unknown locator does. A
+    regression that "helpfully" extracts the locator's own id half for
+    attribution (since it is now visible, unlike the old opaque secret)
+    would re-open the two B-1 holes (coalescing-window evasion by varying
+    the claimed id; a validly-shaped id used to probe existence) this
+    constraint exists to keep closed."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "unattributed-wrong-secret-" + secrets.token_urlsafe(8)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
+        # `cred_id` above is genuinely known to the store; only the secret
+        # half is wrong.
+        wrong_bearer = compose_bearer_locator(cred_id, "definitely-the-wrong-secret")
+        req_id = _fresh_id("req")
+        with pytest.raises(FoundationError) as exc:
+            h.service.capabilities(wrong_bearer, request_id=req_id)
+        assert exc.value.code == "AUTH_INVALID"
+        row = _find_audit_row_by_request_id(h, req_id)
+        assert row is not None
+        assert row.get("actor_id") is None
+        assert row.get("actor_type") == "unknown"
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
+def test_authenticate_application_on_the_control_backend_accepts_the_verbatim_composed_bearer(kind, platform):
+    """Phase 6 WP-2 (design D-1(c)): `ControlBackend.authenticate_
+    application` (`control_plane.py:515-525`, used by `audit_query`'s own
+    "is this secret actually an application credential" probe, D-5) MUST
+    NOT be a locator-unaware "片肺" (half) of D-1 -- it delegates to the
+    SAME `self._credentials` store `issue_credential`/`rotate_credential`
+    already use, so a verbatim in-band-issued application bearer must be
+    recognized here too, exactly as it is recognized by `DataService.
+    authenticate` on the data surface."""
+    h = _build_harness(kind, platform)
+    try:
+        cred_id = _fresh_id("ctl_")
+        secret = "auth-app-probe-secret-" + secrets.token_urlsafe(8)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
+        app_id = _fresh_id("aa")
+        h.service.register_application(secret, app_id)
+        issued = h.service.issue_credential(secret, app_id, "runtime")
+
+        app_context = h.service._backend.authenticate_application(issued["secret"])  # noqa: SLF001
+        assert app_context is not None
+        assert app_context.application_id == app_id
+
+        # A non-application (control) secret, or garbage, must NOT be
+        # recognized as an application credential (returns None, never
+        # raises -- this probe's own documented contract).
+        assert h.service._backend.authenticate_application(secret) is None  # noqa: SLF001
+        assert h.service._backend.authenticate_application("garbage") is None  # noqa: SLF001
+    finally:
+        h.cleanup()
+
+
+@pytest.mark.parametrize("kind", BACKENDS)
 def test_rotate_semantics_revoked_refused_disabled_allowed(kind, platform):
     h = _build_harness(kind, platform)
     try:
         cred_id = _fresh_id("ctl_")
         secret = "rot-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("rt")
         h.service.register_application(secret, app_id)
         issued = h.service.issue_credential(secret, app_id, "runtime")
@@ -1068,7 +1190,7 @@ def test_revoke_is_terminal_and_enable_does_not_un_revoke(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "term-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("tm")
         h.service.register_application(secret, app_id)
         issued = h.service.issue_credential(secret, app_id, "runtime")
@@ -1098,7 +1220,7 @@ def test_application_credential_revoke_accepts_q1_fields_without_inspecting_them
     try:
         cred_id = _fresh_id("ctl_")
         secret = "q1-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("q1")
         h.service.register_application(secret, app_id)
         issued = h.service.issue_credential(secret, app_id, "runtime")
@@ -1129,12 +1251,12 @@ def test_revoking_a_non_last_control_credential_accepts_q1_fields_without_inspec
     try:
         cred_id = _fresh_id("ctl_")
         secret = "q1-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         second_id = _fresh_id("ctl_")
         second_secret = "q1-secret2-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(second_id, second_secret, must_rotate=False)
+        second_secret = h.seed_control_credential(second_id, second_secret, must_rotate=False)
 
         # Two live control credentials now exist -- `second_id` is not the
         # last one, so its revoke is never gated.
@@ -1162,7 +1284,7 @@ def test_revoke_credential_rejects_truthy_non_boolean_destructive_and_non_string
     try:
         cred_id = _fresh_id("ctl_")
         secret = "b1-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         with pytest.raises(FoundationError) as exc:
@@ -1194,12 +1316,12 @@ def test_revoking_an_already_revoked_different_credential_is_never_gated_by_targ
     try:
         cred_id = _fresh_id("ctl_")
         secret = "m1-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         other_id = _fresh_id("ctl_")
         other_secret = "m1-other-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(other_id, other_secret, must_rotate=False)
+        other_secret = h.seed_control_credential(other_id, other_secret, must_rotate=False)
         h.revoke_control_credential_directly(other_id)  # already revoked -- not an active row
 
         # Exactly one active row (cred_id) exists now -- revoking the
@@ -1220,7 +1342,7 @@ def test_issuance_to_a_disabled_application_is_allowed(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "dis-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("da")
         h.service.register_application(secret, app_id)
         h.service.set_application_enabled(secret, app_id, False)
@@ -1272,7 +1394,7 @@ def test_revoking_the_last_live_control_credential_requires_confirmation(kind, p
     try:
         cred_id = _fresh_id("ctl_")
         secret = "last-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         with pytest.raises(FoundationError) as exc:
@@ -1318,7 +1440,7 @@ def test_revoking_the_last_live_control_credential_denial_carries_audited_and_at
     try:
         cred_id = _fresh_id("ctl_")
         secret = "aud-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         before_events = len(h.audit_events())
@@ -1465,11 +1587,11 @@ def test_credential_id_operations_resolve_across_both_tables(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "dual-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         second_control_id = _fresh_id("ctl_")
         second_control_secret = "dual-secret2-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(second_control_id, second_control_secret, must_rotate=False)
+        second_control_secret = h.seed_control_credential(second_control_id, second_control_secret, must_rotate=False)
 
         app_id = _fresh_id("dl")
         h.service.register_application(secret, app_id)
@@ -1500,7 +1622,7 @@ def test_negative_paths_validation_conflict_not_found(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "neg-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         # invalid application_id -> VALIDATION_FAILED
         with pytest.raises(FoundationError) as exc:
@@ -1551,7 +1673,7 @@ def test_deterrence_declarations_present_absent_and_futility(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "decl-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("dc")
         h.service.register_application(secret, app_id)  # consumes rate slot 1 of 2
 
@@ -1575,7 +1697,7 @@ def test_deterrence_declarations_present_absent_and_futility(kind, platform):
         try:
             cred_id2 = _fresh_id("ctl_")
             secret2 = "decl-secret2-" + secrets.token_urlsafe(8)
-            h2.seed_control_credential(cred_id2, secret2, must_rotate=False)
+            secret2 = h2.seed_control_credential(cred_id2, secret2, must_rotate=False)
             app_id2 = _fresh_id("dc")
             h2.service.register_application(secret2, app_id2)
             with pytest.raises(FoundationError) as exc:
@@ -1607,10 +1729,10 @@ def test_audited_true_round_trips_to_a_real_audit_row_for_every_denial_kind(kind
     try:
         cred_id = _fresh_id("ctl_")
         secret = "rt-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         mr_cred_id = _fresh_id("ctl_")
         mr_secret = "rt-mr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
+        mr_secret = h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
         app_id = _fresh_id("rv")
         h.service.register_application(secret, app_id)
 
@@ -1658,7 +1780,7 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "caps-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         caps = h.service.capabilities(secret)
         # Phase 4 WP-2(b) (P4-D4, contract 1.4.0 `versioning.
@@ -1666,8 +1788,10 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         # `audit_query`'s own real behavior. Phase 5 WP-2: re-flipped to
         # 1.5.0 in the same commit as the `operations`/`target_kinds`
         # declaration keys below (design D-4/§8 -- flip and behavior land
-        # together, never separately).
-        assert caps["contract_version"] == "1.5.0"
+        # together, never separately). Phase 6 WP-2: re-flipped again to
+        # 1.6.0 in the same commit as the locator-credential/`surfaces`
+        # behavior this WP ships.
+        assert caps["contract_version"] == "1.6.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         # This harness's `ControlPlaneService` is built with no `audit_
         # reader` (AUDIT DSN unconfigured) -- `audit_query` stays declared
@@ -1697,7 +1821,7 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         # must_rotate does not block capabilities (R-5).
         mr_cred_id = _fresh_id("ctl_")
         mr_secret = "caps-mr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
+        mr_secret = h.seed_control_credential(mr_cred_id, mr_secret, must_rotate=True)
         caps2 = h.service.capabilities(mr_secret)
         assert caps2["role"] == "control"
     finally:
@@ -1720,7 +1844,7 @@ def test_in_memory_backend_delegates_application_and_credential_lifecycle_to_con
     try:
         cred_id = _fresh_id("ctl_")
         secret = "deleg-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
 
         before = len(h.authority.audit_events())
         app_id = _fresh_id("dg")
@@ -1757,11 +1881,15 @@ def test_control_authority_work_parameter_defaults_preserve_existing_callers():
     authority = ControlAuthority(data_service)
     authority.register_application("legacy-app")
     authority.issue_credential("legacy-cred", "legacy-app", "runtime", "legacy-secret")
-    context = credentials.authenticate("legacy-secret")
+    # Phase 6 WP-2 (design D-1(c)): the store still records the verifier of
+    # the RAW "legacy-secret" this call passed -- authentication now needs
+    # the composed locator bearer, not the raw secret alone.
+    legacy_bearer = compose_bearer_locator("legacy-cred", "legacy-secret")
+    context = credentials.authenticate(legacy_bearer)
     assert context.application_id == "legacy-app"
     authority.set_credential_state("legacy-cred", enabled=False)
     with pytest.raises(FoundationError) as exc:
-        credentials.authenticate("legacy-secret")
+        credentials.authenticate(legacy_bearer)
     assert exc.value.code == "AUTH_INVALID"
 
 
@@ -1797,7 +1925,7 @@ def test_control_plane_module_importable_and_usable_without_psycopg() -> None:
         "    control_credentials.rotate('ctl_probe0000000', 'probe-secret', work=work)\n"
         "backend = cp.InMemoryControlBackend(authority, control_credentials)\n"
         "service = cp.ControlPlaneService(backend, audit=ControlAuditSink())\n"
-        "caps = service.capabilities('probe-secret')\n"
+        "caps = service.capabilities('ctl_probe0000000.probe-secret')\n"
         "assert caps['role'] == 'control'\n"
         "print('OK')\n"
     ) % (str(Path(__file__).resolve().parents[1] / "src"),)
@@ -1823,7 +1951,7 @@ def test_audit_role_accepted_on_exactly_the_three_read_endpoints(kind, platform)
     try:
         audit_id = _fresh_id("ctl_")
         audit_secret = "audit-read-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+        audit_secret = h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
 
         caps = h.service.capabilities(audit_secret)
         assert caps["role"] == "audit"
@@ -1869,7 +1997,7 @@ def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint(kind, 
     try:
         audit_id = _fresh_id("ctl_")
         audit_secret = "audit-write-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+        audit_secret = h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
 
         # A pre-existing application/credential (via a separate, ordinary
         # control credential) so every write attempt below targets a real
@@ -1878,7 +2006,7 @@ def test_audit_role_forbidden_fail_closed_on_every_other_control_endpoint(kind, 
         # way (design order).
         owner_id = _fresh_id("ctl_")
         owner_secret = "owner-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(owner_id, owner_secret, must_rotate=False)
+        owner_secret = h.seed_control_credential(owner_id, owner_secret, must_rotate=False)
         app_id = _fresh_id("aw")
         h.service.register_application(owner_secret, app_id)
         issued = h.service.issue_credential(owner_secret, app_id, "runtime")
@@ -1919,7 +2047,7 @@ def test_audit_role_must_rotate_gate_allows_only_capabilities(kind, platform):
     try:
         audit_id = _fresh_id("ctl_")
         audit_secret = "audit-mr-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(audit_id, audit_secret, must_rotate=True, role="audit")
+        audit_secret = h.seed_control_credential(audit_id, audit_secret, must_rotate=True, role="audit")
 
         caps = h.service.capabilities(audit_secret)
         assert caps["role"] == "audit"
@@ -1945,7 +2073,7 @@ def test_issuance_freeze_forbids_then_unfreeze_allows_again(kind, platform):
     try:
         cred_id = _fresh_id("ctl_")
         secret = "freeze-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("fz")
         h.service.register_application(secret, app_id)
 
@@ -1975,7 +2103,7 @@ def test_issuance_freeze_precedence_role_control_refused_before_freeze_check(kin
     try:
         cred_id = _fresh_id("ctl_")
         secret = "freeze-prec-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("fp")
         h.service.register_application(secret, app_id)
         h.set_application_issuance_frozen_directly(app_id, True)
@@ -1998,7 +2126,7 @@ def test_issuance_freeze_does_not_affect_already_issued_credentials(kind, platfo
     try:
         cred_id = _fresh_id("ctl_")
         secret = "freeze-live-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("fl")
         h.service.register_application(secret, app_id)
         issued = h.service.issue_credential(secret, app_id, "runtime")
@@ -2031,7 +2159,7 @@ def test_target_id_populated_for_application_and_credential_lifecycle_events(kin
     try:
         cred_id = _fresh_id("ctl_")
         secret = "tid-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         app_id = _fresh_id("ti")
 
         req_register = _fresh_id("req")
@@ -2088,12 +2216,12 @@ def test_revoke_gate_active_audit_credential_does_not_mask_last_active_control_c
     try:
         cred_id = _fresh_id("ctl_")
         secret = "gate-role-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         audit_id = _fresh_id("ctl_")
         audit_secret = "gate-role-audit-secret-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+        audit_secret = h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
 
         with pytest.raises(FoundationError) as exc:
             h.service.revoke_credential(secret, cred_id)
@@ -2119,12 +2247,12 @@ def test_revoke_gate_revoking_the_audit_credential_itself_is_never_gated(kind, p
     try:
         cred_id = _fresh_id("ctl_")
         secret = "gate-role-secret2-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(cred_id, secret, must_rotate=False)
+        secret = h.seed_control_credential(cred_id, secret, must_rotate=False)
         _ensure_sole_active_control_credential(h, cred_id)
 
         audit_id = _fresh_id("ctl_")
         audit_secret = "gate-role-audit-secret2-" + secrets.token_urlsafe(8)
-        h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
+        audit_secret = h.seed_control_credential(audit_id, audit_secret, must_rotate=False, role="audit")
 
         result = h.service.revoke_credential(secret, audit_id)
         assert result == {"credential_id": audit_id, "enabled": True, "revoked": True}

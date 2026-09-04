@@ -80,7 +80,7 @@ async def test_honest_oversized_body_is_rejected_with_413_before_parsing():
     async with _client(service) as client:
         response = await client.post(
             "/v1/data/notes/query",
-            headers=_auth("secret-a"),
+            headers=_auth("cred-a.secret-a"),
             json={"select": ["id"], "where": [{"field": "id", "operator": "eq", "value": "x" * 5000}]},
         )
     assert response.status_code == 413
@@ -158,7 +158,7 @@ async def test_declared_content_length_smaller_than_actual_body_is_still_bounded
 async def test_body_scope_fields_are_rejected_outright_and_have_no_effect(client):
     response = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "application_id": "app-b"},
     )
     assert response.status_code == 400
@@ -167,7 +167,7 @@ async def test_body_scope_fields_are_rejected_outright_and_have_no_effect(client
     for field, value in (("role", "developer"), ("database", "app-b"), ("schema", "app-b")):
         response = await client.post(
             "/v1/data/notes/mutations",
-            headers=_auth("secret-a"),
+            headers=_auth("cred-a.secret-a"),
             json={"operations": [{"operation": "insert", "values": {"id": 42}}], field: value},
         )
         assert response.status_code == 400, field
@@ -175,14 +175,14 @@ async def test_body_scope_fields_are_rejected_outright_and_have_no_effect(client
 
     # Prove scope really is server-bound: a syntactically valid request from
     # app-a's credential only ever sees app-a's row.
-    ok = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
+    ok = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
     assert ok.status_code == 200
     assert ok.json()["items"] == [{"id": 1}]
 
 
 async def test_cross_application_isolation_over_http(client):
-    resp_a = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
-    resp_b = await client.post("/v1/data/notes/query", headers=_auth("secret-b"), json={"select": ["id"]})
+    resp_a = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
+    resp_b = await client.post("/v1/data/notes/query", headers=_auth("cred-b.secret-b"), json={"select": ["id"]})
     assert resp_a.json()["items"] == [{"id": 1}]
     # app-b's `notes` is a separate cell with its own independent id
     # counter (CCR-13, R-1), so its one seeded row is also id 1 -- this
@@ -205,7 +205,7 @@ async def test_uncaught_exception_becomes_safe_generic_problem(monkeypatch):
 
     monkeypatch.setattr(service, "capabilities", boom)
     async with _client(service) as client:
-        response = await client.get("/v1/capabilities", headers=_auth("secret-a"))
+        response = await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
 
     assert response.status_code == 503
     body = response.json()
@@ -219,7 +219,7 @@ async def test_uncaught_exception_becomes_safe_generic_problem(monkeypatch):
 async def test_malformed_json_body_is_validation_failed(client):
     response = await client.post(
         "/v1/data/notes/query",
-        headers={**_auth("secret-a"), "content-type": "application/json"},
+        headers={**_auth("cred-a.secret-a"), "content-type": "application/json"},
         content=b"{not-valid-json",
     )
     assert response.status_code == 400
@@ -248,7 +248,7 @@ async def test_request_id_present_on_header_and_correlates_with_problem_body(cli
     assert header_id
     assert denied.json()["request_id"] == header_id
 
-    ok = await client.get("/v1/capabilities", headers=_auth("secret-a"))
+    ok = await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
     assert ok.status_code == 200
     ok_header_id = ok.headers.get("x-request-id")
     assert ok_header_id
@@ -264,7 +264,7 @@ async def test_audit_events_from_one_request_share_its_request_id():
     """
     service, control = _build_service()
     async with _client(service) as client:
-        response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
+        response = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
     assert response.status_code == 200
     header_id = response.headers["x-request-id"]
 
@@ -310,7 +310,7 @@ async def test_revoked_credential_fails_closed():
     service, control = _build_service()
     control.set_credential_state("cred-a", revoked=True)
     async with _client(service) as client:
-        response = await client.get("/v1/capabilities", headers=_auth("secret-a"))
+        response = await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
     assert response.status_code == 401
     assert response.json()["code"] == "AUTH_REVOKED"
 
@@ -319,7 +319,7 @@ async def test_disabled_application_fails_closed():
     service, control = _build_service()
     control.set_application_enabled("app-a", enabled=False)
     async with _client(service) as client:
-        response = await client.get("/v1/capabilities", headers=_auth("secret-a"))
+        response = await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
     assert response.status_code == 403
     assert response.json()["code"] == "APPLICATION_DISABLED"
 
@@ -330,7 +330,7 @@ async def test_disabled_application_fails_closed():
 
 
 async def test_capabilities_document_matches_contract_shape(client):
-    response = await client.get("/v1/capabilities", headers=_auth("secret-a"))
+    response = await client.get("/v1/capabilities", headers=_auth("cred-a.secret-a"))
     assert response.status_code == 200
     body = response.json()
     for key in ("contract_version", "capabilities", "limits", "limit_enforcement"):
@@ -344,7 +344,7 @@ async def test_capabilities_document_matches_contract_shape(client):
 
 
 async def test_query_happy_path(client):
-    response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
+    response = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
     assert response.status_code == 200
     body = response.json()
     assert body["items"] == [{"id": 1}]
@@ -357,7 +357,7 @@ async def test_query_happy_path(client):
 
 async def test_query_page_size_is_forwarded(client):
     response = await client.post(
-        "/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"], "page": {"size": 1}}
+        "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "page": {"size": 1}}
     )
     assert response.status_code == 200
     body = response.json()
@@ -370,7 +370,7 @@ async def test_query_page_size_over_the_contract_maximum_is_validation_failed(cl
     itself (`spec/data-service-api.v1.json`), independent of whatever
     `ResourceLimits.result_items` a deployment happens to configure."""
     response = await client.post(
-        "/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"], "page": {"size": 1001}}
+        "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "page": {"size": 1001}}
     )
     assert response.status_code == 400
     assert response.json()["code"] == "VALIDATION_FAILED"
@@ -381,14 +381,14 @@ async def test_query_order_by_sorts_ascending_and_descending(client):
     response reflects the real sort order."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": "z"}}, {"operation": "insert", "values": {"body": "m"}}]},
     )
     assert response.status_code == 200
 
     ascending = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["body"], "order_by": [{"field": "body", "direction": "asc"}]},
     )
     assert ascending.status_code == 200
@@ -399,7 +399,7 @@ async def test_query_order_by_sorts_ascending_and_descending(client):
 
     descending = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["body"], "order_by": [{"field": "body", "direction": "desc"}]},
     )
     assert descending.status_code == 200
@@ -413,14 +413,14 @@ async def test_query_order_by_multiple_clauses(client):
     first, exactly like a real multi-column ORDER BY."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": "dup"}}, {"operation": "insert", "values": {"body": "dup"}}]},
     )
     assert response.status_code == 200
     # Seeded row: id=1, body="a". Then id=2/3, body="dup"/"dup".
     response = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id", "body"], "order_by": [{"field": "body", "direction": "asc"}, {"field": "id", "direction": "desc"}]},
     )
     assert response.status_code == 200
@@ -432,7 +432,7 @@ async def test_query_order_by_multiple_clauses(client):
 async def test_query_order_by_unknown_field_is_not_found(client):
     response = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "ghost", "direction": "asc"}]},
     )
     assert response.status_code == 404
@@ -445,7 +445,7 @@ async def test_query_cursor_pagination_pages_through_results_and_terminates(clie
     null` on the last page."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": f"p{n}"}} for n in range(2, 6)]},
     )
     assert response.status_code == 200
@@ -457,7 +457,7 @@ async def test_query_cursor_pagination_pages_through_results_and_terminates(clie
         body: dict = {"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 2}}
         if cursor is not None:
             body["page"]["cursor"] = cursor
-        response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json=body)
+        response = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json=body)
         assert response.status_code == 200
         payload = response.json()
         seen_ids.extend(item["id"] for item in payload["items"])
@@ -472,13 +472,13 @@ async def test_query_cursor_pagination_pages_through_results_and_terminates(clie
 async def test_query_cursor_tampering_is_validation_failed(client):
     seeded = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
     )
     assert seeded.status_code == 200
     first = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1}},
     )
     cursor = first.json()["next_page"]
@@ -486,7 +486,7 @@ async def test_query_cursor_tampering_is_validation_failed(client):
     tampered = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
     response = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1, "cursor": tampered}},
     )
     assert response.status_code == 400
@@ -500,20 +500,20 @@ async def test_query_cursor_minted_for_a_different_entity_is_rejected(client):
     entity's rows."""
     developer = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "create_entity", "entity": "widgets", "fields": ["name"]},
     )
     assert developer.status_code == 200
     seeded = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
     )
     assert seeded.status_code == 200
 
     minted = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1}},
     )
     cursor = minted.json()["next_page"]
@@ -521,7 +521,7 @@ async def test_query_cursor_minted_for_a_different_entity_is_rejected(client):
 
     response = await client.post(
         "/v1/data/widgets/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "order_by": [{"field": "id", "direction": "asc"}], "page": {"size": 1, "cursor": cursor}},
     )
     assert response.status_code == 400
@@ -533,7 +533,7 @@ async def test_query_matches_filter_executes(client):
     operators`) and reachable end-to-end over HTTP."""
     response = await client.post(
         "/v1/data/notes/query",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "a%"}]},
     )
     assert response.status_code == 200
@@ -542,7 +542,7 @@ async def test_query_matches_filter_executes(client):
 
 async def test_entity_identifier_validation_flows_through_http(client):
     response = await client.post(
-        "/v1/data/bad-entity!/query", headers=_auth("secret-a"), json={"select": ["id"]}
+        "/v1/data/bad-entity!/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]}
     )
     assert response.status_code == 400
     assert response.json()["code"] in {"IDENTIFIER_INVALID", "NOT_FOUND"}
@@ -556,7 +556,7 @@ async def test_entity_identifier_validation_flows_through_http(client):
 async def test_mutate_happy_path_commits(client):
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"body": "z"}}]},
     )
     assert response.status_code == 200
@@ -570,7 +570,7 @@ async def test_mutate_assigned_addresses_are_insert_only_in_operation_order(clie
     element, in operation order -- an update contributes nothing."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={
             "operations": [
                 {"operation": "insert", "values": {"body": "first"}},
@@ -588,7 +588,7 @@ async def test_mutate_assigned_addresses_are_insert_only_in_operation_order(clie
 async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported(client):
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"id": 5}}], "idempotency_key": "abc"},
     )
     assert response.status_code == 400
@@ -596,7 +596,7 @@ async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported
 
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"id": 6}}], "transaction": "best_effort"},
     )
     assert response.status_code == 400
@@ -609,7 +609,7 @@ async def test_mutate_update_and_delete_where_matches_executes(client):
     over HTTP now that `matches` is declared `enabled`."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "renamed"}}]},
     )
     assert response.status_code == 200
@@ -618,7 +618,7 @@ async def test_mutate_update_and_delete_where_matches_executes(client):
     delete_where = [{"field": "body", "operator": "matches", "value": "rename%"}]
     probe = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "delete", "where": delete_where, "destructive": True}]},
     )
     assert probe.status_code == 409
@@ -627,7 +627,7 @@ async def test_mutate_update_and_delete_where_matches_executes(client):
 
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={
             "operations": [
                 {"operation": "delete", "where": delete_where, "destructive": True, "confirmation": phrase}
@@ -636,14 +636,14 @@ async def test_mutate_update_and_delete_where_matches_executes(client):
     )
     assert response.status_code == 200
     assert response.json()["affected"] == 1
-    query_response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["body"]})
+    query_response = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["body"]})
     assert query_response.json()["items"] == []
 
 
 async def test_mutate_invalid_transaction_value_is_validation_failed(client):
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "insert", "values": {"id": 7}}], "transaction": "nonsense"},
     )
     assert response.status_code == 400
@@ -660,11 +660,11 @@ async def test_mutate_invalid_transaction_value_is_validation_failed(client):
 
 
 async def test_http_mutate_expected_revision_executes(client):
-    query_response = await client.post("/v1/data/notes/query", headers=_auth("secret-a"), json={"select": ["id"]})
+    query_response = await client.post("/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"]})
     revision = query_response.json()["revisions"][0]
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": revision}]},
     )
     assert response.status_code == 200
@@ -673,7 +673,7 @@ async def test_http_mutate_expected_revision_executes(client):
     # capability refusal.
     stale = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "y"}, "expected_revision": revision}]},
     )
     assert stale.status_code == 412
@@ -686,7 +686,7 @@ async def test_http_mutate_upsert_without_a_declared_unique_key_is_capability_un
     `notes` here declares no unique key at all."""
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "upsert", "values": {"body": "z"}}]},
     )
     assert response.status_code == 400
@@ -696,19 +696,19 @@ async def test_http_mutate_upsert_without_a_declared_unique_key_is_capability_un
 async def test_http_mutate_upsert_with_a_declared_unique_key_executes(client):
     developer_response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "add_field", "entity": "notes", "field": "tag"},
     )
     assert developer_response.status_code == 200
     index_response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True},
     )
     assert index_response.status_code == 200
     response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "upsert", "values": {"tag": "z"}}]},
     )
     assert response.status_code == 200
@@ -720,16 +720,16 @@ async def test_http_mutate_upsert_with_a_declared_unique_key_executes(client):
 async def test_http_schema_create_index_and_drop_index_execute(client):
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"], "unique": True},
     )
     assert response.status_code == 200
-    catalog_response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+    catalog_response = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
     assert catalog_response.json()["entities"][0]["unique_keys"] == [{"name": "by_body", "fields": ["body"]}]
 
     without_confirmation = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "drop_index", "entity": "notes", "index": "by_body"},
     )
     assert without_confirmation.status_code == 409
@@ -738,18 +738,18 @@ async def test_http_schema_create_index_and_drop_index_execute(client):
 
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "drop_index", "entity": "notes", "index": "by_body", "destructive": True, "confirmation": phrase},
     )
     assert response.status_code == 200
-    catalog_response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+    catalog_response = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
     assert catalog_response.json()["entities"][0]["unique_keys"] == []
 
 
 async def test_http_schema_create_index_still_requires_developer_authority(client):
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"]},
     )
     assert response.status_code == 403
@@ -759,23 +759,58 @@ async def test_http_schema_create_index_still_requires_developer_authority(clien
 async def test_http_schema_field_type_executes(client):
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"},
     )
     assert response.status_code == 200
     mutate_response = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": 5}}]},
     )
     assert mutate_response.status_code == 200
     bad_type = await client.post(
         "/v1/data/notes/mutations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": "not-an-int"}}]},
     )
     assert bad_type.status_code == 400
     assert bad_type.json()["code"] == "VALIDATION_FAILED"
+
+
+@pytest.mark.parametrize("bad_field_types", [{"a": ["string"]}, {"a": {"x": 1}}, {"a": 1}, {"a": None}])
+async def test_http_create_entity_field_types_non_string_value_is_validation_failed_not_503(client, bad_field_types):
+    """Coordinator F2 (2026-09-04 review): the ACTUAL reachable path for a
+    non-string `field_types` value is real HTTP, not a direct
+    `bind_schema_operation` call -- `_check_object_shape` (`http.py`'s own
+    JSON-Schema check) constrains `field_types`' own top-level shape (must
+    be an object) but not its VALUES, so `{"a": ["string"]}` reaches
+    `structured.py`'s `if declared_type not in FIELD_TYPES:` unfiltered.
+    Before the fix, the unhashable cases (`list`/`dict`) raised `TypeError`
+    there, which `_endpoint` (http.py) maps to a bare 503
+    SERVICE_UNAVAILABLE -- not the `VALIDATION_FAILED` design D-3(iv)(b)
+    requires. `{"a": 1}`/`{"a": None}` are hashable (no `TypeError`) but
+    were ALSO wrongly accepted-as-a-lookup-miss before the `isinstance`
+    guard was added first, so all four forms are exercised together here."""
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-a.dev-secret-a"),
+        json={"operation": "create_entity", "entity": "f2_http_reject", "fields": ["a"], "field_types": bad_field_types},
+    )
+    assert response.status_code == 400, f"{bad_field_types!r} -> {response.status_code} {response.text}"
+    assert response.json()["code"] == "VALIDATION_FAILED"
+
+
+async def test_http_add_field_field_type_non_string_value_is_validation_failed_not_503(client):
+    """Coordinator F2: the scalar `add_field.field_type` sibling, over real
+    HTTP."""
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-a.dev-secret-a"),
+        json={"operation": "add_field", "entity": "notes", "field": "f2_scalar", "field_type": ["string"]},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_FAILED"
 
 
 # --------------------------------------------------------------------------
@@ -786,7 +821,7 @@ async def test_http_schema_field_type_executes(client):
 async def test_schema_endpoint_requires_developer_authority(client):
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("secret-a"),
+        headers=_auth("cred-a.secret-a"),
         json={"operation": "create_entity", "entity": "widgets"},
     )
     assert response.status_code == 403
@@ -794,7 +829,7 @@ async def test_schema_endpoint_requires_developer_authority(client):
 
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "create_entity", "entity": "widgets"},
     )
     assert response.status_code == 200
@@ -806,12 +841,12 @@ async def test_schema_endpoint_requires_developer_authority(client):
 async def test_destructive_schema_operation_requires_confirmation(client):
     await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "create_entity", "entity": "temp_entity"},
     )
     response = await client.post(
         "/v1/schema/operations",
-        headers=_auth("dev-secret-a"),
+        headers=_auth("dev-a.dev-secret-a"),
         json={"operation": "drop_entity", "entity": "temp_entity"},
     )
     assert response.status_code == 409
@@ -824,7 +859,7 @@ async def test_destructive_schema_operation_requires_confirmation(client):
 
 
 async def test_catalog_matches_contract_shape_and_application_scope(client):
-    response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+    response = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
     assert response.status_code == 200
     body = response.json()
     # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md §2/R-1):
@@ -833,7 +868,7 @@ async def test_catalog_matches_contract_shape_and_application_scope(client):
     assert body == {
         "application_scope": "app-a",
         "entities": [
-            {"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}
+            {"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}
         ],
     }
     assert response.headers["x-request-id"]
@@ -847,7 +882,7 @@ async def test_catalog_denied_for_revoked_credential_exactly_as_query():
     service, control = _build_service()
     control.set_credential_state("cred-a", revoked=True)
     async with _client(service) as client:
-        response = await client.get("/v1/catalog", headers=_auth("secret-a"))
+        response = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
     assert response.status_code == 401
     assert response.json()["code"] == "AUTH_REVOKED"
 
@@ -858,7 +893,7 @@ async def test_catalog_denied_for_revoked_credential_exactly_as_query():
 
 
 async def test_audit_query_unreachable_with_any_application_credential(client):
-    for secret in ("secret-a", "dev-secret-a"):
+    for secret in ("cred-a.secret-a", "dev-a.dev-secret-a"):
         response = await client.post("/v1/audit/query", headers=_auth(secret), json={})
         assert response.status_code == 400, secret
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", secret
@@ -882,7 +917,7 @@ async def test_cross_entity_mutate_is_capability_unsupported_for_any_application
     # operation this foundation never executes -- see `http.py`'s own
     # comment), so an empty object is enough here, matching `post_audit_
     # query`'s identical precedent above.
-    for secret in ("secret-a", "dev-secret-a"):
+    for secret in ("cred-a.secret-a", "dev-a.dev-secret-a"):
         response = await client.post("/v1/data/mutations", headers=_auth(secret), json={})
         assert response.status_code == 400, secret
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", secret
@@ -905,11 +940,11 @@ async def test_stub_endpoints_count_against_the_request_rate_limit():
     # actually counted.
     service, _control = _build_service(requests_per_minute=1)
     async with _client(service) as client:
-        first = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+        first = await client.post("/v1/data/mutations", headers=_auth("cred-a.secret-a"), json={})
         assert first.status_code == 400
         assert first.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
-        second = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+        second = await client.post("/v1/data/mutations", headers=_auth("cred-a.secret-a"), json={})
         assert second.status_code == 429
         assert second.json()["code"] == "LIMIT_EXCEEDED"
         assert second.json()["details"]["resource"] == "requests_per_minute"
@@ -917,10 +952,10 @@ async def test_stub_endpoints_count_against_the_request_rate_limit():
         # A different credential has its own independent rate window
         # (DataService._acquire_rate keys on credential_id), so this is not
         # a cross-credential accounting bug -- audit_query is bound too.
-        other = await client.post("/v1/audit/query", headers=_auth("dev-secret-a"), json={})
+        other = await client.post("/v1/audit/query", headers=_auth("dev-a.dev-secret-a"), json={})
         assert other.status_code == 400
         assert other.json()["code"] == "CAPABILITY_UNSUPPORTED"
-        other_again = await client.post("/v1/audit/query", headers=_auth("dev-secret-a"), json={})
+        other_again = await client.post("/v1/audit/query", headers=_auth("dev-a.dev-secret-a"), json={})
         assert other_again.status_code == 429
         assert other_again.json()["code"] == "LIMIT_EXCEEDED"
 
@@ -928,7 +963,7 @@ async def test_stub_endpoints_count_against_the_request_rate_limit():
 async def test_cross_entity_mutate_route_does_not_collide_with_per_entity_mutate_route_for_an_entity_named_mutations(client):
     # `POST /v1/data/mutations` (3 path segments) is the new cross-entity
     # stub -- always CAPABILITY_UNSUPPORTED, per the test above.
-    cross_entity = await client.post("/v1/data/mutations", headers=_auth("secret-a"), json={})
+    cross_entity = await client.post("/v1/data/mutations", headers=_auth("cred-a.secret-a"), json={})
     assert cross_entity.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
     # `POST /v1/data/mutations/mutations` (4 path segments: the per-entity
@@ -939,6 +974,6 @@ async def test_cross_entity_mutate_route_does_not_collide_with_per_entity_mutate
     # stub's CAPABILITY_UNSUPPORTED. The two outcomes are only possible
     # from two different handlers, so this is a direct routing check, not
     # an inference from status code alone.
-    per_entity = await client.post("/v1/data/mutations/mutations", headers=_auth("secret-a"), json={"operations": [{"operation": "insert", "values": {}}]})
+    per_entity = await client.post("/v1/data/mutations/mutations", headers=_auth("cred-a.secret-a"), json={"operations": [{"operation": "insert", "values": {}}]})
     assert per_entity.status_code == 404
     assert per_entity.json()["code"] == "NOT_FOUND"
