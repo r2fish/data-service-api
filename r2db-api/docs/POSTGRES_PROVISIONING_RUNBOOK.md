@@ -1026,6 +1026,37 @@ timeout mismatch makes `visibility_lag_ms` untrue. Treat both the same way:
 **if you change the value, you have changed the declaration, and the
 declaration must be changed with it.**
 
+**Declared audit vocabularies (contract 1.5.0, subordinate ruling 10 item 1).**
+The `audit_query` capability entry also publishes THREE vocabularies:
+`event_classes`, and -- new in contract 1.5.0 -- `operations` and
+`target_kinds`. Each is the set of values the corresponding audit-row column
+can take, and every event `audit_query` returns carries values drawn from
+them. The contract requires only that superset relation and enumerates no
+enum: each implementation declares its OWN vocabulary, so the two peers'
+spellings legitimately differ (this peer folds every data mutation into one
+`mutate`/`entity` pair; the sibling peer names each operation individually and
+calls the target a `collection`). This process publishes them `sorted()` from
+`r2db-api/src/r2db_api/audit_query.py`'s `DECLARED_AUDIT_OPERATIONS` /
+`DECLARED_AUDIT_TARGET_KINDS` -- currently **27 `operations` and 5
+`target_kinds`**. `audit_query.operations` is the audit row's `operation`
+vocabulary, unrelated to the `operations` array of a mutation request body.
+
+Three things to know operationally. **(1) There is no env-var knob and nothing
+to size** -- unlike the two timeouts above, these are fixed by the code you
+deployed; the only way they change is a new build. **(2) Only the CONTROL
+process declares them.** The data-plane host declares `audit_query` as
+`unavailable` and carries neither key, deliberately: it never serves
+`audit_query`, so declaring a vocabulary it can never surface would be an
+untrue declaration. `unavailable` there is correct, not a deployment fault.
+**(3) They are version-bound.** A build predating contract 1.5.0 declares
+`contract_version: "1.4.0"` and carries neither key -- fully conformant for
+that version; a build declaring `1.5.0` must carry both. A deployment whose
+declared version and declared keys disagree is a version-binding defect. If an
+`audit_query` result ever shows an `operation` or `target_kind` absent from
+the declaration, treat it as a defect and report it: the declaration is
+checked against this package's own source on every test run, so a divergence
+in a live deployment means the deployed artifact is not the tested one.
+
 **`audit_requests_per_minute`**: a separate, dedicated env var,
 `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` (default `60`, same
 convention as `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`) -- this
@@ -1068,13 +1099,19 @@ deployment that outgrows the default sets
 population needs and nothing else has to change. Widening this window does
 not weaken the property the window exists for: it is checked **before**
 authentication and before any durable write, so no window size lets an
-unauthenticated flood generate audit rows. **Peer difference worth knowing
-if you operate both**: `MitateDB-api` bounds the same class to `[1, 200]`
-in its own `ControlPlaneLimits.__post_init__`, so an equivalent change there
-is a code change, not a configuration change (`MitateDB-api/docs/cloud-run-
+unauthenticated flood generate audit rows. **The accepted value has always
+been an operator responsibility on this peer, published as-declared** in
+`control_capabilities` -- there is no code-side guardrail against declaring
+an implausibly large value, and there never has been. **This peer and
+`MitateDB-api` are now symmetric** (Phase 5 D-3, Q3 案A, WP-4): MitateDB's
+own `ControlPlaneLimits.__post_init__` used to bound the same four
+request-count classes to `[1, 200]`, so raising this window there used to
+be a code change rather than a configuration change; that ceiling has been
+removed, and MitateDB now carries the identical "positive integer, no
+upper bound, operator's responsibility" rule (`MitateDB-api/docs/cloud-run-
 cloud-sql.md` §3.2c). The contract declares no range for this class, so
-both peers conform; the asymmetry is recorded in `security/CONTROL_MAPPING.
-md`'s SI-08 row.
+both peers have always conformed regardless; the (now former) asymmetry is
+recorded in `security/CONTROL_MAPPING.md`'s SI-08 row.
 
 Hitting the window is a plain `LIMIT_EXCEEDED`
 refusal and costs nothing but time: the consumer's cursor is still valid, so

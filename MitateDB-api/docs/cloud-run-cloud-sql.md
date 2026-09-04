@@ -367,6 +367,33 @@ caveat this section's own `visibility_lag_ms` note above already carries.
 State the rule for both values as one rule: **if you change the value, you
 have changed the declaration, and the declaration must be changed with it.**
 
+**Declared audit vocabularies (contract 1.5.0, subordinate ruling 10 item 1).**
+The same `audit_query` capability entry also publishes THREE vocabularies:
+`event_classes`, and -- new in contract 1.5.0 -- `operations` and
+`target_kinds`. They are the sets of values the corresponding columns of an
+audit row can take, and every event `audit_query` returns carries values drawn
+from them (the contract requires the superset relation, never a particular
+member: each implementation declares its own vocabulary, and the contract
+enumerates no enum). On this service they are published `sorted()` as the
+**union of two modules** -- the control half in `src/mitatedb_api/audit_
+query.py` and the application half in `src/mitatedb_api/application_audit.py`
+-- currently **29 `operations` and 5 `target_kinds`**. Note that
+`audit_query.operations` is the audit row's `operation` vocabulary and has
+nothing to do with the `operations` array of a mutation request body.
+
+Two operational consequences. **(1) There is no env-var knob for these**, and
+there is nothing to size: unlike the timeouts above, they are fixed by the
+code you deployed, so the only way they change is a new image. **(2) They are
+version-bound.** An image built before contract 1.5.0 declares
+`contract_version: "1.4.0"` and carries neither key, which is fully conformant
+for that version; an image that declares `1.5.0` must carry both. A deployment
+where the declared version and the declared keys disagree is a version-binding
+defect, not a configuration choice. If you ever see an `operation` or
+`target_kind` value in an `audit_query` result that is absent from the
+declaration, treat it as a defect and report it -- the declaration is checked
+against this service's own source on every test run, so a divergence in a real
+deployment means the deployed artifact is not the tested one.
+
 ### 3.2c Sizing the `audit_requests_per_minute` window
 
 One `audit_query` call returns one page, so a consumer's steady-state cost
@@ -381,26 +408,43 @@ audit_requests_per_minute  >=  ceil(<concurrent audit consumers>
                                + headroom for catch-up
 ```
 
-Two corrections to that naive product. (i) **Catch-up is paging, not
+One correction to that naive product. **Catch-up is paging, not
 polling**: a consumer resuming after an outage walks the cursor one page per
 request until a page comes back empty, so draining N backlogged events at
 `limit` per page costs `N/limit` requests issued as fast as it can -- far
-above steady state. (ii) **The accepted range is `[1, 200]`**
-(`ControlPlaneLimits.__post_init__`, shared with the other request-count
-classes), so past roughly 36 steady-state consumers, or on any catch-up
-burst wanting more than 200 requests in a minute, the **range ceiling binds
-before the default does**. That ceiling follows from folding the new class
-into the existing range instead of inventing a second mechanism; raising it
-is a design change, not a configuration change. **That ceiling is specific
-to this peer** -- `r2db-api`'s own `ControlPlaneLimits.__post_init__`
-validates only "positive integer" and has no upper bound, so the equivalent
-change there is a single env var. The contract declares no range for this
-class, so both peers conform; the asymmetry is recorded in
-`security/CONTROL_MAPPING.md`'s SI-08 row. Exceeding the window is a
-plain `LIMIT_EXCEEDED` refusal that costs only time -- the consumer's cursor
-stays valid and it resumes exactly where it stopped. In every case a
-break-glass `revoke_credential` is unaffected: `audit_query` never touches
-`control_requests_per_minute` (`MitateDB-api/tests/test_audit_query.py::
+above steady state. Size for the catch-up case, or accept refusals during
+catch-up.
+
+**Raising this window is a configuration change, with no upper bound**
+(Phase 5 D-3, Q3 案A, WP-4). `ControlPlaneLimits.__post_init__` validates
+only that each of the four request-count classes is a positive integer --
+there is no ceiling here, and the peer's own test suite really does
+construct and publish `control_requests_per_minute=100_000`-scale values
+(`MitateDB-api/tests/test_control_plane_service.py::
+test_limits_accept_generous_values_beyond_the_former_ceiling`). A
+deployment that outgrows the default sets
+`MITATEDB_CONTROL_AUDIT_REQUESTS_PER_MINUTE_LIMIT` to whatever its
+audit-agent population needs and nothing else has to change -- **matching
+`r2db-api`'s own `ControlPlaneLimits.__post_init__`**, which has validated
+only "positive integer" with no ceiling from the start (`r2db-api/docs/
+POSTGRES_PROVISIONING_RUNBOOK.md` §15). The accepted value is now an
+**operator responsibility, published as-declared** in
+`control_capabilities` -- this peer used to fold the new class into a
+shared `[1, 200]` range with the other three classes, which incidentally
+acted as a guardrail against a wildly oversized configuration; removing
+that ceiling removes the guardrail too (there is nothing in the product
+that stops an operator from declaring, say,
+`audit_requests_per_minute=5_000_000`). That is a deliberate trade (the
+requester's design principle 3, "don't dodge behind a constraint"), not an
+oversight -- it is recorded here and in `security/CONTROL_MAPPING.md`'s
+SI-08 row. Widening this window does not weaken the property the window
+exists for: it is checked **before** authentication and before any
+durable write, so no window size lets an unauthenticated flood generate
+audit rows. Exceeding the window is a plain `LIMIT_EXCEEDED` refusal that
+costs only time -- the consumer's cursor stays valid and it resumes
+exactly where it stopped. In every case a break-glass `revoke_credential`
+is unaffected: `audit_query` never touches `control_requests_per_minute`
+(`MitateDB-api/tests/test_audit_query.py::
 test_audit_query_wire_calls_never_consume_the_control_requests_per_minute_
 window`).
 
@@ -889,7 +933,12 @@ curl -sk \
   -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=<mitatedb-ctrl Cloud Run URL>)" \
   <mitatedb-ctrl Cloud Run URL>/control/v1/capabilities
 # expect 200; capabilities.audit_query.status == "enabled" if MITATEDB_AUDIT_DSN is
-# wired (else "unavailable", not a failure -- §4-6); capabilities.contract_version == "1.4.0"
+# wired (else "unavailable", not a failure -- §4-6); capabilities.contract_version == "1.5.0"
+# and, when audit_query is "enabled", three non-empty declared vocabularies under
+# capabilities.audit_query: event_classes, operations (29 words on this peer) and
+# target_kinds (5). An image built before contract 1.5.0 correctly declares "1.4.0"
+# and carries neither new key -- that is conformant for THAT version, not a failure;
+# what must never disagree is the image's version and its declaration (§3.2b).
 
 # audit_query, cursor-paginated (§4-5)
 curl -sk -X POST \
