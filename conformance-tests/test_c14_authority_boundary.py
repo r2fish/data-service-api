@@ -79,7 +79,6 @@ later test that shares it.
 """
 from __future__ import annotations
 
-import time
 from typing import Any, Callable, Mapping
 
 import pytest
@@ -595,38 +594,79 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
     finally:
         adapter.deprovision_application(cred_app)
 
-    # -- control_requests_per_minute: run LAST, burst, then confirm recovery. --
-    # `control_capabilities` is an operation no PERMANENT bound applies to
-    # (design section R-5: it remains callable even by a must_rotate
-    # credential) -- that operation choice IS the class attribution
-    # (supervisor ruling): a burst of `control_capabilities` calls cannot
-    # be confused with the applications/credentials_per_application
-    # drives above, both already fully cleaned up by this point.
-    successes = 0
-    limit_hit = False
-    for _ in range(rate_limit + margin):
-        try:
-            adapter.control_capabilities(control_actor)
-            successes += 1
-        except ConformanceDenial as exc:
-            _assert_is_contract_code(exc.code)
-            assert exc.code == "LIMIT_EXCEEDED", (
-                f"{adapter.name}: exceeding the declared control_requests_per_minute limit got {exc.code!r}, "
-                "expected LIMIT_EXCEEDED"
-            )
-            limit_hit = True
-            break
-    assert limit_hit, (
-        f"{adapter.name}: issuing up to {rate_limit + margin!r} control_capabilities() calls never "
-        f"triggered LIMIT_EXCEEDED for the declared control_requests_per_minute bound {rate_limit!r}"
-    )
-
-    # Recovery: wait for the next minute-window rollover -- bounded, <=61s
-    # -- and confirm one more call succeeds. This is provided-branch-only
-    # code (never executed under WP-1; the real time cost is documented
-    # here rather than hidden) and proves the refusal above was transient
-    # (the rate class, not a permanent bound), while also un-poisoning the
-    # rate window for whatever runs after this test against the same
-    # session-scoped adapter.
-    time.sleep(61)
-    adapter.control_capabilities(control_actor)
+    # -- control_requests_per_minute: run LAST, burst against an ISOLATED
+    # surface (port v1.10 addendum A, supervisor ruling 2026-09-04,
+    # `adapter.isolated_control_surface()`) -- never the shared, session-
+    # scoped adapter's own control surface every other vector/test on
+    # this file (and every other file) depends on. `control_capabilities`
+    # is an operation no PERMANENT bound applies to (design section R-5:
+    # it remains callable even by a must_rotate credential) -- that
+    # operation choice IS the class attribution (supervisor ruling): a
+    # burst of `control_capabilities`-equivalent calls cannot be confused
+    # with the applications/credentials_per_application drives above,
+    # both already fully cleaned up by this point. The isolated surface's
+    # own rate window starts genuinely EMPTY (it shares application/
+    # credential state with the shared surface, but its OWN, freshly
+    # constructed `_rate_window`) -- unlike the `applications` class
+    # above, this drive needs no `n_existing`-style headroom arithmetic:
+    # the declared bound predicts EXACTLY `rate_limit` successes before
+    # the first refusal, and this vector now asserts that exact position
+    # (design's own "位置算術" requirement, not observed by this class
+    # before this addendum).
+    with adapter.isolated_control_surface() as isolated_call:
+        successes = 0
+        limit_hit = False
+        for _ in range(rate_limit + margin):
+            try:
+                isolated_call(control_actor)
+                successes += 1
+            except ConformanceDenial as exc:
+                _assert_is_contract_code(exc.code)
+                assert exc.code == "LIMIT_EXCEEDED", (
+                    f"{adapter.name}: exceeding the declared control_requests_per_minute limit (isolated "
+                    f"surface) got {exc.code!r}, expected LIMIT_EXCEEDED"
+                )
+                assert successes == rate_limit, (
+                    f"{adapter.name}: the isolated control surface's own control_requests_per_minute drive "
+                    f"was refused with LIMIT_EXCEEDED after only {successes!r} success(es), but the declared "
+                    f"bound {rate_limit!r} predicts exactly that many on a genuinely empty, isolated window -- "
+                    "refused before the declared bound: cannot attribute the refusal to the "
+                    "control_requests_per_minute class (it may be a different class's bound, or a wrongly-"
+                    "configured isolated surface, firing early)"
+                )
+                # Review F4 (2026-09-04): same soft-check shape C-16's own
+                # `batch_entities` LIMIT_EXCEEDED assertion already uses
+                # (`test_c16_cross_entity_atomicity.py`'s `limit_class`
+                # check) -- `limit_class` carries no contract guarantee
+                # (`errors.shape`'s `details` is a free-form object), so a
+                # peer omitting it is not itself a violation, but BOTH
+                # currently-registered peers do emit it
+                # (`r2db-api/src/r2db_api/control_plane.py:1574`,
+                # `MitateDB-api/src/mitatedb_api/control_plane.py:1146`),
+                # so this is a real, reachable-once-provided-branch check,
+                # not a dead assertion.
+                limit_class = exc.details.get("limit_class")
+                if limit_class is not None:
+                    assert limit_class == "control_requests_per_minute", (
+                        f"{adapter.name}: LIMIT_EXCEEDED for the isolated control surface's own "
+                        f"control_requests_per_minute drive carried limit_class={limit_class!r}, expected "
+                        "'control_requests_per_minute'"
+                    )
+                limit_hit = True
+                break
+        assert limit_hit, (
+            f"{adapter.name}: issuing up to {rate_limit + margin!r} control_capabilities()-equivalent calls "
+            f"against the isolated surface never triggered LIMIT_EXCEEDED for the declared "
+            f"control_requests_per_minute bound {rate_limit!r}"
+        )
+    # No recovery-wait: the isolated surface is discarded on `with` exit
+    # (`adapter.isolated_control_surface()`'s own docstring -- an HTTP
+    # plug releases the fresh connection pools it opened; an in-process
+    # plug releases nothing, by construction). It shares no RATE-WINDOW
+    # state with the adapter's own SHARED control surface, so there is
+    # nothing on the shared surface to "recover" and no 60-second wait to
+    # pay, and every later test/vector against this same session-scoped
+    # adapter observes the shared surface's own rate window exactly as it
+    # was before this drive ran (design docs/design/
+    # PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md addendum A, work order
+    # WP-1 completion condition A-1).

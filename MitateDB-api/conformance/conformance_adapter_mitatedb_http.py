@@ -62,6 +62,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -683,6 +684,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # `PostgresApplicationAuditSink` above, both DEFAULT_*).
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
             }
+            # Port v1.10 addendum A: kept on the instance (not just this
+            # local `control_env`) so `isolated_control_surface()` can
+            # call `build_control_service` a SECOND time later, against
+            # the identical environment, without reconstructing it.
+            self._control_env = control_env
             self._control_service = build_control_service(control_env)
             self._control_app = create_control_app(
                 self._control_service, request_bytes_limit=self._control_service.limits.request_bytes)
@@ -1179,6 +1185,54 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # separate reader R-8 calls for.
         return read_control_audit_events(self._platform.provision_dsn, self._platform.schema)
 
+    # port v1.10 addendum A (supervisor ruling 2026-09-04, C-14 vector 5's
+    # own test primitive -- see adapter.py's own docstring for the full
+    # rationale). Real HTTP `/control/v1` app/client, built via THIS
+    # peer's own product composition core (`build_control_service`, the
+    # SAME real function `__init__` above already calls) against the
+    # SAME `self._control_env` (identical DSN/schema/pepper/limits) --
+    # so the same registered applications/credentials authenticate --
+    # but a genuinely fresh `ControlPlaneService`, whose own rate window
+    # starts empty. No pooled connections to release on exit (`build_
+    # control_service`'s own registries/backend open one connection per
+    # call, mirrored from this peer's own established convention, per
+    # that function's own docstring) -- only the fresh httpx client.
+    #
+    # Composition note (pre-1.6.0, unchanged by this addendum): this
+    # peer's real `/control/v1` wire protocol still requires the
+    # composite `"<credential_id>.<secret>"` bearer form on THIS
+    # revision -- the SAME requirement `_control_send`'s own comment
+    # documents. This is this file's 5th such site (the other 4:
+    # `issue_credential`/`issue_credential_inband`/`_control_send`/
+    # `audit_query_on_data_plane_host`); all 5 are removed together in
+    # WP-3, same commit as this plug's own 1.6.0 flip.
+    @contextmanager
+    def isolated_control_surface(self):
+        service = build_control_service(self._control_env)
+        app = create_control_app(service, request_bytes_limit=service.limits.request_bytes)
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        try:
+            def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+                if isinstance(actor, CredentialHandle):
+                    bearer = actor.secret
+                else:
+                    bearer = f"{actor.credential_ref}.{actor.secret}"
+                request = client.build_request(
+                    "GET", "/control/v1/capabilities", headers=[("authorization", f"Bearer {bearer}")]
+                )
+                response = self._run(client.send(request))
+                if response.status_code >= 400:
+                    failure = _HttpFailure(response)
+                    raise ConformanceDenial(
+                        code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                        details=_failure_details(failure),
+                    ) from failure
+                return response.json()
+
+            yield call
+        finally:
+            self._run(client.aclose())
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
     # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
@@ -1415,6 +1469,36 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # `CAPABILITY_UNSUPPORTED`, which this lets propagate naturally
         # rather than fabricating the structural-absence sentinel.
         return self._send("GET", "/v1/catalog", session)
+
+    # port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+    # V1.md section 6.1 item 3, D-3). Real HTTP POST to this peer's real
+    # schema-operation endpoint, carrying the contract's own `fields`/
+    # `field_types` verbatim and PARTIAL where the caller gave a partial
+    # `field_types` -- mirrors `conformance_adapter_r2db_http.py`'s
+    # identical method (this port method never fills in `json` for an
+    # undeclared name itself: D-3(ii)'s default is the PEER's own job to
+    # apply on a partial request, and the round-trip vector's own
+    # "undeclared field reports json" check (design section 6.2 item 3
+    # (iii)) requires a genuinely partial request to reach the peer, not
+    # one this method pre-filled). Unreachable as of this WP (declare-
+    # first gated at 1.6.0; `application_catalog`/`schema_operations` are
+    # also still `unavailable` on this composition today, so a real call
+    # here currently denies with `CAPABILITY_UNSUPPORTED` before the
+    # peer's own field-type vocabulary is even consulted) -- written for
+    # WP-3's real eventual shape, not a stub.
+    def create_entity_with_declared_types(
+        self, session: object, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
+    ) -> None:
+        assert isinstance(session, _Session)
+        body: dict[str, Any] = {"operation": "create_entity", "entity": entity, "fields": list(fields)}
+        if field_types:
+            body["field_types"] = dict(field_types)
+        self._schema(session, body)
+
+    # port v1.10 (same WP as above).
+    def add_field_with_declared_type(self, session: object, entity: str, field: str, field_type: str) -> None:
+        assert isinstance(session, _Session)
+        self._schema(session, {"operation": "add_field", "entity": entity, "field": field, "field_type": field_type})
 
     def _attempt_mutation_item(
         self, entity: str, operation: str, *, values, where_field, where_value,

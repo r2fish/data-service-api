@@ -26,10 +26,12 @@ import json
 import re
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # Contract-derived data. Never hardcode a copy of these; always read the
@@ -62,10 +64,31 @@ def load_contract_error_codes() -> frozenset[str]:
 
 @dataclass(frozen=True)
 class CredentialHandle:
-    credential_ref: str  # opaque control-plane reference to the credential
+    """port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+    DISCOVERY_V1.md section 6.1 item 1, D-1): `secret` is the COMPLETE
+    bearer token for the surface this credential is for -- whatever an
+    `issue`/`rotate`/`bootstrap`/`reset` call (in band or out of band)
+    returned in its own `secret`-shaped field, held here VERBATIM. An
+    adapter presents it to `Authorization: Bearer <secret>` with no
+    transformation of any kind; it never composes it FROM `credential_ref`
+    (or any other field) and never derives anything BY splitting,
+    partitioning, or slicing it -- `credential_ref` is the peer's own,
+    separately-returned `credential_id`, held here verbatim as well, never
+    extracted from `secret`. This regulation binds every currently-
+    registered adapter already (D-1's common realization is additive to
+    what the port already required of a well-behaved adapter); it is
+    stated here as a port-level rule, and independently re-verified by
+    the static, source-level check `test_c19_client_self_sufficiency.py`
+    performs across all four adapters (composition/decomposition-absence,
+    `xfail(strict=True)` until WP-3 removes the one adapter's own
+    remaining composition, design section 6.1 item 1 / section 6.2's own
+    "adapter が bearer を組み立ても分解もしないことの静的固定").
+    """
+
+    credential_ref: str  # opaque control-plane reference to the credential (the peer's own `credential_id`, verbatim)
     application_id: str
     role: str  # "runtime" | "developer"
-    secret: str  # synthetic test value only. Never a real credential.
+    secret: str  # synthetic test value only. Never a real credential. Complete bearer token, verbatim (port v1.10).
 
 
 @dataclass(frozen=True)
@@ -82,10 +105,18 @@ class ControlCredentialHandle:
     defect hide behind a value this port itself fabricated; keeping the
     types disjoint makes such a value a type error instead of a silent
     coercion.
+
+    port v1.10 (design section 6.1 item 1, D-1): `secret` carries the
+    exact same "complete bearer token, held verbatim" meaning
+    `CredentialHandle.secret`'s own docstring states above -- a control
+    credential is a bearer token for the CONTROL surface rather than an
+    application's data surface, never a structurally different kind of
+    value. `credential_ref` is the peer's own `credential_id`, held
+    verbatim, never extracted from `secret` by this adapter.
     """
 
-    credential_ref: str  # opaque reference (e.g. "ctl_...")
-    secret: str  # synthetic test value only. Never a real credential.
+    credential_ref: str  # opaque reference (e.g. "ctl_..."), the peer's own credential_id, held verbatim
+    secret: str  # synthetic test value only. Never a real credential. Complete bearer token, verbatim (port v1.10).
 
 
 @dataclass(frozen=True)
@@ -485,6 +516,65 @@ def contract_version_at_least(contract_version: str, minimum: str) -> bool:
     document()["contract_version"]`) is >= `minimum` under semver-tuple
     comparison (never a string comparison -- see `parse_semver`)."""
     return parse_semver(contract_version) >= parse_semver(minimum)
+
+
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    """`(scheme, host, port)` of `url` -- design docs/design/
+    PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md section 3 D-2's own
+    definition of "origin" for co-hosting judgment: "scheme + host + port
+    -- not the path". Two URLs sharing an origin under this definition may
+    still differ in path (`versioning.base_path`/`control_base_path`),
+    which is exactly the point: co-hosting is a PROCESS/HOST fact, not a
+    path-identity fact."""
+    parts = urlsplit(url)
+    return (parts.scheme, parts.hostname, parts.port)
+
+
+def surfaces_cohosted(document: Mapping[str, Any], *, fallback: Callable[[], bool]) -> bool:
+    """port v1.10 (design section 6.1 item 2, D-2): judges whether this
+    deployment's control surface is co-hosted with its data-plane surface,
+    preferring a 1.6.0+ peer's own DECLARED `surfaces` origins over the
+    pre-1.6.0 topology-declaration fallback -- the port-level realization
+    of "surfaces を返す peer では origin 比較を正とし、返さない (1.5.0
+    宣言の) peer では従来の申告メソッドへフォールバックする" (work order
+    WORK_ORDER_PHASE6_CONTRACT_160_V1.md WP-1 item 5(b)).
+
+    `document` is any real `CapabilityDocument` this deployment returns
+    (the data-plane one and the control one are required, by 1.6.0's own
+    unconditional obligation, to carry the SAME `surfaces` object -- so
+    either serves this function equally; callers pass whichever they
+    already have in hand). `fallback` is the adapter's own pre-1.6.0
+    topology declaration (`ConformanceAdapter.control_surface_cohosted_
+    with_data_plane`), called ONLY when `document` does not affirmatively
+    demonstrate a 1.6.0+ `surfaces` object -- i.e. `contract_version` is
+    below 1.6.0, or `surfaces`/`surfaces.data.base_url` is missing or
+    malformed. This function does not itself assert well-shapedness (that
+    is `test_c19_client_self_sufficiency.py`'s own D-2 vectors' job); a
+    malformed 1.6.0+ document degrades to the fallback rather than raising
+    here, so a shape defect surfaces as a vector failure, never as an
+    opaque exception from this helper.
+
+    When `surfaces.control` is itself absent (a `control_plane:
+    unavailable` deployment, contract-permitted to omit it) this returns
+    `False` DIRECTLY -- never the fallback -- matching design's own "there
+    is no co-hosting partner to be co-hosted WITH" reasoning (section 3
+    D-2) and the pre-1.6.0 fallback's own value for every currently-
+    registered adapter (`False`), so replacing one judgment source with
+    the other is not expected to change any adapter's observed answer
+    (work order WP-1 completion condition 11's own "置換が挙動を変えない
+    ことの実測").
+    """
+    contract_version = str(document.get("contract_version", "0.0.0"))
+    surfaces = document.get("surfaces")
+    if not contract_version_at_least(contract_version, "1.6.0") or not isinstance(surfaces, Mapping):
+        return fallback()
+    data_surface = surfaces.get("data")
+    if not isinstance(data_surface, Mapping) or not data_surface.get("base_url"):
+        return fallback()
+    control_surface = surfaces.get("control")
+    if not isinstance(control_surface, Mapping) or not control_surface.get("base_url"):
+        return False
+    return _origin(str(data_surface["base_url"])) == _origin(str(control_surface["base_url"]))
 
 
 def resolve_valid_confirmation(
@@ -919,6 +1009,15 @@ class ConformanceAdapter(ABC):
         `issue_credential`'s existing out-of-band counterpart already does
         -- `CredentialHandle.credential_ref` holds the same value the peer
         publishes as the contract's `credential_id`.
+
+        port v1.10 (D-1): the peer's real response carries `credential_id`
+        and `secret` as two SEPARATE fields; the adapter places each,
+        UNCHANGED, into `CredentialHandle.credential_ref`/`.secret`
+        respectively -- it never concatenates them into one string first
+        and never derives one from the other. `CredentialHandle.secret`'s
+        own docstring states the general "verbatim, never composed or
+        split" regulation this method's return value is a first instance
+        of.
         """
 
     @abstractmethod
@@ -959,6 +1058,16 @@ class ConformanceAdapter(ABC):
         response for a `secret`-shaped field (see `test_c15_..._is_not_
         permanent`'s own handling) rather than this port inventing a
         second, unified rotate-result type.
+
+        port v1.10 (D-1): whatever `secret`-shaped field the returned
+        response carries is the fresh credential's new COMPLETE bearer
+        token, to be used verbatim (`CredentialHandle.secret`'s own
+        docstring) -- a caller building a fresh handle from this response
+        (e.g. `ControlCredentialHandle(credential_ref=<the same
+        credential_ref this call rotated>, secret=<the response's own
+        secret field, read directly>)`) never re-derives `credential_ref`
+        from the new secret; `credential_ref` does not change on rotation
+        and the caller already has it from before this call.
         """
 
     @abstractmethod
@@ -1006,13 +1115,24 @@ class ConformanceAdapter(ABC):
         the peer's own real refusal (e.g. a control credential already
         exists, C-15 vector 1) or `SurfaceAbsent` where no such ritual
         mechanism exists on this peer at all yet.
+
+        port v1.10 (D-1): the returned `ControlCredentialHandle.secret` is
+        this fresh control credential's COMPLETE bearer token, held
+        verbatim -- an adapter reads `credential_id` and `secret` as the
+        two separate fields the ritual mechanism's own real output carries
+        (a CLI's two separate stdout lines, or a direct function call's
+        two separate return values) and places each unchanged into
+        `credential_ref`/`secret` respectively, never concatenating or
+        splitting either.
         """
 
     @abstractmethod
     def reset(self) -> ControlCredentialHandle:
         """Executes the peer's real out-of-band reset ritual (design
         section R-5) and returns the resulting control credential. Same
-        "real mechanism, no fabrication" contract as `bootstrap`.
+        "real mechanism, no fabrication" contract as `bootstrap`, including
+        `bootstrap`'s own port v1.10 verbatim-secret/separate-fields
+        regulation above.
         """
 
     # --- privileged setup / observation (not itself the in-band surface
@@ -1050,6 +1170,49 @@ class ConformanceAdapter(ABC):
         durably recorded; not itself gated behind any `actor`, since audit
         observation in a conformance build is adapter-privileged the same
         way `provision_application` is.
+        """
+
+    @abstractmethod
+    def isolated_control_surface(
+        self,
+    ) -> AbstractContextManager[Callable[["CredentialHandle | ControlCredentialHandle"], Mapping[str, Any]]]:
+        """C-14 vector 5's OWN test primitive (phase 6 WP-1 addendum A,
+        supervisor ruling 2026-09-04) -- **not a contract capability, and
+        never used by any vector other than the `control_requests_per_
+        minute` resource-bound sub-drive**. A context manager that, on
+        entry, builds a FRESH, throwaway control surface sharing this
+        adapter's own real registered application/credential state (the
+        SAME backend/store objects `control_credential()`'s own actor
+        already authenticates against) but starting from its OWN, EMPTY
+        `control_requests_per_minute` rate window -- and yields a callable
+        presenting a `control_capabilities`-equivalent request to THAT
+        surface (the same real entry point/evaluation order every other
+        control-plane read on this ABC already uses, just against a
+        second, isolated instance of it), returning the peer's real
+        response on success or raising `ConformanceDenial` (most commonly
+        `LIMIT_EXCEEDED` once the ISOLATED surface's own declared bound is
+        reached) exactly as `control_capabilities()` does.
+
+        Exists so exhausting `control_requests_per_minute` to its exact
+        declared bound (the only way to observe the peer's own real
+        `LIMIT_EXCEEDED` at the exact position the declared bound
+        predicts) does not poison the SHARED, session-scoped adapter's
+        own rate window for every later test/vector that depends on it --
+        previously mitigated only by a real 60-second wait for the shared
+        window to roll over (`test_c14_authority_boundary.py`'s own,
+        pre-addendum-A `time.sleep(61)`), which this primitive makes
+        unnecessary rather than merely faster.
+
+        On exit, releases whatever real resources building the isolated
+        surface opened (an HTTP+PostgreSQL plug's own fresh connection
+        pools in particular -- mirrors `_build_control_stack()`'s own
+        `stores.close()` discipline; an in-process plug's isolated
+        `ControlPlaneService` needs no explicit release). Never mutates,
+        rebuilds, or otherwise disturbs the adapter's own SHARED control
+        surface (`control_credential()`/`control_capabilities()`'s own
+        target) -- the isolated surface is additive, constructed
+        alongside it, sharing only read/write access to the same
+        underlying application/credential state, never replacing it.
         """
 
     # ------------------------------------------------------------------
@@ -1241,6 +1404,21 @@ class ConformanceAdapter(ABC):
         what `test_c09_data_plane_host_audit_query_alias_rejects_control_
         credential_unless_cohosted` will accept as conformant (a `PROVIDED`
         outcome becomes acceptable, alongside `AUTH_INVALID`).
+
+        port v1.10 (design docs/design/PHASE6_CONTRACT_160_CLIENT_
+        DISCOVERY_V1.md section 6.1 item 2, D-2): this method itself is
+        UNCHANGED and still required on every adapter -- it becomes the
+        FALLBACK branch of the free function `surfaces_cohosted` (this
+        module's own module-level function, defined ABOVE this ABC --
+        review F10, 2026-09-04, correcting "below") for a peer that has
+        not yet flipped to declaring
+        `contract_version >= 1.6.0` with a real `surfaces` object (no
+        currently-registered adapter has, as of this port revision); a
+        1.6.0-declaring peer's own `surfaces.data`/`surfaces.control`
+        origins become the primary judgment instead. This method's own
+        removal, and the last caller's switch to `surfaces_cohosted`
+        alone, is WP-3's job (same commit as the last peer's 1.6.0 flip,
+        design section 6.1 item 2) -- not this revision's.
         """
 
     # --- application plane ---
@@ -1387,6 +1565,78 @@ class ConformanceAdapter(ABC):
         `CatalogDocument`-shaped dict out of other operations' side
         channels; that would make the suite validate the adapter's
         assembly, not the peer's own declared discovery surface.
+        """
+
+    # ------------------------------------------------------------------
+    # typed schema operations (port v1.10, design docs/design/
+    # PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md section 6.1 item 3, D-3)
+    # ------------------------------------------------------------------
+    #
+    # `create_entity`/`COMMON_FIELD_TYPES` above speak this PORT's own
+    # two-member vocabulary (`"text"`/`"integer"`), deliberately distinct
+    # from the CONTRACT's own seven-member `field_type` vocabulary
+    # (`string`/`integer`/`number`/`boolean`/`object`/`array`/`json`,
+    # `spec/data-service-api.v1.json`'s `SchemaOperationRequest.field_
+    # type` enum) -- see `create_entity`'s own docstring and each plug's
+    # `_PORT_FIELD_TYPE_TO_*` table. The two methods below speak the
+    # CONTRACT's vocabulary directly, verbatim, with no port-level
+    # translation table of their own: the common suite's D-3 round-trip
+    # vector (`test_c19_client_self_sufficiency.py`) needs to know, on its
+    # OWN side, exactly which contract-vocabulary word it declared for
+    # each field, so it can compare that declaration against what
+    # `catalog_document()` reports back -- a port-level translation table
+    # would put that knowledge on the wrong side of the port/plug split
+    # (design principle 1). This is the "new method(s)" resolution design
+    # section 6.1 item 3 left open (work order WP-1 item 5(c)): the common
+    # suite calls these two methods ITSELF with field types it already
+    # knows, so no change to `Fixture` was needed for it to "know its own
+    # declared types" (WP-1 completion report elaborates).
+    #
+    # Neither method is reachable by any currently-registered adapter as
+    # of this port revision -- both are declare-first gated (>= 1.6.0) by
+    # every caller in `test_c19_client_self_sufficiency.py`, and no peer
+    # declares 1.6.0 yet (WP-2/WP-3). Each plug's own implementation is
+    # written against the REAL eventual entry point (the same "written for
+    # the real eventual shape, currently unreached" honesty
+    # `docs/design/CONFORMANCE_ADAPTER_V1.md` sections 18.4/19.5 already
+    # document for other declare-first methods), not a stub -- see each
+    # plug's own docstring/comment for what it targets and why it may
+    # currently deny with `VALIDATION_FAILED` (the peer's pre-1.6.0
+    # vocabulary/keys do not yet accept these contract words) rather than
+    # succeed.
+
+    @abstractmethod
+    def create_entity_with_declared_types(
+        self, session, entity: str, fields: Sequence[str], field_types: Mapping[str, str] | None
+    ) -> None:
+        """Presents a real `create_entity` request carrying the contract's
+        own `fields` (names) and, when given, `field_types` (name -> one
+        of the seven contract-vocabulary words) to the peer's real
+        schema-operation entry point -- the wire-shaped `SchemaOperation
+        Request` itself where a plug's real surface is wire-shaped, or the
+        same request DICT the wire-shaped surface would receive where a
+        plug presents it directly to product code (mirrors every other
+        `self._service.schema(...)`/`self._schema(...)` call already on
+        this ABC's plugs). `field_types` may be partial or `None`/empty --
+        the contract's own D-3(iv) rule ("the request's object may be
+        partial") means any name in `fields` with no entry in `field_
+        types` is created with type `json` (D-3(ii)), a rule this method
+        never enforces or simulates itself: it presents the request
+        exactly as given and returns whatever the peer's real response
+        was (success, or `ConformanceDenial` on the peer's own real
+        refusal -- most commonly `VALIDATION_FAILED` from a pre-1.6.0
+        peer that does not yet accept `field_types` at all).
+        """
+
+    @abstractmethod
+    def add_field_with_declared_type(self, session, entity: str, field: str, field_type: str) -> None:
+        """Presents a real `add_field` request carrying the contract's own
+        per-field `field_type` (one of the seven contract-vocabulary
+        words, verbatim -- never translated through `COMMON_FIELD_TYPES`'
+        own two-member table) to the peer's real schema-operation entry
+        point, the same "real entry point, real response, no
+        fabrication" contract every other schema-mutating method on this
+        ABC already carries.
         """
 
     @abstractmethod

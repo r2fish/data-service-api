@@ -2272,3 +2272,333 @@ registry guard).
   alias handlers already rejected a control/audit credential with
   `AUTH_INVALID` before this revision; only the port and the four plugs
   gained a way to observe that existing behavior.
+
+## 20. v1.10 port revision (coordinated with docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md phase 6 WP-1, and its own WP-3)
+
+`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §6.1 (D-1/D-2/D-3)
+requires three port changes so the common suite can observe contract
+1.6.0's three "client self-sufficiency" obligations (subordinate ruling
+11): (1) a credential's `secret` is the complete, verbatim bearer token
+for the surface it is for; (2) `CapabilityDocument.surfaces` names where
+the OTHER surface is reached; (3) `EntityDescriptor.field_types` names
+every field's real type. This revision **is the first port revision that
+removes a method, and it does so in two work packages, not one**: WP-1
+(this revision's own commit) adds everything below WITHOUT removing
+`control_surface_cohosted_with_data_plane` or the adapter-side
+credential-composition sites §20.4 below records; WP-3 (the LAST peer's
+1.6.0 flip) removes both, in the SAME commit as that flip, and is
+recorded as part of THIS v1.10 revision, not a v1.11 -- one port
+revision spanning two work packages, exactly as §6.1 item 2 of the
+design states it must. Python's `ABC` machinery does not remove an
+unneeded method on its own; WP-3 must delete `control_surface_cohosted_
+with_data_plane`'s own abstract declaration AND all four plugs'
+concrete overrides in that same commit, or a stale, no-longer-called
+override survives silently on whichever plug its author forgets.
+
+### 20.1 Two new abstract methods (D-3, catalog fixture) -- three counting §20.7's own addition
+
+Added to `ConformanceAdapter` immediately after `catalog_document()`,
+before `attempt_mutation`:
+
+- `create_entity_with_declared_types(self, session, entity: str, fields:
+  Sequence[str], field_types: Mapping[str, str] | None) -> None` --
+  presents a real `create_entity` request carrying the CONTRACT's own
+  `fields`/`field_types` (the seven-word vocabulary `string`/`integer`/
+  `number`/`boolean`/`object`/`array`/`json`), verbatim, to the peer's
+  real schema-operation entry point.
+- `add_field_with_declared_type(self, session, entity: str, field: str,
+  field_type: str) -> None` -- the same, for a single `add_field` call.
+
+Design §6.1 item 3 left open whether the "common suite must know its own
+declared types to compare against `catalog_document()`" need was met by
+extending `Fixture` or by adding new method(s); this WP resolves it as
+**new methods, not a `Fixture` change**: `test_c19_client_self_
+sufficiency.py`'s own D-3 vector calls these two methods itself, with
+type declarations it already holds locally, so no test ever needs
+`Fixture` (built once per test, before any of that vector's own entities
+exist) to carry declared-type state.
+
+**Deliberately a SEPARATE vocabulary from `create_entity`'s own
+`fields: Mapping[str, str]`** (`COMMON_FIELD_TYPES`, `"text"`/
+`"integer"`, unchanged by this revision): the two new methods speak the
+CONTRACT's seven-word vocabulary directly, with no port-level
+translation table -- putting a translation table at the port level
+would place peer-mapping knowledge on the wrong side of the port/plug
+split (design principle 1), the same reasoning `adapter.py`'s own
+`_PORT_FIELD_TYPE_TO_R2DB`/`_PORT_FIELD_TYPE_TO_WIRE` tables (each
+plug's own, not the port's) already embody for the OLDER, two-word
+vocabulary.
+
+Neither method is reachable by any currently-registered adapter as of
+this revision -- both are declare-first gated (`>= 1.6.0`) by every
+caller in `test_c19_client_self_sufficiency.py`, and no peer declares
+1.6.0 until WP-2 (r2db-api)/WP-3 (MitateDB-api). Each plug's own
+implementation is written against the REAL eventual entry point (the
+same "written for the real eventual shape, currently unreached" honesty
+§18.4/§19.5 already document for other declare-first methods, not a
+stub) -- see each plug's own docstring/comment (`conformance_adapter_
+r2db.py`/`conformance_adapter_r2db_http.py`/`conformance_adapter_
+mitatedb.py`/`conformance_adapter_mitatedb_http.py`) for what real call
+it targets and why it may currently deny with `VALIDATION_FAILED`
+(r2db's pre-1.6.0 `_SCHEMA_KEYS` does not yet recognize `field_types` at
+all; MitateDB's pre-1.6.0 `_FIELD_TYPE_VOCABULARY` is a DIFFERENT
+five-word set -- `text`/`integer`/`real`/`boolean`/`json` -- not the
+contract's seven) rather than succeed.
+
+### 20.2 Credential verbatim regulation (D-1) -- no new method, a port-level rule
+
+Unlike every other port revision on this document, D-1's own port change
+is **not a new abstract method** -- it is a REGULATION on the EXISTING
+methods that already issue/rotate/bootstrap/reset a credential
+(`issue_credential_inband`/`rotate_credential`/`bootstrap`/`reset`), and
+on the value types those methods return (`CredentialHandle`/
+`ControlCredentialHandle`). `adapter.py`'s own docstrings on all six now
+state it directly: `.secret` is the credential's COMPLETE bearer token,
+used verbatim; `.credential_ref` is the peer's own `credential_id`, held
+verbatim; an adapter composes neither from the other, and derives
+neither by splitting the other. This is additive to what a well-behaved
+adapter already had to do (three of the four currently-registered
+plugs already satisfied it structurally, §20.4 below) -- the change is
+that it is now a documented, port-level obligation, independently
+re-verified by §20.4's own static test, rather than an unstated
+convention living only in each plug's own comments.
+
+### 20.3 `surfaces_cohosted` (D-2) -- a free function, not an abstract method
+
+`adapter.surfaces_cohosted(document, *, fallback)` judges co-hosting from
+a 1.6.0+ peer's own declared `surfaces.data`/`surfaces.control` origins
+(`scheme, host, port` -- never the path, design §3 D-2's own definition),
+falling back to the PRE-1.6.0 mechanism (`ConformanceAdapter.control_
+surface_cohosted_with_data_plane`, port v1.9 §19.1/§19.3) when `document`
+does not affirmatively demonstrate a 1.6.0+ `surfaces` object. It is a
+plain function, not an ABC method, because the judgment itself needs no
+peer-specific knowledge once it has a real `CapabilityDocument` in hand
+-- unlike `control_surface_cohosted_with_data_plane` (a topology fact
+only the PLUG can state, since it alone knows whether its own two ASGI
+apps/service objects are the same process), `surfaces_cohosted` is pure
+computation over a document every plug already knows how to produce.
+
+**`control_surface_cohosted_with_data_plane` is NOT removed by this
+WP** -- design §6.1 item 2 requires its removal to land in the SAME
+commit as the LAST 1.6.0 flip (WP-3), for the identical reason §19.3
+already gives for why the method exists at all: `test_c09_audit_
+evidence.py:868`'s own `test_c09_data_plane_host_audit_query_alias_
+rejects_control_credential_unless_cohosted` calls it UNCONDITIONALLY
+(no version branch at all, by design -- §19.6's own "registered `xfail`-
+free... this is an UNCONDITIONAL obligation"). Removing the method in
+WP-1, before any peer's `surfaces` exists for `surfaces_cohosted` to
+prefer, would make that unconditional vector's own dispatch source
+disappear for two work packages with nothing to replace it. WP-1
+therefore rewires that one call site to `adapter.surfaces_cohosted(
+adapter.capability_document(), fallback=adapter.control_surface_
+cohosted_with_data_plane)` -- a REPLACEMENT of the judgment SOURCE, not
+of the OBSERVED BEHAVIOR: every currently-registered plug still declares
+`False` under the fallback (no plug has `surfaces` yet), so the vector's
+own observed outcome for that call site is unchanged (work order WP-1
+completion condition 11's own "置換が挙動を変えないことの実測" -- see
+the WP-1 completion report's own mutation 8 result for the measured
+proof: removing the fallback branch entirely, so a `surfaces`-less
+peer's judgment source silently returns `True` instead of falling
+through to the topology declaration, turns that same vector red on all
+four plugs).
+
+### 20.4 The four plugs, as of this WP
+
+All four currently-registered plugs implement both new abstract methods
+(§20.1), written against their own real eventual schema-operation entry
+point (unreachable today, §20.1's own closing paragraph).
+
+**Credential composition, as found (D-1(e), the static test's own
+subject, §20.5)**: `conformance_adapter_r2db.py`, `conformance_adapter_
+r2db_http.py`, and `conformance_adapter_mitatedb.py` (the in-process
+MitateDB plug) already compose and decompose nothing -- each already
+carries `credential_id` and `secret` as two separate values end to end,
+never joined into one string by the ADAPTER itself (MitateDB's own
+in-band composition, where it exists, happens inside the PEER's product
+code, `http.py`, on the wire -- never inside this adapter). Only
+`conformance_adapter_mitatedb_http.py` composes, at **five** sites
+(`issue_credential`/`issue_credential_inband`/`_control_send`/`audit_
+query_on_data_plane_host`/`isolated_control_surface`, each an
+`f"{credential_id}.{secret}"`-shaped expression) -- because THIS plug's
+own real wire protocol (`http.py`'s `Authorization` header, pre-1.6.0)
+already requires the composite form on the wire, and no bare-secret
+entry point exists for it to use instead. **Correction (review finding
+F3 / audit finding (iv), 2026-09-04, common-suite discipline 3)**: this
+row originally said "four sites" and did not name `isolated_control_
+surface` -- accurate at the ORIGINAL port v1.10 delivery, but addendum A
+(§20.7) added a 5th composition site inside that new method, and this
+row (plus §20.5's own reason string and `test_c19_client_self_
+sufficiency.py`'s own `xfail` reason) were not updated when addendum A
+landed. §20.5's static test finds exactly these FIVE sites and no
+others (WP-1 completion report has the calibration run, re-run against
+the broadened scanner §20.5 also now describes). Removing all five is
+WP-3's job, same commit as this plug's own 1.6.0 flip (design §3
+D-1(d)'s own "混在期間を作らない" instruction: all of this plug's
+issue/rotate/bootstrap/reset/addendum-A points move to peer-side
+composition in one commit, never some points before others).
+
+### 20.5 Two new `xfail(strict=True)` registrations, `test_c19_client_self_sufficiency.py`
+
+Mirrors §18.6/§19.6's own whole-registry-guard discipline, plus one NEW
+kind of fixed test this document has not carried before:
+
+- `test_c19_every_control_surface_adapter_declares_1_6_0` -- the
+  whole-registry guard, SAME shape as `test_c09_every_control_surface_
+  adapter_declares_1_5_0` (§19.6, phase 5's identically-purposed guard
+  for the PRIOR contract bump): a non-parametrized function that walks
+  `registered_adapters()` itself (never a hardcoded adapter-name list),
+  requiring every control-surface-bearing adapter to declare
+  `contract_version >= 1.6.0`. False today (collected as 1 item);
+  registered `xfail(strict=True)`, reason "no peer declares 1.6.0 yet;
+  un-xfailed by the last flip WP" -- removed in the SAME commit as the
+  LAST 1.6.0 flip (WP-3), the guard's own body unchanged.
+- `test_c19_adapters_never_compose_or_decompose_the_bearer_secret` --
+  the FIRST static, SOURCE-LEVEL fixed test on this port (every prior
+  fixed test in this document observes RUNTIME behavior through the
+  ABC; this one parses every REGISTERED adapter's own module file's AST
+  -- `_scanned_adapter_files()`, derived from `registered_adapters()`
+  itself, never a hardcoded file list, review finding F7/audit finding
+  (vi) -- and never calls any of them). Fixes two properties at once
+  (D-1(e), design §6.2's own warning that dropping ONLY the first
+  leaves a real gap): (a) no expression concatenates an id-shaped value
+  with a secret-shaped value joined by a literal `"."` (an f-string, a
+  `+` chain, or a `".".join([...])` call); (b) no `.split(".")`/
+  `.rsplit(".")`/`.partition(".")`/`.rpartition(".")` call (nor the
+  hand-rolled find/index-based slice equivalent) -- (b) exists because
+  dropping composition alone while still deriving `credential_id` by
+  SPLITTING the bearer would pass (a) while remaining exactly the
+  behavior the verbatim regulation (§20.2) forbids. Genuinely RED today
+  (§20.4's FIVE real findings on `conformance_adapter_mitatedb_http.py`
+  -- corrected from "four", review finding F3/audit finding (iv),
+  2026-09-04, §20.4's own correction note), so registered
+  `xfail(strict=True)` with a reason naming that plug and its five
+  sites by the operations that create them -- removed in the SAME WP-3
+  commit that removes those five sites (§20.4), which is also the same
+  commit that removes `control_surface_cohosted_with_data_plane`
+  (§20.3) -- design §6's own "撤去 3 点を分割しない" instruction (work
+  order WP-1 §7 item 11): the guard `xfail`, the static-test `xfail`,
+  and the adapter composition sites all move together, or none of them
+  do, because dropping any ONE alone either goes vacuously green
+  (masking a still-missing implementation) or breaks a still-load-
+  bearing fallback.
+
+The scanning rule was prototyped and measured against every registered
+plug's own module file BEFORE being placed in the suite (common-suite
+discipline: an undesigned mechanism is measured, not assumed) --
+`scratchpad/wp1y/static_proto.py`, one calibration finding (a false
+positive on a literal error-message string that happened to mention
+both "credential_id" and "secret" in prose, fixed by scoping the
+id-/secret-shape check to INTERPOLATED expressions only, never literal
+text runs) and zero findings needing an exclusion list. **Broadened
+(review finding F7 / audit finding (vi), 2026-09-04)**: decomposition
+detection (property (b)) originally flagged a split/partition call only
+when its own RECEIVER expression's text mentioned "secret"/"bearer" --
+measured (review's own mutation) to miss `token = handle.secret;
+token.split(".")` entirely, since an intermediate variable's name
+carries neither word. The rule now flags ANY `.split(".")`/
+`.rsplit(".")`/`.partition(".")`/`.rpartition(".")` call (plus the
+hand-rolled find/index-based slice equivalent) whose own argument is
+the literal delimiter `"."`, regardless of receiver -- re-calibrated
+against every registered plug's own module file with zero new findings
+(no allowlist entry was needed) and confirmed to catch the review's own
+`token.split(".")` example. **Residual, disclosed limit
+(CONDITIONS.md's C-19 row limit (e))**: this remains a SYNTACTIC scan
+-- it cannot see decomposition performed by a function this file
+merely CALLS (e.g. handing the bearer to an external helper that
+itself splits it), only expressions written directly in the scanned
+file's own AST. WP-1's own completion report has the full transcript
+for both the original calibration and the F7 re-calibration.
+
+### 20.6 Compatibility impact (mirrors §12.7/§13.8/§14.3/§15.8/§16.7/§18.7/§19.7)
+
+- The two new abstract methods (§20.1) are additive to the ABC; a plug
+  that does not implement both fails to instantiate (`ABC` enforcement)
+  -- all four registered plugs implement both as of this revision, so
+  this is not a live compatibility break for any currently-registered
+  adapter.
+- `control_surface_cohosted_with_data_plane` (§20.3) is UNCHANGED and
+  still required on every plug as of this WP -- its eventual removal is
+  WP-3's, not this commit's.
+- `CredentialHandle`/`ControlCredentialHandle`'s own field SHAPES
+  (`credential_ref`/`application_id`/`role`/`secret`, `credential_ref`/
+  `secret`) are unchanged by §20.2 -- only their documented MEANING
+  gained a stated regulation; no plug's construction of either type
+  needed to change to comply (three of the four already complied
+  structurally, §20.4).
+- No peer's product code changed in this WP (work order §7 item 3 /
+  work order completion condition 18) -- only the port, the two-method
+  addition on all four plugs, and (temporarily, until WP-3) nothing else
+  on the adapter-composition side.
+
+### 20.7 Addendum A extension: `isolated_control_surface` (supervisor ruling 2026-09-04)
+
+A THIRD new abstract method, approved and specified by the supervisor
+after reviewing the WP-1 addendum A standalone prototype (§20's own
+initial delivery covered only §20.1's two D-3 methods): `isolated_
+control_surface(self) -> AbstractContextManager[Callable[[CredentialHandle
+| ControlCredentialHandle], Mapping[str, Any]]]`, placed on the ABC
+immediately after `control_audit_events()`. A context manager that
+yields a callable presenting a `control_capabilities`-equivalent request
+to a FRESH, throwaway control surface -- sharing the adapter's own real
+registered application/credential state (the SAME backend/store objects
+`control_credential()`'s own actor already authenticates against) but
+starting from its own EMPTY `control_requests_per_minute` rate window --
+and releases whatever real resources building it opened on exit (an
+HTTP+PostgreSQL plug's own fresh connection pools in particular).
+
+**Not a contract capability.** Used by exactly one caller: `test_c14_
+authority_boundary.py::test_c14_resource_bounds_published_and_enforced`'s
+own `control_requests_per_minute` sub-drive, which this addendum
+rewrites to burst against the isolated surface instead of the adapter's
+shared one -- eliminating both the prior `time.sleep(61)` recovery-wait
+(nothing shared is touched, so there is nothing to wait to recover) and
+its own "un-poison the shared window for later tests" side effect
+(unnecessary by construction: the isolated surface's rate window was
+never shared in the first place). The rewrite also ADDS a property this
+class's own sub-drive never checked before this addendum: exact-position
+attribution (`successes == rate_limit` before the first refusal) --
+previously only the `applications`/`credentials_per_application`
+sub-drives asserted this; the isolated surface's genuinely empty window
+makes it free to check for `control_requests_per_minute` too.
+
+**Per-plug realization**: the two in-process plugs (`conformance_
+adapter_r2db.py`/`conformance_adapter_mitatedb.py`) construct a second
+`ControlPlaneService` sharing the SAME backend/audit/limits objects the
+adapter's own shared `ControlPlaneService` was built from -- no real
+resource to release on exit. The two HTTP plugs reuse their own real
+product-code control-plane assembly a second time (`conformance_
+adapter_r2db_http.py`'s own `_build_control_stack()`, the SAME function
+`__init__`/`_privileged_control_send`'s periodic-rebuild path already
+call; `conformance_adapter_mitatedb_http.py`'s own `build_control_
+service(self._control_env)`, the SAME function `__init__` already calls,
+against a newly-saved `self._control_env` so it can be called a second
+time) against the SAME real Postgres DSN/schema, and release the real
+resources that second call opened on exit -- `r2db-api-http` closes the
+fresh httpx client AND each of the 4 fresh stores `_build_control_
+stack()` returns (mirrors `_privileged_control_send`'s own rebuild-path
+cleanup, `store is not None` guard included); `MitateDB-api-http`
+closes only the fresh httpx client (`build_control_service`'s own
+registries/backend open one connection per call, no pool to release,
+per that function's own docstring).
+
+**Measured (WP-1 completion report has the full transcript)**: `test_
+c14_resource_bounds_published_and_enforced`'s own `call` duration
+across all 4 plugs combined -- previously ~4 * (61 + few seconds) ≈ 248s
+-- is now under 4 seconds total (r2db-api/MitateDB-api in-process:
+0.01s each; r2db-api-http: 0.74s; MitateDB-api-http: 3.13s), a
+>60x reduction, comfortably under the addendum's own 60-second target.
+Configured `applications`/`credentials_per_application`/`control_
+requests_per_minute` values on all four plugs are UNCHANGED by this
+addendum (still `115`/`5`/`200` r2db-api, `100`/`5`/`200` MitateDB-api)
+-- the isolated surface shares `self._control_limits` verbatim, so no
+adapter construction-time value needed to move.
+
+Compatibility impact: additive to the ABC (§20.6's own first bullet
+applies identically -- a plug not implementing it fails to instantiate;
+all four now do). No peer's product code changed. `MitateDB-api-http`'s
+own real wire protocol still requires the pre-1.6.0 composite bearer
+form for a control credential, so this new method's own call helper
+composes it too (this file's 5th such site -- §20.4, as corrected by
+review finding F3 / audit finding (iv), 2026-09-04, now records all
+5 from the start, this one included) -- removed together with the
+other 4 in WP-3.

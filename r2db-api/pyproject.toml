@@ -38,6 +38,17 @@ test = [
     "pytest",
     "httpx>=0.28",
     "anyio>=4.0",
+    # Phase 6 WP-1 addendum B (docs/work-orders/WORK_ORDER_PHASE6_CONTRACT_
+    # 160_V1.md): adapter-unit parallelization for the common `conformance-
+    # tests/` suite (`conftest.py`'s own `pytest_collection_modifyitems`
+    # hook, `-n 5 --dist loadgroup`). Declared here, not in the repository-
+    # root `pyproject.toml` -- that file carries only `[tool.pytest.ini_
+    # options]` (no `[project]`/dependency section exists there at all, so
+    # it cannot structurally carry a dependency declaration) -- and on BOTH
+    # peers' identically-named `test` extra, mirroring `pytest`/`httpx`/
+    # `anyio`'s own already-symmetric placement: this tool serves the one
+    # shared `conformance-tests/` suite, not either peer specifically.
+    "pytest-xdist>=3.6",
 ]
 
 [tool.setuptools.package-data]
