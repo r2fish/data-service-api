@@ -105,6 +105,7 @@ silently serving a subset. There is no partial-startup mode.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -198,15 +199,28 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
 
 
 def _optional_float(env: Mapping[str, str], name: str, default: float) -> float:
-    """`_optional_int`'s `float` counterpart, for the audit-buffer flush
-    interval (Phase 4) -- identical degrade-to-default discipline."""
+    """Phase 6 WP-0 (design D-4(a)): unlike `_optional_int`, this
+    function's only consumer is the audit-buffer flush interval, and a
+    misconfigured value there does not degrade gracefully --
+    `threading.Event.wait(0)`, `.wait(-1)`, and `.wait(float("nan"))` all
+    return immediately (`False`), so a value that is unset or empty is
+    fine (falls back to `default`, same discipline as `_optional_int`),
+    but a *non-empty* value that is not a finite, positive float turns the
+    flush thread into a silent hot loop -- something a deployer who
+    mistyped the variable would never notice, since nothing about a hot
+    flush loop looks alarming on its own. So this fails loudly at startup
+    instead (`ValueError` naming the variable), the same discipline this
+    module's own other env-var validity checks already use."""
     raw = env.get(name)
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        return default
+        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite, positive number, got {raw!r}")
+    return value
 
 
 def _parse_served_apps(raw: str) -> list[str]:

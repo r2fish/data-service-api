@@ -18,7 +18,6 @@ import json
 import uuid
 from contextlib import AbstractAsyncContextManager
 from importlib import resources
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from starlette.applications import Starlette
@@ -47,22 +46,26 @@ REQUEST_ID_HEADER = b"x-request-id"
 # or copied onto the VPS without the sibling `spec/` checkout (§5.3, C-1)
 # still imports. `tests/test_http.py` asserts the packaged copy is
 # byte-identical to the checkout's `spec/`, so the two can never silently
-# drift apart. Running from a repository checkout without having synced the
-# packaged copy still works via the fallback below.
+# drift apart.
+#
+# Phase 6 WP-0 (peer-symmetry ruling, 2026-09-04): a repository-relative
+# fallback (`Path(__file__).resolve()` walked three parent directories up
+# to `"spec"`) used to sit here for a repository checkout that had not
+# synced the packaged copy. Removed -- this package's own byte-identical
+# test already makes
+# staleness between the two copies impossible, so the fallback existed
+# only to paper over an out-of-sync checkout, the same known coupling
+# design D-4(b) closes for MitateDB-api's own `mitatedb_api.http`. Running
+# from a source checkout (this repository's own tests included) still
+# works: `resources.files("r2db_api.contract")` resolves directly against
+# `src/r2db_api/contract/` on disk in that case, no install step required.
 # --------------------------------------------------------------------------
 
 _PACKAGED_CONTRACT_PATH = "data-service-api.v1.json"
-_REPO_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "spec" / "data-service-api.v1.json"
 
 
 def _load_contract_text() -> str:
-    try:
-        packaged = resources.files("r2db_api.contract").joinpath(_PACKAGED_CONTRACT_PATH)
-        if packaged.is_file():
-            return packaged.read_text()
-    except (ModuleNotFoundError, FileNotFoundError, NotADirectoryError):
-        pass
-    return _REPO_CONTRACT_PATH.read_text()
+    return resources.files("r2db_api.contract").joinpath(_PACKAGED_CONTRACT_PATH).read_text()
 
 
 _CONTRACT = json.loads(_load_contract_text())

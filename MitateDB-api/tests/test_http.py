@@ -16,6 +16,8 @@ no separate skip policy is introduced here.
 from __future__ import annotations
 
 import json
+from importlib import resources
+from pathlib import Path
 
 import httpx
 import pytest
@@ -130,6 +132,28 @@ def _post(stack, path, *, bearer=None, json_body=None, headers=None, content=Non
 
 def _get(stack, path, *, bearer=None, headers=None) -> httpx.Response:
     return _run(_aget(stack, path, bearer=bearer, headers=headers))
+
+
+# ---------------------------------------------------------------------------
+# Packaged contract copy (Phase 6 WP-0, design D-4(b)): must never silently
+# drift from `spec/data-service-api.v1.json`, the common repository's single
+# source of truth. `mitatedb_api.http` loads the packaged copy
+# (`mitatedb_api/contract/data-service-api.v1.json`, wired in as package
+# data in `pyproject.toml`) via `importlib.resources` so a unit installed or
+# copied onto the VPS without the sibling `spec/` checkout still imports;
+# this test is what prevents that copy from going stale. Near-verbatim twin
+# of `r2db-api/tests/test_http.py::
+# test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`
+# (same `parents[2]` depth from this file to the repository root) -- the two
+# are pinned to each other by this repository's own peer-symmetry
+# isomorphism test (`test_audit_query.py`).
+# ---------------------------------------------------------------------------
+
+
+def test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth():
+    packaged = resources.files("mitatedb_api.contract").joinpath("data-service-api.v1.json").read_bytes()
+    source_of_truth = (Path(__file__).parents[2] / "spec" / "data-service-api.v1.json").read_bytes()
+    assert packaged == source_of_truth
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ single source of truth for which top-level request fields are accepted.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from importlib import resources
 from typing import Any, Awaitable, Callable, Mapping
 
 from starlette.applications import Starlette
@@ -44,7 +44,34 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
-_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "spec" / "data-service-api.v1.json"
+# --------------------------------------------------------------------------
+# Contract as the single source of truth for request shapes (Phase 6
+# WP-0, design D-4(b)).
+#
+# `spec/data-service-api.v1.json` in the common repository remains the
+# authored source of truth (CLAUDE.md: this package must not become the
+# implicit owner of the public contract). What ships inside this
+# distribution is a byte-identical packaged *copy*
+# (`mitatedb_api/contract/data-service-api.v1.json`, wired in as package
+# data in `pyproject.toml`), loaded via `importlib.resources` so a unit
+# installed or copied onto the VPS without the sibling `spec/` checkout
+# still imports -- this replaces the prior repository-relative lookup
+# (`Path(__file__).resolve()` walked three parent directories up to
+# `"spec"`), which broke the moment this package was installed/copied
+# anywhere that checkout was not a sibling three directories up (the
+# known coupling design D-4(b) closes). `r2db_api.http`'s own loader took
+# the identical repository-relative form as a FALLBACK behind its
+# packaged copy (never this package's own primary path, which had no
+# packaged copy to fall back to before this WP); the supervisor's own WP-0
+# peer-symmetry ruling (2026-09-04) removed that fallback too, so both
+# peers now resolve the contract exclusively through `importlib.
+# resources` against their own packaged copy, no fallback on either side.
+# `tests/test_http.py::test_packaged_contract_copy_is_byte_identical_to_
+# spec_source_of_truth` asserts the packaged copy never silently drifts
+# from `spec/`.
+# --------------------------------------------------------------------------
+
+_CONTRACT_PATH = resources.files("mitatedb_api.contract").joinpath("data-service-api.v1.json")
 _CONTRACT = json.loads(_CONTRACT_PATH.read_text())
 _SCHEMAS = _CONTRACT["schemas"]
 _DEFINITIONS = _CONTRACT["definitions"]
