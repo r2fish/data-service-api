@@ -54,7 +54,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore
+from r2db_api.auth import ControlAuthContext, ControlCredentialStore, CredentialStore, compose_bearer_locator
 from r2db_api.credential_store import PostgresControlCredentialStore, PostgresCredentialStore, validate_control_pepper_separation
 from r2db_api.errors import FoundationError
 from r2db_api.structured import RESET_CONTROL_CREDENTIALS
@@ -309,7 +309,7 @@ def test_in_memory_unit_of_work_commit_applies_change() -> None:
     store = CredentialStore(pepper=PEPPER)
     with store.unit_of_work() as work:
         store.add("crd_uow1", "app-uow", "runtime", "secret-uow1", work=work)
-    context = store.authenticate("secret-uow1")
+    context = store.authenticate(compose_bearer_locator("crd_uow1", "secret-uow1"))
     assert context.credential_id == "crd_uow1"
 
 
@@ -329,9 +329,10 @@ def test_postgres_unit_of_work_commit_applies_change(platform: types.SimpleNames
     _register_application(platform, slug)
     store = _write_app_store(platform)
     try:
+        pg_credential_id = "crd_" + secrets.token_hex(8)
         with store.unit_of_work() as work:
-            store.add("crd_" + secrets.token_hex(8), slug, "runtime", "secret-pguow1", work=work)
-        context = store.authenticate("secret-pguow1")
+            store.add(pg_credential_id, slug, "runtime", "secret-pguow1", work=work)
+        context = store.authenticate(compose_bearer_locator(pg_credential_id, "secret-pguow1"))
         assert context.application_id == slug
     finally:
         store.close()
@@ -408,7 +409,7 @@ def test_control_credential_parity_add_authenticate_rotate_must_rotate_both_impl
         for store, credential_id in ((in_memory, "ctl_" + secrets.token_hex(8)), (pg, "ctl_" + secrets.token_hex(8))):
             with store.unit_of_work() as work:
                 store.add(credential_id, "secret-parity-before", work=work)
-            context = store.authenticate("secret-parity-before")
+            context = store.authenticate(compose_bearer_locator(credential_id, "secret-parity-before"))
             assert isinstance(context, ControlAuthContext)
             assert context.credential_id == credential_id
             assert context.must_rotate is True  # DEFAULT true (R-5)
@@ -416,9 +417,9 @@ def test_control_credential_parity_add_authenticate_rotate_must_rotate_both_impl
             with store.unit_of_work() as work:
                 store.rotate(credential_id, "secret-parity-after", work=work)
             with pytest.raises(FoundationError) as exc:
-                store.authenticate("secret-parity-before")
+                store.authenticate(compose_bearer_locator(credential_id, "secret-parity-before"))
             assert exc.value.code == "AUTH_INVALID"
-            context2 = store.authenticate("secret-parity-after")
+            context2 = store.authenticate(compose_bearer_locator(credential_id, "secret-parity-after"))
             assert context2.must_rotate is False  # rotate clears must_rotate (R-5)
     finally:
         pg.close()
@@ -482,10 +483,10 @@ def test_application_credential_rotate_parity_both_impls_does_not_check_revoked(
         # refuses with AUTH_REVOKED, never AUTH_INVALID (which would imply
         # the new secret was simply never stored).
         with pytest.raises(FoundationError) as exc:
-            in_memory.authenticate("secret-approt-after")
+            in_memory.authenticate(compose_bearer_locator(in_memory_id, "secret-approt-after"))
         assert exc.value.code == "AUTH_REVOKED"
         with pytest.raises(FoundationError) as exc:
-            in_memory.authenticate("secret-approt-before")
+            in_memory.authenticate(compose_bearer_locator(in_memory_id, "secret-approt-before"))
         assert exc.value.code == "AUTH_INVALID"  # old secret no longer matches at all
 
         pg_id = "crd_" + secrets.token_hex(8)
@@ -496,7 +497,7 @@ def test_application_credential_rotate_parity_both_impls_does_not_check_revoked(
         with pg.unit_of_work() as work:
             pg.rotate(pg_id, "secret-approt-pg-after", work=work)  # must not raise
         with pytest.raises(FoundationError) as exc:
-            pg.authenticate("secret-approt-pg-after")
+            pg.authenticate(compose_bearer_locator(pg_id, "secret-approt-pg-after"))
         assert exc.value.code == "AUTH_REVOKED"
     finally:
         pg.close()
@@ -512,13 +513,13 @@ def test_control_credential_visible_to_a_separate_store_instance(platform: types
         credential_id = "ctl_" + secrets.token_hex(8)
         with writer.unit_of_work() as work:
             writer.add(credential_id, "secret-propagation", work=work)
-        context = reader.authenticate("secret-propagation")
+        context = reader.authenticate(compose_bearer_locator(credential_id, "secret-propagation"))
         assert context.credential_id == credential_id
 
         with writer.unit_of_work() as work:
             writer.set_state(credential_id, revoked=True, work=work)
         with pytest.raises(FoundationError) as exc:
-            reader.authenticate("secret-propagation")
+            reader.authenticate(compose_bearer_locator(credential_id, "secret-propagation"))
         assert exc.value.code == "AUTH_REVOKED"
     finally:
         writer.close()
@@ -528,8 +529,14 @@ def test_control_credential_visible_to_a_separate_store_instance(platform: types
 def test_control_authenticate_fails_closed_when_platform_db_unreachable() -> None:
     store = PostgresControlCredentialStore(_unreachable_dsn(), pepper=CONTROL_PEPPER)
     try:
+        # Phase 6 WP-2 (design D-1(c)): a WELL-FORMED locator is required
+        # here -- authentication now checks the locator's SHAPE before ever
+        # attempting the (unreachable) database lookup (SI-15 fail-closed,
+        # no lookup on a malformed presentation), so a bare, dot-less
+        # secret would short-circuit to AUTH_INVALID without ever reaching
+        # the DB-unreachable path this test means to exercise.
         with pytest.raises(FoundationError) as exc:
-            store.authenticate("any-secret")
+            store.authenticate("ctl_whatever.any-secret")
         assert exc.value.code == "AUTH_STATE_UNAVAILABLE"
         assert exc.value.status == 503
         with pytest.raises(FoundationError) as exc:
@@ -583,20 +590,27 @@ def test_cross_store_leakage_secret_added_to_one_store_never_authenticates_the_o
             control_store.add(control_credential_id, control_secret, work=work)
 
         # Cross direction 1: the control credential's own secret, presented
-        # to the application store -- AUTH_INVALID.
+        # to the application store UNDER THE APP STORE'S OWN KNOWN
+        # credential_id (Phase 6 WP-2, design D-1(c): a locator naming an
+        # unknown credential_id would fail on that alone, never reaching
+        # compare_digest at all -- using the app store's own real id here
+        # is what makes this genuinely exercise "the secret half from the
+        # WRONG store/pepper never matches", not merely "unknown id") --
+        # AUTH_INVALID.
         with pytest.raises(FoundationError) as exc:
-            app_store.authenticate(control_secret)
+            app_store.authenticate(compose_bearer_locator(app_credential_id, control_secret))
         assert exc.value.code == "AUTH_INVALID"
 
         # Cross direction 2: the application credential's own secret,
-        # presented to the control store -- AUTH_INVALID.
+        # presented to the control store under the control store's own
+        # known credential_id -- AUTH_INVALID.
         with pytest.raises(FoundationError) as exc:
-            control_store.authenticate(app_secret)
+            control_store.authenticate(compose_bearer_locator(control_credential_id, app_secret))
         assert exc.value.code == "AUTH_INVALID"
 
         # Each store still correctly authenticates its own credential.
-        assert app_store.authenticate(app_secret).credential_id == app_credential_id
-        assert control_store.authenticate(control_secret).credential_id == control_credential_id
+        assert app_store.authenticate(compose_bearer_locator(app_credential_id, app_secret)).credential_id == app_credential_id
+        assert control_store.authenticate(compose_bearer_locator(control_credential_id, control_secret)).credential_id == control_credential_id
 
         # R-2's own claim, directly: identical literal secret, different
         # verifier under each store's pepper.
@@ -610,6 +624,273 @@ def test_cross_store_leakage_secret_added_to_one_store_never_authenticates_the_o
 # ===========================================================================
 # Section B: pepper separation (R-2) -- work order §6 item 5.
 # ===========================================================================
+
+
+# ===========================================================================
+# Section A2 (Phase 6 WP-2, design docs/design/PHASE6_CONTRACT_160_CLIENT_
+# DISCOVERY_V1.md D-1(c)): the locator wire form itself -- verbatim accept,
+# the 3 malformed-locator fail-closed shapes, response uniformity (SI-10),
+# and judgment order (compare_digest before revoked/enabled/app_enabled),
+# for BOTH the application store and the control store, BOTH backends.
+# ===========================================================================
+
+
+_MALFORMED_LOCATORS = (
+    "no-dot-at-all",  # no "." separator
+    ".secret-part-only",  # empty credential_id half
+    "credential-id-only.",  # empty secret half
+    "crd_\x00nulid.secret",  # NUL byte in the credential_id half (coordinator F1)
+    "crd_nulid.sec\x00ret",  # NUL byte in the secret half (coordinator F1)
+)
+
+
+@pytest.mark.parametrize("malformed", _MALFORMED_LOCATORS)
+def test_malformed_locator_fails_closed_without_a_lookup_in_memory_app_store(malformed: str) -> None:
+    """Design D-1(c) fail-closed rule: a malformed locator (no `.`, empty
+    credential_id half, empty secret half) is `AUTH_INVALID` WITHOUT ever
+    looking anything up -- exercised here against a store holding a REAL
+    row, so a mutation that starts scanning `self._records` for a malformed
+    presentation (rather than rejecting the shape outright) would still
+    observe AUTH_INVALID by coincidence only if nothing happens to match;
+    the dedicated `split_bearer_locator`-return-`None` path is what this
+    test is really pinned to (see the sibling Postgres test below, whose
+    malformed presentation deliberately shares no substring with any real
+    row, closing that coincidence gap for both backends together)."""
+    store = CredentialStore(pepper=PEPPER)
+    with store.unit_of_work() as work:
+        store.add("crd_realrow00000001", "some-app", "runtime", "some-real-secret", work=work)
+    with pytest.raises(FoundationError) as exc:
+        store.authenticate(malformed)
+    assert exc.value.code == "AUTH_INVALID"
+
+
+@pytest.mark.parametrize("malformed", _MALFORMED_LOCATORS)
+def test_malformed_locator_fails_closed_without_a_lookup_postgres_app_store(malformed: str, platform: types.SimpleNamespace) -> None:
+    slug = _fresh_slug("ml")
+    _register_application(platform, slug)
+    store = _write_app_store(platform)
+    try:
+        with store.unit_of_work() as work:
+            store.add("crd_" + secrets.token_hex(8), slug, "runtime", "some-real-secret-" + secrets.token_urlsafe(8), work=work)
+        with pytest.raises(FoundationError) as exc:
+            store.authenticate(malformed)
+        assert exc.value.code == "AUTH_INVALID"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("malformed", _MALFORMED_LOCATORS)
+def test_malformed_locator_fails_closed_control_store_both_impls(malformed: str, platform: types.SimpleNamespace) -> None:
+    in_memory = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    pg = _control_store(platform)
+    try:
+        for store in (in_memory, pg):
+            credential_id = "ctl_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, "some-real-control-secret-" + secrets.token_urlsafe(8), work=work)
+            with pytest.raises(FoundationError) as exc:
+                store.authenticate(malformed)
+            assert exc.value.code == "AUTH_INVALID"
+    finally:
+        pg.close()
+
+
+def test_dot_less_locator_matching_a_real_secrets_own_text_still_fails_closed_in_memory() -> None:
+    """Work order mutation 4's own pin: a dot-less presentation is refused
+    WITHOUT ever being compared against any stored row -- even when that
+    presentation happens to be the EXACT TEXT of a real credential's own
+    secret. A full-table-scan fallback for the malformed-shape case (the
+    mutation this test is written against) would find this coincidental
+    match and wrongly authenticate; the correct fail-closed behavior
+    rejects on the missing `.` alone, before any comparison happens."""
+    store = CredentialStore(pepper=PEPPER)
+    coincidental_secret = "this-text-has-no-dot-in-it-at-all"
+    with store.unit_of_work() as work:
+        store.add("crd_coincidence0001", "some-app", "runtime", coincidental_secret, work=work)
+    with pytest.raises(FoundationError) as exc:
+        store.authenticate(coincidental_secret)  # presented bare, no locator prefix
+    assert exc.value.code == "AUTH_INVALID"
+
+
+def test_unknown_locator_and_known_locator_wrong_secret_are_both_uniformly_auth_invalid_app_store(platform: types.SimpleNamespace) -> None:
+    """SI-10: an unknown `credential_id` and a known `credential_id` with a
+    digest mismatch must be indistinguishable in the response -- both
+    `AUTH_INVALID`, both both backends. (The malformed-shape case above is
+    already, separately, `AUTH_INVALID` too -- this test is about the two
+    LOOKUP-REACHING outcomes specifically.)"""
+    slug = _fresh_slug("un")
+    _register_application(platform, slug)
+    for store in (CredentialStore(pepper=PEPPER), _write_app_store(platform)):
+        try:
+            credential_id = "crd_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, slug, "runtime", "the-real-secret", work=work)
+
+            with pytest.raises(FoundationError) as exc_unknown:
+                store.authenticate(compose_bearer_locator("crd_" + secrets.token_hex(8), "irrelevant-secret"))
+            with pytest.raises(FoundationError) as exc_wrong_secret:
+                store.authenticate(compose_bearer_locator(credential_id, "the-WRONG-secret"))
+
+            assert exc_unknown.value.code == "AUTH_INVALID"
+            assert exc_wrong_secret.value.code == "AUTH_INVALID"
+            assert exc_unknown.value.status == exc_wrong_secret.value.status == 401
+            # Same message, same shape -- SI-10's own "no existence-
+            # distinction disclosure" reading extended to this pair.
+            assert exc_unknown.value.message == exc_wrong_secret.value.message
+        finally:
+            if hasattr(store, "close"):
+                store.close()
+
+
+def test_digest_check_precedes_revoked_and_enabled_state_both_impls_and_both_stores(platform: types.SimpleNamespace) -> None:
+    """Design implementation constraint 1 (B-1 ruling maintained): `compare_
+    digest` is evaluated -- and must succeed -- BEFORE any `revoked`/
+    `enabled` state check. Pinned here by presenting the WRONG secret
+    against a row that is ALSO revoked/disabled: if state were checked
+    first, this would surface AUTH_REVOKED/AUTH_INVALID-via-disabled
+    instead of the digest-mismatch AUTH_INVALID this test asserts -- a
+    mutation that reorders the checks turns this red without touching the
+    uniformity test above (which never revokes/disables anything)."""
+    # Application store, revoked.
+    slug = _fresh_slug("or")
+    _register_application(platform, slug)
+    for store in (CredentialStore(pepper=PEPPER), _write_app_store(platform)):
+        try:
+            credential_id = "crd_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, slug, "runtime", "real-secret-order", work=work)
+                store.set_state(credential_id, revoked=True, work=work)
+            with pytest.raises(FoundationError) as exc:
+                store.authenticate(compose_bearer_locator(credential_id, "WRONG-secret-order"))
+            assert exc.value.code == "AUTH_INVALID"  # not AUTH_REVOKED -- digest never matched
+        finally:
+            if hasattr(store, "close"):
+                store.close()
+
+    # Control store, disabled (both impls).
+    in_memory = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    pg = _control_store(platform)
+    try:
+        for store in (in_memory, pg):
+            credential_id = "ctl_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, "real-control-secret-order", work=work)
+                store.set_state(credential_id, enabled=False, work=work)
+            with pytest.raises(FoundationError) as exc:
+                store.authenticate(compose_bearer_locator(credential_id, "WRONG-control-secret-order"))
+            assert exc.value.code == "AUTH_INVALID"  # not the disabled-AUTH_INVALID path -- digest never matched
+    finally:
+        pg.close()
+
+
+def test_locator_id_must_own_the_secret_not_merely_any_row_app_store(platform: types.SimpleNamespace) -> None:
+    """Design D-1(c), r2db decision (c): authentication is a `credential_id`
+    -keyed row lookup, THEN a digest check against THAT row -- never a
+    digest-keyed (`_SELECT_BY_VERIFIER`) scan across every row. Pinned by
+    presenting credential 2's own `credential_id` locator-joined with
+    credential 1's own (genuinely valid, for credential 1) secret: under
+    the correct id-first lookup, this fails (credential 2's row's verifier
+    does not match credential 1's secret). Under a digest-keyed lookup
+    (the retired `_SELECT_BY_VERIFIER` form, work order mutation 2), the
+    digest WOULD match credential 1's row regardless of which id was
+    named in the locator, and would wrongly authenticate as credential 1
+    under credential 2's own claimed identity."""
+    slug = _fresh_slug("xw")
+    _register_application(platform, slug)
+    for store in (CredentialStore(pepper=PEPPER), _write_app_store(platform)):
+        try:
+            id1 = "crd_" + secrets.token_hex(8)
+            secret1 = "cross-wire-secret-1-" + secrets.token_urlsafe(8)
+            id2 = "crd_" + secrets.token_hex(8)
+            secret2 = "cross-wire-secret-2-" + secrets.token_urlsafe(8)
+            with store.unit_of_work() as work:
+                store.add(id1, slug, "runtime", secret1, work=work)
+            with store.unit_of_work() as work:
+                store.add(id2, slug, "runtime", secret2, work=work)
+
+            # id2's own locator, but credential 1's secret -- must fail.
+            with pytest.raises(FoundationError) as exc:
+                store.authenticate(compose_bearer_locator(id2, secret1))
+            assert exc.value.code == "AUTH_INVALID"
+
+            # Each credential's OWN genuine locator still authenticates as
+            # itself (not as the other).
+            assert store.authenticate(compose_bearer_locator(id1, secret1)).credential_id == id1
+            assert store.authenticate(compose_bearer_locator(id2, secret2)).credential_id == id2
+        finally:
+            if hasattr(store, "close"):
+                store.close()
+
+
+def test_compose_bearer_locator_rejects_a_dot_in_either_half() -> None:
+    """Coordinator item 7(iii) (reviewer O2): `compose_bearer_locator`'s
+    own docstring claim ("credential_id/secret never contain `.`, so this
+    join is always unambiguous") was, before this fix, a documented
+    convention of this module's OWN minters, never a checked precondition
+    of the function itself. A `.` in either half is now a `ValueError` at
+    the issuance boundary."""
+    with pytest.raises(ValueError):
+        compose_bearer_locator("crd.with.dot", "secret")
+    with pytest.raises(ValueError):
+        compose_bearer_locator("crd_ok", "secret.with.dot")
+    # Positive control: no dot in either half still composes normally.
+    assert compose_bearer_locator("crd_ok", "secret_ok") == "crd_ok.secret_ok"
+
+
+def test_locator_id_must_own_the_secret_not_merely_any_row_control_store(platform: types.SimpleNamespace) -> None:
+    in_memory = ControlCredentialStore(pepper=CONTROL_PEPPER)
+    pg = _control_store(platform)
+    try:
+        for store in (in_memory, pg):
+            id1 = "ctl_" + secrets.token_hex(8)
+            secret1 = "cross-wire-control-secret-1-" + secrets.token_urlsafe(8)
+            id2 = "ctl_" + secrets.token_hex(8)
+            secret2 = "cross-wire-control-secret-2-" + secrets.token_urlsafe(8)
+            with store.unit_of_work() as work:
+                store.add(id1, secret1, work=work)
+            with store.unit_of_work() as work:
+                store.add(id2, secret2, work=work)
+
+            with pytest.raises(FoundationError) as exc:
+                store.authenticate(compose_bearer_locator(id2, secret1))
+            assert exc.value.code == "AUTH_INVALID"
+
+            assert store.authenticate(compose_bearer_locator(id1, secret1)).credential_id == id1
+            assert store.authenticate(compose_bearer_locator(id2, secret2)).credential_id == id2
+    finally:
+        pg.close()
+
+
+def test_verbatim_composed_bearer_authenticates_every_store_and_backend(platform: types.SimpleNamespace) -> None:
+    """The positive control for the 3 tests above: a genuinely composed,
+    unmodified bearer (`compose_bearer_locator`, never hand-assembled) DOES
+    authenticate, for the application store and the control store, both
+    backends -- confirming the malformed/unknown/wrong-secret/wrong-order
+    tests above are rejecting for the RIGHT reason, not because nothing
+    can ever authenticate."""
+    slug = _fresh_slug("vb")
+    _register_application(platform, slug)
+    for store in (CredentialStore(pepper=PEPPER), _write_app_store(platform)):
+        try:
+            credential_id = "crd_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, slug, "runtime", "verbatim-secret", work=work)
+            context = store.authenticate(compose_bearer_locator(credential_id, "verbatim-secret"))
+            assert context.credential_id == credential_id
+        finally:
+            if hasattr(store, "close"):
+                store.close()
+
+    for store in (ControlCredentialStore(pepper=CONTROL_PEPPER), _control_store(platform)):
+        try:
+            credential_id = "ctl_" + secrets.token_hex(8)
+            with store.unit_of_work() as work:
+                store.add(credential_id, "verbatim-control-secret", work=work)
+            context = store.authenticate(compose_bearer_locator(credential_id, "verbatim-control-secret"))
+            assert context.credential_id == credential_id
+        finally:
+            if hasattr(store, "close"):
+                store.close()
 
 
 def test_validate_control_pepper_separation_rejects_equal_peppers() -> None:
@@ -765,7 +1046,7 @@ def test_reset_revokes_all_and_issues_one_new_credential_atomically_and_touches_
         # Application data/credential unaffected.
         app_reader = _write_app_store(info)
         try:
-            app_context = app_reader.authenticate("secret-untouched-by-reset")
+            app_context = app_reader.authenticate(compose_bearer_locator(app_credential_id, "secret-untouched-by-reset"))
             assert app_context.application_id == slug
         finally:
             app_reader.close()
@@ -1702,7 +1983,7 @@ def test_credential_issuance_succeeds_for_registered_unprovisioned_application(p
         credential_id = "crd_" + secrets.token_hex(8)
         with store.unit_of_work() as work:
             store.add(credential_id, slug, "runtime", "secret-unprovisioned", work=work)
-        context = store.authenticate("secret-unprovisioned")
+        context = store.authenticate(compose_bearer_locator(credential_id, "secret-unprovisioned"))
         assert context.application_id == slug
     finally:
         store.close()
@@ -2125,3 +2406,117 @@ def test_audit_report_does_not_modify_control_audit(platform: types.SimpleNamesp
     assert result.returncode == 0, result.stderr
     after = _count()
     assert after == before, "audit-report must not write any control_audit row (read-only)"
+
+
+# ===========================================================================
+# Coordinator item 3 / item 7(i) (2026-09-04 review) -- structural (white-
+# box) pins that a functional-outcome test cannot express: composition
+# LOCATION discipline, and unconditional `compare_digest` usage.
+# ===========================================================================
+
+
+def test_in_process_adapter_never_composes_the_bearer_itself() -> None:
+    """Coordinator item 3: `conformance_adapter_r2db.py`'s own privileged-
+    setup `issue_credential` port method must present `ControlAuthority.
+    issue_credential`'s ALREADY-COMPOSED return value verbatim -- it must
+    never call `compose_bearer_locator` itself (design D-1(c) "合成は
+    store/service 層のみ" -- adapter is a verbatim consumer, port v1.10
+    (a)). A source-text pin: the conformance suite's own AST-based
+    `test_c19_adapters_never_compose_or_decompose_the_bearer_secret`
+    (`conformance-tests/test_c19_client_self_sufficiency.py`) only
+    recognizes f-string/`+`/`.join` composition, not a named helper call --
+    it would NOT have caught the exact violation this rework fixes (audit
+    finding (d)), so this repository's own local suite carries this
+    narrower, exact-string pin instead."""
+    source = (Path(__file__).resolve().parents[1] / "conformance" / "conformance_adapter_r2db.py").read_text()
+    assert "compose_bearer_locator" not in source, (
+        "conformance_adapter_r2db.py references compose_bearer_locator -- the adapter must present "
+        "issuance responses verbatim, never compose the bearer itself (coordinator item 3)"
+    )
+
+
+def test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest() -> None:
+    """Coordinator item 7(i) (reviewer O3): a structural pin for a property
+    a functional-outcome test cannot express without flaky timing
+    measurement -- all 4 `authenticate` implementations (`auth.py`'s two
+    in-memory stores, `credential_store.py`'s two Postgres stores) must
+    reference `_DUMMY_VERIFIER` so `compare_digest` runs unconditionally
+    (same cost whether or not the presented `credential_id` names a real
+    row), closing the "does this credential_id exist" timing oracle. This
+    is a source-text pin, not a timing measurement -- a real timing attack
+    test would be flaky by nature and is out of this WP's scope; this pin
+    at least prevents a future edit from silently reintroducing the
+    short-circuit form without touching this text."""
+    # Supervisor rework (2026-09-04, audit of the WP-2 rework, item 7(i)):
+    # the previous form of this pin only counted occurrences of the
+    # `_DUMMY_VERIFIER` token per file (>= 2), which stayed green even when
+    # both use sites in a file were reverted to the short-circuit form
+    # (definition + comment still made the count) -- measured by the
+    # auditor. This form reads the AST of each of the four
+    # `authenticate` methods and requires, per method, at least one
+    # `hmac.compare_digest(...)` call that is NOT nested inside any `if`
+    # whose test mentions the looked-up row (`record` / `row`) -- i.e. the
+    # digest comparison must be reached unconditionally, whether or not
+    # the presented locator named a real row. Reverting any ONE of the
+    # four methods to `if record is None: fail(...)` before the
+    # comparison turns this red (measured, one method at a time).
+    import ast
+
+    src_root = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
+    targets = {
+        "auth.py": {"CredentialStore", "ControlCredentialStore"},
+        "credential_store.py": {"PostgresCredentialStore", "PostgresControlCredentialStore"},
+    }
+    row_names = {"record", "row"}
+
+    def _mentions_row(node: ast.AST) -> bool:
+        return any(isinstance(n, ast.Name) and n.id in row_names for n in ast.walk(node))
+
+    def _unconditional_compare_digest(fn: ast.FunctionDef) -> bool:
+        # Walk with an explicit parent chain so each Call knows the `if`
+        # tests it sits under.
+        found = False
+
+        def visit(node: ast.AST, guarding: list[ast.If]) -> None:
+            nonlocal found
+            if isinstance(node, ast.Call):
+                f = node.func
+                is_cd = (isinstance(f, ast.Attribute) and f.attr == "compare_digest") or (isinstance(f, ast.Name) and f.id == "compare_digest")
+                if is_cd and not any(_mentions_row(g.test) for g in guarding):
+                    found = True
+            for child in ast.iter_child_nodes(node):
+                if isinstance(node, ast.If) and child in node.body + node.orelse:
+                    visit(child, guarding + [node])
+                else:
+                    visit(child, guarding)
+
+        visit(fn, [])
+        if not found:
+            return False
+        # Ordering: an early `if record is None: fail(...)` BEFORE the
+        # comparison is the same timing oracle in a different syntactic
+        # coat (the digest is never computed for an unknown locator), so
+        # no `if` whose test mentions the row may precede the first
+        # compare_digest call in source order.
+        first_cd = min(
+            n.lineno for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and (
+                (isinstance(n.func, ast.Attribute) and n.func.attr == "compare_digest")
+                or (isinstance(n.func, ast.Name) and n.func.id == "compare_digest")
+            )
+        )
+        early_row_ifs = [n for n in ast.walk(fn) if isinstance(n, ast.If) and n.lineno < first_cd and _mentions_row(n.test)]
+        return not early_row_ifs
+
+    checked: list[str] = []
+    for filename, class_names in targets.items():
+        tree = ast.parse((src_root / filename).read_text())
+        for cls in [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in class_names]:
+            fns = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "authenticate"]
+            assert len(fns) == 1, f"{filename}::{cls.name} must define exactly one authenticate()"
+            assert _unconditional_compare_digest(fns[0]), (
+                f"{filename}::{cls.name}.authenticate() must call hmac.compare_digest unconditionally "
+                f"(not only inside an `if` that depends on whether the locator named a row)"
+            )
+            checked.append(f"{filename}::{cls.name}")
+    assert len(checked) == 4, checked

@@ -76,7 +76,7 @@ import uuid
 import psycopg
 from psycopg import sql
 
-from .auth import AuthContext, ControlAuthContext, _fail_identified
+from .auth import AuthContext, ControlAuthContext, _DUMMY_VERIFIER, _fail_identified, compose_bearer_locator, split_bearer_locator
 from .errors import FoundationError, fail
 from .postgres import _RolePool, _env_int
 from .structured import validate_identifier
@@ -136,8 +136,23 @@ class _PostgresWork:
 # tuple-unpacking helpers that follow stay in one place instead of being
 # repeated (and risking drifting out of sync) at every call site.
 _COLUMNS = "c.credential_id, c.application_slug, c.role, c.verifier, c.enabled, c.revoked"
-_SELECT_BY_VERIFIER = "SELECT {columns}, a.enabled FROM {credentials} c JOIN {applications} a ON a.application_slug = c.application_slug WHERE c.verifier = {ph}"
+# Phase 6 WP-2 (design D-1(c)): `_SELECT_BY_VERIFIER` (the pre-WP-2
+# digest-keyed lookup) is REMOVED, not merely unused -- authentication is
+# now a locator lookup (`_SELECT_BY_ID`, below) followed by `compare_
+# digest`, never a `WHERE verifier = ...` scan. `_SELECT_BY_ID` was
+# already this store's `assert_active`/`canonical_context`/
+# `application_id_for` lookup; `authenticate` now shares it too.
 _SELECT_BY_ID = "SELECT {columns}, a.enabled FROM {credentials} c JOIN {applications} a ON a.application_slug = c.application_slug WHERE c.credential_id = {ph}"
+
+# Phase 6 WP-2 (design D-1(c), r2db decision (c)'s own "control 側にも
+# `_SELECT_BY_ID` 相当を新設する" item): the control-credential table's own
+# named credential_id-keyed lookup, used by BOTH `PostgresControlCredential
+# Store.authenticate` (below, replacing its former inline `WHERE verifier =
+# {ph}` text) and `.assert_active` (already credential_id-keyed before this
+# WP) -- the same "one named constant, not an inline literal repeated at
+# each call site" discipline `_SELECT_BY_ID` above already follows for the
+# application-credential table.
+_CONTROL_SELECT_BY_ID = "SELECT credential_id, verifier, enabled, revoked, must_rotate, role FROM {table} WHERE credential_id = {ph}"
 
 
 def _execute(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] | Mapping[str, Any] = ()) -> None:
@@ -250,33 +265,65 @@ class PostgresCredentialStore:
     # ---- read path (P2-D4: every call below queries PostgreSQL fresh) -----
 
     def authenticate(self, secret: str | None) -> AuthContext:
+        """Phase 6 WP-2 (design D-1(c), L6-1 (i)/(iv)): `secret` is the
+        presented bearer's locator form `<credential_id>.<secret_part>`
+        (`auth.split_bearer_locator`). Authentication is now a `credential_
+        id`-keyed row lookup (`_SELECT_BY_ID` -- the SAME statement `assert_
+        active`/`canonical_context`/`application_id_for` already use, not a
+        digest-keyed `WHERE verifier = ...` scan), followed by `hmac.
+        compare_digest` against the row's stored `verifier`. Unlike the pre-
+        WP-2 form, that `compare_digest` call is now THE authoritative
+        check -- a `credential_id` alone identifies no secret at all (it is
+        non-secret, R-2's own reasoning: it appears in `list_credentials`
+        responses), so nothing above this comparison has verified anything
+        about the presented secret; skipping it would authenticate on the
+        locator's id half alone. `verifier`'s own `UNIQUE` constraint
+        (`0005_credential_store.sql`) is unrelated to this lookup path now
+        -- it remains a structural guarantee that no two credentials can
+        ever collide on the same verifier, not an index this method
+        queries by.
+        """
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
         if not secret:
             fail("AUTH_REQUIRED", "Authentication is required.", status=401)
-        computed = self.verifier(secret)
-        statement = sql.SQL(_SELECT_BY_VERIFIER).format(
+        locator = split_bearer_locator(secret)
+        if locator is None:
+            # SI-15 fail-closed: malformed locator, no lookup attempted.
+            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        credential_id, secret_part = locator
+        computed = self.verifier(secret_part)
+        statement = sql.SQL(_SELECT_BY_ID).format(
             columns=sql.SQL(_COLUMNS), credentials=self._credentials_table, applications=self._applications_table, ph=sql.Placeholder()
         )
-        row = self._fetch_or_503(statement, [computed])
-        if row is None:
+        row = self._fetch_or_503(statement, [credential_id])
+        # Coordinator item 7(i): `compare_digest` runs UNCONDITIONALLY --
+        # against the real `db_verifier` when a row was found, against the
+        # fixed-shape `auth._DUMMY_VERIFIER` otherwise -- so a `credential_
+        # id` this table does not have costs the same one comparison a
+        # real-but-mismatched one does (no timing oracle for row
+        # existence, mirrors `auth.CredentialStore.authenticate`'s own
+        # identical rework).
+        db_verifier = row[3] if row is not None else _DUMMY_VERIFIER
+        digest_matches = hmac.compare_digest(db_verifier, computed)
+        if row is None or not digest_matches:
+            # Design implementation constraint 2: an unknown locator and a
+            # known locator with a digest mismatch (below) are both a bare,
+            # uniform AUTH_INVALID -- SI-10 gives no signal distinguishing
+            # them. Constraint 3: the client-declared `credential_id` is
+            # never attached to this denial.
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
-        credential_id, application_id, role, db_verifier, enabled, revoked, app_enabled = row
-        # The lookup above is already an exact-equality index match on
-        # `verifier` (the row could not have been found otherwise) -- this
-        # `compare_digest` is deliberate defence-in-depth, not the
-        # authoritative check, kept for structural symmetry with
-        # `auth.CredentialStore.authenticate`'s identical final comparison
-        # (P2-D4).
-        if not hmac.compare_digest(db_verifier, computed):
-            fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        row_credential_id, application_id, role, _db_verifier, enabled, revoked, app_enabled = row
+        # Design implementation constraint 1: `compare_digest` (above) runs
+        # -- and must succeed -- BEFORE `revoked`/`enabled`/`app_enabled`
+        # below, exactly as the pre-WP-2 ordering already was.
         if revoked:
             fail("AUTH_REVOKED", "Credential is not active.", status=401)
         if not enabled:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
         if not app_enabled:
             fail("APPLICATION_DISABLED", "Application is disabled.", status=403)
-        return AuthContext(credential_id, application_id, role)
+        return AuthContext(row_credential_id, application_id, role)
 
     def assert_active(self, context: AuthContext) -> AuthContext:
         if not self.available:
@@ -383,7 +430,7 @@ class PostgresCredentialStore:
 
     # ---- write path (P2-D6: reused directly by `python -m r2db_api.ops`) --
 
-    def add(self, credential_id: str, application_id: str, role: str, secret: str, *, work: _PostgresWork) -> None:
+    def add(self, credential_id: str, application_id: str, role: str, secret: str, *, work: _PostgresWork) -> str:
         """`work` is a required keyword-only argument (round-2 review ruling
         (A) -- see `auth.CredentialStore.add`'s docstring for the full
         history: round 1 made this optional with an auto-managed fallback,
@@ -394,6 +441,12 @@ class PostgresCredentialStore:
         connections" hazard design §7 warns against. Every caller now opens
         `self.unit_of_work()` itself and passes the handle through
         explicitly; omitting `work` is a `TypeError` at the call boundary.
+
+        Rework (coordinator item 3): returns the composed bearer
+        (`auth.compose_bearer_locator(credential_id, secret)`) -- same
+        "issuance point returns the ready-to-present bearer, never the
+        caller" discipline as `auth.CredentialStore.add`'s own identical
+        rework; see that docstring for the full rationale.
         """
         if role not in {"runtime", "developer"}:
             fail("VALIDATION_FAILED", "Application credentials require runtime or developer role.")
@@ -416,6 +469,7 @@ class PostgresCredentialStore:
             fail("CONFLICT", "Credential already exists.", status=409)
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+        return compose_bearer_locator(credential_id, secret)
 
     def set_state(self, credential_id: str, *, enabled: bool | None = None, revoked: bool | None = None, work: _PostgresWork) -> None:
         if enabled is not None and not isinstance(enabled, bool):
@@ -453,7 +507,7 @@ class PostgresCredentialStore:
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
 
-    def rotate(self, credential_id: str, secret: str, *, work: _PostgresWork) -> None:
+    def rotate(self, credential_id: str, secret: str, *, work: _PostgresWork) -> str:
         """Not part of `auth.CredentialStore`'s call surface (that class has
         no rotation concept at all) -- added here because `python -m
         r2db_api.ops rotate-credential` (P2-D6) needs exactly this one extra
@@ -469,6 +523,11 @@ class PostgresCredentialStore:
         docstring for why the new in-memory `rotate` was written to match
         this, not the other way around). `work` is required (round-2
         ruling (A)).
+
+        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
+        returns the composed bearer (`auth.compose_bearer_locator(
+        credential_id, secret)`) -- `ops.py cmd_rotate_credential` now uses
+        this return value verbatim instead of composing it itself.
         """
         verifier = self.verifier(secret)
         statement = sql.SQL(
@@ -484,6 +543,7 @@ class PostgresCredentialStore:
             fail("CONFLICT", "Credential verifier collision.", status=409)
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+        return compose_bearer_locator(credential_id, secret)
 
     def delete(self, credential_id: str, *, work: _PostgresWork) -> None:
         """Not part of `auth.CredentialStore`'s call surface either, and
@@ -630,36 +690,44 @@ class PostgresControlCredentialStore:
         return hmac.new(self._pepper, secret.encode(), hashlib.sha256).hexdigest()
 
     def authenticate(self, secret: str | None) -> ControlAuthContext:
+        """Phase 6 WP-2 (design D-1(c)): locator-then-digest, mirroring
+        `PostgresCredentialStore.authenticate`'s own rewrite above -- see
+        that method's docstring for the full rationale. The former inline
+        `WHERE verifier = {ph}` lookup is gone; this now shares `_CONTROL_
+        SELECT_BY_ID` with `assert_active` below.
+        """
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
         if not secret:
             fail("AUTH_REQUIRED", "Authentication is required.", status=401)
-        computed = self.verifier(secret)
-        statement = sql.SQL("SELECT credential_id, verifier, enabled, revoked, must_rotate, role FROM {table} WHERE verifier = {ph}").format(
-            table=self._table, ph=sql.Placeholder()
-        )
-        row = self._fetch_or_503(statement, [computed])
-        if row is None:
+        locator = split_bearer_locator(secret)
+        if locator is None:
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
-        credential_id, db_verifier, enabled, revoked, must_rotate, role = row
-        if not hmac.compare_digest(db_verifier, computed):
+        credential_id, secret_part = locator
+        computed = self.verifier(secret_part)
+        statement = sql.SQL(_CONTROL_SELECT_BY_ID).format(table=self._table, ph=sql.Placeholder())
+        row = self._fetch_or_503(statement, [credential_id])
+        # Coordinator item 7(i): unconditional compare_digest -- see
+        # `PostgresCredentialStore.authenticate`'s identical comment above.
+        db_verifier = row[1] if row is not None else _DUMMY_VERIFIER
+        digest_matches = hmac.compare_digest(db_verifier, computed)
+        if row is None or not digest_matches:
             fail("AUTH_INVALID", "Credential is not valid.", status=401)
+        row_credential_id, _db_verifier, enabled, revoked, must_rotate, role = row
         if revoked:
-            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=credential_id, role=role)
+            _fail_identified("AUTH_REVOKED", "Credential is not active.", status=401, credential_id=row_credential_id, role=role)
         if not enabled:
-            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=credential_id, role=role)
-        return ControlAuthContext(credential_id, must_rotate, role)
+            _fail_identified("AUTH_INVALID", "Credential is not active.", status=401, credential_id=row_credential_id, role=role)
+        return ControlAuthContext(row_credential_id, must_rotate, role)
 
     def assert_active(self, context: ControlAuthContext) -> ControlAuthContext:
         if not self.available:
             fail("AUTH_STATE_UNAVAILABLE", "Authorization state is unavailable.", status=503)
-        statement = sql.SQL("SELECT credential_id, enabled, revoked, must_rotate, role FROM {table} WHERE credential_id = {ph}").format(
-            table=self._table, ph=sql.Placeholder()
-        )
+        statement = sql.SQL(_CONTROL_SELECT_BY_ID).format(table=self._table, ph=sql.Placeholder())
         row = self._fetch_or_503(statement, [context.credential_id])
         if row is None:
             fail("AUTH_INVALID", "Credential is not active.", status=401)
-        credential_id, enabled, revoked, must_rotate, role = row
+        credential_id, _verifier, enabled, revoked, must_rotate, role = row
         if revoked:
             fail("AUTH_REVOKED", "Credential is not active.", status=401)
         if not enabled:
@@ -735,7 +803,7 @@ class PostgresControlCredentialStore:
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
 
-    def rotate(self, credential_id: str, secret: str, *, work: _PostgresWork) -> None:
+    def rotate(self, credential_id: str, secret: str, *, work: _PostgresWork) -> str:
         """R-5/§2 M-2: verifier replacement + `must_rotate = false` +
         `updated_at` refresh, one statement. A revoked row is refused
         (`VALIDATION_FAILED`) via the same `FOR UPDATE`-then-check pattern
@@ -745,6 +813,10 @@ class PostgresControlCredentialStore:
         row, indistinguishable from "no such credential" -- a strictly
         worse error for the caller than the dedicated `VALIDATION_FAILED`
         this gives instead). `work` is required (round-2 ruling (A)).
+
+        Rework (coordinator follow-up, 2026-09-04 audit finding §3-A):
+        returns the composed bearer -- `ops.py cmd_rotate_control_
+        credential` now uses this return value verbatim.
         """
         verifier = self.verifier(secret)
         select_statement = sql.SQL("SELECT revoked FROM {table} WHERE credential_id = {id_ph} FOR UPDATE").format(
@@ -769,6 +841,7 @@ class PostgresControlCredentialStore:
             fail("CONFLICT", "Control credential verifier collision.", status=409)
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+        return compose_bearer_locator(credential_id, secret)
 
     def has_any(self, *, include_revoked: bool = True, work: _PostgresWork | None = None) -> bool:
         """§8 M-6: bootstrap's existence check, real-row semantics -- see

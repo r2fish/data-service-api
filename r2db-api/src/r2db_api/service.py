@@ -791,7 +791,7 @@ class _DenialCoalescer:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None) -> None:
         # R-9 (CCR-14 WP-5, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
         # §1: "capability 申告は環境変数由来で composition root 注入"):
         # whether this application-plane process' own `capabilities()`
@@ -811,6 +811,19 @@ class DataService:
         if control_plane_status not in {"enabled", "unavailable"}:
             raise ValueError("control_plane_status must be 'enabled' or 'unavailable'")
         self._control_plane_status = control_plane_status
+        # Phase 6 WP-2 (design D-2): `surfaces` is constructor-injected,
+        # same "deployer-declared, not derived" discipline as `control_
+        # plane_status` immediately above -- `main.py` (the real
+        # composition root) is the one caller that validates the two
+        # `R2DB_*_BASE_URL` environment variables' SHAPE at startup and
+        # assembles this dict from them; this class only ever echoes
+        # whatever it was given, verbatim, in `capabilities()` below. `None`
+        # (the default -- every pre-WP-2 caller, including this
+        # repository's own unit tests that construct `DataService` directly
+        # without opting in) omits the `surfaces` key from the response
+        # entirely, never a `"surfaces": None` value (contract `Capability
+        # Document.surfaces` is an optional key, not a nullable one).
+        self._surfaces = surfaces
         self._credentials = credentials
         self.limits = limits or ResourceLimits()
         self.topology = topology or AuthorityTopology()
@@ -870,16 +883,21 @@ class DataService:
             # declaration update is what makes that removal honest rather
             # than a new C-12 "declared unavailable, executes anyway" gap.
             schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
-            return {
+            document: dict[str, Any] = {
                 # Phase 4 WP-2(b) (P4-D4, contract `versioning.
-                # version_binding`), flipped to 1.5.0 in phase 5 WP-2:
-                # unconditional -- every deployment of this data-plane host
-                # declares 1.5.0 now, whether or not
+                # version_binding`), flipped to 1.5.0 in phase 5 WP-2,
+                # flipped to 1.6.0 in phase 6 WP-2 (design docs/design/
+                # PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md, subordinate
+                # ruling 11): unconditional -- every deployment of this
+                # data-plane host declares 1.6.0 now, whether or not
                 # the CONTROL host alongside it has AUDIT DSN configured
                 # (`audit_query` stays `unavailable` right below,
                 # unchanged: this host never provides it, D-5's own
-                # "declaration = real behavior" rule).
-                "contract_version": "1.5.0",
+                # "declaration = real behavior" rule). This same commit
+                # ships every 1.6.0 behavioral obligation this host owns
+                # (locator-form credentials, `surfaces`, `field_types`) --
+                # the flip is never ahead of the behavior it declares.
+                "contract_version": "1.6.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -928,6 +946,13 @@ class DataService:
                 "application_scope": canonical.application_id,
                 "role": canonical.role
             }
+            # Phase 6 WP-2 (design D-2): `surfaces` is an optional key --
+            # present only when this instance was constructed with one
+            # (`__init__`'s own comment on `self._surfaces`). Never a
+            # `"surfaces": None` entry.
+            if self._surfaces is not None:
+                document["surfaces"] = self._surfaces
+            return document
 
     def query(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> list[dict[str, Any]]:
         """Plain-item-list form, unchanged in shape since before CCR-13
@@ -1343,19 +1368,34 @@ class ControlAuthority:
             self._control_event(operation="set_credential_state", outcome="deny", target=credential_id, reason_code=exc.code, event_class="control_failure")
             raise
 
-    def issue_credential(self, credential_id: str, application_id: str, role: str, secret: str, *, work: Any = None) -> None:
+    def issue_credential(self, credential_id: str, application_id: str, role: str, secret: str, *, work: Any = None) -> str:
         """`work` is keyword-only, defaulting to `None` -- see `set_credential_
         state`'s docstring immediately above for the full CCR-14 WP-3
-        rationale; identical reasoning applies here."""
+        rationale; identical reasoning applies here.
+
+        Rework (coordinator item 3, 2026-09-04 review): returns the
+        composed bearer `self._service._credentials.add(...)` itself now
+        returns (design D-1(c) "合成は store/service 層のみ" principle) --
+        this out-of-band lifecycle-authority entry point is an issuance
+        point (the conformance in-process plug's own privileged-setup
+        `issue_credential` calls this directly, `ops.py` does not use this
+        method at all -- see that module's own `cmd_issue_credential`,
+        which calls the store's `add` directly and gets the same composed
+        return value there). Every pre-WP-2 caller that ignored the
+        previous `None` return is unaffected (Python permits discarding a
+        return value freely) -- `test_control_authority_work_parameter_
+        defaults_preserve_existing_callers` pins this explicitly.
+        """
         try:
             if application_id not in self._service._cells:
                 fail("NOT_FOUND", "Application was not found.", status=404)
             if work is not None:
-                self._service._credentials.add(credential_id, application_id, role, secret, work=work)
+                bearer = self._service._credentials.add(credential_id, application_id, role, secret, work=work)
             else:
                 with self._service._credentials.unit_of_work() as own_work:
-                    self._service._credentials.add(credential_id, application_id, role, secret, work=own_work)
+                    bearer = self._service._credentials.add(credential_id, application_id, role, secret, work=own_work)
             self._control_event(operation="issue_credential", outcome="allow", target=application_id, event_class="credential_lifecycle")
+            return bearer
         except FoundationError as exc:
             self._control_event(operation="issue_credential", outcome="deny", target=application_id, reason_code=exc.code, event_class="control_failure")
             raise

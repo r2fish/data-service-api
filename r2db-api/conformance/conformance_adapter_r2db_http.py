@@ -112,6 +112,15 @@ from adapter import (  # noqa: E402
 os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_http_conformance_import_placeholder")
 os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-ctl-pepper")
 os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-app-pepper")
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-2): same import-time hazard, same placeholder discipline --
+# `build_control_app`'s own surfaces validation runs before any network
+# call (see `control_main.py`'s own docstring), so these values are never
+# actually read by anything this adapter constructs (its own real control
+# stack is `assemble_control_stack(..., surfaces=_SURFACES)`, defined
+# below).
+os.environ.setdefault("R2DB_DATA_BASE_URL", "https://r2db-http-conformance-import-placeholder.example.invalid/v1")
+os.environ.setdefault("R2DB_CONTROL_BASE_URL", "https://r2db-http-conformance-import-placeholder.example.invalid/control/v1")
 
 from r2db_api import ControlAuthority, DataService  # noqa: E402
 from r2db_api.control_http import create_control_app  # noqa: E402
@@ -703,6 +712,21 @@ def _stringify_for_path(payload: Any) -> str:
 # enum).
 _PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
 
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-2): this HTTP plug's own declared `surfaces` -- same synthetic,
+# non-dialable, DIFFERENT-origin convention as `conformance_adapter_r2db.
+# py`'s own `_SURFACES` (see that constant's docstring for why the two
+# hosts must stay different: `control_surface_cohosted_with_data_plane()`
+# below declares `False`, and C-19/test_c09's own declare-and-echo/
+# cohosting vectors are realized as repeated real calls to this SAME
+# running app, not a literal dial against these strings -- design section
+# 6.2 item 2(iii)'s own scope decision, `test_c19_client_self_sufficiency.
+# py`'s module docstring).
+_SURFACES = {
+    "data": {"base_url": "https://r2db-http-pg-data.conformance.invalid/v1"},
+    "control": {"base_url": "https://r2db-http-pg-control.conformance.invalid/control/v1"},
+}
+
 
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to r2db-api's real HTTP +
@@ -866,7 +890,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             )
             self._service = DataService(
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
-                durable_audit=self._application_durable_audit,
+                durable_audit=self._application_durable_audit, surfaces=_SURFACES,
             )
             self._control = ControlAuthority(self._service)
 
@@ -1029,6 +1053,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # as the real composition root's own defaults).
             audit_dsn=self._platform.auditreader_dsn,
             audit_reader_pool_size=self._control_pool_size,
+            surfaces=_SURFACES,
         )
         app = create_control_app(service)
         return app, stores

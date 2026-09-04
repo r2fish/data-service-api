@@ -112,6 +112,21 @@ Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
                                            the exact reason `r2db_api.main.
                                            build_app` does the same -- see
                                            that function's own comment
+    R2DB_DATA_BASE_URL                    required (Phase 6 WP-2, design D-2)
+                                           -- SAME variable name/meaning as
+                                           `r2db_api.main`'s own env-var
+                                           table entry (must end with `/v1`,
+                                           no trailing slash). Unconditionally
+                                           required here (unlike `main.py`,
+                                           this process' own control surface
+                                           is always "enabled" -- see
+                                           `_surfaces`'s own docstring).
+    R2DB_CONTROL_BASE_URL                 required (Phase 6 WP-2, design D-2)
+                                           -- must end with `/control/v1`, no
+                                           trailing slash. SAME variable name
+                                           `main.py` reads -- both processes
+                                           are meant to be configured from the
+                                           identical pair.
 
 **Deviation from the design's env-var table (`R2DB_CREDENTIAL_PEPPER`)**:
 design §5's WP-4 row describes this variable as present-if-configured, used
@@ -171,6 +186,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from starlette.types import ASGIApp
 
@@ -219,6 +235,52 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
 
 
+def _validate_surface_base_url(name: str, raw: str, *, suffix: str) -> str:
+    """`r2db_api.main._validate_surface_base_url`'s own duplicate here
+    (Phase 6 WP-2, design D-2) -- same three independent SHAPE checks
+    (absolute URL / correct suffix / no trailing slash), same fail-loud
+    `RuntimeError` naming the variable. Duplicated rather than imported
+    (this module and `main.py` do not share small env-parsing helpers --
+    `_require`/`_optional_int` above are each module's own copy already).
+    """
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"{name} must be an absolute URL, got {raw!r}")
+    without_trailing_slash = raw[:-1] if raw.endswith("/") else raw
+    if not without_trailing_slash.endswith(suffix):
+        raise RuntimeError(f"{name} must end with {suffix!r}, got {raw!r}")
+    # Coordinator item 7(ii): same exclusivity guard as `r2db_api.main`'s
+    # own identical function -- see that module's docstring.
+    if suffix == "/v1" and without_trailing_slash.endswith("/control/v1"):
+        raise RuntimeError(f"{name} must end with {suffix!r}, not '/control/v1', got {raw!r}")
+    if raw.endswith("/"):
+        raise RuntimeError(f"{name} must not end with a trailing slash, got {raw!r}")
+    return raw
+
+
+def _surfaces(env: Mapping[str, str]) -> dict[str, Any]:
+    """Phase 6 WP-2 (design D-2): a live control-plane process' own control
+    surface is, by definition, provided (`ControlPlaneService.capabilities`
+    already hardcodes `control_plane: {"status": "enabled"}` -- if this
+    process answers at all, its own control surface is enabled), so BOTH
+    `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_URL` are unconditionally
+    required here (unlike `r2db_api.main`'s own `_surfaces`, where
+    `R2DB_CONTROL_BASE_URL` is conditional on `R2DB_CONTROL_PLANE_STATUS`).
+    Same two variable names as `main.py` reads -- both processes are meant
+    to be configured from the identical pair, so both capability documents
+    return the identical `surfaces` object (design's own "両プロセスに同じ
+    2変数を配る" instruction; this function cannot itself verify the
+    sibling process agrees, see `main.py`'s own `_validate_surface_base_
+    url` docstring).
+    """
+    data_base_url = _require(env, "R2DB_DATA_BASE_URL")
+    control_base_url = _require(env, "R2DB_CONTROL_BASE_URL")
+    return {
+        "data": {"base_url": _validate_surface_base_url("R2DB_DATA_BASE_URL", data_base_url, suffix="/v1")},
+        "control": {"base_url": _validate_surface_base_url("R2DB_CONTROL_BASE_URL", control_base_url, suffix="/control/v1")},
+    }
+
+
 def assemble_control_stack(
     *,
     controlplane_dsn: str,
@@ -231,6 +293,7 @@ def assemble_control_stack(
     audit_idle_timeout_ms: int | None = None,
     audit_dsn: str | None = None,
     audit_reader_pool_size: int | None = None,
+    surfaces: dict[str, Any] | None = None,
 ) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink, PostgresAuditQueryStore | None]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
@@ -310,6 +373,7 @@ def assemble_control_stack(
     service = ControlPlaneService(
         backend, audit=audit, limits=limits or _DEFAULT_LIMITS,
         audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
+        surfaces=surfaces,
     )
     return service, (applications, credentials, control_credentials, audit, audit_reader)
 
@@ -369,12 +433,18 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # route is still registered and still authenticates, answering
     # `CAPABILITY_UNSUPPORTED` for a genuinely authorized caller.
     audit_dsn = env.get("R2DB_AUDIT_DSN") or None
+    # Phase 6 WP-2 (design D-2): validated/assembled BEFORE the stores
+    # below -- a malformed/missing `R2DB_*_BASE_URL` fails startup the same
+    # "uzurusaku ochiru" way every other required-configuration check in
+    # this function already does, rather than only surfacing once a real
+    # request reaches `capabilities()`.
+    surfaces = _surfaces(env)
 
     service, (applications, credentials, control_credentials, audit, audit_reader) = assemble_control_stack(
         controlplane_dsn=controlplane_dsn, app_pepper=app_pepper, control_pepper=control_pepper,
         schema=schema, pool_size=pool_size, limits=limits,
         audit_statement_timeout_ms=audit_statement_timeout_ms, audit_idle_timeout_ms=audit_idle_timeout_ms,
-        audit_dsn=audit_dsn,
+        audit_dsn=audit_dsn, surfaces=surfaces,
     )
 
     @asynccontextmanager

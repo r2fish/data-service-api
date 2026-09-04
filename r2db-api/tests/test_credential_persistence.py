@@ -46,6 +46,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.testclient import TestClient
 
+from r2db_api.auth import compose_bearer_locator, split_bearer_locator
 from r2db_api.credential_store import PostgresCredentialStore
 from r2db_api.errors import FoundationError
 from r2db_api.structured import delete_credential_confirmation_phrase
@@ -297,10 +298,11 @@ def _read_store(platform: types.SimpleNamespace) -> PostgresCredentialStore:
 def test_credential_persists_and_is_visible_to_a_separate_store_instance(platform: types.SimpleNamespace) -> None:
     slug = _fresh_slug("pa")
     _register_application(platform, slug)
+    credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
         with writer.unit_of_work() as work:
-            writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-persist", work=work)
+            writer.add(credential_id, slug, "runtime", "s3cret-persist", work=work)
     finally:
         writer.close()
 
@@ -310,7 +312,7 @@ def test_credential_persists_and_is_visible_to_a_separate_store_instance(platfor
     # (`SELECT` only) are sufficient for the entire authenticate path.
     reader = _read_store(platform)
     try:
-        context = reader.authenticate("s3cret-persist")
+        context = reader.authenticate(compose_bearer_locator(credential_id, "s3cret-persist"))
         assert context.application_id == slug
         assert context.role == "runtime"
     finally:
@@ -328,7 +330,7 @@ def test_application_id_for_and_canonical_context_resolve_after_persistence(plat
         reader = _read_store(platform)
         try:
             assert reader.application_id_for(credential_id) == slug
-            context = reader.authenticate("s3cret-canonical")
+            context = reader.authenticate(compose_bearer_locator(credential_id, "s3cret-canonical"))
             canonical = reader.canonical_context(context)
             assert canonical is not None
             assert canonical.application_id == slug
@@ -358,7 +360,7 @@ def test_revoke_from_a_separate_connection_is_visible_immediately(platform: type
         finally:
             writer.close()
 
-        context = long_lived_reader.authenticate("s3cret-revoke")
+        context = long_lived_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-revoke"))
 
         # A *different* store/connection (CLI-equivalent) performs the
         # revoke -- `long_lived_reader` above has no cache to invalidate,
@@ -371,7 +373,7 @@ def test_revoke_from_a_separate_connection_is_visible_immediately(platform: type
             revoker.close()
 
         with pytest.raises(FoundationError) as exc:
-            long_lived_reader.authenticate("s3cret-revoke")
+            long_lived_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-revoke"))
         assert exc.value.code == "AUTH_REVOKED"
         assert exc.value.status == 401
 
@@ -395,11 +397,11 @@ def test_application_disable_from_a_separate_connection_is_visible_immediately(p
 
     long_lived_reader = _read_store(platform)
     try:
-        context = long_lived_reader.authenticate("s3cret-appdisable")
+        context = long_lived_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-appdisable"))
         _set_application_enabled(platform, slug, False)
 
         with pytest.raises(FoundationError) as exc:
-            long_lived_reader.authenticate("s3cret-appdisable")
+            long_lived_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-appdisable"))
         assert exc.value.code == "APPLICATION_DISABLED"
         assert exc.value.status == 403
 
@@ -409,7 +411,7 @@ def test_application_disable_from_a_separate_connection_is_visible_immediately(p
 
         _set_application_enabled(platform, slug, True)
         # No cache anywhere -- re-enabling is visible immediately too.
-        long_lived_reader.authenticate("s3cret-appdisable")
+        long_lived_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-appdisable"))
     finally:
         long_lived_reader.close()
 
@@ -443,7 +445,7 @@ def test_application_disable_survives_a_new_store_instance(platform: types.Simpl
     post_restart_reader = _read_store(platform)
     try:
         with pytest.raises(FoundationError) as exc:
-            post_restart_reader.authenticate("s3cret-restart-disable")
+            post_restart_reader.authenticate(compose_bearer_locator(credential_id, "s3cret-restart-disable"))
         assert exc.value.code == "APPLICATION_DISABLED"
     finally:
         post_restart_reader.close()
@@ -467,7 +469,11 @@ def test_authenticate_fails_closed_when_platform_db_is_unreachable() -> None:
     store = PostgresCredentialStore(_unreachable_dsn(), pepper=PEPPER)
     try:
         with pytest.raises(FoundationError) as exc:
-            store.authenticate("any-secret-at-all")
+            # A well-formed locator (any shape survives `split_bearer_
+            # locator` -- it never reaches the unreachable DB anyway) so
+            # this test actually exercises the DB-unreachable path, not an
+            # earlier malformed-locator short-circuit.
+            store.authenticate(compose_bearer_locator("crd_unreachable", "any-secret-at-all"))
         assert exc.value.code == "AUTH_STATE_UNAVAILABLE"
         assert exc.value.status == 503
     finally:
@@ -524,7 +530,10 @@ def test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_recovers_o
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             for attempt_number in range(maxconn + 2):
-                future = executor.submit(store.authenticate, "irrelevant-secret")
+                # Well-formed locator -- must actually reach the pool (an
+                # unparseable one would short-circuit before ever touching
+                # it, defeating this test's own pool-exhaustion premise).
+                future = executor.submit(store.authenticate, compose_bearer_locator("crd_irrelevant", "irrelevant-secret"))
                 try:
                     future.result(timeout=10)
                 except concurrent.futures.TimeoutError:
@@ -546,15 +555,16 @@ def test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_recovers_o
         # permanently exhausted.
         slug = _fresh_slug("rh")
         _register_application(platform, slug)
+        credential_id = "crd_" + secrets.token_hex(8)
         writer = _write_store(platform)
         try:
             with writer.unit_of_work() as work:
-                writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-recovery", work=work)
+                writer.add(credential_id, slug, "runtime", "s3cret-recovery", work=work)
         finally:
             writer.close()
 
         store._pool._dsn = platform.api_dsn
-        context = store.authenticate("s3cret-recovery")
+        context = store.authenticate(compose_bearer_locator(credential_id, "s3cret-recovery"))
         assert context.application_id == slug
     finally:
         store.close()
@@ -590,15 +600,16 @@ def test_0005_migration_is_idempotent(platform: types.SimpleNamespace) -> None:
     # left the schema in a broken half-applied state.
     slug = _fresh_slug("pf")
     _register_application(platform, slug)
+    credential_id = "crd_" + secrets.token_hex(8)
     writer = _write_store(platform)
     try:
         with writer.unit_of_work() as work:
-            writer.add("crd_" + secrets.token_hex(8), slug, "runtime", "s3cret-idempotent", work=work)
+            writer.add(credential_id, slug, "runtime", "s3cret-idempotent", work=work)
     finally:
         writer.close()
     reader = _read_store(platform)
     try:
-        reader.authenticate("s3cret-idempotent")
+        reader.authenticate(compose_bearer_locator(credential_id, "s3cret-idempotent"))
     finally:
         reader.close()
 
@@ -658,7 +669,7 @@ def test_0004_refuses_to_deprovision_while_a_credential_remains_and_touches_noth
         # never modified by the aborted attempt).
         reader = _read_store(platform)
         try:
-            reader.authenticate("s3cret-guard")
+            reader.authenticate(compose_bearer_locator(credential_id, "s3cret-guard"))
         finally:
             reader.close()
 
@@ -782,10 +793,10 @@ def test_rotate_replaces_the_secret_old_secret_rejected_new_secret_succeeds(plat
             store.rotate(credential_id, "s3cret-after-rotate", work=work)
 
         with pytest.raises(FoundationError) as exc:
-            store.authenticate("s3cret-before-rotate")
+            store.authenticate(compose_bearer_locator(credential_id, "s3cret-before-rotate"))
         assert exc.value.code == "AUTH_INVALID"
 
-        context = store.authenticate("s3cret-after-rotate")
+        context = store.authenticate(compose_bearer_locator(credential_id, "s3cret-after-rotate"))
         assert context.credential_id == credential_id
     finally:
         store.close()
@@ -1206,9 +1217,14 @@ def test_cli_list_credentials_never_prints_verifier_or_secret(platform: types.Si
     # stronger check than merely "the secret string itself is absent"
     # (`list-credentials` could not print the secret even if it wanted to,
     # since it never selects that column at all -- see `verifier` below).
+    # `secret` is the composed `<credential_id>.<secret_part>` bearer the
+    # CLI issued -- the actual stored verifier is computed over the
+    # secret HALF only (see `PostgresCredentialStore.authenticate`), so
+    # split it first rather than hashing the whole locator.
+    _issued_credential_id, secret_part = split_bearer_locator(secret)
     reader = _read_store(platform)
     try:
-        verifier = reader.verifier(secret)
+        verifier = reader.verifier(secret_part)
     finally:
         reader.close()
     assert verifier not in listed.stdout
@@ -1336,6 +1352,11 @@ def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> di
         "R2DB_SERVE_APPS": app.slug,
         f"R2DB_APP_{app.slug.upper()}_RUNTIME_DSN": app.runtime_dsn,
         f"R2DB_APP_{app.slug.upper()}_DEVELOPER_DSN": app.developer_dsn,
+        # Phase 6 WP-2 (design D-2): unconditionally required now
+        # (`surfaces.data` is a 1.6.0 unconditional obligation);
+        # `R2DB_CONTROL_BASE_URL` stays unset here since these fixtures
+        # never set `R2DB_CONTROL_PLANE_STATUS` (defaults `unavailable`).
+        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
 
 
@@ -1387,7 +1408,7 @@ def test_build_app_serves_capabilities_over_real_http_and_shuts_down_cleanly(
     # `credentials.close()`) -- a plain request without the `with` block
     # would never trigger shutdown at all.
     with TestClient(asgi_app) as client:
-        response = client.get("/v1/capabilities", headers={"authorization": "Bearer s3cret-main-e2e"})
+        response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {compose_bearer_locator(credential_id, 's3cret-main-e2e')}"})
         assert response.status_code == 200
         document = response.json()
         assert document["application_scope"] == provisioned_app.slug
@@ -1396,6 +1417,48 @@ def test_build_app_serves_capabilities_over_real_http_and_shuts_down_cleanly(
 
         unauthenticated = client.get("/v1/capabilities")
         assert unauthenticated.status_code == 401
+
+
+def test_nul_locator_over_real_http_is_401_and_durably_audited_not_503_silent(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType
+) -> None:
+    """Coordinator F1 (2026-09-04 review): before this fix, a bearer with a
+    NUL (U+0000) byte in either locator half reached `psycopg` as a real
+    query parameter (`credential_store.py`'s `_fetch_or_503`), which
+    refuses a NUL-bearing `text` parameter and mapped that to
+    `AUTH_STATE_UNAVAILABLE` (503) -- a code a CLIENT could trigger at
+    will, and one that `service._DURABLE_DENIAL_CODES` does not include,
+    so the denial was never durably audited at all (SI-14 regression).
+    `auth.split_bearer_locator` now rejects a NUL in either half BEFORE
+    any lookup, exactly like the other 3 malformed shapes -- this test
+    fixes both halves of the regression over REAL HTTP + REAL PostgreSQL:
+    (1) the response is `401 AUTH_INVALID`, never `503`; (2) the denial
+    reaches the durable `application_audit` sink (`AUTH_INVALID` IS in
+    `_DURABLE_DENIAL_CODES`, unlike `AUTH_STATE_UNAVAILABLE`).
+    """
+    asgi_app = main_module.build_app(env=_main_env(platform, provisioned_app))
+    with TestClient(asgi_app) as client:
+        for locator in ("crd_\x00nulid.secret", "crd_nulid.sec\x00ret"):
+            response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {locator}"})
+            assert response.status_code == 401, f"NUL locator {locator!r} returned {response.status_code}, not 401: {response.text}"
+            assert response.json()["code"] == "AUTH_INVALID"
+
+        # Force any coalescing window open for this denial's key closed --
+        # `service.flush_audit_buffer`'s own hook, the same one the real
+        # periodic background thread calls (`main.py`'s `_audit_flush_loop`)
+        # -- so the durable row this denial's FIRST occurrence already
+        # wrote synchronously (`_DenialCoalescer.route`'s own "first
+        # occurrence writes immediately" rule) is guaranteed visible by the
+        # time this test reads `application_audit` below, regardless of
+        # real wall-clock timing relative to `denial_coalesce_window_s`.
+        asgi_app.app.state.service.flush_audit_buffer(force_expire_denial_windows=True)
+
+    with psycopg.connect(_dsn_with(platform.admin_dsn, user=f"{platform.prefix}_auditreader", password=platform.auditreader_password, dbname=platform.platform_db)) as conn:
+        with conn.cursor() as cur:
+            table = sql.Identifier(platform.schema, "application_audit").as_string(conn)
+            cur.execute(f"SELECT count(*) FROM {table} WHERE reason_code = 'AUTH_INVALID' AND operation = 'authenticate'")
+            (count,) = cur.fetchone()
+    assert count >= 1, "NUL-locator AUTH_INVALID denial did not reach the durable application_audit sink"
 
 
 def test_build_app_missing_required_env_var_raises(main_module: types.ModuleType) -> None:
@@ -1416,6 +1479,7 @@ def test_build_app_missing_per_app_dsn_raises(platform: types.SimpleNamespace, m
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
+        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match=f"R2DB_APP_{slug.upper()}_RUNTIME_DSN"):
         main_module.build_app(env=env)
@@ -1430,6 +1494,7 @@ def test_build_app_unregistered_slug_raises(platform: types.SimpleNamespace, mai
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
+        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="not registered"):
         main_module.build_app(env=env)
@@ -1445,6 +1510,7 @@ def test_build_app_disabled_slug_raises(platform: types.SimpleNamespace, main_mo
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
+        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="disabled"):
         main_module.build_app(env=env)
@@ -1465,6 +1531,7 @@ def test_build_app_registered_only_slug_raises(platform: types.SimpleNamespace, 
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
+        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="not yet provisioned"):
         main_module.build_app(env=env)
@@ -1539,7 +1606,7 @@ def test_build_app_default_control_plane_status_is_unavailable(
     assert "R2DB_CONTROL_PLANE_STATUS" not in env
     asgi_app = main_module.build_app(env=env)
     with TestClient(asgi_app) as client:
-        response = client.get("/v1/capabilities", headers={"authorization": "Bearer s3cret-default-status"})
+        response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {compose_bearer_locator(credential_id, 's3cret-default-status')}"})
         assert response.status_code == 200
         assert response.json()["capabilities"]["control_plane"] == {"status": "unavailable"}
 
@@ -1560,9 +1627,15 @@ def test_build_app_control_plane_status_enabled_is_declared(
 
     env = _main_env(platform, provisioned_app)
     env["R2DB_CONTROL_PLANE_STATUS"] = "enabled"
+    # `R2DB_CONTROL_BASE_URL` becomes required the instant control_plane_
+    # status is anything other than `unavailable` (D-2's conditional-
+    # omission rule) -- `_main_env` deliberately never sets it (it never
+    # sets `R2DB_CONTROL_PLANE_STATUS` either), so this test, which flips
+    # the status to `enabled` itself, must also supply it here.
+    env["R2DB_CONTROL_BASE_URL"] = "https://r2db-control-test.example.invalid/control/v1"
     asgi_app = main_module.build_app(env=env)
     with TestClient(asgi_app) as client:
-        response = client.get("/v1/capabilities", headers={"authorization": "Bearer s3cret-enabled-status"})
+        response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {compose_bearer_locator(credential_id, 's3cret-enabled-status')}"})
         assert response.status_code == 200
         assert response.json()["capabilities"]["control_plane"] == {"status": "enabled"}
 

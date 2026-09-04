@@ -96,6 +96,32 @@ Environment variable contract (P2-D5):
                                           (D-4's periodic flush trigger); a
                                           latency knob only, never a
                                           correctness one.
+    R2DB_DATA_BASE_URL                    required (Phase 6 WP-2, design
+                                          docs/design/PHASE6_CONTRACT_160_
+                                          CLIENT_DISCOVERY_V1.md D-2) -- this
+                                          deployment's own absolute data-
+                                          surface base URL (must end with
+                                          `/v1`, no trailing slash),
+                                          declared as `CapabilityDocument.
+                                          surfaces.data.base_url`. A
+                                          deployer's own stated fact, never
+                                          derived from a request's Host
+                                          header.
+    R2DB_CONTROL_BASE_URL                 required whenever `R2DB_CONTROL_
+                                          PLANE_STATUS` is other than
+                                          `unavailable` (design D-2's
+                                          conditional-omission rule) --
+                                          this deployment's own absolute
+                                          control-surface base URL (must
+                                          end with `/control/v1`, no
+                                          trailing slash), declared as
+                                          `surfaces.control.base_url`. Read
+                                          by BOTH this process and `r2db_
+                                          api.control_main` (the SAME two
+                                          variable names, so both
+                                          processes' capability documents
+                                          can return the identical
+                                          `surfaces` object).
 
 Startup failure policy (P2-D5): missing configuration, an application slug
 named in `R2DB_SERVE_APPS` that is not registered in the platform registry,
@@ -110,6 +136,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import psycopg
 from psycopg import sql
@@ -176,6 +203,71 @@ def _require(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required to start r2db_api.main:app")
     return value
+
+
+def _validate_surface_base_url(name: str, raw: str, *, suffix: str) -> str:
+    """Phase 6 WP-2 (design D-2): the SHAPE checks `R2DB_DATA_BASE_URL`/
+    `R2DB_CONTROL_BASE_URL` must pass at startup -- same fail-loud
+    discipline as `_control_plane_status` above (`RuntimeError` naming the
+    variable, never a silent fallback). Deliberately checked as THREE
+    separate, independent conditions (not folded into one `str.endswith`
+    check) -- design's own four malformed forms (relative URL / wrong
+    suffix / trailing slash / absent) are independently observable this
+    way: a value like `https://example.invalid/v1/` (the CORRECT suffix
+    plus one trailing slash) passes the suffix check below on its
+    slash-stripped form and is caught ONLY by the dedicated trailing-slash
+    check, so that check is independently load-bearing rather than a
+    special case the suffix check would have caught anyway. `absent` is
+    the caller's own concern (this function is only ever called with a
+    non-empty `raw`); this function only ever validates a value that was
+    actually given. Only the URL's SHAPE is checked -- whether `data`/
+    `control` actually agree with each other, or resolve to a real
+    listener, is deliberately NOT this function's job (design's own
+    "配備者の責任" ruling, L6-5a): no cross-check between the two variables
+    is invented here.
+    """
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"{name} must be an absolute URL, got {raw!r}")
+    without_trailing_slash = raw[:-1] if raw.endswith("/") else raw
+    if not without_trailing_slash.endswith(suffix):
+        raise RuntimeError(f"{name} must end with {suffix!r}, got {raw!r}")
+    # Coordinator item 7(ii) (reviewer O4, 2026-09-04 review): `/control/
+    # v1` itself ends with the substring `/v1`, so `R2DB_DATA_BASE_URL`'s
+    # own `suffix="/v1"` check above alone would ACCEPT a value that is
+    # actually a control-surface URL (e.g. `https://h/control/v1`) --
+    # `R2DB_CONTROL_BASE_URL`'s own check needs no symmetric guard (a
+    # bare `/v1`-ending value never satisfies its `suffix="/control/v1"`
+    # check in the first place). Exclusive: rejects `R2DB_DATA_BASE_URL`
+    # ending in `/control/v1`.
+    if suffix == "/v1" and without_trailing_slash.endswith("/control/v1"):
+        raise RuntimeError(f"{name} must end with {suffix!r}, not '/control/v1', got {raw!r}")
+    if raw.endswith("/"):
+        raise RuntimeError(f"{name} must not end with a trailing slash, got {raw!r}")
+    return raw
+
+
+def _surfaces(env: Mapping[str, str], *, control_plane_status: str) -> dict[str, Any]:
+    """Phase 6 WP-2 (design D-2): reads `R2DB_DATA_BASE_URL` (always
+    required -- `surfaces.data` is an unconditional 1.6.0 obligation) and
+    `R2DB_CONTROL_BASE_URL` (required only when `control_plane_status` is
+    other than `unavailable` -- a deployment declaring no control surface
+    omits `surfaces.control` entirely, design's own conditional-omission
+    rule). Both env var names are shared with `control_main.py`'s own
+    identically-named function -- the data-plane and control-plane
+    processes are deliberately configured from the SAME two variables so
+    both capability documents can return the identical `surfaces` object
+    (design's own "両プロセスに同じ2変数を配る" instruction); this function
+    does not (and structurally cannot) verify that the sibling process was
+    actually given the same values -- see `_validate_surface_base_url`'s
+    own docstring on why that cross-check is not invented here.
+    """
+    data_base_url = _require(env, "R2DB_DATA_BASE_URL")
+    surfaces: dict[str, Any] = {"data": {"base_url": _validate_surface_base_url("R2DB_DATA_BASE_URL", data_base_url, suffix="/v1")}}
+    if control_plane_status != "unavailable":
+        control_base_url = _require(env, "R2DB_CONTROL_BASE_URL")
+        surfaces["control"] = {"base_url": _validate_surface_base_url("R2DB_CONTROL_BASE_URL", control_base_url, suffix="/control/v1")}
+    return surfaces
 
 
 def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -284,6 +376,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     slugs = _parse_served_apps(_require(env, "R2DB_SERVE_APPS"))
     control_plane_status = _control_plane_status(env)
+    surfaces = _surfaces(env, control_plane_status=control_plane_status)
 
     app_dsns: dict[str, tuple[str, str]] = {}
     for slug in slugs:
@@ -362,6 +455,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     service = DataService(
         credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status,
         durable_audit=durable_audit, audit_buffer_capacity=audit_buffer_capacity,
+        surfaces=surfaces,
         # WP-2(a) fix round 2 review N-2: the alert-row rate floor tracks
         # the ACTUAL configured flush interval (which `R2DB_AUDIT_FLUSH_
         # INTERVAL_S` may have overridden away from the default), not a

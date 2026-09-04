@@ -1018,10 +1018,14 @@ def test_catalog_reflects_entities_and_excludes_internal_bookkeeping_table(app_a
         assert cell.catalog() == []
         cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": ["name", "qty"]}, developer=True, limits=LIMITS)
         catalog = cell.catalog()
+        # Phase 6 WP-2 (design D-3(iii)): `field_types` -- `name`/`qty` were
+        # created with no declared type (JSONB), so they report `json`
+        # (decision (ii)'s default); `id` is always `integer`.
         assert catalog == [
             {
                 "entity": "widgets",
                 "fields": ["id", "name", "qty"],
+                "field_types": {"id": "integer", "name": "json", "qty": "json"},
                 "mutation_class": "mutable",
                 "address_fields": ["id"],
                 "address_reuse": "never",
@@ -1291,6 +1295,118 @@ def test_field_type_maps_to_a_real_typed_column_and_round_trips_every_type(app_a
         assert exc.value.code == "VALIDATION_FAILED"
     finally:
         cell.close()
+
+
+# ===========================================================================
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-3): `create_entity`'s own `field_types` request key applies
+# per-field DDL directly at table-creation time (not only via a follow-up
+# `add_field`), and an explicit `json` declaration maps to the same bare
+# JSONB an untyped field already used.
+# ===========================================================================
+
+
+def test_create_entity_field_types_applies_per_field_ddl_and_round_trips_and_rejects_wrong_type(app_a: types.SimpleNamespace) -> None:
+    """The `field_types` request key on `create_entity` itself (not a
+    follow-up `add_field`) drives real per-field DDL -- a field it names
+    gets a genuinely typed column at CREATE TABLE time, exactly like
+    `add_field`'s own `field_type` does after the fact."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {
+                "operation": "create_entity", "entity": "ce_typed",
+                "fields": ["i", "n", "b", "s", "o", "a", "untyped"],
+                "field_types": {"i": "integer", "n": "number", "b": "boolean", "s": "string", "o": "object", "a": "array"},
+            },
+            developer=True, limits=LIMITS,
+        )
+        entity = cell.catalog()[0]
+        assert entity["field_types"] == {
+            "id": "integer", "i": "integer", "n": "number", "b": "boolean", "s": "string", "o": "object", "a": "array", "untyped": "json",
+        }
+        good = {"i": 1, "n": 1.5, "b": True, "s": "x", "o": {"k": 1}, "a": [1, 2], "untyped": {"any": ["shape", 1, True]}}
+        cell.transact("ce_typed", [{"operation": "insert", "values": good}], LIMITS)
+        rows = cell.query("ce_typed", select=["i", "n", "b", "s", "o", "a", "untyped"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [good]
+
+        # A field the `create_entity`-time `field_types` declared -- not
+        # merely a follow-up `add_field` -- genuinely enforces its type.
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("ce_typed", [{"operation": "insert", "values": {"i": "not-an-int"}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+    finally:
+        cell.close()
+
+
+def test_create_entity_explicit_json_field_type_maps_to_jsonb_and_matches_untyped_behavior(app_a: types.SimpleNamespace) -> None:
+    """Design D-3(ii)/G11: a field explicitly declared `json` (via `create_
+    entity`'s `field_types` or `add_field`'s scalar `field_type`) behaves
+    identically to an untyped field -- same JSONB column, same NUL
+    rejection, same catalog report (`json`, never left as a distinct
+    physical marker)."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "ce_json", "fields": ["j"], "field_types": {"j": "json"}},
+            developer=True, limits=LIMITS,
+        )
+        cell.apply_schema({"operation": "add_field", "entity": "ce_json", "field": "j2", "field_type": "json"}, developer=True, limits=LIMITS)
+        entity = cell.catalog()[0]
+        assert entity["field_types"]["j"] == "json"
+        assert entity["field_types"]["j2"] == "json"
+
+        # Every JSON shape round-trips, on both the create_entity-declared
+        # and the add_field-declared explicit-json columns.
+        good = {"j": {"nested": [1, "two", 3.0, True, None]}, "j2": "plain string"}
+        cell.transact("ce_json", [{"operation": "insert", "values": good}], LIMITS)
+        rows = cell.query("ce_json", select=["j", "j2"], where=[], page_size=10, limits=LIMITS)
+        assert rows.items == [good]
+
+        # NUL byte refused -- the exact regression design's own G11 note
+        # names (an unmapped "json" string would fall through `_check_
+        # type`'s catch-all `ok = True` branch, skipping the NUL check
+        # untyped/mapped-to-None fields get).
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("ce_json", [{"operation": "insert", "values": {"j": "bad\x00value"}}], LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+
+        # Coordinator audit item (b): the PHYSICAL PostgreSQL column type
+        # is genuinely bare JSONB (never a distinct marker/domain) --
+        # confirmed via `information_schema` directly, not merely via this
+        # backend's own catalog report (which is itself derived from that
+        # same introspection -- this assertion checks the introspection
+        # SOURCE, closing the possibility that catalog and physical reality
+        # silently disagree).
+        with cell._developer.connection() as conn:  # noqa: SLF001 -- test-only reach-in, established convention in this file
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT data_type FROM information_schema.columns WHERE table_name = %s AND column_name IN ('j', 'j2')",
+                    ["ce_json"],
+                )
+                data_types = {row[0] for row in cur.fetchall()}
+        assert data_types == {"jsonb"}, f"explicit-json columns are not bare JSONB: {data_types!r}"
+    finally:
+        cell.close()
+
+
+def test_field_type_sql_json_entry_maps_to_jsonb_without_keyerror() -> None:
+    """Design D-3, r2db decision (c) / work order completion condition 16:
+    `_FIELD_TYPE_SQL` carries a `"json"` entry mapping to the same bare
+    JSONB every untyped field already used -- exercised directly (white-
+    box) since normal request handling never presents the literal string
+    "json" to this dict at all (`bind_schema_operation` already translates
+    it to `None` before either DDL applier is reached, `structured.py`'s
+    own G11 decision) -- this is what guards against a `KeyError` if a
+    caller ever DOES look "json" up here directly (`_column_type_sql`'s own
+    docstring)."""
+    from r2db_api.postgres import _JSONB_SQL, _column_type_sql
+    from r2db_api.postgres import _FIELD_TYPE_SQL
+
+    assert "json" in _FIELD_TYPE_SQL
+    assert _FIELD_TYPE_SQL["json"] is _JSONB_SQL
+    assert _column_type_sql("json") is _JSONB_SQL
+    assert _column_type_sql(None) is _JSONB_SQL  # untyped -- same physical type
 
 
 def test_field_type_null_is_allowed_for_any_declared_type(app_a: types.SimpleNamespace) -> None:

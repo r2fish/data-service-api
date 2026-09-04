@@ -55,6 +55,8 @@ correction stated once, and `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`
    real operational work, not a free rollback. Recovering from a
    compromise therefore is not only "revoke what the attacker issued," it
    may also be "re-issue and redistribute what the attacker revoked."
+   (For the mechanics of issuing that replacement secret in its current,
+   1.6.0 locator wire form, see `POSTGRES_PROVISIONING_RUNBOOK.md` §12a.)
 2. **The evidence cannot be erased, including by the credential itself.**
    `control_audit` is INSERT-only from the control-plane process' own role
    (`r2dbsvc_controlplane` -- 0006's GRANT structure, R-3); a stolen control
@@ -79,8 +81,9 @@ held the compromised control credential, exactly as much a reach vector as
 a freshly issued one -- step 3 below treats both the same way); (b) the
 **availability harm** from any application credential the compromised
 control credential revoked -- recovering means re-issuing and
-redistributing a replacement to every affected consumer, not merely
-noting that it happened; and (c) the operational disruption of the
+redistributing a replacement to every affected consumer (again, see
+`POSTGRES_PROVISIONING_RUNBOOK.md` §12a for the current wire form), not
+merely noting that it happened; and (c) the operational disruption of the
 recovery itself (a brief window where the old control credential and any
 of its in-flight operations stop working). Nothing about a compromised
 control credential is a route to unbounded, undetectable, or

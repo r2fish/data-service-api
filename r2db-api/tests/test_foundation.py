@@ -59,7 +59,7 @@ def service():
 
 
 def test_server_bound_scope_and_isolation(service):
-    a = service.authenticate("secret-a")
+    a = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as tampered:
         service.query(replace(a, application_id="app-b"), "notes", select=["id"])
     assert tampered.value.code == "SCOPE_MISMATCH"
@@ -71,18 +71,18 @@ def test_server_bound_scope_and_isolation(service):
 
 
 def test_runtime_developer_separation_and_structured_validation(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.schema(runtime, {"operation": "create_entity", "entity": "new_entity"})
     assert exc.value.code == "FORBIDDEN"
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     assert service.schema(developer, {"operation": "create_entity", "entity": "new_entity"}) == 1
     with pytest.raises(FoundationError):
         service.query(runtime, "notes;drop", select=["id"])
 
 
 def test_atomic_rollback_and_explicit_destructive_operation(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError):
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "c"}}, {"operation": "unsupported"}])
     assert service.query(runtime, "notes", select=["id"]) == [{"id": 1}]
@@ -97,7 +97,7 @@ def test_atomic_rollback_and_explicit_destructive_operation(service):
 def test_insert_or_update_supplying_the_server_assigned_id_is_rejected(service):
     """R-3, property 4: `id` is always server-assigned; a client can read
     it (select/where/order_by) but never write it, on any mutation."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"id": 99, "body": "x"}}])
     assert exc.value.code == "VALIDATION_FAILED"
@@ -112,7 +112,7 @@ def test_insert_with_a_filter_is_validation_failed(service):
     silently never used by any backend's insert path -- the same
     silent-ignore shape upsert's own `where` rejection closes, closed
     symmetrically for insert."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "z"}, "where": [{"field": "id", "operator": "eq", "value": 1}]}])
     assert exc.value.code == "VALIDATION_FAILED"
@@ -120,7 +120,7 @@ def test_insert_with_a_filter_is_validation_failed(service):
 
 
 def test_runtime_unknown_entity_and_failed_mutation_leave_no_ghost(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as unknown:
         service.mutate(runtime, "ghost", [{"operation": "insert", "values": {}}])
     assert unknown.value.code == "NOT_FOUND"
@@ -133,9 +133,9 @@ def test_runtime_unknown_entity_and_failed_mutation_leave_no_ghost(service):
 
 
 def test_developer_schema_catalog_controls_fields(service):
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"}) == 1
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as field_error:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"unlisted": "x"}}])
     assert field_error.value.code == "NOT_FOUND"
@@ -150,7 +150,7 @@ def test_developer_schema_catalog_controls_fields(service):
 
 
 def test_revoke_disable_and_unavailable_state_fail_closed(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     control = ControlAuthority(service)
     control.set_credential_state("cred-a", revoked=True)
     with pytest.raises(FoundationError) as exc:
@@ -161,7 +161,7 @@ def test_revoke_disable_and_unavailable_state_fail_closed(service):
     # issued credential rather than un-revoking cred-a for fixture
     # convenience (docs/design/CONFORMANCE_CONDITIONS_V1_1.md section 5).
     control.issue_credential("cred-a2", "app-a", "runtime", "secret-a2")
-    runtime2 = service.authenticate("secret-a2")
+    runtime2 = service.authenticate("cred-a2.secret-a2")
     control.set_application_enabled("app-a", enabled=False)
     with pytest.raises(FoundationError) as exc:
         service.query(runtime2, "notes", select=["id"])
@@ -177,7 +177,7 @@ def test_revoked_credential_cannot_be_un_revoked(service):
     """Contract 1.1.0 lifecycle.credential: revocation is terminal. No
     control-plane call -- including a later `revoked=False` -- may clear it.
     """
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     control = ControlAuthority(service)
     control.set_credential_state("cred-a", revoked=True)
     with pytest.raises(FoundationError) as exc:
@@ -201,44 +201,61 @@ def test_unrevoked_credential_enabled_false_true_round_trip_still_allowed(servic
     control = ControlAuthority(service)
     control.set_credential_state("cred-a", enabled=False)
     with pytest.raises(FoundationError) as exc:
-        service.authenticate("secret-a")
+        service.authenticate("cred-a.secret-a")
     assert exc.value.code == "AUTH_INVALID"
     control.set_credential_state("cred-a", revoked=False)  # no-op: never revoked
     control.set_credential_state("cred-a", enabled=True)
-    assert service.authenticate("secret-a").application_id == "app-a"
+    assert service.authenticate("cred-a.secret-a").application_id == "app-a"
 
 
 def test_authenticate_fails_closed_for_disabled_application(service):
     control = ControlAuthority(service)
     control.set_application_enabled("app-a", enabled=False)
     with pytest.raises(FoundationError) as exc:
-        service.authenticate("secret-a")
+        service.authenticate("cred-a.secret-a")
     assert exc.value.code == "APPLICATION_DISABLED"
     denials = [event for event in control.audit_events() if event.get("operation") == "authenticate" and event.get("outcome") == "deny"]
     assert denials and denials[-1]["reason_code"] == "APPLICATION_DISABLED"
     control.set_application_enabled("app-a", enabled=True)
-    assert service.authenticate("secret-a").application_id == "app-a"
+    assert service.authenticate("cred-a.secret-a").application_id == "app-a"
+
+
+def test_data_plane_capabilities_declares_contract_1_6_0(service):
+    """Phase 6 WP-2 (design D-5, version_binding): `DataService.
+    capabilities()` declares `contract_version: "1.6.0"` -- the data-plane
+    half of the flip (`ControlPlaneService`'s own equivalent pin lives in
+    `test_control_plane_service.py`/`test_audit_query.py`). Two SEPARATE
+    pins for the two planes -- a mutation reverting only one plane's flip
+    (work order mutation 15) turns exactly one of the two red, never
+    both."""
+    runtime = service.authenticate("cred-a.secret-a")
+    document = service.capabilities(runtime)
+    assert document["contract_version"] == "1.6.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
     """CCR-13 WP-5b: `row_addressability` is declared `enabled`, so
     `DataService.catalog()` publishes the full `EntityDescriptor` shape
     `ApplicationCell.catalog()` itself computes -- no narrowing."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     document = service.catalog(runtime)
+    # Phase 6 WP-2 (design D-3(iii)): `field_types` is now a real key on
+    # every entity descriptor -- `body` was created with no declared type,
+    # so it reports `json` (decision (ii)'s default); `id` is always
+    # `integer` (server-assigned address).
     assert document == {
         "application_scope": "app-a",
-        "entities": [{"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+        "entities": [{"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
     }
-    other = service.authenticate("secret-b")
+    other = service.authenticate("cred-b.secret-b")
     assert service.catalog(other) == {
         "application_scope": "app-b",
-        "entities": [{"entity": "notes", "fields": ["body", "id"], "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+        "entities": [{"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
     }
 
 
 def test_catalog_denied_for_revoked_credential_exactly_as_query(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     control = ControlAuthority(service)
     control.set_credential_state("cred-a", revoked=True)
     with pytest.raises(FoundationError) as exc:
@@ -247,7 +264,7 @@ def test_catalog_denied_for_revoked_credential_exactly_as_query(service):
 
 
 def test_finite_limits_are_enforced_and_discoverable(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     response = service.capabilities(runtime)
     assert all(value > 0 for value in response["limits"].values())
     assert response["capabilities"]["structured_query"]["status"] == "enabled"
@@ -261,11 +278,11 @@ def test_finite_limits_are_enforced_and_discoverable(service):
 def test_audit_is_append_only_and_secret_free(service):
     assert not hasattr(service, "audit")
     assert not hasattr(service, "credentials")
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     service.query(runtime, "notes", select=["id"])
     events = ControlAuthority(service).audit_events()
     assert events
-    assert all(not any(token in str(event).lower() for token in ("secret-a", "password", "sql", "row_value")) for event in events)
+    assert all(not any(token in str(event).lower() for token in ("cred-a.secret-a", "password", "sql", "row_value")) for event in events)
     with pytest.raises(PermissionError):
         ControlAuthority(service).delete_audit()
     tamper_failures = [event for event in ControlAuthority(service).audit_events() if event.get("operation") == "delete_audit"]
@@ -291,7 +308,7 @@ def test_control_lifecycle_and_failures_are_canonical_audit_events(service):
 
 
 def test_malformed_inputs_fail_with_safe_foundation_errors(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     cases = [
         lambda: service.query(runtime, "notes", select="id"),
         lambda: service.query(runtime, "notes", select=["id"], where=[{}]),
@@ -315,7 +332,7 @@ def _limited(**kwargs):
     # Two seed rows, unnamed (id is server-assigned): the first two inserted
     # get id 1 and id 2 respectively, exactly what every test below assumes.
     ControlAuthority(service).register_application("limit-app", entities={"items": [{}, {}]})
-    return service, service.authenticate("limit-secret")
+    return service, service.authenticate("limit-cred.limit-secret")
 
 
 def test_request_body_limit_has_a_deterministic_boundary():
@@ -370,7 +387,7 @@ def test_r2_capability_artifact_matches_real_capabilities_response(service):
     declaration fails loudly instead of silently.
     """
     artifact = json.loads((Path(__file__).parents[1] / "config" / "capabilities.json").read_text())
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     response = service.capabilities(developer)
     capabilities = response["capabilities"]
 
@@ -423,7 +440,7 @@ def test_r2_capability_artifact_names_every_real_capability(service):
     """
     artifact = json.loads((Path(__file__).parents[1] / "config" / "capabilities.json").read_text())
     declared = set(artifact["enabled"]) | set(artifact["unavailable"])
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     response = service.capabilities(developer)
     capabilities = response["capabilities"]
 
@@ -442,7 +459,7 @@ def test_r2_capability_artifact_names_every_real_capability(service):
 def test_capability_response_matches_common_capability_document_schema(service):
     contract = json.loads((Path(__file__).parents[2] / "spec" / "data-service-api.v1.json").read_text())
     schema = contract["schemas"]["CapabilityDocument"]
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     response = service.capabilities(runtime)
     assert set(schema["required"]).issubset(response)
     statuses = set(contract["capability_status"]["status_enum"])
@@ -481,7 +498,7 @@ def test_schema_deadline_failure_rolls_back_entity_catalog_and_revision():
     clock_values = iter([0.0, 0.0, 0.0, 0.01])
     service, context = _limited(execution_ms=1)
     ControlAuthority(service).issue_credential("schema-dev", "limit-app", "developer", "schema-dev-secret")
-    developer = service.authenticate("schema-dev-secret")
+    developer = service.authenticate("schema-dev.schema-dev-secret")
     service._clock = lambda: next(clock_values)
     with pytest.raises(FoundationError) as error:
         service.schema(developer, {"operation": "create_entity", "entity": "deadline_entity", "fields": ["value"]})
@@ -501,7 +518,7 @@ def test_delete_rejects_truthy_non_boolean_destructive_before_confirmation(servi
     The real, currently-valid confirmation phrase is supplied anyway (so
     this test proves the TYPE check denies it, not merely a missing/wrong
     confirmation), and the row is not deleted."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     before = service.query(runtime, "notes", select=["id"])
     where = [{"field": "id", "operator": "eq", "value": 1}]
     phrase = _delete_phrase("notes", where)
@@ -579,7 +596,7 @@ def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded
     "values"}`. This check runs before the per-key `known_fields`
     membership loop (structured.py), so the 101 field names here never
     need to correspond to any real declared field."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     too_many_values = {f"field_{i}": i for i in range(101)}
     with pytest.raises(FoundationError) as exc:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": too_many_values}])
@@ -620,7 +637,7 @@ def test_every_advertised_resource_limit_has_a_deterministic_boundary():
 
     service, context = _limited(schema_objects=1)
     ControlAuthority(service).issue_credential("limit-dev", "limit-app", "developer", "limit-dev-secret")
-    dev_context = service.authenticate("limit-dev-secret")
+    dev_context = service.authenticate("limit-dev.limit-dev-secret")
     with pytest.raises(FoundationError) as error:
         service.schema(dev_context, {"operation": "add_field", "entity": "items", "field": "new_field"})
     assert error.value.code == "LIMIT_EXCEEDED"
@@ -657,7 +674,7 @@ def test_upsert_is_capability_unsupported_without_a_declared_unique_key_and_reje
     # tests further below), so this same assertion is now doubly true. The
     # upsert is deliberately the *second* operation: the preceding insert
     # must roll back with it (failure-before-execution, no partial commit).
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.mutate(runtime, "notes", [
             {"operation": "insert", "values": {"body": "before-upsert"}},
@@ -669,7 +686,7 @@ def test_upsert_is_capability_unsupported_without_a_declared_unique_key_and_reje
 
 
 def test_reserved_identifier_names_are_rejected_for_entities_and_fields(service):
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     with pytest.raises(FoundationError) as exc:
         service.schema(developer, {"operation": "create_entity", "entity": "_r2db_evil"})
     assert exc.value.code == "IDENTIFIER_INVALID"
@@ -695,7 +712,7 @@ def test_audit_events_entity_name_is_reserved_by_exact_match_only(service):
     match only -- `audit_events_archive` (a superstring, not the reserved
     name itself) must still be accepted, proving this is not accidentally a
     prefix rule."""
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     with pytest.raises(FoundationError) as exc:
         service.schema(developer, {"operation": "create_entity", "entity": "audit_events"})
     assert exc.value.code == "IDENTIFIER_INVALID"
@@ -711,8 +728,8 @@ def test_audit_events_is_reserved_at_every_entity_identifier_position(service):
     identifier position" line. Each of these previously fell through to a
     generic NOT_FOUND (no real entity of that name can ever exist) instead
     of the reserved-name refusal itself."""
-    developer = service.authenticate("dev-secret-a")
-    runtime = service.authenticate("secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
 
     with pytest.raises(FoundationError) as exc:
         service.schema(developer, {"operation": "add_field", "entity": "audit_events", "field": "x"})
@@ -787,10 +804,14 @@ def test_application_cell_catalog_returns_the_full_entity_descriptor_shape():
     gated published shape is covered separately by
     `test_catalog_returns_shaped_document_scoped_to_application` above."""
     cell = _cell({"notes": [{"body": "a"}]})
+    # Phase 6 WP-2 (design D-3(iii)): `field_types` added -- `body` was
+    # created with no declared type, so it reports `json` (decision (ii)'s
+    # default); `id` is always `integer`.
     assert cell.catalog() == [
         {
             "entity": "notes",
             "fields": ["body", "id"],
+            "field_types": {"body": "json", "id": "integer"},
             "mutation_class": "mutable",
             "address_fields": ["id"],
             "address_reuse": "never",
@@ -811,6 +832,157 @@ def test_field_type_is_only_accepted_by_add_field():
     _create_entity(cell, "typed_reject")
     with pytest.raises(FoundationError) as exc:
         _add_field(cell, "typed_reject", "n", "not-a-real-type")
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+# ===========================================================================
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-3): `create_entity`'s optional `field_types` request key, the
+# catalog's own `field_types` reporting (both already exercised incidentally
+# by the tests above, via the shared `service`/`_cell` fixtures' own catalog
+# assertions) -- this section is the dedicated, exhaustive coverage: the 3
+# invalid shapes, the declaration round-trip, the `json` default + its NUL
+# regression guard, and the `fields`-only (1.5.0) request's continued
+# validity.
+# ===========================================================================
+
+
+def test_create_entity_field_types_names_a_field_not_present_in_fields_is_validation_failed():
+    """Design D-3(iv) invalid case (a): a `field_types` key naming a field
+    `fields` never declared."""
+    cell = _cell()
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "bad_a", "fields": ["a"], "field_types": {"b": "string"}},
+            developer=True, limits=LIMITS,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+    # No side effect: the entity must not have been partially created.
+    assert cell.catalog() == []
+
+
+@pytest.mark.parametrize("bad_value", ["unknown", ["string"], {"x": 1}, 1, None, True])
+def test_create_entity_field_types_value_outside_the_seven_word_vocabulary_is_validation_failed(bad_value):
+    """Design D-3(iv) invalid case (b): a `field_types` value the contract's
+    7-word enum does not carry -- both a wrong-but-string word (`"unknown"`)
+    and, coordinator F2 (2026-09-04 review): a genuinely non-string value
+    (list/dict/int/None/bool). Before the fix, a non-string value made
+    `if declared_type not in FIELD_TYPES:` raise `TypeError: unhashable
+    type` for the unhashable cases (`list`/`dict`) -- an uncaught exception
+    `http.py`'s `_endpoint` maps to a bare 503, not this method's own
+    `VALIDATION_FAILED` (design D-3(iv)(b) requires `VALIDATION_FAILED`
+    for every non-conforming value, not merely the hashable ones)."""
+    cell = _cell()
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "bad_b", "fields": ["a"], "field_types": {"a": bad_value}},
+            developer=True, limits=LIMITS,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert cell.catalog() == []
+
+
+@pytest.mark.parametrize("bad_value", ["unknown", ["string"], {"x": 1}, 1, None, True])
+def test_add_field_field_type_value_outside_the_seven_word_vocabulary_is_validation_failed(bad_value):
+    """Coordinator F2: the identical isinstance-first guard on `add_field`'s
+    scalar `field_type` (`structured.py:702`'s sibling to the create_entity
+    fix above) -- a pre-existing (not a WP-2 regression) hole the review
+    named as closeable in the same fix."""
+    cell = _cell()
+    _create_entity(cell, "bad_scalar")
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema(
+            {"operation": "add_field", "entity": "bad_scalar", "field": "n", "field_type": bad_value},
+            developer=True, limits=LIMITS,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_create_entity_field_types_without_fields_is_validation_failed():
+    """Design D-3(iv) invalid case (c): `field_types` sent without `fields`
+    at all -- never silently ignored (the exact MitateDB-observed defect
+    this rule closes, design section 1.5 item 1)."""
+    cell = _cell()
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "bad_c", "field_types": {"a": "string"}},
+            developer=True, limits=LIMITS,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert cell.catalog() == []
+
+
+def test_create_entity_field_types_declaration_round_trips_through_the_catalog():
+    """Design D-3(iv): a type declared via `create_entity`'s `field_types`
+    (or `add_field`'s scalar `field_type`) is reported back unchanged by the
+    catalog -- for every one of the 6 non-`json` words at once (a field
+    named `untyped` is deliberately left out of `field_types`, to also
+    exercise decision (ii)'s default in the same call as the round-trip)."""
+    cell = _cell()
+    declared = {"s": "string", "i": "integer", "n": "number", "b": "boolean", "o": "object", "a": "array"}
+    cell.apply_schema(
+        {"operation": "create_entity", "entity": "typed", "fields": [*declared, "untyped"], "field_types": declared},
+        developer=True, limits=LIMITS,
+    )
+    cell.apply_schema({"operation": "add_field", "entity": "typed", "field": "explicit_json", "field_type": "json"}, developer=True, limits=LIMITS)
+    field_types = cell.catalog()[0]["field_types"]
+    assert field_types == {**declared, "untyped": "json", "explicit_json": "json", "id": "integer"}
+
+
+def test_add_field_declared_type_round_trips_through_the_catalog_for_every_non_json_word():
+    """Design D-3(iv): `add_field`'s own scalar `field_type` declaration
+    round-trips through the catalog unchanged -- for each of the 6 non-
+    `json` words individually (distinct from the `create_entity`-time
+    `field_types` round-trip test above, which never exercises `add_field`
+    for anything but the `json` word itself)."""
+    cell = _cell()
+    _create_entity(cell, "af_typed")
+    for name, field_type in (("s", "string"), ("i", "integer"), ("n", "number"), ("b", "boolean"), ("o", "object"), ("a", "array")):
+        _add_field(cell, "af_typed", name, field_type)
+        reported = cell.catalog()[0]["field_types"][name]
+        assert reported == field_type, f"add_field declared {field_type!r} for {name!r} but catalog reports {reported!r}"
+
+
+def test_create_entity_fields_only_request_stays_valid_and_creates_json_fields():
+    """Design D-3(iv): `field_types` is never required -- a `fields`-only
+    `create_entity` (the 1.5.0 request shape) stays valid unchanged, and
+    every field it creates is `json` (decision (ii))."""
+    cell = _cell()
+    cell.apply_schema({"operation": "create_entity", "entity": "legacy_shape", "fields": ["x", "y"]}, developer=True, limits=LIMITS)
+    entity = cell.catalog()[0]
+    assert entity["fields"] == ["id", "x", "y"]
+    assert entity["field_types"] == {"id": "integer", "x": "json", "y": "json"}
+
+
+def test_declared_json_field_accepts_and_round_trips_every_json_shape_and_rejects_nul():
+    """Design D-3(ii)/G11: a field explicitly declared `json` behaves
+    identically to an untyped field -- accepts every JSON shape, and (the
+    NUL-regression this decision's own docstring names) still refuses a
+    NUL byte, exactly like an untyped field does. Value round-trip is
+    exercised at the mutation layer (`bind_mutation`/`_check_type`), not
+    the catalog -- this cell has no storage backend, so this test checks
+    what CAN be checked without one: acceptance/rejection at bind time.
+    """
+    from r2db_api.structured import _check_type
+
+    cell = _cell()
+    cell.apply_schema(
+        {"operation": "create_entity", "entity": "jsonized", "fields": ["j"], "field_types": {"j": "json"}},
+        developer=True, limits=LIMITS,
+    )
+    declared_type = cell.schema["jsonized"]["j"]
+    assert declared_type is None  # G11: explicit "json" collapses to the internal untyped representation
+    # Every JSON shape is accepted (no exception raised).
+    for value in (["a", "b"], {"k": "v"}, "text", 3.14, True, None):
+        _check_type(value, declared_type, "j")
+    # A NUL byte is refused for the SAME reason an untyped field refuses one
+    # (design's own regression concern: an explicit "json" declaration must
+    # not accidentally widen past what untyped already permitted).
+    with pytest.raises(FoundationError) as exc:
+        _check_type("bad\x00value", declared_type, "j")
+    assert exc.value.code == "VALIDATION_FAILED"
+    with pytest.raises(FoundationError) as exc:
+        _check_type({"k": "bad\x00value"}, declared_type, "j")
     assert exc.value.code == "VALIDATION_FAILED"
 
 
@@ -1856,7 +2028,7 @@ def test_transact_checks_deadline_before_each_operation_not_only_the_whole_batch
 
 
 def test_service_query_matches_filter_executes(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     assert service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}]) == [{"body": "a"}]
     assert service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "z%"}]) == []
 
@@ -1864,7 +2036,7 @@ def test_service_query_matches_filter_executes(service):
 def test_service_mutate_update_and_delete_where_matches_executes(service):
     """`update`/`delete`'s own `operation.where` accepts `matches` too, not
     only `query()`'s predicates."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "body", "operator": "matches", "value": "a%"}], "values": {"body": "renamed"}}])
     assert affected == 1
     assert service.query(runtime, "notes", select=["body"]) == [{"body": "renamed"}]
@@ -1879,7 +2051,7 @@ def test_service_mutate_update_and_delete_where_matches_executes(service):
 
 
 def test_service_mutate_expected_revision_executes(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     revision = service.query_page(runtime, "notes", select=["id"], where=[{"field": "id", "operator": "eq", "value": 1}]).revisions[0]
     affected = service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"body": "z"}, "expected_revision": revision}])
     assert affected == 1
@@ -1889,10 +2061,10 @@ def test_service_mutate_expected_revision_executes(service):
 
 
 def test_service_mutate_upsert_executes_with_a_declared_unique_key(service):
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
     service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True})
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     result = service.mutate_result(runtime, "notes", [{"operation": "upsert", "values": {"tag": "z"}}])
     assert result.affected == 1
     assert result.assigned_addresses == [{"address": {"id": 2}}]  # id 1 is the seeded row (tag is null, does not match "z")
@@ -1905,18 +2077,18 @@ def test_service_mutate_upsert_without_a_declared_key_is_still_capability_unsupp
     """Upsert's per-entity precondition (a declared uniqueness key) is a
     real, entity-scoped condition, unaffected by the gate's removal --
     `notes` here declares no unique key at all."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.mutate(runtime, "notes", [{"operation": "upsert", "values": {"body": "x"}}])
     assert exc.value.code == "CAPABILITY_UNSUPPORTED"
 
 
 def test_service_schema_create_index_and_drop_index_execute(service):
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
     revision = service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True})
     assert isinstance(revision, int)
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     assert service.catalog(runtime)["entities"][0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
     with pytest.raises(FoundationError) as exc:
         service.schema(developer, {"operation": "drop_index", "entity": "notes", "index": "by_tag", "destructive": True})
@@ -1930,16 +2102,16 @@ def test_service_non_developer_create_index_is_forbidden(service):
     """Developer authority is still required for schema operations,
     unaffected by the gate's removal (`bind_schema_operation`'s own
     authority check, not the removed gate, is what enforces this)."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as exc:
         service.schema(runtime, {"operation": "create_index", "entity": "notes", "index": "by_body", "fields": ["body"]})
     assert exc.value.code == "FORBIDDEN"
 
 
 def test_service_schema_field_type_executes(service):
-    developer = service.authenticate("dev-secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"}) == 1
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": 5}}])
     assert service.query(runtime, "notes", select=["n"]) == [{"n": 5}]
     with pytest.raises(FoundationError) as exc:
@@ -1954,7 +2126,7 @@ def test_service_schema_field_type_executes(service):
 
 
 def test_service_query_order_by_sorts_and_query_page_reports_pagination(service):
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "z"}}, {"operation": "insert", "values": {"body": "m"}}])
 
     ascending = service.query(runtime, "notes", select=["body"], order_by=[{"field": "body", "direction": "asc"}])
@@ -1971,8 +2143,8 @@ def test_service_query_order_by_sorts_and_query_page_reports_pagination(service)
 
 
 def test_service_query_cursor_from_a_different_entity_is_rejected(service):
-    runtime = service.authenticate("secret-a")
-    developer = service.authenticate("dev-secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
+    developer = service.authenticate("dev-a.dev-secret-a")
     service.schema(developer, {"operation": "create_entity", "entity": "widgets", "fields": ["name"]})
     service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "z"}}])
 
@@ -1988,7 +2160,7 @@ def test_service_query_matches_filter_combines_with_order_by(service):
     same facade call now -- previously (WP-4) this combination would have
     hit the (now-removed) `matches` gate even though `order_by` itself was
     already open."""
-    runtime = service.authenticate("secret-a")
+    runtime = service.authenticate("cred-a.secret-a")
     service.mutate(runtime, "notes", [{"operation": "insert", "values": {"body": "another"}}])
     items = service.query(runtime, "notes", select=["body"], where=[{"field": "body", "operator": "matches", "value": "a%"}], order_by=[{"field": "id", "direction": "asc"}])
     assert items == [{"body": "a"}, {"body": "another"}]

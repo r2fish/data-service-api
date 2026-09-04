@@ -254,6 +254,19 @@ def _print_issued(credential_id: str, secret: str) -> None:
     # The secret is shown exactly once, here, and is never written anywhere
     # by this process (P2-D1: only its verifier is ever persisted) -- copy
     # it now, it cannot be recovered later.
+    #
+    # Phase 6 WP-2 (design D-1(c)), corrected 2026-09-04 (coordinator
+    # follow-up, audit finding §3-A): every caller now passes an ALREADY-
+    # COMPOSED bearer here -- `cmd_bootstrap`/`cmd_reset`/`cmd_issue_audit_
+    # credential` get one straight from `control_plane.py`'s own ceremony
+    # functions (their own issuance point), and `cmd_issue_credential`/
+    # `cmd_rotate_credential`/`cmd_rotate_control_credential` (which call
+    # `store.add`/`.rotate` directly, bypassing those ceremonies) get one
+    # from THAT call's own return value -- `add`/`rotate` are themselves
+    # issuance points now (design D-1(c) "合成は store/service 層のみ"),
+    # so this module composes nothing anywhere, at any call site. This
+    # function itself never composes -- it would double-compose an
+    # already-composed value otherwise.
     print(f"credential_id: {credential_id}")
     print(f"secret: {secret}")
     print("(the secret above is shown once and is not stored anywhere -- save it now)")
@@ -466,7 +479,13 @@ def cmd_issue_credential(args: argparse.Namespace) -> int:
         credential_id = _new_credential_id()
         secret = _new_secret()
         with store.unit_of_work() as work:
-            store.add(credential_id, args.slug, args.role, secret, work=work)
+            # Coordinator item 3 (2026-09-04 review): `store.add` is now
+            # this CLI's own issuance point -- it returns the composed
+            # bearer directly (design D-1(c) "合成は store/service 層の
+            # み"), so this call site no longer composes it itself (see
+            # `_print_issued`'s own docstring: every caller now passes an
+            # already-composed value straight through).
+            bearer = store.add(credential_id, args.slug, args.role, secret, work=work)
             _write_control_audit(
                 work.connection,
                 event_class="credential_lifecycle",
@@ -479,7 +498,7 @@ def cmd_issue_credential(args: argparse.Namespace) -> int:
             )
     finally:
         store.close()
-    _print_issued(credential_id, secret)
+    _print_issued(credential_id, bearer)
     return 0
 
 
@@ -492,7 +511,12 @@ def cmd_rotate_credential(args: argparse.Namespace) -> int:
     try:
         secret = _new_secret()
         with store.unit_of_work() as work:
-            store.rotate(args.credential_id, secret, work=work)
+            # Coordinator follow-up (2026-09-04 audit finding §3-A):
+            # `store.rotate` is now this CLI's own re-issuance point -- it
+            # returns the composed bearer directly (same discipline as
+            # `store.add` in `cmd_issue_credential` above), so this call
+            # site no longer composes it itself.
+            bearer = store.rotate(args.credential_id, secret, work=work)
             _write_control_audit(
                 work.connection,
                 event_class="credential_lifecycle",
@@ -503,7 +527,7 @@ def cmd_rotate_credential(args: argparse.Namespace) -> int:
             )
     finally:
         store.close()
-    _print_issued(args.credential_id, secret)
+    _print_issued(args.credential_id, bearer)
     return 0
 
 
@@ -996,7 +1020,10 @@ def cmd_rotate_control_credential(args: argparse.Namespace) -> int:
     try:
         secret = _new_secret()
         with store.unit_of_work() as work:
-            store.rotate(args.credential_id, secret, work=work)
+            # Coordinator follow-up (2026-09-04 audit finding §3-A): same
+            # verbatim-return-value discipline as `cmd_rotate_credential`
+            # above.
+            bearer = store.rotate(args.credential_id, secret, work=work)
             _write_control_audit(
                 work.connection,
                 event_class="control_credential_lifecycle",
@@ -1007,7 +1034,7 @@ def cmd_rotate_control_credential(args: argparse.Namespace) -> int:
             )
     finally:
         store.close()
-    _print_issued(args.credential_id, secret)
+    _print_issued(args.credential_id, bearer)
     return 0
 
 

@@ -83,6 +83,25 @@ from r2db_api.limits import ControlPlaneLimits  # noqa: E402
 # `field_type` parameter.
 _PORT_FIELD_TYPE_TO_R2DB = {"text": "string", "integer": "integer"}
 
+# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
+# V1.md D-2): this in-process plug's own declared `surfaces` -- synthetic,
+# non-dialable domains (`*.conformance.invalid`, §6.4's own convention;
+# this plug has no real ASGI/HTTP layer at all), used only so C-19's
+# structural vectors (presence, cross-document consistency, declare-and-
+# echo via a second real `capability_document()` call) have a real value
+# to compare. `data`/`control` use DELIBERATELY DIFFERENT hosts -- this
+# adapter's own `control_surface_cohosted_with_data_plane()` below
+# declares `False` (two genuinely separate `DataService`/
+# `ControlPlaneService` objects, no shared credential store), and `adapter.
+# surfaces_cohosted`'s origin comparison must keep resolving the SAME
+# `False` once this plug declares 1.6.0 `surfaces` -- same-origin values
+# here would silently flip that resolution and break `test_c09_audit_
+# evidence.py`'s own "replacement does not change the outcome" vector.
+_SURFACES = {
+    "data": {"base_url": "https://r2db-inprocess.conformance.invalid/v1"},
+    "control": {"base_url": "https://r2db-inprocess-control.conformance.invalid/control/v1"},
+}
+
 
 class R2DBConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to the r2db-api foundation.
@@ -105,7 +124,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # this adapter fabricates only in `capability_document()` -- see
         # `service.py`'s own `DataService.__init__` docstring for why this
         # is the one honest way to make that declaration.
-        self._service = DataService(self._credentials, control_plane_status="enabled")
+        self._service = DataService(self._credentials, control_plane_status="enabled", surfaces=_SURFACES)
         self._control = ControlAuthority(self._service)
         self._counter = 0
 
@@ -214,6 +233,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         self._control_service = ControlPlaneService(
             self._control_backend, audit=self._control_audit, limits=self._control_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+            surfaces=_SURFACES,
         )
         # `control_credential()`'s own maintained handle (memoize +
         # call-time validity check -- see that method's docstring below;
@@ -237,11 +257,28 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         self._control.register_application(application_id, entities={})
 
     def issue_credential(self, application_id: str, role: str) -> CredentialHandle:
+        # Phase 6 WP-2 (design D-1(c)). Rework (coordinator item 3,
+        # 2026-09-04 review): `ControlAuthority.issue_credential` (below)
+        # is an out-of-band, trusted-lifecycle-authority write -- the SAME
+        # kind of direct `store.add(credential_id, ..., secret, ...)` call
+        # `r2db_api.ops`'s CLI subcommands make, not the in-band
+        # `ControlPlaneService.issue_credential` HTTP entry point. Both
+        # `ControlAuthority.issue_credential` and the store's own `add`
+        # are now this repository's issuance points for this path (design
+        # D-1(c) "合成は store/service 層のみ" -- an earlier revision of
+        # this method composed the bearer itself, here, which the
+        # 2026-09-04 review correctly identified as adapter-side
+        # composition; port v1.10 (a) requires an adapter to present
+        # verbatim, never compose). This method now does neither: `self.
+        # _control.issue_credential(...)` returns the ALREADY-COMPOSED
+        # bearer directly, used here verbatim -- exactly the same
+        # discipline `issue_credential_inband` below already followed for
+        # the in-band path.
         self._counter += 1
         credential_id = f"conf-cred-{application_id}-{role}-{self._counter}"
         secret = f"conf-secret-{self._counter}-{uuid.uuid4().hex}"
-        self._control.issue_credential(credential_id, application_id, role, secret)
-        return CredentialHandle(credential_ref=credential_id, application_id=application_id, role=role, secret=secret)
+        bearer = self._control.issue_credential(credential_id, application_id, role, secret)
+        return CredentialHandle(credential_ref=credential_id, application_id=application_id, role=role, secret=bearer)
 
     def revoke_credential(self, handle: CredentialHandle) -> None:
         self._control.set_credential_state(handle.credential_ref, revoked=True)
@@ -456,6 +493,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         fresh_service = ControlPlaneService(
             self._control_backend, audit=self._control_audit, limits=self._control_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
+            surfaces=_SURFACES,
         )
 
         def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
