@@ -22,19 +22,18 @@
 # supplied at container-start time via environment variables (Secret
 # Manager references at the Cloud Run layer, `cloud-run-cloud-sql.md`).
 #
-# BUILD CONTEXT (2026-09-01 fix, part of the same first-deployment fix as
-# the runtime-stage `COPY spec/...` below): this image now needs a file
-# (`spec/data-service-api.v1.json`) that lives at the common repository
-# root, one level above `MitateDB-api/` -- outside a build context scoped
-# to `MitateDB-api/` alone, which every `COPY` source below used to assume
-# (`COPY pyproject.toml ./` only resolves because `pyproject.toml` sits at
-# `MitateDB-api/pyproject.toml`). Build this image from the REPOSITORY
-# ROOT, naming this file explicitly, e.g.:
+# BUILD CONTEXT (2026-09-01 fix; reason updated Phase 6 WP-0 supervisor
+# ruling, contract now ships as packaged data -- see the CONTRACT
+# PACKAGING note below the builder stage): every `COPY` source in this
+# file (`COPY MitateDB-api/pyproject.toml ./`, `COPY MitateDB-api/src
+# ./src`) is written REPOSITORY-ROOT-relative, not `MitateDB-api/`-
+# relative -- a build context scoped to `MitateDB-api/` alone would make
+# both of those `COPY` sources resolve to nonexistent paths (there is no
+# `MitateDB-api/MitateDB-api/pyproject.toml`). Build this image from the
+# REPOSITORY ROOT, naming this file explicitly, e.g.:
 #   docker build -f MitateDB-api/docker/Dockerfile -t mitatedb-api:SERVICE_data .
-# every `COPY` source in this file is written relative to that root
-# accordingly (`MitateDB-api/...` for this package's own files, `spec/...`
-# for the common contract) -- see `cloud-run-cloud-sql.md` §6's own build
-# step for the full command this runbook now documents.
+# -- see `cloud-run-cloud-sql.md` §6's own build step for the full command
+# this runbook now documents.
 
 # ---------------------------------------------------------------------------
 # Stage 1: build a wheel + resolve dependencies into an isolated venv, so
@@ -83,49 +82,23 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# FIRST-DEPLOYMENT FIX (2026-09-01, operator finding, "§9級" per the
-# operator's own report): `http.py`'s `_CONTRACT_PATH = Path(__file__).
-# resolve().parents[3] / "spec" / "data-service-api.v1.json"` is coupled to
-# how many directory hops separate the installed module from the repo root
-# it assumes it is still sitting inside. In a source checkout (`pip install
-# -e .`) that path is `.../MitateDB-api/src/mitatedb_api/http.py`, and
-# `parents[3]` from there IS the repo root (`data-service-api/`), where
-# `spec/` really lives -- so local dev/test never notices this coupling.
-# `pip install .` (this image's own builder stage, no `-e`) instead installs
-# the package flat into the venv's site-packages, so the SAME module lands
-# at `/opt/venv/lib/python3.11/site-packages/mitatedb_api/http.py` in the
-# runtime image (`python:3.11-slim`, this Dockerfile's own `FROM` line is
-# the actual version pin; this package's own `pyproject.toml`
-# `requires-python = ">=3.11"` is only a floor, not what fixes "3.11"
-# specifically here) --
-# `parents[3]` from THAT path is `/opt/venv/lib` (parents[0]=`.../site-
-# packages/mitatedb_api`, [1]=`.../site-packages`, [2]=`.../python3.11`,
-# [3]=`/opt/venv/lib`), two hops shallower than the repo-root case above
-# (the installed layout has no `src/`/`MitateDB-api/` hops to climb). So
-# the runtime image needs its own copy of the contract at
-# `/opt/venv/lib/spec/data-service-api.v1.json` -- confirmed working by the
-# operator against the real first deployment -- computed here, not merely
-# copied from that report, by walking the same four `.parents[]` hops
-# against this stage's own actual installed module path. Path is
-# repo-root-relative (see the BUILD CONTEXT note above the builder stage).
-COPY spec/data-service-api.v1.json /opt/venv/lib/spec/data-service-api.v1.json
-
-# ROOT FIX CANDIDATE (not this fix's scope, logged docs/design/
-# PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §7 ledger): this COPY still
-# couples the image to the exact `parents[3]` arithmetic above. The Python
-# minor version itself is NOT the fragile part -- `.../site-packages/
-# mitatedb_api` is always exactly 3 `.parents[]` hops below `<venv>/lib`
-# regardless of which `python3.X` directory name sits in between -- but any
-# change to the INSTALL LAYOUT (a different venv path/prefix than
-# `/opt/venv`, a build tool that installs into a `.dist-info`-relative
-# layout instead of plain `site-packages`, etc.) still breaks it silently.
-# r2db-api's own `http.py` avoids this entirely with a packaged contract
-# copy loaded via `importlib.resources` (`r2db_api/contract/data-service-
-# api.v1.json`, wired in as package data, `test_http.py::
-# test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`)
-# with a filesystem-path fallback for editable-install dev -- the same
-# shape this peer could adopt so this image no longer depends on
-# filesystem layout coupling at all.
+# CONTRACT PACKAGING (Phase 6 WP-0, design D-4(b)): this image no longer
+# needs its own manual copy of the contract at a computed runtime-stage
+# path. The prior fix here (2026-09-01, operator finding) worked around
+# `http.py`'s then-repository-relative contract lookup, which broke under
+# this image's own flat `pip install .` layout (no source-checkout `spec/`
+# sibling exists inside the venv). That lookup is gone: `http.py` (and
+# `control_http.py`, which now imports `_SCHEMAS` from it rather than
+# loading a second independent copy) load the contract via `importlib.
+# resources` from `mitatedb_api/contract/data-service-api.v1.json`, a
+# byte-identical packaged copy wired in as package data (`pyproject.toml`'s
+# own `[tool.setuptools.package-data]`, mirroring r2db-api's own
+# `r2db_api/contract/*.json`). The builder stage's `pip install .` above
+# already installs that packaged copy as part of the wheel -- no separate
+# `COPY` of `spec/...` into the runtime stage is needed any more.
+# `MitateDB-api/tests/test_http.py::test_packaged_contract_copy_is_byte_
+# identical_to_spec_source_of_truth` is what keeps the packaged copy from
+# silently drifting from `spec/` in this repository's own checkout.
 
 # `SERVICE` selects which of the two ASGI apps this container runs --
 # `data` (default) for `mitatedb_api.main:app`, `control` for
@@ -170,9 +143,11 @@ CMD ["sh", "-c", "if [ \"$SERVICE\" = \"control\" ]; then exec uvicorn mitatedb_
 # a running container built from this image** (`cloud-run-cloud-sql.md` §7
 # states this rule; this file is that rule's own citation). This is not
 # merely a convention: `ops.py`'s own `_DEFAULT_MIGRATIONS_DIR = Path(
-# __file__).resolve().parents[2] / "migrations"` has the SAME
-# install-layout coupling this file's own runtime-stage `_CONTRACT_PATH`
-# fix (above) exists to work around for `http.py` -- inside this image's
+# __file__).resolve().parents[2] / "migrations"` has the SAME KIND of
+# install-layout coupling `http.py`'s own contract lookup used to have
+# before Phase 6 WP-0 moved that one onto packaged data (see the CONTRACT
+# PACKAGING note above) -- `ops.py` itself is out of that WP's scope, so
+# this coupling remains here unchanged: inside this image's
 # `pip install .` venv layout, `parents[2]` from the installed `ops.py`
 # lands at `/opt/venv/lib/python3.11`, where no `migrations/` directory
 # exists at all (and none is ever copied into this image -- see this

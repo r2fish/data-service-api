@@ -28,8 +28,6 @@ request-shape checks against contract `ApplicationRegistrationRequest`/
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from starlette.applications import Starlette
@@ -49,10 +47,22 @@ from .errors import (AuthenticationError, AuthenticationRequiredError,
 from .http import (PROBLEM_CONTENT_TYPE, RequestByteBoundMiddleware,
                    _CredentialMalformed, _CredentialMissing, _extract_bearer,
                    _read_json_object, _request_id, _split_bearer)
-
-_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "spec" / "data-service-api.v1.json"
-_CONTRACT = json.loads(_CONTRACT_PATH.read_text())
-_SCHEMAS = _CONTRACT["schemas"]
+# Phase 6 WP-0 (design D-4(b)): `_SCHEMAS` is imported from `.http` rather
+# than this module loading its own second, independent copy of the
+# contract -- `.http` already owns the packaged-copy / `importlib.
+# resources` load (this peer's own single source of truth for the parsed
+# contract), and a second, separately-maintained repository-relative
+# lookup here (`Path(__file__).resolve()` walked three parent directories
+# up to `"spec"`) was the SAME known coupling design D-4(b) closes in
+# `http.py` -- fixing only one of the two call sites would have left this
+# one silently broken the moment this package was installed/copied
+# anywhere the `spec/` checkout was not a sibling three directories up.
+# Mirrors r2db-api's own `r2db_api.control_http`, which already imports
+# `_SCHEMAS` from `r2db_api.http` for the identical reason (this module's
+# own docstring above: "no code sharing between peers" governs code
+# shared BETWEEN the two peers, not a peer's own two files reusing each
+# other's already-loaded module state).
+from .http import _SCHEMAS
 
 # Control-plane-specific status map: `AUTH_REQUIRED` is added on top of
 # `http.py`'s own table (the app-plane emits it too, but via a DIFFERENT

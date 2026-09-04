@@ -595,6 +595,9 @@ control プロセスの入口は `r2db-api/src/r2db_api/control_main.py` (既に
 
 ---
 
+
+**追補 (2026-09-04、監督裁定・依頼者承認)**: 作業指示書 v1.2 は **WP-1 に suite 高速化 2 件を同梱**する — (A) C-14 vector 5 (`test_c14_resource_bounds_published_and_enforced`) の位置算術を構成値に比例しない形へ作り替える (フェーズ5 L5-7 の閉止)、(B) conformance を adapter 単位の `xdist_group` で並列化し完了ゲートを `-n 5 --dist loadgroup` にする (監督実験 2026-09-04: 422 passed in 117.17s、従来 373s)。いずれも契約不変・製品不変であり、本設計の D-1〜D-5 に影響しない。ローカル PostgreSQL の `max_connections` は 100 → 300 に変更済み (開発機の設定)。
+
 ## 10. 実施記録
 
 *(本節は WP-4 の記録整理で埋める。WP ごとに、実装コミット / merge コミット / root suite の単独実行値 / レビュー往復の閉じ方 / 変異注入の結果 / 受け入れ境界 (この WP で「固定しない」と決めた点) を書く — フェーズ5 設計 §10 と同じ構成。)*
@@ -660,3 +663,5 @@ control プロセスの入口は `r2db-api/src/r2db_api/control_main.py` (既に
 - **Q4 (`visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合)** は独立の設計フェーズとして残る (`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4)。本フェーズは migration 番号の点でのみ Q4 と接する (L6-2)。
 - **外部評価の指摘 1 (conformance の資源管理) と指摘 7 (共通証拠・CI・lock)** は**フェーズ7**、**指摘 6 (実機適用)** は引き継ぎ §4-1 のままである。
 - **1.4.0 alias の除去** (従属判断 9 項目 7 の再検討条件): `endpoints.audit_query` (`POST /v1/audit/query`) の alias を除去するかは別途裁定であり、**本フェーズでは除去しない** — D-2 の `surfaces` は alias を surface として扱わない (§3 D-2) が、alias の存在自体には触れない。
+
+- **L6-11 同型性テストはデコレータ差を両側とも見ない (WP-0 レビュー 中-3、2026-09-04 起票)**。D-4(c) で自分側・兄弟側とも `ast.get_source_segment` (`FunctionDef.lineno` 起点、デコレータを含まない) に統一した結果、L5-6 の「取得方式差による赤/緑のぶれ」は閉じたが、**片 peer だけにデコレータが付く変化はこの機構では検出できない** (レビューの対照実験: MitateDB の byte 同一テストにのみ `@pytest.mark.skip` を付けても同型性テストは両 peer とも緑。`skip` 自体は完了ゲートの `skipped 0` が拾うが、skip しないデコレータは何も拾わない)。あわせて、対応表の駆動関数と入れ子 `_normalize` は peer 名リテラルを持つため原理的に表へ載らず、片側 `_normalize` の弱化も不可視である (機構の完全な自己固定は不可能)。手当て候補: デコレータ列を `FunctionDef.decorator_list` から別途正規化して突き合わせる、または対応表の各行に「デコレータ無し」を assert する。本フェーズでは記録に留める。

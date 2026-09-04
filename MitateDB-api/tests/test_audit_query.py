@@ -1927,97 +1927,208 @@ def test_audit_query_declares_operations_and_target_kinds_over_http() -> None:
 # COMPLETES the isomorphism check WP-2 registered `xfail(strict=True)` on
 # the r2db side (that `xfail` is removed in this SAME commit, work order
 # WP-3 完了条件17) -- both peers now carry this identical-shaped test.
+#
+# Phase 6 WP-0 (design D-4(c), L5-5/L5-6): the single-file/named-tuple
+# mechanism this section describes is generalized below into the
+# `_ISOMORPHIC_TARGETS` (relative path, symbol name) table, which now also
+# covers `src/mitatedb_api/main.py::_optional_float` and `tests/test_http.
+# py`'s byte-identical-contract test function, not only this file's own 11
+# scanner-support helpers -- see that table's own comment for the full
+# rationale.
 # ===========================================================================
 
 
-def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
-    """常設規律6: diffs this peer's scanner-support helpers against
-    r2db-api's own same-named helpers, after normalizing peer name/package
-    name/path/whitespace -- proving the two independently (never
-    shared-module) implementations agree, without sharing code between
-    peers. The sibling module is read as TEXT from its real file path
-    (never `importlib.import_module` -- r2db-api's own package name is
-    `r2db_api`, not importable from this peer's own test environment
-    without adding a cross-peer path hack this WP deliberately avoids). A
-    missing file, or a present file lacking one of the target helper names
-    (or defining it with different content), each count as a mismatch. The
-    resolved path is asserted to point at the r2db-api sibling, never back
-    at this file, so a future edit cannot accidentally make this a
-    self-comparison."""
-    import inspect
-    import re
-    import sys
+# ---------------------------------------------------------------------------
+# Phase 6 WP-0 (design D-4(c), work order §4 WP-0 変更対象 C, L5-5/L5-6):
+# the mechanism above (WP-3, "1 file + a tuple of helper names") is
+# generalized into a (relative path, symbol name) TABLE -- the pair-per-row
+# form is the object that now defines the full set of peer-local symbols
+# this repository pins isomorphic, rather than one hardcoded sibling file.
+# The 11 rows below are the WP-2/WP-3 helpers, carried over UNCHANGED (not
+# one dropped); 4 rows are new this WP: `main.py::_optional_float` and
+# `tests/test_http.py`'s byte-identical-contract test function (design
+# D-4(a)/(b)), plus the mechanism's OWN two new pieces of test-support code
+# -- `_isomorphic_symbol_source` (the row resolver below) and this table's
+# own pin test -- added by supervisor review ruling (2026-09-04) so the
+# generalized mechanism pins itself the same way it pins everything else it
+# was built to check, rather than being exempt from its own guarantee.
+# `{package}` is a template slot resolved per side (this peer's own package
+# name on the self side, the sibling's on the sibling side) -- the ONLY row
+# that needs it is the `main.py` one, since the two peers' package names
+# differ but both source trees are `src/<package>/main.py`; every other
+# relative path here is peer-name-independent (`tests/test_audit_query.py`,
+# `tests/test_http.py` name the same file in both peer checkouts). This
+# tuple's own literal text is peer-name-free, so it reads identically in
+# r2db-api's own copy of this file.
+# ---------------------------------------------------------------------------
 
-    target_helper_names = (
-        "_iter_src_files",
-        "_literal_leaves",
-        "_iter_name_or_attribute_targets",
-        "_is_field_assignment_target",
-        "_collect_direct_shadow_names",
-        "_analyze_field_scope",
-        "_FieldForwardResolver",
-        "_scan_source_field_sites",
-        # WP-3 fix-round L-4 (Opus review): completion condition 17 names
-        # the exclusion-list validators ((i)/(ii') judgment) as part of
-        # this same isomorphism check -- omitting them let a peer change
-        # (ii')'s own judgment (e.g. dropping the safe-forward id check)
-        # go undetected by this test.
-        "_iter_field_definitions",
-        "_field_positional_definitions",
-        "_excluded_definition_forwards_its_own_parameter",
+_ISOMORPHIC_TARGETS: tuple[tuple[str, str], ...] = (
+    ("tests/test_audit_query.py", "_iter_src_files"),
+    ("tests/test_audit_query.py", "_literal_leaves"),
+    ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+    ("tests/test_audit_query.py", "_is_field_assignment_target"),
+    ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
+    ("tests/test_audit_query.py", "_analyze_field_scope"),
+    ("tests/test_audit_query.py", "_FieldForwardResolver"),
+    ("tests/test_audit_query.py", "_scan_source_field_sites"),
+    # WP-3 fix-round L-4 (Opus review): completion condition 17 names the
+    # exclusion-list validators ((i)/(ii') judgment) as part of this same
+    # isomorphism check -- omitting them let a peer change (ii')'s own
+    # judgment (e.g. dropping the safe-forward id check) go undetected.
+    ("tests/test_audit_query.py", "_iter_field_definitions"),
+    ("tests/test_audit_query.py", "_field_positional_definitions"),
+    ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+    # Phase 6 WP-0 additions (design D-4(a)/(b)):
+    ("src/{package}/main.py", "_optional_float"),
+    ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+    # Phase 6 WP-0 additions, round 2 (supervisor review ruling
+    # 2026-09-04): the mechanism's own row resolver and pin test, so the
+    # generalized mechanism is itself pinned isomorphic, not exempt.
+    ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
+    ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
+)
+
+
+def test_isomorphic_target_table_is_pinned_to_its_current_15_rows() -> None:
+    """WP-0 completion condition 8: a bare `len(_ISOMORPHIC_TARGETS) == 15`
+    check would not catch a row silently DROPPED and a different,
+    coincidentally-same-length row added in its place -- only pinning the
+    table's own full CONTENT (not merely its length) catches that. One-time
+    human fixation, same character as Phase 5's "走査対象フィールド集合を
+    pin する" test -- a future WP that adds/removes a row edits this
+    assertion deliberately, not by accident.
+
+    Self-referential by supervisor ruling (2026-09-04): this function's own
+    row, and `_isomorphic_symbol_source`'s, are both IN the table below --
+    the table fixes its own driving code isomorphic too, rather than
+    treating the mechanism as exempt from the guarantee it enforces on
+    every other row. This is not circular: the assertion below is a NAME
+    pinned as data (a 2-tuple of strings), evaluated once at call time
+    against the already-fully-defined `_ISOMORPHIC_TARGETS` above -- it
+    does not recurse into calling itself."""
+    assert _ISOMORPHIC_TARGETS == (
+        ("tests/test_audit_query.py", "_iter_src_files"),
+        ("tests/test_audit_query.py", "_literal_leaves"),
+        ("tests/test_audit_query.py", "_iter_name_or_attribute_targets"),
+        ("tests/test_audit_query.py", "_is_field_assignment_target"),
+        ("tests/test_audit_query.py", "_collect_direct_shadow_names"),
+        ("tests/test_audit_query.py", "_analyze_field_scope"),
+        ("tests/test_audit_query.py", "_FieldForwardResolver"),
+        ("tests/test_audit_query.py", "_scan_source_field_sites"),
+        ("tests/test_audit_query.py", "_iter_field_definitions"),
+        ("tests/test_audit_query.py", "_field_positional_definitions"),
+        ("tests/test_audit_query.py", "_excluded_definition_forwards_its_own_parameter"),
+        ("src/{package}/main.py", "_optional_float"),
+        ("tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
+        ("tests/test_audit_query.py", "_isomorphic_symbol_source"),
+        ("tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_15_rows"),
     )
+    assert len(_ISOMORPHIC_TARGETS) == 15
 
-    def _normalize(source: str, *, peer_module: str, peer_package: str) -> str:
+
+def _isomorphic_symbol_source(peer_root: Path, relative_path_template: str, package: str, symbol: str) -> str | None:
+    """Resolves ONE `_ISOMORPHIC_TARGETS` row against `peer_root` (either
+    this peer's own root or the sibling's) via a plain TEXT read + `ast.
+    parse` -- used for BOTH sides now (WP-0's own L5-6 fix: previously this
+    peer's own side used `inspect.getsource` -- which includes any
+    decorator line -- while the sibling side used `ast.get_source_segment`
+    -- whose `FunctionDef.lineno` starts at the `def`/`class` keyword,
+    never the decorator, per CPython's own AST docs -- so a future
+    decorator on either side alone would have flipped this test red/green
+    on THAT ASYMMETRY, not on an actual implementation difference. Only
+    top-level (`tree.body`) definitions are matched, same restriction the
+    WP-2/WP-3 mechanism already applied -- deliberately not `ast.walk`,
+    which would also match a same-named symbol nested inside an unrelated
+    class/function and silently diff the wrong one. Returns `None` if the
+    file does not exist or does not define `symbol` at module level (the
+    caller decides what that means for each side)."""
+    path = peer_root / relative_path_template.format(package=package)
+    if not path.exists():
+        return None
+    source = path.read_text()
+    tree = _ast.parse(source, filename=str(path))
+    node = next(
+        (n for n in tree.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)) and n.name == symbol),
+        None,
+    )
+    if node is None:
+        return None
+    return _ast.get_source_segment(source, node)
+
+
+def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
+    """常設規律6: diffs this peer's own `_ISOMORPHIC_TARGETS` symbols
+    against r2db-api's own same-named symbols at the same relative paths,
+    after normalizing peer package name / trailing whitespace / blank-line
+    runs -- proving the two independently (never shared-module)
+    implementations agree, without sharing code between peers.
+
+    Table-driven generalization of the WP-2/WP-3 mechanism (design D-4(c),
+    L5-5/L5-6): the prior form read one hardcoded sibling file
+    (`tests/test_audit_query.py`) and diffed 11 named helpers found inside
+    it; `_ISOMORPHIC_TARGETS` above widens that to 15 rows spanning THREE
+    files (`tests/test_audit_query.py`, `src/<package>/main.py`,
+    `tests/test_http.py`), so this WP's own new same-named symbols
+    (`_optional_float`, the byte-identical-contract test function) fall
+    under the SAME peer-symmetry guarantee `_optional_float` (a product
+    file, not a test-support helper) would otherwise have had none of.
+
+    The sibling side is read as TEXT from its real file path (never
+    `importlib.import_module` -- r2db-api's own package name is
+    `r2db_api`, not importable from this peer's own test environment
+    without adding a cross-peer path hack this repository's own
+    no-code-sharing convention avoids). A missing sibling file, or a
+    present file lacking one of the target symbols (or defining it with
+    different content after normalization), each count as a mismatch. The
+    resolved sibling root is asserted to point at the r2db-api sibling,
+    never back at this peer's own root, so a future edit cannot
+    accidentally make this a self-comparison."""
+    import re
+
+    def _normalize(source: str, *, package: str) -> str:
         """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) this
-        peer's own module/package name (substituted for a neutral
-        placeholder), (b) TRAILING whitespace at the end of each line, and
-        (c) the number of consecutive blank lines (collapsed to none) --
-        NEVER leading indentation and NEVER in-line token spacing. The
-        PRIOR form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
+        peer's own package name (substituted for a neutral placeholder),
+        (b) TRAILING whitespace at the end of each line, and (c) the
+        number of consecutive blank lines (collapsed to none) -- NEVER
+        leading indentation and NEVER in-line token spacing. The PRIOR
+        form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
         spaces/tabs ANYWHERE, including a line's own leading indentation --
         which made a nesting-depth-only mutation (moving a branch one
         `if`/`else` level deeper, or shallower, with the exact same token
         sequence and no operator/condition change at all) invisible to
         this comparison: Python's own semantics are indentation-sensitive,
         so an indentation-only edit is a REAL logic change this test must
-        catch, not whitespace noise to discard. The review's own
-        reproduction (moving `_is_field_assignment_target`'s `Attribute`
-        branch one level deeper, past its sibling's `return`, so it never
-        executes) went undetected under the old, over-eager normalization
-        even though both peers' scanners had come to disagree in EXACTLY
-        this way -- confirmed now going red on both peers (mutation 19)."""
-        text = source.replace(peer_package, "<PEER_PACKAGE>").replace(peer_module, "<PEER_MODULE>")
+        catch, not whitespace noise to discard. WP-0 drops the separate
+        `peer_module` substitution the WP-2/WP-3 form also took: none of
+        the 15 target symbols' own source text (verified when this table
+        was assembled) references either peer's test-module name at all,
+        only (occasionally) its own package name, so a second substitution
+        parameter that never fires is dead generality, not a real need."""
+        text = source.replace(package, "<PEER_PACKAGE>")
         text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
         text = re.sub(r"\n\s*\n+", "\n", text)
         return text.strip()
 
-    this_module = sys.modules[__name__]
-
-    r2db_path = Path(__file__).resolve().parents[2] / "r2db-api" / "tests" / "test_audit_query.py"
-    assert "r2db-api" in r2db_path.parts, f"sibling path must resolve under r2db-api, not self: {r2db_path}"
-    assert "MitateDB-api" not in r2db_path.parts, f"sibling path must never resolve back into MitateDB-api: {r2db_path}"
-
-    r2db_source = r2db_path.read_text() if r2db_path.exists() else None
-    r2db_tree = _ast.parse(r2db_source, filename=str(r2db_path)) if r2db_source is not None else None
-    r2db_top_level = (
-        {node.name: node for node in r2db_tree.body if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))}
-        if r2db_tree is not None
-        else {}
-    )
+    self_root = Path(__file__).resolve().parents[1]
+    sibling_root = Path(__file__).resolve().parents[2] / "r2db-api"
+    assert "r2db-api" in sibling_root.parts, f"sibling root must resolve under r2db-api, not self: {sibling_root}"
+    assert "MitateDB-api" not in sibling_root.parts, f"sibling root must never resolve back into MitateDB-api: {sibling_root}"
 
     mismatches: list[str] = []
-    for name in target_helper_names:
-        mitate_obj = getattr(this_module, name)
-        mitate_src = _normalize(inspect.getsource(mitate_obj), peer_module="test_audit_query", peer_package="mitatedb_api")
-        r2db_node = r2db_top_level.get(name)
-        if r2db_node is None:
-            mismatches.append(name)
+    for relative_path_template, symbol in _ISOMORPHIC_TARGETS:
+        self_src = _isomorphic_symbol_source(self_root, relative_path_template, "mitatedb_api", symbol)
+        if self_src is None:
+            raise AssertionError(
+                f"this peer's own table row does not resolve against its own tree -- a table bug, not a sibling "
+                f"mismatch: {relative_path_template}::{symbol}"
+            )
+        sibling_src = _isomorphic_symbol_source(sibling_root, relative_path_template, "r2db_api", symbol)
+        if sibling_src is None:
+            mismatches.append(f"{relative_path_template}::{symbol}")  # not (yet) present on the sibling side
             continue
-        r2db_src_segment = _ast.get_source_segment(r2db_source, r2db_node)
-        r2db_src = _normalize(r2db_src_segment, peer_module="test_audit_query", peer_package="r2db_api")
-        if mitate_src != r2db_src:
-            mismatches.append(name)
-    assert not mismatches, f"peer-local helper(s) not isomorphic after normalization: {mismatches!r}"
+        if _normalize(self_src, package="mitatedb_api") != _normalize(sibling_src, package="r2db_api"):
+            mismatches.append(f"{relative_path_template}::{symbol}")
+    assert not mismatches, f"peer-local symbol(s) not isomorphic after normalization (or missing on the sibling side): {mismatches!r}"
 
 
 def test_declared_visibility_lag_ms_is_derived_from_the_two_timeouts(control_platform) -> None:

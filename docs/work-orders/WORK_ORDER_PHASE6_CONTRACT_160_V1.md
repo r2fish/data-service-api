@@ -1,6 +1,6 @@
 # フェーズ6 作業指示書 — 契約 1.6.0 (credential の完全 bearer 化 + surface 発見 + 型付き catalog) + 衛生 2 件
 
-- 版数: **v1.1 (2026-09-04、起草報告 8 件に対する監督裁定を反映)** — (1) 否定側 vector は **`json` を除く 6 語**に課す (`json` = any JSON value には違反値が存在しない。「監督が発注時に確定する」の逃がしを削除)、(2) 義務の分類語を **unconditional (前提は句)** に統一 (設計 §8 の 1 の書式例は v1.2 の残骸であり従わない)、(3) Dockerfile のパスは実測 `MitateDB-api/docker/Dockerfile` を採る、(4) `[tool.setuptools.package-data]` 節の新設を明記、(5) **同型性テストの機構を「(相対パス, シンボル名) の対応表」駆動へ一般化し、ソース取得方式を両 peer とも `ast.get_source_segment` へ統一する (L5-6 解消)** — WP-0 の確定発注とし、「実測 → 裁定」の形を廃止、(6) 静的固定テストは合成不在 (a) + 分解不在 (b) の両方、(7) **migration の 3 分類を確定**として §7 の 5 に置く、(8) 行番号は起草時の実測値を採る。**あわせて契約英文の確定文は依頼者確定済み (2026-09-04)** である。v1.0 = 起草
+- 版数: **v1.2 (2026-09-04、WP-1 に追補 A/B = suite 高速化 2 件を同梱。WP-0 の実施で確定した 3 点: r2db 側の `parents[3]` フォールバックも除去、同型性テストの対応表は 15 行、WP-0 テストコマンドの `r2db-api/tests/test_main.py` は誤りで実体は `test_credential_persistence.py`)**。v1.1 (2026-09-04、起草報告 8 件に対する監督裁定を反映) — (1) 否定側 vector は **`json` を除く 6 語**に課す (`json` = any JSON value には違反値が存在しない。「監督が発注時に確定する」の逃がしを削除)、(2) 義務の分類語を **unconditional (前提は句)** に統一 (設計 §8 の 1 の書式例は v1.2 の残骸であり従わない)、(3) Dockerfile のパスは実測 `MitateDB-api/docker/Dockerfile` を採る、(4) `[tool.setuptools.package-data]` 節の新設を明記、(5) **同型性テストの機構を「(相対パス, シンボル名) の対応表」駆動へ一般化し、ソース取得方式を両 peer とも `ast.get_source_segment` へ統一する (L5-6 解消)** — WP-0 の確定発注とし、「実測 → 裁定」の形を廃止、(6) 静的固定テストは合成不在 (a) + 分解不在 (b) の両方、(7) **migration の 3 分類を確定**として §7 の 5 に置く、(8) 行番号は起草時の実測値を採る。**あわせて契約英文の確定文は依頼者確定済み (2026-09-04)** である。v1.0 = 起草
 - 正本設計: `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` (**v1.3、確定**)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・契約英文の骨子は設計文書が正本であり、本書はそれを重複させない。設計と本書が食い違ったら**設計が正**であり、本書の誤りとして監督へ差し戻すこと
 - 前提となる引き継ぎ: `docs/work-orders/HANDOVER_20260904_FABLE.md` (第12次)。**現在地は main `a211584`、root suite 単独実行 1611 passed / 0 failed / 0 skipped / 0 xfailed、うち conformance 422 passed**。ブランチ `phase6-contract-160` は main から切ってある
 - 体制: Fable 監督/判断/コミット、Sonnet 実装 (コミットしない)、Opus 起草/独立レビュー/受け入れ監査
@@ -381,6 +381,30 @@
 実装 = Sonnet (テンプレ 2)。コードレビュー = Opus (テンプレ 5、変異注入必須)。受け入れ監査 = Opus (テンプレ 6)。
 
 ---
+
+#### 追補 (v1.2、2026-09-04 監督裁定、依頼者承認「この2つも進めてください」) — suite 高速化 2 件を WP-1 に同梱する
+
+**背景 (実測)**: root suite 単独 8 分 17 秒のうち conformance が 6 分 13 秒、その 3 分の 2 が `test_c14_resource_bounds_published_and_enforced` (C-14 vector 5、4 plug で各 61〜64 秒。フェーズ5 台帳 L5-7)。監督実験 (2026-09-04、リポジトリ外の使い捨てプラグインで adapter 単位に `xdist_group` を付与し `-n 5 --dist loadgroup`): **conformance 422 passed in 117.17s (0:01:57)**、残骸 DB 0。ログ: scratchpad/xdist-experiment.log。
+
+**A. C-14 vector 5 の作り替え (契約不変・製品不変・conformance のみ)**
+
+- 位置算術を**構成値に比例しない形**へ作り替える — 上限そのものまで登録を積み上げるのではなく、**上限に対する相対位置だけを駆動する** (例: adapter の control plane を小さな `applications` 上限で再構築できる既存機構 `_build_control_stack` 系を port 経由で使う、または既に登録済みの件数から残り headroom を計算して必要最小の登録だけ行う)。**具体形は逐語プロトタイプの後に確定する** (常設規律 5): 実装者は先に 1 plug で試作し、所要秒数と検出力を報告してから 4 plug へ展開する。
+- **検出力を落とさない**: LIMIT_EXCEEDED の `limit_class` と位置 (上限ちょうどで拒否、上限−1 で受理) の観測は従来どおり 4 plug 全数。
+- 完了条件 A-1: 当該テストの 4 plug 合計 `call` 時間が **60 秒以下** (`--durations` で実測、従来 約 248 秒)。監査照合 = `--durations` 出力。
+- 完了条件 A-2: 検出力の保持 — **変異 A** (片 peer の applications 上限検査を 1 つ緩める = 上限ちょうどでも受理する → 当該 plug で赤)。**変異 A′** (`limit_class` を別語にする → 赤)。従来テストで赤だった両変異が作り替え後も赤であること。
+- 完了条件 A-3: 作り替えに伴い adapter 構成値 (`applications=115` 等) を**据え置く**か**下げる**かを報告に書く。下げる場合はフェーズ5 §6.4 の据え置き根拠 (他条件テストの登録件数) との整合を示す。フェーズ5 L5-7 が「変異 6/7 は未実測」と記録した点は、作り替えで実用時間になれば本 WP で実測して L5-7 を閉じる。
+
+**B. conformance の adapter 単位並列化 (dev 依存の追加、conformance の conftest のみ)**
+
+- `pytest-xdist` を dev 依存に追加する (root `pyproject.toml` の pytest 設定と、両 peer の dev extras のいずれが正しい置き場かは実測して報告。lock は無い方針のまま)。
+- `conformance-tests/conftest.py` に `pytest_collection_modifyitems` で **adapter param id を `xdist_group` に写す**フックを置く (adapter param の無い registry-wide guard は 1 つの固定グループ)。**xdist が無い環境でもフックは無害** (マーカー付与のみ) であること。
+- 完了ゲートのコマンドを **`./.venv/bin/python -m pytest -q -n 5 --dist loadgroup`** に改める (§6 を更新)。「単独実行」の規律は**他の pytest プロセスと並行しない**という意味で不変。
+- 完了条件 B-1: 上記コマンドで root suite が `failed 0 / skipped 0` かつ xfailed 期待値どおりであること。**従来の逐次コマンドでも同じ集計行**であること (並列化が結果を変えないことの実測)。
+- 完了条件 B-2: **各 adapter の全テストが同一 worker で走る**こと — `-v` 出力の worker id (`[gw0]` 等) を adapter 別に集計して 1 adapter = 1 worker であることを示す。監査照合 = その集計。
+- 完了条件 B-3: 並列実行後に run-prefix 付きの DB / role の残骸が 0 であること (`pg_database` / `pg_roles` の照合)。
+- ローカル PostgreSQL は `max_connections = 300` (2026-09-04 変更済み)。runbook / 引き継ぎに「並列ゲートには 300 以上が要る」旨を WP-4 で記録する。
+
+**対応表 (追補分)**: A-1 監査照合 / A-2 変異 A・A′ / A-3 監査照合 / B-1 監査照合 (2 コマンドの集計行) / B-2 監査照合 / B-3 監査照合。
 
 ### WP-2 r2db-api — locator 形 credential + `surfaces` + `field_types` + 1.6.0 flip
 

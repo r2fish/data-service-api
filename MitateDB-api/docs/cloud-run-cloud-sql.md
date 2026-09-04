@@ -728,17 +728,20 @@ WP's scope).
 
 ## 6. Two Cloud Run services
 
-**Build the image first, from the repository root** (2026-09-01 fix, first
-deployment finding): `docker/Dockerfile`'s runtime stage now packages a copy
-of the common contract (`spec/data-service-api.v1.json`) into the image at
-the exact filesystem path `mitatedb_api.http`'s own `_CONTRACT_PATH`
-resolves to inside a `pip install .` venv layout
-(`/opt/venv/lib/spec/data-service-api.v1.json` -- see that Dockerfile's own
-comment for the `.parents[3]` arithmetic). `spec/` lives one level above
-`MitateDB-api/`, at the common repository root, so this image must be built
-with the REPOSITORY ROOT as build context, naming the Dockerfile
-explicitly, not from inside `MitateDB-api/` the way a package-local
-Dockerfile normally would be:
+**Build the image from the repository root, naming the Dockerfile
+explicitly** (not from inside `MitateDB-api/` the way a package-local
+Dockerfile normally would be): `docker/Dockerfile`'s builder stage `COPY`s
+`MitateDB-api/pyproject.toml` and `MitateDB-api/src` using paths relative
+to the REPOSITORY ROOT, so the build context must be the repository root
+regardless. The common contract itself no longer needs any special
+handling at image-build time (Phase 6 WP-0): `mitatedb_api.http` (and
+`control_http.py`, which imports from it) load it via `importlib.
+resources` from a packaged copy shipped inside the wheel this builder
+stage's own `pip install .` already produces
+(`mitatedb_api/contract/data-service-api.v1.json`, wired in as package
+data, `pyproject.toml`'s own `[tool.setuptools.package-data]`) -- no
+runtime-stage `COPY spec/...` and no filesystem-layout arithmetic (see
+that Dockerfile's own CONTRACT PACKAGING note):
 
 ```sh
 docker build -f MitateDB-api/docker/Dockerfile \

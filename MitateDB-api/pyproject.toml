@@ -37,6 +37,14 @@ test = [
     "anyio>=4.0",
 ]
 
+[tool.setuptools.package-data]
+# Packaged copy of the common contract (Phase 6 WP-0, design D-4(b); see
+# mitatedb_api/http.py's contract loader comment): ships inside this
+# distribution so a deployed unit is self-contained without the sibling
+# spec/ checkout, mirroring r2db-api's own pyproject.toml identically-named
+# section.
+mitatedb_api = ["contract/*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
