@@ -519,6 +519,25 @@ see that module's docstring for the authoritative list):**
 | `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` | Optional, default `60` (Phase 4, design D-5) -- `audit_query`'s own pre-auth rate window (both paths above), never shared with `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`. See `POSTGRES_PROVISIONING_RUNBOOK.md` §15 for sizing guidance. |
 | `R2DB_CONTROL_LIMIT_REQUEST_BYTES` | Optional, default `1048576` (Phase 4 ledger closure L4-10) -- request-body byte bound, discoverable through `GET /control/v1/capabilities`' own `limits`/`limit_enforcement` keys and enforced by the SAME `ControlPlaneLimits.request_bytes` value (`control_main.py`'s own single-source construction, R-7). Unset behaves exactly as before this variable existed. |
 
+**None of the four request-count classes above (`applications`,
+`credentials_per_application`, `control_requests_per_minute`,
+`audit_requests_per_minute`) has an upper bound.** `r2db-api` has validated
+only "positive integer" here from the start; `MitateDB-api` carried a
+`[1, 200]` ceiling on all four until Phase 5 D-3 (Q3 案A, WP-4) removed it,
+so both peers now behave identically. Whatever value you set through the
+env vars above is an **operator responsibility** -- it is published
+as-declared, unchanged, in `GET /control/v1/capabilities`'s own `limits`
+object, and nothing in the product will refuse to start or warn you if it
+is implausible. A deployment that sets `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_
+PER_MINUTE` (or any of the other three) to an order of magnitude larger
+than it needs removes the guardrail that a smaller ceiling used to provide
+against exactly that kind of misconfiguration -- for example, an audit
+consumer polling far faster than the declared `visibility_lag_ms` warrants
+would no longer be capped by a code-side ceiling, only by whatever value
+you chose to declare. Size these deliberately; see
+`POSTGRES_PROVISIONING_RUNBOOK.md` §15 for `audit_requests_per_minute`
+sizing guidance specifically.
+
 A ready-to-copy template listing every variable above, with synthetic
 placeholder values and the same style as `deploy/env/api.env.example`, is
 `deploy/env/control.env.example`.
@@ -563,8 +582,17 @@ placeholder values and the same style as `deploy/env/api.env.example`, is
      https://control.example.invalid:<internal port>/control/v1/capabilities
    ```
    Expected: `200 application/json`, `capabilities.control_plane.status ==
-   "enabled"`, and the SI-08 `limits`/`limit_enforcement` (all three classes
-   `enforced`). **Unlike the application plane's own `/v1/capabilities`
+   "enabled"`, `capabilities.contract_version == "1.5.0"`, and the SI-08
+   `limits`/`limit_enforcement` (all three classes `enforced`). When
+   `R2DB_AUDIT_DSN` is wired, `capabilities.audit_query.status` is `enabled`
+   and the entry carries three NON-EMPTY declared vocabularies:
+   `event_classes`, and -- new in contract 1.5.0 -- `operations` (27 words on
+   this peer) and `target_kinds` (5). With the DSN unset, `audit_query` is
+   `unavailable` and carries none of them; that is a conformant, honest
+   toggle, not a failure (`POSTGRES_PROVISIONING_RUNBOOK.md` §15). A build
+   predating contract 1.5.0 declares `1.4.0` and has neither new key, which is
+   conformant for THAT version -- what must never disagree is the declared
+   version and the declared keys. **Unlike the application plane's own `/v1/capabilities`
    check (§2 step 6), there is no no-credential variant of this check that
    returns `200`** -- `GET /control/v1/capabilities` authenticates the
    caller exactly like every other `/control/v1` endpoint (`Control

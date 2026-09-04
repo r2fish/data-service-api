@@ -378,8 +378,27 @@ curl -sk -H "Authorization: Bearer <control credential secret>" \
 ```
 
 合格: `200 application/json`、`capabilities.audit_query.status == "enabled"`、
-`capabilities.contract_version == "1.4.0"`、`capabilities.audit_query.authority
-== "control_or_audit"`、`event_classes` が空でない配列。
+`capabilities.contract_version == "1.5.0"`、`capabilities.audit_query.authority
+== "control_or_audit"`、そして `audit_query` の**宣言語彙 3 本がいずれも空でない
+配列**であること — `event_classes`、`operations`、`target_kinds`。
+
+後ろの 2 本は**契約 1.5.0 (従属判断 10 項目 1) で加わった宣言キー**である
+(フェーズ5、設計 `docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` D-1)。
+実測される要素数は peer で違う — **r2db は `operations` 27 語 / `target_kinds`
+5 語**、**MitateDB は `operations` 29 語 / `target_kinds` 5 語**。値の中身は
+各実装が宣言するものであり、契約は enum を持たない (共通語彙へ統一しない)。
+**要素数そのものは合格条件ではない**。合格条件は「3 本とも空でない配列で
+あること」と、後述 4-5 で読んだ行の `operation` / `target_kind` がその宣言に
+含まれることである。
+
+**版数についての注意 (どのイメージを配備したかで正しい答えが変わる)**:
+上の `1.5.0` は**フェーズ5 のコードから作ったイメージ**を配備した場合の
+合格値である。フェーズ4 (1.5.0 以前) のコードから作ったイメージは
+`capabilities.contract_version == "1.4.0"` を宣言し、`operations` /
+`target_kinds` の 2 キーを**持たない** — これは不合格ではなく、その版の
+契約に完全に適合した正しい宣言である (1.5.0 の義務は 1.5.0 以上を宣言する
+実装にのみ掛かる)。**配備したイメージの版と宣言が一致していること**が
+確かめたい性質であり、片方だけが動いていれば版束縛違反である。
 
 不合格の読み違いに注意する 2 点:
 
