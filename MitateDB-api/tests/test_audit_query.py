@@ -2057,7 +2057,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2068,18 +2068,80 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
         "tests/test_control_plane_store.py",
         "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
     ),
+    # Q4 phase WP-0 additions (design docs/design/Q4_DB_SIDE_SINGLE_
+    # TRUTH_V1.md D-1 (b)(ii), D-3 (d); work order §4 WP-0 変更対象 A/C;
+    # supervisor ruling 2026-09-05, first pass): the ms-normalization
+    # helper promoted from three independent per-peer test-file copies to
+    # `src/<package>/pg_timeouts.py`, and the static per-application-
+    # upgrade-ledger scanner's own walking helper (`tests/
+    # test_platform_upgrade_ledger_scan.py`), each now a single peer-local
+    # symbol pinned isomorphic to its sibling instead of an unchecked
+    # duplicate.
+    ("src/r2db_api/pg_timeouts.py", "src/mitatedb_api/pg_timeouts.py", "ms_from_pg_timeout_text"),
+    (
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "scan_platform_upgrade_ledger_script",
+    ),
+    # Q4 phase WP-0 差し戻し round addition (supervisor ruling 2026-09-05,
+    # 裁定 A): WP-0's own first-pass three-way-match test asserted three
+    # hand-written literal sets (`{6, 8} == {6, 8} == {6, 8}`) and executed
+    # NONE of the scanner's own extraction logic (a vacuity finding, code
+    # review round 1 + acceptance audit). `template_seed_numbers` is the
+    # named helper the rework round's synthetic three-way-match test now
+    # calls for real, alongside `_classify_migrations_dir`'s own
+    # `applicable_numbers` -- 裁定 A permits EXACTLY this ONE extra row
+    # (WP-0's total is 3, never more): the rows WP-1/WP-2/WP-3/WP-4
+    # themselves introduce are still added by the later half of each pair
+    # (WP-2, WP-4), not here.
+    (
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "template_seed_numbers",
+    ),
+    # Q4 phase WP-0 最終追補 (supervisor ruling 2026-09-05, 裁定 4): the
+    # THREE peer-local helpers the two pinned scanner functions above
+    # (`scan_platform_upgrade_ledger_script`, `template_seed_numbers`)
+    # themselves call -- `_strip_sql_comments`, `_iter_ledger_statements`,
+    # `_strip_string_literals` -- are added here, superseding the earlier
+    # "WP-0's total is 3, never more" ruling (裁定 A above): the table's
+    # own purpose is pinning peer-duplicated HELPERS, and leaving a pinned
+    # function's own sub-helpers outside the table lets one peer loosen
+    # just the sub-helper (never the pinned function's own body) without
+    # either the isomorphism check or the pinned function's own text
+    # changing -- exactly what the acceptance audit's independent mutation
+    # (`_strip_sql_comments`'s string-literal tracking disabled) found:
+    # every existing test, isomorphism check included, stayed green.
+    (
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "_strip_sql_comments",
+    ),
+    (
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "_iter_ledger_statements",
+    ),
+    (
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "tests/test_platform_upgrade_ledger_scan.py",
+        "_strip_string_literals",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_18_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
-    ruling 2026-09-04): a bare `len(_ISOMORPHIC_TARGETS) == 18` check
-    would not catch a row silently DROPPED and a different, coincidentally
-    -same-length row added in its place -- only pinning the table's own
-    full CONTENT (not merely its length) catches that. One-time human
-    fixation, same character as Phase 5's "走査対象フィールド集合を pin
-    する" test -- a future WP that adds/removes a row edits this assertion
-    deliberately, not by accident.
+    ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
+    2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
+    time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4): a
+    bare `len(_ISOMORPHIC_TARGETS) == 24` check would not catch a row silently
+    DROPPED and a different, coincidentally-same-length row added in its
+    place -- only pinning the table's own full CONTENT (not merely its
+    length) catches that. One-time human fixation, same character as
+    Phase 5's "走査対象フィールド集合を pin する" test -- a future WP that
+    adds/removes a row edits this assertion deliberately, not by
+    accident.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -2104,7 +2166,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_18_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_18_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2112,8 +2174,34 @@ def test_isomorphic_target_table_is_pinned_to_its_current_18_rows() -> None:
             "tests/test_control_plane_store.py",
             "test_authenticate_methods_use_the_shared_dummy_verifier_for_unconditional_compare_digest",
         ),
+        ("src/r2db_api/pg_timeouts.py", "src/mitatedb_api/pg_timeouts.py", "ms_from_pg_timeout_text"),
+        (
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "scan_platform_upgrade_ledger_script",
+        ),
+        (
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "template_seed_numbers",
+        ),
+        (
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "_strip_sql_comments",
+        ),
+        (
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "_iter_ledger_statements",
+        ),
+        (
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "tests/test_platform_upgrade_ledger_scan.py",
+            "_strip_string_literals",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 18
+    assert len(_ISOMORPHIC_TARGETS) == 24
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2153,6 +2241,118 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
     return _ast.get_source_segment(source, node)
 
 
+import re  # noqa: E402 -- kept local to this test-support block, mirrors this file's own late-import style; Q4 phase WP-0 差し戻し round (裁定 D): hoisted from inside `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer` to module level, alongside `_strip_leading_docstring`/`_normalize` below, so `_normalize`'s own strictness (does it ever fold two DIFFERENT numeric literals together?) can be pinned by a standalone test without duplicating its body.
+
+
+def _strip_leading_docstring(source: str) -> str:
+    """Phase 6 WP-3 追補 (isomorphism table extension, supervisor
+    ruling 2026-09-04): removes the function/class body's own leading
+    docstring (a bare `Expr(Constant(str))` as the first body
+    statement) BEFORE comparison -- prose is not shape, and the two
+    peers' own docstrings for the same symbol legitimately differ (one
+    names itself "this peer's own X", the other "r2db-api's own X";
+    see e.g. `compose_bearer_locator`'s two docstrings). Located via
+    `ast` (the docstring statement's own `lineno`/`end_lineno` against
+    THIS already-extracted, syntactically self-contained segment),
+    then deleted as TEXT -- never `ast.unparse`, which would also
+    reformat everything else the docstring did not touch (quote
+    style, line wrapping, trailing commas) and so could paper over a
+    real shape difference this comparison exists to catch. A symbol
+    with no leading docstring is returned unchanged."""
+    tree = _ast.parse(source)
+    target = tree.body[0]
+    body = getattr(target, "body", None)
+    if not body:
+        return source
+    first = body[0]
+    if not (isinstance(first, _ast.Expr) and isinstance(first.value, _ast.Constant) and isinstance(first.value.value, str)):
+        return source
+    lines = source.splitlines(keepends=True)
+    del lines[first.lineno - 1 : first.end_lineno]
+    return "".join(lines)
+
+
+def _normalize(source: str) -> str:
+    """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) the
+    symbol's own leading docstring (dropped entirely -- WP-3 追補,
+    supervisor ruling 2026-09-04), (b) BOTH peers' own package names
+    (each substituted for the SAME neutral placeholder), (c) TRAILING
+    whitespace at the end of each line, and (d) the number of
+    consecutive blank lines (collapsed to none) -- NEVER leading
+    indentation, NEVER in-line token spacing, and NEVER a numeric
+    literal's own digits (pinned by `test_isomorphic_normalizer_does_
+    not_absorb_numeric_literals` below -- acceptance-audit 変異 A:
+    loosening this normalizer to ALSO fold numeric literals together let
+    a peer's silently-drifted hour-to-ms multiplier go undetected by
+    `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`). The
+    PRIOR form (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of
+    spaces/tabs ANYWHERE, including a line's own leading indentation --
+    which made a nesting-depth-only mutation (moving a branch one `if`/
+    `else` level deeper, or shallower, with the exact same token
+    sequence and no operator/condition change at all) invisible to
+    this comparison: Python's own semantics are indentation-sensitive,
+    so an indentation-only edit is a REAL logic change this test must
+    catch, not whitespace noise to discard. WP-0 drops the separate
+    `peer_module` substitution the WP-2/WP-3 form also took: none of
+    the target symbols' own source text (verified when this table was
+    assembled) references either peer's test-module name at all, only
+    (occasionally) its own package name, so a second substitution
+    parameter that never fires is dead generality, not a real need.
+
+    WP-3 追補 round 2 (empirical finding, supervisor ruling
+    2026-09-04): switched from a single "this side's own package
+    name" substitution to BOTH known package names, symmetrically, on
+    EITHER side. A one-name-per-side substitution worked fine while
+    every pinned symbol's own text mentioned at most its OWN peer's
+    package name -- but this WP's new `_ISOMORPHIC_TARGETS` rows for
+    `compose_bearer_locator`/`split_bearer_locator`/the main.py row
+    each carry BOTH peers' package names as literal path DATA in the
+    SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
+    mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
+    pinned_to_its_current_24_rows` literally asserts that whole table
+    -- so its own body mentions both names too. A single-name
+    substitution leaves the OTHER peer's name untouched differently
+    on each side (r2db's own normalization leaves "mitatedb_api"
+    alone, MitateDB-api's own leaves "r2db_api" alone), so two
+    raw-identical texts would normalize to two DIFFERENT strings --
+    a false mismatch this fix removes, without weakening the check
+    (both substitutions still collapse to the exact same placeholder,
+    so a REAL difference elsewhere in the text is still caught)."""
+    text = _strip_leading_docstring(source)
+    text = text.replace("r2db_api", "<PEER_PACKAGE>").replace("mitatedb_api", "<PEER_PACKAGE>")
+    text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    return text.strip()
+
+
+def test_isomorphic_normalizer_does_not_absorb_numeric_literals() -> None:
+    """Q4 phase WP-0 差し戻し round (supervisor ruling 2026-09-05, 裁定 D
+    / acceptance-audit 変異 A): pins that `_normalize` above never folds
+    two DIFFERENT numeric literals into the same normalized text. The
+    audit demonstrated this empirically -- loosening `_normalize` with an
+    extra `re.sub(r"\\b\\d[\\d_]*\\b", "AUDITMUT_NUMLIT", text)` step, then
+    drifting one peer's `h`-to-ms multiplier from `3_600_000` to
+    `3_500_000`, left `test_peer_local_helpers_are_isomorphic_to_the_
+    sibling_peer` GREEN on the loosened side -- a real safety-relevant
+    constant could drift undetected. No prior test in this file pinned
+    the normalizer's OWN strictness in isolation, only the end-to-end
+    isomorphism check's current pass/fail against today's source tree,
+    which says nothing about whether a FUTURE loosening would still be
+    caught.
+
+    Contrasted with a second assertion proving identifiers, whitespace,
+    and a differing leading docstring ARE still absorbed -- this is a
+    targeted pin on numeric-literal strictness specifically, not a claim
+    that `_normalize` performs no normalization at all."""
+    numeric_change_a = 'def _sample():\n    """doc"""\n    return 3_600_000\n'
+    numeric_change_b = 'def _sample():\n    """doc"""\n    return 3_500_000\n'
+    assert _normalize(numeric_change_a) != _normalize(numeric_change_b)
+
+    absorbed_a = 'def _sample():\n    """doc A"""\n    x = 3_600_000\n    return x\n\n\n'
+    absorbed_b = 'def _sample():\n    """doc B, worded completely differently"""\n    x = 3_600_000\n    return x   \n'
+    assert _normalize(absorbed_a) == _normalize(absorbed_b)
+
+
 def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     """常設規律6: diffs this peer's own `_ISOMORPHIC_TARGETS` symbols
     against r2db-api's own same-named symbols at each row's own r2db-side
@@ -2164,13 +2364,29 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     Table-driven generalization of the WP-2/WP-3 mechanism (design D-4(c),
     L5-5/L5-6): the prior form read one hardcoded sibling file
     (`tests/test_audit_query.py`) and diffed 11 named helpers found inside
-    it; `_ISOMORPHIC_TARGETS` above widens that to 18 rows spanning FOUR
-    files per side (`tests/test_audit_query.py`, `src/<package>/main.py`,
-    `tests/test_http.py`, and -- Phase 6 WP-3 追補 -- the bearer-locator
-    module (`credential_wire.py` on this peer, `auth.py` on r2db-api) and
-    `tests/test_control_plane_store.py`), so each WP's own new same-named
-    symbols fall under the SAME peer-symmetry guarantee a product file
-    (not just a test-support helper) would otherwise have had none of.
+    it; `_ISOMORPHIC_TARGETS` above widens that to 24 rows spanning SEVEN
+    files per side (measured, not asserted ahead of counting --
+    `scratchpad/audit_rows.py`'s own `len()` + unique-path count against
+    the table actually defined above: `tests/test_audit_query.py`,
+    `src/<package>/main.py`, `tests/test_http.py`, the bearer-locator
+    module (`credential_wire.py` on this peer, `auth.py` on r2db-api,
+    Phase 6 WP-3 追補), `tests/test_control_plane_store.py`, and -- Q4
+    phase WP-0 -- `src/<package>/pg_timeouts.py` and `tests/
+    test_platform_upgrade_ledger_scan.py` (WP-0 最終追補, supervisor
+    ruling 2026-09-05, 裁定 4: three more rows in this SAME already-
+    counted file -- the two pinned scanner functions' own peer-duplicated
+    sub-helpers -- so the file count stays SEVEN, only the row count
+    grows)), so each WP's own new same-named symbols fall under the SAME
+    peer-symmetry guarantee a product file (not just a test-support
+    helper) would otherwise have had none of. (常設規律 3 / acceptance-
+    audit finding: an earlier draft of this docstring claimed "18 rows
+    spanning FOUR files" -- already inaccurate for the 18-row table that
+    predates Q4 WP-0, which in fact spanned FIVE files, `tests/
+    test_control_plane_store.py` having been omitted from the count --
+    and was never caught by either the isomorphism check itself, which
+    normalizes docstrings out before comparing, or the row-count pin test
+    above, which pins the table's
+    DATA, not this prose describing it.)
 
     The sibling side is read as TEXT from its real file path (never
     `importlib.import_module` -- r2db-api's own package name is
@@ -2182,82 +2398,6 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     resolved sibling root is asserted to point at the r2db-api sibling,
     never back at this peer's own root, so a future edit cannot
     accidentally make this a self-comparison."""
-    import re
-
-    def _strip_leading_docstring(source: str) -> str:
-        """Phase 6 WP-3 追補 (isomorphism table extension, supervisor
-        ruling 2026-09-04): removes the function/class body's own leading
-        docstring (a bare `Expr(Constant(str))` as the first body
-        statement) BEFORE comparison -- prose is not shape, and the two
-        peers' own docstrings for the same symbol legitimately differ (one
-        names itself "this peer's own X", the other "r2db-api's own X";
-        see e.g. `compose_bearer_locator`'s two docstrings). Located via
-        `ast` (the docstring statement's own `lineno`/`end_lineno` against
-        THIS already-extracted, syntactically self-contained segment),
-        then deleted as TEXT -- never `ast.unparse`, which would also
-        reformat everything else the docstring did not touch (quote
-        style, line wrapping, trailing commas) and so could paper over a
-        real shape difference this comparison exists to catch. A symbol
-        with no leading docstring is returned unchanged."""
-        tree = _ast.parse(source)
-        target = tree.body[0]
-        body = getattr(target, "body", None)
-        if not body:
-            return source
-        first = body[0]
-        if not (isinstance(first, _ast.Expr) and isinstance(first.value, _ast.Constant) and isinstance(first.value.value, str)):
-            return source
-        lines = source.splitlines(keepends=True)
-        del lines[first.lineno - 1 : first.end_lineno]
-        return "".join(lines)
-
-    def _normalize(source: str) -> str:
-        """WP-3 fix-round M-2 (Opus review): normalizes ONLY (a) the
-        symbol's own leading docstring (dropped entirely -- WP-3 追補,
-        supervisor ruling 2026-09-04), (b) BOTH peers' own package names
-        (each substituted for the SAME neutral placeholder), (c) TRAILING
-        whitespace at the end of each line, and (d) the number of
-        consecutive blank lines (collapsed to none) -- NEVER leading
-        indentation and NEVER in-line token spacing. The PRIOR form
-        (`re.sub(r"[ \t]+", " ", text)`) collapsed every run of spaces/
-        tabs ANYWHERE, including a line's own leading indentation -- which
-        made a nesting-depth-only mutation (moving a branch one `if`/
-        `else` level deeper, or shallower, with the exact same token
-        sequence and no operator/condition change at all) invisible to
-        this comparison: Python's own semantics are indentation-sensitive,
-        so an indentation-only edit is a REAL logic change this test must
-        catch, not whitespace noise to discard. WP-0 drops the separate
-        `peer_module` substitution the WP-2/WP-3 form also took: none of
-        the target symbols' own source text (verified when this table was
-        assembled) references either peer's test-module name at all, only
-        (occasionally) its own package name, so a second substitution
-        parameter that never fires is dead generality, not a real need.
-
-        WP-3 追補 round 2 (empirical finding, supervisor ruling
-        2026-09-04): switched from a single "this side's own package
-        name" substitution to BOTH known package names, symmetrically, on
-        EITHER side. A one-name-per-side substitution worked fine while
-        every pinned symbol's own text mentioned at most its OWN peer's
-        package name -- but this WP's new `_ISOMORPHIC_TARGETS` rows for
-        `compose_bearer_locator`/`split_bearer_locator`/the main.py row
-        each carry BOTH peers' package names as literal path DATA in the
-        SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
-        mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
-        pinned_to_its_current_18_rows` literally asserts that whole table
-        -- so its own body mentions both names too. A single-name
-        substitution leaves the OTHER peer's name untouched differently
-        on each side (r2db's own normalization leaves "mitatedb_api"
-        alone, MitateDB-api's own leaves "r2db_api" alone), so two
-        raw-identical texts would normalize to two DIFFERENT strings --
-        a false mismatch this fix removes, without weakening the check
-        (both substitutions still collapse to the exact same placeholder,
-        so a REAL difference elsewhere in the text is still caught)."""
-        text = _strip_leading_docstring(source)
-        text = text.replace("r2db_api", "<PEER_PACKAGE>").replace("mitatedb_api", "<PEER_PACKAGE>")
-        text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
-        text = re.sub(r"\n\s*\n+", "\n", text)
-        return text.strip()
-
     self_root = Path(__file__).resolve().parents[1]
     sibling_root = Path(__file__).resolve().parents[2] / "r2db-api"
     assert "r2db-api" in sibling_root.parts, f"sibling root must resolve under r2db-api, not self: {sibling_root}"
