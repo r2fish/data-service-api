@@ -14,7 +14,7 @@
 | `6ddcd19` | WP-0 | 共通基盤 (静的規則スキャナ / ms 正規化ヘルパの src 引き上げ / 対応表 18 → 24 行) | **1868 / 0 / 0 / 4 xfailed** |
 | `a01bdf0` | WP-1 (r2db `9ae8ea6`) + WP-2 (MitateDB `0379827`) | 宣言を DB 側の一次情報へ (`0008` / `0007` + composition root + 二重検査 + ops 宣言系) | **2077 / 0 / 0 / 4 xfailed** |
 | `0301c10` | WP-3 (r2db `55998b2`) + WP-4 (MitateDB `370fe33`) | per-application 台帳と一括適用 (`0003` 改訂 + `0009` / `0008` + cell open 検査 + ops) | **2165 / 0 / 0 / 0** |
-| `(本記録の merge。ハッシュは次回引き継ぎ §1 に記載)` | WP-5 | 記録整理 (`CONTROL_MAPPING.md` / runbook 3 本 / DEPLOY_Q4 / 閉止注記 / 設計 §10・§12・§13 / 作業指示書 §11 / 本書) | 文書のみ (**2165** のまま) |
+| `4b438ee` → main `2ab012b` (確定コミットは次回引き継ぎ §1) | WP-5 | 記録整理 (`CONTROL_MAPPING.md` / runbook 3 本 / DEPLOY_Q4 / 閉止注記 / 設計 §10・§12・§13 / 作業指示書 §11 / 本書) | 文書のみ (**2165** のまま) |
 
 **集計行の出所**: 各 WP のコミットメッセージ末尾の `Root suite alone:` 行 (`git log` で確認できる)。いずれも**監督が完了ゲートで単独実行して得た実測値**であり、ゲートログは `{scratchpad}/wp0-gate2.log` / `wp12-gate.log` / `wp34-gate2.log` に残っている。**最終形のディレクトリ別内訳は `r2db-api/tests` 934 / `MitateDB-api/tests` 756 / `conformance-tests` 475 = 2165**。conformance は**本フェーズを通じて 475 のまま不変**である。
 

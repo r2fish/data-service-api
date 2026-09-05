@@ -999,7 +999,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | **WP-2** | MitateDB — 同 (`0007` + 参照実装 `platform_declarations.py`) | `0379827` | `a01bdf0` | **2077 / 0 / 0 / 4 xfailed** (同上) |
 | **WP-3** | r2db — per-application 台帳と一括適用 (`0003` 改訂 + `0009` + cell open 検査 + ops) | `55998b2` | `0301c10` (WP-3 と WP-4 の合流) | **2165 / 0 / 0 / 0** (WP-4 と同一ゲート、`{scratchpad}/wp34-gate2.log`。差し戻し前は `2161 / 0 / 0 / 0`、`wp34-gate.log`) |
 | **WP-4** | MitateDB — 同 (`0003` 改訂 + `0008` + backfill + ops) | `370fe33` | `0301c10` | **2165 / 0 / 0 / 0** (同上) |
-| **WP-5** | 記録整理 (`CONTROL_MAPPING.md` 3 行 + runbook 3 本 + DEPLOY_Q4 + 閉止注記 3 件 + 本節 + 作業指示書 §11 + 引き継ぎ第14次) | `(本記録コミット。ハッシュは次回引き継ぎ §1 に記載)` | `(同上)` | 文書のみ (**2165** のまま。製品コード・テスト・migration・spec を触っていない) |
+| **WP-5** | 記録整理 (`CONTROL_MAPPING.md` 3 行 + runbook 3 本 + DEPLOY_Q4 + 閉止注記 3 件 + 本節 + 作業指示書 §11 + 引き継ぎ第14次) | ``4b438ee` (main `2ab012b`; 本記録の確定コミットは次回引き継ぎ §1 に記載)` | `(同上)` | 文書のみ (**2165** のまま。製品コード・テスト・migration・spec を触っていない) |
 
 **ディレクトリ別内訳 (収集件数)**
 
