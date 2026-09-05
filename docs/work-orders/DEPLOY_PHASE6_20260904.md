@@ -1413,10 +1413,16 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 
 **§0.2 の裁定表を埋めたものと一緒に、以下を実測値で埋めて残す。**
 
-> **記録に書いてよいもの**: `credential_id`、Secret Manager の**名前**と
+> **記録に書いてよいもの**: Secret Manager の**名前**と
 > **version 番号**、image digest、revision 名、行数、HTTP status。
 > **書いてはならないもの**: secret / bearer / パスワード / pepper / DSN の
-> 値。**rotate の印字は記録に写さない。**
+> 値、および**実 `credential_id`** (locator 形 bearer の前半。認証は破らないが
+> 標的を名指しできる -- `docs/security/public-repository-policy.md` の
+> `Never publish` / SI-10)。**`credential_id` を書く場合は `<UPPER_SNAKE>` /
+> `REPLACE_ME_*` の placeholder 形に限る。rotate の印字は記録に写さない。**
+> (訂正: フェーズ7 (g) WP-1 -- 旧文は `credential_id` を「書いてよいもの」に
+> 置いており、上記の禁止と衝突していた。本書の実値は 2026-09-05 に置換済み
+> であり、この訂正は凡例のみを直すものである。)
 
 **この記録は 2026-09-05 に書き始めた。**埋まっている行は実測値であり、
 ` ` のままの行は**まだ実施していない**ことを意味する (「調べていない」ではなく

@@ -68,7 +68,7 @@ security/CONTROL_MAPPING.md
 - production `.env`
 - backup、database dump、production log
 - 実Application/User data、個人情報
-- 本番hostname、private address、internal-only endpoint等の公開不要な運用情報
+- 公開不要な運用情報の分類 -- 正本は `docs/security/public-repository-policy.md` の `Never publish` / placeholder convention 節である
 - credentialやsecretの実値を含むexample、test fixture、documentation
 - editor/OS/build/cache等の公開不要ファイル
 - Git管理対象として不適切な生成物・一時物

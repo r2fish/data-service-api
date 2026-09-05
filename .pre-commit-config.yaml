@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: public-value-scan
+        name: public value scan (no real hostnames/e-mail/project ids/credential_id/IAM/absolute paths/secrets)
+        description: >-
+          Machine enforcement of docs/security/public-repository-policy.md.
+          Standard-library-only script (tools/public_value_scan.py); no
+          external repository dependency (see design D-2, rejecting
+          gitleaks/trufflehog).
+        entry: python3 tools/public_value_scan.py
+        language: system
+        pass_filenames: true
+        types: [text]

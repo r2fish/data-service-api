@@ -795,9 +795,9 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 ### 13.1 集計行
 
 ```
-(WP 完了後に実測を貼る)
+# WP-1 (tree scan): mode=tree files_scanned=228 total_flagged=0 (所要 ~1.0s)
 ```
 
 ### 13.2 WP ごとの記録
 
-(空欄)
+- **WP-1** (`tools/public_value_scan.py` + `.pre-commit-config.yaml` 導入): ツリー走査は上記 13.1 の集計行のとおり `total_flagged=0`。対照 A (placeholder 除外 OFF) / B (ellipsis 除外 OFF) の flagged 件数はそれぞれ **7 / 8** (いずれも非ゼロ、除外が load-bearing であることの確認)。`--history` (`git log --all -p -m`、merge commit を含む) は commits_scanned 総 flagged **1061** 件。件数のみを記す (実値は転記しない)。
