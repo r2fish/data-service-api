@@ -213,6 +213,8 @@
 
 **変異**: `filterwarnings` を有効化した状態で、**`DeprecationWarning` を意図的に発する一時テストを足して赤を実測**し、復元する。
 
+**【監督訂正 2026-09-06、WP-6 レビュー 指摘 1】** 本節の前提「httpx2 を入れなければ `error::DeprecationWarning` で 12 箇所が赤になる」は実測で反証された — `starlette.exceptions.StarletteDeprecationWarning` は **`UserWarning` の派生**であり (MRO `StarletteDeprecationWarning → UserWarning → Warning`)、`error::DeprecationWarning` では捕まらない。error 化で実際に赤になるのは上流の `anyio.abc.BlockingPortal` 参照 (L7-19) であり、こちらは httpx2 の有無と無関係である。httpx2 採用の役割は「上流の fallback 警告を warnings summary から消し、Starlette が fallback を落としたときの `RuntimeError` に備え、両 peer の `[test]` extras を対称に保つ」ことに改める。TestClient は維持 (ASGITransport 置換は lifespan 駆動の有無が変わる)。
+
 ### D-5 (h) r2db 配備資産の再現性
 
 **追加物**:
