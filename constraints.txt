@@ -1,0 +1,42 @@
+# Exact-pin dependency record for the common Data Service API contract's
+# two peer implementations (r2db-api, MitateDB-api).
+#
+# Generation (docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_PUBLICATION_V1.md,
+# WP-2; design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md
+# D-3):
+#
+#   1. Create a clean virtualenv (not ./.venv) in a scratch directory.
+#   2. pip install -e './r2db-api[test]' -e './MitateDB-api[test]'
+#   3. pip freeze > raw output
+#   4. Remove venv-native tooling (pip/setuptools/wheel, when present) and
+#      the two peers' own editable (-e) install lines by hand.
+#   5. The judgment calls made at step 4 are recorded in the WP-2
+#      completion report, not in this file or in git history.
+#
+# Usage:
+#   pip install -c constraints.txt -e './r2db-api[test]' -e './MitateDB-api[test]'
+#
+# Both peers' pyproject.toml files keep their lower-bound pins unchanged
+# (a compatibility claim); this file is a reproducibility record of one
+# known-good, exact resolution and plays a different role (D-3). When a
+# dependency is upgraded, the commit that updates this file carries the
+# resulting pass/fail/skip/xfail tally alongside it.
+anyio==4.15.0
+certifi==2026.7.22
+click==8.5.0
+execnet==2.1.2
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.19
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+psycopg==3.3.5
+psycopg-binary==3.3.5
+Pygments==2.21.0
+pytest==9.1.1
+pytest-xdist==3.8.0
+starlette==1.6.0
+typing_extensions==4.16.0
+uvicorn==0.52.4

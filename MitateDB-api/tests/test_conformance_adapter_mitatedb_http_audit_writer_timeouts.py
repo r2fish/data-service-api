@@ -2,34 +2,44 @@
 WORK_ORDER_PHASE4_LEDGER_CLOSURE_V1.md §1 L4-6 が正本): the HTTP
 conformance adapter (`conformance_adapter_mitatedb_http.py`) constructs its
 own `PostgresApplicationAuditSink` writer connection ad hoc, inside its own
-`__init__` (`:613-616`), never through `mitatedb_api.main.build_app` -- the
-existing composition-root timeout tests
-(`test_application_audit.py:491`/`:667`) never exercise THIS object at
-all. A mutation dropping either `statement_timeout_ms=`/
-`idle_in_transaction_session_timeout_ms=` keyword from that adapter
-construction call site would previously survive both `MitateDB-api/tests`
-(no test touches this object) and `conformance-tests` (backend-agnostic,
-no PostgreSQL session-setting assertions) undetected.
+`__init__`, never through `mitatedb_api.main.build_app` -- the existing
+composition-root timeout tests (`test_application_audit.py`) never
+exercise THIS object at all.
 
-Same method the existing composition-root tests already use (`P4-D17`):
-build the REAL adapter, ask ITS OWN sink for a fresh connection
-(`PostgresApplicationAuditSink._connect()` -- this peer's sink opens a new
-connection per call rather than pooling, see `test_application_audit_
-writer_connection_has_statement_and_idle_timeouts_set`'s own identical
-`sink._connect()` pattern), and `SHOW statement_timeout` / `SHOW
-idle_in_transaction_session_timeout` -- not a hand-constructed stand-in
-`PostgresApplicationAuditSink` (which would only prove the sink class
-itself works, never that the adapter's own construction call site actually
-passes the two keywords -- exactly P4-D17 review point 1).
+Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1(b), work
+order §4 WP-2 変更対象 D): SUPERSEDES the original P4-D17 form of this
+test. `PostgresApplicationAuditSink` no longer accepts ANY timeout
+constructor argument at all (the `SET SESSION` mechanism P4-D17 guarded is
+REMOVED product code) -- so there is no longer a `statement_timeout_ms=`/
+`idle_in_transaction_session_timeout_ms=` keyword pair a mutation could
+drop from the adapter's own construction call site. What COULD still
+regress: the adapter's own `_bootstrap_platform` forgetting to apply
+migration `0007_platform_declarations.sql` (or a caller reintroducing an
+explicit override) -- either would leave the writer connection's real
+GUCs at the bare PostgreSQL cluster default (typically unlimited/`0`)
+rather than the role-level 5000ms/5000ms declaration. The mechanism below
+(build the real adapter, read its own sink's real connection via `SHOW`,
+compare against a fresh admin connection's own bare default) still proves
+exactly that -- it is now a proof that the DECLARATIONS-based mechanism
+reached this object, not that an explicit kwarg did.
+
+Same method the original test used: build the REAL adapter, ask ITS OWN
+sink for a fresh connection (`PostgresApplicationAuditSink._connect()` --
+this peer's sink opens a new connection per call rather than pooling), and
+`SHOW statement_timeout` / `SHOW idle_in_transaction_session_timeout` --
+not a hand-constructed stand-in `PostgresApplicationAuditSink` (which
+would only prove the sink class itself works, never that the adapter's
+own `_bootstrap_platform` actually applied `0007`).
 
 Distinguishable from the untouched server default (P4-D17 review point 2):
 this test reads the real cluster's own compiled-in default via a bare
 admin connection FIRST, then asserts the adapter's own value differs from
-it -- the module-level default the adapter always requests
+it -- the shipped role-level default the migration always seeds
 (`DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`DEFAULT_AUDIT_IDLE_TIMEOUT_MS`, both
 5000ms) is asserted for its literal value too, so a mutation that drops
-the kwargs (falling back to the server's own default, typically "0" =
-disabled) goes red on both assertions.
+migration `0007` from `_bootstrap_platform`'s own list (falling back to
+the server's own default, typically "0" = disabled) goes red on both
+assertions.
 
 Building the real `MitateDBHttpConformanceAdapter` is heavyweight
 (provisions a throwaway PostgreSQL platform database + roles, runs every

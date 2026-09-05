@@ -87,7 +87,18 @@ class FoundationConfig:
             raise ValidationError(str(exc)) from exc
 
     @classmethod
-    def from_env(cls, environ=None):
+    def from_env(cls, environ=None, *, data_base_url: Optional[str] = None, control_base_url: Optional[str] = None):
+        """Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-2):
+        `data_base_url`/`control_base_url` are now REQUIRED keyword
+        arguments the caller (composition root) must already have read,
+        validated, and cross-checked against `MITATEDB_CONTROL_PLANE_
+        STATUS` (F-6) via `platform_declarations.read_platform_
+        declarations`/`check_control_surface_consistency` BEFORE calling
+        this factory -- `environ` no longer supplies either value
+        (`MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are REMOVED
+        env vars, F-2: rejected whenever defined, whatever their value).
+        Every OTHER field below is unaffected -- still read from
+        `environ` exactly as before."""
         values = dict(os.environ if environ is None else environ)
         names = {
             "max_batch_items": "MITATEDB_MAX_BATCH_ITEMS",
@@ -124,39 +135,38 @@ class FoundationConfig:
                 f"got {control_plane_status!r}"
             )
         parsed["control_plane_status"] = control_plane_status
-        # Phase 6 WP-3 (design D-2): `surfaces.data` is an unconditional
-        # 1.6.0 obligation -- a REAL deployment (this factory's own
-        # purpose) must always supply `MITATEDB_DATA_BASE_URL`.
-        # `MITATEDB_CONTROL_BASE_URL` is required only when this same
-        # process declares `control_plane` other than `unavailable`
-        # (the contract's own conditional-on-a-control-surface framing) --
-        # a data-plane process with no sibling control process has
-        # nothing to declare there.
-        data_base_url = values.get("MITATEDB_DATA_BASE_URL")
+        # Q4 phase (design D-2, requester ruling 2026-09-05 overriding
+        # Phase 6 supervisor ruling 5 -- see this module's own historical
+        # note below): `data_base_url`/`control_base_url` are no longer
+        # read from `environ` at all -- the caller (`main.build_app`) has
+        # already read+validated them from `<registry>.
+        # platform_declarations` (D-2) and cross-checked `control_base_
+        # url`'s presence against `MITATEDB_CONTROL_PLANE_STATUS` (F-6,
+        # `platform_declarations.check_control_surface_consistency`)
+        # BEFORE calling this factory -- so by the time `from_env` runs,
+        # either both already agree, or `build_app` has already raised.
+        # `surfaces.data` is still an unconditional 1.6.0 obligation, now
+        # enforced by F-3 (the platform_declarations row's own
+        # required-presence check) rather than by this factory.
+        #
+        # Historical note (superseded, kept for the historical record --
+        # design D-2(f) explicitly requires recording this override, not
+        # silently dropping the old comment): Phase 6 WP-3 差し戻し 最終
+        # ラウンド (supervisor ruling 2026-09-04, 裁定 5) had this factory
+        # itself silently drop a stale `MITATEDB_CONTROL_BASE_URL` env
+        # value whenever `control_plane_status == "unavailable"` ("a
+        # stale/leftover value from a previous configuration...is never
+        # adopted"). Q4 D-2(f) (requester ruling 2026-09-05) OVERRIDES
+        # that ruling: the single declaration now lives in ONE row shared
+        # by both processes, so a mismatch is no longer something either
+        # process may silently ignore -- `check_control_surface_
+        # consistency` (called by `main.build_app` before this factory)
+        # raises F-6 instead.
         if not data_base_url:
-            raise ValidationError("MITATEDB_DATA_BASE_URL is required")
-        control_base_url = values.get("MITATEDB_CONTROL_BASE_URL")
-        if control_plane_status != "unavailable" and not control_base_url:
-            raise ValidationError(
-                "MITATEDB_CONTROL_BASE_URL is required when MITATEDB_CONTROL_PLANE_STATUS is not 'unavailable'"
-            )
-        try:
-            parsed["data_base_url"] = validate_data_base_url(data_base_url)
-            # WP-3 差し戻し 最終ラウンド (supervisor ruling 2026-09-04,
-            # 裁定 5, review F6): a deployment that declares `control_
-            # plane: unavailable` must never surface `surfaces.control`
-            # (contract 1.6.0: "a deployment declaring control_plane
-            # unavailable omits surfaces.control entirely") -- even when
-            # `MITATEDB_CONTROL_BASE_URL` happens to be set in the
-            # environment (a stale/leftover value from a previous
-            # configuration, say), it is never adopted while `control_
-            # plane_status == "unavailable"`. Mirrors r2db-api's own
-            # `main.py::_surfaces`: `if control_plane_status !=
-            # "unavailable": ...` gates `surfaces["control"]` identically.
-            if control_plane_status != "unavailable" and control_base_url:
-                parsed["control_base_url"] = validate_control_base_url(control_base_url)
-        except ValueError as exc:
-            raise ValidationError(str(exc)) from exc
+            raise ValidationError("surfaces.data is required (declared in <registry>.platform_declarations)")
+        parsed["data_base_url"] = data_base_url
+        if control_plane_status != "unavailable" and control_base_url:
+            parsed["control_base_url"] = control_base_url
         return cls(**parsed)
 
     def validate_request_size(self, size):

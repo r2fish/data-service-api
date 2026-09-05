@@ -250,36 +250,6 @@ class ApplicationAuditSink:
         return tuple(self._events)
 
 
-def _apply_session_timeouts(
-    conn: "psycopg.Connection", statement_timeout_ms: Optional[int],
-    idle_in_transaction_session_timeout_ms: Optional[int],
-) -> None:
-    """Phase 4 (design D-6/N-3): sets the two SESSION-level timeouts on a
-    freshly opened connection, via `SET SESSION` immediately after
-    connect -- deliberately NOT via a connection-string `options=`
-    parameter (Cloud SQL's own connector layer for this peer's real
-    deployment does not reliably pass an arbitrary `options` string
-    through, per `docs/cloud-run-cloud-sql.md`'s existing operational
-    notes; `SET SESSION` after connect works identically everywhere this
-    peer connects). A `None` value (the default, matching every pre-Phase-4
-    caller of every function that accepts these two parameters) leaves the
-    server's own default untouched -- this function is a no-op unless a
-    caller explicitly supplies a concrete millisecond value.
-    """
-    if statement_timeout_ms is None and idle_in_transaction_session_timeout_ms is None:
-        return
-    with conn.cursor() as cur:
-        if statement_timeout_ms is not None:
-            cur.execute(sql.SQL("SET SESSION statement_timeout = {}").format(sql.Literal(f"{statement_timeout_ms}ms")))
-        if idle_in_transaction_session_timeout_ms is not None:
-            cur.execute(
-                sql.SQL("SET SESSION idle_in_transaction_session_timeout = {}").format(
-                    sql.Literal(f"{idle_in_transaction_session_timeout_ms}ms")
-                )
-            )
-    conn.commit()
-
-
 _APPLICATION_AUDIT_INSERT = (
     "INSERT INTO {table} (event_id, event_class, occurred_at, request_id, application_id, "
     "actor_type, actor_id, role, operation, target_kind, outcome, reason_code, target_id, count) "
@@ -314,21 +284,23 @@ class PostgresApplicationAuditSink:
     database alongside `control_audit`).
     """
 
-    def __init__(
-        self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5,
-        statement_timeout_ms: Optional[int] = None,
-        idle_in_transaction_session_timeout_ms: Optional[int] = None,
-    ) -> None:
+    def __init__(self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
+        # Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B): the two
+        # writer timeouts are no longer this constructor's own concern --
+        # this peer's former `SET SESSION` (removed here) is superseded by
+        # `mitatedbsvc_api`'s own PostgreSQL role setting (`ALTER ROLE ...
+        # SET`, migration `0007_platform_declarations.sql`), which applies
+        # automatically to every connection made as this role, this
+        # connection included -- no client-side action needed. The
+        # composition root checks the declared-vs-effective value once at
+        # startup (`platform_declarations.check_writer_role_timeouts`)
+        # instead of this class setting it per connection.
         self._dsn = dsn
         self._connect_timeout = connect_timeout
-        self._statement_timeout_ms = statement_timeout_ms
-        self._idle_in_transaction_session_timeout_ms = idle_in_transaction_session_timeout_ms
         self._table = sql.Identifier(schema, "application_audit")
 
     def _connect(self) -> "psycopg.Connection":
-        conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
-        _apply_session_timeouts(conn, self._statement_timeout_ms, self._idle_in_transaction_session_timeout_ms)
-        return conn
+        return psycopg.connect(self._dsn, connect_timeout=self._connect_timeout, autocommit=False)
 
     def append(
         self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],
@@ -422,5 +394,4 @@ __all__ = [
     "ApplicationAuditEvent",
     "ApplicationAuditSink",
     "PostgresApplicationAuditSink",
-    "_apply_session_timeouts",
 ]

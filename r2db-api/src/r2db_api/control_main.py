@@ -7,7 +7,7 @@ dedicated pepper, `r2dbsvc_controlplane` role), R-9 (capability status is a
 *deployer* declaration, injected by `r2db_api.main` from
 `R2DB_CONTROL_PLANE_STATUS` -- untouched by this WP), §5's WP-4 row, and §8
 m-10 (no module-level `app` here yet -- WP-5 places it in the same commit
-that flips the application-plane's `control_plane` declaration to
+that flips the application-plane's own `control_plane` declaration to
 `enabled`, so this surface is never deployable-but-undeclared).
 
 **Deployment default (R-1)**: this process is meant to run separately from
@@ -27,7 +27,46 @@ deployment is this surface's own `GET /control/v1/capabilities`, which
 (`control_plane: enabled` is hardcoded there -- if this process is running
 at all, its own control plane is, by definition, enabled).
 
-Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
+Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work
+order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1;
+REWORK ROUND, supervisor ruling 2026-09-05, rulings-q4-wp12-rework.md
+sec.2): `surfaces`, `audit_visibility_lag_ms`, and the coalescing window
+this process declares are no longer read from env vars -- they are
+DB-side declarations read from `r2dbsvc_registry.platform_declarations`
+and `pg_db_role_setting` (migration `0008`). `R2DB_DATA_BASE_URL`/`R2DB_
+CONTROL_BASE_URL`/`R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_
+TIMEOUT_MS` are REJECTED outright if still defined, whatever their value
+(F-1/F-2, inside `build_control_app` -- runs first).
+
+**Where the DB-side checks run, and why (design SS3.7 control-plane 1-8;
+REWORK ROUND -- supersedes the previous round's lifespan-deferred shape)**:
+the previous round of this module ran these checks inside ASGI `_lifespan`,
+deferred out of `build_control_app()` itself, specifically to preserve that
+function's own pre-Q4 zero-network contract. The supervisor's rework
+ruling REJECTED that shape: design SS3.7's own "起動シーケンス" already
+requires these checks to run as part of composition-root startup, and this
+composition root is explicitly ALLOWED to become network-dependent at
+`build_control_app()` call time (unlike WP-1's other module, `r2db_api.
+main.build_app`, which already was network-dependent pre-Q4 for an
+unrelated reason -- `_load_registry_rows` -- and so never needed this
+carve-out to begin with). `build_control_app()` now runs the DB-side
+declaration read (F-8/F-3/F-3c/F-4/F-4b) and the writer-role double-check
+(F-13/F-7/F-9/F-10/F-11) SYNCHRONOUSLY, before constructing `service` at
+all -- `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms`
+are passed straight into `assemble_control_stack(...)`'s constructor
+arguments, never assigned onto `service` after the fact (the previous
+round's `service._surfaces = ...`/etc. reach-in is REMOVED entirely: there
+is no longer any private-field mutation from this module into `service`).
+`test_control_http.py::test_build_control_app_returns_asgi_app_without_
+connecting` (and any other test relying on a zero-network `build_control_
+app()`) is REWRITTEN by this rework round to use `assemble_control_stack(
+...)` directly with explicit injected values instead -- the env-driven
+`build_control_app(env)` builder is now exercised ONLY by this repository's
+own real-PostgreSQL tests (`tests/test_ops_declarations.py`-adjacent
+fixtures), never by a zero-network unit test.
+
+Environment variable contract (design SS5's WP-4 row / SS1 R-2/R-3/R-7,
+updated Q4 WP-1):
 
     R2DB_CONTROLPLANE_DSN                 required -- `r2dbsvc_controlplane`
                                            role DSN against `r2dbsvc_platform`
@@ -90,7 +129,7 @@ Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
     R2DB_AUDIT_DSN                        optional (Phase 4 WP-2(b), design
                                            D-5) -- the `r2dbsvc_auditreader`
                                            role DSN (migration `0007_
-                                           application_audit.sql` §1.3),
+                                           application_audit.sql` SS1.3),
                                            read-only over BOTH `control_
                                            audit` and `application_audit`.
                                            Unset means `audit_query` stays
@@ -112,24 +151,14 @@ Environment variable contract (design §5's WP-4 row / §1 R-2/R-3/R-7):
                                            the exact reason `r2db_api.main.
                                            build_app` does the same -- see
                                            that function's own comment
-    R2DB_DATA_BASE_URL                    required (Phase 6 WP-2, design D-2)
-                                           -- SAME variable name/meaning as
-                                           `r2db_api.main`'s own env-var
-                                           table entry (must end with `/v1`,
-                                           no trailing slash). Unconditionally
-                                           required here (unlike `main.py`,
-                                           this process' own control surface
-                                           is always "enabled" -- see
-                                           `_surfaces`'s own docstring).
-    R2DB_CONTROL_BASE_URL                 required (Phase 6 WP-2, design D-2)
-                                           -- must end with `/control/v1`, no
-                                           trailing slash. SAME variable name
-                                           `main.py` reads -- both processes
-                                           are meant to be configured from the
-                                           identical pair.
+
+REMOVED (Q4 WP-1, rejected outright if still defined -- see
+`reject_removed_timeout_env`/`reject_removed_surface_env`, called inside
+`build_control_app`): `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`, `R2DB_AUDIT_IDLE_
+TIMEOUT_MS`, `R2DB_DATA_BASE_URL`, `R2DB_CONTROL_BASE_URL`.
 
 **Deviation from the design's env-var table (`R2DB_CREDENTIAL_PEPPER`)**:
-design §5's WP-4 row describes this variable as present-if-configured, used
+design SS5's WP-4 row describes this variable as present-if-configured, used
 only for `validate_control_pepper_separation`'s equality check. That framing
 holds for `ops.py`'s control-credential subcommands (which never touch the
 `credentials` table at all -- `R2DB_CREDENTIAL_PEPPER` is genuinely optional
@@ -148,30 +177,12 @@ actual constructor before writing this, not assumed from the design
 document's own summary table (WP-4 implementation report records this as a
 supervisor-reviewable deviation, not a silent one).
 
-**No startup DSN reachability check (design §2, by contrast with `r2db_api.
-main`'s registry-row validation)**: `r2db_api.main.build_app` connects once
-at startup to validate `R2DB_SERVE_APPS` against the platform registry,
-because a served application's DSNs are static configuration this process
-commits to for its entire lifetime. This control-plane composition root has
-no equivalent commitment to validate -- authentication and every operation
-below it are already a fresh per-request DB round-trip with no cache
-(R-8: "リクエスト毎 DB 参照", `authorization_propagation_bound_ms: 0`), so a
-DSN that is unreachable at process start is exactly as fail-closed (`AUTH_
-STATE_UNAVAILABLE`/503, never silently permissive) as one that becomes
-unreachable five minutes into serving traffic. Adding a startup check here
-would only turn one of those two failure timings into a hard crash for no
-safety benefit `main.py`'s own serving-set commitment doesn't already need.
-`_RolePool.__init__` (postgres.py) does not connect eagerly either --
-constructing every store below is itself a zero-network operation, which is
-what lets this module's own tests build a full app against a bogus DSN
-without needing a reachable PostgreSQL server at all.
-
-**Module-level `app` (design §8 m-10, WP-5 flip)**: this file now ends with
+**Module-level `app` (design SS8 m-10, WP-5 flip)**: this file now ends with
 `app = build_control_app()`, the same pattern `r2db_api.main` already
 establishes (`app = build_app()`) -- placed in the exact same single commit
 that flips the application-plane's own `control_plane` capability
 declaration to `enabled` (`main.py`'s `R2DB_CONTROL_PLANE_STATUS` handling),
-per the CCR-14 single-commit rule (design §5): this control-plane surface
+per the CCR-14 single-commit rule (design SS5): this control-plane surface
 was never deployable-but-undeclared even for one commit. Importing this
 module now reads `os.environ` immediately, exactly like `r2db_api.main`
 already does -- any caller that needs to import this module without a real
@@ -179,22 +190,21 @@ control-plane environment configured (this repository's own tests) must set
 one up first, via `pytest.MonkeyPatch`, before the first import, the same
 established pattern `test_credential_persistence.py`'s `main_module` fixture
 already uses for `r2db_api.main` (see `test_control_http.py`'s own
-`control_main_module` fixture, added this WP).
+`control_main_module` fixture).
 """
 from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
+import psycopg
 from starlette.types import ASGIApp
 
+from .audit_query import DECLARED_COALESCING_WINDOW_MS
 from .control_http import create_control_app
 from .control_plane import ControlPlaneService, PostgresControlBackend
 from .credential_store import (
-    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
-    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
     DEFAULT_SCHEMA,
     PostgresApplicationRegistry,
     PostgresAuditQueryStore,
@@ -204,13 +214,19 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .limits import ControlPlaneLimits
+from . import platform_declarations
+from .platform_declarations import (
+    check_writer_role_timeouts,
+    derive_visibility_lag_ms,
+    read_declared_role_timeouts,
+    read_platform_declarations,
+    reject_removed_surface_env,
+    reject_removed_timeout_env,
+    require_control_surface_declared,
+)
 
 _DEFAULT_LIMITS = ControlPlaneLimits()
-
-# Phase 4 WP-2(b) (design D-6): "clock-skew margin" -- the third term
-# `visibility_lag_ms` sums beyond the two writer-connection timeouts
-# (`statement_timeout_ms + idle_in_transaction_session_timeout_ms + this`).
-_VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000
+_CONNECT_TIMEOUT_S = 5
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -235,52 +251,6 @@ def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
         return default
 
 
-def _validate_surface_base_url(name: str, raw: str, *, suffix: str) -> str:
-    """`r2db_api.main._validate_surface_base_url`'s own duplicate here
-    (Phase 6 WP-2, design D-2) -- same three independent SHAPE checks
-    (absolute URL / correct suffix / no trailing slash), same fail-loud
-    `RuntimeError` naming the variable. Duplicated rather than imported
-    (this module and `main.py` do not share small env-parsing helpers --
-    `_require`/`_optional_int` above are each module's own copy already).
-    """
-    parsed = urlsplit(raw)
-    if not parsed.scheme or not parsed.netloc:
-        raise RuntimeError(f"{name} must be an absolute URL, got {raw!r}")
-    without_trailing_slash = raw[:-1] if raw.endswith("/") else raw
-    if not without_trailing_slash.endswith(suffix):
-        raise RuntimeError(f"{name} must end with {suffix!r}, got {raw!r}")
-    # Coordinator item 7(ii): same exclusivity guard as `r2db_api.main`'s
-    # own identical function -- see that module's docstring.
-    if suffix == "/v1" and without_trailing_slash.endswith("/control/v1"):
-        raise RuntimeError(f"{name} must end with {suffix!r}, not '/control/v1', got {raw!r}")
-    if raw.endswith("/"):
-        raise RuntimeError(f"{name} must not end with a trailing slash, got {raw!r}")
-    return raw
-
-
-def _surfaces(env: Mapping[str, str]) -> dict[str, Any]:
-    """Phase 6 WP-2 (design D-2): a live control-plane process' own control
-    surface is, by definition, provided (`ControlPlaneService.capabilities`
-    already hardcodes `control_plane: {"status": "enabled"}` -- if this
-    process answers at all, its own control surface is enabled), so BOTH
-    `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_URL` are unconditionally
-    required here (unlike `r2db_api.main`'s own `_surfaces`, where
-    `R2DB_CONTROL_BASE_URL` is conditional on `R2DB_CONTROL_PLANE_STATUS`).
-    Same two variable names as `main.py` reads -- both processes are meant
-    to be configured from the identical pair, so both capability documents
-    return the identical `surfaces` object (design's own "両プロセスに同じ
-    2変数を配る" instruction; this function cannot itself verify the
-    sibling process agrees, see `main.py`'s own `_validate_surface_base_
-    url` docstring).
-    """
-    data_base_url = _require(env, "R2DB_DATA_BASE_URL")
-    control_base_url = _require(env, "R2DB_CONTROL_BASE_URL")
-    return {
-        "data": {"base_url": _validate_surface_base_url("R2DB_DATA_BASE_URL", data_base_url, suffix="/v1")},
-        "control": {"base_url": _validate_surface_base_url("R2DB_CONTROL_BASE_URL", control_base_url, suffix="/control/v1")},
-    }
-
-
 def assemble_control_stack(
     *,
     controlplane_dsn: str,
@@ -289,26 +259,38 @@ def assemble_control_stack(
     schema: str = DEFAULT_SCHEMA,
     pool_size: int | None = None,
     limits: ControlPlaneLimits | None = None,
-    audit_statement_timeout_ms: int | None = None,
-    audit_idle_timeout_ms: int | None = None,
     audit_dsn: str | None = None,
     audit_reader_pool_size: int | None = None,
     surfaces: dict[str, Any] | None = None,
+    audit_visibility_lag_ms: int = 0,
+    audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
+    audit: "PostgresControlAuditSink | None" = None,
 ) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink, PostgresAuditQueryStore | None]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
     conformance HTTP adapter (`conformance_adapter_r2db_http.py`) -- the
     adapter's own reason for needing this factored out at all: it must
     periodically rebuild `ControlPlaneService` to reset the in-memory R-7
-    rate window (§13.3's own anticipated "session-scoped adapter shares one
-    window with everything else" concern, measured, WP-5, against real
-    ordinary fixture-building traffic once the C-08 upgrade moved that
-    in-band too), which means it needs a closeable handle back to the 4
-    stores this function constructs -- something `build_control_app`'s own
-    pre-round-2 shape (assemble-and-return-only-the-app) could not give it.
-    Round 1 of WP-5 duplicated this six-line assembly directly inside the
-    adapter instead (a documented deviation from calling `build_control_app`
-    itself); round 2 removes that duplication.
+    rate window, which means it needs a closeable handle back to the 4
+    stores this function constructs.
+
+    Q4 phase WP-1 rework round (design D-1(b)/D-2(e), rulings-q4-wp12-
+    rework.md sec.2): NEVER computes `audit_visibility_lag_ms`/`surfaces`
+    internally -- callers pass the fully-resolved values straight through
+    (`build_control_app` below derives both from the DB-side declarations
+    and the writer-role dual check BEFORE calling this function; the r2db
+    HTTP conformance adapter passes its own fixed constant/injected value,
+    since its own control stack deliberately never reads the DB-side
+    declaration at all, design SS3.11 point 4).
+
+    `audit`: an already-constructed `PostgresControlAuditSink`, OPTIONAL --
+    `build_control_app` constructs this sink itself, BEFORE calling this
+    function, so it can borrow a connection from that sink's own pool (login
+    role = the actual `control_audit` writer role) to run the writer-role
+    dual check ahead of constructing `service` (rework round: no `service.
+    _audit_visibility_lag_ms = ...`-style post-construction mutation any
+    longer). When omitted (every other caller, e.g. the conformance
+    adapter), this function constructs its own, exactly as before.
 
     Validates pepper separation (R-2) unconditionally -- every caller gets
     this check, not just `build_control_app`; the adapter's own two
@@ -320,12 +302,16 @@ def assemble_control_stack(
     control_credentials, audit, audit_reader)`, in the exact order each
     caller's own shutdown/rebuild logic closes them. `audit_reader` is
     `None` whenever `audit_dsn` is not given (D-5 M-4: AUDIT DSN
-    unconfigured) -- callers must guard its `close()` accordingly. Building
-    the ASGI app itself (`create_control_app(service, ...)`) is left to the
-    caller: `build_control_app` below wraps it with a real ASGI `lifespan`
-    hook; the conformance adapter does not drive ASGI lifespan at all (see
-    that adapter's own docstring) and calls `create_control_app(service)`
-    with no `lifespan` argument, closing `stores` directly instead.
+    unconfigured) -- callers must guard its `close()` accordingly; `audit_
+    visibility_lag_ms` is likewise forced to `0` in that case, regardless
+    of what the caller passed in (matching this function's own pre-Q4
+    behavior). Building the ASGI app itself (`create_control_app(service,
+    ...)`) is left to the caller: `build_control_app` below wraps it with a
+    real ASGI `lifespan` hook (shutdown-only in this rework round -- see
+    this module's own header); the conformance adapter does not drive ASGI
+    lifespan at all (see that adapter's own docstring) and calls `create_
+    control_app(service)` with no `lifespan` argument, closing `stores`
+    directly instead.
     """
     try:
         validate_control_pepper_separation(app_pepper, control_pepper)
@@ -335,18 +321,14 @@ def assemble_control_stack(
     applications = PostgresApplicationRegistry(controlplane_dsn, schema=schema, pool_size=pool_size)
     credentials = PostgresCredentialStore(controlplane_dsn, pepper=app_pepper, schema=schema, pool_size=pool_size)
     control_credentials = PostgresControlCredentialStore(controlplane_dsn, pepper=control_pepper, schema=schema, pool_size=pool_size)
-    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): the SAME two
-    # SESSION-level timeouts `r2db_api.main.build_app` sets on the
-    # `application_audit` writer connection, applied here to the
-    # `control_audit` writer connection too -- D-6's visibility-lag
-    # derivation is only valid if BOTH connections carry them; a long-held
-    # control-plane state-change transaction would otherwise let a
-    # `control_audit` row slip past an `audit_query` cursor the same way an
-    # unbounded application-plane one would (design D-6 point 4).
-    audit = PostgresControlAuditSink(
-        controlplane_dsn, schema=schema, pool_size=pool_size,
-        statement_timeout_ms=audit_statement_timeout_ms, idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
-    )
+    # Q4 phase WP-1 (design D-1(b)): no timeout kwargs -- `r2dbsvc_
+    # controlplane`'s `statement_timeout`/`idle_in_transaction_session_
+    # timeout` are now a role setting (migration `0008`), never a
+    # per-connection SESSION `SET` this constructor issues. Rework round:
+    # accepts an already-built sink from the caller (see this function's
+    # own docstring) instead of always constructing a fresh one.
+    if audit is None:
+        audit = PostgresControlAuditSink(controlplane_dsn, schema=schema, pool_size=pool_size)
 
     # Phase 4 WP-2(b) (design D-5): the `r2dbsvc_auditreader` read surface
     # -- a genuinely SEPARATE DSN/role from `controlplane_dsn` above (never
@@ -358,21 +340,16 @@ def assemble_control_stack(
     # route still exists (`control_http.py`'s own unconditional
     # registration), it just answers `CAPABILITY_UNSUPPORTED` (D-5 M-4).
     audit_reader: PostgresAuditQueryStore | None = None
-    audit_visibility_lag_ms = 0
+    effective_visibility_lag_ms = 0
     if audit_dsn:
         audit_reader = PostgresAuditQueryStore(audit_dsn, schema=schema, pool_size=audit_reader_pool_size)
-        # D-6 point 3: DERIVED, never a bare constant -- the SAME two
-        # timeouts the writer connections above (and `r2db_api.main`'s own
-        # `application_audit` writer) actually carry, plus a fixed 1s
-        # clock-skew margin. Changing either timeout changes this value.
-        statement_ms = audit_statement_timeout_ms if audit_statement_timeout_ms is not None else DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-        idle_ms = audit_idle_timeout_ms if audit_idle_timeout_ms is not None else DEFAULT_AUDIT_IDLE_TIMEOUT_MS
-        audit_visibility_lag_ms = statement_ms + idle_ms + _VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS
+        effective_visibility_lag_ms = audit_visibility_lag_ms
 
     backend = PostgresControlBackend(applications=applications, credentials=credentials, control_credentials=control_credentials)
     service = ControlPlaneService(
         backend, audit=audit, limits=limits or _DEFAULT_LIMITS,
-        audit_reader=audit_reader, audit_visibility_lag_ms=audit_visibility_lag_ms,
+        audit_reader=audit_reader, audit_visibility_lag_ms=effective_visibility_lag_ms,
+        audit_coalescing_window_ms=audit_coalescing_window_ms,
         surfaces=surfaces,
     )
     return service, (applications, credentials, control_credentials, audit, audit_reader)
@@ -381,13 +358,42 @@ def assemble_control_stack(
 def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     """Assemble the control-plane ASGI app from `env` (defaults to `os.environ`).
 
-    Factored out of a module-level `app = build_control_app()` (design §8
+    Factored out of a module-level `app = build_control_app()` (design SS8
     m-10 -- deliberately not placed in this file yet, see this module's own
     header) so this repository's own tests can exercise the full
     environment-validation and assembly logic -- including the required-env
-    and pepper-separation failure paths -- without needing a reachable
-    PostgreSQL server at all (constructing every store below is a zero-
-    network operation; see the header's note on `_RolePool`).
+    and pepper-separation failure paths -- against a real, throwaway-
+    provisioned local PostgreSQL platform database.
+
+    Q4 phase WP-1 rework round (rulings-q4-wp12-rework.md sec.2): runs the
+    DB-side declaration read (F-8/F-3/F-3c/F-4/F-4b) and the writer-role
+    dual check (F-13/F-7/F-9/F-10/F-11) SYNCHRONOUSLY, right here, in this
+    exact order, before `service` is ever constructed -- NOT deferred to
+    ASGI lifespan startup (the previous round's shape, rejected by the
+    supervisor). This mirrors `r2db_api.main.build_app`'s own startup
+    sequence (design SS3.7 control-plane 1-8):
+
+    1. required env reads;
+    2. reject the four removed env vars (F-1/F-2), whatever their value;
+    3. read `platform_declarations` (F-8/F-3/F-4/F-4b/F-5), then require
+       `surfaces.control` unconditionally (F-3c: this process, by
+       definition, always has a control surface to declare -- unlike the
+       data-plane process, whose equivalent requirement is conditional on
+       `R2DB_CONTROL_PLANE_STATUS`, F-6, `r2db_api.main`-only);
+    4. construct the `control_audit` writer sink, then run the writer-role
+       dual check on a connection BORROWED FROM THAT SINK'S OWN POOL (login
+       role = the actual writer role, design D-1(c)) -- self-role inclusion
+       (F-13) first, then this role's own catalog/effective check (F-7/
+       F-9/F-10/F-11);
+    5. read EVERY declared `audit_writer_roles` role's catalog (not only
+       this process' own) to derive `visibility_lag_ms` -- UNCONDITIONALLY
+       (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
+       検査は audit_reader の有無に依らず無条件"), regardless of whether
+       `R2DB_AUDIT_DSN` is even configured on this process;
+    6. assemble the rest of the stack via `assemble_control_stack(...)`,
+       passing the already-built audit sink and the fully-resolved
+       `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
+       constructor arguments -- never mutated onto `service` afterward.
     """
     env = env if env is not None else os.environ
 
@@ -398,7 +404,30 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # `ops.py`'s control-credential-only commands.
     app_pepper = _require(env, "R2DB_CREDENTIAL_PEPPER")
 
+    # Resolved before step 2 (not just before step 3) so F-2's own message
+    # can name the REAL configured schema (design amendment 2026-09-05,
+    # N-7) rather than this module's `DEFAULT_SCHEMA` -- zero-network, so
+    # moving it earlier changes nothing about the startup-sequence design.
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
+
+    # Step 2 (F-1/F-2): a deployer who left one of these four defined must
+    # find out immediately.
+    reject_removed_timeout_env(env, names=platform_declarations.REMOVED_TIMEOUT_ENV)
+    reject_removed_surface_env(env, names=platform_declarations.REMOVED_SURFACE_ENV, schema=schema)
+
+    # Pepper separation (R-2): validated here, BEFORE the DB-side
+    # declaration read below, so this remains a zero-network config check
+    # -- exactly where it ran pre-Q4 (inside `assemble_control_stack`,
+    # called early). `assemble_control_stack` still re-validates it too
+    # (that function's own contract: every caller gets this check, not
+    # just this one) -- redundant here, harmless, and keeps `assemble_
+    # control_stack` safe to call independently (the conformance adapter
+    # never goes through `build_control_app` at all).
+    try:
+        validate_control_pepper_separation(app_pepper, control_pepper)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
 
     limits = ControlPlaneLimits(
@@ -418,37 +447,82 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # so leaving this env var unset changes nothing (behavior-preserving).
         request_bytes=_optional_int(env, "R2DB_CONTROL_LIMIT_REQUEST_BYTES", _DEFAULT_LIMITS.request_bytes),
     )
-    # Phase 4 (design D-6/N-3): read from the SAME env-var names
-    # `r2db_api.main.build_app` reads for the `application_audit` writer
-    # connection -- both processes' composition roots agree on one naming
-    # scheme for what is, by design, one shared timeout policy.
-    # WP-2(a) fix round 2 review N-6: shared defaults with `r2db_api.main`
-    # (`credential_store.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_MS`),
-    # not an independently-maintained `5000` literal that could silently
-    # drift from the other composition root's own default.
-    audit_statement_timeout_ms = _optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
-    audit_idle_timeout_ms = _optional_int(env, "R2DB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
     # Phase 4 WP-2(b) (design D-5): the `r2dbsvc_auditreader` DSN -- OPTIONAL.
     # Unset means `audit_query` stays declared `unavailable` (D-5 M-4); the
     # route is still registered and still authenticates, answering
     # `CAPABILITY_UNSUPPORTED` for a genuinely authorized caller.
     audit_dsn = env.get("R2DB_AUDIT_DSN") or None
-    # Phase 6 WP-2 (design D-2): validated/assembled BEFORE the stores
-    # below -- a malformed/missing `R2DB_*_BASE_URL` fails startup the same
-    # "uzurusaku ochiru" way every other required-configuration check in
-    # this function already does, rather than only surfacing once a real
-    # request reaches `capabilities()`.
-    surfaces = _surfaces(env)
 
+    # Step 3 (F-8/F-3/F-3c/F-4/F-4b/F-5): the DB-side declaration read, on
+    # a short-lived, dedicated connection (never the writer sink's own
+    # pool -- that pool is reserved for step 4's login-role-specific dual
+    # check below).
+    try:
+        _decl_conn = psycopg.connect(controlplane_dsn, connect_timeout=_CONNECT_TIMEOUT_S)
+    except psycopg.Error as exc:
+        raise RuntimeError(f"could not connect to read {schema}.platform_declarations: {exc}") from exc
+    try:
+        declarations = read_platform_declarations(
+            _decl_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.MIGRATION_NUMBER,
+        )
+    finally:
+        _decl_conn.close()
+    # F-3c: unconditionally required for THIS process (unlike `r2db_api.
+    # main`'s F-6, which is conditional on `R2DB_CONTROL_PLANE_STATUS`).
+    require_control_surface_declared(declarations.surfaces, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+
+    surfaces: dict[str, Any] = {
+        "data": {"base_url": declarations.surfaces.data_base_url},
+        "control": {"base_url": declarations.surfaces.control_base_url},
+    }
+
+    # Step 4 (F-13/F-7/F-9/F-10/F-11): construct the writer sink FIRST (so
+    # its own pool exists to borrow a login-role-correct connection from),
+    # then run the dual check on a connection actually logged in as
+    # `r2dbsvc_controlplane`.
+    audit = PostgresControlAuditSink(controlplane_dsn, schema=schema, pool_size=pool_size)
+    with audit.borrow_connection() as _writer_conn:
+        own_catalog = check_writer_role_timeouts(
+            _writer_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
+            ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+
+        # Step 5: EVERY declared role's catalog, unconditionally (rework
+        # round -- no longer gated on `audit_dsn`/`audit_reader`
+        # presence). `pg_db_role_setting` is a world-readable shared
+        # catalog (design SS1.5 finding 6): this SAME connection can read
+        # any role's entry, not only its own login role's.
+        all_catalogs = [own_catalog]
+        for role in declarations.audit_writer_roles:
+            if role == own_catalog.role:
+                continue
+            all_catalogs.append(
+                read_declared_role_timeouts(
+                    _writer_conn, role, ops_module=platform_declarations.PEER_MODULE,
+                    migration=platform_declarations.MIGRATION_NUMBER,
+                )
+            )
+        visibility_lag_ms = derive_visibility_lag_ms(all_catalogs)
+
+    # Step 6: assemble the rest of the stack -- `surfaces`/`audit_
+    # visibility_lag_ms`/`audit_coalescing_window_ms` are already fully
+    # resolved constructor arguments; `assemble_control_stack` never
+    # mutates `service`'s fields after construction, and neither does this
+    # function.
     service, (applications, credentials, control_credentials, audit, audit_reader) = assemble_control_stack(
         controlplane_dsn=controlplane_dsn, app_pepper=app_pepper, control_pepper=control_pepper,
         schema=schema, pool_size=pool_size, limits=limits,
-        audit_statement_timeout_ms=audit_statement_timeout_ms, audit_idle_timeout_ms=audit_idle_timeout_ms,
-        audit_dsn=audit_dsn, surfaces=surfaces,
+        audit_dsn=audit_dsn, audit=audit,
+        surfaces=surfaces, audit_visibility_lag_ms=visibility_lag_ms,
+        audit_coalescing_window_ms=declarations.audit_coalescing_window_ms,
     )
 
     @asynccontextmanager
     async def _lifespan(_app: Any):
+        # Rework round: shutdown-only. Every startup-time DB check now
+        # runs synchronously above, inside `build_control_app` itself, so
+        # this lifespan hook has nothing left to do before `yield`.
         try:
             yield
         finally:
@@ -468,8 +542,46 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     return create_control_app(service, lifespan=_lifespan)
 
 
-# Design §8 m-10, WP-5 flip: the literal uvicorn/systemd entry point,
+# Design SS8 m-10, WP-5 flip: the literal uvicorn/systemd entry point,
 # `python -m uvicorn r2db_api.control_main:app` (or any ASGI server pointed
 # at this module) -- landed in the same single commit that flips
-# `main.py`'s `control_plane` declaration (design §5's single-commit rule).
-app = build_control_app()
+# `main.py`'s `control_plane` declaration (design SS5's single-commit rule).
+#
+# Rework round, in-session implementer judgment call (report this as a
+# deviation for supervisor review, not a silent choice): `app` is built
+# LAZILY, via a PEP 562 module-level `__getattr__`, rather than by a plain
+# eager `app = build_control_app()` assignment. This is now REQUIRED
+# because `build_control_app()` is no longer zero-network (design SS3.7's
+# own startup-sequence checks now run synchronously inside it, per this
+# module's own header) -- an eager assignment would mean MERELY IMPORTING
+# this module (e.g. `from r2db_api.control_main import assemble_control_
+# stack`, which this repository's own `tests/test_audit_query.py` and
+# `conformance/conformance_adapter_r2db_http.py` both do at THEIR OWN
+# module level, with placeholder env values that -- by both files' own
+# existing comments -- were only ever meant to satisfy this previously
+# zero-network construction) attempts a real PostgreSQL connection using
+# whatever `os.environ` happens to hold at import time. A REAL deployment
+# is unaffected: `uvicorn r2db_api.control_main:app` accesses `.app`
+# immediately after import, exactly as before -- this changes nothing
+# about when a real deployment's `app` is built or when a bad env is
+# discovered, and a second access after the first returns the SAME
+# already-built object (cached into this module's own namespace on first
+# access, below), not a freshly rebuilt one.
+# `importlib.reload()` re-executes this module's top-level code against
+# its EXISTING namespace dict -- it does NOT clear an attribute that was
+# only ever set at RUNTIME (by `__getattr__` below caching into
+# `globals()`), since nothing in the top-level source assigns `app`
+# directly any longer. Without this explicit `pop`, a test suite that
+# reloads this module with a NEW environment after some earlier test
+# already triggered a successful `.app` access would silently keep
+# serving the OLD, stale app object -- this line is what makes a reload
+# behave like a fresh import for this one lazily-cached attribute.
+globals().pop("app", None)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        value = build_control_app()
+        globals()["app"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

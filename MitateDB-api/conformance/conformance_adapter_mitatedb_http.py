@@ -98,9 +98,7 @@ from adapter import (  # noqa: E402
     resolve_valid_confirmation,
 )
 
-from mitatedb_api.application_audit import (DEFAULT_AUDIT_IDLE_TIMEOUT_MS,  # noqa: E402
-                                             DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
-                                             PostgresApplicationAuditSink)
+from mitatedb_api.application_audit import PostgresApplicationAuditSink  # noqa: E402
 from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
@@ -252,6 +250,16 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         # auditreader role -- `_run_psql` below runs this AFTER 0002,
         # exactly the order the file's own header requires.
         "0005_application_audit.sql",
+        # Q4 phase (design D-1/D-2, work order §4 WP-2 変更対象 D):
+        # platform declarations table + the two service writer roles'
+        # timeout role settings -- THIS adapter's own `build_control_
+        # service(control_env)` call (design §6.1 α, §1.5 finding 10)
+        # goes through the composition root's real startup path, so the
+        # declarations table's own read is load-bearing here (unlike
+        # r2db-api's HTTP plug, which injects `surfaces` directly).
+        # Without this migration applied + a `surfaces` row seeded below,
+        # `build_control_service` fails F-8/F-3 at construction time.
+        "0007_platform_declarations.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -272,6 +280,32 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     # (`WHO RUNS THIS: mitatedbsvc_provision`, migration 0005's own
     # header) -- runs as the SAME `provision_dsn` 0002 already ran as.
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+    # Q4 phase: platform declarations + writer-role timeouts -- only
+    # depends on 0002's two roles, run here (before the password-ALTER
+    # block below, order-independent either way).
+    _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+    # `surfaces` (D-2(c)): BOTH `data`/`control` -- this adapter's own
+    # `build_control_service` call requires `control` unconditionally
+    # (design §3.7: "control プロセスは自らの control surface を必ず持
+    # つ"), and its data-plane `FoundationConfig` construction below uses
+    # the SAME `_DATA_SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL`
+    # constants as the value SOURCE this row's own values are seeded
+    # from -- keeping both origins textually visible at this one seed
+    # site, rather than only inside a composition-root env var.
+    surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
+    try:
+        with surfaces_conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', {value})").format(
+                    table=sql.Identifier(schema, "platform_declarations"),
+                    value=sql.Literal(
+                        '{"data":{"base_url":"' + _DATA_SURFACE_BASE_URL + '"},'
+                        '"control":{"base_url":"' + _CONTROL_SURFACE_BASE_URL + '"}}'
+                    ),
+                ),
+            )
+    finally:
+        surfaces_conn.close()
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
@@ -616,20 +650,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # it. `pool.BoundedConnectionPool` remains genuinely used and
             # exercised by `main.py`'s own composition root, where the
             # concurrency it is actually for exists.
-            # Phase 4 WP-3(b) (design D-1/D-6, work order "http adapter は
-            # migration 0005 を bootstrap、application 側書き手にも timeout
-            # 指定"): a real Postgres `application_audit` writer -- the SAME
+            # Q4 phase (design D-1(b), work order §4 WP-2 変更対象 D): a
+            # real Postgres `application_audit` writer -- the SAME
             # `<prefix>svc_api` role/DSN `self._read_store` above already
             # connects with (migration 0005 grants it INSERT-only on this
-            # table). Carries the SAME two SESSION-level timeouts the real
-            # composition root (`main.build_app`) sets on this exact writer
-            # connection -- without them, `visibility_lag_ms` (the control
-            # side, below) would declare a lag this adapter's own writer
-            # transactions have no relationship to.
+            # table). No longer carries ANY timeout constructor argument
+            # (the former per-connection `SET SESSION` this class used is
+            # REMOVED product code) -- the two writer timeouts now come
+            # from `<prefix>svc_api`'s own PostgreSQL role setting
+            # (`_bootstrap_platform`'s own `0007_platform_declarations.
+            # sql` run, the SAME shipped 5000ms/5000ms default `main.
+            # build_app` relies on), applied automatically at login.
             self._application_durable_audit = PostgresApplicationAuditSink(
                 self._platform.api_dsn, schema=self._platform.schema,
-                statement_timeout_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
-                idle_in_transaction_session_timeout_ms=DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
             )
             self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
 
@@ -691,21 +724,26 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 "MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT": "5",
                 "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT": "200",
                 # Phase 4 WP-3(b) (design D-5): the real `<prefix>svc_
-                # auditreader` DSN -- `visibility_lag_ms` is derived (D-6
-                # point 3) from the two writer-connection timeout defaults
-                # `build_control_service` itself falls back to (neither is
-                # overridden here, same as the real composition root's own
-                # defaults -- matching the explicit `statement_timeout_ms`/
-                # `idle_in_transaction_session_timeout_ms` passed to
-                # `PostgresApplicationAuditSink` above, both DEFAULT_*).
+                # auditreader` DSN -- `visibility_lag_ms` is now DERIVED
+                # by `build_control_service` from `pg_db_role_setting`
+                # (design D-1(c), `platform_declarations.derive_
+                # visibility_lag_ms`) -- the SAME shipped 5000ms/5000ms
+                # role-level default `_bootstrap_platform`'s own `0007`
+                # run seeds, matching `self._application_durable_audit`'s
+                # own (now argument-free) writer connection above.
                 "MITATEDB_AUDIT_DSN": self._platform.auditreader_dsn,
-                # Phase 6 WP-3 (design D-2): both required from here on
-                # (`control_composition.build_control_service`). This is
-                # one of the two HTTP plugs (design §6.2 (2)(iii)) -- the
-                # SAME `BASE_URL` this adapter's own `self._client`/
-                # `self._control_client` are built against, below.
-                "MITATEDB_DATA_BASE_URL": _DATA_SURFACE_BASE_URL,
-                "MITATEDB_CONTROL_BASE_URL": _CONTROL_SURFACE_BASE_URL,
+                # Q4 phase (design D-2, work order §4 WP-2 変更対象 D):
+                # `MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are
+                # REMOVED env vars (F-2) -- `surfaces` now comes from
+                # `<registry>.platform_declarations`, seeded by
+                # `_bootstrap_platform` above with the SAME `_DATA_
+                # SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL` values
+                # this control_env dict used to pass directly. This is
+                # the load-bearing half of design §6.1 α / §1.5 finding
+                # 10: `build_control_service` is a REAL composition root
+                # call, so the declarations table's own read matters here
+                # (unlike r2db-api's HTTP plug, which injects `surfaces`
+                # directly and never exercises this read at all).
             }
             # Port v1.10 addendum A: kept on the instance (not just this
             # local `control_env`) so `isolated_control_surface()` can

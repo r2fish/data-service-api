@@ -148,6 +148,12 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
     prefix = f"r2dbtest{secrets.token_hex(4)}"
     control_role = f"{prefix}_control"
     api_role = f"{prefix}_api"
+    # Q4 phase WP-1 rework (D-2(h) point 1): migration `0008` now takes
+    # `-v api_role=... -v controlplane_role=...` -- this fixture never
+    # otherwise needed a `controlplane_role` local (this file's own tests
+    # never authenticate AS that role), so it is introduced here solely to
+    # feed the migration invocation below.
+    controlplane_role = f"{prefix}_controlplane"
     platform_db = f"{prefix}_platform"
     schema = f"{prefix}_registry"
     control_password = secrets.token_urlsafe(24)
@@ -170,6 +176,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
+        "0008_platform_declarations_and_writer_timeouts.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = rewritten_dir / name
@@ -190,6 +197,22 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # (and the `auditreader` role) to exist, exactly as it already
         # needed `0006`'s `control_audit`/`r2dbsvc_controlplane`.
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        # Q4 phase WP-1 (design D-1/D-2): platform single-shot migration --
+        # ALTER ROLE writer-timeout role settings + the platform_
+        # declarations table (seeds only audit_coalescing_window_ms; see
+        # this file's own `_DEFAULT_SURFACES_VALUE`/`_set_surfaces_row`
+        # below for the `surfaces` row every fixture in this file needs).
+        _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        with psycopg.connect(control_dsn) as _seed_conn:
+            with _seed_conn.cursor() as _seed_cur:
+                _seed_cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            _seed_conn.commit()
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -1344,6 +1367,33 @@ def provisioned_app(platform: types.SimpleNamespace) -> Iterator[types.SimpleNam
         deprovision_app(platform, "mainroot")
 
 
+# Q4 phase WP-1 (design D-2(c)): `surfaces` is now a DB-side declaration
+# (`<registry>.platform_declarations`), never an env var -- this is the
+# SAME default value `_main_env` used to inject via `R2DB_DATA_BASE_URL`
+# before this phase, seeded once by the `platform` fixture (module-scoped,
+# shared by every test below) and left WITHOUT a `control` key (matching
+# `R2DB_CONTROL_PLANE_STATUS` defaulting `unavailable`, F-6). The one test
+# that needs `control_plane_status=enabled`
+# (`test_build_app_control_plane_status_enabled_is_declared`) adds it via
+# `_set_surfaces_row` and restores this default afterward (`finally`) --
+# this row is shared, module-scoped state, unlike the pre-Q4 per-test env
+# var it replaces.
+_DEFAULT_SURFACES_VALUE = {"data": {"base_url": "https://r2db-main-test.example.invalid/v1"}}
+
+
+def _set_surfaces_row(platform: types.SimpleNamespace, value: dict) -> None:
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps(value)],
+            )
+        conn.commit()
+
+
 def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> dict[str, str]:
     return {
         "R2DB_CREDENTIAL_PEPPER": PEPPER,
@@ -1352,11 +1402,10 @@ def _main_env(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> di
         "R2DB_SERVE_APPS": app.slug,
         f"R2DB_APP_{app.slug.upper()}_RUNTIME_DSN": app.runtime_dsn,
         f"R2DB_APP_{app.slug.upper()}_DEVELOPER_DSN": app.developer_dsn,
-        # Phase 6 WP-2 (design D-2): unconditionally required now
-        # (`surfaces.data` is a 1.6.0 unconditional obligation);
-        # `R2DB_CONTROL_BASE_URL` stays unset here since these fixtures
-        # never set `R2DB_CONTROL_PLANE_STATUS` (defaults `unavailable`).
-        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
+        # Q4 phase WP-1 (design D-2(f)): `R2DB_DATA_BASE_URL`/`R2DB_
+        # CONTROL_BASE_URL` are REMOVED -- surfaces now come from the
+        # `platform` fixture's own seeded `platform_declarations` row (see
+        # `_DEFAULT_SURFACES_VALUE` above), never from this env dict.
     }
 
 
@@ -1479,7 +1528,6 @@ def test_build_app_missing_per_app_dsn_raises(platform: types.SimpleNamespace, m
         "R2DB_PLATFORM_DSN": platform.api_dsn,
         "R2DB_PLATFORM_SCHEMA": platform.schema,
         "R2DB_SERVE_APPS": slug,
-        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match=f"R2DB_APP_{slug.upper()}_RUNTIME_DSN"):
         main_module.build_app(env=env)
@@ -1494,7 +1542,6 @@ def test_build_app_unregistered_slug_raises(platform: types.SimpleNamespace, mai
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
-        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="not registered"):
         main_module.build_app(env=env)
@@ -1510,7 +1557,6 @@ def test_build_app_disabled_slug_raises(platform: types.SimpleNamespace, main_mo
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
-        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="disabled"):
         main_module.build_app(env=env)
@@ -1531,7 +1577,6 @@ def test_build_app_registered_only_slug_raises(platform: types.SimpleNamespace, 
         "R2DB_SERVE_APPS": slug,
         f"R2DB_APP_{slug.upper()}_RUNTIME_DSN": "irrelevant",
         f"R2DB_APP_{slug.upper()}_DEVELOPER_DSN": "irrelevant",
-        "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
     }
     with pytest.raises(RuntimeError, match="not yet provisioned"):
         main_module.build_app(env=env)
@@ -1627,17 +1672,25 @@ def test_build_app_control_plane_status_enabled_is_declared(
 
     env = _main_env(platform, provisioned_app)
     env["R2DB_CONTROL_PLANE_STATUS"] = "enabled"
-    # `R2DB_CONTROL_BASE_URL` becomes required the instant control_plane_
-    # status is anything other than `unavailable` (D-2's conditional-
-    # omission rule) -- `_main_env` deliberately never sets it (it never
-    # sets `R2DB_CONTROL_PLANE_STATUS` either), so this test, which flips
-    # the status to `enabled` itself, must also supply it here.
-    env["R2DB_CONTROL_BASE_URL"] = "https://r2db-control-test.example.invalid/control/v1"
-    asgi_app = main_module.build_app(env=env)
-    with TestClient(asgi_app) as client:
-        response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {compose_bearer_locator(credential_id, 's3cret-enabled-status')}"})
-        assert response.status_code == 200
-        assert response.json()["capabilities"]["control_plane"] == {"status": "enabled"}
+    # Q4 phase WP-1 (design D-2(f)/F-6): `surfaces.control`'s presence is
+    # now the SAME shared, DB-side `platform_declarations` row every
+    # process reads (never a per-call env override) -- this test flips the
+    # status to `enabled` itself, so it must also add `control` to that
+    # row, and restore the module-scoped `platform` fixture's default
+    # (control-less) row afterward, since later tests in this module share
+    # the same fixture instance.
+    _set_surfaces_row(platform, {
+        "data": {"base_url": "https://r2db-main-test.example.invalid/v1"},
+        "control": {"base_url": "https://r2db-control-test.example.invalid/control/v1"},
+    })
+    try:
+        asgi_app = main_module.build_app(env=env)
+        with TestClient(asgi_app) as client:
+            response = client.get("/v1/capabilities", headers={"authorization": f"Bearer {compose_bearer_locator(credential_id, 's3cret-enabled-status')}"})
+            assert response.status_code == 200
+            assert response.json()["capabilities"]["control_plane"] == {"status": "enabled"}
+    finally:
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
 
 
 def test_import_r2db_api_main_module_succeeds_with_valid_environment(

@@ -1,0 +1,267 @@
+# Common-evidence CI for the Data Service API contract's two peer
+# implementations (r2db-api, MitateDB-api).
+#
+# Design: docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md
+# D-3. Work order: docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_
+# PUBLICATION_V1.md WP-2.
+#
+# Python matrix (requester ruling 2026-09-05, design section 6 (alpha)):
+# 3.11 and 3.12 are BOTH required -- 3.11 is the recording environment for
+# the authoritative pass/failed/skipped/xfailed tally (it also matches
+# MitateDB's container base image, python:3.11-slim); 3.12 matches r2db's
+# VPS runtime. Neither job carries `continue-on-error`, so a failure in
+# either one fails the workflow. The `tally-consistency` job below is the
+# mechanism that makes the 3.12 job additionally guarantee it reproduced
+# the SAME tally as 3.11 -- the 3.11 job's tally remains the one
+# authoritative record (also documented in conformance-tests/README.md).
+#
+# PostgreSQL 16 is started with a dedicated `docker run` step, not a
+# `services:` container: `services.<id>` only accepts `image` / `credentials`
+# / `env` / `ports` / `volumes` / `options` -- there is no key that passes
+# command-line arguments to the container's entrypoint, so `max_connections`
+# would stay at Postgres's default of 100 and the gate's `-n 5` concurrent
+# adapters would exhaust connections. `docker run` passes `-c
+# max_connections=300` directly as a command argument to `postgres:16`.
+name: CI
+
+# Least-privilege default token scope (no job needs to write anything).
+permissions:
+  contents: read
+
+# One concurrent run per branch/ref: a new push cancels whatever is
+# already running for the same ref instead of racing it for the shared
+# real-PostgreSQL completion gate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Trigger is supervisor ruling 2026-09-05: `push` on every branch only.
+# `pull_request` is deliberately not a trigger -- this is a single-worker
+# repository with no PR workflow, and the supervisor measures mutations by
+# pushing to a branch directly; keeping `pull_request` would double-run
+# the same commit for no reader.
+"on":
+  push:
+  workflow_dispatch:
+
+# Real values are never written to this file. The PostgreSQL password below
+# is a synthetic, CI-local, ephemeral value for a container that lives only
+# for the duration of one job run -- not a credential of any real system.
+# It is duplicated (rather than composed via an expression) into the two
+# DSN variables below because the `env` context cannot reliably reference
+# a sibling key defined in the same `env:` mapping.
+env:
+  CI_SYNTHETIC_PG_PASSWORD: "ci-only-ephemeral-not-a-real-secret"
+  # Both variables default to a unix-socket DSN (host=/tmp) when unset,
+  # which does not reach a server published on a loopback TCP port --
+  # both must be overridden here (design D-3; conformance-tests/
+  # README.md "Running against real PostgreSQL").
+  R2DB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
+  MITATEDB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
+
+jobs:
+  conformance:
+    name: conformance (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: "Start PostgreSQL 16 (docker run, not services: -- see file header)"
+        run: |
+          docker run -d --name pg16 \
+            -e POSTGRES_PASSWORD="$CI_SYNTHETIC_PG_PASSWORD" \
+            -p 127.0.0.1:5432:5432 \
+            postgres:16 -c max_connections=300
+
+      - name: Wait for PostgreSQL to accept connections
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec pg16 pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then
+              echo "PostgreSQL is ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL did not become ready within 60s" >&2
+          docker logs pg16 || true
+          exit 1
+
+      - name: Install PostgreSQL client (both adapters shell out to psql)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install (exact-pinned via constraints.txt)
+        run: pip install -c constraints.txt -e ./r2db-api[test] -e ./MitateDB-api[test]
+
+      - name: Run the common conformance gate
+        run: |
+          set -o pipefail
+          python -m pytest -q -n 5 --dist loadgroup 2>&1 | tee pytest-output.log
+
+      - name: Extract pass/fail/skip/xfail tally
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          text = pathlib.Path("pytest-output.log").read_text()
+          # Candidate lines are pytest's own tally categories -- passed/
+          # failed/skipped/xfailed/error(s) -- not just passed/failed/error.
+          # A run that is entirely skipped or xfailed (0 passed, 0 failed)
+          # produces a summary line with none of "passed"/"failed"/"error"
+          # in it (e.g. "5 skipped, 2 xfailed in 1.20s"); the previous
+          # narrower filter missed that line entirely.
+          candidates = [
+              line
+              for line in text.splitlines()
+              if re.search(r"\b(passed|failed|skipped|xfailed|errors?)\b", line)
+          ]
+
+          if not candidates:
+              print(
+                  "ERROR: no candidate pytest summary line found in "
+                  "pytest-output.log (no line contains passed/failed/"
+                  "skipped/xfailed/error(s))",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          summary = candidates[-1]
+
+          # A real pytest tally line always ends with "in <N>[.<N>]s". If
+          # the last matching line does not have that shape, it is not
+          # actually pytest's summary line (e.g. a stray log line that
+          # happens to contain one of the words above) -- fail loudly
+          # instead of silently writing an all-zero tally.
+          if not re.search(r"\bin\s+\d+(?:\.\d+)?s\b", summary):
+              print(
+                  "ERROR: extracted line does not look like a pytest "
+                  f"summary line (missing 'in <N>s'): {summary!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          def count(word: str) -> str:
+              m = re.search(r"(\d+)\s+" + word, summary)
+              return m.group(1) if m else "0"
+
+          # This tally schema has no "errors" field (collection/fixture
+          # errors are a different outcome from failed tests). Rather than
+          # silently reporting an all-zero passed/failed/skipped/xfailed
+          # tally while dropping evidence of errors on the floor, fail
+          # loudly when the summary line reports any.
+          error_count = count("errors?")
+          if error_count != "0":
+              print(
+                  f"ERROR: pytest summary reports {error_count} error(s), "
+                  "which this tally schema does not track -- failing "
+                  f"instead of silently dropping them: {summary!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          tally = {
+              "passed": count("passed"),
+              "failed": count("failed"),
+              "skipped": count("skipped"),
+              "xfailed": count("xfailed"),
+              "summary_line": summary,
+          }
+          pathlib.Path("pytest-tally.json").write_text(json.dumps(tally, indent=2))
+          print(json.dumps(tally, indent=2))
+          PYEOF
+
+      - name: Write job summary (passed / failed / skipped / xfailed)
+        if: always()
+        run: |
+          {
+            echo "### Conformance gate tally -- Python ${{ matrix.python-version }}"
+            echo ""
+            if [ -f pytest-tally.json ]; then
+              echo '```json'
+              cat pytest-tally.json
+              echo '```'
+            else
+              echo "gate failed before a tally was written"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Upload tally artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-tally-${{ matrix.python-version }}
+          path: pytest-tally.json
+
+  tally-consistency:
+    # The 3.11 job's tally is the authoritative record of the completion
+    # gate (design section 6 (alpha)). This job's only purpose is to make
+    # the 3.12 job's "required" status additionally depend on reproducing
+    # that exact tally -- a mismatch fails this job, which is required.
+    name: 3.11 tally is authoritative -- 3.12 must reproduce it
+    needs: conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pytest-tally-3.11
+          path: tally-3.11
+      - uses: actions/download-artifact@v4
+        with:
+          name: pytest-tally-3.12
+          path: tally-3.12
+      - name: Compare the 3.11 (authoritative) and 3.12 tallies
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import sys
+
+          authoritative = json.load(open("tally-3.11/pytest-tally.json"))
+          reproduced = json.load(open("tally-3.12/pytest-tally.json"))
+          keys = ("passed", "failed", "skipped", "xfailed")
+          mismatch = {
+              k: {"3.11": authoritative[k], "3.12": reproduced[k]}
+              for k in keys
+              if authoritative[k] != reproduced[k]
+          }
+          if mismatch:
+              print("3.11 (authoritative) vs 3.12 tally mismatch:", mismatch)
+              sys.exit(1)
+          print("3.11 and 3.12 tallies match:", {k: authoritative[k] for k in keys})
+          PYEOF
+
+  scanner:
+    name: public-value scan (tree mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run the public-value scanner (WP-1 CLI; no external dependency)
+        run: python3 tools/public_value_scan.py
+
+  deploy-assets-lint:
+    # This job's frame (name, dependency install, single call into WP-3's
+    # own lint script) was placed by WP-2; the lint script itself
+    # (`r2db-api/deploy/scripts/lint_deploy_assets.sh`) and the assets it
+    # lints are WP-3's own, now merged to main and used here unmodified.
+    name: deploy assets lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nginx and systemd tooling
+        run: sudo apt-get update && sudo apt-get install -y nginx
+      - name: Lint r2db-api deploy assets (WP-3 script)
+        run: bash r2db-api/deploy/scripts/lint_deploy_assets.sh --require-tools

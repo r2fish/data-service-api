@@ -21,6 +21,7 @@ territory and are not exercised here.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -38,6 +39,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from starlette.testclient import TestClient
 
 from r2db_api.audit import ApplicationAuditSink, AuditEvent
 from r2db_api.audit_hook import ApplicationAuditHook
@@ -62,7 +64,14 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    "0008_platform_declarations_and_writer_timeouts.sql",
 )
+
+# Q4 phase WP-1 (design D-2(c)): the default `surfaces` row this file's own
+# `platform` fixture seeds -- `r2db_api.main.build_app`/`r2db_api.control_
+# main`'s startup now requires a `surfaces` row to exist (F-3) even for
+# tests whose whole point is the WRITER-TIMEOUT double-check, not surfaces.
+_DEFAULT_SURFACES_VALUE = {"data": {"base_url": "https://r2db-application-audit-test.example.invalid/v1"}}
 
 
 # ===========================================================================
@@ -174,6 +183,17 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        with psycopg.connect(control_dsn) as _seed_conn:
+            with _seed_conn.cursor() as _seed_cur:
+                _seed_cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            _seed_conn.commit()
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -396,6 +416,67 @@ def test_migration_0007_applied_for_the_first_time_changes_no_0001_through_0006_
         _sweep_prefix(admin_dsn, prefix)
 
 
+def test_build_app_refuses_to_start_when_migration_0008_has_not_been_applied(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """SS4(g)/completion condition 9's non-vacuity requirement (work
+    order): a REAL platform database that has never had migration `0008`
+    applied at all (0001/0002/0005/0006/0007 only -- the exact pre-Q4
+    shape every already-deployed instance has) must refuse to start
+    (F-8: `platform_declarations` itself does not exist) rather than
+    surface a raw psycopg exception or, worse, silently start unbounded.
+    Provisions its own fully independent, throwaway instance -- mirrors
+    `test_migration_0007_applied_for_the_first_time_changes_no_0001_
+    through_0006_grant`'s own bootstrap pattern immediately above."""
+    _require_admin_connection()
+    admin_dsn = _admin_dsn()
+    prefix = f"r2dbtestf8{secrets.token_hex(4)}"
+    control_role = f"{prefix}_control"
+    api_role = f"{prefix}_api"
+    platform_db = f"{prefix}_platform"
+    schema = f"{prefix}_registry"
+    control_password = secrets.token_urlsafe(24)
+    api_password = secrets.token_urlsafe(24)
+    controlplane_password = secrets.token_urlsafe(24)
+    auditreader_password = secrets.token_urlsafe(24)
+
+    rewritten_dir = tmp_path_factory.mktemp("r2db_f8_migrations")
+    rewritten: dict[str, Path] = {}
+    for name in ("0001_bootstrap_control_plane.sql", "0002_provisioning_functions.sql", "0005_credential_store.sql", "0006_control_plane_http.sql", "0007_application_audit.sql"):
+        text_ = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
+        out = rewritten_dir / name
+        out.write_text(text_)
+        rewritten[name] = out
+
+    try:
+        _run_psql(admin_dsn, rewritten["0001_bootstrap_control_plane.sql"], {"control_password": control_password})
+        control_dsn = _dsn_with(admin_dsn, user=control_role, password=control_password, dbname=platform_db)
+        _run_psql(control_dsn, rewritten["0002_provisioning_functions.sql"])
+        _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
+        _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
+        _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        # Deliberately NEVER applies 0008.
+
+        # `R2DB_SERVE_APPS`'s own registry validation (`_load_registry_
+        # rows`) runs BEFORE the platform_declarations read inside `build_
+        # app` (design SS3.7 step 3 precedes step 4) -- provisioning a real
+        # SERVABLE application here (0003/0004) purely to reach step 4
+        # would be a large, unrelated detour for this one condition, so
+        # this exercises `read_platform_declarations` directly instead:
+        # the SAME function `build_app`'s own step 4 calls (proven called
+        # from that real startup path by every other real-PG test in this
+        # file/`test_ops_declarations.py`), against a genuinely NEVER-
+        # migrated-0008 instance (complementary to `test_ops_declarations.
+        # py::test_f8_message_is_pinned_verbatim_and_not_a_raw_psycopg_
+        # exception`'s "created, then dropped" variant).
+        api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
+        from r2db_api.platform_declarations import MIGRATION_NUMBER, PEER_MODULE, PlatformDeclarationError, read_platform_declarations
+
+        with psycopg.connect(api_dsn) as conn:
+            with pytest.raises(PlatformDeclarationError, match="migration 0008"):
+                read_platform_declarations(conn, schema=schema, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
+    finally:
+        _sweep_prefix(admin_dsn, prefix)
+
+
 # ===========================================================================
 # Section 2: GRANT-realized tests (work order completion conditions 3,
 # design §9.2 property 2) -- raw connections, no facade in between.
@@ -495,45 +576,91 @@ def _show(conn: "psycopg.Connection[Any]", setting: str) -> str:
         return cur.fetchone()[0]
 
 
-def test_audit_write_connections_have_statement_and_idle_in_transaction_timeouts_set(platform: types.SimpleNamespace) -> None:
-    app_sink = real_durable_sink(platform, statement_timeout_ms=1234, idle_in_transaction_session_timeout_ms=4321)
+def test_audit_write_connections_effective_timeouts_come_from_the_role_setting(platform: types.SimpleNamespace) -> None:
+    """Q4 phase WP-1 (design D-1(b)): `PostgresApplicationAuditSink`/
+    `PostgresControlAuditSink` no longer accept OR issue a per-connection
+    SESSION `SET` for either timeout at all (design D-1(b): "書き手プロセス
+    は接続時のセッションSETをやめ") -- migration `0008` (applied by this
+    file's own `platform` fixture) is now the ONLY mechanism governing the
+    effective value, via `ALTER ROLE ... SET`. This observes that
+    property directly, end to end: (a) with 0008's own shipped default
+    (5000ms/5000ms) untouched, both writer connections' EFFECTIVE
+    `pg_settings` value (`effective_timeouts_ms()`, design D-1(b)(ii)) is
+    5000/5000; (b) after `ALTER ROLE ... SET`-ing a DIFFERENT value on each
+    role directly (mirroring what `ops set-platform-timeouts` does), a
+    FRESH sink's fresh connection reflects the NEW value -- proving this
+    is genuinely role-setting-derived, never a value cached anywhere in
+    this test's own process or set by either sink class itself."""
+    app_sink = real_durable_sink(platform)
     try:
-        with app_sink._pool.connection() as conn:
-            assert _show(conn, "statement_timeout") == "1234ms"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "4321ms"
+        assert app_sink.effective_timeouts_ms() == {"statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000}
     finally:
         app_sink.close()
 
-    control_sink = PostgresControlAuditSink(
-        platform.controlplane_dsn, schema=platform.schema, pool_size=2,
-        statement_timeout_ms=2345, idle_in_transaction_session_timeout_ms=5432,
-    )
+    control_sink = PostgresControlAuditSink(platform.controlplane_dsn, schema=platform.schema, pool_size=2)
     try:
-        with control_sink._pool.connection() as conn:
-            assert _show(conn, "statement_timeout") == "2345ms"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "5432ms"
+        assert control_sink.effective_timeouts_ms() == {"statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000}
     finally:
         control_sink.close()
 
+    api_role = sql.Identifier(platform.api_role)
+    controlplane_role = sql.Identifier(platform.controlplane_role)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '1234ms'").format(api_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '4321ms'").format(api_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '2345ms'").format(controlplane_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5432ms'").format(controlplane_role))
+        conn.commit()
+    try:
+        app_sink2 = real_durable_sink(platform)
+        try:
+            assert app_sink2.effective_timeouts_ms() == {"statement_timeout": 1234, "idle_in_transaction_session_timeout": 4321}
+        finally:
+            app_sink2.close()
 
-def test_audit_sink_without_configured_timeouts_leaves_server_defaults_untouched(platform: types.SimpleNamespace) -> None:
-    """Regression guard: `_RolePool`'s new timeout parameters must be
-    opt-in (`None` = do not touch either setting) -- every OTHER `_RolePool`
-    consumer (ordinary application data-plane pools) must not silently
-    acquire a timeout policy as a side effect of this WP."""
+        control_sink2 = PostgresControlAuditSink(platform.controlplane_dsn, schema=platform.schema, pool_size=2)
+        try:
+            assert control_sink2.effective_timeouts_ms() == {"statement_timeout": 2345, "idle_in_transaction_session_timeout": 5432}
+        finally:
+            control_sink2.close()
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(api_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(api_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(controlplane_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(controlplane_role))
+            conn.commit()
+
+
+def test_audit_sink_never_issues_a_session_set_regardless_of_the_role_setting(platform: types.SimpleNamespace) -> None:
+    """Q4 phase WP-1 (design D-1(b)) regression guard: `_RolePool` no
+    longer HAS a timeout parameter at all (removed, not merely opt-in) --
+    a connection this class opens carries whatever the LOGIN ROLE's own
+    `pg_db_role_setting` declares (5000ms/5000ms, migration 0008's default,
+    applied by this file's own `platform` fixture), never a value this
+    class itself sets. Distinguishable from a coincidence: a bare `SHOW`
+    on an UNRELATED role (this test's own admin connection, which is
+    neither `r2dbsvc_api` nor `r2dbsvc_controlplane` and so carries NO
+    role-setting override) shows the untouched cluster default, which this
+    assertion confirms differs from 5000ms/5000ms in this test environment
+    -- so `real_durable_sink`'s own 5000ms/5000ms reading is verifiably the
+    ROLE setting, not merely "whatever the cluster default happens to be
+    too"."""
+    with psycopg.connect(platform.admin_dsn) as admin:
+        with admin.cursor() as cur:
+            cur.execute("SHOW statement_timeout")
+            cluster_default = cur.fetchone()[0]
+    assert cluster_default != "5000ms" and cluster_default != "5s", (
+        "test environment's own cluster-wide default statement_timeout coincidentally equals the role setting "
+        "this test means to distinguish it from -- adjust postgresql.conf or this assertion"
+    )
+
     sink = real_durable_sink(platform)
     try:
-        with sink._pool.connection() as conn:
-            # The server's own compiled-in default is "0" (disabled) unless
-            # an operator's `postgresql.conf` overrides it -- this assertion
-            # is about THIS CODE not issuing a `SET SESSION` at all, not
-            # about what the value happens to be, so it checks the actual
-            # cluster default rather than assuming "0".
-            with psycopg.connect(platform.admin_dsn) as admin:
-                with admin.cursor() as cur:
-                    cur.execute("SHOW statement_timeout")
-                    cluster_default = cur.fetchone()[0]
-            assert _show(conn, "statement_timeout") == cluster_default
+        effective = sink.effective_timeouts_ms()
+        assert effective == {"statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000}
     finally:
         sink.close()
 
@@ -560,129 +687,390 @@ def _reload_module_with_env(module_name: str, env: dict[str, str], monkeypatch: 
     return importlib.import_module(module_name)
 
 
-def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_connection(
+def test_build_app_double_check_reflects_the_real_role_setting_not_a_cached_default(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """WP-2(a) review M-1 (major): a prior revision had no test exercising
-    the actual `main.py`/`control_main.py` composition-root WIRING of the
-    two writer-connection timeouts -- `test_audit_write_connections_have_
-    statement_and_idle_in_transaction_timeouts_set` (above) constructs
-    `PostgresApplicationAuditSink`/`PostgresControlAuditSink` directly with
-    explicit values, which only proves `_RolePool`'s own `SET SESSION`
-    mechanism works, never that `build_app`/`build_control_app` actually
-    read the env vars and pass them through (removing that wiring left
-    `r2db-api/tests` at 599 passed, unchanged -- a live mutant). This test
-    builds the REAL app via `r2db_api.main.build_app(env=...)` and reads
-    `SHOW statement_timeout`/`SHOW idle_in_transaction_session_timeout`
-    from a connection drawn from the WIRED sink (`app.state.service.
-    _durable_audit`, `http.create_app`'s own `app.state.service` -- not a
-    separately, directly constructed sink), first with the env vars unset
-    (defaults 5000/5000) and then with them overridden.
+    """Q4 phase WP-1 (design D-1(b)(i)/(ii), M-1's own successor concern):
+    `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` are
+    REMOVED -- defining either now fails startup outright (F-1,
+    `test_build_app_rejects_removed_audit_timeout_env_vars` below), so
+    there is no env-based "wiring" left to test the way M-1 originally
+    meant. What replaced it (and what a mutation dropping the double-check
+    call entirely -- work order variant 8 -- would leave undetected by a
+    test that only ever exercises `PostgresApplicationAuditSink` directly)
+    is that `build_app`'s OWN startup double-check reads the REAL, CURRENT
+    `pg_db_role_setting` value every time it runs, not a cached constant:
+    this builds the real app TWICE -- once against migration 0008's own
+    shipped default (5000/5000), once after changing the role setting
+    directly (mirroring `ops set-platform-timeouts`) -- and observes the
+    WIRED sink's own effective value track the change both times.
     """
-    def _env(statement_ms: str | None, idle_ms: str | None) -> dict[str, str]:
-        env = {
+    def _env() -> dict[str, str]:
+        return {
             "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-main",
             "R2DB_PLATFORM_DSN": platform.api_dsn,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
             "R2DB_SERVE_APPS": app_a.slug,
             f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
             f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
-            # Phase 6 WP-2 (design D-2): unconditionally required now.
-            "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
         }
-        if statement_ms is not None:
-            env["R2DB_AUDIT_STATEMENT_TIMEOUT_MS"] = statement_ms
-        if idle_ms is not None:
-            env["R2DB_AUDIT_IDLE_TIMEOUT_MS"] = idle_ms
-        return env
 
-    module = _reload_module_with_env("r2db_api.main", _env(None, None), monkeypatch)
-    default_app = module.build_app(env=_env(None, None))
+    module = _reload_module_with_env("r2db_api.main", _env(), monkeypatch)
+    default_app = module.build_app(env=_env())
     try:
         sink = default_app.app.state.service._durable_audit
-        with sink._pool.connection() as conn:
-            # PostgreSQL's own `SHOW` normalizes an exact multiple of 1000ms
-            # to the coarser "Ns" unit -- 5000ms and 5s are the same value,
-            # this is a display quirk, not a wiring bug (contrast the
-            # overridden case below, whose non-round values display in ms).
-            assert _show(conn, "statement_timeout") == "5s"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "5s"
+        assert sink.effective_timeouts_ms() == {"statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000}
     finally:
         default_app.app.state.service._durable_audit.close()
         default_app.app.state.service._credentials.close()
 
-    overridden_app = module.build_app(env=_env("1234", "4321"))
+    api_role = sql.Identifier(platform.api_role)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '1234ms'").format(api_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '4321ms'").format(api_role))
+        conn.commit()
     try:
-        sink = overridden_app.app.state.service._durable_audit
-        with sink._pool.connection() as conn:
-            assert _show(conn, "statement_timeout") == "1234ms"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "4321ms"
+        overridden_app = module.build_app(env=_env())
+        try:
+            sink = overridden_app.app.state.service._durable_audit
+            assert sink.effective_timeouts_ms() == {"statement_timeout": 1234, "idle_in_transaction_session_timeout": 4321}
+        finally:
+            overridden_app.app.state.service._durable_audit.close()
+            overridden_app.app.state.service._credentials.close()
+            module.default_pool_manager.dispose_all()
     finally:
-        overridden_app.app.state.service._durable_audit.close()
-        overridden_app.app.state.service._credentials.close()
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(api_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(api_role))
+            conn.commit()
+
+
+def test_build_app_f9_fires_when_a_connection_string_options_override_changes_the_effective_value(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SS4(e)/completion condition 8(iv), non-vacuity requirement (work
+    order): F-9 fires when the EFFECTIVE value diverges from the
+    DECLARED (`pg_db_role_setting`) value via a real PostgreSQL GUC-
+    priority override -- a connection-string `options=-c
+    statement_timeout=...` outranks `ALTER ROLE ... SET` (design D-1(b),
+    the GUC source-priority chain) -- exercised against a REAL PostgreSQL
+    connection, never a synthetic stub. `R2DB_PLATFORM_DSN` carries the
+    override, so `PostgresApplicationAuditSink`'s own pool (built from
+    that SAME DSN) opens its connections with it too."""
+    good_env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f9-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": app_a.slug,
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+    }
+    # Reload FIRST, against the GOOD env (module-level `app = build_app()`
+    # would itself raise -- uncaught by this test own pytest.raises
+    # below -- if the override were already active before this point).
+    module = _reload_module_with_env("r2db_api.main", good_env, monkeypatch)
+    overridden_env = dict(good_env)
+    overridden_env["R2DB_PLATFORM_DSN"] = _dsn_with(platform.api_dsn, options="-c statement_timeout=30000")
+    with pytest.raises(RuntimeError, match="effective value is 30000 ms"):
+        module.build_app(env=overridden_env)
+
+
+def test_build_app_checks_the_env_mapping_argument_not_os_environ(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completion condition 4 (design D-1(d)): the removed-env-var check
+    (F-1/F-2) inspects the `env` MAPPING `build_app` was actually called
+    with, never the real process `os.environ` -- a deployer's shell (or
+    this pytest process' own ambient environment) can carry a leftover
+    R2DB_AUDIT_STATEMENT_TIMEOUT_MS without affecting a `build_app(env=...)`
+    call whose own explicit `env` dict does not name it. This sets the
+    REAL `os.environ` (via monkeypatch.setenv, not the `env=` argument)
+    and confirms `build_app` still starts successfully."""
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-cond4-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": app_a.slug,
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+    }
+    # Reload FIRST, against a clean environment (module-level `app =
+    # build_app()` reads real `os.environ` at reload time -- polluting it
+    # before this point would make the RELOAD itself raise, which is not
+    # what this test is checking). Only AFTER the module is loaded do we
+    # pollute the real `os.environ` -- proving the explicit `env=` argument
+    # to `.build_app()` below, not `os.environ`, is what this composition
+    # root actually reads.
+    module = _reload_module_with_env("r2db_api.main", dict(env), monkeypatch)
+    monkeypatch.setenv("R2DB_AUDIT_STATEMENT_TIMEOUT_MS", "9999")
+    monkeypatch.setenv("R2DB_DATA_BASE_URL", "https://this-must-never-be-read.example.invalid/v1")
+    asgi_app = module.build_app(env=env)
+    try:
+        assert asgi_app is not None
+    finally:
+        asgi_app.app.state.service._durable_audit.close()
+        asgi_app.app.state.service._credentials.close()
         module.default_pool_manager.dispose_all()
 
 
-def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_writer_connection(
+@pytest.mark.parametrize("bad_value", ["60000", -1, 60000.5])
+def test_build_app_rejects_a_hand_edited_coalescing_window_value(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, bad_value,
+) -> None:
+    """Completion condition 6 (design D-2(d), F-4b): the SAME validation
+    function runs on the write path (`ops declare-coalescing-window`,
+    `test_ops_declarations.py`) and this READ path -- a value hand-edited
+    directly into `platform_declarations` (never through `ops`, simulating
+    an operator editing the row by hand, or a bug in some other writer)
+    must ALSO be rejected at startup, for a string, a negative integer, and
+    a fractional (decimal) value."""
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f4b-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": app_a.slug,
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+    }
+    # Reload FIRST, while the row is still the good default (module-level
+    # `app = build_app()` would itself raise -- uncaught by this test's own
+    # `pytest.raises` below -- if the bad value were already written before
+    # this point).
+    module = _reload_module_with_env("r2db_api.main", env, monkeypatch)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('audit_coalescing_window_ms', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps(bad_value)],
+            )
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError, match="audit_coalescing_window_ms"):
+            module.build_app(env=env)
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('audit_coalescing_window_ms', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps(60000)],
+                )
+            conn.commit()
+
+
+def test_build_app_rejects_removed_audit_timeout_env_vars(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-1 (design §3.8): `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_
+    IDLE_TIMEOUT_MS`, whatever their value (including empty string), fail
+    startup outright -- the M-1 test above's original premise (these vars
+    configure the writer connection) no longer holds even a LITTLE; they
+    are actively rejected."""
+    base_env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f1-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": app_a.slug,
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+    }
+    module = _reload_module_with_env("r2db_api.main", base_env, monkeypatch)
+    for name, value in (
+        ("R2DB_AUDIT_STATEMENT_TIMEOUT_MS", "1234"),
+        ("R2DB_AUDIT_STATEMENT_TIMEOUT_MS", ""),
+        ("R2DB_AUDIT_IDLE_TIMEOUT_MS", "4321"),
+        ("R2DB_AUDIT_IDLE_TIMEOUT_MS", ""),
+    ):
+        env = dict(base_env)
+        env[name] = value
+        with pytest.raises(RuntimeError, match=name):
+            module.build_app(env=env)
+
+
+def test_build_app_rejects_removed_surface_env_vars(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SS4(a): F-2 -- `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_URL`,
+    whatever their value (including empty string), fail `r2db_api.main.
+    build_app`'s REAL startup path outright. Completes the {2 timeout
+    vars, 2 surface vars} x {empty, real value} = 8-case matrix SS4(a)
+    requires -- `test_build_app_rejects_removed_audit_timeout_env_vars`
+    above is this test's timeout-pair sibling."""
+    base_env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f2-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": app_a.slug,
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+    }
+    module = _reload_module_with_env("r2db_api.main", base_env, monkeypatch)
+    for name, value in (
+        ("R2DB_DATA_BASE_URL", "https://this-must-never-be-read.example.invalid/v1"),
+        ("R2DB_DATA_BASE_URL", ""),
+        ("R2DB_CONTROL_BASE_URL", "https://this-must-never-be-read.example.invalid/control/v1"),
+        ("R2DB_CONTROL_BASE_URL", ""),
+    ):
+        env = dict(base_env)
+        env[name] = value
+        with pytest.raises(RuntimeError, match=name):
+            module.build_app(env=env)
+
+
+def test_build_control_app_double_check_reflects_the_real_role_setting_not_a_cached_default(
     platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The `control_main.py` half of M-1 -- see the `main.py` test's own
-    docstring immediately above for the full rationale."""
-    def _env(statement_ms: str | None, idle_ms: str | None) -> dict[str, str]:
-        env = {
+    """Q4 phase WP-1 (design D-1(b)(i)/(ii)) -- the `control_main.py` half
+    of `test_build_app_double_check_reflects_the_real_role_setting_not_a_
+    cached_default` above; see that test's own docstring for the full
+    rationale. `build_control_app()` itself stays zero-network (module
+    docstring) -- the double-check runs inside `_lifespan`'s own startup,
+    so this drives it via `TestClient` as a context manager (the same
+    mechanism `test_surfaces_env.py` uses for control-plane surfaces
+    checks)."""
+    def _env() -> dict[str, str]:
+        return {
             "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
             "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-ctl",
             "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-m1-control-app",
             "R2DB_PLATFORM_SCHEMA": platform.schema,
-            # Phase 6 WP-2 (design D-2): unconditionally required now.
-            "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
-            "R2DB_CONTROL_BASE_URL": "https://r2db-application-audit-control-test.example.invalid/control/v1",
         }
-        if statement_ms is not None:
-            env["R2DB_AUDIT_STATEMENT_TIMEOUT_MS"] = statement_ms
-        if idle_ms is not None:
-            env["R2DB_AUDIT_IDLE_TIMEOUT_MS"] = idle_ms
-        return env
 
-    module = _reload_module_with_env("r2db_api.control_main", _env(None, None), monkeypatch)
-    default_app = module.build_control_app(env=_env(None, None))
+    module = _reload_module_with_env("r2db_api.control_main", _env(), monkeypatch)
+
+    # control-plane unconditionally requires surfaces.control (design §3.7
+    # control-plane 1-5) -- this file's own `platform` fixture seeds a
+    # control-less default row (data-plane tests never need one); restore
+    # it afterward since `platform` is module-scoped and shared.
+    _control_surfaces_value = {
+        "data": {"base_url": "https://r2db-application-audit-test.example.invalid/v1"},
+        "control": {"base_url": "https://r2db-application-audit-control-test.example.invalid/control/v1"},
+    }
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps(_control_surfaces_value)],
+            )
+        conn.commit()
     try:
-        sink = default_app.app.state.control_service._audit
-        with sink._pool.connection() as conn:
-            # See the `main.py` test's identical comment above.
-            assert _show(conn, "statement_timeout") == "5s"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "5s"
+        default_app = module.build_control_app(env=_env())
+        with TestClient(default_app):
+            sink = default_app.app.state.control_service._audit
+            assert sink.effective_timeouts_ms() == {"statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000}
+
+        controlplane_role = sql.Identifier(platform.controlplane_role)
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '2345ms'").format(controlplane_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5432ms'").format(controlplane_role))
+            conn.commit()
+        try:
+            overridden_app = module.build_control_app(env=_env())
+            with TestClient(overridden_app):
+                sink = overridden_app.app.state.control_service._audit
+                assert sink.effective_timeouts_ms() == {"statement_timeout": 2345, "idle_in_transaction_session_timeout": 5432}
+        finally:
+            with psycopg.connect(platform.control_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(controlplane_role))
+                    cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(controlplane_role))
+                conn.commit()
     finally:
-        default_app.app.state.control_service._audit.close()
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            conn.commit()
 
-    overridden_app = module.build_control_app(env=_env("2345", "5432"))
-    try:
-        sink = overridden_app.app.state.control_service._audit
-        with sink._pool.connection() as conn:
-            assert _show(conn, "statement_timeout") == "2345ms"
-            assert _show(conn, "idle_in_transaction_session_timeout") == "5432ms"
-    finally:
-        overridden_app.app.state.control_service._audit.close()
+
+def test_build_control_app_rejects_removed_audit_timeout_env_vars(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-1 -- the `control_main.py` half of `test_build_app_rejects_
+    removed_audit_timeout_env_vars` above."""
+    base_env = {
+        "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-f1-control-ctl",
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f1-control-app",
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+    }
+    module = _reload_module_with_env("r2db_api.control_main", base_env, monkeypatch)
+    for name, value in (
+        ("R2DB_AUDIT_STATEMENT_TIMEOUT_MS", "1234"),
+        ("R2DB_AUDIT_STATEMENT_TIMEOUT_MS", ""),
+        ("R2DB_AUDIT_IDLE_TIMEOUT_MS", "4321"),
+        ("R2DB_AUDIT_IDLE_TIMEOUT_MS", ""),
+    ):
+        env = dict(base_env)
+        env[name] = value
+        with pytest.raises(RuntimeError, match=name):
+            module.build_control_app(env=env)
 
 
-def test_both_composition_roots_share_one_audit_timeout_default_definition(
+def test_build_control_app_rejects_removed_surface_env_vars(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SS4(a): F-2 -- the `control_main.py` half of `test_build_app_
+    rejects_removed_surface_env_vars` above. Rework round: `build_control_
+    app` validates F-1/F-2 before any network access, so a placeholder
+    `R2DB_CONTROLPLANE_DSN` still surfaces this error, never a connection
+    failure."""
+    base_env = {
+        "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-f2-control-ctl",
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f2-control-app",
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+    }
+    module = _reload_module_with_env("r2db_api.control_main", base_env, monkeypatch)
+    for name, value in (
+        ("R2DB_DATA_BASE_URL", "https://this-must-never-be-read.example.invalid/v1"),
+        ("R2DB_DATA_BASE_URL", ""),
+        ("R2DB_CONTROL_BASE_URL", "https://this-must-never-be-read.example.invalid/control/v1"),
+        ("R2DB_CONTROL_BASE_URL", ""),
+    ):
+        env = dict(base_env)
+        env[name] = value
+        with pytest.raises(RuntimeError, match=name):
+            module.build_control_app(env=env)
+
+
+def test_both_composition_roots_derive_the_same_visibility_lag_ms_from_one_db_side_source(
     platform: types.SimpleNamespace, app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """WP-2(a) fix round 2 review N-6: `r2db_api.main`/`r2db_api.control_
-    main` must reference the SAME single definition
-    (`credential_store.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_
-    MS`) for their writer-connection timeout defaults, not two
-    independently-maintained `5000` literals that could silently drift
-    apart -- a WP-2(b) `visibility_lag_ms` declaration is derived from
-    both processes' writer connections carrying the identical policy.
-    Imports both composition-root modules through the same safe reload
-    pattern the M-1 tests use (never a bare `import`, which would read
-    real `os.environ` at whatever moment either module happens to be
-    imported first in the whole test session -- see `_reload_module_with_
-    env`'s own docstring), so this test's result does not depend on test
-    execution order.
+    """Q4 phase WP-1 (design D-1(c), condition 10): WP-2(a)'s original N-6
+    concern -- both composition roots must never independently drift on
+    what `visibility_lag_ms` means -- no longer has two Python constants
+    to compare (`r2db_api.main`/`r2db_api.control_main` do not import
+    `DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/`_IDLE_TIMEOUT_MS` at all anymore;
+    there is nothing left to drift, since BOTH processes now derive from
+    the SAME `pg_db_role_setting` catalog, migration 0008). What replaces
+    N-6's guarantee is observed here directly: `r2db_api.main`'s own
+    writer double-check succeeds against 0008's shipped default (5000/5000
+    for both roles, unchanged since `platform`'s own migration application)
+    -- proving `r2dbsvc_api`'s catalog entry is exactly 5000/5000 -- and
+    `r2db_api.control_main`'s REAL `capabilities()` response (driven
+    through `TestClient`, exercising `_lifespan`'s own derivation) reports
+    `visibility_lag_ms == 5000 + 5000 + 1000 == 11000` -- design condition
+    10's own shipped-default value, unchanged from the pre-Q4 constant.
     """
-    import r2db_api.credential_store as credential_store_module
+    from r2db_api.control_plane import bootstrap_control_credential
+    from r2db_api.credential_store import PostgresControlCredentialStore
 
     main_env = {
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-main",
@@ -691,30 +1079,159 @@ def test_both_composition_roots_share_one_audit_timeout_default_definition(
         "R2DB_SERVE_APPS": app_a.slug,
         f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
         f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
-        # Phase 6 WP-2 (design D-2): unconditionally required now.
-        "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
     }
     main_module = _reload_module_with_env("r2db_api.main", main_env, monkeypatch)
+    main_app = main_module.build_app(env=main_env)
+    try:
+        assert main_app.app.state.service._durable_audit.effective_timeouts_ms() == {
+            "statement_timeout": 5000, "idle_in_transaction_session_timeout": 5000,
+        }
+    finally:
+        main_app.app.state.service._durable_audit.close()
+        main_app.app.state.service._credentials.close()
+        main_module.default_pool_manager.dispose_all()
 
+    control_pepper = "synthetic-test-pepper-n6-control-ctl"
     control_env = {
         "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
-        "R2DB_CONTROL_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-control-ctl",
+        "R2DB_CONTROL_CREDENTIAL_PEPPER": control_pepper,
         "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-n6-control-app",
         "R2DB_PLATFORM_SCHEMA": platform.schema,
-        # Phase 6 WP-2 (design D-2): unconditionally required now.
-        "R2DB_DATA_BASE_URL": "https://r2db-application-audit-test.example.invalid/v1",
-        "R2DB_CONTROL_BASE_URL": "https://r2db-application-audit-control-test.example.invalid/control/v1",
+        "R2DB_AUDIT_DSN": platform.auditreader_dsn,
     }
     control_main_module = _reload_module_with_env("r2db_api.control_main", control_env, monkeypatch)
 
-    assert main_module.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS is credential_store_module.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-    assert main_module.DEFAULT_AUDIT_IDLE_TIMEOUT_MS is credential_store_module.DEFAULT_AUDIT_IDLE_TIMEOUT_MS
-    assert control_main_module.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS is credential_store_module.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-    assert control_main_module.DEFAULT_AUDIT_IDLE_TIMEOUT_MS is credential_store_module.DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+    # control-plane unconditionally requires surfaces.control (design §3.7
+    # control-plane 1-5) -- this file's own `platform` fixture seeds a
+    # control-less default row (data-plane tests never need one); restore
+    # it afterward since `platform` is module-scoped and shared.
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({
+                    "data": {"base_url": "https://r2db-application-audit-test.example.invalid/v1"},
+                    "control": {"base_url": "https://r2db-application-audit-control-test.example.invalid/control/v1"},
+                })],
+            )
+        conn.commit()
+    try:
+        control_app = control_main_module.build_control_app(env=control_env)
 
-    main_module.app.app.state.service._durable_audit.close()
-    main_module.default_pool_manager.dispose_all()
-    control_main_module.app.app.state.control_service._audit.close()
+        control_store = PostgresControlCredentialStore(platform.control_dsn, pepper=control_pepper, schema=platform.schema)
+        control_audit = PostgresControlAuditSink(platform.control_dsn, schema=platform.schema)
+        try:
+            with control_store.unit_of_work() as work:
+                _credential_id, control_bearer = bootstrap_control_credential(control_store, control_audit, work=work)
+        finally:
+            control_store.close()
+            control_audit.close()
+
+        with TestClient(control_app) as client:
+            response = client.get("/control/v1/capabilities", headers={"authorization": f"Bearer {control_bearer}"})
+            assert response.status_code == 200, response.text
+            assert response.json()["capabilities"]["audit_query"]["visibility_lag_ms"] == 5_000 + 5_000 + 1_000
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            conn.commit()
+
+
+def test_control_visibility_lag_ms_reflects_the_sibling_roles_catalog_not_only_its_own(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completion condition 21: `derive_visibility_lag_ms` must be fed
+    EVERY role in the declared `audit_writer_roles` set, not only the
+    control-plane process' own role -- proven by setting ASYMMETRIC
+    timeouts (api role bigger than the control-plane's own) and observing
+    the REAL `control_main.build_control_app` -> `/control/v1/
+    capabilities` path report the max across BOTH, not just its own. A
+    mutation that dropped the sibling-role loop (work order 変異 18) would
+    report a SMALLER value here (its own role's 1000+1000+1000=3000
+    instead of the api role's 9000+9000+1000=19000)."""
+    from r2db_api.control_plane import reset_control_credentials
+    from r2db_api.credential_store import PostgresControlCredentialStore
+
+    api_role = sql.Identifier(platform.api_role)
+    controlplane_role = sql.Identifier(platform.controlplane_role)
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '9000ms'").format(api_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '9000ms'").format(api_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '1000ms'").format(controlplane_role))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '1000ms'").format(controlplane_role))
+        conn.commit()
+
+    control_pepper = "synthetic-test-pepper-sibling-ctl"
+    control_env = {
+        "R2DB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "R2DB_CONTROL_CREDENTIAL_PEPPER": control_pepper,
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-sibling-app",
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_AUDIT_DSN": platform.auditreader_dsn,
+    }
+    control_main_module = _reload_module_with_env("r2db_api.control_main", control_env, monkeypatch)
+
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                [json.dumps({
+                    "data": {"base_url": "https://r2db-sibling-lag-test.example.invalid/v1"},
+                    "control": {"base_url": "https://r2db-sibling-lag-test-control.example.invalid/control/v1"},
+                })],
+            )
+        conn.commit()
+    try:
+        control_app = control_main_module.build_control_app(env=control_env)
+
+        control_store = PostgresControlCredentialStore(platform.control_dsn, pepper=control_pepper, schema=platform.schema)
+        control_audit = PostgresControlAuditSink(platform.control_dsn, schema=platform.schema)
+        try:
+            with control_store.unit_of_work() as work:
+                # Rework note: this file's shared `platform` fixture is
+                # module-scoped and may already have a control credential
+                # bootstrapped by an earlier test in this same session
+                # (bootstrap refuses -- CONFLICT -- once ANY row exists,
+                # even revoked) -- `reset` always succeeds regardless of
+                # prior state and gives this test its own fresh bearer.
+                _credential_id, control_bearer = reset_control_credentials(control_store, control_audit, work=work)
+        finally:
+            control_store.close()
+            control_audit.close()
+
+        with TestClient(control_app) as client:
+            response = client.get("/control/v1/capabilities", headers={"authorization": f"Bearer {control_bearer}"})
+            assert response.status_code == 200, response.text
+            assert response.json()["capabilities"]["audit_query"]["visibility_lag_ms"] == 9_000 + 9_000 + 1_000
+    finally:
+        with psycopg.connect(platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(api_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(api_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(controlplane_role))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(controlplane_role))
+                cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(platform.schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            conn.commit()
 
 
 # ===========================================================================
@@ -2491,3 +3008,48 @@ def test_in_memory_and_postgres_application_audit_sinks_have_parity(platform: ty
         memory.inject_fault(None)
     finally:
         pg.close()
+
+
+# ---------------------------------------------------------------------------
+# N-2 (monitor ruling 2026-09-05, delta review §4): "the dual check runs on
+# the connection the writer sink's own pool hands out" is the central
+# claim `check_writer_role_timeouts`'s own docstring makes (design D-1(c)),
+# but nothing pinned that `borrow_connection()` actually delegates to
+# `self._pool.connection()` -- the delta review's own mutation B (swapping
+# BOTH sinks' `borrow_connection` bodies for a throwaway `psycopg.connect`
+# outside the pool) left the full 889-test suite green. These two
+# zero-network tests substitute a fake `_pool` object for the real one
+# (`_RolePool.__init__` never opens a connection itself, so this needs no
+# real PostgreSQL) and assert `borrow_connection()` returns EXACTLY the
+# sentinel `_pool.connection()` produces -- an identity check that a
+# rewritten `borrow_connection` opening a connection some OTHER way cannot
+# satisfy by accident.
+# ---------------------------------------------------------------------------
+
+
+class _SentinelPool:
+    def __init__(self) -> None:
+        self.connection_call_count = 0
+        self.sentinel = object()
+
+    def connection(self):
+        self.connection_call_count += 1
+        return self.sentinel
+
+
+def test_application_audit_sink_borrow_connection_delegates_to_its_own_pool() -> None:
+    sink = PostgresApplicationAuditSink("postgresql://unused/unused", schema="unused_schema", pool_size=1)
+    fake_pool = _SentinelPool()
+    sink._pool = fake_pool  # noqa: SLF001 -- substituting the real _RolePool for a zero-network fake
+    result = sink.borrow_connection()
+    assert result is fake_pool.sentinel
+    assert fake_pool.connection_call_count == 1
+
+
+def test_control_audit_sink_borrow_connection_delegates_to_its_own_pool() -> None:
+    sink = PostgresControlAuditSink("postgresql://unused/unused", schema="unused_schema", pool_size=1)
+    fake_pool = _SentinelPool()
+    sink._pool = fake_pool  # noqa: SLF001 -- substituting the real _RolePool for a zero-network fake
+    result = sink.borrow_connection()
+    assert result is fake_pool.sentinel
+    assert fake_pool.connection_call_count == 1

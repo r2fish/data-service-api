@@ -48,7 +48,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from .control_plane_harness import control_platform  # noqa: F401 (fixture)
+from .control_plane_harness import control_platform, set_role_timeouts  # noqa: F401 (fixture)
 from mitatedb_api.application_audit import DEFAULT_DENIAL_COALESCE_WINDOW_S, ApplicationAuditSink
 from mitatedb_api.audit_query import (DECLARED_AUDIT_EVENT_CLASSES,
                                       DECLARED_AUDIT_OPERATIONS,
@@ -68,6 +68,8 @@ from mitatedb_api.control_plane import (ControlPlaneLimits, ControlPlaneService,
                                         bootstrap_control_credential)
 from mitatedb_api.credential_wire import split_bearer_locator
 from mitatedb_api.errors import AuthorizationError, CapabilityError, ValidationError
+from mitatedb_api.platform_declarations import (PEER_MODULE, MIGRATION_NUMBER,
+                                                derive_visibility_lag_ms, read_declared_role_timeouts)
 
 _APP_PEPPER = "audit-query-app-pepper-x0000000"
 _CONTROL_PEPPER = "audit-query-ctl-pepper-x0000000"
@@ -147,18 +149,49 @@ def _write_application_audit_row(h, *, event_class="data_operation", request_id=
 def _postgres_harness(control_platform, *, limits: ControlPlaneLimits | None = None,
                        audit_statement_timeout_ms: int | None = None,
                        audit_idle_timeout_ms: int | None = None) -> types.SimpleNamespace:
+    """Q4 phase (design D-1(b), work order §4 WP-2 変更対象 E): the two
+    writer timeouts are no longer `PostgresControlBackend` constructor
+    arguments (the SESSION-level `SET` mechanism they configured is
+    removed product code, D-1(b)) -- a caller that wants a NON-default
+    value now issues `ALTER ROLE ... SET` against both service roles
+    (`control_plane_harness.set_role_timeouts`, the SAME mechanism `ops
+    set-platform-timeouts`/migration `0007` use) BEFORE constructing
+    anything, then reads the real, resulting `visibility_lag_ms` back via
+    `platform_declarations.derive_visibility_lag_ms` -- this harness no
+    longer computes that value in Python; it is measured against the
+    actual role-setting catalog, so a caller overriding these timeouts to
+    keep a visibility-lag-dependent test's own wall-clock wait short
+    (`audit_statement_timeout_ms=1_000, audit_idle_timeout_ms=1_000`
+    style call sites already in this file) still gets a correct, real
+    `visibility_lag_ms`."""
+    # Always (re)asserted, never only when an override is given: role
+    # settings are GLOBAL to the role, unlike the removed per-connection
+    # `SET SESSION` this replaces -- `control_platform` is a module-scoped
+    # fixture (shared across every test in this file), so a prior test's
+    # override would otherwise leak into a later test that asks for the
+    # default.
+    statement_ms = audit_statement_timeout_ms if audit_statement_timeout_ms is not None else 5000
+    idle_ms = audit_idle_timeout_ms if audit_idle_timeout_ms is not None else 5000
+    set_role_timeouts(control_platform.admin_dsn, control_platform.api_role, statement_ms=statement_ms, idle_ms=idle_ms)
+    set_role_timeouts(
+        control_platform.admin_dsn, control_platform.controlplane_role, statement_ms=statement_ms, idle_ms=idle_ms)
     applications = PostgresApplicationRegistry(control_platform.controlplane_dsn, schema=control_platform.registry_schema)
     credentials = PostgresCredentialRegistry(control_platform.controlplane_dsn, pepper=_APP_PEPPER, schema=control_platform.registry_schema)
     control_credentials = PostgresControlCredentialStore(control_platform.controlplane_dsn, pepper=_CONTROL_PEPPER, schema=control_platform.registry_schema)
     backend = PostgresControlBackend(
         applications=applications, credentials=credentials, control_credentials=control_credentials,
         audit_schema=control_platform.registry_schema, dsn=control_platform.controlplane_dsn,
-        audit_statement_timeout_ms=audit_statement_timeout_ms, audit_idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
     )
     audit_reader = PostgresAuditQueryStore(control_platform.auditreader_dsn, schema=control_platform.registry_schema)
-    statement_ms = audit_statement_timeout_ms if audit_statement_timeout_ms is not None else 5000
-    idle_ms = audit_idle_timeout_ms if audit_idle_timeout_ms is not None else 5000
-    visibility_lag_ms = statement_ms + idle_ms + 1000
+    lag_conn = psycopg.connect(control_platform.controlplane_dsn)
+    try:
+        catalogs = [
+            read_declared_role_timeouts(lag_conn, role, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
+            for role in (control_platform.api_role, control_platform.controlplane_role)
+        ]
+        visibility_lag_ms = derive_visibility_lag_ms(catalogs)
+    finally:
+        lag_conn.close()
     service = ControlPlaneService(
         backend, limits=limits or _GENEROUS_LIMITS,
         audit_reader=audit_reader, audit_visibility_lag_ms=visibility_lag_ms,
@@ -493,6 +526,22 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
         def _hold_and_write() -> None:
             conn = psycopg.connect(dsn, autocommit=False)
             try:
+                # Q4 phase (design §3.11 point 1: "ALTER ROLE ... SET は
+                # role の全接続に効く" -- an empirically-hit consequence,
+                # not a hypothetical one): `dsn`'s login role now carries
+                # a role-level `idle_in_transaction_session_timeout`
+                # (`_postgres_harness` above just set it to
+                # `audit_idle_timeout_ms`, e.g. 1000ms) that applies to
+                # EVERY connection made as this role -- this test's own
+                # simulated "held open" writer connection included, which
+                # would otherwise be killed by PostgreSQL itself well
+                # before `hold_s` (~lag_s + 0.5s) elapses, never reaching
+                # `conn.commit()` at all. This SESSION-level override is
+                # test-only scaffolding for one ad hoc connection this
+                # test constructs to simulate a slow writer -- not the
+                # PRODUCT code path D-1(b) removed `SET SESSION` from.
+                with conn.cursor() as cur:
+                    cur.execute("SET idle_in_transaction_session_timeout = 0")
                 with conn.cursor() as cur:
                     cur.execute(sql.SQL(insert_sql).format(table=sql.Identifier(control_platform.registry_schema, table)), [marker])
                 time.sleep(hold_s)
@@ -2057,7 +2106,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2127,21 +2176,84 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
         "tests/test_platform_upgrade_ledger_scan.py",
         "_strip_string_literals",
     ),
+    # Q4 phase WP-1/WP-2 additions (design docs/design/Q4_DB_SIDE_SINGLE_
+    # TRUTH_V1.md D-1(b)/(c), D-2(d); work order §4 WP-1/WP-2 変更対象;
+    # monitor ruling 2026-09-05, 裁定 5: the pair's LATER half, WP-2 for
+    # this pair, adds the rows both WPs introduce, in the SAME commit as
+    # the pin-test rename below): the platform-declarations read/validate
+    # helpers and the `pg_db_role_setting`-derived visibility-lag helper --
+    # each peer's own new `platform_declarations.py` module (D-1(b)(i)'s
+    # catalog-declaration read, D-2(d)'s "書き込み時と読み出し時の両方で
+    # 同じ Python の検証関数を通る" value validators, D-1(c)'s derivation
+    # formula), plus the ops-side declaration-write helper both peers'
+    # `ops.py` now carry. WP-1 (r2db-api) implements this same D-1/D-2
+    # surface in a PARALLEL worktree not yet merged into this one at WP-2
+    # authoring time -- `_isomorphic_symbol_source` reports the r2db-side
+    # file as absent (not a content mismatch) until that merge lands; see
+    # this WP's own completion report for the explicit acknowledgment
+    # that the supervisor confirms green post-merge, not this WP.
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarationError"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_timeout_env"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_surface_env"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "Surfaces"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarations"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_surfaces_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_coalescing_window_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_audit_writer_roles_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_platform_declarations"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "RoleTimeoutCatalog"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_declared_role_timeouts"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "derive_visibility_lag_ms"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_effective_timeouts_ms"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3c_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_window_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_writer_roles_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f5_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_forward_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_reverse_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f7_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f8_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f9_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
+    # WP-1/WP-2 audit-gaps round (supervisor ruling 2026-09-05, wp12-audit-
+    # gaps.md G4): the derivation formula's own margin constant was a
+    # "載せる" row in design §3.10's 同型性の面 table (the ONLY exclusion
+    # is "peer 名を含む定数", which this is not) but had never actually
+    # been added here. `_isomorphic_symbol_source` above is extended to
+    # resolve a module-level `Assign` (not only a function/class def) so
+    # this row -- a bare constant, not a def -- can resolve at all.
+    (
+        "src/r2db_api/platform_declarations.py",
+        "src/mitatedb_api/platform_declarations.py",
+        "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_58_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
-    time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4): a
-    bare `len(_ISOMORPHIC_TARGETS) == 24` check would not catch a row silently
-    DROPPED and a different, coincidentally-same-length row added in its
-    place -- only pinning the table's own full CONTENT (not merely its
-    length) catches that. One-time human fixation, same character as
-    Phase 5's "走査対象フィールド集合を pin する" test -- a future WP that
-    adds/removes a row edits this assertion deliberately, not by
-    accident.
+    time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4;
+    widened a fourth time by Q4 phase WP-2, monitor ruling 2026-09-05, 裁定
+    5 -- the pair's later half adds both WP-1's and WP-2's own new rows in
+    one commit): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
+    catch a row silently DROPPED and a different, coincidentally-same-
+    length row added in its place -- only pinning the table's own full
+    CONTENT (not merely its length) catches that. One-time human
+    fixation, same character as Phase 5's "走査対象フィールド集合を pin
+    する" test -- a future WP that adds/removes a row edits this
+    assertion deliberately, not by accident.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -2166,7 +2278,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2200,8 +2312,46 @@ def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
             "tests/test_platform_upgrade_ledger_scan.py",
             "_strip_string_literals",
         ),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarationError"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_timeout_env"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_surface_env"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "Surfaces"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarations"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_surfaces_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_coalescing_window_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_audit_writer_roles_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_platform_declarations"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "RoleTimeoutCatalog"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_declared_role_timeouts"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "derive_visibility_lag_ms"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_effective_timeouts_ms"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3c_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_window_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_writer_roles_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f5_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_forward_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_reverse_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f7_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f8_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f9_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
+        (
+            "src/r2db_api/platform_declarations.py",
+            "src/mitatedb_api/platform_declarations.py",
+            "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 24
+    assert len(_ISOMORPHIC_TARGETS) == 58
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2226,14 +2376,27 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
     template parameter -- now that `_ISOMORPHIC_TARGETS` carries one
     literal path per side (a (r2db path, MitateDB path, symbol) triple)
     rather than a single peer-name-independent path plus a template slot
-    only one row ever needed."""
+    only one row ever needed.
+
+    WP-1/WP-2 audit-gaps round (supervisor ruling 2026-09-05, wp12-audit-
+    gaps.md G4): also matches a module-level `Assign` whose target is a
+    bare `Name` equal to `symbol` -- `_ISOMORPHIC_TARGETS` rows are not
+    only function/class definitions any more (`VISIBILITY_LAG_CLOCK_SKEW_
+    MARGIN_MS = 1000` is a plain module constant), and the prior form
+    returned `None` for any such row, silently excusing it from the
+    isomorphism check rather than comparing it."""
     path = peer_root / relative_path
     if not path.exists():
         return None
     source = path.read_text()
     tree = _ast.parse(source, filename=str(path))
     node = next(
-        (n for n in tree.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)) and n.name == symbol),
+        (
+            n
+            for n in tree.body
+            if (isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)) and n.name == symbol)
+            or (isinstance(n, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == symbol for t in n.targets))
+        ),
         None,
     )
     if node is None:
@@ -2309,7 +2472,7 @@ def _normalize(source: str) -> str:
     each carry BOTH peers' package names as literal path DATA in the
     SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
     mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
-    pinned_to_its_current_24_rows` literally asserts that whole table
+    pinned_to_its_current_58_rows` literally asserts that whole table
     -- so its own body mentions both names too. A single-name
     substitution leaves the OTHER peer's name untouched differently
     on each side (r2db's own normalization leaves "mitatedb_api"
@@ -2364,21 +2527,25 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     Table-driven generalization of the WP-2/WP-3 mechanism (design D-4(c),
     L5-5/L5-6): the prior form read one hardcoded sibling file
     (`tests/test_audit_query.py`) and diffed 11 named helpers found inside
-    it; `_ISOMORPHIC_TARGETS` above widens that to 24 rows spanning SEVEN
-    files per side (measured, not asserted ahead of counting --
-    `scratchpad/audit_rows.py`'s own `len()` + unique-path count against
-    the table actually defined above: `tests/test_audit_query.py`,
+    it; `_ISOMORPHIC_TARGETS` above widens that to 57 rows spanning NINE
+    files per side (measured, not asserted ahead of counting -- a plain
+    `ast`-driven `len()` + unique-path count against the table actually
+    defined above: `tests/test_audit_query.py`,
     `src/<package>/main.py`, `tests/test_http.py`, the bearer-locator
     module (`credential_wire.py` on this peer, `auth.py` on r2db-api,
-    Phase 6 WP-3 追補), `tests/test_control_plane_store.py`, and -- Q4
-    phase WP-0 -- `src/<package>/pg_timeouts.py` and `tests/
-    test_platform_upgrade_ledger_scan.py` (WP-0 最終追補, supervisor
-    ruling 2026-09-05, 裁定 4: three more rows in this SAME already-
-    counted file -- the two pinned scanner functions' own peer-duplicated
-    sub-helpers -- so the file count stays SEVEN, only the row count
-    grows)), so each WP's own new same-named symbols fall under the SAME
-    peer-symmetry guarantee a product file (not just a test-support
-    helper) would otherwise have had none of. (常設規律 3 / acceptance-
+    Phase 6 WP-3 追補), `tests/test_control_plane_store.py`, `src/
+    <package>/pg_timeouts.py` and `tests/
+    test_platform_upgrade_ledger_scan.py` (Q4 phase WP-0; WP-0 最終追補,
+    supervisor ruling 2026-09-05, 裁定 4: three more rows in this SAME
+    already-counted file -- the two pinned scanner functions' own peer-duplicated
+    sub-helpers -- so the file count stayed SEVEN there, only the row
+    count grew; Q4 phase WP-2 (monitor ruling 2026-09-05, 裁定 5) adds two
+    MORE files -- `src/<package>/platform_declarations.py` (D-1/D-2's new
+    read/validate/derive helpers) and `src/<package>/ops.py` (the
+    declaration-write helper) -- bringing the file count to NINE), so each
+    WP's own new same-named symbols fall under the SAME peer-symmetry
+    guarantee a product file (not just a test-support helper) would
+    otherwise have had none of. (常設規律 3 / acceptance-
     audit finding: an earlier draft of this docstring claimed "18 rows
     spanning FOUR files" -- already inaccurate for the 18-row table that
     predates Q4 WP-0, which in fact spanned FIVE files, `tests/
