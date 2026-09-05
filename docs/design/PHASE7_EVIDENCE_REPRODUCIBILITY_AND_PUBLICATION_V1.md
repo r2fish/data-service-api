@@ -363,15 +363,65 @@
 
 影響を受けるのは **`isolated_application_surface()` の構成経路**である。HTTP plug は composition root を通る。Q4 WP-B 以後の **MitateDB α plug は platform DB の宣言表に seed が要る**一方、**r2db γ plug は明示注入のままである** (Q4 設計 §6.1 / LQ4-11 の非対称)。
 
-**なお Q4 §6.1 / LQ4-11 が述べる非対称は control plane の composition root に関するものである。** data plane の隔離 surface については、**MitateDB の `surfaces` が Q4 D-2 の宣言表由来になる** (`cell.py` の `_surfaces_document_fragment(config)`) ので**別の経路で同じ結論** (seed が要る) に達する。**追補にはこの区別を書く** — 書かないと、実装担当が control 側の記述をそのまま data 側へ写す事故が起きる。
+**なお Q4 §6.1 / LQ4-11 が述べる非対称は control plane の composition root に関するものである。** data plane の隔離 surface については、**MitateDB の `surfaces` が Q4 D-2 の宣言表由来になる** (`cell.py` の `_surfaces_document_fragment(config)`) ので**別の経路で同じ結論** (seed が要る) に達する。**追補にはこの区別を書く** **【監督訂正 2026-09-06、追補承認時】この 1 文は現物と合わない — `cell.py:1480` が読むのは `config` であり、宣言表の値が `config` に入るのは `main.build_app` (`main.py:321/377`) だけで、両 MitateDB plug は `FoundationConfig(data_base_url=…, control_base_url=…)` を明示注入している。したがって seed 要否の非対称は Q4 §6.1 α/γ と**同じ理由 (control plane の composition root)** であり、data plane の隔離 surface に seed は要らない。追補 (下記) の事実が正であり、本文のこの推測は撤回する。** — 書かないと、実装担当が control 側の記述をそのまま data 側へ写す事故が起きる。
 
 ##### Q4 確定後の追補
 
-未記入。**記入は WP-4 の着手条件である** (設計レビュー 1 回目、B-10) — 追補が決めるのは `isolated_application_surface()` の**構成経路**であり、それを実装するのは WP-4 だからである。**Q4 の main マージ後、WP-4 の最初の作業として記入し、監督承認を得てから WP-4 の実装に入る。** WP-8 が持つのは**確定記録**だけである。
+【追補記入 2026-09-06、Q4 v1.4 (main `a6de3e3`) 確定後。**監督承認済み 2026-09-06** — WP-4 の着手条件を満たす】
+
+**記入は WP-4 の着手条件である** (設計レビュー 1 回目、B-10) — 追補が決めるのは `isolated_application_surface()` の**構成経路**であり、それを実装するのは WP-4 だからである。**Q4 の main マージ後、WP-4 の最初の作業として記入し、監督承認を得てから WP-4 の実装に入る。** WP-8 が持つのは**確定記録**だけである。
+
+**本欄は事実の記録であり、D-6 の決定 (V1 / V2 / V3 の形、駆動集合の導出規則、port v1.11 の 2 項目) を変えない。** 以下はすべて Q4 マージ後の現物 (main `a6de3e3` を取り込んだ作業ツリー) の読み取りであり、**テストは実行していない**。
+
+**(1) 4 plug の構成経路**
+
+| plug | data-plane instance の構成経路 | Q4 後にこの経路が要求するもの | 小さな profile を与える手段 |
+|---|---|---|---|
+| `r2db-api` (in-process) | service を直接構築 (composition root を通らない) | **無し** | `DataService(..., limits=ResourceLimits(...))` |
+| `r2db-api-http` | **data plane は直接構築**、control plane のみ組み立て核 `assemble_control_stack(...)` (明示注入) | **無し** (宣言表の seed も書き手 role 設定も不要) | 同上。HTTP の byte 境界も同じ `ResourceLimits` から出る |
+| `MitateDB-api` (in-process) | service を直接構築 | **無し** | `FoundationConfig(...)` の限度フィールド |
+| `MitateDB-api-http` | **data plane は直接構築**、control plane のみ composition root `build_control_service(env)` | **control 面を新たに張る場合のみ** platform DB に `0007` 適用 + `surfaces` 行 seed | `FoundationConfig(...)` の限度フィールド + `create_app(request_bytes_limit=...)` を同値にする |
+
+**`r2db-api` (in-process)**。現行は `DataService(self._credentials, control_plane_status="enabled", surfaces=_SURFACES)` (`r2db-api/conformance/conformance_adapter_r2db.py:132`) と `ControlAuthority(self._service)` (`:133`) を直接構築し、`provision_application` は `self._control.register_application(...)` (`:262`) である。cell は `DataService` インスタンスの内部状態であり (`r2db-api/src/r2db_api/structured.py:1095` の `ApplicationCell` は純データクラス)、別インスタンスへ自動的には引き継がれない。**この経路は composition root (`r2db-api/src/r2db_api/main.py:283` の `build_app`) を通らないので、Q4 が入れた廃止 env 拒否・宣言表読み・書き手 role 二重検査のいずれにも触れない。** 小さな profile は `DataService` の第 2 引数 `limits` (`r2db-api/src/r2db_api/service.py:794`、既定は `:828` の `ResourceLimits()`) で与える。`ResourceLimits` は 9 class をフィールドに持ち (`r2db-api/src/r2db_api/limits.py:11-20`)、`__post_init__` (`:22-25`) が正の整数以外を拒む。**env 経路は無い** — r2db に application-plane の限度 env は存在せず、`build_app` の `DataService(...)` 呼び出し (`main.py:457-460`) も `limits=` を渡していない。
+
+**`r2db-api-http`**。**data plane は composition root を通らない** — `DataService(...)` を直接構築し (`r2db-api/conformance/conformance_adapter_r2db_http.py:911-914`)、`create_app(self._service)` (`:917`) で ASGI app を組む。cell は `cell_factory=self._make_cell` (`:912`) が返す実 PG の `PostgresCell` である。**composition root 由来の組み立て核を通るのは control plane だけ**であり、`assemble_control_stack(..., surfaces=_SURFACES)` (`:1062-1088`、`surfaces` は `:1076`、定数は `:737-740`) の明示注入である。Q4 の rework で `assemble_control_stack` は `surfaces` / `audit_visibility_lag_ms` を内部計算しない契約になった (`r2db-api/src/r2db_api/control_main.py:277-284`)。この plug の platform DB には `0008` を当てない (migration 一覧 `:331` 近傍、理由の逐語は `:896-907`)。**したがって隔離 data-plane instance に対して宣言表の行や書き手 role 設定の seed は要求されない** (Q4 §3.11 の 4 / §6.1 γ と同じ結論が data 面にも当てはまる)。
+- **`build_app` を使う形を採ると要求が増える** — `main.py:316-317` (廃止 env 4 本の拒否)、`:360-362` (`read_platform_declarations`)、`:366` (F-6)、`:400-403` (`check_writer_role_timeouts`) が必ず走り、かつ `build_app` は `limits` 引数を持たない (`main.py:283` / `:457-460`) ので**小さな profile を与える手段がそもそも無い**。
+- 小さな profile は in-process と同じ `limits=` である。**HTTP 面の `request_bytes` も同じ 1 個所から出る** — `create_app` は `RequestByteBoundMiddleware(app, service.limits)` を返す (`r2db-api/src/r2db_api/http.py:475`) ので、宣言と enforcement が同一の `ResourceLimits` を見る。
+- application ごとの PG 資産は `_provision_pg_app` (`:365`) が rewrite 済みの `0003_provision_application.sql` (`:331` / `:360`) で作る。Q4 WP-3 でこの `0003` が台帳表 `public._r2db_platform_upgrades` を作り現番号を seed する (`r2db-api/migrations/0003_provision_application.sql:279-290`) ので、隔離 instance が同じ経路で application を作る限り台帳は揃う。**なおこの plug の `_make_cell` は `verify_platform_upgrades_applied()` を呼ばない** — 呼ぶのは composition root の `_cell_factory` (`main.py:434`) だけである。
+
+**`MitateDB-api` (in-process)**。`ControlPlane(pepper, config=FoundationConfig(control_plane_status="enabled", data_base_url=..., control_base_url=...), audit_router=...)` (`MitateDB-api/conformance/conformance_adapter_mitatedb.py:348-363`) と `MitateDataService(self._control)` (`:364`) の直接構築である。cell は `ControlPlane.provision_application` が作り、各 cell は `sqlite3.connect(":memory:")` を 1 本持つ (`MitateDB-api/src/mitatedb_api/backend_sqlite.py:71-72`)。**platform DB も env も読まないので Q4 後の追加要求は無い。** 小さな profile は `FoundationConfig` の限度フィールド — `max_batch_items` / `max_batch_entities` / `max_result_rows` / `max_fields` / `max_filter_terms` / `max_request_bytes` / `max_schema_objects` (`MitateDB-api/src/mitatedb_api/config.py:20-35`) — を構築時に与える。現行 plug は base URL と `control_plane_status` しか渡していないので、いまは全部が既定値である。
+
+**`MitateDB-api-http`**。**data plane は composition root を通らない** — `HttpService(self._gate, _cell_factory, audit_router=self._audit_router)` (`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py:700`) と `create_app(self._service, request_bytes_limit=1_048_576)` (`:701`) の直接構築であり、cell も plug 自身が `ApplicationCell(application_id, FoundationConfig(...), backend=PostgresBackend(...), audit_router=...)` (`:891-902`) で組む。**data 面の `surfaces` は `FoundationConfig(data_base_url=..., control_base_url=...)` (`:899`) の明示注入である** — `cell.py:1480` の `_surfaces_document_fragment(config)` が読むのはこの `config` であり、宣言表の値が `config` に入るのは composition root `main.build_app` (`MitateDB-api/src/mitatedb_api/main.py:235` / `:321` / `:377`) の経路だけで、**どの plug もその経路を使っていない**。
+- **composition root を通るのは control plane だけである** — `build_control_service(control_env)` (`:767`、`MitateDB-api/src/mitatedb_api/control_composition.py:49`)。**control 面の隔離 instance を張る場合は、fixture の platform DB に (i) `0007_platform_declarations.sql` の適用 (`:276` / `:300`、psql 変数 `api_role` / `controlplane_role` を渡す) と (ii) `surfaces` 行の seed (`:309-322`) が要る** — `build_control_service` が起動時に `read_platform_declarations` (`control_composition.py:123-126`)、`require_control_surface_declared` (`:135`)、`check_writer_role_timeouts` (`:139-142`) を同期で走らせるからである。`0007` は `ALTER ROLE` の 4 文と `audit_writer_roles` / `audit_coalescing_window_ms` の seed を同一トランザクションで持つので、この 1 本で書き手 role 設定も揃う。既存の前例は `isolated_control_surface` が `build_control_service(self._control_env)` を 2 度目に呼ぶ形 (`:1300-1302`) である。
+- **data 面だけを新たに張る場合、この seed は要求されない。**
+- 小さな profile は `FoundationConfig` の限度フィールド (`config.py:20-35`) である。ただし `request_bytes` は**宣言と enforcement が別引数**である — 宣言は `cell.py:1491` (`config.max_request_bytes`)、enforcement は `create_app(..., request_bytes_limit=...)` (`MitateDB-api/src/mitatedb_api/http.py:954` / `:969`、middleware は `:220-222`) であり、HTTP 面はさらに `limit_enforcement.request_bytes` を `enforced` へ上書きする (`http.py:591`)。product の composition root は `main.py:513` で `request_bytes_limit=config.max_request_bytes` と揃えているので、**隔離 instance でも同じ値にする**。
+- application ごとの PG 資産は `0003_provision_application.sql` (`:261`) で作る。`PostgresBackend.__init__` は cell open 時に台帳を検査し、未適用なら F-12 のメッセージを保持して以後の storage 操作をすべて拒む (`MitateDB-api/src/mitatedb_api/backend_postgres.py:419-421` / `:453-478`)。
+
+**(推測)** 隔離 instance が共有 surface と同じ `CredentialStore` / 資格情報を共有するか自前に持つかは、D-6 も本追補も決めていない — 現物からはどちらの形も構成できる。決めるのは WP-4 である。
+
+**(2) `limit_enforcement` / `limits` の出所は Q4 で変わっていない**
+
+- **r2db**: `capabilities()` の `"limits"` / `"limit_enforcement"` は `self.limits.as_dict()` から組む (`r2db-api/src/r2db_api/service.py:936-937`)。`self.limits` は constructor 引数由来である (`:794` / `:828`)。Q4 が `build_app` の `DataService(...)` 呼び出しに入れたのは `surfaces=` と `denial_coalesce_window_s=` であり (`main.py:457-466`)、`limits` は渡していない。
+- **MitateDB**: `"limits"` は `config.max_*` から (`MitateDB-api/src/mitatedb_api/cell.py:1481-1493`)、`"limit_enforcement"` は同じブロックの静的な辞書から組む (`:1494-1503`)。`FoundationConfig.from_env` の Q4 改訂は `data_base_url` / `control_base_url` を必須キーワード引数へ移しただけで、7 つの限度 env は据え置きである — 「Every OTHER field below is unaffected -- still read from `environ` exactly as before」(`config.py:100-101`、`names` は `:103-111`)。HTTP 面の `request_bytes: enforced` 上書き (`http.py:591`) も Q4 で触られていない。
+- したがって **C-05 の V1 / V2 / V3 が読む宣言の出所は 4 plug とも Q4 前と同一である** (D-6.5 冒頭の「limit class は Q4 の対象外」がそのまま成立している)。
+
+**(3) (e) 資源検査のための計数の手がかり**
+
+- **`r2db-api-http`**: `pg_stat_activity` を login role で数える。同型の既存ヘルパが `r2db-api/tests/test_postgres.py:303-316` (`_live_connections_by_role`) にある。plug 側には admin DSN (`conformance_adapter_r2db_http.py:181` の `_admin_dsn`) と `self._platform` の role/DSN があり、startup sweep が既に `pg_stat_activity` を直接引いている (`:470`)。pool は store 単位 (`pool_size=2`、`:990` / `:1067`)、cell 側は `SharedPoolManager` / `_PoolHandle` (`r2db-api/src/r2db_api/postgres.py:553` / `:672` / `:699`) である。解放の前例は `isolated_control_surface` の `finally` が client を閉じ 4 store を `close()` する形 (`:1793-1816`)。
+- **`MitateDB-api-http`**: **cell 1 個につき persistent 接続はちょうど 2 本**である (`MitateDB-api/src/mitatedb_api/backend_postgres.py:404` の docstring と `:419-421`)、解放は `close()` (`:480`)。plug は `cell._backend.close()` を eviction (`:886`) と teardown (`:791`) で呼び、`_MAX_OPEN_CELLS = 6` (`:882`) の上限を持つ。`pg_stat_activity` は plug 自身の sweep が datname 単位で引いている (`:440`)。control 面を張る場合は `build_control_service` が起動検査用に 1 本開いて `finally` で閉じる過渡がある (`control_composition.py:121` / `:155`) 一方、生成される store 群は per-call connection で pool を持たない (`control_composition.py:195-198` の逐語)。
+- **`r2db-api` (in-process)**: 数える外部資源が無い。`isolated_control_surface` の逐語が "No real resource to release on exit (in-memory construction only)" (`conformance_adapter_r2db.py:515-516`) と書き、cell は純データクラス (`structured.py:1095`) である。観測できるのは生存 Python オブジェクトの数だけである。
+- **`MitateDB-api` (in-process)**: cell 1 個につき `sqlite3.connect(":memory:")` が 1 本 (`backend_sqlite.py:71-72`、`close()` は `:477`)。plug の `close()` は現に no-op である (`conformance_adapter_mitatedb.py:1787-1790`)。**D-6.6 の「in-memory plug は live pool 数」に相当する現物の観測量は、この live な sqlite 接続数である。**
+
+**(4) WP-4 実装担当への構成経路の注意**
+
+- **`r2db-api` (in-process)**: control 側の `isolated_control_surface` は backend / audit / limits を**共有したまま** `ControlPlaneService` を作り直す形 (`conformance_adapter_r2db.py:517-527`) だが、data plane では cell が `DataService` インスタンスの内部状態なので同じ形にはならない — 隔離 instance は自前の `ControlAuthority.register_application` から始める。`limits=` を渡すのは新 `DataService` に対してだけであり、共有 surface の宣言は動かさない。
+- **`r2db-api-http`**: **control 側の記述 (composition root・宣言表・書き手 role) を data 側へ写さないこと。** この plug の data plane は `DataService` + `create_app` の直接構築であり、`build_app` を呼ぶと廃止 env 拒否・宣言表読み・書き手 role 二重検査が走るうえ `limits` を注入できない。application を新設するなら既存の `_provision_pg_app` を通す (`0003` が台帳を seed する)。
+- **`MitateDB-api` (in-process)**: 新しい `FoundationConfig` で `ControlPlane` + `MitateDataService` を作り直すだけでよい。**Q4 の宣言表・role 設定はこの経路に一切現れない。**
+- **`MitateDB-api-http`**: **seed が要るのは control 面を新たに張るときだけである** — `build_control_service` が composition root だからであり (Q4 §6.1 α)、data 面の隔離 instance は `ApplicationCell` + `FoundationConfig` の明示注入で宣言表を読まない。`request_bytes` を小さくするなら `FoundationConfig.max_request_bytes` と `create_app(request_bytes_limit=...)` を**同時に**動かす (片方だけでは宣言と enforcement が食い違う)。
 
 #### D-6.6 (e) L6-13 — 隔離 surface の資源検査
 
-`isolated_control_surface()` / `isolated_application_surface()` について、**呼び出しの前後で資源が戻ることを assert する** — PG plug は `pg_stat_activity` の件数、in-memory plug は live pool 数。**同一 WP で行う** (WP-4)。
+`isolated_control_surface()` / `isolated_application_surface()` について、**呼び出しの前後で資源が戻ることを assert する** — PG plug は `pg_stat_activity` の件数、in-memory plug は live pool 数。**同一 WP で行う** (WP-4)。**【監督注記 2026-09-06】in-memory plug に「pool」は現物に無い — r2db in-process は資源ゼロ、MitateDB in-process は cell ごとの `sqlite3.connect(":memory:")` 1 本 (`backend_sqlite.py:71-72`)。計数対象は「live sqlite 接続数 / 生存オブジェクト数」と読み替える (追補 (3))。close 撤去の変異が効く対象は plug ごとに異なる (r2db HTTP = store の pool、MitateDB HTTP = cell の persistent 接続)。**
 
 **変異**: context manager の close を外す → 件数が戻らず赤。
 
