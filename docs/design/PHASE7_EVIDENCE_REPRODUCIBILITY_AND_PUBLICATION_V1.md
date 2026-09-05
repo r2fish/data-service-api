@@ -1,8 +1,9 @@
 # フェーズ7 実施設計: 証拠・再現性・公開準備 (契約 1.6.0 不変)
 
-- 版数: **v1.1 (2026-09-05、設計レビュー 1 回目の指摘 20 件を全件反映。§6 に (γ) 新設。監督が V3 の xfail 件数を 6/8 → 7/9 に訂正 — MitateDB in-process の `request_bytes: unavailable` を静的 parametrize が拾うため。L7-1 に副項目を追加)** — **§5 の依頼者裁定は 1 文字も変えていない。** v1.0 からの変更点: **(1)** D-2 の変異から合成リテラル 2 件を削除し、「許可リスト外の合成 FQDN 1 件と合成 e-mail 1 件を**実装担当が生成して一時ファイルにのみ置く**」へ改めた (書いたままでは WP-1 のスキャナ導入と同時に**本書自身が R1 / R2_fqdn で赤になる**)。**(2)** **D-6.2 を 4 列** (class / 契約上の意味 / 両 peer で同時成立する駆動レシピ / 検査の形) **へ格上げ**し、`query_complexity` / `request_bytes` / `result_items` の 3 class を**片側検査**へ落とした (metric の合成・計測方式が peer 間で異なり、共通の 1 レシピでは N / N+1 の位置が一致しない)。**(3)** V2 の**駆動集合の導出規則を明文化**した — 「(その plug が叩く surface で `enforced`) ∩ (D-6.2 で検査形を持つ class)」とし、差集合 (r2db の `concurrency`) と理由を C-05 行に開示する。**(4)** **公開ゲートに force push (全 branch・tag) と、remote から取り直した新規 clone に対する履歴スキャン**を挿入し (D-1 (iv) / §9)、**GitHub 側に残る unreachable object への対処を §6 (γ) として両論で新設**した (監督案 = 案 1、確定はしない)。**(5)** filter-repo の前に**すべての linked worktree を畳む**手順を §9 の先頭に置いた。**(6)** スキャナの placeholder 除外を「トークン全体を除外」から「**placeholder 部分文字列を除去してから再判定**」へ改めた (前置による実値の隠蔽を塞ぐ)。**(7)** CI の PostgreSQL を `services:` から**専用 step の `docker run`** へ改め (`services:` に `command:` キーは無い)、DSN 既定値が unix socket であるため CI では loopback TCP への上書きが必須である旨を明記した。**(8)** V2 に **`_MAX_EXERCISABLE_LIMIT` 相当の上限 assert と `requests_per_minute` 窓の headroom 前提**を置いた (C-14:476 / :490-511 と同型)。**(9)** `isolated_application_surface()` が返すものを単一 callable から**port 準拠の adapter instance** (小さな profile の新 service に束縛した同型の adapter) へ改めた。**(10)** C-10 の応答走査を port 追加ではなく **conftest 側の generic proxy** に置き、「wire 水準」の語を「**adapter 境界水準**」へ改めた (port 追加項は 2 のまま)。**(11)** V1 (e) が**契約の義務ではなく共通 suite の追加要件**であることを明記し、V1 (c) の対象を **`enforced` と `reference_wall_clock` のみ**へ限定した (`deployment_required` は `limits` 側の制約を置かない)。**(12)** V1 (e) の適用面を **application plane のみ**とし control plane の必須集合を C-14 の 4 class に置き、**V3 を固定 9 の静的 parametrize** へ改め、C-07 の全体 guard と V2 の空振り防止を **per-plug 非空性 assert** (C-17:182-218 と同型) へ改めた。**(13)** `details.limit_class` 必須の根拠を自前の論から**契約 `errors.details_vocabulary` (required、1.2.0 義務)** へ差し替え、C-14 の stale 注釈と L6-19 の訂正を WP-4 に載せた。**(14)** D-6.5「Q4 確定後の追補」の記入を WP-8 から **WP-4 の着手条件**へ移した。**(15)** `httpx2` は**提供元が Starlette / encode 系であることの確認**を完了条件とし、確認できなければ ASGITransport 経路へ切り替えると明記した。**(16)** D-7 の長さ上限を**主表の各セル**に掛けると明記し、目安を 1,500 から **2,500** へ改め (履歴ゼロの C-17 Condition 列が 1,788 文字)、register テストに **ID 重複禁止 assert** を足した。**(17)** `CONDITIONS.md` の更新規約は**表の外の前文に散文で**置くと明記した (parser の単一表前提を壊さないため)。**(18)** companion の見出しを **ID のみ**とし、anchor の解決を register テストで検査すると明記した。**(19)** 「43 ファイル中」の**母数の出所**を明記した。**(20)** §12 に「前倒しした 7-A の worktree も WP-9 の手順 1 の前に畳む」を足した
+- 版数: **v1.2 (2026-09-05、依頼者裁定 (α)(β)(γ) 確定 + 7-A 前倒し確定)** — **§5 の依頼者裁定は 1 文字も変えていない。** v1.1 からの変更点: **(1)** **§6 を「未確定」から「依頼者裁定 (2026-09-05 確定)」へ改め**、裁定文を逐語で置き、(α)(β)(γ) の各項に確定内容を付した (**両論は経緯として残す**)。**(2)** **(α) 確定**に伴い、**D-3 の Python matrix を「3.11 と 3.12 の両方を required、完了ゲートの正本は 3.11 job の集計行 (3.12 job は同一集計行であることを required で担保)」**へ改め、L7-6 の射程を狭めた。**(3)** **(β) 確定**に伴い、**MitateDB の欠落 4 class への明示エントリ追加を WP-4 同梱**として確定扱いにした (§10)。**(4)** **(γ) 確定 (案 1)** に伴い、**D-1 (iv) の (4)(5)**、**§9 の手順表** (手順 3 = 同名リポジトリの delete + 書換後履歴のみ push + 再作成、手順 4 の取得元 = 再作成後の remote)、**§10 WP-9 の着手条件**、**L7-13 (閉じた)** を確定形へ改めた。**(5)** **7-A (WP-1 / WP-2 / WP-3) の前倒し着手の確定**を §12 と §10 に記した
+- 旧 **v1.1 (2026-09-05、設計レビュー 1 回目の指摘 20 件を全件反映。§6 に (γ) 新設。監督が V3 の xfail 件数を 6/8 → 7/9 に訂正 — MitateDB in-process の `request_bytes: unavailable` を静的 parametrize が拾うため。L7-1 に副項目を追加)** — **§5 の依頼者裁定は 1 文字も変えていない。** v1.0 からの変更点: **(1)** D-2 の変異から合成リテラル 2 件を削除し、「許可リスト外の合成 FQDN 1 件と合成 e-mail 1 件を**実装担当が生成して一時ファイルにのみ置く**」へ改めた (書いたままでは WP-1 のスキャナ導入と同時に**本書自身が R1 / R2_fqdn で赤になる**)。**(2)** **D-6.2 を 4 列** (class / 契約上の意味 / 両 peer で同時成立する駆動レシピ / 検査の形) **へ格上げ**し、`query_complexity` / `request_bytes` / `result_items` の 3 class を**片側検査**へ落とした (metric の合成・計測方式が peer 間で異なり、共通の 1 レシピでは N / N+1 の位置が一致しない)。**(3)** V2 の**駆動集合の導出規則を明文化**した — 「(その plug が叩く surface で `enforced`) ∩ (D-6.2 で検査形を持つ class)」とし、差集合 (r2db の `concurrency`) と理由を C-05 行に開示する。**(4)** **公開ゲートに force push (全 branch・tag) と、remote から取り直した新規 clone に対する履歴スキャン**を挿入し (D-1 (iv) / §9)、**GitHub 側に残る unreachable object への対処を §6 (γ) として両論で新設**した (監督案 = 案 1、確定はしない)。**(5)** filter-repo の前に**すべての linked worktree を畳む**手順を §9 の先頭に置いた。**(6)** スキャナの placeholder 除外を「トークン全体を除外」から「**placeholder 部分文字列を除去してから再判定**」へ改めた (前置による実値の隠蔽を塞ぐ)。**(7)** CI の PostgreSQL を `services:` から**専用 step の `docker run`** へ改め (`services:` に `command:` キーは無い)、DSN 既定値が unix socket であるため CI では loopback TCP への上書きが必須である旨を明記した。**(8)** V2 に **`_MAX_EXERCISABLE_LIMIT` 相当の上限 assert と `requests_per_minute` 窓の headroom 前提**を置いた (C-14:476 / :490-511 と同型)。**(9)** `isolated_application_surface()` が返すものを単一 callable から**port 準拠の adapter instance** (小さな profile の新 service に束縛した同型の adapter) へ改めた。**(10)** C-10 の応答走査を port 追加ではなく **conftest 側の generic proxy** に置き、「wire 水準」の語を「**adapter 境界水準**」へ改めた (port 追加項は 2 のまま)。**(11)** V1 (e) が**契約の義務ではなく共通 suite の追加要件**であることを明記し、V1 (c) の対象を **`enforced` と `reference_wall_clock` のみ**へ限定した (`deployment_required` は `limits` 側の制約を置かない)。**(12)** V1 (e) の適用面を **application plane のみ**とし control plane の必須集合を C-14 の 4 class に置き、**V3 を固定 9 の静的 parametrize** へ改め、C-07 の全体 guard と V2 の空振り防止を **per-plug 非空性 assert** (C-17:182-218 と同型) へ改めた。**(13)** `details.limit_class` 必須の根拠を自前の論から**契約 `errors.details_vocabulary` (required、1.2.0 義務)** へ差し替え、C-14 の stale 注釈と L6-19 の訂正を WP-4 に載せた。**(14)** D-6.5「Q4 確定後の追補」の記入を WP-8 から **WP-4 の着手条件**へ移した。**(15)** `httpx2` は**提供元が Starlette / encode 系であることの確認**を完了条件とし、確認できなければ ASGITransport 経路へ切り替えると明記した。**(16)** D-7 の長さ上限を**主表の各セル**に掛けると明記し、目安を 1,500 から **2,500** へ改め (履歴ゼロの C-17 Condition 列が 1,788 文字)、register テストに **ID 重複禁止 assert** を足した。**(17)** `CONDITIONS.md` の更新規約は**表の外の前文に散文で**置くと明記した (parser の単一表前提を壊さないため)。**(18)** companion の見出しを **ID のみ**とし、anchor の解決を register テストで検査すると明記した。**(19)** 「43 ファイル中」の**母数の出所**を明記した。**(20)** §12 に「前倒しした 7-A の worktree も WP-9 の手順 1 の前に畳む」を足した
 - 旧 v1.0 (2026-09-05、監督裁定 S-1〜S-6 反映) — 初版起草後・設計レビュー前に、起草者の疑義 3 件と事実確認に対する監督裁定 S-1〜S-6 (D-6 V1 規則の確定形と V2 probe 対象の限定 / 必須エントリ集合の「固定 9 + capability 条件付き 3」化 / D-1 (iii) の凡例訂正 / C-07 の形と port 追加項の限定 / CI matrix と runbook の事実確認 / Status 同一コミット規律) を反映した訂正であり、初版の版数を維持した
-- 位置づけ: **監督が確定した枠 (2026-09-05) の実施設計**である。§3 の D-1〜D-7 は監督裁定を受けた確定であり、§5 の依頼者裁定 1〜4 は逐語で記録して**再審議しない**。WP 分割は §10 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_PUBLICATION_V1.md`) は別途起こす。構成・粒度・文体はフェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) を踏襲する
+- 位置づけ: **監督が確定した枠 (2026-09-05) の実施設計**である。§3 の D-1〜D-7 は監督裁定を受けた確定であり、§5 の依頼者裁定 1〜4 は逐語で記録して**再審議しない**。**§6 の (α)(β)(γ) も 2026-09-05 の依頼者裁定で確定した** — **本設計に未確定事項は無い**。WP 分割は §10 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_PUBLICATION_V1.md`) は別途起こす。構成・粒度・文体はフェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) を踏襲する
 - テーマ: **「第三者が同じ集計行を再現でき、公開しても安全で、現行の担保を短時間で読み取れる」状態にすること**
 - 出所: `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 **L6-20 の (a)(b)(g)(h)(i)** を本フェーズの実施対象とし、**(c)(d)(e)** については採否を本設計で決める。**(f) は Q4 フェーズへ移管済みであり本フェーズの範囲外**である (依頼者裁定 2026-09-05)
 - **契約は不変である**。本フェーズは `spec/data-service-api.v1.json` を 1 バイトも変えない。`limit_enforcement` の値語彙 (`enforced` / `reference_wall_clock` / `deployment_required` / `unavailable`) と `limits.classes` の 16 語 (契約 :254) は**既存のまま使う**
@@ -112,20 +113,20 @@
 1. **すべての linked worktree を畳む** (`git worktree remove` / `git worktree prune`) — `.claude/worktrees/*` は共有ツリーの `.git/objects` を参照するので、書換後は不整合な参照を持つ。**書換自体は remote から取り直した fresh clone 上で実行する**。
 2. `git filter-repo --replace-text` による**全履歴の置換**。置換表は**リポジトリ外の運用者記録にある既存の対応表**を使う (本書はその存在だけを書く)。
 3. filter-repo が出す **commit-map で文書内の hash 参照を一括更新**する。対象規模は `docs/` + `security/` + `conformance-tests/CONDITIONS.md` の 43 ファイル中 **29 ファイル・262 件**の 7〜40 桁 hex 様トークンである (**母数の 43 は探索時に走査した `docs/` + `security/` 配下の `.md` と `conformance-tests/CONDITIONS.md` の合計本数である**。誤検出は精査で除く。全数目視は未実施)。
-4. **書換履歴の force push (全 branch・全 tag)**。**運用者作業。** これを行わない限り、履歴の実値が消えるのはローカルだけである。
-5. **remote から新規 clone を取り直し**、そのクローンに**スキャナの履歴モード** (`git log --all -p` を走査) を掛けて**全規則 0 件**であること。
+4. **同名リポジトリを delete し、書換後の履歴だけを push して再作成する** (**依頼者裁定 2026-09-05**、§6 (γ) 案 1)。全 branch・全 tag を push する。**運用者作業。** これを行わない限り、履歴の実値が消えるのはローカルだけである。**force push では GitHub 側に旧 commit が unreachable object として残り得る**ので、**remote の object store 自体を新しくする**。
+5. **remote から新規 clone を取り直し**、そのクローンに**スキャナの履歴モード** (`git log --all -p` を走査) を掛けて**全規則 0 件**であること。**取得元は (4) で再作成した remote である** (§6 (γ) 案 1)。
 6. **全 clone・worktree の作り直し** — 共有ツリー、`.claude/worktrees/*`、VPS 上の clone を含む。
 7. **有効 credential 2 件 (r2db control / runtime) の revoke + 再発行**。**rotate は id を保持するため不可である** (裁定 2)。**運用者作業。**
 8. **依頼者の実行合図** (着手条件) と **visibility の切替** (依頼者作業)。
 
-**順序**: **(1) → (2) → (3) → (4) → (5) → (6) → (7) → visibility**。(3) は書換後の新 commit として乗る。(5) を (6) の前に置くのは、**検査対象を「remote が実際に保持している履歴」にする**ためである — ローカルの書換済みツリーを検査しても、公開されるのは remote 側の内容である。
+**順序**: **(1) → (2) → (3) → (4) → (5) → (6) → (7) → visibility**。(3) は書換後の新 commit として乗る。**(4) が delete + 再作成である以上、(5) の取得元は再作成後の remote である。**(5) を (6) の前に置くのは、**検査対象を「remote が実際に保持している履歴」にする**ためである — ローカルの書換済みツリーを検査しても、公開されるのは remote 側の内容である。
 
-**残留への注意**: force push 後も、GitHub 側には旧 commit が **unreachable object** として残り得る (SHA 直指定で取得できる)。private → public の切替は、その残留を公衆に開くことを意味する。**この点への対処は §6 (γ) として両論のまま残す** — 本設計では確定しない。
+**残留への注意 (対処は確定した)**: force push 後も、GitHub 側には旧 commit が **unreachable object** として残り得る (SHA 直指定で取得できる)。private → public の切替は、その残留を公衆に開くことを意味する。**この点への対処は §6 (γ) で確定した — 案 1 (同名リポジトリを delete し、書換後の履歴だけを push して再作成する) である** (依頼者裁定 2026-09-05)。**remote の object store 自体が新しくなるので、旧 object は存在しない。**
 
 **覚悟すべき帰結として記録する**: 書換後、**リポジトリ外の記録 (運用者の私的記録、引き継ぎ以前のメモリ) が引く旧 hash は無効になる**。commit-map は**リポジトリ外の運用者記録に保存する** (内容は本書に書かない)。
 
 **却下した代替案**:
-- **別リポジトリへの新規公開** — 裁定 2 が単一リポジトリの維持を確定している。**なお §6 (γ) の案 1 (同名リポジトリの delete + 再作成) はこれとは別物である** — owner も名前も正本も 1 つのままであり、変わるのは remote の object store だけである。**その読みが妥当かどうかは (γ) で依頼者が確定する。**
+- **別リポジトリへの新規公開** — 裁定 2 が単一リポジトリの維持を確定している。**なお §6 (γ) の案 1 (同名リポジトリの delete + 再作成) はこれとは別物である** — owner も名前も正本も 1 つのままであり、変わるのは remote の object store だけである。**この読み (裁定 2 の「単一リポジトリを維持する」は識別 (owner / 名前 / 単一の正本) の維持と読む) は依頼者裁定 2026-09-05 で確定した** (§6 (γ))。
 - **BFG Repo-Cleaner** — replace-text の機構自体は同等だが、(2) の一括更新手順が **filter-repo の commit-map 形式を前提にしている**。
 - **「置換前版が残るのは 6 commit だけだから該当 commit を squash する」** — 履歴の連続性と、他文書からの hash 参照を**より多く壊す**。
 
@@ -184,10 +185,10 @@
 
 - ubuntu ランナー、**PostgreSQL 16 は `services:` ではなく専用 step の `docker run` で起動する** (`postgres:16`、`-c max_connections=300` をコマンド引数として直接渡す、**合成パスワード**、loopback への port 公開)。**GitHub Actions の `services.<id>` が受けるのは `image` / `credentials` / `env` / `ports` / `volumes` / `options` であり、コンテナのコマンド引数を渡すキーは無い** — `command:` と書いても構文エラーか無視になり、`max_connections` が既定 100 のまま `-n 5` を回して接続枯渇で赤になる。`docker run` step はローカル手順と同型でもある。**代替は service container + 起動後 step の `ALTER SYSTEM SET max_connections=300` + コンテナ再起動**だが、手数が増えるので採らない
 - 環境変数 `R2DB_TEST_ADMIN_DSN` / `MITATEDB_TEST_ADMIN_DSN` (superuser 相当、CI 内 loopback)。**両変数の既定値は unix socket (`host=/tmp`) であり、コンテナで起動した PG には届かない** — **CI では必ず loopback TCP の DSN で上書きする**
-- **Python matrix: 3.11 と 3.12** — 3.11 は集計行の記録環境と MitateDB のコンテナ基底 (`python:3.11-slim`)、3.12 は r2db の VPS 実行環境である (§1.6 の 6)。**この 2 つは「実際に走る 2 環境」であることが事実確認で裏付けられている** (裁定 S-5): **r2db の VPS には 3.12 しか無く**、**MitateDB のコンテナ基底は 3.11 である**ので、どちらか一方だけを測ると、もう一方の実配備環境が無検査になる。**両方 required とするかは §6 (α) に残す (監督案は required)**
+- **Python matrix: 3.11 と 3.12** — 3.11 は集計行の記録環境と MitateDB のコンテナ基底 (`python:3.11-slim`)、3.12 は r2db の VPS 実行環境である (§1.6 の 6)。**この 2 つは「実際に走る 2 環境」であることが事実確認で裏付けられている** (裁定 S-5): **r2db の VPS には 3.12 しか無く**、**MitateDB のコンテナ基底は 3.11 である**ので、どちらか一方だけを測ると、もう一方の実配備環境が無検査になる。**両方を required とする** (**依頼者裁定 2026-09-05**、§6 (α))。**完了ゲートの正本は 3.11 job の集計行** (集計行の記録環境) であり、**3.12 job は同一の集計行であることを required で担保する** — 集計行が食い違えば 3.12 job が赤になるので、引く集計行は 1 本のままである
 - ゲートコマンド `python -m pytest -q -n 5 --dist loadgroup`、**集計行を job summary に出す**
 - **別 job**: スキャナ (D-2)、配備資産 lint (D-5)
-- **CI が緑であることを「共通証拠」とし、以後の完了ゲートは CI の集計行を正本の記録に引く** (ローカル単独実行は維持する)
+- **CI が緑であることを「共通証拠」とし、以後の完了ゲートは CI の集計行を正本の記録に引く** (ローカル単独実行は維持する)。**正本は 3.11 job の集計行である** (依頼者裁定 2026-09-05、§6 (α))
 
 **実 PG の要件** (superuser DSN、`max_connections=300`、`-n 5`) を **`conformance-tests/README.md` に明文化する** — 現状これらは引き継ぎ文書と作業指示書にしか無い (§1.2)。
 
@@ -467,7 +468,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 | # | 代替案 | 却下理由 | 出所 |
 |---|---|---|---|
-| 1 | 別リポジトリへの新規公開 | 裁定 2 が単一リポジトリ維持を確定。**§6 (γ) 案 1 の「同名リポジトリの delete + 再作成」はこれとは別物である** (識別は 1 つのまま、remote の object store だけが変わる) | D-1 |
+| 1 | 別リポジトリへの新規公開 | 裁定 2 が単一リポジトリ維持を確定。**§6 (γ) 案 1 の「同名リポジトリの delete + 再作成」はこれとは別物である** (識別は 1 つのまま、remote の object store だけが変わる。**2026-09-05 に案 1 で確定**) | D-1 |
 | 2 | BFG Repo-Cleaner | 機構は同等だが、hash 一括更新が filter-repo の commit-map 形式を前提にしている | D-1 |
 | 3 | 実値を含む 6 commit だけを squash | 履歴の連続性と他文書の hash 参照を**より多く**壊す | D-1 |
 | 4 | 既製 secret scanner (gitleaks 等) の導入 | 対象は secret ではなく運用固有識別子であり規則集が合わない。pre-commit に外部リポジトリ依存を持ち込む | D-2 |
@@ -505,11 +506,23 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ---
 
-## 6. 未確定 (依頼者判断が要り得る点。両論のまま残す)
+## 6. 依頼者裁定 ((α)(β)(γ)、2026-09-05 に確定)
 
-**本節の 3 点は本設計では確定しない。** 監督案を明記するが、確定は依頼者判断に委ねる。
+**本節の 3 点は依頼者裁定で確定した。裁定文は逐語で置き、両論は経緯として残す。**
+
+**【依頼者裁定 2026-09-05】**
+
+> (α)(β)(γ) は監督案どおり確定。7-A を前倒しで着手してください。
+
+**帰結の一覧**: **(α)** CI の Python matrix は 3.11 と 3.12 の**両方を required** とし、**完了ゲートの正本は 3.11 job の集計行**である (3.12 job は同一集計行であることを required で担保する)。**(β)** MitateDB の欠落 4 class への明示エントリ追加は **7-B WP-4 に置く** (宣言と検証を同一コミットに)。**(γ)** **案 1** — 同名リポジトリを delete し、書換後の履歴だけを push して再作成する。**あわせて 7-A (WP-1 / WP-2 / WP-3) の前倒し着手が確定した** (§12)。
 
 ### (α) CI の Python matrix に 3.12 を required とするか、informative に留めるか
+
+**【依頼者裁定 2026-09-05】監督案を採用: CI の Python matrix は 3.11 と 3.12 の両方を required とする。完了ゲートの正本は 3.11 job の集計行 (集計行の記録環境) であり、3.12 job は同一集計行であることを required で担保する。**
+
+**帰結**: `.github/workflows/ci.yml` は 3.11 / 3.12 の 2 job を定義し、**どちらも required** である (D-3)。「以後の完了ゲートは CI の集計行を正本の記録に引く」(D-3) の**正本は 3.11 job の集計行**であり、**3.12 job が担うのは「同一の集計行であること」の担保**である — 食い違えば 3.12 job が赤になる。**したがって正本の集計行は 1 本のままであり、「2 環境の集計行のどちらを引くか」という曖昧さは生じない** (L7-6 の射程はこれで狭まる)。
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 - **required とする案 (監督案)**: 3.11 は集計行の記録環境と MitateDB のコンテナ基底 (`python:3.11-slim`)、3.12 は r2db の VPS 実行環境 (実測 3.12.3 のみ) である (§1.6 の 6)。**実際に走る 2 環境をどちらも証拠にする**方が、「共通証拠」という本フェーズの目的に合う。両 peer の `requires-python` は `>=3.11` であり、3.12 で赤が出れば**それは実配備で起きる不具合**である。
 - **informative に留める案**: 3.12 の赤が上流依存の一時的な非互換に起因する場合、**公開ゲート (D-1 (iv)) が上流の都合で止まる**。required は「集計行 = 1 つ」という現行の完了ゲートの単純さを崩し、2 環境の集計行が食い違ったときの正本を決める必要が生じる。
@@ -517,13 +530,25 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ### (β) MitateDB の 4 class に明示エントリを足す変更を、7-B WP-4 に置くか、宣言だけ先に 7-A へ出すか
 
+**【依頼者裁定 2026-09-05】監督案を採用: MitateDB の欠落 4 class への明示エントリ追加は 7-B WP-4 に置く (宣言と検証を同一コミットに)。**
+
+**帰結**: 当該の宣言追加は **WP-4 の成果物のまま**であり、**7-A へ先出ししない** (§10)。`MitateDB-api/src/mitatedb_api/cell.py` の `limit_enforcement` ブロックへの追加と、それを測る C-05 の V1 (e) が**同一コミットに載る**。**`operation_depth` の値 (`enforced` か `unavailable` か) を実測で決める工程は WP-4 に残る** (D-6.1 の二枝)。
+
 **対象は MitateDB の固定 9 のうち欠落している 4 class** (`execution_ms` / `concurrency` / `requests_per_minute` / `operation_depth`) **のみである** (裁定 S-2)。**r2db 側は 9 class を宣言済みで、`cross_entity_mutation` / `idempotency` がいずれも `unavailable` なので条件付き 3 class は適用外であり、無変更で V1 (e) を満たす** — したがって本論点は MitateDB 1 peer の話に閉じる。
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 - **WP-4 に置く案 (監督案)**: **宣言と検証を同一コミットに載せる**。宣言の追加は V1 (e) の欠落を埋める変更であり、**V1 を先に入れて宣言を後にすると 7-A の期間ずっと V1 が赤**になる。逆に宣言を先に入れると **V1 が測る前に事実だけが動く**。フェーズ6 の全体 vacuity guard と同じ扱いである。なお **V3 の xfail は宣言追加では XPASS しない** (`unavailable` である限り落ち続ける) ので、xfail の先置きは同一 WP に同居できる (D-6.1)。
 - **7-A へ先出しする案**: 宣言の追加は peer-local かつ契約無変更であり、Q4 と触るファイルが重ならない (`cell.py` の宣言ブロックは Q4 の対象外)。**公開ゲートは (g)(b) の完了で開く**ので、宣言だけでも先に正直になっていた方が、公開時点のクライアントに対する誠実さは上がる。
 - **どちらを採っても変わらない点**: 宣言の置き場は `MitateDB-api/src/mitatedb_api/cell.py` の `limit_enforcement` ブロック (`:1494-1504`) である (D-6.1)。また **`operation_depth` の値 (`enforced` か `unavailable` か) は実測で決まる**ので、どちらの案でも**実装担当が事実を確かめる工程は WP に残る** (D-6.1)。
 
 ### (γ) force push 後も GitHub 側に残る unreachable object への対処
+
+**【依頼者裁定 2026-09-05】監督案を採用: 案 1 — 同名リポジトリを delete し、書換後の履歴だけを push して再作成する。裁定 2 の「単一リポジトリを維持する」は識別 (owner / 名前 / 単一の正本) の維持と読む。**
+
+**帰結**: **D-1 (iv) の (4) は「force push」から「同名リポジトリの delete + 書換後履歴のみ push + 再作成」に変わり、(5) の clone 取得元は再作成後の remote になる**。**§9 の手順表も手順 3・4 が同じ形になる** (手順 3 = delete + 再作成 + push、手順 4 = 再作成後の remote からの新規 clone)。**§10 WP-9 の着手条件から「§6 (γ) の確定」は外れる** — 確定済みだからである。**L7-13 は閉じた** (§11)。**残留対処が未確定であることを理由に公開を止める阻却事由は無くなった。**
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 **論点** (設計レビュー 1 回目、A-4): 履歴を `git filter-repo` で書き換えて force push しても、**GitHub 側には旧 commit が unreachable object として残り得る** — **SHA を直接指定すれば取得できる**状態である (PR ref / fork / cached diff view があれば露出はさらに増える)。**private → public の切替は、その残留オブジェクトを公衆に開くことを意味する。** D-1 (iv) の「履歴の実値を消す」という主張は、この対処を決めない限り **remote 側で担保されない**。**本設計はこれを確定しない** — 依頼者判断が要る点として両論で残す。
 
@@ -618,7 +643,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ## 9. 公開ゲートの手順骨子
 
-**D-1 (iv) の順序に従う。** 各項目に **[監督]** / **[運用者]** / **[依頼者]** の担当を付す。**着手条件は WP-1・2・3・6 の完了 (= (g)(b) 完了)、依頼者の実行合図、かつ §6 (γ) の確定である。**
+**D-1 (iv) の順序に従う。** 各項目に **[監督]** / **[運用者]** / **[依頼者]** の担当を付す。**着手条件は WP-1・2・3・6 の完了 (= (g)(b) 完了) と依頼者の実行合図である** — **§6 (γ) は 2026-09-05 の依頼者裁定で案 1 に確定した**ので、着手条件としては残らない。
 
 | # | 手順 | 担当 |
 |---|---|---|
@@ -626,8 +651,8 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 | 0.5 | **すべての linked worktree を畳む** (`git worktree remove` / `git worktree prune`) — `.claude/worktrees/*` は共有ツリーの `.git/objects` を参照するので、書換後は不整合な参照を持つ。**前倒しで作った 7-A の worktree もここで畳む** (§12)。**書換は remote から取り直した fresh clone 上で行う** — filter-repo 自体が fresh clone での実行を前提にしており、既存作業ツリーで `--force` を使うと gc 前の object 残留を生む | **[運用者]** |
 | 1 | `git filter-repo --replace-text` による**全履歴の置換**。置換表はリポジトリ外の運用者記録の既存対応表を使う。**filter-repo は作業機に未インストールなので、まず導入する** | **[運用者]** (実行) / **[監督]** (手順書) |
 | 2 | **commit-map による文書内 hash 参照の一括更新**。**書換後の新 commit として乗る**。対象規模は 29 ファイル・262 件の hex 様トークン (誤検出は精査で除く) | **[監督]** (適用スクリプトと精査) |
-| 3 | **書換履歴の force push (全 branch・全 tag)** — これを行わない限り、履歴の実値が消えるのはローカルだけである | **[運用者]** |
-| 4 | **remote から新規 clone を取り直し**、そのクローンに**スキャナの履歴モードを掛けて全規則 0 件**であること (`--history`)。**ローカルの書換済みツリーではなく、remote が実際に保持している履歴を検査する** | **[監督]** |
+| 3 | **同名リポジトリを delete し、書換後の履歴だけを push して再作成する** (**§6 (γ) 案 1 で確定**、依頼者裁定 2026-09-05)。**全 branch・全 tag を push する**。**force push では GitHub 側に旧 commit が unreachable object として残り得る**ので、remote の object store 自体を新しくする。これを行わない限り、履歴の実値が消えるのはローカルだけである | **[運用者]** |
+| 4 | **remote から新規 clone を取り直し**、そのクローンに**スキャナの履歴モードを掛けて全規則 0 件**であること (`--history`)。**取得元は手順 3 で再作成した remote である** (§6 (γ) 案 1)。**ローカルの書換済みツリーではなく、remote が実際に保持している履歴を検査する** | **[監督]** |
 | 5 | **全 clone・worktree の作り直し** — 共有ツリー、`.claude/worktrees/*`、VPS 上の clone | **[運用者]** |
 | 6 | **有効 credential 2 件 (r2db control / runtime) の revoke + 再発行**。**rotate は id を保持するため不可** | **[運用者]** |
 | 6.5 | **R7 (個人名) の人手確認** — スキャナが規則化できない個人名 (L7-3) を、新規 clone の `git log --all -p` に対して人手で確認する (対象語はリポジトリ外の運用者記録にある) | **[運用者]** |
@@ -639,7 +664,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 **手順 6 が手順 5 より後である理由**: 作り直し前の clone が古い credential で動き続けることを避けるためではなく (revoke は即時に効く)、**手順 1〜4 が失敗して巻き戻す場合に、まだ credential を失っていない状態でやり直せるようにするため**である。credential の再発行は**取り消せない**唯一の手順である。
 
-**手順 3・4 で閉じない残留がある**: force push 後も GitHub 側に旧 commit が **unreachable object** として残り得る (SHA 直指定で取得できる)。**その対処は §6 (γ) の両論のまま**であり、**依頼者が (γ) を確定するまで手順 7 (visibility の切替) には進めない** — 案 1 (同名リポジトリの delete + 再作成) を採る場合、**手順 3 が「delete + 再作成 + push」に置き換わり、手順 4 のクローン取得元も新リポジトリになる**。
+**手順 3 が残留を閉じる (2026-09-05 に確定)**: force push だけでは GitHub 側に旧 commit が **unreachable object** として残り得る (SHA 直指定で取得できる)。**依頼者裁定 2026-09-05 は §6 (γ) の案 1 を採ったので、手順 3 は「同名リポジトリの delete + 書換後履歴のみ push + 再作成」であり、手順 4 のクローン取得元も再作成後の remote である。** **remote の object store 自体が新しくなるので、旧 object は残らない** — **(γ) の未確定を理由に手順 7 (visibility の切替) を止める必要はなくなった** (L7-13)。
 
 ---
 
@@ -649,17 +674,19 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ### 7-A (Q4 非依存。共有ツリーと触るファイルが重ならない)
 
+**前倒し着手が確定している** (**依頼者裁定 2026-09-05**、§6 / §12) — **7-A の 3 WP は Q4 の main マージを待たずに着手する**。
+
 | WP | 内容 | 主な成果物 |
 |---|---|---|
 | **WP-1** | **(g) 公開規律** | `docs/security/public-repository-policy.md` (Never publish の D-1 (i) 表の全行 = 6 分類 + placeholder 規約 + First-public-push gate の 8 項目)、`INITIAL_GITHUB_PUBLICATION_WORK_ORDER.md:71` の参照化、配備記録テンプレート、`tools/public_value_scan.py`、`.pre-commit-config.yaml` |
-| **WP-2** | **(b) constraints と CI** | `constraints.txt`、`.github/workflows/ci.yml` (**PG を起動する `docker run` step**、DSN の loopback TCP 上書き、Python matrix、scanner job、deploy-assets lint job)、`conformance-tests/README.md` の実 PG 要件 |
+| **WP-2** | **(b) constraints と CI** | `constraints.txt`、`.github/workflows/ci.yml` (**PG を起動する `docker run` step**、DSN の loopback TCP 上書き、**Python matrix 3.11 / 3.12 をともに required** (§6 (α) 確定。正本は 3.11 job の集計行)、scanner job、deploy-assets lint job)、`conformance-tests/README.md` の実 PG 要件 |
 | **WP-3** | **(h) r2db 配備資産** | `r2db-api/deploy/systemd/r2dbsvc-control.service`、nginx 例の `location /control/v1/`、`r2db-api/deploy/scripts/` の operator script 3 本、runbook §7 の更新 |
 
 ### 7-B (各 WP に「**着手条件: Q4 の main マージ後**」)
 
 | WP | 内容 | 主な成果物 |
 |---|---|---|
-| **WP-4** (**着手条件: Q4 の main マージ後、かつ §D-6.5「Q4 確定後の追補」の記入と監督承認の後**) | **(a) C-05 + (e)** | **§D-6.5 追補の記入** (最初の作業)、`test_c05_limit_declaration_agreement.py` (V1 (a)〜(e) / V2 / V3)、**port v1.11 の `isolated_application_surface()`** (port 準拠の adapter instance を返す形)、MitateDB の**欠落 4 class への明示エントリ追加** (3 つは `unavailable`、`operation_depth` は実測で二枝。D-6.1)、V3 の `xfail(strict=True)` **7 または 9 件** (in-process の `request_bytes` を含む)、隔離 surface の資源検査、**D-6.2 の駆動レシピ・検査形の全 plug 実測と §13 への記録**、**C-14 の `limit_class` soft-check 注釈の訂正と L6-19 の閉止** (D-6.4) |
+| **WP-4** (**着手条件: Q4 の main マージ後、かつ §D-6.5「Q4 確定後の追補」の記入と監督承認の後**) | **(a) C-05 + (e)** | **§D-6.5 追補の記入** (最初の作業)、`test_c05_limit_declaration_agreement.py` (V1 (a)〜(e) / V2 / V3)、**port v1.11 の `isolated_application_surface()`** (port 準拠の adapter instance を返す形)、MitateDB の**欠落 4 class への明示エントリ追加** (3 つは `unavailable`、`operation_depth` は実測で二枝。D-6.1。**§6 (β) 確定により本 WP に置く** — 7-A へ先出ししない)、V3 の `xfail(strict=True)` **7 または 9 件** (in-process の `request_bytes` を含む)、隔離 surface の資源検査、**D-6.2 の駆動レシピ・検査形の全 plug 実測と §13 への記録**、**C-14 の `limit_class` soft-check 注釈の訂正と L6-19 の閉止** (D-6.4) |
 | **WP-5** | **(a) 他 5 条件 + (d)** | `test_c04_*` / `test_c10_*` / `test_c02_*` / `test_c07_*` (原子性 + 宣言分岐 + 全体 guard) / `test_c00_*`、**port v1.11 の `idempotency_key` optional フィールド**、r2db の `surfaces` 検証ヘルパの 1 モジュール化と同型性対応表への追加 |
 | **WP-6** | **(b)(iii)** | `filterwarnings = ["error::DeprecationWarning"]` の有効化、`httpx2` 追加または `ASGITransport` への 12 箇所の書き換え |
 | **WP-7** | **(i) 履歴分離** | `CONTROL_MAPPING_HISTORY.md` / `CONDITIONS_HISTORY.md`、元 2 ファイルの現行行化と更新規約、`test_conditions_register.py` の拡張と `test_control_mapping_register.py` の新設 |
@@ -667,7 +694,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ### WP-9 公開ゲート (独立の最終 WP)
 
-**着手条件: WP-1・2・3・6 完了 (= (g)(b) 完了)、依頼者の実行合図、かつ §6 (γ) の確定。** 内容は **§9 の (0)〜(7)** である。**(γ) が未確定のまま手順 7 (visibility の切替) へ進んではならない。**
+**着手条件: WP-1・2・3・6 完了 (= (g)(b) 完了) と依頼者の実行合図。** 内容は **§9 の (0)〜(7)** である。**§6 (γ) は依頼者裁定 2026-09-05 で案 1 に確定した**ので着手条件からは外れ、**手順 3 は「同名リポジトリの delete + 書換後履歴のみ push + 再作成」、手順 4 の clone 取得元は再作成後の remote** である。
 
 ---
 
@@ -678,18 +705,18 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 - **L7-3 R7 (個人名) は機械検査の対象外である** (D-2)。正規表現で表現できないため、**人手レビューに委ねる**。現時点で個人名は現行ツリー・履歴とも 0 件と記録されている (L6-20 (g)) が、**これは機械的に維持される性質ではない**。公開ゲートの手順に人手確認の項目として残す。
 - **L7-4 スキャナの誤検出率は R2_fqdn の TLD 集合に依存する**。プロトタイプ v2 は短 TLD と属性連鎖 (`self.dev` 形) の衝突で 112 件の誤検出を出した。**TLD 限定集合は実装 WP で再プロトタイプして 0 件を確認してから固定する** (D-2)。**将来 TLD を足すときは同じ手順を踏む** — 集合を広げると誤検出が戻る。**あわせて、placeholder 除外を「トークン全体の除外」から「部分文字列を除去して再判定」へ改めた新規則で、付録 A に残る誤検出 2 件が同じく消えることを再プロトタイプで確認する** (D-2)。
 - **L7-5 `constraints.txt` は作業機の venv の写像であり、CI とローカルの二重の真実になり得る**。生成手順が「清浄 venv + `pip freeze` + 手で整える」である以上、**手で整える工程の判断はコミットに残らない**。CI が constraints を使ってインストールすることで食い違いは検出されるが、**constraints 自体が正しいかは CI では測れない**。依存を上げるときに集計行を添える規約 (D-3) がこの穴を埋める唯一の機構である。
-- **L7-6 CI の集計行とローカル単独実行の集計行が食い違ったときの正本が未定義である**。D-3 は「以後の完了ゲートは CI の集計行を正本の記録に引く (ローカル単独実行は維持)」とするが、**2 つが食い違った場合の扱い**を決めていない。§6 (α) で Python matrix を required とするなら、**2 環境の集計行が 2 つ存在する**ことになり、この点はより顕在化する。
+- **L7-6 CI の集計行とローカル単独実行の集計行が食い違ったときの正本が未定義である**。D-3 は「以後の完了ゲートは CI の集計行を正本の記録に引く (ローカル単独実行は維持)」とするが、**2 つが食い違った場合の扱い**を決めていない。**§6 (α) は 2026-09-05 に「両方 required、正本は 3.11 job の集計行」で確定した**ので、**引く集計行は 1 本に定まった** — 3.12 job は同一集計行であることの担保に回り、食い違えば当該 job が赤になる。**本項に残るのは「CI の集計行とローカル単独実行の集計行が食い違ったときの扱い」だけである。**
 - **L7-7 C-10 の共通化は adapter 境界水準に留まる** (D-6.7)。**「wire 水準」とは書かない** — in-process の 2 plug には wire が無いので、誤読源になる。**PG 権限そのもの (runtime role が platform 表を読めないこと等) は peer-local 証拠の参照のままである** — 共通 suite は adapter 越しにしか peer を見ないので、DB role の権限を直接検査できない。**射程はさらに「各 worker が観測した応答の範囲」に限られる** (`-n 5 --dist loadgroup` では plug ごとに worker が分かれる)。**この 2 つの射程を `CONDITIONS.md` C-10 行に開示する。**
 - **L7-8 C-07 の idempotency 側は現時点で肯定側が空である**。両 peer とも `idempotency: unavailable` を宣言する (§1.6 の 5) ので、共通 suite が測れるのは「**拒否が実行前に起き、副作用が 0 件であること**」だけである (D-6.7)。**空振りにはならない** — 宣言分岐の全体 guard が「観測対象 ≥ 1 plug」を要求し、現時点では `unavailable` 枝の観測 4 件がこれを満たす。**どちらかの peer が `idempotency` を `unavailable` 以外で宣言した時点で、再送同一結果の肯定側が初めて load-bearing になる。** port v1.11 が足すのは **`idempotency_key` を運ぶ optional フィールドだけ**であり (裁定 S-4)、**肯定側の primitive (key の保管・再送・結果比較) はそのときに足す** — 動かす対象が無いうちに port の面積を増やさない。
 - **L7-9 現行セルの長さ上限は仕分け後の実測から決める** (D-7)。**上限は主表の各セルに掛け、設計は目安 2,500 文字だけを置き、確定値は実装 WP が仕分け後の最長セルから決めて本設計に記録する。** 上限が実際の最長セルより低ければ仕分けが未了ということであり、高すぎれば再蓄積を止められない。**目安を 1,500 から 2,500 へ上げたのは実測による** — `CONDITIONS.md` の Condition 列だけで **C-17 が 1,788 文字**あり、この列は条件の定義文であって履歴を含まないので、**1,500 では仕分けをどれだけ完璧にやっても割れない** (設計レビュー 1 回目、B-12)。
 - **L7-10 履歴分離のレビューは「落ちた制約」の突合を独立項目に置く** (D-7)。**機械検査は anchor の有無と長さしか見ない** — 現行行から現行の制約が落ちていないことは、**人手の突合でしか担保できない**。C-19 の Honest limits (a)〜(e) が最も落ちやすい形である。
 - **L7-11 配備資産は合成値から書き起こすので、実機の原本との一致は保証されない** (D-5)。**運用者が原本と突合するのは任意の検証であり、本フェーズの完了条件ではない。** CI の lint job が担保するのは「テンプレートとして構文が妥当であること」までである。
 - **L7-12 公開ゲートの手順 6 (credential の revoke + 再発行) は取り消せない**。手順 1〜4 が失敗して巻き戻す場合に備え、**credential 再発行を手順 5 の後に置く** (§9)。**この順序は、失敗時に credential を失わないことだけを目的としている。**
-- **L7-13 force push 後の GitHub 側 unreachable object の残留は、本設計では閉じていない** (§6 (γ)、D-1 (iv))。**書換後の履歴を force push しても、GitHub 側には旧 commit が SHA 直指定で取得できる形で残り得る**ので、private → public の切替はその残留を公衆に開くことになる。**対処は両論 (同名リポジトリの delete + 再作成 / GitHub Support への purge 依頼) のままであり、依頼者判断で確定する。** **確定するまで公開ゲートの最終手順に進めない** — 本項は「未確定であること自体が公開の阻却事由である」ことを記録するための起票である。
+- **L7-13 (閉じた、2026-09-05) force push 後の GitHub 側 unreachable object の残留への対処は、依頼者裁定 (§6 (γ)) で案 1 に確定した** — **同名リポジトリを delete し、書換後の履歴だけを push して再作成する**。**remote の object store 自体が新しくなるので旧 object は残らない**。裁定 2 の「単一リポジトリを維持する」は**識別 (owner / 名前 / 単一の正本) の維持**と読む。**したがって「未確定であること自体が公開の阻却事由である」という本項の起票理由は解消した** — 残るのは実行 (§9 の手順 3・4、D-1 (iv) の (4)(5)) だけである。**本項は WP-9 の実施記録で最終的に閉じる。**
 
 ---
 
-## 12. 7-A 前倒しの判断材料
+## 12. 7-A 前倒し (2026-09-05 に確定) と判断材料
 
 **7-A の 3 WP は Q4 と触るファイルがほぼ重ならないので、Q4 の main マージを待たずに着手できる。** 判断材料として、両者が触る範囲を並べる。
 
@@ -697,7 +724,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 - **Q4 が触るもの**: 両 peer の `src` / `migrations` / `ops` / `tests`、conformance adapter 2 本、`CONTROL_MAPPING.md` の 3 行、runbook。
 - **重なりは 2 点だけである**: **`r2db-api/deploy/env/*.example`** (Q4 WP-D が廃止 env を消す) と **`CONTROL_MAPPING.md`** (本フェーズでは WP-7 が触るが、WP-7 は 7-B である)。
 
-したがって **7-A の前倒し着手で衝突するのは `r2db-api/deploy/env/*.example` の 1 点のみ**であり、7-A WP-3 がこの 2 ファイルを触らない (unit / nginx / script / runbook §7 のみを触る) 範囲に留めれば、**重なりは 0 になる**。**前倒しの可否は監督が判断する。**
+したがって **7-A の前倒し着手で衝突するのは `r2db-api/deploy/env/*.example` の 1 点のみ**であり、7-A WP-3 がこの 2 ファイルを触らない (unit / nginx / script / runbook §7 のみを触る) 範囲に留めれば、**重なりは 0 になる**。**前倒しの着手は依頼者裁定 2026-09-05 で確定した** (§6) — **7-A (WP-1 / WP-2 / WP-3) は Q4 の main マージを待たずに着手する**。**7-B の着手条件 (Q4 の main マージ後) は変わらない** (§2 の C8 / §10)。
 
 **前倒しで作った worktree も、WP-9 の手順 1 (filter-repo) の前に畳む必要がある** (§9 の手順 0.5) — linked worktree は共有ツリーの `.git/objects` を参照するので、書換後は不整合な参照を持つ。**前倒しの判断材料として、この後始末が WP-9 に乗ることを織り込む。**
 
