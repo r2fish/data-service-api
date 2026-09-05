@@ -520,7 +520,7 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 **【依頼者裁定 2026-09-05】監督案を採用: CI の Python matrix は 3.11 と 3.12 の両方を required とする。完了ゲートの正本は 3.11 job の集計行 (集計行の記録環境) であり、3.12 job は同一集計行であることを required で担保する。**
 
-**帰結**: `.github/workflows/ci.yml` は 3.11 / 3.12 の 2 job を定義し、**どちらも required** である (D-3)。「以後の完了ゲートは CI の集計行を正本の記録に引く」(D-3) の**正本は 3.11 job の集計行**であり、**3.12 job が担うのは「同一の集計行であること」の担保**である — 食い違えば 3.12 job が赤になる。**したがって正本の集計行は 1 本のままであり、「2 環境の集計行のどちらを引くか」という曖昧さは生じない** (L7-6 の射程はこれで狭まる)。
+**帰結**: `.github/workflows/ci.yml` は 3.11 / 3.12 の 2 job を定義し、**どちらも required** である (D-3)。「以後の完了ゲートは CI の集計行を正本の記録に引く」(D-3) の**正本は 3.11 job の集計行**であり、**3.12 job が担うのは「同一の集計行であること」の担保**である — 食い違えば 3.12 job が赤になる。 **(監督注記 2026-09-05、WP-2 受理時)**: 実装ではこの担保を**別 job `tally-consistency`** が担い、両 job の 4 数 (passed / failed / skipped / xfailed) を比較して食い違えばその job が赤になる。「同一の集計行」とは**この 4 数の同一**を指し、経過秒を含む逐語一致ではない (WP-2 監査の疑義 A・B に対する判定)。**したがって正本の集計行は 1 本のままであり、「2 環境の集計行のどちらを引くか」という曖昧さは生じない** (L7-6 の射程はこれで狭まる)。
 
 **経緯 (両論。裁定前の記述をそのまま残す)**
 
@@ -713,6 +713,10 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 - **L7-11 配備資産は合成値から書き起こすので、実機の原本との一致は保証されない** (D-5)。**運用者が原本と突合するのは任意の検証であり、本フェーズの完了条件ではない。** CI の lint job が担保するのは「テンプレートとして構文が妥当であること」までである。
 - **L7-12 公開ゲートの手順 6 (credential の revoke + 再発行) は取り消せない**。手順 1〜4 が失敗して巻き戻す場合に備え、**credential 再発行を手順 5 の後に置く** (§9)。**この順序は、失敗時に credential を失わないことだけを目的としている。**
 - **L7-13 (閉じた、2026-09-05) force push 後の GitHub 側 unreachable object の残留への対処は、依頼者裁定 (§6 (γ)) で案 1 に確定した** — **同名リポジトリを delete し、書換後の履歴だけを push して再作成する**。**remote の object store 自体が新しくなるので旧 object は残らない**。裁定 2 の「単一リポジトリを維持する」は**識別 (owner / 名前 / 単一の正本) の維持**と読む。**したがって「未確定であること自体が公開の阻却事由である」という本項の起票理由は解消した** — 残るのは実行 (§9 の手順 3・4、D-1 (iv) の (4)(5)) だけである。**本項は WP-9 の実施記録で最終的に閉じる。**
+- **L7-14 (7-A で起票、2026-09-05) スキャナのツリーモードは `git ls-files` の対象しか検査しない — 未追跡ファイルは見ない。** **実測**: WP-2 の変異 4 の先行試行 (実行時生成した違反を**未追跡のまま**置いた) では **scanner job が緑のまま**であり、`git add -N` で intent-to-add した後に初めて赤になった (§13.2 WP-2)。**これは欠陥ではなく契約である** — ツリーモードは「**コミット対象になり得るもの**」を見る、と定義されている。**未追跡ファイルの側は `.pre-commit-config.yaml` の local hook が担う** (hook は staged なファイルに対して走る)。**したがって「ツリーモードが緑である」は「作業ディレクトリに実値が無い」を意味しない** — この射程を公開ゲート (D-1 (iv) の (5)) の読み手が取り違えないよう、**WP-9 の履歴スキャンは fresh clone に対して掛ける** (未追跡ファイルが存在し得ない状態にする) という現行の手順がそのまま手当てになっている。**本項は記録であり、追加の手当ては要さない。**
+- **L7-15 (7-A で起票、2026-09-05) 現行 origin 履歴の実値 1061 件という実測値は、WP-9 の書換で消える。** WP-1 の `--history` (`git log --all -p -m`、merge commit を含む) が commits_scanned 218 に対して報告した **総 flagged 1061 件** (規則別: R1_email 447 / R2_fqdn 192 / R2_url 102 / R3_project_id 174 / R3_project_number 34 / R4_credential_id 14 / R5_iam_principal 28 / R5_iam_sa 32 / R6_home_path 38。走査したパッチ行数 336,789) は、**パッチ行単位の件数であり重複を含む** — 付録 A.2 の見積り (単一ファイルの履歴、パッチ行 2,157) とは母数が違うので**直接比較できない**。**この数値は WP-9 の filter-repo と remote 再作成の後には再現できない** — 書換後の履歴に対する `--history` は**全規則 0 件**であることが公開ゲートの条件 (D-1 (iv) の (5)) だからである。**したがって本項は「書換前の規模を記録に残す」ためだけに存在する**。**WP-9 の実施記録で、書換前 1061 → 書換後 0 の対比として引く。**
+- **L7-16 (7-A で起票、2026-09-05) deploy-assets lint の検査結果は runner 上のツール版に依存する。** **実測**: 分離形の `http2` ディレクティブを置く変異 L3 が `nginx -t` で赤になるのは、**runner の nginx が 1.24.0 (ubuntu-24.04) だから**である。**nginx 1.25 以降ではこの記法が正当になるので、runner が上がれば L3 は緑に転じ、完了条件 4 (「1.24 互換記法である」) を守っている検査が消える。** 同種の依存は `systemd-analyze` と `shellcheck` にもある — **どの版で何が赤になったかは記録にしか残らない**。**手当ての方向 (本フェーズでは採らない)**: (i) lint job でツール版を出力して記録に残す、(ii) nginx の版を workflow で pin する、(iii) 記法の互換要件そのものを**配備先の nginx 版**に紐づけて runbook 側で管理する。**(iii) が長期に正しい形だが、配備先の版が上がったときに誰が気づくかという問題が残る** — **L7-11 (配備資産と実機の突合は任意の検証である) と同じ性質の穴**であり、実機との突合を制度化しない限り閉じない。**本項は記録として残し、次フェーズ以降で扱う。**
+- **L7-17 (7-A で起票、2026-09-05) 集計行が 1800 / 1802 から 1868 passed + 4 xfailed へ動いたのは Q4 フェーズの main 反映であり、本フェーズの変更ではない。** 作業指示書 :1073 が 7-A の基準値として置くのは**フェーズ6 完了時点の 1800 passed / 0 / 0 / 0**、その後 main に乗った値は **1802** である。一方 7-A の CI 基準 run は **1868 passed / 0 failed / 0 skipped / 4 xfailed** である。**差分は Q4 フェーズが main へ入ったこと (Q4 側が先置きした `strict` xfail を含む) によるもの**であり、**7-A の 3 WP は収集対象のテストファイルを 1 本も足していない** — 変更ファイルはすべて root `pyproject.toml:3` の `testpaths` の外であり、`--collect-only` の収集件数 1872 件 (= 1868 + 4) の一致で確認した (§13.1)。**注意すべき帰結は 2 つある**: **(i)** 作業指示書 :1073 の基準値の記述は**7-A の実測とは合わない**が、**発注時の記述は書き換えない** (差を消さないため) — 7-A の実測は本設計 §13.1 が正本である。**(ii) 7-B (WP-4 以降) の基準値は「Q4 マージ後の集計行」であり、それは 1868 passed / 4 xfailed である** — WP-4 が増やす xfail 7 または 9 件は**この 4 件の上に載る**。**本設計 §7.4 と作業指示書 :1062 の「+ 着手時点の既存分」はこの 4 件を指す。**
 
 ---
 
@@ -792,12 +796,128 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 (WP 完了後に確定する。集計行、WP ごとのコミット、受理境界、実測事項をここに置く。)
 
+**本節の完成度 (2026-09-05、7-A 完了時点)**: **7-A (WP-1 / WP-2 / WP-3) は完了した**。各 WP について**成果物・レビュー/監査の件数と主要指摘・変異の実測 (ローカルと CI)・受理境界 (この WP で「実測できなかった」「固定しない」と決めた点)・監督裁定で決めた逸脱**を書いた。**逸脱の正本は作業指示書 `docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_PUBLICATION_V1.md` §4 の訂正註 1〜6** であり、本節はそれを参照する (重複させない)。**7-B (WP-4〜WP-8) と WP-9 は未着手**であり、本節に該当項は無い。**残るプレースホルダは WP-2 の merge ハッシュ (`e1d33c3`) と 7-A 記録コミット自身のハッシュ (`本記録コミット。hash は次回引き継ぎ §1 に記載`) だけ**であり、監督がコミット後に埋める欄である — **本文中の事実に未確定は無い**。構成はフェーズ6 設計 §10 を踏襲する。**本節の起草者はテストも CI も実行していない** — レビュー・監査・変異の各ログと監督の CI 実測からの引用である。
+
 ### 13.1 集計行
 
 ```
 # WP-1 (tree scan): mode=tree files_scanned=228 total_flagged=0 (所要 ~1.0s)
+# 7-A の CI 基準 run 33962523499 (branch phase7-wp2 @ 6e92979、全 job 緑) — Python 3.11 job (正本)
+1868 passed, 4 xfailed, 10 warnings in 378.88s (0:06:18)
+# 同 3.12 job: passed / failed / skipped / xfailed の 4 数が同一 (tally-consistency job = success)
 ```
+
+**集計行の出所と読み方**:
+
+- **ローカルの完了ゲート (`pytest -q -n 5 --dist loadgroup` の単独実行) は 7-A では回していない。** 7-A の 3 WP は**収集対象のテストファイルを 1 本も足していない** (WP-1 は `tools/` と `docs/`、WP-2 は `.github/` と `constraints.txt` と `conformance-tests/README.md`、WP-3 は `r2db-api/deploy/` — いずれも root `pyproject.toml:3` の `testpaths` の外である)。**収集対象が不変であることは `--collect-only` の収集件数 1872 件 (= 1868 passed + 4 xfailed) の一致で確認した。**
+- **したがって 7-A の正本の集計行は CI の 3.11 job の集計行である** (D-3、§6 (α) 確定)。**3.12 job は同一であることの担保に回り**、実装は**別 job `tally-consistency` が両 job の 4 数を突き合わせて赤になる**形を採った (**設計 D-3 / §6 (α) の字面は「食い違えば 3.12 job が赤」であり、実装は別 job である — 監督既決。設計側の訂正註としてここに記す**)。
+- **「同一の集計行」の意味は「4 数 (passed / failed / skipped / xfailed) が同一」である。** 基準 run の逐語の集計行は経過秒が異なり (3.11 が `in 378.88s (0:06:18)`)、**経過秒を含む逐語一致は原理的に成立しない**。`conformance-tests/README.md` の "identical tally" もこの意味である。
+- **着手時点との差**: 作業指示書 :1073 が 7-A の基準値として置くのはフェーズ6 完了時点の **1800 passed / 0 failed / 0 skipped / 0 xfailed** であり、その後 main に乗った値は **1802** である。CI 基準 run の **1868 passed / 0 / 0 / 4 xfailed** との差は **Q4 フェーズの main 反映によるもので、本フェーズの変更ではない** (台帳 **L7-17**)。**7-A の 3 WP は collection を 1 件も動かしていない。**
+- **`10 warnings`** は `StarletteDeprecationWarning` 系の既存分である (§1.2)。**`filterwarnings` の有効化は WP-6 であり、7-A では有効化していない** (WP-2 禁止事項 3)。
 
 ### 13.2 WP ごとの記録
 
 - **WP-1** (`tools/public_value_scan.py` + `.pre-commit-config.yaml` 導入): ツリー走査は上記 13.1 の集計行のとおり `total_flagged=0`。対照 A (placeholder 除外 OFF) / B (ellipsis 除外 OFF) の flagged 件数はそれぞれ **7 / 8** (いずれも非ゼロ、除外が load-bearing であることの確認)。`--history` (`git log --all -p -m`、merge commit を含む) は commits_scanned 総 flagged **1061** 件。件数のみを記す (実値は転記しない)。
+
+**7-A の commit / merge**:
+
+| WP | 内容 | 実装コミット | merge コミット |
+|---|---|---|---|
+| **WP-0(docs)** | 設計 v1.2 + 作業指示書 v1.0/v1.1 | `d464e2b` | `6a27d7a` |
+| **WP-0(裁定)** | (α)(β)(γ) の確定記録 | — | `bb365d0` |
+| **WP-3** | (h) r2db 配備資産 | branch `phase7-wp3` | `df35451` |
+| **WP-1** | (g) 公開規律とスキャナ | `4c0f6ad` | `393b9f1` |
+| **WP-2** | (b) constraints と CI | branch `phase7-wp2` の `8c46202` + follow-up `f4736f6` / `6e92979` | `e1d33c3` |
+| **7-A 記録** | 本節・§11・作業指示書 v1.2・第13次引き継ぎ追記 | `本記録コミット。hash は次回引き継ぎ §1 に記載` | `本記録コミット。hash は次回引き継ぎ §1 に記載` |
+
+**着手順の実際**: 設計 §12 の前倒し確定により **WP-1 / WP-2 / WP-3 を別 worktree で並列に走らせた**。**merge の順序は WP-3 → WP-1 → WP-2** であり、**発注上の依存順 (WP-1 → WP-2 → WP-3) とは逆である** — この食い違いが作業指示書 §4 **訂正註 1** (lint 本体の置き場所) の直接の原因である。**並列化の帰結であり、実装物の欠陥ではない。**
+
+- **WP-1 (続き — レビュー・監査・受理境界)**: **独立レビューの指摘 11 件 (高 3 / 中 3 / 低 5)**、差し戻し 1 回。レビューは**規則ごとの対照実験**を自作し、各精密化を 1 つずつ無効化したときの flagged 件数 (`example_label` OFF → 18、`malformed_artifact` OFF → 58、`info_attr_chain` OFF → 1、`r6_empty_first_seg` OFF → 6) を指摘の根拠にした。主要な閉じ方は **(1)** `example` 許可を**第 1 ラベルが `example-project` のときだけ**に狭める、**(2)** アーティファクト許可を**その行に placeholder が実在するときだけ**に限る、**(3)** `--history` の exit code を実測し直す (実装担当の初回ログの `exit=0` はログ採取の誤りで、実測は `exit=1`) の 3 点である。**受け入れ監査は完了条件 14 項目**を判定し、**H-A (監査の新規指摘)** として「placeholder 判定が**行**単位なので、同一行に `<UPPER_SNAKE>` が 1 つでもあれば `--` / `..` / 先頭 `.`・`-` を含む実値がアーティファクト扱いで黙って除外される」抜け道を**合成値の探針 3 形で実測**し、あわせて当該箇所のコメントが**設計 D-2 に存在しない文言を根拠として引用していた**ことを指摘した。**是正は設計 D-2 の字面どおり「トークン粒度」へ寄せる方向を採った** — 是正後の再実測で、抜け道 3 形 (二重ハイフンの裸 FQDN / punycode の e-mail / deny-suffix ホスト) がいずれも **FLAG** になり、placeholder がホスト自身に掛かる正当なアーティファクトは**除外のまま**であること、および**ツリー 228 ファイル 0 件**が維持されることを確認した。**`/usr/bin/python3` (3.9.6) でも同一の集計行**が出ることを確認している (pre-commit hook が `python3` = システム Python を entry に持つため)。
+- **WP-1 の受理境界**: **(i) R7 (個人名) は検査していない** — 出力末尾が明示するとおり「0 件」ではない (L7-3)。**(ii) ツリーモードは `git ls-files` の対象だけを見る** — 未追跡ファイルは検査されない (**L7-14**、pre-commit hook 側が担う)。**(iii) 完了条件 14 (集計行不変) の突合は 7-A の CI 基準 run で行った** — WP-1 単独のローカルゲートは回していない (13.1)。**(iv) レビュー指摘の逐条突合は行えていない** — 検証ログに指摘本文が残っておらず、監査はコードと文書の実体からの逆算で確認した。
+
+- **WP-2** (`constraints.txt` + `.github/workflows/ci.yml` + `conformance-tests/README.md`。branch `phase7-wp2` の `8c46202` + follow-up `f4736f6` / `6e92979` → merge `e1d33c3`):
+
+  **実際に採った形** (発注と食い違った点は**実装が正**として記す):
+
+  - **`constraints.txt`** は root 1 本・**19 行すべて `==` の exact pin** である。清浄 venv の `pip freeze` から **editable install で現れる 2 peer 自身の 2 行だけ**を除いた (`pip` / `setuptools` / `wheel` は当該 venv の freeze に現れなかった)。清浄 venv での `pip install -c constraints.txt -e ./r2db-api[test] -e ./MitateDB-api[test]` は成功し、`pip check` が `No broken requirements found` を返す。**両 peer の `pyproject.toml` の下限 pin は 1 行も触っていない。**
+  - **CI** は PostgreSQL 16 を**専用 step の `docker run`** で起動し (`-c max_connections=300` をコマンド引数で直接渡す、合成パスワード、loopback 公開)、**`services:` キーは workflow 全体に不在**である。`R2DB_TEST_ADMIN_DSN` / `MITATEDB_TEST_ADMIN_DSN` を **loopback TCP の DSN で上書き**する (既定値は unix socket なのでコンテナ PG に届かない)。**matrix は 3.11 / 3.12 の 2 job で、job / step とも `continue-on-error` を 1 つも持たない**。ゲートコマンドは `python -m pytest -q -n 5 --dist loadgroup` で**ローカルの完了ゲートと文字列一致**する。集計行は 4 数 + `summary_line` の JSON として job summary に出る。
+  - **「3.12 が同一の集計行であること」の担保は別 job `tally-consistency`** が artifact 経由で両 job の 4 数を突き合わせる形で実装した (**監督既決**。設計の字面との差は 13.1 に記した)。
+  - **トリガーは `push` (全 branch) + `workflow_dispatch` のみ**であり、**`pull_request` は置かない** (**訂正註 4** — 単独作業者で PR 運用が無く、CI の赤/緑の実測は監督が当該ブランチを push して行うので、二重起動そのものが生じない)。
+  - **deploy-assets lint job は「枠」ではなく、`r2db-api/deploy/scripts/lint_deploy_assets.sh --require-tools` の呼び出しと必要な apt install を同梱した形**で着地した (**訂正註 1** — 並列着手により WP-3 が中身を書き込む先の workflow ファイルが存在しなかったため、lint 本体を script 側に置き、workflow は呼ぶだけにした。**WP-2 = job の枠、WP-3 = 検査の中身という境界そのものは保たれている**)。
+
+  **レビューと差し戻し**: 独立レビューの指摘 **7 件 (中 4 / 低 3)**、差し戻し **7 項目すべて是正**。主要なものは **(1) 集計行抽出の非空ガード** (候補ゼロ / `in <N>s` の形状 / `error` 数の非黙殺 — 変異 3 の CI ログで実発火した)、**(2) `psql` クライアントの install** (adapter が実 `psql` を呼ぶ)、**(3) README への `psql` 要件の明記**、**(4) `permissions` / `concurrency` とトリガーの確定**、**(5) lint job の安定した id / name**、**(6) README の接続数記述をフェーズ6 の実測 (100 中 64 接続) に紐づける**、**(7) `[test]` extras の shell 引用**である。レビューは `ci.yml` の heredoc から**抽出器を逐語で切り出して机上実行**し、6 形の入力に対する挙動を指摘の根拠にした。
+
+  **受け入れ監査**: 完了条件 **14 項目中 13 を充足**と判定し、**1 件を証拠不足**とした (完了条件 14 = 着手時点の main の集計行を記録した一次証拠が repo にも監査材料にも無い。13.1 でこれを埋めた)。監査は `gh run view` から集計行を自分で取得し直し、**基準 run と変異 4 本の失敗行を逐語で照合**した。監査自身の追加変異は **3 件 (机上、抽出器を逐語に切り出して実行)** である — **`no tests ran in 0.12s`** → **exit 1** (完全な collection 空振りも赤になる)、**集計行の直後に `replacing crashed worker gw3 …` を置く** → 本物の集計行を選ぶ (末尾行の誤選択が無い)、**`1 passed in 0.50s`** → **exit 0** (下記の受理境界)。
+
+  **変異注入の結果 (すべて監督が CI 上で実測。ローカルでは再現しない性質のもの)**:
+
+  | # | 変異 | run | 結果 |
+  |---|---|---|---|
+  | **1** | constraints に無いパッケージを import する一時テストを足す | 33961761737 | **赤** (3.11 / 3.12 とも `ModuleNotFoundError`。`tally-consistency` は `needs` により skipped) |
+  | **2** | `max_connections` を 100 にする | 33961762443 | **赤** (3.11 / 3.12 とも接続枯渇 — `remaining connection slots are reserved for roles with the SUPERUSER attribute`)。**`max_connections=300` の要件は load-bearing であり、「変異なし」の記録は不要になった** |
+  | **3** | DSN の loopback 上書きを外す | 33961763356 | **赤** (既定の unix socket に落ち、`required conformance adapter(s) failed to import or build; the suite fails rather than skips` で exit 4)。**skip ではない** — README の「未接続は fail」と一致する |
+  | **4** | WP-1 の変異と同型の合成違反を含めて回す | 33961828701 | **scanner job が赤** (`R1_email:flagged = 1`、exit 1)。**先行試行 (未追跡の生成ファイル) は scanner が緑のまま**であり、**ツリーモード = `git ls-files` という契約どおり**であることを同時に実測した (**L7-14**) |
+
+  変異用の branch (`phase7-wp2-mut1`〜`mut4`) は測定後に削除した。**合成の違反リテラルはコミットに 1 度も入っていない** (変異 4 は実行時生成 + `git add -N`)。
+
+  **受理境界 (この WP で「固定しない」と決めた点)**:
+
+  - **CI は集計行の値そのものを pin していない。** 監査の追加変異 `1 passed in 0.50s` が exit 0 で通るとおり、**収集が壊れて 1 件しか走らなくても、3.11 と 3.12 が同数なら `tally-consistency` も通り workflow は緑になる**。完了条件 14 が人手の監査照合である以上これは条件違反ではないが、**「期待集計行を repo に記録して CI で突き合わせる」恒久策は本フェーズでは採っていない**。
+  - **job summary のレンダリング結果そのものは監査で再取得できない** (GitHub REST が返さない)。同一性はステップが `cat` する構造によって担保されている。
+  - **`constraints.txt` の「手で整える」工程の判断はコミットに残らない** (L7-5)。除いたのが 2 peer 自身の 2 行だけであることは監査が freeze ログとの完全一致で確認したが、**constraints 自体の正しさは CI では測れない**。
+  - **ゲート step の `python` は `setup-python` が解決したものである** (監督既決)。ローカルの `./.venv/bin/python` との**版の一致は matrix が担保し、パスの一致は担保しない**。
+  - **job summary 書き出し step の末尾の無条件 `exit 0`** は、summary 書き込み自体の失敗を飲み込む。ゲート step と抽出 step が別に赤くなるので実害は無い。
+
+- **WP-3** (`r2dbsvc-control.service` + nginx `location /control/v1/` + operator script + runbook。branch `phase7-wp3` → merge `df35451`):
+
+  **実際に採った形** (発注と食い違った点は**実装が正**として記す):
+
+  - **control unit** はコメント・空行を除いた directive diff が既存 `r2dbsvc-api.service` と **3 行** (`Description=` / `EnvironmentFile=` / `ExecStart=`) しか違わない。hardening 節と `PrivateTmp` の posture B 注意書きを同型で持つ。**`EnvironmentFile` は placeholder にせず literal パスのまま**とした (**訂正註 2** — 既存 unit が literal で書いており、新設 unit だけを伏字にすると完了条件 1 の同型性照合と衝突する。**placeholder 化の対象は unit 名と port に限る**)。
+  - **nginx** は `location /control/v1/` を追加し、**`/v1/` と proxy_* 6 項目が完全一致**する。`listen 8443 ssl http2;` の **nginx 1.24 互換記法**であり、分離形 `http2 on;` は 0 件である。`:86-98` の「このテンプレートにはまだ含まれていない」コメントは追加と同時に置換した。
+  - **operator script は 3 本ではなく 4 本**である (**訂正註 3** — part1 / part1b / part2 に加え、訂正註 1 の帰結として **`lint_deploy_assets.sh`** が同ディレクトリに入った)。`bash -n` は**新設 4 本すべて**に掛かる。part1 は `R2DBSVC_API_PASSWORD` を含む **13 変数の必須検査** (`require_var`) を持ち、**未設定・未解決 placeholder のいずれでも一切の変更前に停止する**。
+  - **lint は `systemd-analyze verify` / `nginx -t` / `bash -n` の 3 検査に、`shellcheck` と check 4 (`ExecStart` 非空虚検査) を足した 5 検査**であり、**`--require-tools` モード**を持つ (**訂正註 6** — **監督が事後承認**。設計 D-5 が挙げる 3 検査は撤去せず、その上に足す形である)。
+  - **runbook** は §7 の「第二 unit を作れ」という散文指示をテンプレート参照へ置き換え (grep 0 件)、`:105` の stale な「Python 3.11 virtualenv」を `requires-python (>=3.11)` を満たす版という表現へ改め、**具体の版を書く箇所を CI matrix と配備記録に一本化**した。
+  - **`r2db-api/deploy/env/*.example` は 1 バイトも触っていない** (`git diff --stat` / `git status --porcelain` のいずれにも現れない。Q4 WP-D との唯一の重なりを 0 にする条件。§12)。
+
+  **レビューと差し戻し**: 独立レビューの指摘 **7 件 (重大 2 / 中 4 / 軽 1)**、差し戻し 1 回。**重大 1** = part1b が **bootstrap の非 0 終了を無条件に「既存 credential あり」と読んで reset 儀式へ落ちていた** → **`error: CONFLICT:` の文字列で分岐**し、非 CONFLICT は stderr を verbatim に出して停止、**CONFLICT 確定後も `R2DBSVC_ALLOW_CONTROL_RESET=1` の opt-in が無ければ停止**する形へ。**重大 2** = `nginx -t` が実在しない証明書パスを見ていた → **使い捨ての自己署名証明書を openssl で生成して sed 置換**し、`trap` で破棄する形へ。**中** の代表は part2 の `verify_401` が **非 401 応答を捕まえていなかった**点 (fake curl が 200 を返しても `part 2 complete` まで到達した) で、`%{http_code}` を読んで `!= "401"` で停止する形へ是正した。レビューは自作の変異 (`reject_placeholder_in_file` の無効化、`require_var` ループの削除) で「検出されない」ことを実測してから指摘している。
+
+  **受け入れ監査**: 完了条件 **13 項目**を判定し、**未充足 0**、**証拠不足 4** (完了条件 5 / 9 の一部 = CI 待ち、10 の正規手段 = WP-1 待ち、13 = 監督ゲート待ち) とした。監査はリポジトリの複製に対してのみ作業し、`r2db-api/deploy` 全 10 ファイルの sha256 を監査前 / 後 1 / 後 2 で照合して**本体無変更**を確認している。**監査自身の追加変異 3 件**:
+
+  | # | 変異 | 結果 |
+  |---|---|---|
+  | **X1** | part1b の CONFLICT 判定を `*'error: CONFLICT:'*` → `*'error:'*` に緩める | **DB 接続エラーの stderr が CONFLICT と誤判定され、opt-in 済み環境で reset 儀式が起動した** — 判定文字列は load-bearing |
+  | **X2** | part2 の `!= "401"` 比較を無効化 | **200 を返すバックエンドが「part 2 complete」として素通り** — 比較は load-bearing (重大指摘の是正が空振りでないことの確認) |
+  | **X3** | lint の sed をテンプレートへ適用し、残存 placeholder / 旧証明書パス / 分離形 `http2` / brace 平衡を機械照合 | 残存 **0 件**、brace **4/4**、分離形 **0 件** — `nginx -t` の前提が構文水準で満たされていることの確認 |
+
+  監査はあわせて **3 件の所見** を残した — **F-1 (中)**: runbook が part1b について「既存 credential があれば**自動的に** reset 儀式へ落ちる」と断言しているが、実装は opt-in が無ければ停止する (**破壊的操作の記述なので runbook 側を opt-in 込みへ揃える**)。**F-2 (小)**: part1 の usage コメントが具体の Python 版を書いており、runbook の「版を書く箇所は 2 箇所」という主張の 3 箇所目になっている。**F-3 (小)**: part1b の declaration step が `set +e` で囲まれ rc を検査していない。 **→ 3 件とも監督裁定で受理前に修正し (runbook の part1b 記述を opt-in 込みへ、usage の具体版を削除、declaration step の rc 検査 = 期待 2 以外は停止、fake ops で rc 9 の素通りが再現しないことを実測)、WP-3 のコミット `df35451` に含めた。**
+
+  **変異注入の結果**:
+
+  | # | 変異 | 実測 |
+  |---|---|---|
+  | **1 (ローカル)** | `ExecStart` を存在しない module path へ向ける | **本機では `systemd-analyze verify` が動かないため測れない**。**check 4 (`ExecStart` 非空虚検査) が赤**になることで代替した |
+  | **2 / 3 (ローカル)** | nginx の `proxy_pass` を壊す / script の構文を壊す | 3 は `bash -n: FAIL` → **RC 1**。2 は本機に nginx が無いため CI 待ち |
+  | **`--require-tools` (ローカル)** | ツール不在の環境で強制モードを掛ける | `systemd-analyze verify: FAIL` / `nginx -t: FAIL` → **RC 1** (「緑なのに何も検証していない」穴が塞がっていることの実測) |
+  | **L1 (CI)** | control unit の `ExecStart` を存在しない module へ向ける | run 33962527777 — **`ExecStart` 非空虚検査だけが FAIL**。**`systemd-analyze verify` は module パスを見ないので PASS のまま**であり、**check 4 が当該完了条件を担う唯一の検査**であることが実測された |
+  | **L2 (CI)** | `location /control/v1/` の `proxy_pass` を綴り違いにする | run 33962529260 — **`nginx -t` が FAIL** (`unknown directive "proxy_pazz"`) |
+  | **L3 (CI)** | 分離形の `http2` ディレクティブを置く | run 33962530314 — **`nginx -t` が FAIL** (`unknown directive "http2"`。runner の nginx 1.24.0 / ubuntu-24.04) |
+
+  変異用の branch (`phase7-wp3-mutL1`〜`L3`) と作業 worktree は測定後に削除した。
+
+  **CI 初回 run で見つかった実バグ 5 件と是正** (基準 run 33961202682 の deploy-assets lint job は **failure** だった。**本機で緑だった lint が CI で 5 箇所落ちた**もので、**設計・発注の誤りではなく実装の実バグ**である。是正は follow-up `f4736f6` / `6e92979`):
+
+  1. **`nginx -t` が `/run/nginx.pid` を書けない** (runner の権限) → **一時 main conf に `pid` と `error_log` を置く**形へ。
+  2. **同じく `/var/log/nginx/access.log` を書けない** → 一時 main conf に `access_log` を置く形へ。
+  3. **shellcheck が SC1072 / SC1073 を出す** — **`# shellcheck` で始まる散文コメント**を shellcheck が directive として解釈していた → コメントを書き換えた。
+  4. **`systemd-analyze verify` が `Command … is not executable: No such file`** — runner に実バイナリが無い → **scratch の unit コピー (`ExecStart` を stub 化、`EnvironmentFile` を空)** に対して verify する形へ。
+  5. **shellcheck の SC2317 (到達不能コード)** → disable directive を置いた。
+
+  是正後の run 33962523499 では **`systemd-analyze verify` / `nginx -t` / `bash -n` / `shellcheck` / `ExecStart` 非空虚**の 5 検査がすべて PASS である。
+
+  **受理境界 (この WP で「実測できなかった」「固定しない」と決めた点)**:
+
+  - **`systemd-analyze verify` は unit の構文しか見ず、`ExecStart` が指す module パスの実在を検証しない。** L1 の実測がこれを確定させた — **完了条件 2 (`ExecStart` が `uvicorn r2db_api.control_main:app` を指す) を赤にできる検査は check 4 だけ**であり、**check 4 は設計 D-5 に無い拡張である** (訂正註 6、監督が事後承認)。設計 D-5 の 3 検査だけでは当該条件に対応する変異が成立しない。
+  - **lint ツールの版は runner 依存である** (**L7-16**)。分離形 `http2` が赤になるのは **nginx 1.24.0 / ubuntu-24.04** の性質であり、**runner の nginx が上がれば L3 は緑に転じ得る** — その時点で「1.24 互換記法」という完了条件 4 の意味が変わる。
+  - **配備資産は合成値から書き起こしたものであり、実機の原本との一致は保証されない** (L7-11)。**運用者が原本と突合するのは任意の検証**であり、本フェーズの完了条件ではない。lint が担保するのは**テンプレートとして構文が妥当であること**までである。
+  - **完了条件 10 (新規資産に実値 0 件) の正規手段は WP-1 のスキャナ**だが、WP-3 の監査時点では WP-1 が未着地だったため**監査が手動スキャンで代替**した。**WP-1 / WP-2 着地後の CI 基準 run で `public-value scan (tree mode)` が緑**になっており、正規手段による確認は 13.1 の基準 run が担っている。
+  - **成果物 1 の字面 (「`EnvironmentFile` は placeholder」) と実装は食い違う** — 同型性 (完了条件 1) を優先した (訂正註 2)。**発注時の記述は書き換えず、差を残す。**
