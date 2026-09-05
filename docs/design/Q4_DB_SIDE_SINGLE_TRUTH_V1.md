@@ -1,6 +1,7 @@
 # Q4 フェーズ 実施設計: 宣言と適用状態の根拠を DB 側の一次情報へ寄せる
 
-- 版数: **v1.3 (2026-09-05、監督裁定 D-2 (h) — 書き手 role の宣言表化を反映)**。v1.2 からの変更点: **(1)** D-2 に **(h) 書き手 role は宣言表が特定する**を新設した — 宣言表に `audit_writer_roles` 行を置き、**書き手プロセスは起動時に自 `current_user` がその宣言に含まれることを確認し (F-13)**、**control は宣言された各 role の catalog から `visibility_lag_ms` を導出する**。**role 名をコード内の命名規則 (schema 名からの導出・接尾辞の書き換え) から得る形は両 peer から撤去する。** **(2)** `key` の CHECK の許容集合に `audit_writer_roles` を加え、**platform 単発 migration が `ALTER ROLE` を発行した role 名と同じ値を同じトランザクションで seed する**形にした (D-2 (a) / (c)、D-1 (a) / (c))。**(3)** §3.7 の起動順に「`audit_writer_roles` 読み → 自 role の包含確認 → 二重検査」を挿入し、§3.8 に **F-13** を追加、**F-4b** の射程を `audit_writer_roles` 行の検証へ広げた。**(4)** §3.10 に **seed 値の行**を足し、role 名の 2 行に「本番の seed 値」と注記した。**(5)** §12 に **LQ4-22** を起票した (却下 2 案 — 命名規則依存 / env で role 名を渡す — を含む)。**同日追補 (版数据え置き、2026-09-05 の WP-1 / WP-2 差し戻し裁定)**: §3.8 に **F-3c** を追加し、**F-11 の射程を timeout キーを含む per-database 行に絞り**、**§3.10 に同型性の面 (両 peer で名前・シグネチャ・本体を一致させるシンボル) の表**を新設し、**L6-17 (r2db の `surfaces` 検証 2 コピー) を `validate_surfaces_value` への統合で閉じる**旨を §12 LQ4-23 に起票した。
+- 版数: **v1.4 (2026-09-05、実施記録)**。v1.3 からの変更点: **§10 に WP-0 のスキャナ改訂後の最終実測 (両 peer) と実 PG 確認項目 1〜6 の結果を貼り**、**§12 の台帳を現在形にし (LQ4-1〜LQ4-3 / LQ4-7 / LQ4-11 / LQ4-13 / LQ4-19 / LQ4-21〜LQ4-23 に状態を付し、LQ4-24〜LQ4-27 を起票)**、**§13 に実施記録 (集計行・WP ごとのコミットとレビュー往復・変異の結果・受理境界) を置いた**。**§1〜§9 と D-1〜D-6 の確定事項は v1.3 から 1 文字も変えていない** — 本版が足すのは実測と記録だけである。**§6.2 (契約に載せる場合) は「採用せず」のまま**であり (依頼者裁定 U-1 の逐語指示)、記録として残す。
+- 版数履歴: **v1.3 (2026-09-05、監督裁定 D-2 (h) — 書き手 role の宣言表化を反映)**。v1.2 からの変更点: **(1)** D-2 に **(h) 書き手 role は宣言表が特定する**を新設した — 宣言表に `audit_writer_roles` 行を置き、**書き手プロセスは起動時に自 `current_user` がその宣言に含まれることを確認し (F-13)**、**control は宣言された各 role の catalog から `visibility_lag_ms` を導出する**。**role 名をコード内の命名規則 (schema 名からの導出・接尾辞の書き換え) から得る形は両 peer から撤去する。** **(2)** `key` の CHECK の許容集合に `audit_writer_roles` を加え、**platform 単発 migration が `ALTER ROLE` を発行した role 名と同じ値を同じトランザクションで seed する**形にした (D-2 (a) / (c)、D-1 (a) / (c))。**(3)** §3.7 の起動順に「`audit_writer_roles` 読み → 自 role の包含確認 → 二重検査」を挿入し、§3.8 に **F-13** を追加、**F-4b** の射程を `audit_writer_roles` 行の検証へ広げた。**(4)** §3.10 に **seed 値の行**を足し、role 名の 2 行に「本番の seed 値」と注記した。**(5)** §12 に **LQ4-22** を起票した (却下 2 案 — 命名規則依存 / env で role 名を渡す — を含む)。**同日追補 (版数据え置き、2026-09-05 の WP-1 / WP-2 差し戻し裁定)**: §3.8 に **F-3c** を追加し、**F-11 の射程を timeout キーを含む per-database 行に絞り**、**§3.10 に同型性の面 (両 peer で名前・シグネチャ・本体を一致させるシンボル) の表**を新設し、**L6-17 (r2db の `surfaces` 検証 2 コピー) を `validate_surfaces_value` への統合で閉じる**旨を §12 LQ4-23 に起票した。
 - 版数履歴: **v1.2 (2026-09-05、依頼者裁定 U-1〜U-3 を反映、契約無変更で確定)**。v1.1 からの変更点: **(1)** §5 の U-1〜U-3 を**【依頼者裁定 2026-09-05】**で確定にした (両論は経緯として残す)。**(2) U-1 = 載せない (peer-local)** — 適用状態の可視化は両 peer の `ops upgrade-status` (provision DSN) のみ。**共通契約は 1.6.0 のまま無変更、conformance の vector / port も無変更**であり、§6 は 6.1 が本線、6.2 は**採用せず (記録)** となった (§6、D-5、D-6 の 4)。**(3) U-2 = 台帳表に runtime role の `SELECT` のみ付与** — §3.9 の権限表と D-3 (a) の DDL 骨子を確定し、**cell を開く時点の集合検査**を §3.7 と D-3 (f) に置き、§3.8 に **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を示す) を追加した。パッケージ定数と `migrations/` の同期義務は **§10 / D-3 (d) の三者一致静的検査**が担保する。**(4) U-3 = 起動時スナップショット** — D-1 (e) / D-2 (g) / §9.2 を確定にし、live 案の差し替え注記を削除した。**(5)** §8 の migration 番号を**本フェーズの割当**として確定した (r2db `0008` / `0009`、MitateDB `0007` / `0008`。L6-2 に従い本フェーズが先に出荷する)。**(6)** §12 の LQ4-1〜LQ4-3 を裁定の記録に改め、**LQ4-20** (U-1「載せる」案を将来再検討する場合の前提) を起票した。
 - 版数履歴: **v1.1 (2026-09-05、設計レビュー 2 本を反映)**。v1.0 (2026-09-05、初版) からの変更点: **(1)** D-3 に新項 (e) — 台帳表を作ると r2db の catalog / RLS 監視が恒久的に落ちるため、両 peer の backend の bookkeeping 除外集合と r2db の `_r2db_missing_rls` ビューを同じ WP で拡張する。**(2)** 台帳表の DDL に provision role への `GRANT SELECT` を足し、§3.9 の権限表と「書き込み経路」の記述を現物 (所有者 = developer role) に合わせた。**(3)** 「未適用」を**集合差**で定義し直し、`applied_level` 単一値を廃して applied / pending の集合表示にした (D-4 / D-5)。適用状態の可視化は既存の一覧コマンドを触らず新サブコマンド `ops upgrade-status` に分けた。**(4)** timeout の比較を**両辺 ms 整数の数値比較**に確定し、実効値の取得を `pg_settings` に、GUC 優先順位の記述を訂正し、`0` (無制限) と per-database role 設定を fail-fast (F-10 / F-11) にした。**(5)** ops コマンドを `set-platform-timeouts` に改名し射程を明記。**(6)** 廃止 env の検査対象を composition root に渡された env mapping に限定し、`deploy/env/*.example` を成果物に加えた。**(7)** F-6 の推奨を「`*_CONTROL_PLANE_STATUS` を直す」に反転。**(8)** 宣言表の値検査を Python 側に一本化し F-4b を追加。**(9)** 静的規則の規則文・命名規範・非空振り条件を確定 (§8 / §10 / D-3 (d))。**(10)** §3.11 に射程と残余を 4 項追加し、§12 に LQ4-14〜LQ4-19 を起票。**(11)** §4 / §5 / §7 の SI-02 参照を「invariant の禁止」ではなく**運用上の代償**の記述に書き改めた (Security Invariants を許可リストに使わない)。(v1.1 時点では U-1〜U-3 が未確定であった。)
 - 位置づけ: **監督が確定した枠 (2026-09-05 裁定) の実施設計**である。§3 の D-1〜D-6 は監督裁定を受けた確定であり、**§5 の U-1〜U-3 も依頼者裁定 (2026-09-05) で確定した** — 本設計に未確定事項は無い。WP 分割は §11 に素案のみを置き、作業指示書は別途起こす。フェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) の構成・粒度・文体をそのまま踏襲する
@@ -877,14 +878,32 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **完了条件 6 のとおり**: 違反 0 かつ 免除 = r2db 空 / MitateDB `{6}` (本フェーズにまだ per-application upgrade script が無いため 適合 は両 peer とも 0 — 完了条件 8 のとおり `xfail(strict=True)` で登録し、r2db = WP-3 / MitateDB = WP-4 で撤去する)。
 
-**実 PG での確認項目** (WP で実測し、ここに結果を貼る):
+**最終実測 (WP-3 / WP-4 出荷後、2026-09-05)** — 本フェーズの per-application upgrade script (r2db `0009` / MitateDB `0008`) が出荷され、**WP-0 が登録した `xfail(strict=True)` 4 本 (両 peer の「適合 ≥ 1」と「三者一致」) は当該 peer の WP と同一コミットで撤去された** (r2db = WP-3 `55998b2`、MitateDB = WP-4 `370fe33`)。各 peer のテストが自 peer の `migrations/` だけを走査した結果:
+
+```
+### r2db-api/migrations  (peer=r2db-api)
+  適合: 1        (0009_platform_upgrades_ledger_upgrade.sql)
+  違反: 0
+  免除(許可リストで免除): 0
+  対象外(命名不一致): 8   (0001-0008 の platform 単発 migration とテンプレート)
+
+### MitateDB-api/migrations  (peer=MitateDB-api)
+  適合: 1        (0008_platform_upgrades_upgrade.sql)
+  違反: 0
+  免除(許可リストで免除): 1   (0006_declared_field_types_upgrade.sql、出荷済み)
+  対象外(命名不一致): 6
+```
+
+**三者一致 (規則 (d))**: `{*_upgrade.sql の番号集合}` == `{0003 テンプレートの seed 集合}` == `{パッケージ定数 `PLATFORM_UPGRADE_NUMBERS`}` が **r2db = `{9}`、MitateDB = `{6, 8}`** で成立する (`test_platform_upgrade_ledger_scan.py::test_real_migrations_three_way_match`、両 peer 同名)。**期待値 (§8 の割当) と実測が一致した。** 命名規範 (§8.1) の非空振りも実測されている — `NAME_RE` に一致するのは r2db では `0009` だけ、MitateDB では `0006` と `0008` だけであり、platform 単発 migration (r2db `0008` / MitateDB `0007`) はどちらも走査対象に入っていない (`::test_naming_convention_excludes_every_current_platform_single_shot_migration`)。
+
+**実 PG での確認項目 — 結果 (2026-09-05、WP-1〜WP-4 の実装とレビューが実測)**:
 
 1. **`setconfig` の保存形** — `ALTER ROLE … SET statement_timeout = '5000ms'` を実際に発行したときに catalog が `5000ms` を逐語で保持すること。**済 (レビュー 2 が実測)**: `pg_db_role_setting.setconfig` は書いた文字列をそのまま保持し、正規化されない。一方 `SHOW` / `current_setting` は `5s` を返す。→ D-1 (b)(ii) の両辺 ms 正規化の根拠。
-2. **GUC 優先順位** — `ALTER ROLE … SET` / `ALTER DATABASE … SET` / `ALTER ROLE … IN DATABASE … SET` / `PGOPTIONS` の実優先順位 (D-1 (b) の列挙は PostgreSQL の GUC source 順位に基づく推論であり、**未実測**)。
-3. **F-9 の変異先行検証** — 上書きを注入して F-9 が出ること (§12 LQ4-5)。
-4. **本体失敗時に台帳行が残らないこと** — D-3 (d) がトランザクション内位置を静的に検査しない代わりの担保。
-5. **台帳表を作っても catalog / RLS 監視が壊れないこと** — D-3 (e) の変異先行テスト (台帳表がある DB で `application_catalog` が 200 を返し台帳表が entities に現れないこと、`_r2db_missing_rls` が空のままであること、`schema_objects` 会計がずれないこと)。
-6. **cell open 時の集合検査 (D-3 (f)) が効くこと** — 変異先行テスト: 台帳から 1 番号を削った application DB では cell を開く時点で **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を含む) になり、台帳が揃った DB では通常どおり通ること。**runtime role の `SELECT` だけで台帳を読めること**も併せて実測する (D-3 (a) の `GRANT SELECT`、依頼者裁定 U-2)。
+2. **GUC 優先順位** — **部分的に実測した。実務上効く 2 経路は実測済みであり、1 経路は未実測のまま残る。** 実測: **(a) 接続時 `options=-c statement_timeout=…` は `ALTER ROLE … SET` を上書きする** (`MitateDB-api/tests/test_platform_declarations.py::test_f9_connection_string_override_is_caught`、r2db は `test_ops_declarations.py::test_f9_message_is_pinned_verbatim` が同じ注入で発火を観測)、**(b) `ALTER ROLE … IN DATABASE … SET` は database-independent の行を上書きする** (`::test_f11_per_database_row_takes_precedence`、および「これは F-9 の偶然一致ではない」ことを別テスト `::test_f11_is_specifically_raised_not_a_coincidental_f9_match` が固定)。**未実測: `ALTER DATABASE … SET` が `ALTER ROLE … SET` より低い優先順位であること** — repo 内に `ALTER DATABASE` を発行するテストは 1 件も無い (2026-09-05 実測)。**この未実測は安全側である** — 仮に優先順位が逆であっても、そのとき実効値は catalog 値と食い違うので **F-9 が起動を止める**。§3.11 の 2 の列挙のうち、機構が依存しているのは「上書きされたら気づく」ことだけであり、優先順位そのものではない。
+3. **F-9 の変異先行検証** — **済**。上書き (`options=-c statement_timeout=30000`) を注入した接続で起動が止まることを両 peer で観測し、比較を落とす変異で赤を実測した (WP-1 変異 8 / WP-2 変異 29、`{scratchpad}/wp12e-test.log`)。§12 LQ4-5 は本項で閉じる。
+4. **本体失敗時に台帳行が残らないこと** — **済**。`r2db-api/tests/test_postgres.py::test_0009_failure_leaves_no_ledger_table_or_row_behind`、`MitateDB-api/tests/test_platform_upgrades.py::test_failed_upgrade_script_leaves_no_ledger_row` および `::test_ledger_insert_and_backfill_share_one_atomic_transaction`。
+5. **台帳表を作っても catalog / RLS 監視が壊れないこと** — **済**。r2db: `test_postgres.py::test_backend_excludes_the_ledger_from_catalog_and_schema_objects_accounting`、`::test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application`、`::test_ledger_table_has_no_row_level_security`。MitateDB: `test_platform_upgrades.py::test_schema_count_excludes_the_ledger_table`、`::test_catalog_never_lists_the_ledger_table`、`::test_ledger_table_has_no_row_level_security`。**除外集合を落とす変異で赤になる**ことを両 peer で実測した (WP-3 / WP-4)。
+6. **cell open 時の集合検査 (D-3 (f)) が効くこと** — **済**。台帳から 1 番号を削った application では cell を開く時点で **F-12** (`SERVICE_UNAVAILABLE`、`ops upgrade-applications` を含む逐語メッセージ) になり、揃った DB では通常どおり通る: r2db `test_postgres.py::test_verify_platform_upgrades_applied_raises_service_unavailable_when_a_number_is_missing` / `::test_verify_platform_upgrades_applied_raises_when_the_ledger_table_is_entirely_absent` / `::test_verify_platform_upgrades_applied_passes_when_the_ledger_is_complete`、MitateDB `test_platform_upgrades.py::test_cell_open_check_raises_service_unavailable_for_missing_upgrade` / `::test_cell_open_check_passes_for_a_fully_upgraded_application`。**runtime role の `SELECT` だけで台帳を読めること**も実測した (`test_postgres.py::test_runtime_role_can_select_but_not_write_the_ledger`、`test_platform_upgrades.py::test_runtime_role_has_select_only_on_the_ledger`)。**H-1 裁定 (2026-09-05) の射程も実測済み**: 未適用の application があってもプロセスは起動し、他の application は 200 を返し、当該 application だけが 503 になる (両 peer 同名の `test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_pending_upgrade` — r2db は `tests/test_application_audit.py`、MitateDB は `tests/test_main.py` — と、適用後に再起動すれば通ることの `::test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_application_serves_normally`、起動ログに F-12 が逐語で出ることの r2db `::test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time`)。
 
 ---
 
@@ -928,20 +947,123 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **LQ4-19 静的規則の許可リストの鍵は番号の集合である** (§10)。各 peer のテストが自 peer の `migrations/` だけを走査するので、peer 名の導出は要らない。**MitateDB `0006` は自番号の台帳 INSERT を持たないことと `\q` skip 経路を持つことの両方について免除される** (LQ4-10 の許可リストと同一のもの)。
 - **LQ4-21 モジュール定数は同型性対応表の対象外であり、各 peer の単位テストが担保する** (WP-0 最終追補、監督裁定 2026-09-05、裁定 4)。`ms_from_pg_timeout_text` の `_UNIT_MULTIPLIER_MS` / `_PATTERN` はモジュール定数であり、`_ISOMORPHIC_TARGETS` は `ms_from_pg_timeout_text` という**関数**を pin するだけでその内部が参照するモジュール定数までは辿らない。したがって片 peer だけが `_UNIT_MULTIPLIER_MS["h"]` を `3_600_000` から `3_500_000` へドリフトさせても、同型性テストは赤にならない (audit-wp0-delta.log §6 (5) の実測)。**この経路の安全性は各 peer 自身の `tests/test_pg_timeouts.py` の単位別ケース (`h` を含む) が担保する** — 定数を対応表へ追加するのではなく、単位テストの存在が代替の担保であることを記録する。
 - **LQ4-22 書き手 role の特定は宣言表の一次情報で行う (監督裁定 2026-09-05、D-2 (h) 新設)**。WP-1 は `schema.removesuffix("_registry") + "_api"` の命名規則で、WP-2 は `current_user` と `svc_provision` 接尾辞の書き換えで role 名を導出しており、**どちらもコード内の命名規則依存であり両 peer で不一致 (同型性が成立していなかった)**。**§3.10 の固定 role 名は本番の値であり、テスト harness の throwaway prefix と衝突する**という申告は事実として採用した。決定は D-2 (h) の 6 項 — 宣言表の `audit_writer_roles` 行 (migration が `ALTER ROLE` と**同じ psql 変数から同じトランザクションで** seed、`key` の CHECK に追加)、書き手プロセスの**自 role 包含確認 (F-13)** と自 role についての二重検査、control の**宣言された各 role からの導出**と命名規則の撤去、ops `set-platform-timeouts` の対象を宣言表から取ること (role 名引数を持たない)、harness の throwaway prefix seed、行の検証 (非空の文字列配列 / 重複なし / 識別子妥当、落ちれば F-4b)。**却下 2 案**: **(a) 命名規則依存** — 本番で schema 名や role 名が規則を外れた瞬間に**無音で壊れる**。**(b) env で role 名を渡す** — **env 廃止の趣旨に反し、真実が 2 つになる**。**同型性**: `platform_declarations.py` の同名ヘルパは両 peer で名前・シグネチャ・ロジックを揃え、**対応表の行は対の後半 WP (WP-2) が持ち、WP-1 側は WP-2 と同名にする**。作業指示書は WP-1 に完了条件 19〜23 / 変異 16〜20、WP-2 に完了条件 21〜22 / 変異 18〜23 を追補した。
+
+### 12.1 各項目の状態 (2026-09-05、WP-5 記録整理)
+
+**上の各項目の本文は起票時の記述として残す。** 本節がその現在形である。
+
+| 項目 | 状態 |
+|---|---|
+| **LQ4-1 / LQ4-2 / LQ4-3** (U-1 / U-2 / U-3) | **閉止**。3 件とも依頼者裁定どおり実装された — 適用状態は peer-local (`ops upgrade-status` のみ、契約 1.6.0 無変更)、台帳の runtime 権限は `SELECT` のみ + cell open 時の集合検査 (F-12)、宣言の読みは起動時スナップショット + 両プロセス再起動。§10 の実 PG 確認項目 6 と §13 が実測である |
+| **LQ4-4** (`ALTER ROLE … SET` の射程) | **記録のまま (設計の帰結)。** 射程が監査書き込みに限られないことを F-1 / F-7 / F-9 のメッセージ本文と両 peer の runbook (`POSTGRES_PROVISIONING_RUNBOOK.md` §16 / `cloud-run-cloud-sql.md` §3.2b) に**運用者責任として**明記した。「既定値では実害が無い」は依然として見立てであり実測ではない |
+| **LQ4-5** (catalog は実効値そのものではない) | **閉止**。F-7 / F-9 / F-10 / F-11 を実装し、上書き注入で F-9 が発火することを両 peer で実測した (§10 の確認項目 2 / 3)。**残る未実測は `ALTER DATABASE … SET` の優先順位のみ**であり、それが逆であっても F-9 が止めるという意味で安全側である |
+| **LQ4-6** (r2db の provision role の帯域外 INSERT) | **記録のまま (peer 非対称)。** 本フェーズは 2 つのサービス書き手 role の設定だけを固定しており、宣言はこの経路について何も主張しない |
+| **LQ4-7** (r2db の `surfaces` 検証 2 コピー) | **閉止 (LQ4-23 と同時)。** `validate_surfaces_value` の 1 本になり同型性対応表に載った |
+| **LQ4-8** (`_r2db_schema_revision` の runtime `UPDATE`) | **記録のまま (本設計の対象外)。** 台帳表は `SELECT` のみで出荷しており、既存の非対称はそのまま残る |
+| **LQ4-9** (宣言された `base_url` の到達性) | **記録のまま (L6-5 の射程)。** 本フェーズは宣言の保管場所だけを変えた |
+| **LQ4-10 / LQ4-19** (静的規則の許可リスト) | **閉止**。許可リストは MitateDB `{6}` / r2db 空のまま増えず、実 `migrations/` 走査で 免除 = 許可リスト、違反 0、適合 1 (両 peer) を実測した (§10) |
+| **LQ4-11** (HTTP plug の非対称) | **記録のまま (実装で確認済み)。** MitateDB HTTP plug は宣言表を通り (fixture の seed を落とすと adapter が起動しない)、r2db HTTP plug は `surfaces` の明示注入のままで宣言表を通らない。**したがって本機構は共通 conformance では検証されない** — r2db 側の表読み出しは peer-local の実 PG テストが単独で担う |
+| **LQ4-12** (data / control の非対称は両 peer) | **閉止**。D-2 (f) の統合は両 peer に等しく効き、`surfaces` は 1 行になった |
+| **LQ4-13** (閉止対象 3 件) | **閉止**。`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4、`PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 L6-5a / L6-20 (f) (および L6-17) に**日付付き閉止注記**を置いた (WP-5、本文は書き換えていない) |
+| **LQ4-14** (失敗時に残る developer role membership) | **記録のまま (対応済みの範囲で)。** ops は失敗した application ごとに `REVOKE` 文を出力に含める。「次回実行の先頭で自動的に掃除する」形にするかは本設計の対象外のまま |
+| **LQ4-15** (起動時検査の射程) | **記録のまま (開示済みの限界)。** (i) control は `*svc_api` の実効値を検証できない、(ii) 起動時スナップショットであり pool が後から張った接続は検査されない。両 runbook・`CONTROL_MAPPING.md` SI-14・DEPLOY_Q4 に明記した。**現配備にプーラがあるかは依然として未確認**であり、DEPLOY_Q4 §7 が運用者への確認事項として持つ |
+| **LQ4-16** (同じ platform DB を見ていることは未検証) | **記録のまま (開示済みの限界)。** SI-14 の置換文言に限定として含め、配備後チェック (両 surface の `/capabilities` 突合) を DEPLOY_Q4 §4-1 が必須項目として持つ |
+| **LQ4-17** (宣言変更時の過渡的なずれ) | **記録のまま (開示済みの限界)。** 危険な向きは §9.2 の再起動順序で避ける。両 runbook と DEPLOY_Q4 §4-4 に理由 (C-09 の消費者が見えていない行を見逃す) 付きで記載した |
+| **LQ4-18** (一括適用の並行実行) | **記録のまま (本設計では決めない)。** `pg_advisory_xact_lock` を per-app script の規律に足すかは将来課題 |
+| **LQ4-20** (U-1「載せる」案の再検討前提) | **記録のまま (将来課題)。** 本フェーズでは §6.2 を「採用せず」として残した |
+| **LQ4-21** (モジュール定数は同型性の対象外) | **記録のまま (代替担保あり)。** 各 peer の `tests/test_pg_timeouts.py` の単位別ケースが担保する |
+| **LQ4-22** (書き手 role の特定 = D-2 (h)) | **閉止**。`audit_writer_roles` 行を migration が `ALTER ROLE` と同じ psql 変数・同じトランザクションで seed し、書き手は F-13 で自 role の包含を確認し、control は宣言された各 role から導出する。命名規則依存はコードから撤去された (`test_ops_declarations.py::test_no_naming_convention_role_derivation_remains_in_composition_roots`) |
+| **LQ4-23** (L6-17) | **閉止**。上記 LQ4-7 と同じ |
+
+**本フェーズで新たに見えた項目 (WP-5 起票、2026-09-05)**
+
+- **LQ4-24 配備資産 (`r2db-api/deploy/scripts/part1_provision_host_and_db.sh`) が本フェーズに追随していない**。同 script はフェーズ7 WP-3 の成果物であり、`0001`/`0002`/`0005`/`0006`/`0007` と最初の application の `0003` を当てるが、**`0008` を当てず `ops declare-surfaces` も打たない**。この script だけで作った新規ホストは、両プロセスが F-8 → F-3 で起動しない。**当面の手当ては手順書側**である (`DEPLOYMENT_RUNBOOK.md` §7 の注記、`DEPLOY_Q4_20260905.md` §7)。script 本体の更新は配備資産の作業であり、本フェーズの文書 WP の範囲外とした。
+- **LQ4-25 r2db の `database_name` NULL 系テストは出荷済みスキーマでは到達不能な状態を人工的に作る** (受け入れ監査の両論、2026-09-05)。r2db は throwaway registry に `ALTER TABLE … ALTER COLUMN database_name DROP NOT NULL` を打ってその状態を作る (docstring に明記あり) のに対し、MitateDB は二段階 registry のため自然に到達する。**同名テストだが意味は同じではない** — r2db 側は「将来 `NOT NULL` が緩んだときの防御」であり、現行スキーマの経路の実測ではない。
+- **LQ4-26 ops 出力の細部に peer 非対称が残る**。`--script` の「skipped (already recorded) を偽報告しない」assert は MitateDB のみ、失敗時の tail は r2db が stderr のみ / MitateDB が stdout + stderr である。**集計行の書式と計数規則は両 peer で揃え、両 peer 同名のテスト (`::test_upgrade_applications_tally_line_counts_one_of_each_outcome`) で固定した** (受理境界の解消、§13)。残るのは上記 2 点である。
+- **LQ4-27 fail-fast の文字列ピンの形が peer 非対称**。F-3 の逐語ピンは r2db が実 PG 版のみ、MitateDB は純関数版と実 PG 版の 2 本を持つ。廃止 env の 16 ケースも r2db は `for` ループ、MitateDB は `parametrize` であり、**どちらも条件は満たすがテスト id から読める粒度が違う**。同型性対応表が固定するのは製品コードのヘルパであってテストの形ではないため、これは記録として残す。
 - **LQ4-23 L6-17 (r2db の `surfaces` 検証の重複) は本フェーズで閉じる (監督裁定 2026-09-05、WP-1 / WP-2 差し戻し §2)**。起草時の r2db は `main.py` / `control_main.py` の `_validate_surface_base_url` の **2 コピー**を持ち、本フェーズの ops 宣言系がそこへ **3 コピー目**を作りかけていた。**決定**: **URL 形式検証の本体は `platform_declarations.validate_surfaces_value` に置き、`main.py` / `control_main.py` / `ops.py` はいずれもこの関数を呼ぶ** (§3.10 の同型性の面)。これにより r2db 側も MitateDB の `surfaces.py` と同じく**単一の検証**になり、**同型性対応表に載る** (LQ4-7 が記した「重複解消の動機」がここで実現する)。**`PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 L6-17 への閉止注記は WP-5 (文書 WP) が日付付きで置く** — 本文は書き換えない (D-6 の 3 と同じ規律)。**フェーズ7候補 L6-20 (d) の当該部分も同じ注記で扱う。**
 
 ---
 
-## 13. 実施記録
+## 13. 実施記録 (WP-5 記録整理、2026-09-05)
 
-(WP 完了後に確定する。集計行、WP ごとのコミット、受理境界、実測事項をここに置く。)
+**本節が本フェーズの実施記録の正本である** (作業指示書 §11 はその要約)。**集計行はすべて監督が完了ゲートで単独実行して得た実測値**であり (`pytest -q -n 5 --dist loadgroup`、ローカル PostgreSQL `max_connections = 300`)、各 WP のコミットメッセージ末尾の `Root suite alone:` 行にも転記してある。**本節の起草者 (WP-5) は suite を実行していない** — 数値はゲートログ・実装報告・レビュー / 監査ログからの引用であり、出所を各行に書いた。
 
 ### 13.1 集計行
 
-```
-(WP 完了後に実測を貼る)
-```
+| WP | 内容 | 実装コミット | merge | root suite (単独実行、passed / failed / skipped / xfailed) |
+|---|---|---|---|---|
+| **基準値** | フェーズ6 完了 + 配備記録の main | — | — | **1802 / 0 / 0 / 0** (2026-09-04、`DEPLOY_PHASE6_20260904.md` §7.1 に記録された監督の単独実行値。**Q4 着手時点での再実測は記録に無い**) |
+| **WP-0** | 共通基盤 (静的規則スキャナ + ms 正規化ヘルパの src 引き上げ + 同型性対応表) | `977cb7d` | `6ddcd19` | **1868 / 0 / 0 / 4 xfailed** (`{scratchpad}/wp0-gate2.log`。差し戻し前の第 1 ラウンドは `1862 / 0 / 0 / 4`、`wp0-gate.log`) |
+| **WP-1** | r2db — 宣言を DB 側へ (`0008` + composition root + 二重検査 + ops 宣言系) | `9ae8ea6` | `a01bdf0` (WP-1 と WP-2 の合流) | **2077 / 0 / 0 / 4 xfailed** (WP-2 と同一ゲート、`{scratchpad}/wp12-gate.log`) |
+| **WP-2** | MitateDB — 同 (`0007` + 参照実装 `platform_declarations.py`) | `0379827` | `a01bdf0` | **2077 / 0 / 0 / 4 xfailed** (同上) |
+| **WP-3** | r2db — per-application 台帳と一括適用 (`0003` 改訂 + `0009` + cell open 検査 + ops) | `55998b2` | `0301c10` (WP-3 と WP-4 の合流) | **2165 / 0 / 0 / 0** (WP-4 と同一ゲート、`{scratchpad}/wp34-gate2.log`。差し戻し前は `2161 / 0 / 0 / 0`、`wp34-gate.log`) |
+| **WP-4** | MitateDB — 同 (`0003` 改訂 + `0008` + backfill + ops) | `370fe33` | `0301c10` | **2165 / 0 / 0 / 0** (同上) |
+| **WP-5** | 記録整理 (`CONTROL_MAPPING.md` 3 行 + runbook 3 本 + DEPLOY_Q4 + 閉止注記 3 件 + 本節 + 作業指示書 §11 + 引き継ぎ第14次) | `(本記録コミット。ハッシュは次回引き継ぎ §1 に記載)` | `(同上)` | 文書のみ (**2165** のまま。製品コード・テスト・migration・spec を触っていない) |
+
+**ディレクトリ別内訳 (収集件数)**
+
+| 時点 | `r2db-api/tests` | `MitateDB-api/tests` | `conformance-tests` | 計 |
+|---|---|---|---|---|
+| WP-1 / WP-2 完了時 | 898 (+ 2 xfailed) | 704 (+ 2 xfailed) | 475 | **2077 passed + 4 xfailed** |
+| WP-3 / WP-4 完了時 | **934** | **756** | **475** | **2165 passed + 0 xfailed** (`--collect-only` による内訳確認、2026-09-05) |
+
+**WP-0 完了時の内訳は記録されていない** (ゲートログは合計のみ)。**`conformance-tests` は本フェーズを通じて 475 のまま不変**である — 契約無変更 (U-1) であり、vector / port / `registry.json` を 1 行も触っていない (§6.1)。
+
+**`xfailed` の推移**: 基準 0 → **WP-0 で 4** (両 peer の「適合 ≥ 1」と「三者一致」の `xfail(strict=True)`、各 peer 2 本) → WP-1 / WP-2 で 4 のまま (両 WP は対応表も placeholder も触らない) → **WP-3 で r2db 分 2 本、WP-4 で MitateDB 分 2 本を、当該 peer の per-app script と同一コミットで撤去して 0**。**本フェーズは `xfail` を 1 本も残していない。**
+
+**同型性対応表 (`_ISOMORPHIC_TARGETS`) の行数**: 着手時 18 → **WP-0 で 24** (静的スキャナと ms ヘルパ、および pin 対象関数が呼ぶ private ヘルパ 3 つ) → **WP-2 で 58** (`platform_declarations.py` の全対象シンボル + `VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS`) → **WP-4 で 66** (`platform_upgrades.py` の対象シンボル)。**行数 pin テストは各 WP と同一コミットで実数へ改めた** (両 peer 同名 `test_isomorphic_target_table_is_pinned_to_its_current_66_rows`)。
 
 ### 13.2 WP ごとの記録
 
-(空欄)
+#### WP-0 — 共通基盤 (`977cb7d` → merge `6ddcd19`)
+
+**採った形**: `ms_from_pg_timeout_text` を両 peer の `src/<peer_pkg>/pg_timeouts.py` へ引き上げ (PG の受理単位 `us`/`ms`/`s`/`min`/`h`/`d` + 単位無し、端数は基底 ms 換算後に round-half-even = PG の `rint` 相当)、per-application upgrade script の静的規則スキャナを両 peer の `tests/test_platform_upgrade_ledger_scan.py` に設置、対応表を 24 行へ拡張。**実 `migrations/` に対する「適合 ≥ 1」と三者一致は、この時点ではまだ真でないので `xfail(strict=True)` で先置きした。**
+
+**レビューと差し戻し**: 独立レビューの指摘 8 件、**差し戻し 2 回** (`{scratchpad}/wp0-rework-rulings.md` 裁定 A〜H、`wp0-final-rulings.md` 追補 1〜7)。差し戻しで見つかった**実バグ**: (i) `--` 行コメント内の `INSERT` を 適合 と誤判定 (実行されない文を適合にする空振り)、(ii) インラインコメント中のセミコロンで文分割が早まり適合を 違反 と誤判定、(iii) 文字列リテラル中の数字 (`'note 9 here'`) を自番号と誤認。**いずれも合成 fixture と変異で赤を実測してから直した。**
+
+**変異**: 対応表の 8 件 (変異 1〜8) を実測。差し戻し後に M2 / M3 / M5 / M6 / M7 を再実測して赤の集計行を `{scratchpad}/wp0-final-test.log` に残し、追補で `_strip_sql_comments` の文字列追跡と `_strip_string_literals` の 2 種を追加した。
+
+**受理境界**: **モジュール定数は同型性対応表の対象外である** (`_UNIT_MULTIPLIER_MS` / `_PATTERN` — 対応表は関数を pin するが、その関数が参照するモジュール定数までは辿らない)。片 peer だけが定数値をドリフトさせても対応表は赤にならず、**担保は各 peer の `tests/test_pg_timeouts.py` の単位別ケース**である。§12 **LQ4-21** に起票した。
+
+#### WP-1 / WP-2 — 宣言を DB 側の一次情報へ (`9ae8ea6` / `0379827` → merge `a01bdf0`)
+
+**採った形**: platform 単発 migration (r2db `0008` / MitateDB `0007`) が **`ALTER ROLE … SET` の 4 文と宣言表 `<registry>.platform_declarations` を 1 トランザクションで**作り、`audit_coalescing_window_ms` の既定 (`60000`) と `audit_writer_roles` (`ALTER ROLE` と**同じ psql 変数から**組んだ値) を seed する (`surfaces` は seed しない)。両 peer の composition root は起動時にこの表と `pg_db_role_setting` を読み、廃止 env 4 本を拒否し (F-1 / F-2)、書き手プロセスは自 role について二重検査を行う (F-13 → F-7 / F-10 / F-11 → F-9)。control は宣言された各 role の catalog から `visibility_lag_ms` を導出する。ops に宣言系 4 コマンドを追加した。
+
+**監督裁定 3 件がこの対で確定した**: **(1) D-2 (h)** — 書き手 role の特定を宣言表の一次情報で行う (両 WP が別々の命名規則で role 名を導出しており、両 peer で不一致だった。却下 = 命名規則依存 / env で role 名を渡す)。**(2) lifespan 遅延は不採用** — control の起動時検査を ASGI lifespan へ遅らせる案は、**`--lifespan off` で起動したプロセスが検査を丸ごと飛ばし、宣言と食い違う capability 文書を無音で配る**ため却下し、`build_control_app()` 内での同期検査を維持した。zero-network のテストは明示注入の `assemble_control_stack(…)` を使う形に書き換えた。**(3) F-3c の新設と F-11 の絞り込み** — 「行はあるが `control` が無く、かつ control プロセスである」を F-3 とは別の確定文言にし、F-11 は `setconfig` に timeout キーを含む per-database 行だけを対象にした (無関係な `IN DATABASE` 設定で起動を止めない)。**L6-17 (r2db の `surfaces` 検証 2 コピー) もここで閉じた** — ops が 3 コピー目を作りかけていたのを `validate_surfaces_value` 1 本へ統合した。
+
+**進め方**: 並行実装は本体が食い違うため、**MitateDB (WP-2) を参照実装とし、r2db (WP-1) は名前・シグネチャを合わせて動作を作り、統合パスで本体を MitateDB へ揃える**形を採った (`{scratchpad}/rulings-q4-wp12-rework.md` §5)。**差し戻し 2 回** (レビュー指摘の後の共通分解、監査の不足 G1〜G10)。
+
+**変異**: 作業指示書の対応表どおり WP-1 = 28 件、WP-2 = 31 件 (うち 4 件は同一注入を両行で報告)。赤の集計行は `{scratchpad}/wp1b-test.log` / `wp2c-mutations.log` / `wp12d-test.log` / `wp12e-test.log` にある。**復元はすべて scratchpad backup + `sleep 3` 後の sha256 二重照合 + 変異文字列の全文 grep** で確認した。
+
+**受理境界 (監査 `audit-wp12-delta.log` §4 を監督が受理)**:
+
+- **変異 22 の赤はモジュール内のテスト順序に依存する full-file 実行でしか観測されていない** (単独選択実行では緑になり得る)。
+- **変異 23 / 24 / 25 は最終ラウンドで再注入しておらず、過去ログ (`wp1b-test.log`) の記録に依拠している。**
+- **完了条件 11 (ops の終了コード 1) は `psycopg.OperationalError` 経路でのみ観測**しており、`FoundationError` 分岐は未観測である。
+- **テストの形に peer 非対称が残る** — 廃止 env の 16 ケースが r2db は `for` ループ / MitateDB は `parametrize`、F-3 の逐語ピンが r2db は実 PG 版のみ / MitateDB は純関数版 + 実 PG 版。**条件は両 peer とも満たすが、テスト id から読める粒度が違う。** §12 **LQ4-27** に起票した。
+
+#### WP-3 / WP-4 — per-application 台帳と一括適用 (`55998b2` / `370fe33` → merge `0301c10`)
+
+**採った形**: `0003` テンプレートを改訂して台帳表 `public._<peer>_platform_upgrades` を作り現時点の全番号を seed し (r2db `{9}` / MitateDB `{6, 8}`)、既存 DB 用の per-app upgrade script (r2db `0009` / MitateDB `0008`) を対で出した (MitateDB は `_mdb_field_types` の存在で `0006` を backfill する)。backend の bookkeeping 除外集合、r2db の `_r2db_missing_rls` ビュー、`schema_objects` の会計を台帳表について更新した。cell open 時の集合検査と **F-12** を実装し、ops に `upgrade-applications` / `upgrade-status` を追加した (終了コード 0/1/2/3/4、`enabled` 非依存、`database_name` NULL は失敗、失敗 DB ごとに `REVOKE` の掃除文と psql stderr の tail)。**WP-0 の `xfail` 4 本は当該 peer の WP と同一コミットで撤去した。**
+
+**監督裁定 (H-1、2026-09-05)**: **未適用の application があってもプロセスは起動する。当該 application の cell だけが不提供になり、その application 宛のリクエストが F-12 の逐語メッセージで `SERVICE_UNAVAILABLE` になる。他の application は通常どおり serve する。** 起動時にログへ F-12 を 1 行出す。両 peer で同型 (r2db は refusing cell を登録、MitateDB は backend が pending を保持) であり、どちらも「cell open 時に一度検査し結果を保持」= 起動時スナップショットである。**設計 D-3 (f) をこの裁定に合わせて precisify した。**
+
+**実バグ**: MitateDB の `--script` 指定が、**未適用の DB に対して「skipped (already recorded)」と偽報告し得た** (差し戻し裁定 M-2 (c))。修正後、同じ注入を変異として再現し赤を実測した (`{scratchpad}/wp34e-test.log`)。**差し戻し 2 回** (レビュー H-1 / M-1〜M-4 / L-1〜L-5 と、監査の U-1〜U-9)。
+
+**変異**: WP-3 = 17 件、WP-4 = 21 件 (WP-3 の 1〜17 の読み替えから RLS ビューの 1 件を除き、18〜22 を追加)。**監査が「非空振りの直接証拠が無い」と指摘した M-1 / M-2 / M-3 と集計行については、両 peer で追加の変異 8 件を実測して赤を記録した** (`{scratchpad}/wp34e-test.log`、復元は sha256 二重照合 + grep = 0 件)。
+
+**受理境界**:
+
+- **設計 D-3 (f) の「全リクエスト」は storage 境界を通るリクエストの意味である** — `/v1/capabilities` と `/v1/audit/query` は cell を経由しないので、未適用の application が serve されている状態でも 200 を返す。**記述を現物に合わせて precisify した** (D-3 (f)、`cloud-run-cloud-sql.md` §3.4b)。**この 2 ルートを観測するテストは置いていない。**
+- **r2db の `database_name` NULL 系テストは、出荷済みスキーマでは到達不能な状態を人工的に作る** (throwaway registry に `DROP NOT NULL` を打つ)。MitateDB は二段階 registry のため自然に到達する。**同名だが等価ではない** — §12 **LQ4-25**。
+- **ops 出力の細部に peer 非対称が残る** (`--script` の偽報告 assert が MitateDB のみ、失敗時 tail の範囲)。**集計行の書式と計数規則は両 peer で揃え、両 peer 同名テストで固定した。** §12 **LQ4-26**。
+- **r2db の `_cell_factory` は refusing cell へ倒す際に生成済みの `PostgresCell` を `close()` せずに捨てる。** `_PoolHandle` はプール遅延生成のため接続リークは無い (監査が実測) が、**「捨てる」形自体は記録として残す。**
+
+#### WP-5 — 記録整理 (本節を含む)
+
+**成果物**: `security/CONTROL_MAPPING.md` の 4 行 (SI-02 / SI-10 / SI-12 と、**SI-14 の点 (12) の "nothing enforces it" の置換**。**置換文言は「同一の platform データベースを前提に」という限定を含む** — 落とすと過大主張になる)、r2db の runbook 2 本 (`POSTGRES_PROVISIONING_RUNBOOK.md` に **§16 / §17 を新設**し、§5 / §10 / §15 の廃止 env 記述を現在形に。`DEPLOYMENT_RUNBOOK.md` は §1 / §2 Step 2 / §7 を現在形に)、`MitateDB-api/docs/cloud-run-cloud-sql.md` (§3.2b の `0007` 適用コマンドに**必須の `-v` 2 本が欠けていたのを訂正**、§3.4b に F-12 復旧手順を追加)、`docs/work-orders/DEPLOY_Q4_20260905.md` (新規、両 peer の本番適用計画)、正本 2 文書への日付付き閉止注記 4 件 (Q4 / L6-5a / L6-17 / L6-20 (f))、本節と §10 / §12、作業指示書 §11、引き継ぎ第14次。
+
+**本 WP は製品コード・テスト・migration・`spec/` を 1 行も変更していない** ので変異注入は行わない。**代わりに evidence テスト名の実在性が非空振り要件の位置を占める** — 本 WP が `CONTROL_MAPPING.md` に書いた evidence テスト名は**全件 `grep -rl "def <name>"` で解決すること**を確認した (2026-09-05)。**併せて、Q4 で改名・削除された古い evidence 名 3 種 (SI-14 の点 (12) が引いていた env 由来の writer-timeout テスト名と、r2db の adapter timeout テスト名) を現行名へ訂正した** — 記録が現物と食い違ったままの箇所を残さないためである。
+
+**受理境界**: **本番配備は未実施である** (運用者作業)。`DEPLOY_Q4_20260905.md` の実測欄・裁定欄は空のままであり、**適用元 main のハッシュも配備時に埋まる**。また、**`r2db-api/deploy/scripts/part1_provision_host_and_db.sh` が `0008` を当てず宣言も打たない**ことが本 WP の照合で判明したが (§12 **LQ4-24**)、script 本体の修正は配備資産の作業であり本 WP の範囲外として、手順書側の注記で当面を塞いだ。

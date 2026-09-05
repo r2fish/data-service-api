@@ -43,7 +43,7 @@ document beyond stating its plan and preconditions.
 Confirm all of the following before starting §2. This runbook does not
 re-verify them; it assumes they are already true.
 
-1. **PostgreSQL migrations `0001` through `0007` have been applied** against
+1. **PostgreSQL migrations `0001` through `0008` have been applied** against
    the target cluster, per `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`
    §5 (`0001_bootstrap_control_plane.sql` through
    `0004_deprovision_application.sql`), migration `0005` (the
@@ -63,9 +63,28 @@ re-verify them; it assumes they are already true.
    §15 -- **also required even when `R2DB_AUDIT_DSN` is left unset**: the
    application-plane process' `application_audit` writer connection depends
    on the table existing regardless of whether `audit_query` itself is
-   declared `enabled`). Every application
+   declared `enabled`), and **migration
+   `0008_platform_declarations_and_writer_timeouts.sql`** (Q4 phase,
+   `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-1/D-2 --
+   `r2dbsvc_registry.platform_declarations` plus the two writer roles'
+   `statement_timeout`/`idle_in_transaction_session_timeout` role settings;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §16 -- **required by BOTH processes
+   unconditionally**: without it, either process stops at startup with F-8,
+   and it takes two `-v` variables naming the writer roles). **After
+   applying it, declare this deployment's own surfaces once** --
+   `python -m r2db_api.ops declare-surfaces --data-base-url <URL>
+   [--control-base-url <URL>]` -- since `0008` deliberately seeds no
+   `surfaces` row and neither process starts without one (F-3). Every
+   application
    slug this deployment will serve must already be provisioned (`0003`) and
-   present in `r2dbsvc_registry.applications` with `enabled = true`. **The
+   present in `r2dbsvc_registry.applications` with `enabled = true`, **and
+   its per-application platform-upgrade ledger must be current** -- run
+   `python -m r2db_api.ops upgrade-status` (exit `0` = nothing pending) and,
+   if anything is pending, `python -m r2db_api.ops upgrade-applications`
+   (`POSTGRES_PROVISIONING_RUNBOOK.md` §17). An application provisioned by
+   the current `0003` is already current; one provisioned earlier is not, and
+   its own cell will refuse every request with `SERVICE_UNAVAILABLE` (F-12)
+   until the retrofit is applied and this process restarted. **The
    target cluster must be PostgreSQL 13 or later** (CCR-13, `docs/design/
    R2DB_CCR13_STORAGE_V1.md` §6 申し送り 4 -- every entity table's
    `_r2db_revision` column depends on the built-in `gen_random_uuid()`,
@@ -156,22 +175,42 @@ object-name prefix.
    ownership plus `0600` is the intended, sufficient protection boundary,
    matching `POSTGRES_PROVISIONING_RUNBOOK.md`'s treatment of the control
    DSN as an operator-only secret.
-5. If this deployment also runs the control-plane process (§7), keep
-   `R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS`
-   identical between this file and `control.env` -- both derive the same
-   declared `audit_query.visibility_lag_ms` (§7's table,
-   `POSTGRES_PROVISIONING_RUNBOOK.md` §15).
-6. **Set `R2DB_DATA_BASE_URL`** (Phase 6 WP-2, design
-   `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2) to this deployment's
-   own real, absolute data-surface base URL (ending `/v1`, no trailing
-   slash) -- this process fails to start without it (§10 of the
-   provisioning runbook has the exact shape checks). **If this deployment
-   also runs the control-plane process (§7), `R2DB_CONTROL_BASE_URL` must
-   be set here too, to the IDENTICAL value §7's `control.env` uses** --
-   both processes' capability documents must return the same `surfaces`
-   object; neither process can detect a mismatch on its own (§10's own
-   note, ledger item L6-5a). Leave `R2DB_CONTROL_BASE_URL` unset here only
-   when `R2DB_CONTROL_PLANE_STATUS` stays `unavailable`.
+5. **Remove all four of `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`,
+   `R2DB_AUDIT_IDLE_TIMEOUT_MS`, `R2DB_DATA_BASE_URL` and
+   `R2DB_CONTROL_BASE_URL` from this file** if you copied it forward from a
+   pre-Q4 deployment (Q4 phase WP-1, design
+   `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-1/D-2). **None of the four
+   is read any more, and this process refuses to start while any one of them
+   is defined at all, whatever its value -- an empty string included** (F-1
+   for the timeouts, F-2 for the base URLs). Commenting the line out counts
+   as removed; leaving it set does not, and the failure is at the NEXT
+   restart, not at deploy time. The current `deploy/env/api.env.example`
+   carries the removal notices in place of these variables.
+6. **Declare the surfaces and the writer timeouts once, in the database
+   instead** (`POSTGRES_PROVISIONING_RUNBOOK.md` §16, after migration
+   `0008`):
+   ```
+   python -m r2db_api.ops declare-surfaces \
+     --data-base-url <this deployment's data base URL, ending /v1> \
+     [--control-base-url <its control base URL, ending /control/v1>]
+   python -m r2db_api.ops set-platform-timeouts --statement-ms 5000 --idle-ms 5000
+   python -m r2db_api.ops declare-coalescing-window --ms 60000
+   ```
+   (all on `R2DB_CONTROL_DSN`, the provision role -- an operator-held
+   credential, never placed in either `EnvironmentFile`). This is now ONE
+   declaration shared by both processes, so the two can no longer be
+   configured into disagreeing about `surfaces` or about the derived
+   `audit_query.visibility_lag_ms`. Pass `--control-base-url` whenever this
+   deployment runs the control-plane process (§7); omit it (or pass the
+   explicit `--no-control`) only when `R2DB_CONTROL_PLANE_STATUS` stays
+   `unavailable` -- **omitting it also removes the control surface for the
+   control-plane process, which then refuses to start (F-3c)**. Every
+   declaration is read once, at startup: change it, then restart both
+   processes (§7's own note on ordering when a timeout value changes).
+   **What this still does not check (design §3.11 point 7, ledger LQ4-16):
+   that both processes actually read the same platform database.** Diff the
+   two capability documents' `surfaces` after any change
+   (`docs/work-orders/DEPLOY_Q4_20260905.md` §4-1).
 
 ### Step 3 -- choose and verify the internal port
 
@@ -533,13 +572,13 @@ see that module's docstring for the authoritative list):**
 |---|---|
 | `R2DB_CONTROLPLANE_DSN` | The `r2dbsvc_controlplane` role's DSN against `r2dbsvc_platform` (§11 of the provisioning runbook). Never `r2dbsvc_control` -- this process must not hold provisioning authority. |
 | `R2DB_CONTROL_CREDENTIAL_PEPPER` | Control-credential verifier HMAC pepper. **Must differ from `R2DB_CREDENTIAL_PEPPER`** (R-2) -- this process refuses to start if the two are equal. |
-| `R2DB_DATA_BASE_URL` | Required (Phase 6 WP-2, design `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2). This deployment's absolute data-surface base URL (must end `/v1`, no trailing slash) -- declared as `surfaces.data.base_url`. **Same variable name as the application-plane process' own `api.env`** -- both processes must be configured with the identical value (§10 of the provisioning runbook has the shape-check detail; neither process can verify the other agrees). |
-| `R2DB_CONTROL_BASE_URL` | Required (design D-2). This deployment's absolute control-surface base URL (must end `/control/v1`, no trailing slash) -- declared as `surfaces.control.base_url`. Unlike the application-plane process (where this variable is conditional on `R2DB_CONTROL_PLANE_STATUS`), this process is unconditionally required to set it: a running control-plane process' own control surface is, by definition, provided. |
+| ~~`R2DB_DATA_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2)** -- no longer read, and **this process refuses to start while it is defined at all** (F-2). `surfaces.data.base_url` now comes from the single `surfaces` row of `r2dbsvc_registry.platform_declarations`, shared with the application-plane process; declare it with `ops declare-surfaces` (`POSTGRES_PROVISIONING_RUNBOOK.md` §16). |
+| ~~`R2DB_CONTROL_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design D-2)** -- same treatment (F-2). This process still requires a control surface unconditionally, but it now requires it in the DECLARATION: a `surfaces` row without a `control` half stops this process with F-3c, naming the `ops declare-surfaces --data-base-url <URL> --control-base-url <URL>` invocation that fixes it. |
 | `R2DB_CREDENTIAL_PEPPER` | The same application-plane pepper `r2db_api.main` uses -- required here too (not merely "if configured"), because this process also issues/rotates *application* credentials in-band; see `control_main`'s own module docstring for why this departs from an earlier design-table reading. |
 | `R2DB_CONTROL_LIMIT_APPLICATIONS` / `R2DB_CONTROL_LIMIT_CREDENTIALS_PER_APPLICATION` / `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE` | Optional, SI-08 resource bounds (R-7); default to the contract's `example_profile` values if unset. |
 | `R2DB_PLATFORM_SCHEMA` / `R2DB_PLATFORM_POOL_SIZE` | Optional -- identical escape hatch/tuning knob to the application-plane process' own (§10 of the provisioning runbook); a real deployment leaves `R2DB_PLATFORM_SCHEMA` unset. |
 | `R2DB_AUDIT_DSN` | Optional (Phase 4, design `PHASE4_DURABLE_AUDIT_SINK_V1.md` D-5) -- the `r2dbsvc_auditreader` role's DSN against `r2dbsvc_platform` (migration `0007_application_audit.sql`, `POSTGRES_PROVISIONING_RUNBOOK.md` §15), read-only over both `control_audit` and `application_audit`. Unset means `audit_query` (`POST /control/v1/audit/query` and its `POST /v1/audit/query` alias) stays declared `unavailable` -- the routes remain registered and still authenticate the caller, answering `CAPABILITY_UNSUPPORTED` rather than a bare 404. |
-| `R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS` | Optional, both default `5000` (Phase 4, design D-1/D-6) -- session-level timeouts on this process' `control_audit` writer connection. **Must be set to the SAME value as the application-plane process' own `api.env`** (identically-named variables, read independently by each composition root) -- the two together derive the declared `audit_query.visibility_lag_ms` (`statement_timeout_ms + idle_timeout_ms + 1000` ms clock-skew margin); changing either value on either process changes that published declaration (`POSTGRES_PROVISIONING_RUNBOOK.md` §15). |
+| ~~`R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS`~~ | **REMOVED (Q4 phase WP-1, design D-1)** -- no longer read, and **either one defined at all stops this process at startup** (F-1). Both writer roles carry the two timeouts as PostgreSQL role settings (`ALTER ROLE ... SET`, migration `0008`); this process derives `audit_query.visibility_lag_ms` from that catalog across every role in the declared `audit_writer_roles` (`max(statement + idle) + 1000` ms clock-skew margin, `11000` at the shipped defaults) **and verifies its own writer connection's effective value against it at startup** (F-9), refusing to start on a mismatch. Change both roles together with `ops set-platform-timeouts` and restart both processes -- **data-plane first when shortening, control first when lengthening** (`POSTGRES_PROVISIONING_RUNBOOK.md` §16). **It cannot effective-check `r2dbsvc_api`'s own connections** (role settings apply at login; design §3.11 point 9) -- that is the application-plane process' own startup job. |
 | `R2DB_CONTROL_LIMIT_AUDIT_REQUESTS_PER_MINUTE` | Optional, default `60` (Phase 4, design D-5) -- `audit_query`'s own pre-auth rate window (both paths above), never shared with `R2DB_CONTROL_LIMIT_CONTROL_REQUESTS_PER_MINUTE`. See `POSTGRES_PROVISIONING_RUNBOOK.md` §15 for sizing guidance. |
 | `R2DB_CONTROL_LIMIT_REQUEST_BYTES` | Optional, default `1048576` (Phase 4 ledger closure L4-10) -- request-body byte bound, discoverable through `GET /control/v1/capabilities`' own `limits`/`limit_enforcement` keys and enforced by the SAME `ControlPlaneLimits.request_bytes` value (`control_main.py`'s own single-source construction, R-7). Unset behaves exactly as before this variable existed. |
 
@@ -581,6 +620,17 @@ with no credential). `deploy/scripts/lint_deploy_assets.sh` is the
 syntax-level check the `deploy-assets` CI job runs against all of the
 above (unit files, the nginx example, and the scripts themselves) -- it
 does not perform a deployment.
+
+**Gap to close by hand until the scripts catch up (recorded 2026-09-05, Q4
+phase WP-5).** `deploy/scripts/part1_provision_host_and_db.sh` was written
+before the Q4 phase and applies `0001`/`0002`/`0005`/`0006`/`0007` plus the
+first application's `0003` -- **it does not apply `0008`, and it does not run
+`ops declare-surfaces`**. A host provisioned by that script alone therefore
+has both processes refusing to start (F-8, then F-3). After running it, apply
+`0008` and declare the surfaces by hand per `POSTGRES_PROVISIONING_RUNBOOK.md`
+§16, and check the ledger with `ops upgrade-status` (§17), before installing
+the units. Updating the script itself is deploy-asset work outside the Q4
+phase's document WP.
 
 1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
    root-owned, mode `0600`, containing the table above (copy
@@ -656,11 +706,15 @@ does not perform a deployment.
    conformant for THAT version -- what must never disagree is the declared
    version and the declared keys. Also new in contract 1.6.0: the response
    carries a `surfaces` object (`{"data": {"base_url": ...}, "control":
-   {"base_url": ...}}`, from this process' own `R2DB_DATA_BASE_URL`/
-   `R2DB_CONTROL_BASE_URL` above) that must be byte-identical to the SAME
-   key in the application plane's own `GET /v1/capabilities` response --
-   diff the two if you have any doubt they were configured from the same
-   values (`POSTGRES_PROVISIONING_RUNBOOK.md` §10's own note on this).
+   {"base_url": ...}}`) that must be byte-identical to the SAME key in the
+   application plane's own `GET /v1/capabilities` response. **Since the Q4
+   phase both processes read that object from ONE declared row** (`ops
+   declare-surfaces`, `POSTGRES_PROVISIONING_RUNBOOK.md` §16), so a mismatch
+   no longer means "two env files disagree" -- it means **the two processes
+   are not reading the same platform database**, the one thing this
+   mechanism deliberately does not verify (design §3.11 point 7, ledger
+   LQ4-16). **Diff the two documents anyway; that is still the only check
+   for it** (`docs/work-orders/DEPLOY_Q4_20260905.md` §4-1).
    **A credential issued by a build predating this peer's own 1.6.0 flip
    will not authenticate here (or on the application plane) until it is
    rotated** -- see `POSTGRES_PROVISIONING_RUNBOOK.md` §12a for why (D-1's

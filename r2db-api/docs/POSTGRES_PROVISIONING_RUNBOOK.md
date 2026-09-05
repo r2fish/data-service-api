@@ -311,6 +311,18 @@ SCHEMA IF NOT EXISTS` / `CREATE OR REPLACE FUNCTION`. Step 3 is **not**
 idempotent by design -- it raises if the slug is already provisioned, so a
 re-run is a deliberate signal, not silently absorbed.
 
+**The platform migrations that come after `0002`** are each described in
+their own section, and are applied in file order: `0005` (§9, credential
+store), `0006` (§11, control-plane storage), `0007` (§15, audit sink) and
+**`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
+both processes now REFUSE TO START until it is applied)**. **§17 covers the
+third class of migration** -- per-application upgrade scripts, of which
+`0009` is this peer's first: those are applied per application database, by
+`python -m r2db_api.ops upgrade-applications`, never by hand in this order.
+An application provisioned by the current `0003` (step 3 above) already
+carries the ledger `0009` retrofits, so §17 is a catch-up step for databases
+provisioned before that revision, exactly like the CCR-13 DOMAIN note below.
+
 **CCR-13 note (procedural only -- no application database has actually been
 provisioned against this cluster yet, so this has not been exercised):**
 `0003_provision_application.sql` now also creates two DOMAINs,
@@ -584,8 +596,8 @@ not a partial startup:
 | `R2DB_PLATFORM_POOL_SIZE` | no, default `4` | The platform pool's own cap -- see §4's "+ platform pool" note. |
 | `R2DB_PLATFORM_SCHEMA` | no, default `r2dbsvc_registry` | **TEST-ONLY -- never set this in a real deployment.** Overrides the registry schema name `PostgresCredentialStore`/`r2db_api.main` look `applications`/`credentials` up under. Its only reason to exist is so this repository's own test suite and the conformance adapter -- which run the real migration files with `r2dbsvc` textually rewritten to a random throwaway prefix, to avoid colliding with anything else in a shared local cluster -- can point a built app at their own rewritten schema. A real deployment always uses the literal schema `0005_credential_store.sql` creates and must leave this unset. |
 | `R2DB_CONTROL_PLANE_STATUS` | no, default `unavailable` | CCR-14 (R-9, `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`). Allowed values are exactly `enabled`/`unavailable`; anything else is a startup failure, never a silent fallback. This is a **deployer declaration**, not a detected fact -- this process cannot verify on its own whether a `/control/v1` control-plane process (`r2db_api.control_main`) is actually reachable. Set it to `enabled` only once that process is genuinely deployed and reachable (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7); the authoritative check for "is a control plane actually reachable" in a separated deployment is always the control plane's own `GET /control/v1/capabilities`, never this declaration. |
-| `R2DB_DATA_BASE_URL` | yes (Phase 6 WP-2, design `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` D-2) | This deployment's own absolute data-surface base URL, declared as `CapabilityDocument.surfaces.data.base_url` (contract 1.6.0, unconditional obligation). Checked at startup for SHAPE only -- must be an absolute URL, must end with `/v1`, must not end with a trailing slash; a relative value, a wrong suffix, or a trailing slash is a startup failure naming this variable. **A deployer-stated fact, never derived from a request's Host header.** |
-| `R2DB_CONTROL_BASE_URL` | yes, whenever `R2DB_CONTROL_PLANE_STATUS` is other than `unavailable`; unread otherwise | This deployment's own absolute control-surface base URL, declared as `surfaces.control.base_url`. Same shape check as `R2DB_DATA_BASE_URL` above, except the required suffix is `/control/v1`. **Read by BOTH `r2db_api.main` and `r2db_api.control_main`** -- the same variable name, so both processes' capability documents can return the identical `surfaces` object (§7 of the deployment runbook has the control-plane process' own copy of this variable, which is unconditionally required there). Checking only the SHAPE of each process' own value is a structural limit, not an oversight: neither process can verify that the OTHER process was actually configured with the matching value -- see `docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §3 D-2 and ledger item L6-5a. Verify agreement manually after any change to either `api.env`/`control.env` (§15's own "配備後チェック" precedent): `curl` both `.../v1/capabilities` and `.../control/v1/capabilities` and diff their `surfaces` objects. |
+| ~~`R2DB_DATA_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2)** | **No longer read. This process now REFUSES TO START whenever this variable is defined at all, whatever its value (an empty string included)** -- fail-fast F-2, which names the `ops` command below. `surfaces.data.base_url` (contract 1.6.0, unconditional obligation) is now the `surfaces` row of `r2dbsvc_registry.platform_declarations` (migration `0008`), a SINGLE row **both** this process and `r2db_api.control_main` read at startup. Declare it with `python -m r2db_api.ops declare-surfaces --data-base-url <URL> [--control-base-url <URL>]` and restart both processes -- §16 below. The same shape rules still apply, now checked on the declared value (absolute URL, ends `/v1`, no trailing slash) and on the write path as well as the read path. **Still a deployer-stated fact, never derived from a request's Host header.** |
+| ~~`R2DB_CONTROL_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design D-2)** | **No longer read; defining it at all fails startup (F-2), exactly as above.** `surfaces.control.base_url` is the `control` half of that same single declared row, shared with `r2db_api.control_main` -- which is why re-declaring without `--control-base-url` (or with the explicit `--no-control`) also removes the control declaration for the control-plane process, whose own startup then fails with F-3c. The suffix requirement is unchanged (`/control/v1`, no trailing slash). **The one thing this phase did NOT close (design §3.11 point 7, ledger LQ4-16): that both processes read the SAME platform database is not verified by either of them** -- a control process pointed at a stale platform DSN reproduces the old L6-5a drift. Diffing `surfaces` between `.../v1/capabilities` and `.../control/v1/capabilities` after any change therefore REMAINS a required post-deploy check (`docs/work-orders/DEPLOY_Q4_20260905.md` §4-1). |
 
 The corresponding synthetic entries already exist in `deploy/env/api.env.example`
 (P3-D8), following the existing repository-root `.env.example` pattern --
@@ -1033,56 +1045,39 @@ deployment can run indefinitely with `application_audit`/`control_audit`
 durably filling and `R2DB_AUDIT_DSN` unset; evidence keeps accumulating,
 only the in-band read surface is off.
 
-**The two writer timeouts and `visibility_lag_ms`**: `R2DB_AUDIT_STATEMENT_
-TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS` (both default `5000`, read
-identically by `r2db_api.main` for the `application_audit` writer
-connection and by `r2db_api.control_main` for the `control_audit` writer
-connection -- the SAME two env-var names, both processes must agree) are
-what `audit_query`'s own declared `visibility_lag_ms` is *derived* from:
-`statement_timeout_ms + idle_in_transaction_session_timeout_ms + 1000`
-(1s fixed clock-skew margin) -- `11000` at the defaults. Changing either
-timeout on either writer connection changes the value `control_capabilities`
-publishes; the two composition roots are never independently tunable to
-different values in practice (both read the same env-var names), and both
-connections must actually be running under this bound for the derivation to
-be true -- confirm with:
+**The two writer timeouts and `visibility_lag_ms` -- SUPERSEDED by the Q4
+phase (2026-09-05, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md`
+D-1/D-2, migration `0008`). Read §16 below; the paragraphs this replaces
+described the env-var mechanism that no longer exists.** In summary of what
+changed: `R2DB_AUDIT_STATEMENT_TIMEOUT_MS` / `R2DB_AUDIT_IDLE_TIMEOUT_MS`
+are **removed** env vars -- either one defined at all, whatever its value,
+now fails startup (F-1) -- and both writer roles carry `statement_timeout` /
+`idle_in_transaction_session_timeout` as PostgreSQL **role settings**
+(`ALTER ROLE ... SET`, `0008`), which is the single source both the declared
+`audit_query.visibility_lag_ms` and the writer connections' own effective
+values come from. The derivation itself is unchanged --
+`max(statement_timeout_ms + idle_in_transaction_session_timeout_ms) over the
+declared writer roles + 1000` (1s clock-skew margin), `11000` at the shipped
+`5000`/`5000` defaults -- but it is no longer a claim two processes have to
+be configured into agreeing about: each writer process verifies, at startup,
+that its OWN effective value equals the catalog value it derived from, and
+refuses to start otherwise (F-7/F-9/F-10/F-11/F-13, §16). The former
+"structural assumption" recorded here and in `security/CONTROL_MAPPING.md`'s
+SI-14 point 12 is closed, with the two limits §16 states.
 
-```sql
-SHOW statement_timeout;
-SHOW idle_in_transaction_session_timeout;
-```
+The denial-coalescing window moved the same way: `control_capabilities.
+audit_query.coalescing_window_ms` is now the `audit_coalescing_window_ms`
+row of `r2dbsvc_registry.platform_declarations`, read by BOTH processes at
+startup, so the data-plane's actual `DataService(denial_coalesce_window_s=
+...)` and the published declaration come from one row rather than from a
+constant on one side and a constructor argument on the other. Change it with
+`python -m r2db_api.ops declare-coalescing-window --ms <N>` and restart both
+processes -- never by editing a constant in either process' source.
 
-run against a connection each writer role (`r2dbsvc_api` for `application_
-audit`, `r2dbsvc_controlplane` for `control_audit`) actually holds open (a
-fresh `psql` session as those roles does not carry this SESSION-level
-setting -- only a connection opened by the running `r2db_api.main`/
-`r2db_api.control_main` process itself does).
-
-**Structural assumption (WP-2(b) fix round 2, item D, record only)**: the
-declared `visibility_lag_ms` is COMPUTED by the control process alone
-(`r2db_api.control_main.assemble_control_stack`, from its OWN `R2DB_AUDIT_
-STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS`) but is a claim about
-BOTH writer connections -- `application_audit`'s writer runs in the
-SEPARATE `r2db_api.main` process, which reads the identically-NAMED env
-vars independently. Nothing enforces the two processes agreeing at deploy
-time beyond both reading the same env-var names off (ideally) the same
-configuration source; a deployment that sets them differently per process
-makes the published `visibility_lag_ms` untrue for `application_audit`
-without either process detecting it. Keep both processes' env identical
-for these two variables. (This premise is now recorded as evidence in
-`security/CONTROL_MAPPING.md`'s SI-14 row, point 12.)
-
-**Anything that changes either timeout changes a published declaration.**
-The same is true of the denial-coalescing window: `control_capabilities.
-audit_query.coalescing_window_ms` is published by the CONTROL process from
-the single shared default constant, while the window that actually
-coalesces denials lives in the DATA-plane process (`DataService(denial_
-coalesce_window_s=...)`). There is no env-var knob for the latter today, so
-a deployment that constructs `DataService` with a non-default window makes
-the published `coalescing_window_ms` untrue, exactly as a per-process
-timeout mismatch makes `visibility_lag_ms` untrue. Treat both the same way:
-**if you change the value, you have changed the declaration, and the
-declaration must be changed with it.**
+**Anything that changes either timeout still changes a published
+declaration** -- that has not changed, only the place you change it (`ops`,
+not env) and the fact that a mismatch now stops a process instead of
+publishing a false declaration.
 
 **Declared audit vocabularies (contract 1.5.0, subordinate ruling 10 item 1).**
 The `audit_query` capability entry also publishes THREE vocabularies:
@@ -1392,3 +1387,255 @@ operational boundary does not describe. When reviewing the deployment:
    the control app. That would put a control/audit credential's traffic on the
    application-facing host, which is the separation the SI-00/SI-02 rows of
    `security/CONTROL_MAPPING.md` exist to keep.
+
+## 16. Platform declarations and writer-role timeouts (`0008_platform_declarations_and_writer_timeouts.sql`, Q4 phase WP-1)
+
+Design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-1/D-2 (work order
+`docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md` WP-1). This
+migration moves four things that used to be per-process environment
+variables into the platform database itself, as the single state **both**
+`r2db_api.main` and `r2db_api.control_main` read at startup.
+
+**Run once, after `0007`, as `r2dbsvc_control` against `r2dbsvc_platform`**
+(idempotent -- safe to re-run; a re-run resets a hand-changed timeout back
+to the shipped default, so use `ops set-platform-timeouts` for real
+changes):
+
+```
+psql "$R2DBSVC_CONTROL_DSN" \
+  -v api_role=r2dbsvc_api -v controlplane_role=r2dbsvc_controlplane \
+  -f r2db-api/migrations/0008_platform_declarations_and_writer_timeouts.sql
+```
+
+The two `-v` variables name the service writer roles this file both issues
+`ALTER ROLE ... SET` for **and** seeds into the `audit_writer_roles`
+declaration row -- from the same variables, in the same transaction, so the
+`ALTER ROLE` targets and the declared row can never drift apart. Production
+values are the two above; this repository's own tests pass throwaway-prefixed
+names through the same variables, which is exactly why the role names are
+not hard-coded anywhere in the product code (design D-2(h)).
+
+What it creates:
+
+- `statement_timeout` / `idle_in_transaction_session_timeout` as PostgreSQL
+  **role settings** on both writer roles, at the shipped defaults
+  `5000ms`/`5000ms` -- **identical to the SESSION-level defaults this phase
+  replaces, so applying this migration changes no observable behavior.**
+  **Scope note (design §3.11 point 1, ledger LQ4-4), an operator
+  responsibility:** `ALTER ROLE ... SET` bounds **every** connection those
+  roles make, not only audit writes -- `r2dbsvc_api` is also the credential
+  store's read role (`0005`) and `r2dbsvc_controlplane` is also the
+  control-plane registry's role (`0006`). 5000ms is generous for the short,
+  indexed statements either role issues elsewhere, but if you ever shorten
+  these substantially, you are shortening those paths too.
+- `r2dbsvc_registry.platform_declarations`, a three-key table
+  (`surfaces`, `audit_coalescing_window_ms`, `audit_writer_roles`) with a
+  NAMED `CHECK` on `key` and `SELECT` for the two platform roles (writes go
+  through the provision DSN only). `audit_coalescing_window_ms` is seeded
+  with the shipped default `60000` and `audit_writer_roles` with the two
+  role names above; **`surfaces` is deployment-specific and is deliberately
+  NOT seeded** -- declare it before first start:
+
+```
+python -m r2db_api.ops declare-surfaces \
+  --data-base-url https://data.example.invalid/v1 \
+  --control-base-url https://control.example.invalid/control/v1
+```
+
+Omitting `--control-base-url` entirely -- or passing `--no-control`, the
+explicit spelling of that same omission -- declares no control surface;
+passing both at once is a usage error (exit 2). Because this is ONE row
+shared by both processes, re-declaring without a control surface also
+removes it for the control-plane process, which then refuses to start
+(F-3c). The other three subcommands, all on `R2DB_CONTROL_DSN`:
+
+```
+python -m r2db_api.ops set-platform-timeouts --statement-ms 5000 --idle-ms 5000
+python -m r2db_api.ops declare-coalescing-window --ms 60000
+python -m r2db_api.ops show-declarations
+```
+
+`set-platform-timeouts` places the SAME two values on **every role listed in
+`audit_writer_roles`** -- it takes no role-name argument and has no per-role
+flag, because the published `visibility_lag_ms` is the max across those
+roles anyway. It rejects `0` and negatives (`0` means "no limit" in
+PostgreSQL, and an audit writer must never run unbounded).
+`show-declarations` prints both the table's rows and each declared role's
+own `pg_db_role_setting` entry, which is the one command to run when
+something looks inconsistent.
+
+**Every declaration is a startup-time snapshot** (requester ruling U-3):
+apply the change, then **restart both processes**. Nothing re-reads the
+table per request.
+
+**Restart order matters whenever a timeout VALUE changes** (design §9.2):
+
+- **Shortening either timeout: restart the DATA-plane process first, the
+  control process second.**
+- **Lengthening either timeout: restart the CONTROL process first, the
+  data-plane second.**
+
+The reason is one-directional harm, not symmetry: the reverse order leaves a
+window in which the published `visibility_lag_ms` is SHORTER than the bound
+the still-old writer connections actually honor, and a consumer that follows
+C-09 (wait the declared lag, then poll) silently misses rows it never sees
+again. The transient disagreement itself cannot be removed (design §3.11
+point 10, ledger LQ4-17) -- only its direction can.
+
+**The four removed environment variables.** `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`,
+`R2DB_AUDIT_IDLE_TIMEOUT_MS`, `R2DB_DATA_BASE_URL`, `R2DB_CONTROL_BASE_URL`
+are no longer read by either process, and **any one of them still defined --
+whatever its value, an empty string included -- makes that process refuse to
+start** (F-1 for the two timeouts, F-2 for the two URLs). This is deliberate:
+a deployment that copies an old `api.env`/`control.env` forward stops at the
+next restart with a message naming the `ops` command to run, rather than
+running on with a stale, unread configuration. Remove those lines from
+`/etc/r2dbsvc/api.env` and `/etc/r2dbsvc/control.env`
+(`deploy/env/{api,control}.env.example` already carry the removal notices).
+
+**Startup fail-fast, in the order the checks run** (design §3.7/§3.8 hold the
+verbatim message text; every message names the next command to run):
+
+| # | Condition |
+|---|---|
+| F-1 / F-2 | a removed env var is defined (timeouts / base URLs) |
+| F-8 | `r2dbsvc_registry.platform_declarations` does not exist -- `0008` was never applied to this platform database |
+| F-3 / F-3c | no `surfaces` row / a `surfaces` row with no `control` half, in the control-plane process |
+| F-4 / F-4b | the window or `audit_writer_roles` row is missing / its value is malformed (validated on every read, because the table can be hand-edited) |
+| F-5 | a declared `base_url` fails the shape check (absolute, `/v1` or `/control/v1`, no trailing slash) |
+| F-6 | `surfaces.control` and this process' `R2DB_CONTROL_PLANE_STATUS` disagree (data-plane only; the default remedy is to fix the status variable, since re-declaring would break the control process) |
+| F-13 | this connection's `current_user` is not one of the declared `audit_writer_roles` |
+| F-7 / F-10 / F-11 / F-9 | the role setting is absent / is `0` or negative / is overridden by an `ALTER ROLE ... IN DATABASE ...` row carrying either timeout key / disagrees with this connection's actual effective value |
+
+**What this does NOT verify -- two limits, both real:**
+
+1. **That both processes read the same platform database is not checked by
+   either of them** (design §3.11 point 7, ledger LQ4-16). Neither knows the
+   other's DSN. Hand the control process a stale `R2DB_CONTROLPLANE_DSN`
+   pointing at an old platform database and the pre-Q4 `surfaces` /
+   `visibility_lag_ms` drift returns in exactly its old shape. **Diffing the
+   two capability documents' `surfaces` after any change remains a required
+   post-deploy check** (`docs/work-orders/DEPLOY_Q4_20260905.md` §4-1).
+2. **A process effective-checks only its own role, and only at startup**
+   (design §3.11 point 9, ledger LQ4-15). The control process reads
+   `r2dbsvc_api`'s catalog entry -- that is where half the declared lag comes
+   from -- but cannot observe that role's effective value; only the
+   data-plane process can, on its own next start. And connections a pool
+   opens after startup are not re-checked, which matters under a connection
+   pooler; whether this deployment has one in front of PostgreSQL is not
+   recorded here.
+
+Reading both roles' declared settings by hand is still useful at deploy time,
+and is the one place both are visible together:
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -c "SELECT r.rolname, s.setconfig FROM pg_db_role_setting s JOIN pg_roles r ON r.oid = s.setrole WHERE s.setdatabase = 0"
+```
+
+## 17. Per-application platform-upgrade ledger and bulk apply (revised `0003` + `0009_platform_upgrades_ledger_upgrade.sql`, Q4 phase WP-3)
+
+Design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-3/D-4/D-5 (work order
+WP-3). Every application database now carries its own ledger table,
+`public._r2db_platform_upgrades`, recording which of this package's
+per-application upgrade scripts have been applied to it. This peer currently
+ships exactly one such script, `0009`, so the complete set is `{9}`.
+
+- **A freshly provisioned application already has it**: `0003` (§5 step 3)
+  creates the ledger and seeds every number this package ships. Nothing extra
+  to do when onboarding.
+- **An application provisioned before this WP shipped needs the retrofit**,
+  which is what `0009` is for -- and the way to run it is `ops`, not a
+  hand-run script per database:
+
+```
+# Preview: applies nothing, reports applied/pending per application.
+python -m r2db_api.ops upgrade-applications --dry-run
+
+# Apply. Visits every registered application; one failure does not stop the
+# rest -- failed applications are listed at the end with a cleanup line.
+python -m r2db_api.ops upgrade-applications
+```
+
+`--application <slug>` limits either form to one application. `enabled` does
+**not** affect which applications are targeted -- a disabled application's
+database is brought current too, so re-enabling it later never surfaces a
+stale ledger. Both commands run on `R2DB_CONTROL_DSN` (the provision role);
+no API process holds that DSN (`security/CONTROL_MAPPING.md` SI-02 row).
+
+Exit codes: `0` nothing pending, `1` enumeration failed (registry/provision
+DSN unreachable), `2` usage error (unknown `--application`, a `--script`
+file that does not exist, a script number this package does not ship), `3`
+at least one application failed to apply, `4` (`--dry-run` only) at least one
+application still has a pending upgrade.
+
+**If an application fails to apply**: the upgrade script's own ritual grants
+`r2dbsvc_control` a *temporary* membership in that application's developer
+role and revokes it at the end of a successful run; a failed run never
+reaches that closing `REVOKE`, so the output for a failed application
+includes the exact statement to issue by hand on the provision DSN, of the
+form:
+
+```sql
+REVOKE "<that application's developer role>" FROM "r2dbsvc_control";
+```
+
+Issue it after diagnosing and fixing the failure, then re-run
+`upgrade-applications` for that application. Leaving it unrevoked crosses no
+boundary SI-02/SI-12 draws (the provision role can already reach every
+application database), but it does defeat the existing ritual's intent that
+the membership is temporary, and repeated failures accumulate (design §3.11
+point 8, ledger LQ4-14).
+
+**Read-only status** (provision DSN only, writes nothing):
+
+```
+python -m r2db_api.ops upgrade-status
+python -m r2db_api.ops upgrade-status --application myapp
+```
+
+It reports `applied` / `pending` / `database_name` per application (an
+application with no ledger table at all reports `applied: []`; one whose
+provisioning never finished reports a NULL `database_name` and every number
+pending). Exit codes `0`/`4` mirror `--dry-run`. **This is the ONLY
+visualization of per-application upgrade state** (requester ruling U-1,
+design §5): deliberately not exposed on any HTTP surface, and `list-apps` is
+unchanged. Run it as part of every deploy's pre-flight, the same way
+`show-declarations` is.
+
+**Data-plane enforcement, disclosed for context (no operator action).** From
+this WP on, the data-plane process reads the ledger when it opens an
+application's storage boundary and compares it against the set this package
+ships. If a number is missing -- including the case where the ledger table
+does not exist at all -- **that application's cell refuses every request with
+`SERVICE_UNAVAILABLE`, and the response names the missing upgrade number(s)
+and `ops upgrade-applications`** (F-12; the runtime role holds `SELECT` on
+the ledger for exactly this check, requester ruling U-2). **The process still
+starts, every other served application still serves normally, and
+`/v1/capabilities` is unaffected** (supervisor ruling 2026-09-05, review
+H-1): only the lagging application's own cell refuses, until the upgrade is
+applied **and the process is restarted** (the check is a cell-open snapshot,
+like every other declaration in this phase). The startup log carries the same
+F-12 line, so a missed upgrade is visible without waiting for a client to
+report it.
+
+**Recovery from an F-12 refusal**, start to finish:
+
+1. `python -m r2db_api.ops upgrade-status --application <slug>` -- confirm
+   which numbers are pending (exit 4 means at least one is).
+2. `python -m r2db_api.ops upgrade-applications --application <slug>
+   --dry-run`, then the same command without `--dry-run`.
+3. If it exits 3, read the failure block: fix the cause, issue the printed
+   `REVOKE`, re-run step 2.
+4. `sudo systemctl restart r2dbsvc-api.service` -- the check is a cell-open
+   snapshot, so the refusing cell keeps refusing until the process restarts.
+5. Re-check with any ordinary request against that application, and with
+   `ops upgrade-status` (expect exit 0).
+
+**When you ship the next per-application upgrade script** (design §9.4): name
+it `NNNN_<name>_upgrade.sql`, wrap its body after `\c` in one transaction,
+make it idempotent, give it no `\q` skip path, record its own number in the
+ledger with `INSERT ... ON CONFLICT DO NOTHING` as the last statement, and
+add that number to BOTH the `0003` template's seed list and the package
+constant, in the same commit. A static test holds those three sets equal, so
+forgetting one of them fails CI instead of shipping a deployment whose
+cell-open check silently does not require the new number.

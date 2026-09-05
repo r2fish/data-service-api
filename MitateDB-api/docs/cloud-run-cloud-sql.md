@@ -334,8 +334,20 @@ Apply the platform single-shot migration (idempotent -- safe to re-run):
 
 ```sh
 psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -v api_role='mitatedbsvc_api' -v controlplane_role='mitatedbsvc_controlplane' \
   -f MitateDB-api/migrations/0007_platform_declarations.sql
 ```
+
+**Both `-v` variables are required** (correction 2026-09-05, Q4 phase WP-5 --
+this command previously omitted them, and `psql` stops on the first
+unset-variable reference): they name the two service writer roles this file
+both issues `ALTER ROLE ... SET` for **and** seeds into the
+`audit_writer_roles` declaration row, from the same variables inside the
+same transaction, so the roles that carry the timeouts and the roles the
+control service derives the lag over can never drift apart (design D-2(h)).
+The two values above are this deployment's production role names; the
+repository's own tests pass throwaway-prefixed names through the very same
+variables, which is why no role name is hard-coded in the product code.
 
 This sets `statement_timeout`/`idle_in_transaction_session_timeout` as
 PostgreSQL role settings on BOTH `mitatedbsvc_api` and
@@ -865,6 +877,22 @@ the **sole** peer-local visualization of per-application upgrade state
 ruling 2026-09-05) -- it is never exposed on any HTTP surface, and
 `list-applications` (§7) is unchanged (still the contract-shaped
 `ApplicationsResult`, no upgrade-state column added).
+
+**Recovery from an F-12 refusal**, start to finish (the r2db peer's own
+`POSTGRES_PROVISIONING_RUNBOOK.md` §17 states the same five steps):
+
+1. `python -m mitatedb_api.ops upgrade-status --application <id>` -- confirm
+   which numbers are pending (exit `4` means at least one is).
+2. `python -m mitatedb_api.ops upgrade-applications --application <id>
+   --dry-run`, then the same command without `--dry-run`.
+3. If it exits `3`, read that application's failure block: fix the cause,
+   issue the printed `REVOKE`, re-run step 2.
+4. **Redeploy or restart the data service** (`gcloud run services update
+   mitatedb-data ...`, or any new revision) -- the ledger check is a
+   cell-open snapshot, so the refusing cell keeps refusing until the process
+   opens that application's storage boundary again.
+5. Re-check with an ordinary request against that application, and with
+   `ops upgrade-status` (expect exit `0`).
 
 **`--script <NNNN>` danger, disclosed** (design D-4(f)): this flag applies
 one specific script only to databases that have not yet recorded it --
