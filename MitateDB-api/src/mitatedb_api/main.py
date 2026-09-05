@@ -108,6 +108,7 @@ loud "refuse to start" -- there is no partial-startup mode.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import threading
@@ -136,6 +137,14 @@ from .platform_declarations import (check_control_surface_consistency,
 from .pool import BoundedConnectionPool, pool_size_from_env
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
+
+# U-6 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査): the H-1
+# startup-time F-12 log line, below, goes through the standard `logging`
+# module, not a bare `print(..., file=sys.stderr)`, so it can be pinned
+# by a `caplog`-based test (verbatim text, same as the API response body)
+# instead of only a visual stderr check -- same fix as r2db-api's own
+# `main.py` (independent realization, no cross-peer sharing).
+_logger = logging.getLogger(__name__)
 
 
 def _require(env: Mapping[str, str], name: str) -> str:
@@ -382,7 +391,32 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     cells: dict[str, ApplicationCell] = {}
     for application_id in ids:
         runtime_dsn, developer_dsn = app_dsns[application_id]
-        backend = PostgresBackend(runtime_dsn, developer_dsn)
+        # Q4 phase (design D-3(f), F-12; supervisor ruling 2026-09-05
+        # H-1(a)): "cell open" for this served application --
+        # `PostgresBackend.__init__` checks the ledger itself, over the
+        # runtime connection it just opened, but no longer RAISES on a
+        # missing upgrade -- it stores the F-12 message on the backend
+        # instead, so this loop always completes and every OTHER served
+        # application's cell opens normally. The affected application's
+        # own cell still gets built and registered below (a refusing
+        # cell, not a missing one) -- its backend refuses every real
+        # operation with `SERVICE_UNAVAILABLE`/F-12 the moment a request
+        # reaches it (`backend_postgres._guard_pending_platform_
+        # upgrades`), while this process itself starts and every other
+        # application is served without interruption.
+        backend = PostgresBackend(runtime_dsn, developer_dsn, application_id=application_id)
+        if backend._pending_platform_upgrade_message is not None:
+            # H-1: logged once, here, at cell-open time -- the SAME text
+            # this application's own requests will see in every
+            # `SERVICE_UNAVAILABLE` response from here on ("起動時には
+            # ログへ F-12 を1行出す (API 応答と同じ文面)"). Without this
+            # line an operator would have no way to learn of the refusal
+            # short of a client report, since this backend deliberately
+            # no longer crashes the process to surface it (H-1(a)).
+            _logger.warning(
+                "mitatedb_api: application '%s' cell refusing requests: %s",
+                application_id, backend._pending_platform_upgrade_message,
+            )
         cells[application_id] = ApplicationCell(
             application_id, config, audit, guard=credentials.assert_active, backend=backend,
             audit_router=audit_router,

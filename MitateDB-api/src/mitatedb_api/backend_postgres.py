@@ -80,14 +80,44 @@ database-per-application, R-1 -- RLS as an additional layer is future-work,
 design v1.1 §7, not this WP's own containment boundary).
 """
 
+import functools
+
 import psycopg
 from psycopg import sql
 
 from .backend import SQL_OPERATOR_TOKENS
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
-                     StorageConfigurationError, ValidationError)
+                     PlatformUpgradePending, StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
 from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
+from . import platform_upgrades
+
+
+def _guard_pending_platform_upgrades(method):
+    """Q4 rework (supervisor ruling 2026-09-05, H-1(a)): decorates every
+    `PostgresBackend` method below that touches THIS application's own
+    storage. `PostgresBackend.__init__` no longer raises when this
+    application's own platform-upgrade ledger is missing an entry --  it
+    stores the F-12 message on `self._pending_platform_upgrade_message`
+    instead (`None` when nothing is pending) so `main.py::build_app`'s
+    own eager per-application construction loop completes and every
+    OTHER served application's cell opens normally. This decorator is
+    the single place the deferred `errors.PlatformUpgradePending` (F-12)
+    actually gets raised -- at the moment a real request against THIS
+    specific, refusing cell reaches its backend, never earlier. Raises
+    the dedicated `PlatformUpgradePending` subclass (never the bare
+    `StorageConfigurationError`) so `http.py::_problem_for_exception`'s
+    own `isinstance` narrowing can let JUST this one message reach the
+    HTTP response verbatim (design §3.8: "F-12だけは...API応答として
+    利用者に届く") without changing what every OTHER `StorageConfig
+    urationError` site in this file surfaces on the wire."""
+    @functools.wraps(method)
+    def _wrapped(self, *args, **kwargs):
+        if self._pending_platform_upgrade_message is not None:
+            raise PlatformUpgradePending(self._pending_platform_upgrade_message)
+        return method(self, *args, **kwargs)
+    return _wrapped
+
 
 # R-3 (design v1.1 §0/R-4 WP-0 m-7): backend-specific reserved names.
 # `audit_events` mirrors the SQLite backend's own defensive reservation
@@ -337,6 +367,26 @@ _SCHEMA_REVISION_TABLE = "_mdb_schema_revision"
 # before `ALTER DEFAULT PRIVILEGES` in both migrations).
 _FIELD_TYPES_TABLE = "_mdb_field_types"
 
+# Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(a)/(e)(i),
+# work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4
+# WP-4 変更対象 C): the per-application platform-upgrade ledger -- same
+# access-pattern reasoning as `_SCHEMA_REVISION_TABLE`/`_FIELD_TYPES_TABLE`
+# above for EXCLUSION purposes (`schema_count`'s own accounting must never
+# count this bookkeeping table towards `FoundationConfig.max_schema_
+# objects`, design D-3(e)(i): "放置すると全 application の schema_objects
+# 会計が +1 ずれる"), but UNLIKE those two, the runtime role DOES hold a
+# grant on it (`SELECT` only, design D-3(a)/U-2) -- read directly by
+# `platform_upgrades.require_application_upgrades_applied` below, over the
+# runtime connection, at cell-open time.
+_PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
+
+# m-1 (independent review correction, extended Q4 phase WP-4): the full
+# set of this package's own bookkeeping table names `schema_count()`
+# excludes from its `application`-level accounting -- a plain tuple, not a
+# `frozenset`, so the SQL `NOT IN (%s, %s, %s)` parameter list below stays
+# in a fixed, readable order matching this declaration.
+_BOOKKEEPING_TABLES = (_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPGRADES_TABLE)
+
 
 def _execute(cursor, statement, params=()):
     """R-2 choke point. The ONLY call to `cursor.execute` in this module."""
@@ -366,9 +416,66 @@ class PostgresBackend:
     `runtime_conn`, because this backend never even attempts DDL there.
     """
 
-    def __init__(self, runtime_dsn, developer_dsn):
+    def __init__(self, runtime_dsn, developer_dsn, *, application_id=None):
         self._runtime = psycopg.connect(runtime_dsn, autocommit=False)
         self._developer = psycopg.connect(developer_dsn, autocommit=False)
+        # Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f),
+        # §3.7 data-plane steps 9-10, F-12; requester ruling 2026-09-05
+        # U-2, reworked by supervisor ruling 2026-09-05 H-1(a)): "cell
+        # open" for THIS peer -- the served set is static configuration
+        # this WP applies eagerly at startup for every served application
+        # (`main.py::build_app`'s own docstring), so there is no later,
+        # per-request "first open" moment to hook instead -- IS the
+        # moment this backend's own two persistent connections come into
+        # existence, once per served application. `application_id=None`
+        # (test/tooling callers that construct a bare `PostgresBackend`
+        # with no application context at all, e.g. `tests/test_postgres.
+        # py`'s own low-level catalog/RLS probes) skips this check
+        # entirely -- those callers are not exercising a served
+        # application's own storage boundary.
+        #
+        # H-1(a) rework: this constructor no longer RAISES when this
+        # application's own ledger is missing an upgrade -- before this
+        # rework, raising here out of `main.py::build_app`'s own eager
+        # `for application_id in ids` loop took the WHOLE PROCESS down
+        # the moment even ONE served application's ledger had a pending
+        # upgrade, refusing every OTHER served application too (review
+        # H-1). Instead this constructor stores the F-12 message on
+        # `self._pending_platform_upgrade_message` (`None` when nothing
+        # is pending); `build_app` still completes and every OTHER
+        # served application's cell serves normally. Every public
+        # storage-touching method below is decorated with `_guard_
+        # pending_platform_upgrades`, which raises `errors.
+        # StorageConfigurationError` (F-12) -- mapped by `http.py::
+        # _CLASSIFY_ORDER` to the contract's `SERVICE_UNAVAILABLE` code
+        # -- the moment a request actually reaches THIS application's
+        # own refusing cell.
+        self._pending_platform_upgrade_message = None
+        if application_id is not None:
+            try:
+                try:
+                    platform_upgrades.require_application_upgrades_applied(
+                        self._runtime, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME,
+                        expected=platform_upgrades.PLATFORM_UPGRADE_NUMBERS, application_id=application_id,
+                        ops_module=platform_upgrades.PEER_MODULE,
+                    )
+                finally:
+                    # `require_application_upgrades_applied` only ever
+                    # reads (a `SELECT`, or nothing at all if `UndefinedTable`
+                    # already rolled the runtime connection back itself) --
+                    # this `rollback()` closes out that read-only
+                    # transaction either way.
+                    self._runtime.rollback()
+            except platform_upgrades.PlatformUpgradeError as exc:
+                # design §3.8 F-12: the ONLY platform-upgrade condition
+                # that reaches an API response. H-1(a): the message is
+                # HELD here, not raised -- both connections stay open (a
+                # refusing cell is otherwise a normal, live cell; only
+                # every storage-touching method on it refuses) so a
+                # later `ops upgrade-applications` run followed by a
+                # process restart is the only way this application's own
+                # cell becomes a normal one again.
+                self._pending_platform_upgrade_message = str(exc)
 
     def close(self):
         self._runtime.close()
@@ -381,13 +488,14 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # catalog (developer connection -- schema owner)
     # ------------------------------------------------------------------
+    @_guard_pending_platform_upgrades
     def schema_count(self):
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s)"
-                ), [_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE])
+                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s)"
+                ), list(_BOOKKEEPING_TABLES))
                 count = cur.fetchone()[0]
         except psycopg.Error as exc:
             self._developer.rollback()
@@ -396,6 +504,7 @@ class PostgresBackend:
             self._developer.commit()
         return count
 
+    @_guard_pending_platform_upgrades
     def field_domains(self, collection):
         """Live catalog lookup (R-2 stage 2) doubling as the value-domain
         source B-1 (i) needs: for every column of `collection`, this
@@ -469,6 +578,7 @@ class PostgresBackend:
                   .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
         return {field: declared_type for field, declared_type in cur.fetchall()}
 
+    @_guard_pending_platform_upgrades
     def field_types(self, collection):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
         field_types`'s own contract -- the single source of truth `GET
@@ -502,6 +612,7 @@ class PostgresBackend:
             raise NotFoundError("collection not found")
         return declared
 
+    @_guard_pending_platform_upgrades
     def all_field_types(self):
         """Phase 6 WP-3 (design D-3): see `backend_sqlite.SQLiteBackend.
         all_field_types`'s identical docstring -- `GET /v1/catalog`'s
@@ -529,6 +640,7 @@ class PostgresBackend:
             result.setdefault(entity, {})[field] = declared_type
         return result
 
+    @_guard_pending_platform_upgrades
     def schema_revision(self):
         try:
             with self._developer.cursor() as cur:
@@ -549,6 +661,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
+    @_guard_pending_platform_upgrades
     def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
         validate_identifier(name, "collection")
         definitions = []
@@ -620,6 +733,7 @@ class PostgresBackend:
             self._developer.rollback()
             raise
 
+    @_guard_pending_platform_upgrades
     def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
@@ -699,6 +813,7 @@ class PostgresBackend:
                 params.append(item.value)
         return sql.SQL(" WHERE ") + sql.SQL(" AND ").join(clauses), params
 
+    @_guard_pending_platform_upgrades
     def insert(self, collection, fields, params):
         # PostgreSQL 12+ has no per-row OID by default and this
         # foundation's own entity tables carry no server-assigned primary
@@ -743,6 +858,7 @@ class PostgresBackend:
             self._runtime.commit()
         return {"rowid": rowid}
 
+    @_guard_pending_platform_upgrades
     def insert_in_transaction(self, collection, fields, params):
         # No commit/rollback here (unlike `insert` above): this runs
         # inside a transaction the seam's own `transact()` already opened
@@ -776,6 +892,7 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"rowid": rowid}
 
+    @_guard_pending_platform_upgrades
     def update_in_transaction(self, collection, fields, params, filters):
         # P3-D2 (WP-1.5): no commit/rollback here (unlike `update` below)
         # -- mirrors `insert_in_transaction`'s own reasoning above. Runs
@@ -801,6 +918,7 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"updated": updated}
 
+    @_guard_pending_platform_upgrades
     def delete_in_transaction(self, collection, filters):
         # P3-D2 (WP-1.5): no commit/rollback here (unlike `delete` below)
         # -- same reasoning as `update_in_transaction` immediately above.
@@ -820,6 +938,7 @@ class PostgresBackend:
             raise ValidationError("storage backend rejected the request") from exc
         return {"deleted": deleted}
 
+    @_guard_pending_platform_upgrades
     def read(self, collection, selected, filters, order_by, limit):
         columns = sql.SQL(", ").join(sql.Identifier(x) for x in selected)
         statement = sql.SQL("SELECT {} FROM {}").format(columns, sql.Identifier(collection))
@@ -867,6 +986,7 @@ class PostgresBackend:
             self._runtime.commit()
         return rows
 
+    @_guard_pending_platform_upgrades
     def update(self, collection, fields, params, filters):
         assignments = sql.SQL(", ").join(
             sql.SQL("{} = %s").format(sql.Identifier(f)) for f in fields
@@ -888,6 +1008,7 @@ class PostgresBackend:
             self._runtime.commit()
         return {"updated": updated}
 
+    @_guard_pending_platform_upgrades
     def delete(self, collection, filters, audit_hook=None):
         statement = sql.SQL("DELETE FROM {}").format(sql.Identifier(collection))
         where, params = self._where_sql(filters)
@@ -923,6 +1044,7 @@ class PostgresBackend:
             raise
         return {"deleted": deleted}
 
+    @_guard_pending_platform_upgrades
     def begin(self):
         # psycopg3 connections (`autocommit=False`) already implicitly
         # start a transaction on first use; nothing to do beyond ensuring

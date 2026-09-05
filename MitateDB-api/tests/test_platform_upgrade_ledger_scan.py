@@ -17,22 +17,19 @@ This peer's own test scans ONLY `MitateDB-api/migrations/` (design D-3
 
 Non-vacuity (常設規律 1, work order §4 WP-0 非 vacuity 要件): the
 synthetic `tmp_path` fixtures below observe 適合/違反/ゼロ埋め不適合/
-命名不一致/三者不一致 -- at least one of each -- because the real
-`migrations/` directory, as of this WP, has no per-application upgrade
-script that still needs the (b) check to hold (`0006` is grandfathered
-via the allow-list) and so cannot exercise 適合 by itself until WP-4
-ships `0008` (design §10: "本フェーズ出荷後" is the ONLY point at which
-適合 >= 1 is expected against the real directory).
+命名不一致/三者不一致 -- at least one of each -- independent of whatever
+the real `migrations/` directory currently contains.
 
-xfail bookkeeping (supervisor ruling 2026-09-05, work order §4 WP-0
-完了条件 7/8): the two assertions against the REAL `migrations/`
-directory that cannot yet be true (適合 >= 1, and the three-way match
-against the not-yet-existing `mitatedb_api.platform_upgrades` package
-constant) are registered `xfail(strict=True)` and removed in the SAME
-commit as WP-4 (`MitateDB-api/migrations/0008_..._upgrade.sql` + the
-`platform_upgrades.py` module) -- `strict=True` so an accidental early
-green (e.g. from a stray file matching the naming convention) is
-reported as a failure (XPASS), not silently ignored.
+xfail bookkeeping, now closed (supervisor ruling 2026-09-05, work order §4
+WP-0 完了条件 7/8, WP-4 完了条件 12/13): WP-0 registered the two
+assertions against the REAL `migrations/` directory that could not yet be
+true at that point (適合 >= 1, and the three-way match against the then
+not-yet-existing `mitatedb_api.platform_upgrades` package constant) as
+`xfail(strict=True)`. Q4 phase WP-4 removes both `xfail` markers in the
+SAME commit that ships `MitateDB-api/migrations/0008_platform_upgrades_
+upgrade.sql`, `0003`'s revised seed list, and the `platform_upgrades.py`
+module -- both assertions below now hold unconditionally against the real
+directory.
 
 Rework round (supervisor ruling 2026-09-05, work order §4 WP-0 差し戻し
 指示 1 / 裁定 A / 裁定 C): code review round 1 (Opus, mutation-tested)
@@ -637,36 +634,31 @@ def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
 
 def test_naming_convention_excludes_every_current_platform_single_shot_migration():
     """完了条件 5: platform 単発 migration がこの命名を使っていないこと
-    -- 実 `migrations/` の中で `NAME_RE` に一致するファイルは
-    `0006_declared_field_types_upgrade.sql` の 1 件だけである。"""
+    -- 実 `migrations/` の中で `NAME_RE` に一致するファイルは per-
+    application upgrade script 2 件 (`0006_declared_field_types_
+    upgrade.sql`、Q4 phase WP-4 の `0008_platform_upgrades_upgrade.sql`)
+    だけであり、platform 単発 migration (`0001`/`0002`/`0007` 等) は
+    含まれない。"""
     matching = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if NAME_RE.match(p.name)}
-    assert matching == {"0006_declared_field_types_upgrade.sql"}
+    assert matching == {"0006_declared_field_types_upgrade.sql", "0008_platform_upgrades_upgrade.sql"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "design §10 / work order §4 WP-0 完了条件 8: real MitateDB-api/migrations/ has no "
-        "per-application upgrade script that still needs the (b) check to hold (0006 is "
-        "allow-listed; 0008 ships in WP-4) -- 適合 >= 1 cannot yet hold. Removed in the SAME "
-        "commit as WP-4, which ships 0008_..._upgrade.sql."
-    ),
-)
 def test_real_migrations_dir_has_at_least_one_conforming_script():
+    """Q4 phase WP-4 (design §10 / work order §4 WP-0 完了条件 8, WP-4
+    完了条件 13): the `xfail(strict=True)` WP-0 registered is removed in
+    this SAME commit as `0008_platform_upgrades_upgrade.sql` -- real
+    `MitateDB-api/migrations/` now has exactly one conforming script."""
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
     assert result.tally["適合"] >= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "design §10 / work order §4 WP-0 完了条件 7: the package constant module "
-        "(mitatedb_api.platform_upgrades, design D-3 (f)) does not exist until WP-4, and "
-        "0003's seed list is empty until WP-4 -- the three-way match cannot yet hold. "
-        "Removed in the SAME commit as WP-4."
-    ),
-)
 def test_real_migrations_three_way_match():
+    """Q4 phase WP-4 (design §10 / work order §4 WP-0 完了条件 7, WP-4
+    完了条件 12): the `xfail(strict=True)` WP-0 registered is removed in
+    this SAME commit as `mitatedb_api.platform_upgrades` (design D-3(f))
+    and `0003`'s revised seed list -- the three-way match now holds
+    against the real directory, the real template, and the real package
+    constant."""
     import importlib
 
     script_numbers = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME).applicable_numbers

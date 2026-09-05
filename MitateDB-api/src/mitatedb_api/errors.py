@@ -132,6 +132,33 @@ class StorageConfigurationError(FoundationError):
     """
 
 
+class PlatformUpgradePending(StorageConfigurationError):
+    """Q4 rework (supervisor ruling 2026-09-05, H-1; design docs/design/
+    Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(f)/§3.8 F-12): raised (by `backend_
+    postgres.py`'s own `_guard_pending_platform_upgrades`) instead of the
+    bare `StorageConfigurationError` above for exactly one condition --
+    an application's own per-application platform-upgrade ledger is
+    missing an entry this package requires.
+
+    A DISTINCT subclass, not a bare `StorageConfigurationError`, because
+    F-12 is design §3.8's own explicitly named exception to SI-10's
+    general "never surface `str(exc)` on the wire" discipline (`http.py::
+    _problem_for_exception`'s own docstring/comment): "F-12だけは起動時
+    ではなくcell open時であり、API応答として利用者に届く...F-12の
+    メッセージは未適用の番号とopsコマンド名を示す". Every OTHER
+    `StorageConfigurationError` site in this peer (the missing-`0006`
+    reads in `field_domains`/`field_types`/`all_field_types`) keeps the
+    generic, fixed `_problem_for_exception` message -- `isinstance`
+    narrows to exactly this one subclass, so a future `Storage
+    ConfigurationError` raise elsewhere does not silently start leaking
+    its own message onto the wire by inheriting this behavior unasked.
+    `platform_upgrades._f12_message`'s own construction already excludes
+    DSN/credential/internal-hostname/declared-value text (only the
+    missing upgrade numbers and the next `ops` command appear), so this
+    message is safe to surface verbatim.
+    """
+
+
 class AuditSinkUnavailable(FoundationError):
     """Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md D-2/D-3,
     work order WP-3(a)): raised when the durable application-plane audit
