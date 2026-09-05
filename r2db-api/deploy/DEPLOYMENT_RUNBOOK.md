@@ -102,11 +102,22 @@ re-verify them; it assumes they are already true.
    `POSTGRES_PROVISIONING_RUNBOOK.md` §7 -- this runbook's job is standing up
    the ASGI process and nginx listener, not PostgreSQL network policy.
 5. A dedicated install location for this deployment exists on the target
-   host, with a Python 3.11 virtualenv containing this package installed
-   (`pip install` from a build of this repository's `r2db-api/`, matching
-   the `requires-python` this codebase targets -- confirm with `python3
-   --version` on the target, the same caution the project's own test setup
-   applies: system `python3` may be an older version not suitable here).
+   host, with a virtualenv containing this package installed (`pip install`
+   from a build of this repository's `r2db-api/`) built with an interpreter
+   satisfying this codebase's own `requires-python` (`>=3.11`,
+   `r2db-api/pyproject.toml`) -- confirm with `python3 --version` on the
+   target, the same caution the project's own test setup applies: system
+   `python3` may be an older version not suitable here. This runbook
+   deliberately does not name one specific interpreter version here: the
+   version actually exercised is recorded in two other places instead, so a
+   stale hardcoded number here cannot drift out of sync with either of
+   them -- the CI Python matrix (`.github/workflows/ci.yml`, Phase 7 WP-2)
+   states which versions this codebase's own test suite is verified
+   against, and a deployment's own record (`docs/work-orders/DEPLOY_*.md`
+   §7-template, Phase 7 WP-1 D-1 (iii)) states which interpreter version
+   that specific target actually runs (a target's system Python may be
+   newer than the floor this codebase requires -- confirm on the target
+   rather than assuming a specific minor version from this document).
 
 ## 2. Stage 1 install steps
 
@@ -557,13 +568,38 @@ placeholder values and the same style as `deploy/env/api.env.example`, is
 
 **Deployment steps (mirrors §2 above, for the second unit):**
 
+Phase 7 WP-3 turned steps 1-2 below from prose instructions into
+reproducible templates and operator scripts -- see `deploy/systemd/
+r2dbsvc-control.service` (the second unit, isomorphic to `deploy/systemd/
+r2dbsvc-api.service` except unit name/port/`EnvironmentFile`/`ExecStart`),
+`deploy/nginx/r2dbsvc-api-8443.conf.example`'s own `location /control/v1/`
+block, and `deploy/scripts/` (`part1_provision_host_and_db.sh` through
+`0007`+the first application, `part1b_control_credential_reset.sh` for
+step 4 below, `part2_enable_units_and_nginx.sh` for installing/enabling
+both units and the nginx listener together and verifying both fail closed
+with no credential). `deploy/scripts/lint_deploy_assets.sh` is the
+syntax-level check the `deploy-assets` CI job runs against all of the
+above (unit files, the nginx example, and the scripts themselves) -- it
+does not perform a deployment.
+
 1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
    root-owned, mode `0600`, containing the table above (copy
    `deploy/env/control.env.example` as a starting point) -- never the
-   application plane's own `api.env`.
-2. Install a second systemd unit pointing `ExecStart=` at
-   `uvicorn r2db_api.control_main:app` on its own internal port, following
-   the same account/port-collision checks as §2 steps 1 and 3 above.
+   application plane's own `api.env`. `part1_provision_host_and_db.sh`
+   provisions the database objects this file's DSNs point at; placing the
+   file itself is still a manual, per-target step (this repository never
+   holds a real value for it).
+2. Install the second systemd unit, `deploy/systemd/
+   r2dbsvc-control.service`, pointing `ExecStart=` at `uvicorn r2db_api.
+   control_main:app` on its own internal port, following the same
+   account/port-collision checks as §2 steps 1 and 3 above -- and add the
+   nginx `location /control/v1/` block from `deploy/nginx/
+   r2dbsvc-api-8443.conf.example` alongside the existing `location /v1/`
+   block. `part2_enable_units_and_nginx.sh` performs both halves of this
+   step together (install/enable both units, install the nginx listener,
+   verify both surfaces answer `401` with no credential) once the
+   `EnvironmentFile`s from step 1 are in place; it refuses to install any
+   file that still contains an unresolved `REPLACE_ME_*` placeholder.
 3. **Only after** the control-plane process is genuinely running and
    reachable, set `R2DB_CONTROL_PLANE_STATUS=enabled` in the
    **application-plane** process' own `api.env` and restart
@@ -582,6 +618,19 @@ placeholder values and the same style as `deploy/env/api.env.example`, is
    R2DB_CONTROL_DSN=... R2DB_CONTROL_CREDENTIAL_PEPPER=... \
      python -m r2db_api.ops bootstrap
    ```
+   `deploy/scripts/part1b_control_credential_reset.sh` wraps this same
+   command. If bootstrap's stderr contains `error: CONFLICT:` (ops.py's
+   fixed refusal text for "a control credential already exists"), the
+   script does **not** fall back automatically: it stops with `exit 1`
+   unless the operator has explicitly set `R2DBSVC_ALLOW_CONTROL_RESET=1`,
+   since the fallback is the gated `reset` ritual (with its own
+   declare-and-echo confirmation) and revokes every existing control
+   credential on this platform database. Only with that variable set does
+   it proceed to `reset` -- the recovery path for the "printed credential
+   lost before reaching the secret manager" scenario. Any other bootstrap
+   failure (a wrong/unreachable `R2DB_CONTROL_DSN`, a PostgreSQL outage,
+   etc.) is not this refusal: the script prints ops's stderr verbatim and
+   stops with `exit 1`, never proceeding to `reset`.
    The issued credential is `must_rotate=true` -- authorized for nothing but
    `GET /control/v1/capabilities` and rotating itself until an operator
    completes one real rotation (`POST /control/v1/credentials/{id}/rotate`,
