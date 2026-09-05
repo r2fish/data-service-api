@@ -173,6 +173,10 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         prefix=prefix, admin_dsn=admin_dsn, control_dsn=control_dsn, control_role=control_role,
         api_role=api_role, controlplane_role=controlplane_role, platform_db=platform_db, schema=schema,
         rewritten_migrations_dir=rewritten_dir,
+        # api_password is needed by the one test that connects AS the api role:
+        # under TCP + scram (CI) the password is actually checked, unlike the
+        # local unix-socket trust setup that hid this omission.
+        api_password=api_password,
     )
     try:
         yield info
@@ -1056,7 +1060,9 @@ def test_f13_message_is_pinned_verbatim_and_fires_before_f7(ops_env: types.Simpl
 def test_f13_fires_when_audit_writer_roles_row_is_absent(ops_env: types.SimpleNamespace) -> None:
     from r2db_api.platform_declarations import check_writer_role_timeouts
 
-    with psycopg.connect(_dsn_with(ops_env.control_dsn, user=ops_env.api_role)) as conn:
+    with psycopg.connect(
+        _dsn_with(ops_env.control_dsn, user=ops_env.api_role, password=ops_env.api_password)
+    ) as conn:
         with pytest.raises(PlatformDeclarationError) as exc:
             check_writer_role_timeouts(conn, declared_roles=(), schema=ops_env.schema, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
     assert str(exc.value) == _f13(ops_env.api_role, (), schema=ops_env.schema)

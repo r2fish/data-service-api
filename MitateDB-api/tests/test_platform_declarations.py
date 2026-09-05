@@ -483,9 +483,12 @@ def test_f3_missing_surfaces_row(control_platform) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {control_platform.registry_schema}.platform_declarations (key, value) "
-                "VALUES ('surfaces', '{\"data\":{\"base_url\":\"https://data.mitatedb-control-platform"
-                ".example.invalid/v1\"},\"control\":{\"base_url\":\"https://control.mitatedb-control-platform"
-                ".example.invalid/control/v1\"}}')"
+                # One literal per URL so the synthetic `.example.invalid` host is
+                # visible on its own line to the line-based public-value scanner.
+                "VALUES ('surfaces', '{\"data\":{\"base_url\":"
+                "\"https://data.mitatedb-control-platform.example.invalid/v1\"},"
+                "\"control\":{\"base_url\":"
+                "\"https://control.mitatedb-control-platform.example.invalid/control/v1\"}}')"
             )
         conn.close()
 
