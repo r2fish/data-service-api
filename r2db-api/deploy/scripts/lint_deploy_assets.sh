@@ -86,6 +86,20 @@ SRC_DIR="${REPO_ROOT}/r2db-api/src/r2db_api"
 overall_status=0
 declare -a results=()
 
+# Scratch files/dirs created by the checks below (systemd-analyze verify's
+# stub unit copies, nginx -t's rendered conf/cert). Collected here rather
+# than one `trap ... EXIT` per check so a later check's trap does not
+# silently replace an earlier one's and skip its cleanup.
+declare -a cleanup_paths=()
+# shellcheck disable=SC2329 # invoked indirectly via `trap ... EXIT` below
+cleanup_scratch() {
+    local p
+    for p in "${cleanup_paths[@]}"; do
+        rm -rf "$p"
+    done
+}
+trap cleanup_scratch EXIT
+
 record() {
     # $1 = check name, $2 = one of PASS / FAIL / "SKIPPED (tool absent)"
     results+=("$1: $2")
@@ -110,7 +124,45 @@ record_absent_tool() {
 # ---------------------------------------------------------------------------
 if command -v systemd-analyze >/dev/null 2>&1; then
     unit_check_failed=0
-    for unit in "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" "${DEPLOY_DIR}/systemd/r2dbsvc-control.service"; do
+
+    # `systemd-analyze verify` stats the ExecStart= binary and the
+    # EnvironmentFile= path and hard-fails ("Command ... is not executable:
+    # No such file or directory") if either is absent -- both name the
+    # TARGET host's illustrative install layout (/opt/r2dbsvc/..., /etc/
+    # r2dbsvc/...), which does not and must not exist on whatever host runs
+    # this lint (including CI). Verify a scratch COPY of each unit instead,
+    # with ONLY those two paths substituted for lint-local stand-ins: the
+    # ExecStart binary for a trivial executable stub, EnvironmentFile for an
+    # empty file. No other directive is touched, so the hardening posture,
+    # unit shape, and every other value are still exercised byte-for-byte.
+    # Check 4 (ExecStart non-vacuity) below verifies the module target
+    # against the ORIGINAL, unmodified unit files -- this substitution is
+    # for check 1 only.
+    verify_dir="$(mktemp -d)"
+    cleanup_paths+=("$verify_dir")
+
+    verify_stub_bin="${verify_dir}/uvicorn-stub"
+    printf '#!/bin/sh\n' >"$verify_stub_bin"
+    chmod +x "$verify_stub_bin"
+
+    verify_env_api="${verify_dir}/api.env"
+    verify_env_control="${verify_dir}/control.env"
+    : >"$verify_env_api"
+    : >"$verify_env_control"
+
+    verify_unit_api="${verify_dir}/r2dbsvc-api.service"
+    sed \
+        -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/uvicorn#${verify_stub_bin}#" \
+        -e "s#/etc/r2dbsvc/api\.env#${verify_env_api}#" \
+        "${DEPLOY_DIR}/systemd/r2dbsvc-api.service" >"$verify_unit_api"
+
+    verify_unit_control="${verify_dir}/r2dbsvc-control.service"
+    sed \
+        -e "s#/opt/r2dbsvc/r2db-api/\.venv/bin/uvicorn#${verify_stub_bin}#" \
+        -e "s#/etc/r2dbsvc/control\.env#${verify_env_control}#" \
+        "${DEPLOY_DIR}/systemd/r2dbsvc-control.service" >"$verify_unit_control"
+
+    for unit in "$verify_unit_api" "$verify_unit_control"; do
         if ! systemd-analyze verify "$unit"; then
             unit_check_failed=1
         fi
@@ -135,7 +187,7 @@ if command -v nginx >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
     nginx_tmp_conf="$(mktemp)"
     nginx_tmp_dir="$(mktemp -d)"
     nginx_tls_dir="$(mktemp -d)"
-    trap 'rm -f "$nginx_tmp_conf"; rm -rf "$nginx_tmp_dir" "$nginx_tls_dir"' EXIT
+    cleanup_paths+=("$nginx_tmp_conf" "$nginx_tmp_dir" "$nginx_tls_dir")
 
     # Throwaway, synthetic-only self-signed cert/key (1-day validity) --
     # never a real certificate, never committed, generated fresh on every
@@ -162,7 +214,19 @@ if command -v nginx >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
     # server block itself is `include`d unmodified from the rendered copy
     # above so the check exercises this repository's own file byte-for-byte
     # (after substitution), not a paraphrase of it.
+    #
+    # `pid` and `error_log` are set explicitly to lint-local scratch paths
+    # in the main context (they are not valid inside events{}/http{}):
+    # nginx's own compiled-in default is `pid /run/nginx.pid;`, which a
+    # non-root lint invocation cannot write to (`[emerg] open()
+    # "/run/nginx.pid" failed (13: Permission denied)`), failing the
+    # config test even though the config's own syntax is fine. The default
+    # error_log target (typically /var/log/nginx/error.log) is equally
+    # unwritable to a non-root lint; pointing it at the same scratch dir
+    # avoids relying on that ambient path either.
     cat >"${nginx_tmp_dir}/nginx.conf" <<EOF
+pid ${nginx_tmp_dir}/nginx.pid;
+error_log ${nginx_tmp_dir}/error.log;
 events {}
 http {
     include ${nginx_tmp_conf};
@@ -207,9 +271,14 @@ if command -v shellcheck >/dev/null 2>&1; then
         record "shellcheck" "FAIL"
     fi
 else
-    # shellcheck is "add it if available" per this WP's own design (D-5) --
-    # unlike nginx/systemd-analyze it is never a required check, so its
-    # absence stays SKIPPED even under --require-tools.
+    # NOTE: shellcheck is "add it if available" per this WP's own design
+    # (D-5) -- unlike nginx/systemd-analyze it is never a required check,
+    # so its absence stays SKIPPED even under --require-tools. (This
+    # comment deliberately does not start with the literal token sequence
+    # "# shellcheck" -- shellcheck parses any comment beginning that way as
+    # a directive, e.g. "# shellcheck disable=SC1234", and fails with
+    # SC1072/SC1073 if what follows isn't that key=value shape. This is
+    # prose, not a directive, hence the reworded lead-in.)
     record "shellcheck" "SKIPPED (tool absent)"
 fi
 
