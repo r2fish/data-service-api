@@ -187,10 +187,15 @@ jobs:
           {
             echo "### Conformance gate tally -- Python ${{ matrix.python-version }}"
             echo ""
-            echo '```json'
-            cat pytest-tally.json
-            echo '```'
+            if [ -f pytest-tally.json ]; then
+              echo '```json'
+              cat pytest-tally.json
+              echo '```'
+            else
+              echo "gate failed before a tally was written"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Upload tally artifact
         if: always()

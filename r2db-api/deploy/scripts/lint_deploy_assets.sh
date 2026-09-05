@@ -91,7 +91,16 @@ declare -a results=()
 # than one `trap ... EXIT` per check so a later check's trap does not
 # silently replace an earlier one's and skip its cleanup.
 declare -a cleanup_paths=()
-# shellcheck disable=SC2329 # invoked indirectly via `trap ... EXIT` below
+# shellcheck disable=SC2329,SC2317 # invoked indirectly via `trap ... EXIT`
+# below. (Deliberately not starting the next line with the literal token
+# sequence "# shellcheck" -- the linter parses any comment beginning that
+# way as a directive and fails with SC1072/SC1073 if what follows isn't
+# that key=value shape; see the same note near the shellcheck-availability
+# branch further down.) SC2329 ("function is never invoked") and SC2317
+# ("command appears to be unreachable") are the same false positive: an
+# older linter release does not trace the `trap ... EXIT` reference below
+# back into this function body. A newer release may already resolve this
+# on its own; the disable is harmless either way.
 cleanup_scratch() {
     local p
     for p in "${cleanup_paths[@]}"; do
@@ -224,11 +233,28 @@ if command -v nginx >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
     # error_log target (typically /var/log/nginx/error.log) is equally
     # unwritable to a non-root lint; pointing it at the same scratch dir
     # avoids relying on that ambient path either.
+    #
+    # `access_log` inside http{} is set the same way, for the same reason:
+    # neither this wrapper conf nor the included server block (deploy/
+    # nginx/r2dbsvc-api-8443.conf.example) declares an `access_log`
+    # directive anywhere, so nginx falls back to its own compiled-in
+    # default target (typically `/var/log/nginx/access.log` on a
+    # distro-packaged build) -- and `nginx -t` does not just check syntax,
+    # it also opens every log target the resolved config names. A
+    # non-root lint invocation cannot write there either (`[emerg] open()
+    # "/var/log/nginx/access.log" failed (13: Permission denied)`), which
+    # fails the config test independently of `error_log` already being
+    # covered above; setting `access_log off;` only in this wrapper's own
+    # http{} would not help if the included server block ever adds its own
+    # `access_log /absolute/path ...;` (server-context directives override
+    # the http-context default) -- so this points at a scratch file
+    # instead of turning logging off, and stays correct either way.
     cat >"${nginx_tmp_dir}/nginx.conf" <<EOF
 pid ${nginx_tmp_dir}/nginx.pid;
 error_log ${nginx_tmp_dir}/error.log;
 events {}
 http {
+    access_log ${nginx_tmp_dir}/access.log;
     include ${nginx_tmp_conf};
 }
 EOF
