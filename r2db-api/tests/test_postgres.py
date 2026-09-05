@@ -47,6 +47,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from r2db_api import platform_upgrades
 from r2db_api.errors import FoundationError
 from r2db_api.limits import ResourceLimits
 from r2db_api.postgres import PostgresCell, SharedPoolManager, _RolePool
@@ -661,6 +662,11 @@ _REVISION_TABLE = "_r2db_schema_revision"  # provisioned by
 # application database, independent of anything these tests create --
 # excluded below the same way `PostgresCell._load_catalog` excludes it, so
 # it does not read as a false "something was created" side effect.
+# Q4 WP-3 (design D-3(a)): the per-application platform-upgrade ledger
+# `0003`/`0009` now also provision unconditionally into every application
+# database -- excluded below for the identical reason, so `_real_table_
+# names`' own "nothing but what THIS test created" assertions stay true.
+_BOOKKEEPING_TABLES = (_REVISION_TABLE, "_r2db_platform_upgrades")
 
 
 def _real_table_names(dsn: str, schema: str) -> set[str]:
@@ -673,8 +679,8 @@ def _real_table_names(dsn: str, schema: str) -> set[str]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s AND table_type = 'BASE TABLE' AND table_name <> %s",
-                [schema, _REVISION_TABLE],
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s AND table_type = 'BASE TABLE' AND table_name <> ALL(%s)",
+                [schema, list(_BOOKKEEPING_TABLES)],
             )
             return {row[0] for row in cur.fetchall()}
     finally:
@@ -3033,3 +3039,310 @@ def test_role_pool_never_hangs_after_repeated_connect_failures_and_recovers() ->
                 assert cur.fetchone() == (1,)
     finally:
         pool.close_all()
+
+
+# ===========================================================================
+# Q4 phase WP-3 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3,
+# work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md
+# WP-3): the per-application platform-upgrade ledger -- `0003`'s revised
+# template seed, `0009`'s retrofit for a pre-existing application, the
+# backend bookkeeping-exclusion set, and the cell open time check (F-12).
+# ===========================================================================
+
+
+def _ledger_numbers(dsn: str) -> frozenset[int]:
+    conn = psycopg.connect(dsn)
+    try:
+        return platform_upgrades.read_applied_upgrade_numbers(conn, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME) or frozenset()
+    finally:
+        conn.close()
+
+
+def _rewrite_0009(prefix: str, tmp_path: Path) -> Path:
+    text = (MIGRATIONS_DIR / "0009_platform_upgrades_ledger_upgrade.sql").read_text().replace("r2dbsvc", prefix)
+    out = tmp_path / "0009_platform_upgrades_ledger_upgrade.sql"
+    out.write_text(text)
+    return out
+
+
+def test_template_seeds_the_ledger_with_the_current_platform_upgrade_numbers(app_a: types.SimpleNamespace) -> None:
+    """完了条件 1/5: `0003` テンプレートで新規 provision した application の
+    台帳が、パッケージ定数 `platform_upgrades.PLATFORM_UPGRADE_NUMBERS`
+    (現状 `{9}`) と一致すること。"""
+    assert _ledger_numbers(app_a.developer_dsn) == platform_upgrades.PLATFORM_UPGRADE_NUMBERS == frozenset({9})
+
+
+def test_0009_has_no_skip_path() -> None:
+    """完了条件 3 (監査照合の実測版): `0009` に `\\q` によるskip経路が無い
+    こと -- design §1.5 の 7a、静的規則の走査対象外の性質を直接 grep で
+    固定する。"""
+    text = (MIGRATIONS_DIR / "0009_platform_upgrades_ledger_upgrade.sql").read_text()
+    assert "\\q" not in text
+
+
+def test_0009_upgrades_a_legacy_application_to_match_a_freshly_provisioned_ledger(
+    platform: types.SimpleNamespace, tmp_path: Path
+) -> None:
+    """完了条件 1/2/5: `0009` を「台帳の無い既存 application」(WP-3 以前に
+    provision された状態を、台帳表を落として模する) に当てると、新規
+    provision (`0003`) と同じ終状態 (`{9}`) に着くこと。2 回適用しても
+    終状態が変わらないこと (冪等)。"""
+    script = _rewrite_0009(platform.prefix, tmp_path)
+    with provisioned_apps(platform, ["upglegacy"]) as apps:
+        app = apps[0]
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE public._r2db_platform_upgrades")
+        finally:
+            conn.close()
+        assert _ledger_numbers(app.developer_dsn) == frozenset()
+
+        _run_psql(platform.control_dsn, script, {"app_slug": app.slug})
+        first = _ledger_numbers(app.developer_dsn)
+        assert first == frozenset({9})
+
+        _run_psql(platform.control_dsn, script, {"app_slug": app.slug})
+        second = _ledger_numbers(app.developer_dsn)
+        assert second == first == frozenset({9})
+
+
+def test_0009_failure_leaves_no_ledger_table_or_row_behind(platform: types.SimpleNamespace, tmp_path: Path) -> None:
+    """完了条件 4 (実 PG、設計 §10 実 PG 確認項目 4): 本体 (`BEGIN` ...
+    `COMMIT`) の途中に失敗を注入すると psql が非 0 で終わり、台帳表その
+    ものが (トランザクショナル DDL のため) 存在しないこと -- 行が残らない
+    ことの上位互換の実測。"""
+    real_text = (MIGRATIONS_DIR / "0009_platform_upgrades_ledger_upgrade.sql").read_text().replace("r2dbsvc", platform.prefix)
+    mutated_text = real_text.replace("COMMIT;\n", "SELECT 1/0;\nCOMMIT;\n", 1)
+    assert mutated_text != real_text, "mutation did not actually change the script text"
+    mutated_script = tmp_path / "0009_mutated_failure_injection.sql"
+    mutated_script.write_text(mutated_text)
+
+    with provisioned_apps(platform, ["upgfail"]) as apps:
+        app = apps[0]
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE public._r2db_platform_upgrades")
+        finally:
+            conn.close()
+
+        with pytest.raises(RuntimeError, match="division by zero"):
+            _run_psql(platform.control_dsn, mutated_script, {"app_slug": app.slug})
+
+        conn = psycopg.connect(app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public._r2db_platform_upgrades')")
+                assert cur.fetchone() == (None,), "a failed run must not leave the ledger table behind at all"
+        finally:
+            conn.close()
+
+
+def test_runtime_role_can_select_but_not_write_the_ledger(app_a: types.SimpleNamespace) -> None:
+    """完了条件 6 (U-2 逐語): runtime 接続で `SELECT` が通り、`INSERT` /
+    `UPDATE` / `DELETE` は `permission denied` になること。"""
+    conn = psycopg.connect(app_a.runtime_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades")
+            assert cur.fetchall() == [(9,)]
+        for statement in (
+            "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name) VALUES (99, 'x')",
+            "UPDATE public._r2db_platform_upgrades SET script_name = 'y' WHERE upgrade_number = 9",
+            "DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with conn.cursor() as cur:
+                    cur.execute(statement)
+            conn.rollback()
+    finally:
+        conn.close()
+
+
+def test_provision_role_can_read_the_ledger_after_the_script_ends(app_a: types.SimpleNamespace, platform: types.SimpleNamespace) -> None:
+    """完了条件 7: script 終了後 (`REVOKE :"developer_role" FROM
+    CURRENT_USER` の後) の provision DSN から `dbname` を差し替えた接続で
+    `SELECT` が通ること -- 付与が無いと `ops upgrade-applications
+    --dry-run` すら動かない (設計 D-3(a))。"""
+    dsn = _dsn_with(platform.control_dsn, dbname=app_a.database)
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades")
+            assert cur.fetchall() == [(9,)]
+    finally:
+        conn.close()
+
+
+def test_ledger_table_has_no_row_level_security(app_a: types.SimpleNamespace) -> None:
+    """完了条件 8: `pg_class.relrowsecurity` / `relforcerowsecurity` が
+    ともに false であること (監督裁定 2026-09-05: FORCE RLS は所有者にも
+    適用され、provision -> `SET ROLE developer` の書き込みが拒まれる)。"""
+    conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT relrowsecurity, relforcerowsecurity FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relname = '_r2db_platform_upgrades'"
+            )
+            assert cur.fetchone() == (False, False)
+    finally:
+        conn.close()
+
+
+_PRE_WP3_MISSING_RLS_VIEW = (
+    "CREATE OR REPLACE VIEW public._r2db_missing_rls AS "
+    "SELECT c.relname AS table_name FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+    "AND c.relname <> '_r2db_schema_revision' "
+    "AND (c.relrowsecurity = false OR c.relforcerowsecurity = false)"
+)
+
+
+def test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application(
+    platform: types.SimpleNamespace, tmp_path: Path
+) -> None:
+    """完了条件 9: `_r2db_missing_rls` が、テンプレート経由の新規 DB と
+    `0009` 適用済みの既存 DB の両方で空のままであること (設計 D-3(e)(ii):
+    テンプレートと per-app script の両方で `CREATE OR REPLACE VIEW` が
+    要る)。「既存 DB」は、台帳表はある (`0003` 適用時と同じ) がその
+    `_r2db_missing_rls` の定義だけが WP-3 以前の (台帳名を除外しない)
+    版で固まっている状態を、ビューだけを古い定義へ戻すことで模する --
+    台帳表を丸ごと落とすと「台帳が無いので比較対象も無い」形になり、この
+    条件の非空振り (テンプレートと per-app script の両方が要ること) を
+    実測できない。"""
+    script = _rewrite_0009(platform.prefix, tmp_path)
+    with provisioned_apps(platform, ["missrlsnew", "missrlsold"]) as apps:
+        new_app, legacy_app = apps
+
+        conn = psycopg.connect(new_app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_name FROM public._r2db_missing_rls")
+                assert cur.fetchall() == []
+        finally:
+            conn.close()
+
+        # Simulate "provisioned before WP-3": only the VIEW is reverted to
+        # its pre-WP-3 definition (the ledger table itself, seeded by the
+        # now-updated `0003`, is left in place -- unaffected by this
+        # revert, and still has no RLS, design D-3(a)). With the OLD view
+        # in place, the ledger table (RLS disabled) now shows up as a
+        # false-positive offender -- exactly the drift `0009`'s own
+        # `CREATE OR REPLACE VIEW` must correct.
+        conn = psycopg.connect(legacy_app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_PRE_WP3_MISSING_RLS_VIEW)
+                cur.execute("SELECT table_name FROM public._r2db_missing_rls")
+                assert cur.fetchall() == [("_r2db_platform_upgrades",)], (
+                    "test setup sanity check: the pre-WP-3 view must see the ledger table as an offender"
+                )
+        finally:
+            conn.close()
+
+        _run_psql(platform.control_dsn, script, {"app_slug": legacy_app.slug})
+        conn = psycopg.connect(legacy_app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_name FROM public._r2db_missing_rls")
+                assert cur.fetchall() == []
+        finally:
+            conn.close()
+
+
+def test_backend_excludes_the_ledger_from_catalog_and_schema_objects_accounting(app_a: types.SimpleNamespace) -> None:
+    """完了条件 10 (設計 D-3(e)(i)、実 PG 確認項目 5): 台帳表がある DB で
+    (i) `application_catalog` (`cell.catalog()`) が台帳表を entities に
+    含めないこと、(ii) `create_entity` が 503 にならないこと (`_create_
+    entity` 直後の RLS 検査が台帳表を offenders に含めない)、(iii)
+    `verify_row_level_security` が通ること、(iv) `schema_objects` の会計
+    が台帳表の分だけずれていない (`+1` にならない) ことを、境界値ちょうど
+    での `LIMIT_EXCEEDED` 判定で実測する。"""
+    cell = make_cell(app_a)
+    try:
+        catalog = cell.catalog()
+        assert catalog == [], "a freshly provisioned application's catalog must be empty -- the ledger must not appear in it"
+
+        # (iv) exact schema_objects accounting: 1 entity + id + 1 declared
+        # field = 3 objects. If the ledger table (3 columns of its own)
+        # were mistakenly counted by `_load_catalog`, this would either
+        # raise LIMIT_EXCEEDED at exactly 3, or require a higher bound to
+        # succeed -- observed both ways below.
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": ["name"]}, developer=True, limits=ResourceLimits(schema_objects=2))
+        assert exc.value.code == "LIMIT_EXCEEDED"
+        assert cell.catalog() == [], "the rejected create_entity must not have left a table behind"
+
+        # (ii)/(iii) at the correct boundary (schema_objects=3), the SAME
+        # operation succeeds without 503 -- and `verify_row_level_security`
+        # (which reads `_rls_offenders`, the OTHER exclusion-set call site)
+        # agrees the database is clean.
+        cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": ["name"]}, developer=True, limits=ResourceLimits(schema_objects=3))
+        cell.verify_row_level_security()
+
+        # (i) again, now with a real entity present: the catalog lists
+        # exactly the entity just created, never the ledger table.
+        catalog = cell.catalog()
+        assert [entry["entity"] for entry in catalog] == ["widgets"]
+    finally:
+        cell.close()
+
+
+def test_verify_platform_upgrades_applied_passes_when_the_ledger_is_complete(app_a: types.SimpleNamespace) -> None:
+    """完了条件 11 (前半): 台帳が揃った DB では通常どおり通ること。"""
+    cell = make_cell(app_a)
+    try:
+        cell.verify_platform_upgrades_applied()  # must not raise
+    finally:
+        cell.close()
+
+
+def test_verify_platform_upgrades_applied_raises_service_unavailable_when_a_number_is_missing(app_a: types.SimpleNamespace) -> None:
+    """完了条件 11: 台帳から 1 番号を削った application DB では、cell を
+    開く時点で F-12 (`SERVICE_UNAVAILABLE`) になること。F-12 の骨子を
+    設計 §3.8 から逐語 assert する (常設規律 4)。"""
+    conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
+    finally:
+        conn.close()
+
+    cell = make_cell(app_a)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.verify_platform_upgrades_applied()
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        assert exc.value.status == 503
+        assert exc.value.message == (
+            "This application's storage is missing platform upgrade(s) 9: the deployment must apply "
+            "them before this application can serve requests. Run 'python -m r2db_api.ops "
+            "upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry."
+        )
+    finally:
+        cell.close()
+
+
+def test_verify_platform_upgrades_applied_raises_when_the_ledger_table_is_entirely_absent(app_a: types.SimpleNamespace) -> None:
+    """完了条件 11 の「台帳表そのものが無い場合を含む」: `read_applied_
+    upgrade_numbers` の `None` センチネル (表が無い) が集合差の計算で
+    「全番号が未適用」として扱われること。"""
+    conn = psycopg.connect(app_a.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE public._r2db_platform_upgrades")
+    finally:
+        conn.close()
+
+    cell = make_cell(app_a)
+    try:
+        with pytest.raises(FoundationError) as exc:
+            cell.verify_platform_upgrades_applied()
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        assert "missing platform upgrade(s) 9" in exc.value.message
+    finally:
+        cell.close()

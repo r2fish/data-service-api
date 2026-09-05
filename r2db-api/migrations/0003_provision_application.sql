@@ -224,20 +224,96 @@ GRANT SELECT, UPDATE ON public._r2db_schema_revision TO :"runtime_role";
 ALTER DEFAULT PRIVILEGES FOR ROLE :"developer_role" IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"runtime_role";
 
+-- Q4 WP-3 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(a)/(b)(i),
+-- work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md
+-- WP-3 change table A): the per-application platform-upgrade ledger --
+-- "how far has THIS application's own database been upgraded", recorded
+-- inside that same database (D-3's own "実体と同じデータベースの中に記録
+-- する"), never in a control-plane-side table that could drift from a
+-- restored/cloned copy of this one. A brand-new application, provisioned
+-- by this very script, starts out already at the LATEST per-application
+-- upgrade number this shipped package knows about -- seeded below as the
+-- literal, de-zero-padded integer(s) `r2db_api.platform_upgrades.
+-- PLATFORM_UPGRADE_NUMBERS` names (currently `{9}`; kept in three-way sync
+-- with that package constant and every real `NNNN_..._upgrade.sql` file
+-- under `migrations/` by `tests/test_platform_upgrade_ledger_scan.py`'s
+-- own three-way-match assertion, design D-3(d) regulation (d)) -- so a
+-- freshly provisioned application never needs `0009` (or any later
+-- per-application upgrade script) run against it at all; those exist
+-- solely to bring an application provisioned BEFORE that number shipped
+-- up to date (D-3(b)(ii)).
+--
+-- No RLS on this table (monitor ruling 2026-09-05, design D-3(a)'s own
+-- note): unlike `_r2db_schema_revision` above, `FORCE ROW LEVEL SECURITY`
+-- would apply even to this table's OWNER (the developer role), which is
+-- exactly the role every per-application upgrade script (and this
+-- template) writes through via `SET LOCAL ROLE` -- forcing RLS here would
+-- require a policy admitting that write with no isolation benefit this
+-- table's own access pattern (provision-DSN-only writes, U-2) needs.
+--
+-- `REVOKE ALL ... FROM :"runtime_role"` undoes the `ALTER DEFAULT
+-- PRIVILEGES` rule just above (which would otherwise auto-grant the
+-- runtime role full DML on this brand-new table the instant it is
+-- created) before granting back exactly `SELECT` (requester ruling
+-- 2026-09-05, U-2: "台帳表に対するruntime roleの権限はSELECTのみ付与") --
+-- read-only, for this same process' own cell open time check
+-- (`r2db_api.postgres.PostgresCell.verify_platform_upgrades_applied`,
+-- design D-3(f)). `GRANT SELECT ... TO SESSION_USER` (the provision role
+-- running this very script, NOT `CURRENT_USER` -- see this block's own
+-- position inside `SET LOCAL ROLE :"developer_role"`) is what lets `ops
+-- upgrade-applications`/`ops upgrade-status` (D-4/D-5), which authenticate
+-- as the provision role against each application's own database in turn,
+-- read this table AFTER this script's own closing `REVOKE :"developer_
+-- role" FROM CURRENT_USER` below has ended the provision role's one-shot
+-- membership in the developer role (design D-3(a)'s own "付与が無いと
+-- --dry-runすら動かない" note). `GRANT USAGE ON SCHEMA public TO
+-- SESSION_USER` is likewise required for that same reason (implementer
+-- finding, real-PG confirmed): the `REVOKE ALL ON SCHEMA public FROM
+-- PUBLIC` above already stripped the provision role's OWN standing
+-- access to this schema (its earlier access, before `ALTER SCHEMA public
+-- OWNER TO :"developer_role"`, was as the schema's IMPLICIT owner via
+-- `pg_database_owner`, which the ownership transfer itself ends) --
+-- `GRANT SELECT` on a table alone does not let a role even NAME an object
+-- inside a schema it has no `USAGE` on ("permission denied for schema
+-- public").
+CREATE TABLE IF NOT EXISTS public._r2db_platform_upgrades (
+    upgrade_number integer     PRIMARY KEY,
+    script_name    text        NOT NULL,
+    applied_at     timestamptz NOT NULL DEFAULT now()
+);
+REVOKE ALL    ON public._r2db_platform_upgrades FROM :"runtime_role";
+GRANT  SELECT ON public._r2db_platform_upgrades TO :"runtime_role";
+GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
+GRANT  USAGE  ON SCHEMA public TO SESSION_USER;
+INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name)
+    VALUES (9, '0009_platform_upgrades_ledger_upgrade.sql')
+    ON CONFLICT (upgrade_number) DO NOTHING;
+
 -- §8.5 condition 3(b) -- see this file's header. A live view, not a
 -- point-in-time claim: querying it always reflects the database's current
 -- catalog state, so it catches RLS having been disabled or never enabled
 -- on any table by any means, not just ones `PostgresCell` created.
--- `_r2db_schema_revision` (created above, already RLS-protected) is
--- excluded the same way `PostgresCell._load_catalog` excludes it from the
--- application-visible catalog.
-CREATE VIEW public._r2db_missing_rls AS
+-- `_r2db_schema_revision` (created above, already RLS-protected) and --
+-- Q4 WP-3, design D-3(e)(ii) -- the per-application platform-upgrade
+-- ledger just created above (which deliberately carries no RLS at all,
+-- see that block's own comment) are both excluded the same way
+-- `PostgresCell._load_catalog`/`_rls_offenders` exclude them from the
+-- application-visible catalog/RLS-coverage check (`r2db_api.postgres.
+-- _BOOKKEEPING_TABLES`). `CREATE OR REPLACE VIEW` (monitor ruling
+-- 2026-09-05; a plain `CREATE VIEW` before this WP) -- `0009_..._upgrade.
+-- sql` re-runs this identical `CREATE OR REPLACE VIEW` statement against
+-- every application provisioned BEFORE this WP shipped, whose own copy of
+-- this view was frozen at ITS `0003` run's definition (design D-3(e)(ii):
+-- "既存applicationのビューは0003適用時点の定義で固まっている") -- the
+-- template and the per-application upgrade script must therefore always
+-- carry the exact same view body.
+CREATE OR REPLACE VIEW public._r2db_missing_rls AS
     SELECT c.relname AS table_name
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
       AND c.relkind = 'r'
-      AND c.relname <> '_r2db_schema_revision'
+      AND c.relname NOT IN ('_r2db_schema_revision', '_r2db_platform_upgrades')
       AND (c.relrowsecurity = false OR c.relforcerowsecurity = false);
 GRANT SELECT ON public._r2db_missing_rls TO :"runtime_role";
 

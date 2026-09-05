@@ -112,6 +112,7 @@ from .audit_hook import ApplicationAuditHook
 from .backend import StorageBackend as _StorageBackend
 from .errors import fail
 from .limits import ResourceLimits
+from . import platform_upgrades
 from .structured import (
     BoundMutation,
     MutationOutcome,
@@ -137,6 +138,20 @@ from .structured import (
 )
 
 _REVISION_TABLE = "_r2db_schema_revision"
+# Q4 WP-3 (design D-3(e), work order §4 WP-3 change table C): every backend
+# bookkeeping table that must be excluded from (a) the application-visible
+# catalog (`_load_catalog`) and (b) the RLS-coverage check (`_rls_offenders`,
+# also reached inline by `_create_entity` right after every `CREATE TABLE`)
+# -- a SET, not a single name, now that the per-application platform-upgrade
+# ledger (`platform_upgrades.LEDGER_TABLE_NAME`) joins `_REVISION_TABLE` as a
+# second bookkeeping table living in `public`. `_REVISION_TABLE` itself is
+# kept as its own name (not folded away) because `_read_schema_revision`/
+# `_bump_revision` still need it by name for real access, unlike the ledger
+# table, which this file never reads or writes directly (the ledger is
+# owned by `migrations/0003_provision_application.sql`/`0009_...sql` and
+# read only by `platform_upgrades.read_applied_upgrade_numbers`, via the
+# runtime pool's own connection -- U-2's `SELECT`-only grant).
+_BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME})
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -753,6 +768,20 @@ class PostgresCell:
         validate_identifier(developer_role)
         self._runtime_role = runtime_role
         self._developer_role = developer_role
+        # Q4 WP-3 (design D-3(f)): kept as a plain attribute, separate from
+        # `self._runtime` below, so `verify_platform_upgrades_applied` can
+        # open a single, UNPOOLED, explicitly-closed connection for its own
+        # one-shot cell open time check -- never through the shared pool
+        # manager. Reaching through `self._runtime`'s own pool instead
+        # would leave a live connection sitting in that pool indefinitely
+        # (pools are released only by `close()`/idle eviction, never by
+        # this class itself), which would needlessly hold every served
+        # application's runtime database open from the moment its cell is
+        # constructed, before a single real request against it ever
+        # arrives -- exactly the standing-connection cost this class' own
+        # "no pool is created here at construction time" design (this
+        # docstring's own paragraph above) exists to avoid.
+        self._runtime_dsn = runtime_dsn
         manager = pool_manager if pool_manager is not None else default_pool_manager
         self._pool_manager = manager
         self._runtime = _PoolHandle(manager, (application_id, "runtime"), runtime_dsn, schema, pool_size)
@@ -771,6 +800,51 @@ class PostgresCell:
         """
         self._runtime.close()
         self._developer.close()
+
+    def verify_platform_upgrades_applied(self) -> None:
+        """Q4 WP-3 cell open time check (design D-3(f)/§3.7 data-plane
+        steps 9-10, requester ruling 2026-09-05 U-2): before this cell is
+        handed to `DataService` (its caller, `r2db_api.main`'s own
+        `_cell_factory`, calls this immediately after constructing the
+        cell -- "cell open" IS the moment `_cell_factory` runs, since every
+        served application's cell is opened eagerly at startup, not
+        lazily on first request, design §3.7's own "起動シーケンスの後、
+        当該applicationのcellを初めて開くとき"), confirm this application's
+        own per-application platform-upgrade ledger already has every
+        number `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` requires.
+
+        Read-only, over the RUNTIME role's own connection (U-2: "読み取り
+        はruntime roleのSELECT 1本である") -- never the developer
+        connection. Deliberately a single, UNPOOLED connection
+        (`self._runtime_dsn`, opened and closed right here), never the
+        shared runtime POOL (`self._runtime`) every ordinary request-
+        serving call in this class borrows from: this check runs exactly
+        once per cell, at cell open time, before any real request ever
+        needs a pooled runtime connection at all -- reaching through the
+        pool instead would leave a live connection sitting in it
+        indefinitely (this class creates no pool at construction time
+        otherwise; see this class' own docstring), holding every served
+        application's own database connection open from startup for no
+        request-serving reason. Raises `FoundationError`
+        (`SERVICE_UNAVAILABLE`, F-12's own verbatim text) if anything is
+        pending; does nothing otherwise.
+        """
+        conn = psycopg.connect(self._runtime_dsn)
+        try:
+            try:
+                platform_upgrades.require_application_upgrades_applied(
+                    conn,
+                    ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME,
+                    expected=platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+                    application_id=self.application_id,
+                    ops_module=platform_upgrades.PEER_MODULE,
+                )
+            except platform_upgrades.PlatformUpgradeError as exc:
+                fail("SERVICE_UNAVAILABLE", str(exc), status=503)
+            finally:
+                conn.rollback()
+        finally:
+            conn.close()
 
     # ---- catalog -----------------------------------------------------
 
@@ -836,8 +910,8 @@ class PostgresCell:
             "FROM information_schema.tables t "
             "JOIN information_schema.columns c "
             "ON c.table_schema = t.table_schema AND c.table_name = t.table_name "
-            "WHERE t.table_schema = {schema} AND t.table_type = 'BASE TABLE' AND t.table_name <> {revision_table}"
-        ).format(schema=sql.Placeholder(), revision_table=sql.Placeholder())
+            "WHERE t.table_schema = {schema} AND t.table_type = 'BASE TABLE' AND t.table_name <> ALL({bookkeeping_tables})"
+        ).format(schema=sql.Placeholder(), bookkeeping_tables=sql.Placeholder())
         # Every unique index (composite or single-column) on any of this
         # application's tables, excluding the primary key (`id`'s own PK is
         # the address, not a domain uniqueness declaration -- R-1/§2) and
@@ -866,7 +940,7 @@ class PostgresCell:
         identity_ok: dict[str, bool] = {}
         revision_ok: dict[str, bool] = {}
         with conn.cursor() as cur:
-            _run(cur, columns_statement, [self.schema, _REVISION_TABLE])
+            _run(cur, columns_statement, [self.schema, list(_BOOKKEEPING_TABLES)])
             for table_name, column_name, data_type, is_identity, domain_name in cur.fetchall():
                 columns = tables.setdefault(table_name, {})
                 if column_name == _ID_COLUMN:
@@ -1742,20 +1816,22 @@ class PostgresCell:
         (current schema, i.e. `public`) that do NOT have both `ENABLE ROW
         LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY` set right now,
         according to PostgreSQL's own catalog -- never this Python
-        process's memory of what it thinks it did. `_r2db_schema_revision`
-        (provisioned by `migrations/0003_provision_application.sql`,
-        already RLS-protected there) is excluded the same way
-        `_load_catalog` excludes it from the application-visible catalog.
-        Ordered so callers get a deterministic offender list.
+        process's memory of what it thinks it did. Every backend
+        bookkeeping table (`_BOOKKEEPING_TABLES`: `_r2db_schema_revision`,
+        already RLS-protected, and -- Q4 WP-3 -- the per-application
+        platform-upgrade ledger, which deliberately carries no RLS at all,
+        design D-3(a)) is excluded the same way `_load_catalog` excludes
+        them from the application-visible catalog. Ordered so callers get
+        a deterministic offender list.
         """
         statement = sql.SQL(
             "SELECT c.relname FROM pg_class c "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.relname <> {revision_table} "
+            "WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.relname <> ALL({bookkeeping_tables}) "
             "AND (c.relrowsecurity = false OR c.relforcerowsecurity = false) "
             "ORDER BY c.relname"
-        ).format(revision_table=sql.Placeholder())
-        _run(cur, statement, [_REVISION_TABLE])
+        ).format(bookkeeping_tables=sql.Placeholder())
+        _run(cur, statement, [list(_BOOKKEEPING_TABLES)])
         return [row[0] for row in cur.fetchall()]
 
     def verify_row_level_security(self) -> None:
@@ -1883,9 +1959,69 @@ class PostgresCell:
             _run(cur, lock_timeout)
 
 
+class _RefusingPlatformUpgradeCell:
+    """Q4 rework (supervisor ruling 2026-09-05, H-1(a)): stands in for one
+    served application's own `PostgresCell` when `main.py::build_app`'s
+    own `_cell_factory` finds, at cell-open time, that this application's
+    per-application platform-upgrade ledger is missing an entry
+    `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` requires.
+
+    Before this rework, `_cell_factory` called `PostgresCell.verify_
+    platform_upgrades_applied()` and let the `SERVICE_UNAVAILABLE`
+    `FoundationError` it raises propagate straight out of `_cell_
+    factory`, out of `ControlAuthority.register_application`, out of
+    `build_app`'s own eager `for slug in slugs` registration loop -- so
+    ONE served application with a pending upgrade took the WHOLE PROCESS
+    down, refusing every OTHER served application too (review H-1).
+
+    Now `_cell_factory` catches that same `FoundationError` and registers
+    one of these instead: this process still starts, every OTHER served
+    application's `PostgresCell` opens and serves exactly as before, and
+    ONLY this one application's cell -- carrying the identical
+    `StorageBackend` face (`query`/`transact`/`apply_schema`/`catalog`,
+    `r2db_api.backend.StorageBackend`, asserted below exactly like
+    `PostgresCell` itself is) -- refuses every real request against it
+    with the SAME F-12 message (design §3.8, verbatim, `SERVICE_
+    UNAVAILABLE`, HTTP 503) `verify_platform_upgrades_applied` would have
+    raised. The message is captured once, at cell-open time (a startup
+    snapshot, matching D-1(e)/D-2(g)/U-3's own "起動時スナップショット"
+    discipline for every other Q4 declared value) -- never re-derived per
+    request.
+    """
+
+    def __init__(self, application_id: str, message: str) -> None:
+        self.application_id = application_id
+        self._message = message
+
+    def _refuse(self) -> None:
+        fail("SERVICE_UNAVAILABLE", self._message, status=503)
+
+    def close(self) -> None:
+        """No pool/connection was ever opened for a refusing cell (the
+        one-shot ledger check that discovered the pending upgrade already
+        closed its own connection, `verify_platform_upgrades_applied`'s
+        own `finally: conn.close()`) -- nothing to release here."""
+
+    def query(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse()
+
+    def transact(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse()
+
+    def apply_schema(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse()
+
+    def catalog(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse()
+
+
 # Checked, not just claimed: `PostgresCell` must present the exact same call
 # surface as `ApplicationCell` (design D-1). See `backend.py` for the
 # equivalent assertion covering `ApplicationCell`.
 assert issubclass(PostgresCell, _StorageBackend), "PostgresCell must conform to StorageBackend (design D-1)"
+# H-1(a): the refusing cell registered in its place must present that same
+# face too -- `DataService` (and every conformance/test caller) cannot tell
+# the two apart at the type level.
+assert issubclass(_RefusingPlatformUpgradeCell, _StorageBackend), "_RefusingPlatformUpgradeCell must conform to StorageBackend (H-1(a))"
 
-__all__ = ["PostgresCell", "SharedPoolManager", "default_pool_manager"]
+__all__ = ["PostgresCell", "SharedPoolManager", "default_pool_manager", "_RefusingPlatformUpgradeCell"]

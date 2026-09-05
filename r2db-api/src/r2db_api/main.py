@@ -122,6 +122,7 @@ docstring).
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import threading
@@ -146,10 +147,19 @@ from .platform_declarations import (
     reject_removed_surface_env,
     reject_removed_timeout_env,
 )
-from .postgres import PostgresCell, default_pool_manager
+from .errors import FoundationError
+from .postgres import PostgresCell, _RefusingPlatformUpgradeCell, default_pool_manager
 from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
+
+# U-6 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査): the H-1
+# startup-time F-12 log line (`_cell_factory`'s own `except FoundationError`
+# branch, below) goes through the standard `logging` module, not a bare
+# `print(..., file=sys.stderr)`, so it can be pinned by a `caplog`-based
+# test (verbatim text, same as the API response body) instead of only a
+# visual stderr check.
+_logger = logging.getLogger(__name__)
 
 # R-9 (CCR-14 WP-5): the only two values `DataService.__init__`'s own
 # `control_plane_status` parameter accepts -- kept in sync deliberately
@@ -395,7 +405,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
     audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
 
-    def _cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell:
+    def _cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell | _RefusingPlatformUpgradeCell:
         if entities:
             # The composition root never pre-populates entities -- every
             # entity a served application has goes through the real
@@ -405,7 +415,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             raise AssertionError("composition root does not pre-populate entities")
         runtime_dsn, developer_dsn = app_dsns[application_id]
         row = registry[application_id]
-        return PostgresCell(
+        cell = PostgresCell(
             application_id,
             "public",
             runtime_dsn=runtime_dsn,
@@ -413,6 +423,36 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             runtime_role=row["runtime_role"],
             developer_role=row["developer_role"],
         )
+        # Q4 WP-3 (design D-3(f), requester ruling 2026-09-05 U-2; reworked
+        # by supervisor ruling 2026-09-05 H-1(a)): "cell open time" IS this
+        # call -- every served application's cell is opened eagerly, right
+        # here, in the `for slug in slugs` loop below, not lazily on first
+        # request. `verify_platform_upgrades_applied()` no longer gets to
+        # propagate its `SERVICE_UNAVAILABLE`/F-12 `FoundationError` out of
+        # this factory -- before this rework that took the WHOLE PROCESS
+        # down (`ControlAuthority.register_application` -> `build_app`'s
+        # own eager registration loop -> the caller of `build_app` itself)
+        # the moment even ONE served application's ledger had a pending
+        # upgrade, refusing every OTHER served application too (review
+        # H-1). Instead, THIS application alone gets a `_Refusing
+        # PlatformUpgradeCell` in place of its real `PostgresCell` --
+        # every other served application's cell (this same loop, other
+        # iterations) still opens and serves normally, and this process
+        # itself still starts.
+        try:
+            cell.verify_platform_upgrades_applied()
+        except FoundationError as exc:
+            # F-12 is logged once, here, at cell-open time -- the SAME
+            # text this application's own requests will see in every
+            # `SERVICE_UNAVAILABLE` response from here on (H-1: "起動時
+            # にはログへ F-12 を1行出す (API 応答と同じ文面)"). This is the
+            # only way an operator would otherwise learn of the refusal
+            # without waiting for a client to report one, since this
+            # rework deliberately no longer crashes the process to surface
+            # it.
+            _logger.warning("r2db_api: application '%s' cell refusing requests: %s", application_id, exc.message)
+            return _RefusingPlatformUpgradeCell(application_id, exc.message)
+        return cell
 
     service = DataService(
         credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status,

@@ -41,6 +41,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from starlette.testclient import TestClient
 
+import r2db_api.ops as ops
 from r2db_api.audit import ApplicationAuditSink, AuditEvent
 from r2db_api.audit_hook import ApplicationAuditHook
 from r2db_api.auth import CredentialStore, compose_bearer_locator
@@ -65,6 +66,15 @@ MIGRATION_NAMES = (
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
+    # Q4 rework (supervisor ruling 2026-09-05, H-1 test (ii)): rewritten
+    # (its own literal `r2dbsvc_registry` textually replaced by this
+    # module's own throwaway prefix, same as every other migration file
+    # here) but never applied at PLATFORM level by this fixture -- `0009`
+    # is a PER-APPLICATION upgrade script, run against one application's
+    # own database by `ops upgrade-applications` (`R2DB_MIGRATIONS_DIR`
+    # pointed at `platform.upgrade_migrations_dir`, below), not part of
+    # the platform bootstrap sequence.
+    "0009_platform_upgrades_ledger_upgrade.sql",
 )
 
 # Q4 phase WP-1 (design D-2(c)): the default `surfaces` row this file's own
@@ -218,6 +228,17 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
         application_audit_sql=rewritten["0007_application_audit.sql"],
+        # Q4 rework (H-1 test (ii)): the directory `ops upgrade-
+        # applications`' own `R2DB_MIGRATIONS_DIR` test escape hatch
+        # (`test_ops_upgrade.py`'s own established convention) should
+        # point at -- holds a REWRITTEN `0009` (this module's own
+        # throwaway schema prefix, matching every other migration file
+        # here) alongside the platform-bootstrap files, so a real `ops.
+        # main(["upgrade-applications", ...])` call against THIS
+        # module's own throwaway registry resolves `<schema>.applications`
+        # correctly instead of the real deployment's literal
+        # `r2dbsvc_registry`.
+        upgrade_migrations_dir=rewritten_dir,
         controlplane_password=controlplane_password,
         auditreader_password=auditreader_password,
     )
@@ -273,13 +294,46 @@ def make_cell(app: types.SimpleNamespace, *, pool_size: int = 2) -> PostgresCell
     )
 
 
+def _delete_credentials_for(platform: types.SimpleNamespace, slug: str) -> None:
+    """`0005`'s own `credentials.application_slug` is `ON DELETE RESTRICT`
+    (`test_credential_persistence.py::provisioned_app`'s own teardown
+    docstring) -- any test that issues a credential against an `app_a`/
+    `app_b`-fixture application (the H-1 tests below, via `_issue_runtime_
+    credential`) must clear it before `deprovision_app` runs, or `0004`
+    genuinely fails with a foreign-key-shaped `RAISE`. Safe to call even
+    when no credential was ever issued (deletes zero rows)."""
+    with psycopg.connect(platform.control_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("DELETE FROM {table} WHERE application_slug = %s").format(table=sql.Identifier(platform.schema, "credentials")),
+                [slug],
+            )
+        conn.commit()
+
+
 @pytest.fixture
 def app_a(platform: types.SimpleNamespace) -> Iterator[types.SimpleNamespace]:
     app = provision_app(platform, "aaudit")
     try:
         yield app
     finally:
+        _delete_credentials_for(platform, "aaudit")
         deprovision_app(platform, "aaudit")
+
+
+@pytest.fixture
+def app_b(platform: types.SimpleNamespace) -> Iterator[types.SimpleNamespace]:
+    """Q4 rework (supervisor ruling 2026-09-05, H-1): a SECOND, independently
+    provisioned application, used alongside `app_a` to prove H-1(a) --
+    ONE served application's own missing platform upgrade must refuse only
+    that application's own cell, never take down the whole data-plane
+    process (which would refuse `app_a` too)."""
+    app = provision_app(platform, "baudit")
+    try:
+        yield app
+    finally:
+        _delete_credentials_for(platform, "baudit")
+        deprovision_app(platform, "baudit")
 
 
 def real_durable_sink(platform: types.SimpleNamespace, **kwargs: Any) -> PostgresApplicationAuditSink:
@@ -3053,3 +3107,220 @@ def test_control_audit_sink_borrow_connection_delegates_to_its_own_pool() -> Non
     result = sink.borrow_connection()
     assert result is fake_pool.sentinel
     assert fake_pool.connection_call_count == 1
+
+
+# ===========================================================================
+# Q4 phase WP-3 (design D-3(f), work order §4 WP-3): the cell open time
+# check (F-12) exercised through the REAL startup path (`r2db_api.main.
+# build_app`), not just a direct `PostgresCell.verify_platform_upgrades_
+# applied()` call (`test_postgres.py`'s own unit-level coverage) -- proving
+# `main.py`'s own `_cell_factory` actually WIRES this check in, the same
+# non-vacuity discipline `test_build_app_double_check_reflects_the_real_
+# role_setting_not_a_cached_default`'s own docstring states for the D-1(b)
+# double-check ("a mutation dropping the double-check call entirely ...
+# would leave undetected by a test that only ever exercises
+# `PostgresApplicationAuditSink` directly").
+# ===========================================================================
+
+
+def _issue_runtime_credential(platform: types.SimpleNamespace, app: types.SimpleNamespace) -> tuple[str, str]:
+    """Seeds a fresh RUNTIME credential directly against the platform
+    database (mirrors `test_surfaces_env.py::_issue_and_compose`'s own
+    convention) -- returns `(credential_id, raw_secret)`; the caller
+    composes the `Bearer <credential_id>.<secret>` header itself."""
+    from r2db_api.credential_store import PostgresCredentialStore
+
+    store = PostgresCredentialStore(platform.control_dsn, pepper="synthetic-test-pepper-f12-main", schema=platform.schema)
+    try:
+        credential_id = "crd_" + secrets.token_hex(8)
+        secret = "h1-e2e-secret-" + secrets.token_urlsafe(8)
+        with store.unit_of_work() as work:
+            store.add(credential_id, app.slug, "runtime", secret, work=work)
+    finally:
+        store.close()
+    return credential_id, secret
+
+
+_F12_MESSAGE_UPGRADE_9 = (
+    "This application's storage is missing platform upgrade(s) 9: the deployment must apply "
+    "them before this application can serve requests. Run 'python -m r2db_api.ops "
+    "upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry."
+)
+
+
+def test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_pending_upgrade(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, app_b: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 1 (H-1 = (a), supervisor ruling 2026-09-05, review H-1): a
+    served application whose own ledger is missing an upgrade gets a
+    REFUSING cell (`postgres._RefusingPlatformUpgradeCell`), never a
+    process that fails to start. `app_a`'s own ledger is complete (seeded
+    `{9}` by the updated `0003`); `app_b`'s own upgrade 9 is deleted below
+    before `build_app` ever runs. Exercised over REAL HTTP
+    (`starlette.testclient.TestClient`, not a direct Python call), the
+    same non-vacuity discipline this file already applies to the D-1(b)
+    double-check: `app_a`'s own `GET /v1/catalog` must return 200 and
+    `app_b`'s own `GET /v1/catalog` must return 503 with the F-12 message
+    verbatim -- proving `build_app` itself starts (a mutation reverting
+    H-1(a) back to the pre-rework "`_cell_factory` lets `Foundation
+    Error` propagate" form would make THIS test fail at `build_app(...)`
+    itself, before either HTTP assertion is ever reached)."""
+    conn = psycopg.connect(app_b.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
+    finally:
+        conn.close()
+
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f12-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_DEVELOPER_DSN": app_b.developer_dsn,
+    }
+    module = _reload_module_with_env("r2db_api.main", env, monkeypatch)
+
+    # H-1(a)'s own headline claim: this must NOT raise, even though
+    # `app_b`'s own ledger is missing upgrade 9.
+    asgi_app = module.build_app(env=env)
+    try:
+        credential_a, secret_a = _issue_runtime_credential(platform, app_a)
+        credential_b, secret_b = _issue_runtime_credential(platform, app_b)
+        with TestClient(asgi_app) as client:
+            response_a = client.get("/v1/catalog", headers={"authorization": f"Bearer {credential_a}.{secret_a}"})
+            assert response_a.status_code == 200
+
+            response_b = client.get("/v1/catalog", headers={"authorization": f"Bearer {credential_b}.{secret_b}"})
+            assert response_b.status_code == 503
+            body_b = response_b.json()
+            assert body_b["code"] == "SERVICE_UNAVAILABLE"
+            assert body_b["message"] == _F12_MESSAGE_UPGRADE_9
+            # U-2 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査,
+            # design D-3(f) 追記の精密化): H-1's own refusal is scoped to
+            # operations that cross the storage boundary -- `/v1/
+            # capabilities` (the discovery document) never touches the
+            # cell, so it must still answer normally (200) for `app_b`
+            # even while its own `GET /v1/catalog` is refused above. This
+            # is what keeps an operator's own AI agent able to read the
+            # F-12 remediation hint via `/v1/catalog`'s own error body
+            # while ALSO being able to read this application's own
+            # declared capabilities.
+            response_b_capabilities = client.get(
+                "/v1/capabilities", headers={"authorization": f"Bearer {credential_b}.{secret_b}"}
+            )
+            assert response_b_capabilities.status_code == 200
+    finally:
+        asgi_app.app.state.service._durable_audit.close()
+        asgi_app.app.state.service._credentials.close()
+
+
+def test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, app_b: types.SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """U-6 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査): H-1's own
+    design-doc claim ("起動時にはログへ F-12 を1行出す (API 応答と同じ
+    文面)") previously had no direct evidence -- `_cell_factory`'s own
+    stderr `print` was a visual-only check (裁定 1 の証拠不足).
+    `main.py::_cell_factory` now logs through the standard `logging`
+    module, so `caplog` pins the verbatim F-12 text at cell-open time --
+    the SAME text `app_b`'s own HTTP responses carry (companion H-1 test
+    above) -- and confirms `app_a` (whose own ledger is complete) never
+    logs a refusal at all."""
+    conn = psycopg.connect(app_b.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
+    finally:
+        conn.close()
+
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f12-log",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_DEVELOPER_DSN": app_b.developer_dsn,
+    }
+    module = _reload_module_with_env("r2db_api.main", env, monkeypatch)
+
+    caplog.set_level(logging.WARNING, logger="r2db_api.main")
+    asgi_app = module.build_app(env=env)
+    try:
+        messages = [record.getMessage() for record in caplog.records if record.name == "r2db_api.main"]
+        expected = f"r2db_api: application '{app_b.slug}' cell refusing requests: {_F12_MESSAGE_UPGRADE_9}"
+        assert expected in messages
+        assert not any(app_a.slug in message for message in messages)
+    finally:
+        asgi_app.app.state.service._durable_audit.close()
+        asgi_app.app.state.service._credentials.close()
+
+
+def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_application_serves_normally(
+    platform: types.SimpleNamespace, app_a: types.SimpleNamespace, app_b: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """裁定 1 (H-1, (i)/(ii)): running the real `ops upgrade-applications`
+    against `app_b` (whose own ledger is missing upgrade 9, deleted below)
+    and then restarting the data-plane process (a fresh `build_app` call,
+    the only way this rework's own startup snapshot -- D-1(e)/D-2(g)/U-3
+    -- is ever re-read) makes `app_b`'s own cell a normal one again: its
+    `GET /v1/catalog` now returns 200, the exact same real-HTTP
+    observation the companion test above uses to prove the 503."""
+    conn = psycopg.connect(app_b.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
+    finally:
+        conn.close()
+
+    env = {
+        "R2DB_CREDENTIAL_PEPPER": "synthetic-test-pepper-f12-main",
+        "R2DB_PLATFORM_DSN": platform.api_dsn,
+        "R2DB_PLATFORM_SCHEMA": platform.schema,
+        "R2DB_SERVE_APPS": f"{app_a.slug},{app_b.slug}",
+        f"R2DB_APP_{app_a.slug.upper()}_RUNTIME_DSN": app_a.runtime_dsn,
+        f"R2DB_APP_{app_a.slug.upper()}_DEVELOPER_DSN": app_a.developer_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_RUNTIME_DSN": app_b.runtime_dsn,
+        f"R2DB_APP_{app_b.slug.upper()}_DEVELOPER_DSN": app_b.developer_dsn,
+    }
+    module = _reload_module_with_env("r2db_api.main", env, monkeypatch)
+
+    # Confirm the refusal first (same observation as the companion test).
+    asgi_app = module.build_app(env=env)
+    try:
+        credential_b, secret_b = _issue_runtime_credential(platform, app_b)
+        with TestClient(asgi_app) as client:
+            response = client.get("/v1/catalog", headers={"authorization": f"Bearer {credential_b}.{secret_b}"})
+            assert response.status_code == 503
+    finally:
+        asgi_app.app.state.service._durable_audit.close()
+        asgi_app.app.state.service._credentials.close()
+
+    monkeypatch.setenv("R2DB_CONTROL_DSN", platform.control_dsn)
+    monkeypatch.setenv("R2DB_PLATFORM_SCHEMA", platform.schema)
+    # `ops.py`'s own test-only escape hatch (`test_ops_upgrade.py`'s own
+    # established convention) -- points `_migrations_dir()` at the
+    # REWRITTEN `0009` (this module's own throwaway schema prefix)
+    # instead of the real `r2db-api/migrations/`, whose `0009` names the
+    # real deployment's literal `r2dbsvc_registry`.
+    monkeypatch.setenv("R2DB_MIGRATIONS_DIR", str(platform.upgrade_migrations_dir))
+    rc = ops.main(["upgrade-applications", "--application", app_b.slug])
+    assert rc == 0
+
+    # "Restart" -- a fresh `build_app` call re-reads the ledger this
+    # rework's own startup snapshot only ever reads once per process.
+    asgi_app_restarted = module.build_app(env=env)
+    try:
+        credential_b2, secret_b2 = _issue_runtime_credential(platform, app_b)
+        with TestClient(asgi_app_restarted) as client:
+            response = client.get("/v1/catalog", headers={"authorization": f"Bearer {credential_b2}.{secret_b2}"})
+            assert response.status_code == 200
+    finally:
+        asgi_app_restarted.app.state.service._durable_audit.close()
+        asgi_app_restarted.app.state.service._credentials.close()
