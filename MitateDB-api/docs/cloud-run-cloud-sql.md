@@ -1149,7 +1149,7 @@ access needed):
 export MITATEDB_CONTROLPLANE_DSN="host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_controlplane password=..."
 export MITATEDB_CREDENTIAL_PEPPER="..." MITATEDB_CONTROL_CREDENTIAL_PEPPER="..."
 export MITATEDB_CONTROL_CREDENTIAL_ID="ctl_..." MITATEDB_CONTROL_CREDENTIAL_SECRET="..."
-python -m mitatedb_api.ops revoke-credential crd_0123456789abcdef
+python -m mitatedb_api.ops revoke-credential crd_0123456789abcdef  # synthetic
 ```
 
 ## 8. If a control credential is lost, leaked, or misused
