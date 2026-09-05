@@ -19,8 +19,17 @@
 # are out of scope for nginx itself).
 
 server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
+    # nginx 1.24 compatibility (real-deployment lesson, DEPLOY_PHASE6_
+    # 20260904.md §8 item 10): the combined `listen ... ssl http2;` form
+    # below is the form this target's nginx 1.24 actually accepts. The
+    # newer, split `http2 on;` directive (nginx >=1.25.1) fails `nginx -t`
+    # on 1.24 -- it does not degrade to HTTP/1.1, it refuses to load at
+    # all. Confirm the target's actual nginx version (`nginx -v`) before
+    # assuming either form; if the target runs >=1.25.1, prefer the split
+    # `http2 on;` directive per that version's own deprecation of the
+    # combined form instead of copying this line unchanged.
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
 
     # Same server_name as the existing production 443 block (handover §2.5:
     # deliberately not a new hostname -- stage 1 tests the new implementation
@@ -83,19 +92,24 @@ server {
     # ------------------------------------------------------------------------
     client_max_body_size 1100k;
 
-    # Only the contract's data-plane path is proxied by THIS template. The
-    # control-plane surface (/control/v1, CCR-14 -- docs/design/
-    # R2DB_CCR14_CONTROL_PLANE_V1.md) is a SEPARATE process (`r2db_api.
-    # control_main:app`, DEPLOYMENT_RUNBOOK.md §7) on its own internal
-    # port; when it is deployed on the same listener, a second
-    # `location /control/v1/ { proxy_pass http://127.0.0.1:<control port>; }`
-    # block with the same proxy_* settings as below is added to the
-    # installed copy. That block is not yet part of this template (tracked
-    # as Phase 7 deploy-asset work, 2026-09-05; the earlier comment here
-    # citing "CCR-14 is undecided" was stale). The data plane's own HTTP
-    # endpoints are under /v1/ only (r2db-api/src/r2db_api/http.py
-    # `_ROUTES`), and the explicit catch-all below returns 404 for any other
-    # path rather than silently proxying it.
+    # Both the contract's data-plane and control-plane paths are proxied by
+    # THIS template. The control-plane surface (/control/v1, CCR-14 --
+    # docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md) is a SEPARATE process
+    # (`r2db_api.control_main:app`, deploy/systemd/r2dbsvc-control.service,
+    # DEPLOYMENT_RUNBOOK.md §7) on its own internal port -- the
+    # `location /control/v1/` block below proxies to it with the same
+    # proxy_* settings as the data-plane block, per the deployment lesson
+    # recorded in DEPLOY_PHASE6_20260904.md §8 item 10 (both locations
+    # proxying loopback ports side by side on this one listener). Added
+    # 2026-09-05 (Phase 7 WP-3, deploy-asset reproducibility) -- the earlier
+    # comment here saying this block was "not yet part of this template"
+    # (itself replacing an even earlier "CCR-14 is undecided" comment) is
+    # now stale; both are superseded by the block below. The data plane's
+    # own HTTP endpoints remain under /v1/ only (r2db-api/src/r2db_api/
+    # http.py `_ROUTES`), the control plane's own endpoints remain under
+    # /control/v1/ only (r2db_api/control_main.py's own route table), and
+    # the explicit catch-all at the end of this file returns 404 for any
+    # other path rather than silently proxying it.
     location /v1/ {
         proxy_pass http://127.0.0.1:REPLACE_ME_INTERNAL_PORT;
 
@@ -129,6 +143,43 @@ server {
     # r2dbsvc-api.service) and verified against the existing implementation's
     # own listeners per DEPLOYMENT_RUNBOOK.md's port collision check -- do not
     # pick this value independently of that unit file.
+
+    # Control-plane surface (/control/v1, CCR-14) -- same proxy_* settings as
+    # the data-plane block above, proxying instead to the SEPARATE
+    # r2dbsvc-control.service process on its own internal port. See that
+    # unit's own file (deploy/systemd/r2dbsvc-control.service) for the
+    # matching ExecStart port.
+    location /control/v1/ {
+        proxy_pass http://127.0.0.1:REPLACE_ME_CONTROL_PORT;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Same rationale as the data-plane block above: this is the first
+        # (and, in stage 1, only) hop nginx makes to either backend process,
+        # so $remote_addr is used directly rather than
+        # $proxy_add_x_forwarded_for.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # The control-plane process mints and returns its own X-Request-Id
+        # via the SAME `RequestByteBoundMiddleware` (r2db_api/http.py) the
+        # data plane uses -- `create_control_app` (r2db_api/control_http.py)
+        # wraps the control ASGI app in it directly (not a separate
+        # reimplementation in control_main.py); do not let nginx overwrite
+        # it if a client happens to send one inbound.
+        proxy_set_header X-Request-Id "";
+
+        # No local buffering/caching of request or response bodies beyond
+        # nginx's own defaults is required for this bound-size, non-streaming
+        # JSON API; left as nginx defaults deliberately rather than tuned
+        # here -- same posture as the data-plane block above.
+    }
+
+    # REPLACE_ME_CONTROL_PORT must be the same collision-checked loopback
+    # port configured in deploy/systemd/r2dbsvc-control.service's own
+    # ExecStart, distinct from REPLACE_ME_INTERNAL_PORT above and from 8443
+    # itself -- do not pick this value independently of that unit file.
 
     location / {
         return 404;
