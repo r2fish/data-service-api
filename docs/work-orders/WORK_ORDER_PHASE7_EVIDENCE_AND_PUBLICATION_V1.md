@@ -1,6 +1,7 @@
 # フェーズ7 作業指示書 — 証拠・再現性・公開準備 (契約 1.6.0 不変)
 
-- 版数: **v1.1 (2026-09-05、裁定 (α)(β)(γ) の確定を反映)**。v1.0 からの変更点: **(1)** §0.2 の 6 を「未確定 3 点」から**確定済み**に書き換えた — **(α)** WP-2 は matrix 3.11 + 3.12 をともに required とし、完了ゲートの正本は 3.11 job の集計行、**(β)** WP-4 同梱で確定、**(γ)** 案 1 (WP-9 の手順 3 = delete + 再作成 + push、手順 4 の clone 取得元 = 再作成後の remote) で確定。**(2)** §0.2 の 3 と §1 の WP-9 着手条件から「§6 (γ) の確定」を外した。**(3)** §1 の依存順の根拠に **7-A 前倒し着手の確定** (依頼者裁定 2026-09-05) を書いた。**(4)** WP-2 の完了条件 5・対応表・禁止事項 6 を **required 確定**の形へ改めた。**(5)** WP-4 の成果物 4 と禁止事項 10 を (β) 確定の形へ改めた。**(6)** WP-9 のチェックリスト手順 3・4、完了条件 5、対応表、禁止事項 5 を (γ) 案 1 の形へ改めた。**(7)** WP-8 の引き継ぎ記載事項と禁止事項 2 を「確定内容の記録」へ改めた。**(8)** 正本設計の版数を **v1.2** へ更新した
+- 版数: **v1.2 (2026-09-05、7-A 完了)**。v1.1 からの変更点: **(1)** **§4 に訂正註 6 件**を追加した (WP-3 の lint 本体の置き場所 / control unit の `EnvironmentFile` / operator script の本数 / CI トリガー / WP-1 成果物一覧 / lint の check 4 と `--require-tools`)。**いずれも実装物の欠陥ではなく、本書側の誤りか本書の発注後に監督が下した裁定である** (フェーズ6 §11 L6-18 の流儀)。**本文の発注内容は書き換えていない。** **(2)** **§1 の WP-1 / WP-2 / WP-3 の行に実施状態 (完了と main の merge ハッシュ) を付した** — 3 WP はいずれも 2026-09-05 に完了し main へマージ済みである。**(3)** 7-A の実測 (集計行・変異・受理境界) は**正本設計 §13 実施記録**に置き、**台帳の新規 4 項目 (L7-14〜L7-17) は同 §11** に置いた — **本書には重複させない**
+- 旧 **v1.1 (2026-09-05、裁定 (α)(β)(γ) の確定を反映)**。v1.0 からの変更点: **(1)** §0.2 の 6 を「未確定 3 点」から**確定済み**に書き換えた — **(α)** WP-2 は matrix 3.11 + 3.12 をともに required とし、完了ゲートの正本は 3.11 job の集計行、**(β)** WP-4 同梱で確定、**(γ)** 案 1 (WP-9 の手順 3 = delete + 再作成 + push、手順 4 の clone 取得元 = 再作成後の remote) で確定。**(2)** §0.2 の 3 と §1 の WP-9 着手条件から「§6 (γ) の確定」を外した。**(3)** §1 の依存順の根拠に **7-A 前倒し着手の確定** (依頼者裁定 2026-09-05) を書いた。**(4)** WP-2 の完了条件 5・対応表・禁止事項 6 を **required 確定**の形へ改めた。**(5)** WP-4 の成果物 4 と禁止事項 10 を (β) 確定の形へ改めた。**(6)** WP-9 のチェックリスト手順 3・4、完了条件 5、対応表、禁止事項 5 を (γ) 案 1 の形へ改めた。**(7)** WP-8 の引き継ぎ記載事項と禁止事項 2 を「確定内容の記録」へ改めた。**(8)** 正本設計の版数を **v1.2** へ更新した
 - 旧 **v1.0 (2026-09-05、起草。監督確認で 4 点訂正: Q4 参照を v1.2 へ、WP-4 に V1 (a) の変異 12 を追加、WP-9 手順 6.5 の担当を運用者 (記録確認は監督) に統一、起草者の指摘 8 件の判定は設計 v1.1 側へ反映)**
 - 正本設計: `docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` (**v1.2、確定**。**§6 の (α)(β)(γ) は 2026-09-05 の依頼者裁定で確定した**)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・命題の言葉遣いは設計文書が正本であり、本書はそれを重複させない。**設計と本書が食い違ったら設計が正であり、本書の誤りとして監督へ差し戻すこと** (フェーズ6 §11 L6-18 の流儀。訂正註は本書 §4 に置く)
 - 依存する並行フェーズ: `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` (main の **v1.2**、merge `afcf2f5`。U-1〜U-3 は 2026-09-05 に依頼者裁定で確定)。**7-B の全 WP (WP-4〜WP-8) の着手条件は「Q4 の main マージ後」である** (設計 §2 の C8 / §10)
@@ -58,9 +59,9 @@
 
 | WP | 内容 | 主に触るファイル | 着手条件 | 担当 | 設計レビュー |
 |---|---|---|---|---|---|
-| **WP-1** | **(g) 公開規律とスキャナ** | `docs/security/public-repository-policy.md`、`docs/work-orders/INITIAL_GITHUB_PUBLICATION_WORK_ORDER.md`、`docs/work-orders/DEPLOY_PHASE6_20260904.md` (§7 凡例)、`tools/public_value_scan.py` (新設)、`.pre-commit-config.yaml` (新設) | なし (7-A) | Sonnet 実装 → Opus レビュー → Opus 受け入れ監査 | 追加なし |
-| **WP-2** | **(b)(i)(ii) constraints と CI** | `constraints.txt` (新設)、`.github/workflows/ci.yml` (新設)、`conformance-tests/README.md` | なし (7-A) | 同上 | 追加なし |
-| **WP-3** | **(h) r2db 配備資産** | `r2db-api/deploy/systemd/r2dbsvc-control.service` (新設)、`r2db-api/deploy/nginx/r2dbsvc-api-8443.conf.example`、`r2db-api/deploy/scripts/` (新設 3 本)、`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md`、`.github/workflows/ci.yml` (lint job の中身) | なし (7-A)。**`r2db-api/deploy/env/*.example` を触らない** | 同上 | 追加なし |
+| **WP-1** | **(g) 公開規律とスキャナ** | `docs/security/public-repository-policy.md`、`docs/work-orders/INITIAL_GITHUB_PUBLICATION_WORK_ORDER.md`、`docs/work-orders/DEPLOY_PHASE6_20260904.md` (§7 凡例)、`tools/public_value_scan.py` (新設)、`.pre-commit-config.yaml` (新設) | なし (7-A)。**完了 (2026-09-05、main `393b9f1`)** | Sonnet 実装 → Opus レビュー → Opus 受け入れ監査 | 追加なし |
+| **WP-2** | **(b)(i)(ii) constraints と CI** | `constraints.txt` (新設)、`.github/workflows/ci.yml` (新設)、`conformance-tests/README.md` | なし (7-A)。**完了 (2026-09-05、main `e1d33c3`)** | 同上 | 追加なし |
+| **WP-3** | **(h) r2db 配備資産** | `r2db-api/deploy/systemd/r2dbsvc-control.service` (新設)、`r2db-api/deploy/nginx/r2dbsvc-api-8443.conf.example`、`r2db-api/deploy/scripts/` (新設 3 本)、`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md`、`.github/workflows/ci.yml` (lint job の中身) | なし (7-A)。**`r2db-api/deploy/env/*.example` を触らない**。**完了 (2026-09-05、main `df35451`)** | 同上 | 追加なし |
 | **WP-4** | **(a) C-05 + (e) 資源検査** | `conformance-tests/adapter.py` (port v1.11)、`conformance-tests/test_c05_limit_declaration_agreement.py` (新設)、4 plug 実装、`MitateDB-api/src/mitatedb_api/cell.py`、`conformance-tests/test_c14_authority_boundary.py` (注釈訂正)、`conformance-tests/CONDITIONS.md`、`docs/design/CONFORMANCE_ADAPTER_V1.md` | **Q4 の main マージ後、かつ §D-6.5 追補の記入と監督承認の後** | 同上 | 追加なし |
 | **WP-5** | **(a) 他 5 条件 + (d)** | `conformance-tests/test_c04_*` / `test_c10_*` / `test_c02_*` / `test_c07_*` / `test_c00_*` (新設 5 本)、`conformance-tests/conftest.py`、`conformance-tests/CONDITIONS.md`、`r2db-api/src/r2db_api/` (surfaces ヘルパの 1 モジュール化)、両 peer の `tests/test_audit_query.py` (同型性対応表) | **Q4 の main マージ後** | 同上 | 追加なし |
 | **WP-6** | **(b)(iii) DeprecationWarning の error 化** | `pyproject.toml` (root)、両 peer の `pyproject.toml` (`[test]` extras、httpx2 案の場合)、`r2db-api/tests/` の 12 箇所 (ASGITransport 案の場合)、`constraints.txt` | **Q4 の main マージ後** | 同上 | 追加なし |
@@ -1073,8 +1074,38 @@ bash -n r2db-api/deploy/scripts/<各 script>
 
 ---
 
-## 4. 訂正註
+## 4. 訂正註 (2026-09-05 追記、7-A 実装中)
 
-**(空。)**
+**訂正註は 6 件であり、いずれも実装物の欠陥ではなく、本書側の誤りか、本書の発注後に監督が下した裁定である** (フェーズ6 §11 **L6-18** の流儀 —「実装 / レビュー / 監査が実測で見つけた発注文書側の誤り。設計が正」)。**本文の発注内容は書き換えていない。** **版数行は v1.1 のまま据え置く** (監督裁定。7-A の実装中であり、7-A 完了時にまとめて版数を上げる)。
+
+1. **WP-3 成果物 6 / 完了条件 9 — CI の deploy-assets lint job の中身の置き場所。**
+   - **発注文書の記述**: 成果物 6 は「**`.github/workflows/ci.yml` の deploy-assets lint job の中身**」を WP-3 の成果物とし、`systemd-analyze verify` / `nginx -t` / `bash -n` を **WP-3 が workflow ファイルに直接書く**形で発注していた (WP-2 の完了条件 9 と禁止事項 5 が「枠だけを WP-2、中身は WP-3」と対になっていた)。
+   - **実際**: **7-A 前倒し着手の確定により WP-1〜WP-3 を並列で走らせた**ため、**WP-3 の着手時点で `.github/workflows/ci.yml` (WP-2 の成果物 2) がまだ着地しておらず**、WP-3 が中身を書き込む先のファイルが存在しなかった。
+   - **裁定**: **監督裁定により構成を変更する。** lint 本体を **`r2db-api/deploy/scripts/lint_deploy_assets.sh`** (**`--require-tools` モード付き**) に置き、**WP-2 の job はそれを呼ぶだけ**とする。**検査の実体と変異 1〜3 の宛先は当該 script** であり、workflow 側は呼び出しのみを持つ。**WP-2 = job の枠、WP-3 = 検査の中身という境界そのものは保たれている** — 変わったのは中身の置き場所だけである。並列化の帰結であり、実装物の欠陥ではない。
+
+2. **WP-3 成果物 1 — control unit の `EnvironmentFile` を placeholder にするという指定。**
+   - **発注文書の記述**: 「**unit 名・port・`EnvironmentFile` は placeholder** (`REPLACE_ME_CONTROL_PORT` 等)」。
+   - **実際**: `EnvironmentFile` まで placeholder 化すると、**完了条件 1 の同型性照合と衝突する** — 既存 `r2dbsvc-api.service` は `EnvironmentFile` を literal パスで書いており、新設 unit だけを伏字にすると同型でなくなる。加えて **control 面の env ファイル名は既存 `deploy/env/control.env.example` が literal パスとして既に確立している** (当該ファイルは WP-3 の禁止事項 2 により触れない)。
+   - **裁定**: **既存 unit との同型性を優先する。** `EnvironmentFile` は**既存 `control.env.example` が確立した literal パスのまま**置き、**placeholder 化の対象は unit 名と port の側に限る**。**完了条件 1 の「差分が限られる」の実測結果は Description / `EnvironmentFile` / `ExecStart` の 3 行のみ**である。
+
+3. **WP-3 成果物 3 / 完了条件 6 — 新設 operator script の本数。**
+   - **発注文書の記述**: 「`r2db-api/deploy/scripts/` に **operator script 3 本**」(part1 / part1b / part2)。完了条件 6 も「**operator script 3 本がある**」。
+   - **実際**: **訂正註 1 の帰結として `lint_deploy_assets.sh` が同ディレクトリに加わり、新設は 4 本**である (part1 / part1b / part2 + `lint_deploy_assets.sh`)。
+   - **裁定**: **4 本が正。** 完了条件 6 の `bash -n` は**新設 4 本すべて**に掛ける。
+
+4. **WP-2 の CI トリガー — レビュー提案「`push` を main に限定し pull_request に任せる」の不採用。**
+   - **発注文書の記述**: 本書は WP-2 の完了条件・禁止事項で**トリガーを規定していない** (実現手段は実装担当が選ぶ形になっていた)。これに対しレビューが、**`push` を main に限定し branch は `pull_request` に任せる** (同一 commit での二重起動を避ける) 形を提案した。
+   - **実際**: 本リポジトリは**単独作業者であり PR 運用が無い**。また **CI の赤/緑の実測は監督が当該ブランチを push して行う** (WP-2 の非 vacuity 要件)。**`pull_request` を持たない構成では二重起動そのものが生じない。**
+   - **裁定**: **監督裁定により提案は不採用。** トリガーは **`push` (全 branch) + `workflow_dispatch` のみ**とし、**`pull_request` は置かない**。
+
+5. **WP-1 成果物一覧 — 一覧に無いファイルへの注記 1 語の追記。**
+   - **発注文書の記述**: WP-1 の成果物は **6 点**であり、**`MitateDB-api/docs/cloud-run-cloud-sql.md` を含まない**。
+   - **実際**: **R4 の synthetic 許可を「同一行 / 直前行の注記」の粒度に狭めた**帰結として (許可を文書単位・広域に取ると誤検出の抑止が効きすぎるため)、同文書の該当箇所が flag されるようになり、**`# synthetic` の注記 1 語**の追記が必要になった。
+   - **裁定**: **監督採用。** 規則を狭めたことの帰結であり、**WP-1 の範囲内**として扱う。**追記は注記 1 語のみ**であり、当該文書の内容・記述には触れない。
+
+6. **WP-3 の lint — check 4 (`ExecStart` 非空検査) と `--require-tools` は設計 D-5 に無い拡張である。**
+   - **発注文書の記述**: 成果物 6 / 完了条件 9 が挙げる検査は **`systemd-analyze verify` / `nginx -t` / `bash -n` の 3 つ**であり、**設計 D-5 にも `ExecStart` の非空検査と、検査ツール不在時に失敗させるモードは無い**。
+   - **実際**: **(i)** `ExecStart` を壊す**変異 1 を本機で赤にできない** — 当該検査は `systemd-analyze verify` に依存しており、本機ではそれが動かない。**(ii)** ツール不在を黙って通す形にすると、**CI 側でツールが欠けたときに lint が緑のまま通り得る** (非 vacuity 要件「lint が実際に落ちうることを 3 種すべてで示す」が空振りになる)。
+   - **裁定**: **監督が事後承認。** **check 4 (`ExecStart` 非空検査)** と **`--require-tools`** は D-5 に無い拡張だが、**変異 1 の実測可能性と lint の非 vacuity を成立させるために必要**である。**設計 D-5 が挙げる 3 検査は撤去せず、その上に足す**形とする。
 
 **実装担当が本書の誤りを見つけたら、本書の記述を独断で読み替えず監督へ差し戻し、監督が本節に訂正註を追加する** (フェーズ6 §11 L6-18 の流儀)。**本文の発注内容は書き換えず、誤りと判明した箇所に【訂正註 YYYY-MM-DD】を置き、本節に理由を書く** — 発注時の記述と実測の差を消さないためである。**訂正註を追加したときは本書の版数を上げる。**
