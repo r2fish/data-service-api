@@ -517,6 +517,8 @@ control プロセスの入口は `r2db-api/src/r2db_api/control_main.py` (既に
 
 **案 (推奨)**: **新条件 C-19「クライアント自足性 (client self-sufficiency)」を 1 行切る** — 「共通仕様と 1 つの base URL と 1 つの credential だけを持つクライアントが、実装知識なしに、両 surface へ到達し、認証し、entity の型を発見できる」。理由は 3 点である。
 
+> **【注記 2026-09-05、外部評価の指摘】** 上記の命題文「両 surface へ到達し、認証し」は過大であった — 契約上、application credential は control surface で、control credential は data surface で拒否される (SI-02、C-13 / C-14 が検証)。C-19 の実際の vector も data 面には application credential、control 面には control credential を使う。`CONDITIONS.md` の C-19 行と `test_c19_client_self_sufficiency.py` の module docstring は「1 つの credential は、その credential の権限クラスが許す surface で verbatim に認証でき、相手 surface の所在と entity の型を発見できる」へ狭めた。本節の文言は起草時の記録として残す。
+
 1. **既存行のどれとも命題が違う**。C-12 は「宣言と実挙動の一致」(agreement)、C-13 / C-14 は認可境界である。D-1 / D-2 / D-3 が新たに主張するのは「**実装知識なしで到達できる**」という**発見性**の命題であり、agreement の一種ではない。
 2. **3 決定が 1 つのテーマの 3 面である**。credential / surface / 型は別々の条件に散らすより 1 条件の 3 vector にする方が、読み手 (AI エージェント統合者) にとって主張が見える。
 3. **限界の開示先が要る**。port から `control_surface_cohosted_with_data_plane()` が消える (WP-3) ことで L5-4 が閉じる事実、および「`surfaces` は配備者の表明であり、宣言された URL が実在することは declare-and-echo でしか検証していない」という射程を書く先が要る。

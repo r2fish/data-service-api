@@ -9,9 +9,14 @@ three vectors) and item 8 (the two `xfail(strict=True)` registrations in
 this file). Every real (non-guard, non-static) test here carries
 `@pytest.mark.condition("C-19")` via the module-level `pytestmark`.
 
-C-19's own proposition (CONDITIONS.md): a client holding only the common
-contract, one base URL, and one credential -- with no peer-specific
-knowledge -- can reach both surfaces, authenticate, and discover entity
+C-19's own proposition (CONDITIONS.md, wording narrowed 2026-09-05): a
+client holding only the common contract, one base URL, and one
+credential -- with no peer-specific knowledge -- can authenticate with
+that credential, verbatim, on the surface its authority class admits
+(application credential -> data surface; control credential -> control
+surface; never the other -- SI-02, verified by C-13/C-14, which is why
+the two verbatim vectors below use one credential of each class), can
+discover where the OTHER surface is reached, and can discover entity
 types. Three decisions from contract 1.6.0 (subordinate ruling 11) make
 this true: D-1 (a credential's `secret` is a complete, verbatim bearer
 token -- nothing to compose or split), D-2 (`CapabilityDocument.surfaces`
