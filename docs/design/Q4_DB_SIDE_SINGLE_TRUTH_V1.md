@@ -1,6 +1,7 @@
 # Q4 フェーズ 実施設計: 宣言と適用状態の根拠を DB 側の一次情報へ寄せる
 
-- 版数: **v1.2 (2026-09-05、依頼者裁定 U-1〜U-3 を反映、契約無変更で確定)**。v1.1 からの変更点: **(1)** §5 の U-1〜U-3 を**【依頼者裁定 2026-09-05】**で確定にした (両論は経緯として残す)。**(2) U-1 = 載せない (peer-local)** — 適用状態の可視化は両 peer の `ops upgrade-status` (provision DSN) のみ。**共通契約は 1.6.0 のまま無変更、conformance の vector / port も無変更**であり、§6 は 6.1 が本線、6.2 は**採用せず (記録)** となった (§6、D-5、D-6 の 4)。**(3) U-2 = 台帳表に runtime role の `SELECT` のみ付与** — §3.9 の権限表と D-3 (a) の DDL 骨子を確定し、**cell を開く時点の集合検査**を §3.7 と D-3 (f) に置き、§3.8 に **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を示す) を追加した。パッケージ定数と `migrations/` の同期義務は **§10 / D-3 (d) の三者一致静的検査**が担保する。**(4) U-3 = 起動時スナップショット** — D-1 (e) / D-2 (g) / §9.2 を確定にし、live 案の差し替え注記を削除した。**(5)** §8 の migration 番号を**本フェーズの割当**として確定した (r2db `0008` / `0009`、MitateDB `0007` / `0008`。L6-2 に従い本フェーズが先に出荷する)。**(6)** §12 の LQ4-1〜LQ4-3 を裁定の記録に改め、**LQ4-20** (U-1「載せる」案を将来再検討する場合の前提) を起票した。
+- 版数: **v1.3 (2026-09-05、監督裁定 D-2 (h) — 書き手 role の宣言表化を反映)**。v1.2 からの変更点: **(1)** D-2 に **(h) 書き手 role は宣言表が特定する**を新設した — 宣言表に `audit_writer_roles` 行を置き、**書き手プロセスは起動時に自 `current_user` がその宣言に含まれることを確認し (F-13)**、**control は宣言された各 role の catalog から `visibility_lag_ms` を導出する**。**role 名をコード内の命名規則 (schema 名からの導出・接尾辞の書き換え) から得る形は両 peer から撤去する。** **(2)** `key` の CHECK の許容集合に `audit_writer_roles` を加え、**platform 単発 migration が `ALTER ROLE` を発行した role 名と同じ値を同じトランザクションで seed する**形にした (D-2 (a) / (c)、D-1 (a) / (c))。**(3)** §3.7 の起動順に「`audit_writer_roles` 読み → 自 role の包含確認 → 二重検査」を挿入し、§3.8 に **F-13** を追加、**F-4b** の射程を `audit_writer_roles` 行の検証へ広げた。**(4)** §3.10 に **seed 値の行**を足し、role 名の 2 行に「本番の seed 値」と注記した。**(5)** §12 に **LQ4-22** を起票した (却下 2 案 — 命名規則依存 / env で role 名を渡す — を含む)。**同日追補 (版数据え置き、2026-09-05 の WP-1 / WP-2 差し戻し裁定)**: §3.8 に **F-3c** を追加し、**F-11 の射程を timeout キーを含む per-database 行に絞り**、**§3.10 に同型性の面 (両 peer で名前・シグネチャ・本体を一致させるシンボル) の表**を新設し、**L6-17 (r2db の `surfaces` 検証 2 コピー) を `validate_surfaces_value` への統合で閉じる**旨を §12 LQ4-23 に起票した。
+- 版数履歴: **v1.2 (2026-09-05、依頼者裁定 U-1〜U-3 を反映、契約無変更で確定)**。v1.1 からの変更点: **(1)** §5 の U-1〜U-3 を**【依頼者裁定 2026-09-05】**で確定にした (両論は経緯として残す)。**(2) U-1 = 載せない (peer-local)** — 適用状態の可視化は両 peer の `ops upgrade-status` (provision DSN) のみ。**共通契約は 1.6.0 のまま無変更、conformance の vector / port も無変更**であり、§6 は 6.1 が本線、6.2 は**採用せず (記録)** となった (§6、D-5、D-6 の 4)。**(3) U-2 = 台帳表に runtime role の `SELECT` のみ付与** — §3.9 の権限表と D-3 (a) の DDL 骨子を確定し、**cell を開く時点の集合検査**を §3.7 と D-3 (f) に置き、§3.8 に **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を示す) を追加した。パッケージ定数と `migrations/` の同期義務は **§10 / D-3 (d) の三者一致静的検査**が担保する。**(4) U-3 = 起動時スナップショット** — D-1 (e) / D-2 (g) / §9.2 を確定にし、live 案の差し替え注記を削除した。**(5)** §8 の migration 番号を**本フェーズの割当**として確定した (r2db `0008` / `0009`、MitateDB `0007` / `0008`。L6-2 に従い本フェーズが先に出荷する)。**(6)** §12 の LQ4-1〜LQ4-3 を裁定の記録に改め、**LQ4-20** (U-1「載せる」案を将来再検討する場合の前提) を起票した。
 - 版数履歴: **v1.1 (2026-09-05、設計レビュー 2 本を反映)**。v1.0 (2026-09-05、初版) からの変更点: **(1)** D-3 に新項 (e) — 台帳表を作ると r2db の catalog / RLS 監視が恒久的に落ちるため、両 peer の backend の bookkeeping 除外集合と r2db の `_r2db_missing_rls` ビューを同じ WP で拡張する。**(2)** 台帳表の DDL に provision role への `GRANT SELECT` を足し、§3.9 の権限表と「書き込み経路」の記述を現物 (所有者 = developer role) に合わせた。**(3)** 「未適用」を**集合差**で定義し直し、`applied_level` 単一値を廃して applied / pending の集合表示にした (D-4 / D-5)。適用状態の可視化は既存の一覧コマンドを触らず新サブコマンド `ops upgrade-status` に分けた。**(4)** timeout の比較を**両辺 ms 整数の数値比較**に確定し、実効値の取得を `pg_settings` に、GUC 優先順位の記述を訂正し、`0` (無制限) と per-database role 設定を fail-fast (F-10 / F-11) にした。**(5)** ops コマンドを `set-platform-timeouts` に改名し射程を明記。**(6)** 廃止 env の検査対象を composition root に渡された env mapping に限定し、`deploy/env/*.example` を成果物に加えた。**(7)** F-6 の推奨を「`*_CONTROL_PLANE_STATUS` を直す」に反転。**(8)** 宣言表の値検査を Python 側に一本化し F-4b を追加。**(9)** 静的規則の規則文・命名規範・非空振り条件を確定 (§8 / §10 / D-3 (d))。**(10)** §3.11 に射程と残余を 4 項追加し、§12 に LQ4-14〜LQ4-19 を起票。**(11)** §4 / §5 / §7 の SI-02 参照を「invariant の禁止」ではなく**運用上の代償**の記述に書き改めた (Security Invariants を許可リストに使わない)。(v1.1 時点では U-1〜U-3 が未確定であった。)
 - 位置づけ: **監督が確定した枠 (2026-09-05 裁定) の実施設計**である。§3 の D-1〜D-6 は監督裁定を受けた確定であり、**§5 の U-1〜U-3 も依頼者裁定 (2026-09-05) で確定した** — 本設計に未確定事項は無い。WP 分割は §11 に素案のみを置き、作業指示書は別途起こす。フェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) の構成・粒度・文体をそのまま踏襲する
 - テーマ: **「宣言 (または適用状態の判定根拠) を持つプロセスと、値が実際に効いているプロセスが別で、どちらも他方を検証できない」構造の解消**
@@ -167,6 +168,8 @@ ALTER ROLE r2dbsvc_controlplane SET idle_in_transaction_session_timeout   = '500
 
 MitateDB は同じ 4 文を `mitatedbsvc_api` / `mitatedbsvc_controlplane` に対して置く (`MITATEDB_PROVISION_DSN` で実行)。**読み手 role (`*_auditreader`) には置かない** — 宣言は書き手についての主張だからである。
 
+**role 名は migration が psql 変数で受ける** (**監督裁定 2026-09-05**、D-2 (h))。上の 4 文の識別子位置は既存様式 (`0001` の `:'…'` / `0004` の `-v app_slug=…` / `-v app_id=…`) と同じく migration に渡された psql 変数から組み、**同じ migration の同じトランザクション内で、その同じ変数から `audit_writer_roles` 行を seed する**。したがって**逐語の role 名は本番の seed 値の例示である** (§3.10)。
+
 **(b) 書き手プロセスは接続時のセッション `SET` をやめ、起動時に「宣言と実効値の二重検査」を行う** (**監督裁定 2026-09-05**)。現行は `PostgresApplicationAuditSink` が接続ごとに 2 つの timeout を SESSION レベルで設定している (`r2db-api/src/r2db_api/main.py:420-431` のコメントが逐語でそう書く)。これを廃し、書き手プロセスは起動時に次の**両方**を検査する。
 
 - **(i) 宣言の存在と有効性** — `pg_db_role_setting` に自 role の `statement_timeout` と `idle_in_transaction_session_timeout` の 2 設定が**存在し、かつ ms へ正規化した値が 1 以上であること**。**`0` は PostgreSQL では「無制限」を意味する** (レビュー 2 が実測) ので、存在検査だけでは「無音の unbounded」を通してしまう。0 と負数は F-10 で止める。
@@ -190,7 +193,11 @@ SELECT r.rolname, s.setdatabase, s.setconfig
    AND r.rolname IN ('r2dbsvc_api', 'r2dbsvc_controlplane');   -- MitateDB は mitatedbsvc_*
 ```
 
+**`rolname IN (…)` に入れる role 名は宣言表の `audit_writer_roles` 行の各要素である** (**監督裁定 2026-09-05**、D-2 (h))。**schema 名や接尾辞の書き換えから role 名を導出する形はコードから撤去する** — 上の逐語の 2 名は本番の seed 値の例示である (§3.10)。
+
 **`setdatabase = 0` の行 (database 非依存の `ALTER ROLE … SET`) だけを宣言とみなす。** それでもクエリが per-database 行 (`setdatabase ≠ 0`、`ALTER ROLE … IN DATABASE … SET`) を**拾う**のは、その行が存在すること自体を検出して止めるためである — per-database 行は `ALTER ROLE … SET` より優先順位が高く、宣言の根拠を無効にする。存在すれば **F-11** で fail-fast し、`ALTER ROLE … IN DATABASE … RESET` による除去を指示する。v1.0 のクエリ (`WHERE s.setdatabase = 0`) はこの行を**構造的に見落としていた**。
+
+**per-database 行のうち F-11 とするのは、その `setconfig` が `statement_timeout` または `idle_in_transaction_session_timeout` を含む行だけである** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻し**)。**この 2 キーのいずれも含まない per-database 行は無視する** — `ALTER ROLE … IN DATABASE … SET search_path = …` のような無関係な設定で起動を止めない (未知キーを読み飛ばす規律 ((b)(ii)) と同じ理由である)。**catalog クエリは `setdatabase IN (0, 自 DB の oid)` に限定する** (上のクエリのとおり) — 他の database に対する per-database 行はこの配備の実効値を左右しないからである。この絞り込みにより、**F-11 は `ALTER ROLE … IN DATABASE … RESET statement_timeout, idle_in_transaction_session_timeout` で解消できる状態にのみ発火する** (F-11 の文面は据え置く)。
 
 **`SET ROLE` では実効値は取れない。** `ALTER ROLE … SET` はログイン時にのみ適用されるので、control プロセスが `SET LOCAL ROLE r2dbsvc_api` して読んでも、それは control 自身のセッション値であって書き手 role の実効値ではない (レビュー 2 の確認)。control が読むのは**あくまで catalog** である。
 
@@ -225,7 +232,7 @@ visibility_lag_ms = max( statement_timeout_ms(role) + idle_in_transaction_sessio
 CREATE TABLE IF NOT EXISTS r2dbsvc_registry.platform_declarations (
     key        text PRIMARY KEY
                CONSTRAINT platform_declarations_key_check
-               CHECK (key IN ('surfaces', 'audit_coalescing_window_ms')),
+               CHECK (key IN ('surfaces', 'audit_coalescing_window_ms', 'audit_writer_roles')),
     value      jsonb       NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -238,6 +245,14 @@ GRANT SELECT ON r2dbsvc_registry.platform_declarations TO r2dbsvc_controlplane;
 INSERT INTO r2dbsvc_registry.platform_declarations (key, value)
 VALUES ('audit_coalescing_window_ms', to_jsonb(60000))
 ON CONFLICT (key) DO NOTHING;
+
+-- 書き手 role の宣言を seed する ((h)、監督裁定 2026-09-05)。
+-- D-1 (a) の ALTER ROLE 4 文と同じ psql 変数から組み、同じトランザクションに置く
+-- (変数名は例示。要件は「ALTER ROLE の対象と seed 値が同じ変数から来ること」である)。
+-- ALTER ROLE が上書き代入である以上、この行も再適用で終状態が揃う形にする。
+INSERT INTO r2dbsvc_registry.platform_declarations (key, value)
+VALUES ('audit_writer_roles', to_jsonb(ARRAY[:'api_role', :'controlplane_role']))
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 -- surfaces は配備固有なので seed しない (下記 (c))。
 ```
 
@@ -255,19 +270,38 @@ ON CONFLICT (key) DO NOTHING;
 |---|---|---|
 | `surfaces` | `{"data": {"base_url": "https://data.example.invalid/v1"}, "control": {"base_url": "https://control.example.invalid/control/v1"}}` — `control` は control surface が提供される配備にのみ置く | **しない** — 配備固有。**行が無ければ起動時 fail-fast** (1.6.0 で `surfaces.data` は無条件義務) |
 | `audit_coalescing_window_ms` | 整数 (例 `60000`) | **する** — 現行定数と同値 |
+| `audit_writer_roles` | 文字列配列 (例 `["r2dbsvc_api", "r2dbsvc_controlplane"]` / `["mitatedbsvc_api", "mitatedbsvc_controlplane"]`) — **`application_audit` の書き手と `control_audit` の書き手** ((h)) | **する** — **同じ migration が `ALTER ROLE` を発行した role 名と同じ値**を同じトランザクションで seed する (D-1 (a)) |
 
 **(d) 検証は書き込み時と読み出し時の両方で行い、両方が同じ Python の検証関数を通る** (表が手で編集され得るため)。
 
 - **`surfaces`**: 検査項目は 1.6.0 で確定済みの 4 点 — 絶対 URL であること、`data` は `/v1` で終わること、`control` は `/control/v1` で終わること、**末尾スラッシュを含まないこと**。**両 peer の既存 validate を再利用する** (`MitateDB-api/src/mitatedb_api/surfaces.py:78-93` の `validate_data_base_url` / `validate_control_base_url`、r2db は `main.py` / `control_main.py` の `_validate_surface_base_url` — 2 コピーある。L6-17 / L6-20 (d)、§12 LQ4-7)。落ちれば **F-5**。
+- **`audit_writer_roles`** ((h)、**監督裁定 2026-09-05**): **非空の文字列配列であり、重複が無く、各要素が PostgreSQL 識別子として妥当であること** (**既存の識別子検証を再利用する**)。落ちれば **F-4b**。**この行を書くのは platform 単発 migration だけである** (ops に書き込みサブコマンドを設けない) ので、「同じ関数を通る」の射程は**行を読むすべての経路** — 両プロセスの起動時と ops (`set-platform-timeouts` / `show-declarations`) — である。
 - **`audit_coalescing_window_ms`**: **jsonb の数値であり、整数であり、0 以上であること** (**監督裁定 2026-09-05**。`0` は「coalescing を行わない」を意味する有効な値である。契約の `limits` は `minimum 1` だが、この宣言は `limits` の項目ではなく `audit_query` capability の値側にあるので、その下限は及ばない)。文字列・負数・小数は拒否する。落ちれば **F-4b**。`value jsonb` は DB 側では何でも入るので (`key` の CHECK は key しか見ない)、この経路が無いと「行はあるが値が壊れている」が無検査になる。
 
 **(e) 両プロセスは起動時にこの表を読む。** data-plane は `surfaces` と窓を `DataService` / `AuditRouter` へ、control は `surfaces` と宣言へ渡す。定数 `DECLARED_COALESCING_WINDOW_MS` / `DEFAULT_COALESCING_WINDOW_MS` は **seed 値の出所としてのみ残す** (実行時の宣言の出所ではなくなる)。
+
+**ops `declare-surfaces` の引数と `--no-control` の関係** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻しに伴う訂正。両 peer 同じ**): **`--control-base-url <URL>` は任意**であり、**省略すると `surfaces` 行に `control` を置かない**。**`--no-control` は「省略と等価の明示形」として受け付ける** — 設計 §3.8 の F-2 / F-3 / F-6 の文面が運用者にこのフラグを提示するので、提示されたコマンドがそのまま通る必要がある。**両方を同時に渡したら使い方の誤り** (終了コード 2) である。**必須の相互排他にはしない** — すなわち「`--control-base-url` か `--no-control` のどちらかを必ず渡せ」という要求はしない。省略だけで control 無しの宣言が書けることを保つ。
 
 **(f) env は廃止する。** `R2DB_DATA_BASE_URL` / `R2DB_CONTROL_BASE_URL`、`MITATEDB_DATA_BASE_URL` / `MITATEDB_CONTROL_BASE_URL` を読まない。**定義されていれば値によらず fail-fast** (D-1 (d) と同じ理由・同じ検査対象 = composition root に渡された env mapping)。**現行の data / control 非対称** — data 側は `*_CONTROL_PLANE_STATUS` 依存、control 側は無条件必須 — は**表の 1 行に統合されて消える**。代わりに、**`surfaces` 行に `control` があるか否かと、そのプロセスの `*_CONTROL_PLANE_STATUS` の整合を起動時に検査する**: `unavailable` を宣言するのに `control` 行がある、またはその逆は fail-fast である (F-6)。
 
 **これは Phase 6 監督裁定 5 を上書きする** (記録として明示する)。現行実装は「`*_CONTROL_BASE_URL` が環境に残っていても `control_plane_status == 'unavailable'` なら**決して採用しない**」を明示の裁定として持つ (`MitateDB-api/src/mitatedb_api/config.py:146-158` のコメントが逐語で「a stale/leftover value from a previous configuration, say — it is never adopted」と書く。r2db `main.py` の `_surfaces` も同型のゲートを持つ)。宣言が env から**両プロセス共通の 1 行**へ移る以上、「黙って無視する」ではなく**行の存在自体を矛盾として拒否する**形に改める。単一の宣言表では、無視した側が兄弟プロセスの宣言と食い違ったまま動くことになるからである。
 
 **(g) 読みは起動時スナップショットである** (D-1 (e) と同じ。**依頼者裁定 2026-09-05**、U-3)。宣言表を変えたら**両プロセス再起動**が要る (§9.2)。
+
+**(h) 書き手 role の特定も宣言表の一次情報で行う** (**監督裁定 2026-09-05**)。
+
+**問題**: D-1 は「書き手 role の 2 つの timeout」を単一の真実にするが、**どの role が書き手か**をコード内の命名規則から導出すると、その規則が本番で外れた瞬間に無音で壊れる。起草時の両 peer は実際に非対称な規則を採っていた (r2db は schema 名からの導出、MitateDB は接尾辞の書き換え) ため、**同型性も成立していなかった**。また §3.10 の固定 role 名は**本番の値**であり、テスト harness の throwaway prefix と衝突する。
+
+1. **宣言表に `audit_writer_roles` 行を置く。** 値は jsonb の文字列配列 (D-2 (c))。**platform 単発 migration (r2db `0008` / MitateDB `0007`) が `ALTER ROLE` を発行した role 名と同じ値を seed する** — **`ALTER ROLE` と seed は同じ migration の同じトランザクション内**であり、migration は **psql 変数で role 名を受ける既存様式**に従い、**seed 値もその同じ変数から組む** (D-1 (a)、D-2 (a))。`key` の CHECK の許容集合に `audit_writer_roles` を加える。
+2. **書き手プロセス** (data-plane / control-plane の書き手 pool) は、**起動時に `current_user` が `audit_writer_roles` に含まれることを確認する。** 含まれなければ **F-13** で fail-fast する。**そのうえで** D-1 (b) の二重検査 (catalog 行の存在 + ms ≥ 1 + 実効値一致) を**自 role について**行う。
+3. **control プロセス**は `audit_writer_roles` の**各 role**について catalog (`pg_db_role_setting`、`setdatabase IN (0, 自 DB の oid)`、per-database 行は F-11) を読み、`visibility_lag_ms = max(statement + idle) + 1000` を導出する (D-1 (c))。**role 名の導出規則 (schema 名・接尾辞の書き換え) はコードから撤去する。**
+4. **ops `set-platform-timeouts` は `audit_writer_roles` の各 role に `ALTER ROLE` を発行する** — **role 名を引数で受けない** (D-1 (d) の「変更手段は ops サブコマンド + 両プロセス再起動の 1 経路」はそのまま)。
+5. **テスト harness は throwaway prefix の role 名で行を seed する** (migration を harness が流す場合は psql 変数で渡す)。**逐語の本番 role 名をテストへ焼き付けない。**
+6. **行の検証**は ops の読み時と起動時の読み出し時で**同じ関数**を通る — 非空の文字列配列、重複なし、各要素が PostgreSQL 識別子として妥当 (**既存の識別子検証を再利用する**)。落ちれば **F-4b** (D-2 (d))。
+
+**却下した 2 案** (§12 LQ4-22): **(a) 命名規則依存** (起草時の両 WP の現状) — 本番で schema 名や role 名が規則を外れた瞬間に**無音で壊れる**。**(b) env で role 名を渡す** — env 廃止の趣旨に反し、**真実が 2 つになる**。
+
+**同型性**: `platform_declarations.py` の同名ヘルパは**両 peer で名前・シグネチャ・ロジックを揃える** (対応表の行は対の後半 WP = WP-2 が持ち、WP-1 側は WP-2 と同名にする。作業指示書 §3 の裁定と同じ規律)。
 
 ### D-3 per-application platform upgrade 台帳を各 application DB に置く
 
@@ -433,9 +467,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 1. 既存の env 読み取り (DSN、pepper、`*_CONTROL_PLANE_STATUS` ほか)。
 2. **廃止 env の不在検査** — **composition root に渡された env mapping** (`os.environ` ではない) に 4 変数のいずれかが**定義されていれば、値によらず** fail-fast (F-1 / F-2)。
 3. platform 接続の確立 (既存)。
-4. **宣言表の読み出し。** 検査は**この順**で行う — **(a) 表そのものの存在** (無ければ F-8)、**(b) 行の存在** (`surfaces` 行が無ければ F-3、`audit_coalescing_window_ms` 行が無ければ F-4)。順序を守らないと、migration 未適用の配備が `relation does not exist` の生の psycopg 例外で落ちる。
-5. **値の検証** — `surfaces` の形式検証 (既存 validate、落ちれば F-5)、`audit_coalescing_window_ms` の型・範囲検証 (落ちれば F-4b)、**`control` 行 × `*_CONTROL_PLANE_STATUS` の整合検査** (F-6)。
-6. **書き手 role の設定検査 (二重検査、D-1 (b))** — (i) `pg_db_role_setting` (`setdatabase = 0` の行) に `statement_timeout` と `idle_in_transaction_session_timeout` の両方があること (欠ければ F-7)、その ms 値が 1 以上であること (0 / 負数なら F-10)、per-database 行 (`setdatabase ≠ 0`) が無いこと (あれば F-11)、(ii) **監査書き手が使う pool の接続 (login role = 自 role)** で `pg_settings` から取った実効値が、(i) の値と **ms 整数で一致**すること (食い違えば F-9)。
+4. **宣言表の読み出し。** 検査は**この順**で行う — **(a) 表そのものの存在** (無ければ F-8)、**(b) 行の存在** (`surfaces` 行が無ければ F-3、`audit_coalescing_window_ms` 行が無ければ F-4)。順序を守らないと、migration 未適用の配備が `relation does not exist` の生の psycopg 例外で落ちる。**同じ読み出しで `audit_writer_roles` 行も取る** (D-2 (h)。**行が無い場合は下記 6 の包含確認で F-13 になる**)。
+5. **値の検証** — `surfaces` の形式検証 (既存 validate、落ちれば F-5)、`audit_coalescing_window_ms` の型・範囲検証 (落ちれば F-4b)、**`audit_writer_roles` の型・要素検証** (非空の文字列配列 / 重複なし / 各要素が妥当な識別子。落ちれば F-4b。D-2 (h) の 6)、**`control` 行 × `*_CONTROL_PLANE_STATUS` の整合検査** (F-6)。
+6. **自 role の包含確認 (D-2 (h) の 2) → 書き手 role の設定検査 (二重検査、D-1 (b))。** **先に `current_user` が `audit_writer_roles` に含まれることを確認する** (含まれなければ、行が無い場合を含めて **F-13**) — 宣言された書き手でない role の timeout を検査しても、`visibility_lag_ms` が語る対象にならないからである。**そのうえで**自 role について — (i) `pg_db_role_setting` (`setdatabase = 0` の行) に `statement_timeout` と `idle_in_transaction_session_timeout` の両方があること (欠ければ F-7)、その ms 値が 1 以上であること (0 / 負数なら F-10)、per-database 行 (`setdatabase ≠ 0`) が無いこと (あれば F-11)、(ii) **監査書き手が使う pool の接続 (login role = 自 role)** で `pg_settings` から取った実効値が、(i) の値と **ms 整数で一致**すること (食い違えば F-9)。
 7. audit sink を構築する。**セッション `SET` はしない** (D-1 (b))。
 8. `DataService` / `AuditRouter` へ窓を渡し、capability document へ `surfaces` を注入する。
 
@@ -448,8 +482,11 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **control-plane プロセス** (`r2db_api.control_main` / `mitatedb_api.control_composition`)
 
-1〜5 は同じ (control プロセスは自らの control surface を必ず持つので、`surfaces.control` は**無条件必須**)。
-6. **両書き手 role の 4 設定を catalog から読む** → 欠ければ F-7、0 / 負数なら F-10、per-database 行があれば F-11。`visibility_lag_ms` を D-1 (c) の式で導出する。control プロセス自身も `control_audit` の書き手であるから、**自 role については D-1 (b)(ii) の実効値一致検査も行う** (食い違えば F-9)。**`*svc_api` (data-plane の書き手) の実効値は検証できない** — role 設定は login 時にのみ適用され、`SET ROLE` では取れないからである。その検証は data-plane プロセスが自分で行う (§3.11 の 9)。
+1〜5 は同じ (control プロセスは自らの control surface を必ず持つので、`surfaces.control` は**無条件必須**)。**`surfaces` 行はあるが `control` が無い場合は F-3 (行不在) ではなく F-3c を出す** (§3.8。行の不在と「行はあるが control が無い」は運用者に対して別の状況である)。
+
+**この検査は composition root で同期的に行う** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻し**)。**r2db は env 駆動の composition である `build_control_app()` の中で行い、ASGI の lifespan へ遅延させない** — 遅延させると `--lifespan off` で起動したプロセスは検査を飛ばし、**`surfaces` を欠いた capability 文書を無音で配る**からである (§4 の却下案)。**明示注入で組む経路 (`assemble_control_stack(…)`) は従来どおり引数で受ける** — env 駆動 builder を呼ぶのは実 PG のテストと本番の起動経路だけである (§3.11 の 4)。**宣言値は private 属性への reach-in (`service._surfaces` の類) ではなくコンストラクタ引数で渡す** (同裁定) — 宣言の出所が composition root の 1 経路に閉じていることが、この設計の要点だからである。
+
+6. **`audit_writer_roles` に宣言された各 role の 2 設定を catalog から読む** (**D-2 (h) の 3**。role 名を命名規則から導出しない) → 欠ければ F-7、0 / 負数なら F-10、per-database 行があれば F-11。`visibility_lag_ms` を D-1 (c) の式で導出する。control プロセス自身も `control_audit` の書き手であるから、**自 `current_user` が `audit_writer_roles` に含まれることを先に確認し** (含まれなければ F-13。D-2 (h) の 2)、**自 role については D-1 (b)(ii) の実効値一致検査も行う** (食い違えば F-9)。**`*svc_api` (data-plane の書き手) の実効値は検証できない** — role 設定は login 時にのみ適用され、`SET ROLE` では取れないからである。その検証は data-plane プロセスが自分で行う (§3.11 の 9)。**兄弟 role (自 `current_user` 以外の、宣言された各 role) の catalog 検査は無条件に行う** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻し**) — **`audit_reader` (監査読み手) の構成の有無に依存させない**。`visibility_lag_ms` は `audit_writer_roles` の**全 role**についての主張であり、読み手が構成されているか否かはその主張の根拠と無関係だからである。
 7. `audit_coalescing_window_ms` を宣言表から読む。
 8. capability document を組む。
 
@@ -457,7 +494,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **env 名 / migration 番号 / 次に打つ ops コマンド名**を含めて出す (制約 7)。`<peer>` は `r2db_api` / `mitatedb_api`、`<NNNN>` は §8 が確定した番号 (r2db `0008` / `0009`、MitateDB `0007` / `0008`) に置き換える。
 
-**F-1〜F-11 はプロセス起動時の出力であり、API 応答や公開 endpoint には現れない** (SI-10)。F-5 / F-9 のように宣言値そのものをメッセージに含めるものがあるため、readiness / health endpoint へ転記しないことを規律として明記する。
+**F-1〜F-11 (F-3c を含む) と F-13 はプロセス起動時の出力であり、API 応答や公開 endpoint には現れない** (SI-10)。F-5 / F-9 / F-13 のように宣言値そのものをメッセージに含めるものがあるため、readiness / health endpoint へ転記しないことを規律として明記する。
+
+**F-13 は監督裁定 2026-09-05 (D-2 (h)) による確定文であり、依頼者裁定ではない** — 前文が F-12 について「依頼者裁定 2026-09-05、U-2」と書くのと同じ扱いで、出所を取り違えないために明記する。
 
 **F-12 だけは起動時ではなく cell open 時であり、API 応答として利用者に届く** (依頼者裁定 2026-09-05、U-2)。**F-12 のメッセージは未適用の番号と ops コマンド名を示す** (裁定文のとおり)。API 応答に現れる以上、**DSN・資格情報・内部ホスト名・宣言値は置かない** (SI-10)。
 
@@ -466,22 +505,28 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | F-1 | `*_AUDIT_STATEMENT_TIMEOUT_MS` または `*_AUDIT_IDLE_TIMEOUT_MS` が **env mapping に定義されている** (値は問わない。空文字列を含む) | 両 | `R2DB_AUDIT_STATEMENT_TIMEOUT_MS is no longer read (Q4 D-1): the audit writer roles carry statement_timeout / idle_in_transaction_session_timeout as PostgreSQL role settings, applied by migration <NNNN>. This variable is rejected whenever it is defined, whatever its value (an empty string included). Unset this variable, then set the value with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>' and restart both processes. Note this setting also bounds every other connection made by this role (credential store lookups and control-plane registry operations included).` |
 | F-2 | `*_DATA_BASE_URL` または `*_CONTROL_BASE_URL` が **env mapping に定義されている** (値は問わない) | 両 | `R2DB_DATA_BASE_URL is no longer read (Q4 D-2): surfaces are declared in <registry>.platform_declarations, created by migration <NNNN>. This variable is rejected whenever it is defined, whatever its value (an empty string included). Unset this variable, then declare with 'python -m <peer>.ops declare-surfaces --data-base-url <URL> [--control-base-url <URL>]' and restart both processes.` |
 | F-3 | `platform_declarations` に `surfaces` 行が無い | 両 | `no 'surfaces' row in <registry>.platform_declarations: contract 1.6.0 requires surfaces.data unconditionally. Declare it with 'python -m <peer>.ops declare-surfaces --data-base-url <URL> [--control-base-url <URL>]', then restart both processes.` |
+| **F-3c** | **`surfaces` 行はあるが `surfaces.control` が無く、かつそれが control-plane プロセスである** (行不在の F-3 とは別の状況。§3.7 control 1〜5) | control-plane | `'surfaces' row in <registry>.platform_declarations has no surfaces.control, but this is the control-plane process, which always has a control surface to declare (contract 1.6.0: both documents return the same surfaces object). Declare it with 'python -m <peer>.ops declare-surfaces --data-base-url <URL> --control-base-url <URL>', then restart both processes.` (**監督確定文 2026-09-05。逐語。`<registry>` は実 schema 名、`<peer>` は `r2db_api` / `mitatedb_api` に置換する。両 peer で同じ文面**) |
 | F-4 | `audit_coalescing_window_ms` 行が無い | 両 | `no 'audit_coalescing_window_ms' row in <registry>.platform_declarations: migration <NNNN> seeds it with the shipped default (60000). Apply that migration, or set the value with 'python -m <peer>.ops declare-coalescing-window --ms <N>', then restart both processes.` |
-| **F-4b** | `audit_coalescing_window_ms` 行はあるが**値が壊れている** (jsonb の数値でない / 整数でない / 負数) | 両 | `'audit_coalescing_window_ms' in <registry>.platform_declarations must be a non-negative integer (0 means no coalescing), got '<value>'. This table can be edited by hand, so the value is validated on every read as well as on write. Re-set it with 'python -m <peer>.ops declare-coalescing-window --ms <N>', then restart both processes.` |
+| **F-4b** | 行はあるが**値が壊れている** — (i) `audit_coalescing_window_ms` が jsonb の数値でない / 整数でない / 負数、または (ii) **`audit_writer_roles` が非空の文字列配列でない / 重複がある / 要素が PostgreSQL 識別子として妥当でない** (D-2 (h) の 6) | 両 | (i) `'audit_coalescing_window_ms' in <registry>.platform_declarations must be a non-negative integer (0 means no coalescing), got '<value>'. This table can be edited by hand, so the value is validated on every read as well as on write. Re-set it with 'python -m <peer>.ops declare-coalescing-window --ms <N>', then restart both processes.` / (ii) `'audit_writer_roles' in <registry>.platform_declarations must be a non-empty JSON array of distinct, valid PostgreSQL identifiers, got '<value>'. This table can be edited by hand, so the value is validated on every read. This row is written only by migration <NNNN>, which seeds it with the very role names it issues ALTER ROLE for: re-apply that migration to this platform database with this deployment's writer role names, then restart both processes.` |
 | F-5 | 宣言された `base_url` が形式検査に落ちる (絶対 URL でない / 接尾辞違い / 末尾スラッシュ) | 両 | `surfaces.data.base_url in <registry>.platform_declarations must be an absolute URL ending in '/v1' with no trailing slash, got '<value>'. Re-declare it with 'python -m <peer>.ops declare-surfaces …'.` |
 | F-6 | `surfaces.control` の有無と `*_CONTROL_PLANE_STATUS` が食い違う | data-plane | `surfaces.control is declared but R2DB_CONTROL_PLANE_STATUS is 'unavailable' (contract 1.6.0: a deployment declaring control_plane unavailable omits surfaces.control). The surfaces row is shared by BOTH processes: re-declaring with '--no-control' removes the control declaration for the control-plane process too, and that process will then fail to start (F-3). Unless this deployment really offers no control surface, change R2DB_CONTROL_PLANE_STATUS on this process instead, then restart both processes. If the deployment genuinely has no control surface, re-declare with 'python -m <peer>.ops declare-surfaces --data-base-url <URL> --no-control'.` (逆向き — `unavailable` 以外なのに `control` 行が無い — も同型の 1 文で出す) |
 | F-7 | 書き手 role に 2 設定のいずれかが無い | 両 | `role 'r2dbsvc_api' has no statement_timeout / idle_in_transaction_session_timeout in pg_db_role_setting: migration <NNNN> is not applied to this platform database, and an audit writer must never run unbounded. Apply migration <NNNN>, or set the values with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>', then restart both processes. Note this setting also bounds every other connection made by this role (credential store lookups and control-plane registry operations included).` |
 | F-8 | 宣言表そのものが無い (migration 未適用) | 両 | `relation <registry>.platform_declarations does not exist: migration <NNNN> (Q4 D-2) has not been applied to this platform database. Apply it with 'psql "$R2DB_CONTROL_DSN" -f r2db-api/migrations/<NNNN>_….sql', then restart both processes.` |
 | F-9 | 実効値が `pg_db_role_setting` の値と食い違う (D-1 (b)(ii)) | 両 | `role 'r2dbsvc_api' declares statement_timeout = 5000 ms in pg_db_role_setting but this connection's effective value is 30000 ms (both shown in milliseconds; PostgreSQL renders these settings in whichever unit divides evenly, so never compare the rendered strings): the declared visibility_lag_ms would not describe the effective connection. Remove the override -- a connection-string 'options=-c …', PGOPTIONS, or an 'ALTER ROLE … IN DATABASE … SET' row -- so the role setting is the effective value, or change the role setting with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>', then restart both processes. Note this setting also bounds every other connection made by this role.` |
 | **F-10** | 書き手 role の設定はあるが **ms 値が 0 または負数** | 両 | `role 'r2dbsvc_api' declares statement_timeout = 0 in pg_db_role_setting, which PostgreSQL reads as "no limit": an audit writer must never run unbounded, and the declared visibility_lag_ms would describe a bound that does not exist. Set a positive value with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>' (the command rejects 0 and negative values), then restart both processes.` |
-| **F-11** | 書き手 role に **per-database の role 設定行が存在する** (`pg_db_role_setting.setdatabase ≠ 0`) | 両 | `role 'r2dbsvc_api' has an 'ALTER ROLE … IN DATABASE …' setting row for database '<db>', which takes precedence over the database-independent role setting this deployment declares. The role setting must be a single database-independent row. Remove it with 'ALTER ROLE r2dbsvc_api IN DATABASE <db> RESET statement_timeout, idle_in_transaction_session_timeout;' (issued on the provision DSN), then restart both processes.` |
+| **F-11** | 書き手 role に **per-database の role 設定行が存在し、その `setconfig` が `statement_timeout` または `idle_in_transaction_session_timeout` を含む** (`pg_db_role_setting.setdatabase ≠ 0`。**catalog クエリは `setdatabase IN (0, 自 DB の oid)` に限る**。**この 2 キーのいずれも含まない per-database 行は無視する** — 監督裁定 2026-09-05、D-1 (c)) | 両 | `role 'r2dbsvc_api' has an 'ALTER ROLE … IN DATABASE …' setting row for database '<db>', which takes precedence over the database-independent role setting this deployment declares. The role setting must be a single database-independent row. Remove it with 'ALTER ROLE r2dbsvc_api IN DATABASE <db> RESET statement_timeout, idle_in_transaction_session_timeout;' (issued on the provision DSN), then restart both processes.` |
 | **F-12** | **cell open 時**: 台帳の番号集合に対して**未適用の per-app upgrade がある** (台帳表が無い場合を含む) | data-plane (**起動時ではなく cell open 時。API 応答に現れる唯一の項目**) | `This application's storage is missing platform upgrade(s) <未適用の番号…>: the deployment must apply them before this application can serve requests. Run 'python -m <peer>.ops upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry.` — HTTP 503 / `SERVICE_UNAVAILABLE` (D-3 (f)、§3.7 の 9〜10) |
+| **F-13** | **起動時**: 自 `current_user` が `audit_writer_roles` の宣言に**含まれない** (**行が無い場合を含む**。D-2 (h) の 2) | 両 (書き手プロセス) | `current_user 'r2dbsvc_api_t3' is not declared as an audit writer role: 'audit_writer_roles' in <registry>.platform_declarations is absent, or it does not list this role (declared: ["r2dbsvc_api", "r2dbsvc_controlplane"]). Migration <NNNN> seeds that row with the very role names it issues 'ALTER ROLE … SET statement_timeout / idle_in_transaction_session_timeout' for, in the same transaction, so a process connecting as any other role writes audit rows whose timeouts the declared visibility_lag_ms does not describe. Apply migration <NNNN> to this platform database with this deployment's writer role names, or connect this process as one of the declared roles; then set the timeouts with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>' (it issues ALTER ROLE for every role in 'audit_writer_roles', and takes no role-name argument) and restart both processes.` |
 
 **F-12 についての注記** (**依頼者裁定 2026-09-05**、U-2): 現状の検出は**最初のリクエスト**が storage の深部で `StorageConfigurationError` になる形であり (§1.4)、原因も次に打つ手も応答から読み取れない。F-12 は同じ `SERVICE_UNAVAILABLE` を**適用漏れという原因と `ops upgrade-applications` という手当て付き**で、cell を開く時点に前倒しする。**止めるときは必ず次に打つコマンドを示す** (決定軸、制約 7)。
 
 **F-6 の推奨の向きについての注記**: **既定の推奨は「`*_CONTROL_PLANE_STATUS` を直す」である** (**監督裁定 2026-09-05**)。宣言表の `surfaces` 行は**両プロセス共通の 1 行**なので、`--no-control` で再宣言すると control 行が消え、**次に再起動した control プロセスが F-3 で起動不能になる** (§3.7 control 1〜5 は `surfaces.control` を無条件必須とする)。運用者は AI エージェント前提であり提示されたコマンドを素直に打つので、破壊的でない側を既定に置く。
 
 **F-6 の対称性についての注記**: `*_CONTROL_PLANE_STATUS` は各プロセスの env のまま残る (本設計は廃止しない) — control プロセスは定義上 control surface を持ち、data-plane プロセスの宣言だけが配備で変わるためである。受理値は r2db では `{"enabled", "unavailable"}` であり (`r2db-api/src/r2db_api/main.py:182` 実測)、契約の "control_plane other than unavailable" との照合で F-6 が誤爆する余地は無い。
+
+**F-11 の射程についての注記** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻し**): **per-database 行のうち F-11 を発火させるのは `statement_timeout` または `idle_in_transaction_session_timeout` を `setconfig` に含む行だけである。** 他のキー (`search_path` など) だけを持つ per-database 行は**無視する** — 宣言の根拠を無効にしないからであり、無関係な `ALTER ROLE … IN DATABASE … SET` で起動を止めないためである (未知キーを読み飛ばす規律、D-1 (b)(ii) と同じ理由)。**catalog クエリ自体も `setdatabase IN (0, 自 DB の oid)` に限る。** この絞り込みにより **F-11 はメッセージが示す `RESET statement_timeout, idle_in_transaction_session_timeout` で必ず解消できる状態にのみ発火する** — **メッセージの文面は据え置く。**
+
+**F-3c についての注記** (**監督確定文 2026-09-05**): 行の不在 (F-3) と「行はあるが `control` が無い」(F-3c) は、運用者にとって**別の状況であり次に打つコマンドも異なる** (F-3 は宣言そのものを置く、F-3c は既存の宣言へ control を足す)。**F-3c は control-plane プロセスだけが出す** — data-plane プロセスでの同じ状態は `*_CONTROL_PLANE_STATUS` との突き合わせ (F-6) の対象であり、`unavailable` を宣言する data-plane では正常な状態である。
 
 ### 3.9 新設する 2 表の DDL 骨子と権限
 
@@ -507,8 +552,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | registry スキーマ | `r2dbsvc_registry` | `mitatedb_registry` |
 | provision role | `r2dbsvc_control` | `mitatedbsvc_provision` |
 | provision DSN env | `R2DB_CONTROL_DSN` | `MITATEDB_PROVISION_DSN` |
-| data-plane platform role (= `application_audit` 書き手 + credential store 読み手) | `r2dbsvc_api` | `mitatedbsvc_api` |
-| control-plane role (= `control_audit` 書き手) | `r2dbsvc_controlplane` | `mitatedbsvc_controlplane` |
+| data-plane platform role (= `application_audit` 書き手 + credential store 読み手) — **本番の seed 値** (D-2 (h)。コードは命名規則から導出せず宣言表から読む。テストは throwaway prefix の名で seed する) | `r2dbsvc_api` | `mitatedbsvc_api` |
+| control-plane role (= `control_audit` 書き手) — **本番の seed 値** (同上) | `r2dbsvc_controlplane` | `mitatedbsvc_controlplane` |
+| **新設** `audit_writer_roles` 行の **seed 値** (D-2 (h)。platform 単発 migration が `ALTER ROLE` と同じ psql 変数から同じトランザクションで書く) | `["r2dbsvc_api", "r2dbsvc_controlplane"]` | `["mitatedbsvc_api", "mitatedbsvc_controlplane"]` |
 | 監査読み手 role (本設計の対象外) | `r2dbsvc_auditreader` | `mitatedbsvc_auditreader` |
 | application 識別子列 | `application_slug` | `application_id` |
 | 既存 bookkeeping 表 | `public._r2db_schema_revision` | `public._mdb_schema_revision` |
@@ -533,6 +579,32 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | HTTP plug が宣言表を通るか (§6.1) | **通らない** (`assemble_control_stack(…, surfaces=…)` の明示注入)。表の読み出しは peer-local 実 PG テストが担う | **通る** (`build_control_service(env)` = composition root そのもの) |
 | runbook | `docs/POSTGRES_PROVISIONING_RUNBOOK.md`、`deploy/DEPLOYMENT_RUNBOOK.md` | `docs/cloud-run-cloud-sql.md` |
 | env 接頭辞 | `R2DB_` | `MITATEDB_` |
+
+**同型性の面 (両 peer で名前・シグネチャ・本体を一致させるシンボル)** (**監督裁定 2026-09-05、WP-1 / WP-2 差し戻し §1**)
+
+本フェーズが新設するモジュール **`<peer_pkg>/platform_declarations.py`** の次のシンボルは、**両 peer で名前・シグネチャ・本体を一致させる**。**peer 差は引数 (schema 名、peer 名、ops モジュール名) と呼び出し側に閉じる** — 本体の中に peer 名や schema 名を書かない。**同型性テストの対応表 (`_ISOMORPHIC_TARGETS`) に載せるのは下表で「載せる」とした行である** (対応表への追加は対の後半 WP が行う、作業指示書 §3)。**peer 間でコードは共有しない** (依頼者裁定 2026-09-03)。
+
+| シンボル | 役割 (裁定文のまま) | 対応表 |
+|---|---|---|
+| `class PlatformDeclarationError(RuntimeError)` | 本モジュールの例外型 | 載せる |
+| `VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000` | 導出式の margin (D-1 (c))。**adapter 等の `1000` リテラルはこの定数を import する** | 載せる (裁定 §1 の一覧に含まれる。**除外は「peer 名を含む定数」だけ**である) |
+| `REMOVED_TIMEOUT_ENV: tuple[str, ...]` / `REMOVED_SURFACE_ENV: tuple[str, ...]` | 廃止 env 名の集合 | **載せない** (**peer 名を含む定数**) |
+| `reject_removed_timeout_env(env: Mapping[str, str], *, names: tuple[str, ...]) -> None` | F-1。**定義されていれば値によらず**。`os.environ` を見ない | 載せる |
+| `reject_removed_surface_env(env: Mapping[str, str], *, names: tuple[str, ...], schema: str) -> None` | F-2 (`schema` は呼び出し側の実 schema。監督裁定 2026-09-05 N-7) | 載せる |
+| `@dataclass(frozen=True) class Surfaces` | `data_base_url: str`, `control_base_url: str \| None` | 載せる |
+| `@dataclass(frozen=True) class PlatformDeclarations` | `surfaces: Surfaces`, `audit_coalescing_window_ms: int`, `audit_writer_roles: tuple[str, ...]` | 載せる |
+| `validate_surfaces_value(value: object, *, schema: str, ops_module: str) -> Surfaces` | F-5 逐語。**URL 形式検証の本体はこの関数に置く。r2db の `main.py` / `control_main.py` の重複コピーはこの関数を呼ぶ形に置き換える (= L6-17 の閉止、§12 LQ4-23)** | 載せる |
+| `validate_coalescing_window_value(value: object, *, schema: str, ops_module: str) -> int` | F-4b | 載せる |
+| `validate_audit_writer_roles_value(value: object, *, schema: str, ops_module: str) -> tuple[str, ...]` | F-4b。**非空・重複なし・PG 識別子妥当** | 載せる |
+| `read_platform_declarations(conn, *, schema: str, ops_module: str, migration: str) -> PlatformDeclarations` | F-8 表不在 → F-4 行不在 (surfaces / window / writer_roles) → 各 `validate_*`。**読み側で必ず `validate_*` を通す** | 載せる |
+| `@dataclass(frozen=True) class RoleTimeoutCatalog` | `role: str`, `statement_ms: int`, `idle_ms: int` | 載せる |
+| `read_declared_role_timeouts(conn, role: str, *, ops_module: str, migration: str) -> RoleTimeoutCatalog` | catalog を `setdatabase IN (0, 自 DB oid)` で読む。per-database 行は **`setconfig` に 2 つの timeout キーのいずれかを含む場合のみ** F-11 (それ以外の per-database 行は無視)。role 行不在 / キー欠落 → F-7。値 0 / 負 → F-10。ms 正規化は `pg_timeouts.ms_from_pg_timeout_text` | 載せる |
+| `derive_visibility_lag_ms(catalogs: Sequence[RoleTimeoutCatalog]) -> int` | 純関数: `max(statement + idle) + margin` | 載せる |
+| `read_effective_timeouts_ms(conn) -> tuple[int, int]` | `pg_settings` の `setting` 列、ms 整数 | 載せる |
+| `check_writer_role_timeouts(conn, *, declared_roles: Sequence[str], schema: str, ops_module: str, migration: str) -> RoleTimeoutCatalog` | 順序: `current_user ∈ declared_roles` でなければ F-13 (`schema` は呼び出し側の実 schema。監督裁定 2026-09-05 N-7) → `read_declared_role_timeouts(current_user)` → `read_effective_timeouts_ms` と一致しなければ F-9。**`conn` は呼び出し側が書き手 sink の接続取得経路で開いたもの** (r2db は sink の pool から 1 本借りる、MitateDB は sink が接続を開くのと同じ関数で 1 本開く) — **「書き手が実際に使う接続」であることを両 peer の docstring に書く** | 載せる |
+| `check_control_surface_consistency(surfaces: Surfaces, control_plane_status: str, *, ops_module: str) -> None` | F-6。**data-plane のみが呼ぶ**。推奨は「status env を直す」 | 載せる |
+| `_f1_message(...)` … `_f13_message(...)` | 設計 §3.8 の文面を**逐語で組む関数群** (F-3c の文面もこの群が組み、同じ命名に従う) | 載せる |
+| `_upsert_declaration(conn, *, schema: str, key: str, value: object) -> None` (ops 側) | **パラメータバインド。`sql.Literal` 不使用、`dsn` ではなく `conn`** | 載せる |
 
 ### 3.11 既知の帰結 (決定の一部として記録する)
 
@@ -559,6 +631,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **案 C (書き手が実効値を表に書き、control が読む)** — 案 B より軽く見えるが、**新しい書き込み面**が増え、**書き手が死んでいる間の古い値の扱い**を決める必要がある。D-1 は catalog を読むだけで書き込み面が無い。
 - **`surfaces` / 窓も role 設定 (custom GUC、`ALTER ROLE`/`DATABASE SET x.y`) に載せる案** — 機構は 1 つになるが、**型無しの文字列 GUC で JSON を持つ**ことになり、`DATABASE` 単位にすると reader / control-plane 接続にも効き、`ROLE` 単位にすると role の数だけ真実が増える。timeout は **PostgreSQL 自身が意味を持つ設定**だから role 設定が「実効値そのもの」なのであって、`surfaces` は PostgreSQL にとって無意味である。宣言表なら `SELECT` 1 本で inspect でき、権限規律も既存 bookkeeping 表と同型になる。
 - **env をフォールバックとして残す案** — 真実が 2 つに戻り、ドリフトが再発する。
+- **control プロセスの起動時検査を ASGI の lifespan へ遅延させる案** (**却下。監督裁定 2026-09-05、WP-1 / WP-2 差し戻し §2**) — composition (`build_control_app()`) の中で同期的に検査する代わりに、アプリ起動イベントで検査する形である。**却下の理由**: **`--lifespan off` で起動したプロセスは検査を丸ごと飛ばし、`surfaces` を欠いた (あるいは宣言と食い違う) capability 文書を無音で配る**。fail-fast は「配る前に止まる」ことが要点であり、起動オプション 1 つで無効化できる置き場は要件を満たさない。**zero-network のテストは明示注入の `assemble_control_stack(…)` を使う** — env 駆動の builder を呼ぶのは実 PG テストと本番の起動経路だけであり、テストの都合で検査を遅らせる必要は無い (§3.7 control)。
 - **廃止 env を無視して警告のみにする案** — AI エージェント運用者にとっては、警告を読み落とす可能性より **fail-fast の明示メッセージ**の方が確実である。ゲートではなくガードレールとして成立するのは、**メッセージが次に打つコマンドを示している**からである。
 - **platform 台帳案 (control-plane の共通表で全 application の適用レベルを持つ)** — 台帳が application DB の外にあると、**DB の restore / clone で台帳と実体がずれる**。実体と同じ DB に置く方が原子的である (D-3 (c) の 1 トランザクション)。一括表示は各 DB を読めば足りる。
 - **台帳表を `public` 以外の専用スキーマ (例 `_platform`) に置く案** — r2db の catalog 除外も RLS 監視ビューも触らずに済む可能性はあるが、**新スキーマの所有と grant を設計し直す必要があり、既存 bookkeeping 表 (`_r2db_schema_revision` / `_mdb_schema_revision` / `_mdb_field_types`) との非対称を生む**。既存の作成儀式 (§1.5 の 5) と PG16 の所有権ハードニングを前提にすると `public` が自然である。却下し、代わりに D-3 (e) で除外集合を拡張する。
@@ -854,6 +927,8 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **LQ4-20 U-1「載せる」案は採用しなかったが、記録として残す** (§5 U-1 の「載せる」側、§6.2)。**将来再検討する場合に先に決める必要がある前提**: (i) **適用レベルを control が得る経路** — control プロセスに全 application DB への到達性を与えるか (単一侵害の影響範囲が広がる)、data-plane が platform DB へ複製する二次情報を置くか (本設計の単一真実の趣旨と衝突する) のいずれかを決めること、(ii) **公開範囲** — `list_applications` は control 資格だけでなく **audit 資格でも読める** (`spec:111` / `:125`) ため、適用状態を audit 資格へ公開してよいかを明示的に決めること (SI-07)、(iii) **契約の形** — `ApplicationStateResult` / `ApplicationsResult.applications[]` は `additionalProperties: false` なので **additive な契約変更 (1.7.0) が必須**であり、1.5.0 / 1.6.0 と同じ版束縛規律 (単独コミットでの契約公開、flip と挙動出荷の同一コミット、vacuity guard) を採ること、(iv) **conformance の射程** — in-process plug は per-application DB を持たないため **4 plug 全数で非空 precondition を持てない可能性が高く**、その場合は射程を `CONDITIONS.md` に開示すること。**骨子は `platform_upgrade: {applied: [<integer>…], pending: [<integer>…]}`** であり (§5 U-1 の契約英文骨子)、**D-4 (b) / D-3 (f) の集合意味に揃える**。
 - **LQ4-19 静的規則の許可リストの鍵は番号の集合である** (§10)。各 peer のテストが自 peer の `migrations/` だけを走査するので、peer 名の導出は要らない。**MitateDB `0006` は自番号の台帳 INSERT を持たないことと `\q` skip 経路を持つことの両方について免除される** (LQ4-10 の許可リストと同一のもの)。
 - **LQ4-21 モジュール定数は同型性対応表の対象外であり、各 peer の単位テストが担保する** (WP-0 最終追補、監督裁定 2026-09-05、裁定 4)。`ms_from_pg_timeout_text` の `_UNIT_MULTIPLIER_MS` / `_PATTERN` はモジュール定数であり、`_ISOMORPHIC_TARGETS` は `ms_from_pg_timeout_text` という**関数**を pin するだけでその内部が参照するモジュール定数までは辿らない。したがって片 peer だけが `_UNIT_MULTIPLIER_MS["h"]` を `3_600_000` から `3_500_000` へドリフトさせても、同型性テストは赤にならない (audit-wp0-delta.log §6 (5) の実測)。**この経路の安全性は各 peer 自身の `tests/test_pg_timeouts.py` の単位別ケース (`h` を含む) が担保する** — 定数を対応表へ追加するのではなく、単位テストの存在が代替の担保であることを記録する。
+- **LQ4-22 書き手 role の特定は宣言表の一次情報で行う (監督裁定 2026-09-05、D-2 (h) 新設)**。WP-1 は `schema.removesuffix("_registry") + "_api"` の命名規則で、WP-2 は `current_user` と `svc_provision` 接尾辞の書き換えで role 名を導出しており、**どちらもコード内の命名規則依存であり両 peer で不一致 (同型性が成立していなかった)**。**§3.10 の固定 role 名は本番の値であり、テスト harness の throwaway prefix と衝突する**という申告は事実として採用した。決定は D-2 (h) の 6 項 — 宣言表の `audit_writer_roles` 行 (migration が `ALTER ROLE` と**同じ psql 変数から同じトランザクションで** seed、`key` の CHECK に追加)、書き手プロセスの**自 role 包含確認 (F-13)** と自 role についての二重検査、control の**宣言された各 role からの導出**と命名規則の撤去、ops `set-platform-timeouts` の対象を宣言表から取ること (role 名引数を持たない)、harness の throwaway prefix seed、行の検証 (非空の文字列配列 / 重複なし / 識別子妥当、落ちれば F-4b)。**却下 2 案**: **(a) 命名規則依存** — 本番で schema 名や role 名が規則を外れた瞬間に**無音で壊れる**。**(b) env で role 名を渡す** — **env 廃止の趣旨に反し、真実が 2 つになる**。**同型性**: `platform_declarations.py` の同名ヘルパは両 peer で名前・シグネチャ・ロジックを揃え、**対応表の行は対の後半 WP (WP-2) が持ち、WP-1 側は WP-2 と同名にする**。作業指示書は WP-1 に完了条件 19〜23 / 変異 16〜20、WP-2 に完了条件 21〜22 / 変異 18〜23 を追補した。
+- **LQ4-23 L6-17 (r2db の `surfaces` 検証の重複) は本フェーズで閉じる (監督裁定 2026-09-05、WP-1 / WP-2 差し戻し §2)**。起草時の r2db は `main.py` / `control_main.py` の `_validate_surface_base_url` の **2 コピー**を持ち、本フェーズの ops 宣言系がそこへ **3 コピー目**を作りかけていた。**決定**: **URL 形式検証の本体は `platform_declarations.validate_surfaces_value` に置き、`main.py` / `control_main.py` / `ops.py` はいずれもこの関数を呼ぶ** (§3.10 の同型性の面)。これにより r2db 側も MitateDB の `surfaces.py` と同じく**単一の検証**になり、**同型性対応表に載る** (LQ4-7 が記した「重複解消の動機」がここで実現する)。**`PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 L6-17 への閉止注記は WP-5 (文書 WP) が日付付きで置く** — 本文は書き換えない (D-6 の 3 と同じ規律)。**フェーズ7候補 L6-20 (d) の当該部分も同じ注記で扱う。**
 
 ---
 

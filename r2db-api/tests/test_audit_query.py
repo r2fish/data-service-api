@@ -14,6 +14,7 @@ already works and tests the READ side built on top of it.
 from __future__ import annotations
 
 import os
+import json
 import secrets
 import subprocess
 import threading
@@ -50,12 +51,12 @@ from r2db_api.auth import AuthContext, ControlCredentialStore, CredentialStore, 
 os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_audit_query_test_import_placeholder")
 os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-ctl-pepper")
 os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-audit-query-test-import-placeholder-app-pepper")
-# Phase 6 WP-2 (design D-2): `build_control_app` unconditionally requires
-# both surfaces vars now -- same `setdefault` guard, same reasoning as the
-# three lines above (this file's own module-level import must not fail on
-# this pytest process' unrelated ambient environment).
-os.environ.setdefault("R2DB_DATA_BASE_URL", "https://r2db-audit-query-test.example.invalid/v1")
-os.environ.setdefault("R2DB_CONTROL_BASE_URL", "https://r2db-audit-query-control-test.example.invalid/control/v1")
+# Q4 phase WP-1 (design D-2(f)): `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_
+# URL` are REMOVED -- `build_control_app` now rejects them outright (F-2)
+# if defined at all, so the two `setdefault` calls a prior phase placed
+# here are gone; `build_control_app()` itself remains zero-network after
+# this phase too (see `control_main.py`'s own docstring), so this module's
+# bare import still never touches the network.
 
 import r2db_api.control_main as control_main  # noqa: E402 -- module object itself (not just `assemble_control_stack`), see `test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env` below
 from r2db_api.control_http import _ROUTES, create_control_app  # noqa: E402
@@ -80,7 +81,18 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    "0008_platform_declarations_and_writer_timeouts.sql",
 )
+
+# Q4 phase WP-1 (design D-2(c)): this file's own `platform` fixture seeds a
+# `surfaces` row WITH `control` (unlike `test_credential_persistence.py`'s
+# own control-less default) -- every real `control_main.build_control_app`
+# built below is a genuine control-plane process, which unconditionally
+# requires `surfaces.control` (design §3.7 control-plane 1-5).
+_DEFAULT_SURFACES_VALUE = {
+    "data": {"base_url": "https://r2db-audit-query-test.example.invalid/v1"},
+    "control": {"base_url": "https://r2db-audit-query-control-test.example.invalid/control/v1"},
+}
 
 # Generous enough that no test below accidentally trips a limit it is not
 # specifically testing (mirrors test_control_plane_service.py's own
@@ -191,6 +203,17 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        with psycopg.connect(control_dsn) as _seed_conn:
+            with _seed_conn.cursor() as _seed_cur:
+                _seed_cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('surfaces', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(schema, "platform_declarations")),
+                    [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+            _seed_conn.commit()
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -263,11 +286,23 @@ def _postgres_harness(platform: types.SimpleNamespace, *, clock=None, audit_stat
     # their own explicit, larger values). The product default (5000ms/
     # 5000ms -> 11s) would make every other test here wait 11 real seconds
     # per write before a row becomes visible.
+    #
+    # Q4 phase WP-1 (design D-1(c)): `assemble_control_stack` no longer
+    # derives `audit_visibility_lag_ms` internally from a timeout pair (it
+    # now derives from `pg_db_role_setting`, a real composition root's own
+    # job -- `r2db_api.control_main.build_control_app`'s `_lifespan`) --
+    # this test helper keeps its own pre-existing public parameter names
+    # (`audit_statement_timeout_ms`/`audit_idle_timeout_ms`) and performs
+    # the SAME `+ 1000` derivation formula itself before calling
+    # `assemble_control_stack`, so every existing call site below (and the
+    # exact `3_000 + 4_000 + 1_000` arithmetic `test_declared_visibility_
+    # lag_ms_is_derived_from_the_two_timeouts` asserts) is unchanged.
+    _statement_ms = audit_statement_timeout_ms if audit_statement_timeout_ms is not None else 200
+    _idle_ms = audit_idle_timeout_ms if audit_idle_timeout_ms is not None else 200
     service, stores = assemble_control_stack(
         controlplane_dsn=platform.controlplane_dsn, app_pepper=APP_PEPPER, control_pepper=CONTROL_PEPPER,
         schema=platform.schema, pool_size=2, limits=limits,
-        audit_statement_timeout_ms=audit_statement_timeout_ms if audit_statement_timeout_ms is not None else 200,
-        audit_idle_timeout_ms=audit_idle_timeout_ms if audit_idle_timeout_ms is not None else 200,
+        audit_visibility_lag_ms=_statement_ms + _idle_ms + 1_000,
         audit_dsn=platform.auditreader_dsn,
     )
     service._clock = clock or service._clock  # noqa: SLF001 -- test-only clock injection, mirrors test_control_plane_service.py's own pattern
@@ -2318,7 +2353,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2388,21 +2423,84 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
         "tests/test_platform_upgrade_ledger_scan.py",
         "_strip_string_literals",
     ),
+    # Q4 phase WP-1/WP-2 additions (design docs/design/Q4_DB_SIDE_SINGLE_
+    # TRUTH_V1.md D-1(b)/(c), D-2(d); work order §4 WP-1/WP-2 変更対象;
+    # monitor ruling 2026-09-05, 裁定 5: the pair's LATER half, WP-2 for
+    # this pair, adds the rows both WPs introduce, in the SAME commit as
+    # the pin-test rename below): the platform-declarations read/validate
+    # helpers and the `pg_db_role_setting`-derived visibility-lag helper --
+    # each peer's own new `platform_declarations.py` module (D-1(b)(i)'s
+    # catalog-declaration read, D-2(d)'s "書き込み時と読み出し時の両方で
+    # 同じ Python の検証関数を通る" value validators, D-1(c)'s derivation
+    # formula), plus the ops-side declaration-write helper both peers'
+    # `ops.py` now carry. Agent C (supervisor integration pass,
+    # rulings-q4-wp12-rework.md sec.5) brought r2db-api's own realization's
+    # body isomorphic to MitateDB-api's reference implementation before
+    # adding this table's own rows -- see this WP's completion report for
+    # the per-symbol convergence direction (which peer's body each row's
+    # text was reconciled onto, and why).
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarationError"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_timeout_env"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_surface_env"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "Surfaces"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarations"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_surfaces_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_coalescing_window_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_audit_writer_roles_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_platform_declarations"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "RoleTimeoutCatalog"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_declared_role_timeouts"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "derive_visibility_lag_ms"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_effective_timeouts_ms"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3c_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_window_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_writer_roles_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f5_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_forward_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_reverse_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f7_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f8_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f9_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
+    # WP-1/WP-2 audit-gaps round (supervisor ruling 2026-09-05, wp12-audit-
+    # gaps.md G4): the derivation formula's own margin constant was a
+    # "載せる" row in design §3.10's 同型性の面 table (the ONLY exclusion
+    # is "peer 名を含む定数", which this is not) but had never actually
+    # been added here. `_isomorphic_symbol_source` above is extended to
+    # resolve a module-level `Assign` (not only a function/class def) so
+    # this row -- a bare constant, not a def -- can resolve at all.
+    (
+        "src/r2db_api/platform_declarations.py",
+        "src/mitatedb_api/platform_declarations.py",
+        "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_58_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
-    time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4): a
-    bare `len(_ISOMORPHIC_TARGETS) == 24` check would not catch a row silently
-    DROPPED and a different, coincidentally-same-length row added in its
-    place -- only pinning the table's own full CONTENT (not merely its
-    length) catches that. One-time human fixation, same character as
-    Phase 5's "走査対象フィールド集合を pin する" test -- a future WP that
-    adds/removes a row edits this assertion deliberately, not by
-    accident.
+    time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4;
+    widened a fourth time by Q4 phase WP-2, monitor ruling 2026-09-05, 裁定
+    5 -- the pair's later half adds both WP-1's and WP-2's own new rows in
+    one commit): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
+    catch a row silently DROPPED and a different, coincidentally-same-
+    length row added in its place -- only pinning the table's own full
+    CONTENT (not merely its length) catches that. One-time human
+    fixation, same character as Phase 5's "走査対象フィールド集合を pin
+    する" test -- a future WP that adds/removes a row edits this
+    assertion deliberately, not by accident.
 
     Self-referential by supervisor ruling (2026-09-04): this function's own
     row, and `_isomorphic_symbol_source`'s, are both IN the table below --
@@ -2427,7 +2525,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_24_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2461,8 +2559,46 @@ def test_isomorphic_target_table_is_pinned_to_its_current_24_rows() -> None:
             "tests/test_platform_upgrade_ledger_scan.py",
             "_strip_string_literals",
         ),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarationError"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_timeout_env"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "reject_removed_surface_env"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "Surfaces"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "PlatformDeclarations"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_surfaces_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_coalescing_window_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_audit_writer_roles_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_platform_declarations"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "RoleTimeoutCatalog"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_declared_role_timeouts"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "derive_visibility_lag_ms"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "read_effective_timeouts_ms"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_writer_role_timeouts"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_control_surface_consistency"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "require_control_surface_declared"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f1_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f2_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f3c_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_window_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f4b_writer_roles_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f5_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_forward_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f6_reverse_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f7_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f8_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f9_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
+        (
+            "src/r2db_api/platform_declarations.py",
+            "src/mitatedb_api/platform_declarations.py",
+            "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 24
+    assert len(_ISOMORPHIC_TARGETS) == 58
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2487,14 +2623,27 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
     template parameter -- now that `_ISOMORPHIC_TARGETS` carries one
     literal path per side (a (r2db path, MitateDB path, symbol) triple)
     rather than a single peer-name-independent path plus a template slot
-    only one row ever needed."""
+    only one row ever needed.
+
+    WP-1/WP-2 audit-gaps round (supervisor ruling 2026-09-05, wp12-audit-
+    gaps.md G4): also matches a module-level `Assign` whose target is a
+    bare `Name` equal to `symbol` -- `_ISOMORPHIC_TARGETS` rows are not
+    only function/class definitions any more (`VISIBILITY_LAG_CLOCK_SKEW_
+    MARGIN_MS = 1000` is a plain module constant), and the prior form
+    returned `None` for any such row, silently excusing it from the
+    isomorphism check rather than comparing it."""
     path = peer_root / relative_path
     if not path.exists():
         return None
     source = path.read_text()
     tree = _ast.parse(source, filename=str(path))
     node = next(
-        (n for n in tree.body if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)) and n.name == symbol),
+        (
+            n
+            for n in tree.body
+            if (isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)) and n.name == symbol)
+            or (isinstance(n, _ast.Assign) and any(isinstance(t, _ast.Name) and t.id == symbol for t in n.targets))
+        ),
         None,
     )
     if node is None:
@@ -2570,7 +2719,7 @@ def _normalize(source: str) -> str:
     each carry BOTH peers' package names as literal path DATA in the
     SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
     mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
-    pinned_to_its_current_24_rows` literally asserts that whole table
+    pinned_to_its_current_58_rows` literally asserts that whole table
     -- so its own body mentions both names too. A single-name
     substitution leaves the OTHER peer's name untouched differently
     on each side (r2db's own normalization leaves "mitatedb_api"
@@ -3084,10 +3233,11 @@ def test_build_control_app_declares_audit_query_status_from_r2db_audit_dsn_env(p
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
-            # Phase 6 WP-2 (design D-2): unconditionally required by
-            # `build_control_app` now.
-            "R2DB_DATA_BASE_URL": "https://r2db-audit-query-test.example.invalid/v1",
-            "R2DB_CONTROL_BASE_URL": "https://r2db-audit-query-control-test.example.invalid/control/v1",
+            # Q4 phase WP-1 (design D-2(f)): surfaces are now a DB-side
+            # declaration (this file's own `platform` fixture seeds a
+            # working `surfaces` row, `_DEFAULT_SURFACES_VALUE`) -- these
+            # two env vars are REMOVED and would now fail startup (F-2) if
+            # still set here.
         }
         headers = {"authorization": f"Bearer {compose_bearer_locator(credential_id, secret)}"}
 
@@ -3155,10 +3305,11 @@ def test_build_control_app_request_bytes_limit_matches_the_declared_one(platform
             "R2DB_CONTROL_CREDENTIAL_PEPPER": CONTROL_PEPPER,
             "R2DB_CREDENTIAL_PEPPER": APP_PEPPER,
             "R2DB_PLATFORM_SCHEMA": platform.schema,
-            # Phase 6 WP-2 (design D-2): unconditionally required by
-            # `build_control_app` now.
-            "R2DB_DATA_BASE_URL": "https://r2db-audit-query-test.example.invalid/v1",
-            "R2DB_CONTROL_BASE_URL": "https://r2db-audit-query-control-test.example.invalid/control/v1",
+            # Q4 phase WP-1 (design D-2(f)): surfaces are now a DB-side
+            # declaration (this file's own `platform` fixture seeds a
+            # working `surfaces` row, `_DEFAULT_SURFACES_VALUE`) -- these
+            # two env vars are REMOVED and would now fail startup (F-2) if
+            # still set here.
         }
 
         # (i) declaration: env unset -> the untouched default (1_048_576,

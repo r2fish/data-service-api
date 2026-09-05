@@ -40,21 +40,20 @@ BASE_URL = "http://mitatedb-control-main-test.invalid"
 
 _APP_PEPPER = "control-main-test-app-pepper-00000"
 _CONTROL_PEPPER = "control-main-test-ctl-pepper-00000"
-# Phase 6 WP-3 (design D-2): both required from here on (see
-# `config.FoundationConfig.from_env`/`control_composition.
-# build_control_service`).
-_DATA_BASE_URL = "http://mitatedb-control-main-test.example.invalid/v1"
-_CONTROL_BASE_URL = "http://mitatedb-control-main-test.example.invalid/control/v1"
 
 
 def _env(control_platform, **overrides) -> dict[str, str]:
+    # Q4 phase (design D-2, work order §4 WP-2 変更対象 D): `MITATEDB_
+    # DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are REMOVED env vars (F-2)
+    # -- `surfaces` now comes from `<registry>.platform_declarations`,
+    # already seeded by `control_plane_harness.bootstrap_control_platform`
+    # (both `data`/`control`, matching this composition root's own
+    # unconditional requirement for a control surface).
     env = {
         "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": control_platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": control_platform.registry_schema,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     env.update(overrides)
     return env
@@ -125,6 +124,37 @@ def test_build_control_app_rejects_identical_peppers(control_main_module, contro
         control_main_module.build_control_app(env)
 
 
+@pytest.mark.parametrize(
+    "removed_var,value",
+    [
+        ("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", ""),
+        ("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", "5000"),
+        ("MITATEDB_AUDIT_IDLE_TIMEOUT_MS", ""),
+        ("MITATEDB_AUDIT_IDLE_TIMEOUT_MS", "5000"),
+        ("MITATEDB_DATA_BASE_URL", ""),
+        ("MITATEDB_DATA_BASE_URL", "https://removed-env.example.invalid/v1"),
+        ("MITATEDB_CONTROL_BASE_URL", ""),
+        ("MITATEDB_CONTROL_BASE_URL", "https://removed-env.example.invalid/control/v1"),
+    ],
+)
+def test_build_control_service_rejects_every_removed_env_var_through_the_real_composition_root(
+    control_platform, removed_var: str, value: str,
+) -> None:
+    """{scratchpad}/wp12-audit-gaps.md G5 (WP-2 completion condition
+    23(a)): the control-plane half of the same gap `test_main.py::test_
+    build_app_rejects_every_removed_env_var_through_the_real_composition_
+    root` closes for the data plane -- `reject_removed_timeout_env`/
+    `reject_removed_surface_env` were exercised ONLY as bare function
+    calls in `test_platform_declarations.py`, never through `build_
+    control_service` itself (`control_composition.py:104-105`). 8 cases:
+    {the 2 removed timeout vars, the 2 removed surface vars} x {empty
+    string, a real-looking value}."""
+    env = _env(control_platform)
+    env[removed_var] = value
+    with pytest.raises(RuntimeError, match="no longer read"):
+        build_control_service(env)
+
+
 def test_build_control_app_mounts_a_real_working_control_v1_surface(control_main_module, control_platform) -> None:
     """End-to-end proof that `control_main.build_control_app` (the literal
     uvicorn entry point) produces a genuinely working `/control/v1`
@@ -173,6 +203,59 @@ def test_build_control_app_mounts_a_real_working_control_v1_surface(control_main
                              json_body={"application_id": "controlmainapp", "role": "runtime"}))
     assert issue_resp.status_code == 200, issue_resp.text
     assert issue_resp.json()["role"] == "runtime"
+
+
+def test_build_control_app_capabilities_document_is_a_startup_snapshot_not_re_read_per_request(control_main_module, control_platform) -> None:
+    """N-3 (monitor ruling 2026-09-05, delta review §4): the control-plane
+    half of completion condition 27 (U-3, startup snapshot) had no test --
+    only the data-plane half did (`test_main.py::test_build_app_
+    capabilities_document_is_a_startup_snapshot_not_re_read_per_request`).
+    `build_control_service` reads `platform_declarations` exactly ONCE and
+    passes `surfaces=` into `ControlPlaneService.__init__` (`self.
+    _surfaces`) -- `control_capabilities()` never re-reads the DB -- so
+    this pins behavior that already exists (裁定: 設計外の機構は足さない),
+    mirroring r2db-api's own sibling test in `test_surfaces_env.py`."""
+    app = control_main_module.build_control_app(_env(control_platform))
+
+    service = build_control_service(_env(control_platform))
+    backend = service._backend  # test-only reach-in, mirrors this file's own convention
+    with backend.unit_of_work() as work:
+        credential_id, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+
+    rotate_resp = _run(_apost(app, f"/control/v1/credentials/{credential_id}/rotate",
+                              headers={"authorization": f"Bearer {secret}"}))
+    assert rotate_resp.status_code == 200, rotate_resp.text
+    secret = rotate_resp.json()["secret"]
+    auth_header = {"authorization": f"Bearer {secret}"}
+
+    before = _run(_aget(app, "/control/v1/capabilities", headers=auth_header))
+    assert before.status_code == 200, before.text
+    before_surfaces = before.json()["surfaces"]
+
+    schema = control_platform.registry_schema
+    admin = psycopg.connect(control_platform.provision_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(
+                sql.SQL("UPDATE {table} SET value = %s::jsonb WHERE key = 'surfaces'").format(
+                    table=sql.Identifier(schema, "platform_declarations")),
+                ['{"data": {"base_url": "https://control-snapshot-changed.example.invalid/v1"}, '
+                 '"control": {"base_url": "https://control-snapshot-changed.example.invalid/control/v1"}}'],
+            )
+        try:
+            after = _run(_aget(app, "/control/v1/capabilities", headers=auth_header))
+            assert after.status_code == 200, after.text
+            assert after.json()["surfaces"] == before_surfaces
+        finally:
+            import json
+            with admin.cursor() as cur:
+                cur.execute(
+                    sql.SQL("UPDATE {table} SET value = %s::jsonb WHERE key = 'surfaces'").format(
+                        table=sql.Identifier(schema, "platform_declarations")),
+                    [json.dumps(before_surfaces)],
+                )
+    finally:
+        admin.close()
 
 
 def test_build_control_app_request_bytes_limit_matches_the_declared_one(control_main_module, control_platform) -> None:

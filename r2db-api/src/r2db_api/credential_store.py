@@ -1162,8 +1162,6 @@ class PostgresControlAuditSink:
         pool_size: int | None = None,
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
-        statement_timeout_ms: int | None = None,
-        idle_in_transaction_session_timeout_ms: int | None = None,
     ) -> None:
         validate_identifier(schema)
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
@@ -1172,35 +1170,51 @@ class PostgresControlAuditSink:
             pool_kwargs["connect_timeout"] = connect_timeout
         if acquire_timeout is not None:
             pool_kwargs["acquire_timeout"] = acquire_timeout
-        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): the
-        # connection that writes `control_audit` gets the SAME two SESSION-
-        # level timeouts as the one that writes `application_audit`
-        # (`PostgresApplicationAuditSink`, below) -- D-6's visibility-lag
-        # derivation depends on BOTH being enforced, not just the
-        # application-plane side; a long-held control-plane state-change
-        # transaction would otherwise let a `control_audit` row slip past a
-        # cursor the same way an unbounded application-plane one would.
-        # `None` (the default) keeps every pre-Phase-4 caller of this class
-        # (this repository's own tests that build a bare `PostgresControl
-        # AuditSink` for reasons unrelated to timeout behaviour) unchanged;
-        # `control_main.assemble_control_stack` is the only caller that
-        # passes concrete values, read by `control_main.build_control_app`
-        # from `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS`
-        # -- review n-1: this comment previously named a `R2DB_CONTROL_
-        # AUDIT_*` prefix that `control_main.py` has never actually read;
-        # the real names are identical to `r2db_api.main`'s own (deliberate
-        # -- both processes share one timeout policy, see `control_main.
-        # assemble_control_stack`'s own comment at its call site).
-        if statement_timeout_ms is not None:
-            pool_kwargs["statement_timeout_ms"] = statement_timeout_ms
-        if idle_in_transaction_session_timeout_ms is not None:
-            pool_kwargs["idle_in_transaction_session_timeout_ms"] = idle_in_transaction_session_timeout_ms
+        # Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md
+        # D-1(b)): this class no longer sets `statement_timeout`/
+        # `idle_in_transaction_session_timeout` itself -- the connection
+        # that writes `control_audit` (`r2dbsvc_controlplane`) now carries
+        # both as a PostgreSQL role setting applied by migration `0008`
+        # (`ALTER ROLE ... SET`), the single source of truth `visibility_
+        # lag_ms` is derived from. `r2db_api.control_main.build_control_app`
+        # double-checks this connection's actual effective value against
+        # that role setting SYNCHRONOUSLY at startup (`effective_timeouts_
+        # ms` below, `r2db_api.platform_declarations.check_writer_role_
+        # timeouts`) rather than this class setting anything itself.
         self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
         self._schema = schema
         self._table = sql.Identifier(schema, "control_audit")
 
     def close(self) -> None:
         self._pool.close_all()
+
+    def borrow_connection(self):
+        """Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1): exposes
+        this sink's OWN pool so `platform_declarations.check_writer_role_
+        timeouts` can run its dual check on a connection whose login role
+        actually IS the `control_audit` writer role (`r2dbsvc_
+        controlplane`) -- a role setting only takes effect at login time,
+        so no other connection would observe this role's true effective
+        value (design D-1(c))."""
+        return self._pool.connection()
+
+    def effective_timeouts_ms(self) -> dict[str, int]:
+        """Q4 phase WP-1 (design D-1(b)(ii)): borrows one connection from
+        this sink's OWN pool (login role = the actual `control_audit`
+        writer role, `r2dbsvc_controlplane`) and reads back `statement_
+        timeout`/`idle_in_transaction_session_timeout` from `pg_settings`
+        -- the ms-integer effective value PostgreSQL is actually enforcing
+        on THIS connection, as opposed to what `pg_db_role_setting` merely
+        declares (`r2db_api.platform_declarations.read_declared_role_
+        timeouts`). `pg_settings.setting` for these two GUCs is already a
+        bare ms integer (never unit-suffixed), so no text parsing is
+        needed -- see `r2db_api.platform_declarations.read_effective_
+        timeouts_ms`'s own docstring."""
+        from .platform_declarations import read_effective_timeouts_ms
+
+        with self._pool.connection() as conn:
+            statement_ms, idle_ms = read_effective_timeouts_ms(conn)
+        return {"statement_timeout": statement_ms, "idle_in_transaction_session_timeout": idle_ms}
 
     def append(
         self,
@@ -1333,8 +1347,6 @@ class PostgresApplicationAuditSink:
         pool_size: int | None = None,
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
-        statement_timeout_ms: int | None = None,
-        idle_in_transaction_session_timeout_ms: int | None = None,
     ) -> None:
         validate_identifier(schema)
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
@@ -1343,20 +1355,39 @@ class PostgresApplicationAuditSink:
             pool_kwargs["connect_timeout"] = connect_timeout
         if acquire_timeout is not None:
             pool_kwargs["acquire_timeout"] = acquire_timeout
-        # Phase 4 (design D-6/N-3): see `PostgresControlAuditSink.__init__`'s
-        # identical comment -- `r2db_api.main.build_app` is the only caller
-        # that passes concrete values, read from `R2DB_AUDIT_STATEMENT_
-        # TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` (both default 5000).
-        if statement_timeout_ms is not None:
-            pool_kwargs["statement_timeout_ms"] = statement_timeout_ms
-        if idle_in_transaction_session_timeout_ms is not None:
-            pool_kwargs["idle_in_transaction_session_timeout_ms"] = idle_in_transaction_session_timeout_ms
+        # Q4 phase WP-1 (design D-1(b)): see `PostgresControlAuditSink.
+        # __init__`'s identical comment -- this class no longer sets
+        # `statement_timeout`/`idle_in_transaction_session_timeout` itself;
+        # `r2dbsvc_api` (the `application_audit` writer role) carries both
+        # as a PostgreSQL role setting applied by migration `0008`,
+        # double-checked at startup by `r2db_api.main.build_app`
+        # (`effective_timeouts_ms` below).
         self._pool = _RolePool(dsn, schema=schema, maxconn=maxconn, **pool_kwargs)
         self._schema = schema
         self._table = sql.Identifier(schema, "application_audit")
 
     def close(self) -> None:
         self._pool.close_all()
+
+    def borrow_connection(self):
+        """Q4 phase WP-1 rework (rulings-q4-wp12-rework.md sec.1): exposes
+        this sink's OWN pool so `platform_declarations.check_writer_role_
+        timeouts` can run its dual check on a connection whose login role
+        actually IS the `application_audit` writer role (`r2dbsvc_api`) --
+        see `PostgresControlAuditSink.borrow_connection`'s identical
+        docstring."""
+        return self._pool.connection()
+
+    def effective_timeouts_ms(self) -> dict[str, int]:
+        """Q4 phase WP-1 (design D-1(b)(ii)): see `PostgresControlAuditSink.
+        effective_timeouts_ms`'s identical docstring -- this sink's own
+        pool connection logs in as `r2dbsvc_api`, the `application_audit`
+        writer role."""
+        from .platform_declarations import read_effective_timeouts_ms
+
+        with self._pool.connection() as conn:
+            statement_ms, idle_ms = read_effective_timeouts_ms(conn)
+        return {"statement_timeout": statement_ms, "idle_in_transaction_session_timeout": idle_ms}
 
     def append(
         self,

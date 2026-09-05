@@ -12,7 +12,24 @@ here -- CCR-14 is undecided -- application slugs served are declared by
 *configuration*, a static control-plane form CCR-14 already anticipates as
 legitimate).
 
-Environment variable contract (P2-D5):
+Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work
+order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-1):
+`surfaces` and the two `application_audit` writer-connection timeouts are
+no longer configured from this process' own environment at all -- both are
+now DB-side declarations this process reads at startup from
+`r2dbsvc_registry.platform_declarations` (`surfaces`, `audit_coalescing_
+window_ms`, migration `0008`) and `pg_db_role_setting` (`r2dbsvc_api`'s own
+`statement_timeout`/`idle_in_transaction_session_timeout` role setting,
+same migration). `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_BASE_URL`/`R2DB_AUDIT_
+STATEMENT_TIMEOUT_MS`/`R2DB_AUDIT_IDLE_TIMEOUT_MS` are REJECTED outright if
+still defined in this process' env mapping, whatever their value (design
+D-1(d)/D-2(f); see `_reject_removed_env_vars` below) -- the only way to
+change either declaration is now `python -m r2db_api.ops set-platform-
+timeouts`/`declare-surfaces`/`declare-coalescing-window`, followed by
+restarting both this process and `r2db_api.control_main` (design §9.2; the
+read is a startup-time snapshot, U-3).
+
+Environment variable contract (P2-D5, updated Q4 WP-1):
 
     R2DB_CREDENTIAL_PEPPER               required -- verifier HMAC pepper
     R2DB_PLATFORM_DSN                    required -- `r2dbsvc_api` role DSN
@@ -66,24 +83,12 @@ Environment variable contract (P2-D5):
                                           is the actual authority for whether
                                           a control plane is reachable, this
                                           declaration is only ever the
-                                          deployer's stated intent).
-    R2DB_AUDIT_STATEMENT_TIMEOUT_MS       optional, default 5000 (Phase 4,
-                                          design PHASE4_DURABLE_AUDIT_SINK_
-                                          V1.md D-6/N-3) -- SESSION-level
-                                          `statement_timeout` on the
-                                          connection that writes
-                                          `application_audit`. Changing this
-                                          changes the derived `visibility_
-                                          lag_ms` a WP-2(b) `audit_query`
-                                          declaration would publish
-                                          (`r2db_api.control_main` reads the
-                                          identical env-var name for the
-                                          `control_audit` writer connection
-                                          -- both must agree).
-    R2DB_AUDIT_IDLE_TIMEOUT_MS            optional, default 5000 -- SESSION-
-                                          level `idle_in_transaction_
-                                          session_timeout` on the same
-                                          connection; see the note above.
+                                          deployer's stated intent). Q4 WP-1
+                                          adds a startup cross-check (F-6)
+                                          against the DB-side `surfaces.
+                                          control` declaration -- see
+                                          `platform_declarations.require_
+                                          control_status_matches_surfaces`.
     R2DB_AUDIT_BUFFER_CAPACITY            optional, default 1000 -- D-4's
                                           bounded in-memory buffer capacity
                                           for ordinary (buffer-class)
@@ -96,38 +101,24 @@ Environment variable contract (P2-D5):
                                           (D-4's periodic flush trigger); a
                                           latency knob only, never a
                                           correctness one.
-    R2DB_DATA_BASE_URL                    required (Phase 6 WP-2, design
-                                          docs/design/PHASE6_CONTRACT_160_
-                                          CLIENT_DISCOVERY_V1.md D-2) -- this
-                                          deployment's own absolute data-
-                                          surface base URL (must end with
-                                          `/v1`, no trailing slash),
-                                          declared as `CapabilityDocument.
-                                          surfaces.data.base_url`. A
-                                          deployer's own stated fact, never
-                                          derived from a request's Host
-                                          header.
-    R2DB_CONTROL_BASE_URL                 required whenever `R2DB_CONTROL_
-                                          PLANE_STATUS` is other than
-                                          `unavailable` (design D-2's
-                                          conditional-omission rule) --
-                                          this deployment's own absolute
-                                          control-surface base URL (must
-                                          end with `/control/v1`, no
-                                          trailing slash), declared as
-                                          `surfaces.control.base_url`. Read
-                                          by BOTH this process and `r2db_
-                                          api.control_main` (the SAME two
-                                          variable names, so both
-                                          processes' capability documents
-                                          can return the identical
-                                          `surfaces` object).
+
+REMOVED (Q4 WP-1, rejected outright if still defined -- see
+`_reject_removed_env_vars`): `R2DB_AUDIT_STATEMENT_TIMEOUT_MS`, `R2DB_
+AUDIT_IDLE_TIMEOUT_MS`, `R2DB_DATA_BASE_URL`, `R2DB_CONTROL_BASE_URL`.
 
 Startup failure policy (P2-D5): missing configuration, an application slug
 named in `R2DB_SERVE_APPS` that is not registered in the platform registry,
 and a registered-but-disabled slug are all import-time (`build_app`)
 failures -- "uzurusaku ochiru" (loudly failing to start) rather than
-silently serving a subset. There is no partial-startup mode.
+silently serving a subset. There is no partial-startup mode. Q4 WP-1 adds
+the DB-side declaration/role-setting checks above to this same fail-fast
+policy -- this process is ALREADY network-dependent at `build_app()` time
+(`_load_registry_rows`, pre-Q4), so folding the new checks into the same
+synchronous call adds no new architectural property (contrast with
+`r2db_api.control_main`, which defers its own equivalent checks to ASGI
+lifespan startup specifically to preserve THAT module's own pre-existing
+zero-network `build_control_app()` contract -- see that module's
+docstring).
 """
 from __future__ import annotations
 
@@ -136,51 +127,35 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
 import psycopg
 from psycopg import sql
 from starlette.types import ASGIApp
 
 from .credential_store import (
-    DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
-    DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
     DEFAULT_SCHEMA,
     PostgresApplicationAuditSink,
     PostgresCredentialStore,
 )
 from .http import create_app
+from . import platform_declarations
+from .platform_declarations import (
+    check_control_surface_consistency,
+    check_writer_role_timeouts,
+    read_platform_declarations,
+    reject_removed_surface_env,
+    reject_removed_timeout_env,
+)
 from .postgres import PostgresCell, default_pool_manager
 from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
-
-# Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3; WP-2(a) fix
-# round 2 review N-6): the two SESSION-level timeout defaults the
-# connection that writes `application_audit` carries for its entire
-# lifetime are now `credential_store.DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS`/
-# `DEFAULT_AUDIT_IDLE_TIMEOUT_MS` -- ONE shared definition,
-# `r2db_api.control_main` imports the SAME names for its own
-# `control_audit` writer connection, rather than each composition root
-# maintaining its own `5000` literal that could silently drift apart.
-# `visibility_lag_ms` (a WP-2(b) `audit_query` declaration concern) is
-# derived from these two plus 1s of clock-skew margin; changing either
-# default changes that derived value for BOTH processes at once (5s/5s ->
-# an 11s derived lag, design §6.1's own stated defaults).
-#
-# The periodic buffer-flush interval below is likewise imported from
-# `r2db_api.service` (`_DEFAULT_AUDIT_FLUSH_INTERVAL_S`) rather than
-# defined here -- it doubles as `_AuditBuffer`'s own default minimum
-# overflow-alert interval (review N-2), so it has to be the SAME value the
-# `DataService` this composition root builds actually uses, not a second,
-# independently-set literal.
 
 # R-9 (CCR-14 WP-5): the only two values `DataService.__init__`'s own
 # `control_plane_status` parameter accepts -- kept in sync deliberately
 # (service.py's constructor validates independently too, so a caller other
 # than this composition root gets the identical guard).
 _VALID_CONTROL_PLANE_STATUSES = {"enabled", "unavailable"}
-
 
 def _control_plane_status(env: Mapping[str, str]) -> str:
     """Reads `R2DB_CONTROL_PLANE_STATUS` (default `unavailable`) and fails
@@ -203,71 +178,6 @@ def _require(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required to start r2db_api.main:app")
     return value
-
-
-def _validate_surface_base_url(name: str, raw: str, *, suffix: str) -> str:
-    """Phase 6 WP-2 (design D-2): the SHAPE checks `R2DB_DATA_BASE_URL`/
-    `R2DB_CONTROL_BASE_URL` must pass at startup -- same fail-loud
-    discipline as `_control_plane_status` above (`RuntimeError` naming the
-    variable, never a silent fallback). Deliberately checked as THREE
-    separate, independent conditions (not folded into one `str.endswith`
-    check) -- design's own four malformed forms (relative URL / wrong
-    suffix / trailing slash / absent) are independently observable this
-    way: a value like `https://example.invalid/v1/` (the CORRECT suffix
-    plus one trailing slash) passes the suffix check below on its
-    slash-stripped form and is caught ONLY by the dedicated trailing-slash
-    check, so that check is independently load-bearing rather than a
-    special case the suffix check would have caught anyway. `absent` is
-    the caller's own concern (this function is only ever called with a
-    non-empty `raw`); this function only ever validates a value that was
-    actually given. Only the URL's SHAPE is checked -- whether `data`/
-    `control` actually agree with each other, or resolve to a real
-    listener, is deliberately NOT this function's job (design's own
-    "配備者の責任" ruling, L6-5a): no cross-check between the two variables
-    is invented here.
-    """
-    parsed = urlsplit(raw)
-    if not parsed.scheme or not parsed.netloc:
-        raise RuntimeError(f"{name} must be an absolute URL, got {raw!r}")
-    without_trailing_slash = raw[:-1] if raw.endswith("/") else raw
-    if not without_trailing_slash.endswith(suffix):
-        raise RuntimeError(f"{name} must end with {suffix!r}, got {raw!r}")
-    # Coordinator item 7(ii) (reviewer O4, 2026-09-04 review): `/control/
-    # v1` itself ends with the substring `/v1`, so `R2DB_DATA_BASE_URL`'s
-    # own `suffix="/v1"` check above alone would ACCEPT a value that is
-    # actually a control-surface URL (e.g. `https://h/control/v1`) --
-    # `R2DB_CONTROL_BASE_URL`'s own check needs no symmetric guard (a
-    # bare `/v1`-ending value never satisfies its `suffix="/control/v1"`
-    # check in the first place). Exclusive: rejects `R2DB_DATA_BASE_URL`
-    # ending in `/control/v1`.
-    if suffix == "/v1" and without_trailing_slash.endswith("/control/v1"):
-        raise RuntimeError(f"{name} must end with {suffix!r}, not '/control/v1', got {raw!r}")
-    if raw.endswith("/"):
-        raise RuntimeError(f"{name} must not end with a trailing slash, got {raw!r}")
-    return raw
-
-
-def _surfaces(env: Mapping[str, str], *, control_plane_status: str) -> dict[str, Any]:
-    """Phase 6 WP-2 (design D-2): reads `R2DB_DATA_BASE_URL` (always
-    required -- `surfaces.data` is an unconditional 1.6.0 obligation) and
-    `R2DB_CONTROL_BASE_URL` (required only when `control_plane_status` is
-    other than `unavailable` -- a deployment declaring no control surface
-    omits `surfaces.control` entirely, design's own conditional-omission
-    rule). Both env var names are shared with `control_main.py`'s own
-    identically-named function -- the data-plane and control-plane
-    processes are deliberately configured from the SAME two variables so
-    both capability documents can return the identical `surfaces` object
-    (design's own "両プロセスに同じ2変数を配る" instruction); this function
-    does not (and structurally cannot) verify that the sibling process was
-    actually given the same values -- see `_validate_surface_base_url`'s
-    own docstring on why that cross-check is not invented here.
-    """
-    data_base_url = _require(env, "R2DB_DATA_BASE_URL")
-    surfaces: dict[str, Any] = {"data": {"base_url": _validate_surface_base_url("R2DB_DATA_BASE_URL", data_base_url, suffix="/v1")}}
-    if control_plane_status != "unavailable":
-        control_base_url = _require(env, "R2DB_CONTROL_BASE_URL")
-        surfaces["control"] = {"base_url": _validate_surface_base_url("R2DB_CONTROL_BASE_URL", control_base_url, suffix="/control/v1")}
-    return surfaces
 
 
 def _optional_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -368,6 +278,18 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     assembly logic against a real, throwaway-provisioned local PostgreSQL
     platform database without needing to reload this module or mutate
     `os.environ` for the whole test process.
+
+    Q4 phase WP-1 startup sequence (design §3.7, data-plane 1-8): (1) basic
+    env reads, (2) reject the four removed env vars (F-1/F-2) whatever
+    their value, (3) the platform connection this process already made
+    eagerly pre-Q4 (`_load_registry_rows`), (4) read `platform_
+    declarations` (F-8 if the table itself is missing), (5) validate
+    `surfaces`/`audit_coalescing_window_ms` (F-3/F-4 if a row is missing,
+    F-5/F-4b/F-6 if a present value is malformed), (6) the writer-role
+    double-check (F-7/F-10/F-11 against `pg_db_role_setting`, F-9 against
+    this process' own writer pool's effective `pg_settings` value), (7)
+    build the audit sink (no SESSION `SET` -- design D-1(b)), (8) wire
+    `surfaces`/the coalescing window into `DataService`.
     """
     env = env if env is not None else os.environ
 
@@ -376,7 +298,13 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     schema = env.get("R2DB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
     slugs = _parse_served_apps(_require(env, "R2DB_SERVE_APPS"))
     control_plane_status = _control_plane_status(env)
-    surfaces = _surfaces(env, control_plane_status=control_plane_status)
+
+    # Step 2 (F-1/F-2): must run before anything else touches the network
+    # -- a deployer who left one of these four defined must find out
+    # immediately, not after this process has already opened a platform
+    # connection for an unrelated reason.
+    reject_removed_timeout_env(env, names=platform_declarations.REMOVED_TIMEOUT_ENV)
+    reject_removed_surface_env(env, names=platform_declarations.REMOVED_SURFACE_ENV, schema=schema)
 
     app_dsns: dict[str, tuple[str, str]] = {}
     for slug in slugs:
@@ -387,6 +315,8 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             raise RuntimeError(f"{runtime_name} and {developer_name} are both required for application {slug!r} named in R2DB_SERVE_APPS")
         app_dsns[slug] = (runtime_dsn, developer_dsn)
 
+    # Step 3 (existing, pre-Q4): the platform connection this process
+    # already made eagerly to validate R2DB_SERVE_APPS.
     registry = _load_registry_rows(platform_dsn, schema, slugs)
     for slug in slugs:
         row = registry.get(slug)
@@ -406,6 +336,29 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         if not row["provisioned"]:
             raise RuntimeError(f"application {slug!r} named in R2DB_SERVE_APPS is registered but not yet provisioned in the platform registry ({schema}.applications) -- provision it (0003_provision_application.sql) or remove it from R2DB_SERVE_APPS")
 
+    # Steps 4-5 (Q4 D-2, F-8/F-3/F-4/F-5/F-4b/F-6): the DB-side
+    # declarations, replacing the pre-Q4 env-based `_surfaces(env, ...)`.
+    # `read_platform_declarations` needs only a SELECT-granted connection
+    # (never the writer sink's own pool) -- this is a short-lived,
+    # dedicated connection, closed immediately after, mirroring `_load_
+    # registry_rows`'s own one-shot-connection pattern above.
+    try:
+        _declarations_conn = psycopg.connect(platform_dsn, connect_timeout=_PLATFORM_CONNECT_TIMEOUT_S)
+    except psycopg.Error as exc:
+        raise RuntimeError(f"could not connect to read {schema}.platform_declarations: {exc}") from exc
+    try:
+        declarations = read_platform_declarations(
+            _declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.MIGRATION_NUMBER,
+        )
+    finally:
+        _declarations_conn.close()
+    check_control_surface_consistency(declarations.surfaces, control_plane_status, ops_module=platform_declarations.PEER_MODULE)
+    surfaces: dict[str, Any] = {"data": {"base_url": declarations.surfaces.data_base_url}}
+    if declarations.surfaces.control_base_url is not None:
+        surfaces["control"] = {"base_url": declarations.surfaces.control_base_url}
+    coalescing_window_ms = declarations.audit_coalescing_window_ms
+
     # Computed from `env` (this function's own parameter), and always
     # passed explicitly below -- not left as `None` for `PostgresCredential
     # Store` to default on its own, which would silently read the real
@@ -415,21 +368,30 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # of being fully driven by its argument for testability.
     platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
     credentials = PostgresCredentialStore(platform_dsn, pepper=pepper, schema=schema, pool_size=platform_pool_size)
-    # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6): the durable
-    # application-plane audit sink -- the SAME `R2DB_PLATFORM_DSN` (already
-    # `r2dbsvc_api`, which migration `0007_application_audit.sql` grants
-    # INSERT-only on `application_audit`) `PostgresCredentialStore` above
-    # already connects with; this is a second, independent pool against
-    # that same role/database, not a shared connection (D-1(c): "書き手 =
-    # data-plane プロセスが既に保持している platform 接続"). The two
-    # SESSION-level timeouts are set once, at connect time, on every
-    # connection this pool ever opens (D-6/N-3's visibility-lag basis).
-    audit_statement_timeout_ms = _optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
-    audit_idle_timeout_ms = _optional_int(env, "R2DB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
-    durable_audit = PostgresApplicationAuditSink(
-        platform_dsn, schema=schema, pool_size=platform_pool_size,
-        statement_timeout_ms=audit_statement_timeout_ms, idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
-    )
+    # Step 7 (Q4 D-1(b)): the durable application-plane audit sink -- the
+    # SAME `R2DB_PLATFORM_DSN` (already `r2dbsvc_api`, which migration
+    # `0007_application_audit.sql` grants INSERT-only on `application_
+    # audit`) `PostgresCredentialStore` above already connects with; this
+    # is a second, independent pool against that same role/database, not a
+    # shared connection (D-1(c): "書き手 = data-planeプロセスが既に保持して
+    # いるplatform接続"). No SESSION `SET` for either timeout -- both are
+    # now a `pg_db_role_setting` role setting, migration `0008` (D-1(a)).
+    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema, pool_size=platform_pool_size)
+
+    # Step 6 (Q4 D-1(b), F-13/F-7/F-9/F-10/F-11; rework D-2(h)): the
+    # self-role inclusion check (F-13) followed by the writer-role double
+    # check, run on a connection BORROWED FROM `durable_audit`'S OWN POOL
+    # (login role = the actual `application_audit` writer role -- a role
+    # setting only takes effect at login time, design D-1(c)) -- never a
+    # naming-convention-derived role name (rejected, rulings-q4-writer-
+    # roles.md): the role set comes exclusively from the declared
+    # `audit_writer_roles` row this process just read above.
+    with durable_audit.borrow_connection() as _writer_conn:
+        check_writer_role_timeouts(
+            _writer_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
+            ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
     audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
 
@@ -456,6 +418,13 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status,
         durable_audit=durable_audit, audit_buffer_capacity=audit_buffer_capacity,
         surfaces=surfaces,
+        # Step 8 (Q4 D-2(e)): the DB-declared coalescing window, ms ->
+        # seconds -- replaces the pre-Q4 hardcoded default (`DataService`'s
+        # own `_DENIAL_COALESCE_WINDOW_S` default, still used as the
+        # migration `0008` seed value's SOURCE constant, `r2db_api.
+        # audit_query.DECLARED_COALESCING_WINDOW_MS`, but no longer read
+        # directly by this composition root).
+        denial_coalesce_window_s=coalescing_window_ms / 1000.0,
         # WP-2(a) fix round 2 review N-2: the alert-row rate floor tracks
         # the ACTUAL configured flush interval (which `R2DB_AUDIT_FLUSH_
         # INTERVAL_S` may have overridden away from the default), not a

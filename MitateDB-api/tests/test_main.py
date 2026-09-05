@@ -29,8 +29,10 @@ from __future__ import annotations
 import sys
 
 import httpx
+import psycopg
 import pytest
 
+from mitatedb_api.application_audit import PostgresApplicationAuditSink
 from mitatedb_api.auth import Role
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 
@@ -47,11 +49,12 @@ _CONTROL_PEPPER = "synthetic-test-pepper-mitatedb-main-ctl-0000"
 _PROBE_APP_ID = "main_import_probe"
 
 
-_DATA_BASE_URL = "http://mitatedb-main-test.example.invalid/v1"
-_CONTROL_BASE_URL = "http://mitatedb-main-test.example.invalid/control/v1"
-
-
 def _base_env(platform, probe_app) -> dict[str, str]:
+    # Q4 phase (design D-2, work order §4 WP-2 変更対象 E): `MITATEDB_
+    # DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are REMOVED env vars
+    # (F-2) -- `surfaces` comes from `<registry>.platform_declarations`,
+    # already seeded (`data` only -- see `test_postgres.py::_bootstrap_
+    # platform`'s own comment) by the shared `platform` fixture.
     return {
         "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
@@ -60,13 +63,6 @@ def _base_env(platform, probe_app) -> dict[str, str]:
         "MITATEDB_SERVE_APPS": probe_app.app_id,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_RUNTIME_DSN": probe_app.runtime_dsn,
         f"MITATEDB_APP_{probe_app.app_id.upper()}_DEVELOPER_DSN": probe_app.developer_dsn,
-        # Phase 6 WP-3 (design D-2): `MITATEDB_DATA_BASE_URL` is required
-        # unconditionally from here on (contract 1.6.0's own `surfaces.
-        # data` obligation); `MITATEDB_CONTROL_BASE_URL` is only required
-        # when `MITATEDB_CONTROL_PLANE_STATUS=enabled` (unset by default
-        # here) but is harmless to always supply.
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
 
 
@@ -119,6 +115,38 @@ def test_build_app_rejects_identical_peppers(main_module, platform, probe_app):
         main_module.build_app(env)
 
 
+@pytest.mark.parametrize(
+    "removed_var,value",
+    [
+        ("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", ""),
+        ("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", "5000"),
+        ("MITATEDB_AUDIT_IDLE_TIMEOUT_MS", ""),
+        ("MITATEDB_AUDIT_IDLE_TIMEOUT_MS", "5000"),
+        ("MITATEDB_DATA_BASE_URL", ""),
+        ("MITATEDB_DATA_BASE_URL", "https://removed-env.example.invalid/v1"),
+        ("MITATEDB_CONTROL_BASE_URL", ""),
+        ("MITATEDB_CONTROL_BASE_URL", "https://removed-env.example.invalid/control/v1"),
+    ],
+)
+def test_build_app_rejects_every_removed_env_var_through_the_real_composition_root(
+    main_module, platform, probe_app, removed_var: str, value: str,
+) -> None:
+    """{scratchpad}/wp12-audit-gaps.md G5 (WP-2 completion condition
+    23(a)): `reject_removed_timeout_env`/`reject_removed_surface_env`
+    were exercised ONLY as bare function calls in `test_platform_
+    declarations.py` -- never through `build_app` itself. Removing
+    `main.py`'s own two calls to those functions (`main.py:257-258`)
+    left every PRE-EXISTING test in this file green, since none of them
+    ever set one of the four removed env vars at all. 8 cases: {the 2
+    removed timeout vars, the 2 removed surface vars} x {empty string,
+    a real-looking value} -- design §3.8 F-1/F-2's own "値は問わない。空
+    文字列を含む" (whatever its value, an empty string included)."""
+    env = _base_env(platform, probe_app)
+    env[removed_var] = value
+    with pytest.raises(RuntimeError, match="no longer read"):
+        main_module.build_app(env)
+
+
 def test_build_app_serves_a_real_authenticated_request(main_module, platform, probe_app):
     # Reuses the SAME app object the module-level `app = build_app()` call
     # already built at import time (calling `build_app()` a second time
@@ -153,6 +181,85 @@ def test_build_app_serves_a_real_authenticated_request(main_module, platform, pr
     # this app was built (fixture `main_module`, module import time) from
     # `_base_env`, which does not set that variable.
     assert document["capabilities"]["control_plane"]["status"] == "unavailable"
+
+
+def test_build_app_capabilities_document_is_a_startup_snapshot_not_re_read_per_request(main_module, platform, probe_app):
+    """WP-1/WP-2 completion condition 13 / rework condition 27 (U-3,
+    requester ruling 2026-09-05): the declaration read happens ONCE, at
+    startup -- changing `platform_declarations.surfaces` directly in the
+    DB AFTER `build_app` has already returned must NOT change what an
+    already-running process' `/v1/capabilities` reports. Mirrors r2db-
+    api's own `test_surfaces_env.py::test_build_app_capabilities_
+    document_is_a_startup_snapshot_not_re_read_per_request` (added there
+    first); this is the MitateDB-side non-vacuity companion (work order
+    変異14/28's own target -- previously absent for this peer)."""
+    import asyncio
+    import json
+
+    app = main_module.app
+    write_store = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
+    )
+    try:
+        credential_id, bearer = write_store.issue(probe_app.app_id, Role.RUNTIME)
+    finally:
+        write_store.close()
+
+    async def _get():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
+
+    before = asyncio.run(_get())
+    assert before.status_code == 200, before.text
+    before_surfaces = before.json().get("surfaces")
+
+    admin = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(
+                f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s::jsonb WHERE key = 'surfaces'",
+                [json.dumps({"data": {"base_url": "https://startup-snapshot-changed.example.invalid/v1"}})],
+            )
+        try:
+            after = asyncio.run(_get())
+            assert after.status_code == 200, after.text
+            assert after.json().get("surfaces") == before_surfaces
+        finally:
+            # restore -- IDENTICAL to the value this test itself observed
+            # BEFORE mutating (never a hardcoded guess at the fixture's
+            # own seed shape).
+            with admin.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s::jsonb WHERE key = 'surfaces'",
+                    [json.dumps(before_surfaces)],
+                )
+    finally:
+        admin.close()
+
+
+def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_method(main_module, platform, probe_app, monkeypatch):
+    """N-2 (monitor ruling 2026-09-05, delta review §4): `check_writer_
+    role_timeouts`'s own connection must be opened via THE SAME METHOD
+    `PostgresApplicationAuditSink` uses to open every connection it ever
+    writes through (`_connect`) -- never a separately-written `psycopg.
+    connect(...)` call that merely happens to match its arguments today.
+    Patches `_connect` to record every call; `build_app` makes no HTTP
+    request of its own, so a call recorded here can only have happened
+    during the startup dual-check step itself. Would go RED under the
+    delta review's own finding (`main.py:295` duplicating the connect
+    call instead of calling `_connect`)."""
+    calls: list[object] = []
+    real_connect = PostgresApplicationAuditSink._connect
+
+    def _spy(self):
+        calls.append(self)
+        return real_connect(self)
+
+    monkeypatch.setattr(PostgresApplicationAuditSink, "_connect", _spy)
+    env = _base_env(platform, probe_app)
+    main_module.build_app(env)
+    assert len(calls) >= 1
+    assert all(isinstance(c, PostgresApplicationAuditSink) for c in calls)
 
 
 def test_build_app_rejects_invalid_control_plane_status_value(main_module, platform, probe_app):
@@ -218,6 +325,27 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
     # module-scoped `_sweep_prefix` teardown drops this run's entire
     # throwaway database regardless, so this is not real residue.
     flip_app = provision_app(platform, "main_control_plane_flip_probe")
+    # Q4 phase (design D-2(f), F-6): flipping ONLY this process' own
+    # `MITATEDB_CONTROL_PLANE_STATUS` is no longer sufficient on its own
+    # -- `surfaces.control`'s presence in the SHARED declarations row
+    # must agree, or F-6 refuses to start (exactly the drift this phase
+    # closes: a real deployment now re-declares surfaces via `ops
+    # declare-surfaces --control-base-url <URL>` in the SAME operation as
+    # flipping this status, §9.2). This test re-declares the row with a
+    # `control` key added, mirroring that real operator action, before
+    # calling `build_app` with the flipped status.
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                [
+                    '{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"},'
+                    '"control":{"base_url":"https://control.mitatedb-main-test.example.invalid/control/v1"}}'
+                ],
+            )
+    finally:
+        conn.close()
     env = {
         "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
@@ -227,10 +355,22 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
         f"MITATEDB_APP_{flip_app.app_id.upper()}_RUNTIME_DSN": flip_app.runtime_dsn,
         f"MITATEDB_APP_{flip_app.app_id.upper()}_DEVELOPER_DSN": flip_app.developer_dsn,
         "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
-    app = main_module.build_app(env)
+    try:
+        app = main_module.build_app(env)
+    finally:
+        # Restore the shared row to its data-only baseline so every OTHER
+        # test in this module-scoped fixture keeps seeing the default
+        # (`unavailable`)-consistent declaration.
+        conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                    ['{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"}}'],
+                )
+        finally:
+            conn.close()
 
     write_store = PostgresCredentialStore(
         platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
@@ -324,42 +464,70 @@ def test_control_service_factory_builds_a_real_working_service(main_module, plat
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
-    service = main_module.build_control_service(env)
-
-    from mitatedb_api.credential_wire import split_bearer_locator
-
-    backend = service._backend  # test-only reach-in, mirroring this file's own existing conventions
-    with backend.unit_of_work() as work:
-        credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+    # Q4 phase (design F-6): `build_control_service` unconditionally
+    # requires `surfaces.control` -- `platform`'s own shared declaration
+    # row is data-only (matching `test_main.py`'s OWN data-plane-default
+    # baseline, `MITATEDB_CONTROL_PLANE_STATUS` unset) -- this test adds
+    # `control` to that SAME row before calling the factory, then
+    # restores it, so no other test in this module sees a lingering
+    # control declaration.
+    conn = psycopg.connect(platform.provision_dsn, autocommit=True)
     try:
-        secret = bearer
-        rotated = service.rotate_credential(secret, credential_id)
-        rotated_secret = rotated["secret"]
-        document = service.control_capabilities(rotated_secret)
-        assert document["capabilities"]["control_plane"]["status"] == "enabled"
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                [
+                    '{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"},'
+                    '"control":{"base_url":"https://control.mitatedb-main-test.example.invalid/control/v1"}}'
+                ],
+            )
     finally:
-        # Clean up so this factory-only credential does not linger in the
-        # shared throwaway platform for the rest of the test session.
-        import psycopg
+        conn.close()
+    try:
+        service = main_module.build_control_service(env)
+
+        backend = service._backend  # test-only reach-in, mirroring this file's own existing conventions
+        with backend.unit_of_work() as work:
+            credential_id, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
+        try:
+            secret = bearer
+            rotated = service.rotate_credential(secret, credential_id)
+            rotated_secret = rotated["secret"]
+            document = service.control_capabilities(rotated_secret)
+            assert document["capabilities"]["control_plane"]["status"] == "enabled"
+        finally:
+            # Clean up so this factory-only credential does not linger in
+            # the shared throwaway platform for the rest of the test
+            # session.
+            conn = psycopg.connect(platform.provision_dsn, autocommit=True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+            finally:
+                conn.close()
+    finally:
         conn = psycopg.connect(platform.provision_dsn, autocommit=True)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"DELETE FROM {platform.registry_schema}.control_credentials")
+                cur.execute(
+                    f"UPDATE {platform.registry_schema}.platform_declarations SET value = %s WHERE key = 'surfaces'",
+                    ['{"data":{"base_url":"https://data.mitatedb-main-test.example.invalid/v1"}}'],
+                )
         finally:
             conn.close()
 
 
 def test_control_service_factory_rejects_identical_peppers(main_module, platform) -> None:
+    """Pepper separation is checked BEFORE `surfaces` is ever read (design
+    §3.7 control-plane steps 1-2 precede step 4) -- this raises
+    regardless of the shared `platform` fixture's own data-only
+    declaration, so no `control` re-declaration is needed here."""
     env = {
         "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
         "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _PEPPER,
         "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
         "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-        "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
     }
     with pytest.raises(ValueError):
         main_module.build_control_service(env)

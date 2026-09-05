@@ -36,6 +36,15 @@ from r2db_api.http import create_app
 from r2db_api.limits import ControlPlaneLimits
 from r2db_api.service import ControlAuthority, DataService
 
+# Q4 phase WP-1 rework round (rulings-q4-wp12-rework.md sec.2): `build_control_app` is
+# no longer zero-network, so the module-level-`app`/subprocess-import tests below
+# (section 8) need a REAL, migrated platform database -- reused by import from
+# `test_credential_persistence.py`/`test_surfaces_env.py`, the same convention
+# `test_surfaces_env.py` itself already uses for this exact fixture.
+from test_credential_persistence import PEPPER, _DEFAULT_SURFACES_VALUE, _set_surfaces_row, platform  # noqa: F401 -- imported for fixture re-export, pytest discovers by name
+from test_surfaces_env import _control_main_module, _real_control_env  # noqa: F401
+from r2db_api.control_main import assemble_control_stack  # noqa: E402
+
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 
 BASE_URL = "http://r2db-control.example.invalid"
@@ -675,38 +684,50 @@ async def test_revoke_last_control_credential_with_wire_truthy_non_boolean_destr
 
 # ===========================================================================
 # 8. `control_main.build_control_app` (work order §4 item 8): required-env
-#    failures, pepper-equality failure, a normal env returns an ASGI app
-#    without ever connecting, and a module-level `app` exists (§8 m-10,
-#    flipped WP-5).
+#    failures, pepper-equality failure, a normal env returns an ASGI app,
+#    and a module-level `app` exists (§8 m-10, flipped WP-5).
+#
+#    Q4 phase WP-1 REWORK ROUND (supervisor ruling 2026-09-05, rulings-q4-
+#    wp12-rework.md sec.2): `build_control_app` is NO LONGER zero-network
+#    -- design SS3.7's own startup-sequence DB-side checks (surfaces/
+#    writer-role dual check) now run SYNCHRONOUSLY inside it, mirroring
+#    `r2db_api.main.build_app`. The required-env and pepper-separation
+#    checks below still run BEFORE any network access (moved ahead of the
+#    DB read inside `build_control_app`, see that module's own docstring)
+#    and so still pass with a placeholder, unreachable DSN (`_VALID_ENV`).
+#    Tests that need `build_control_app` to actually SUCCEED (a normal env
+#    returns a real app; the module-level `app`; the literal subprocess
+#    entry point) now need a REAL, migrated platform database -- reused by
+#    import from `test_credential_persistence.py`'s own `platform` fixture
+#    (the same convention `test_surfaces_env.py` already established for
+#    testing this exact module). `assemble_control_stack` itself remains
+#    zero-network (its own constructors never connect eagerly) -- pinned
+#    down directly, with explicit injected values, replacing the previous
+#    round's env-driven `build_control_app(_VALID_ENV)` zero-network test.
 # ===========================================================================
 
 _VALID_ENV = {
     "R2DB_CONTROLPLANE_DSN": "host=/tmp port=1 dbname=r2db_control_http_test_unreachable",
     "R2DB_CONTROL_CREDENTIAL_PEPPER": "control-main-test-control-pepper-0000",
     "R2DB_CREDENTIAL_PEPPER": "control-main-test-app-pepper-0000",
-    # Phase 6 WP-2 (design D-2): `build_control_app` unconditionally
-    # requires both surfaces vars now.
-    "R2DB_DATA_BASE_URL": "https://r2db-main-test.example.invalid/v1",
-    "R2DB_CONTROL_BASE_URL": "https://r2db-control-test.example.invalid/control/v1",
+    # Q4 phase WP-1 (design D-2(f)): `R2DB_DATA_BASE_URL`/`R2DB_CONTROL_
+    # BASE_URL` are REMOVED -- `build_control_app` rejects them outright
+    # (F-2) if defined at all; neither is present here.
 }
 
 
 @pytest.fixture
 def control_main_module():
-    """CCR-14 WP-5: `r2db_api.control_main` now ends with a module-level
-    `app = build_control_app()` (§8 m-10's flip, same single commit as
-    `main.py`'s own declaration flip) -- a bare `import r2db_api.control_main`
-    therefore reads real `os.environ` the instant it first runs, exactly
-    like `r2db_api.main` already does (P2-D5). This mirrors `test_credential_
-    persistence.py`'s own `main_module` fixture for that exact reason: a
-    valid, synthetic environment (`_VALID_ENV` above -- zero-network,
-    `build_control_app`/its stores never connect eagerly, see
-    `test_build_control_app_returns_asgi_app_without_connecting`'s own
-    comment) is set via `pytest.MonkeyPatch` before the first import/reload,
-    so this file's own top-level collection never touches this module
-    (avoiding a collection-time crash for the whole root pytest suite, which
-    has no such environment configured ambiently) and every test below gets
-    a fresh, valid module object instead.
+    """CCR-14 WP-5: `r2db_api.control_main` ends with a module-level `app`
+    (§8 m-10's flip) resolved LAZILY (rework round: a PEP 562 module
+    `__getattr__`, `control_main.py`'s own tail -- necessary now that
+    `build_control_app()` is network-dependent, see that module's own
+    docstring) -- a bare `import r2db_api.control_main` no longer builds
+    anything eagerly, but this fixture still sets a controlled environment
+    via `pytest.MonkeyPatch` before each test's own first `import`/reload,
+    mirroring `test_credential_persistence.py`'s own `main_module` fixture,
+    so tests that DO touch `.app` (below) get a deterministic, per-test
+    module object rather than depending on import order across the file.
     """
     mp = pytest.MonkeyPatch()
     for key, value in _VALID_ENV.items():
@@ -746,49 +767,138 @@ def test_build_control_app_requires_application_pepper(control_main_module):
 
 
 def test_build_control_app_rejects_equal_peppers(control_main_module):
+    """Rework round: pepper-separation validation runs BEFORE the DB-side
+    declaration read inside `build_control_app` (see that module's own
+    docstring) -- a placeholder, unreachable `R2DB_CONTROLPLANE_DSN` must
+    still surface THIS error, not a connection failure, proving the order
+    is what the module claims."""
     env = dict(_VALID_ENV)
     env["R2DB_CREDENTIAL_PEPPER"] = env["R2DB_CONTROL_CREDENTIAL_PEPPER"]
     with pytest.raises(RuntimeError, match="must not be equal"):
         control_main_module.build_control_app(env)
 
 
-def test_build_control_app_returns_asgi_app_without_connecting(control_main_module):
-    # `R2DB_CONTROLPLANE_DSN` above points at a database that does not
-    # exist -- if construction ever tried to connect, this would raise a
-    # `psycopg` error instead of returning. `_RolePool.__init__` (postgres.py)
-    # does not connect eagerly, which is exactly what this test pins down.
-    app = control_main_module.build_control_app(_VALID_ENV)
-    assert app is not None
-    assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
-    assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
+def test_assemble_control_stack_returns_asgi_wireable_service_without_connecting():
+    """Rework round replacement for the previous round's `test_build_
+    control_app_returns_asgi_app_without_connecting` (rulings-q4-wp12-
+    rework.md sec.2: "zero-network の既存テストは明示注入のassemble_
+    control_stack(...)を使う形に書き換える") -- `build_control_app` itself
+    is no longer zero-network (see this section's own header), but
+    `assemble_control_stack` still is: `_RolePool.__init__` (postgres.py)
+    never connects eagerly, so a bogus, unreachable DSN still returns a
+    fully wireable `ControlPlaneService` when values are injected
+    explicitly rather than read from `env`."""
+    service, stores = assemble_control_stack(
+        controlplane_dsn=_VALID_ENV["R2DB_CONTROLPLANE_DSN"],
+        app_pepper=_VALID_ENV["R2DB_CREDENTIAL_PEPPER"],
+        control_pepper=_VALID_ENV["R2DB_CONTROL_CREDENTIAL_PEPPER"],
+    )
+    try:
+        app = create_control_app(service)
+        assert app is not None
+        assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
+        assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
+    finally:
+        for store in stores:
+            if store is not None:
+                store.close()
 
 
-def test_control_main_module_level_app_exists_and_is_asgi(control_main_module):
-    # §8 m-10's flip (WP-5, bound to the same single commit as `main.py`'s
-    # own declaration flip): importing this module now constructs a real
-    # module-level `app`, exactly like `r2db_api.main:app` already does --
-    # the inverse of the pre-WP-5 mechanical check of the same name.
-    assert hasattr(control_main_module, "app")
-    app = control_main_module.app
-    assert app is not None
-    assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
-    assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
+def _real_env_for_control_main_module(platform: types.SimpleNamespace) -> dict[str, str]:
+    env = _real_control_env(platform)
+    env["R2DB_CONTROL_DSN"] = platform.control_dsn
+    return env
 
 
-def test_import_r2db_api_control_main_module_succeeds_with_valid_environment():
+def test_control_main_module_level_app_exists_and_is_asgi(platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """§8 m-10's flip (WP-5): importing this module with a REAL, migrated
+    platform database and then touching `.app` constructs a real module-
+    level app, exactly like `r2db_api.main:app` already does. Rework round:
+    `.app` is a PEP 562 lazy attribute, resolved (and, on the FIRST touch,
+    cached) the moment something accesses it -- `hasattr`/plain attribute
+    access below is that touch. `platform`'s own shared default `surfaces`
+    row is control-LESS (matches `r2db_api.main`'s own default), but this
+    module unconditionally requires `surfaces.control` (F-3c) -- seeded
+    here, restored in `finally`.
+
+    Uses pytest's own `monkeypatch` fixture (NOT a manually-constructed
+    `pytest.MonkeyPatch()` undone by a helper before returning) -- `.app`
+    access is now lazy (PEP 562 `__getattr__`, `control_main.py`'s own
+    tail), so it happens INSIDE this test's own body, and the env must
+    still be in effect at that point; `monkeypatch`'s own teardown runs
+    only after this test function returns."""
+    for key, value in _real_env_for_control_main_module(platform).items():
+        monkeypatch.setenv(key, value)
+    _set_surfaces_row(platform, {
+        "data": {"base_url": "https://control-http-module-level-test.example.invalid/v1"},
+        "control": {"base_url": "https://control-http-module-level-test.example.invalid/control/v1"},
+    })
+    try:
+        import importlib
+        import sys
+
+        if "r2db_api.control_main" in sys.modules:
+            module = importlib.reload(sys.modules["r2db_api.control_main"])
+        else:
+            import r2db_api.control_main as module
+        assert hasattr(module, "app")
+        app = module.app
+        assert app is not None
+        assert hasattr(app, "app")  # RequestByteBoundMiddleware wrapping a Starlette app
+        assert len(app.app.routes) == 13  # Phase 4 WP-2(b): 11 + audit_query's 2 paths
+    finally:
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
+def test_import_r2db_api_control_main_module_succeeds_with_valid_environment(platform: types.SimpleNamespace) -> None:
     # Mirrors `test_credential_persistence.py::
     # test_import_r2db_api_main_module_succeeds_with_valid_environment`: a
     # real `import` in a fresh subprocess (never polluting this pytest
     # process' own `sys.modules`/`control_main_module` fixture state),
     # proving the literal `r2db_api.control_main:app` ASGI-server entry
-    # point actually works end to end.
+    # point actually works end to end -- now against a REAL, migrated
+    # platform database (rework round: `build_control_app` is no longer
+    # zero-network). See the sibling test above for why a control-
+    # INCLUSIVE `surfaces` row must be seeded first.
+    _set_surfaces_row(platform, {
+        "data": {"base_url": "https://control-http-subprocess-import-test.example.invalid/v1"},
+        "control": {"base_url": "https://control-http-subprocess-import-test.example.invalid/control/v1"},
+    })
+    try:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(SRC_DIR)
+        env.update(_real_env_for_control_main_module(platform))
+        script = "import r2db_api.control_main as m; assert m.app is not None; print('IMPORT_OK')"
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+        assert result.returncode == 0, result.stderr
+        assert "IMPORT_OK" in result.stdout
+    finally:
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
+def test_import_r2db_api_control_main_module_exits_nonzero_on_a_bad_declared_state(platform: types.SimpleNamespace) -> None:
+    """N-4 (monitor ruling 2026-09-05, delta review §4/§6 point 2): the
+    PEP 562 lazy `.app` attribute is justified only if a bad declared
+    state still makes the PROCESS fail loudly -- the delta review's own
+    "副次" concern is that a real ASGI server's `import_from_string`
+    flattens an `AttributeError` raised while resolving `.app` into a
+    generic "Attribute 'app' not found in module" that HIDES the real
+    cause. This subprocess accesses `.app` against `platform`'s own
+    DEFAULT `surfaces` row (deliberately control-LESS, per this file's
+    sibling tests' own comments) with NO control surface seeded -- F-3c
+    (`require_control_surface_declared`) must fire, propagate as a plain
+    `RuntimeError` (not `AttributeError`), and exit this process non-zero
+    with THAT message on stderr, not a generic "not found" one."""
     env = dict(os.environ)
     env["PYTHONPATH"] = str(SRC_DIR)
-    env.update(_VALID_ENV)
-    script = "import r2db_api.control_main as m; assert m.app is not None; print('IMPORT_OK')"
+    env.update(_real_env_for_control_main_module(platform))
+    script = "import r2db_api.control_main as m; m.app"
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
-    assert result.returncode == 0, result.stderr
-    assert "IMPORT_OK" in result.stdout
+    assert result.returncode != 0
+    assert "surfaces.control" in result.stderr, result.stderr
+    assert "control-plane process, which always has a control surface" in result.stderr
+    assert "Attribute 'app' not found" not in result.stderr
+    assert "AttributeError" not in result.stderr
 
 
 # ===========================================================================

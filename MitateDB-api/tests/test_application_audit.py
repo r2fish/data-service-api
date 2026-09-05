@@ -81,6 +81,15 @@ MIGRATION_NAMES = (
     "0003_provision_application.sql",
     "0004_deprovision_application.sql",
     "0005_application_audit.sql",
+    # Q4 phase (design D-1/D-2, work order §4 WP-2): platform declarations
+    # table + the two service writer roles' timeout role settings. Applied
+    # in the fixture right after 0002 (before 0005) -- it only depends on
+    # 0002's two roles, and running it before `grant_snapshot_before_0005`
+    # is captured keeps `test_migration_0005_applies_after_0004_and_
+    # changes_no_existing_grant`'s own "0005's new grants name only the
+    # new table" assertion meaningful (0007's own new GRANTs land in the
+    # BASELINE snapshot, not in "what 0005 added").
+    "0007_platform_declarations.sql",
 )
 
 
@@ -225,6 +234,20 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
                 cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
         finally:
             admin.close()
+        _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
+        try:
+            with surfaces_conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', %s)").format(
+                        table=sql.Identifier(schema, "platform_declarations")),
+                    [
+                        '{"data":{"base_url":"' + _DATA_BASE_URL + '"},'
+                        '"control":{"base_url":"' + _CONTROL_BASE_URL + '"}}'
+                    ],
+                )
+        finally:
+            surfaces_conn.close()
         grant_snapshot_before_0005 = _grant_snapshot(provision_dsn)
         _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         admin = psycopg.connect(admin_dsn, autocommit=True)
@@ -478,53 +501,89 @@ def test_auditreader_role_can_select_both_audit_tables_and_nothing_else(platform
 
 
 # ===========================================================================
-# Writer-connection timeouts (D-6/N-3) -- both composition roots
+# Writer-connection timeouts (Q4 phase, design D-1(b) -- SUPERSEDES Phase 4
+# D-6/N-3's per-connection `SET SESSION`, both composition roots)
+#
+# `PostgresApplicationAuditSink`/`PostgresControlBackend` no longer accept
+# `statement_timeout_ms=`/`idle_in_transaction_session_timeout_ms=`
+# constructor arguments at all -- the SET-SESSION mechanism they configured
+# is REMOVED product code (D-1(b): "書き手プロセスは接続時のセッションSET
+# をやめ"). The three tests this section used to hold (constructing a sink
+# directly with explicit timeout kwargs; asserting "no configuration
+# leaves the server default"; calling the now-deleted `_apply_session_
+# timeouts` directly against a raw control-plane connection) each tested
+# behavior that no longer exists. Replaced below with the Q4 mechanism:
+# `ALTER ROLE ... SET` (the SAME shape migration `0007`/`ops set-platform-
+# timeouts` use) on the role itself, observed via each writer's own real
+# connection.
 # ===========================================================================
 
 
-def test_application_audit_writer_connection_has_statement_and_idle_timeouts_set(platform: types.SimpleNamespace) -> None:
-    sink = PostgresApplicationAuditSink(
-        platform.api_dsn, schema=platform.schema, statement_timeout_ms=1234, idle_in_transaction_session_timeout_ms=5678,
-    )
-    conn = sink._connect()
+def _set_role_timeouts(admin_dsn: str, role: str, *, statement_ms: int, idle_ms: int) -> None:
+    admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW statement_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 1234
-            cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 5678
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = {}").format(
+                sql.Identifier(role), sql.Literal(f"{statement_ms}ms")))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = {}").format(
+                sql.Identifier(role), sql.Literal(f"{idle_ms}ms")))
     finally:
-        conn.close()
+        admin.close()
 
 
-def test_application_audit_writer_without_configured_timeouts_leaves_server_defaults(platform: types.SimpleNamespace) -> None:
-    sink = PostgresApplicationAuditSink(platform.api_dsn, schema=platform.schema)
-    conn = sink._connect()
+def test_application_audit_writer_connection_reflects_the_api_roles_own_setting(platform: types.SimpleNamespace) -> None:
+    """Q4 phase (design D-1(a)/(b)): `platform`'s own `0007` migration
+    already set `mitatedbsvc_api` to the shipped 5000ms/5000ms default --
+    this overrides it to a distinguishable value via the SAME `ALTER
+    ROLE ... SET` mechanism `ops set-platform-timeouts` uses, then proves
+    the sink's own real connection (which no longer accepts ANY
+    timeout-related constructor argument) reflects it automatically,
+    login-time, with no client-side action."""
+    _set_role_timeouts(platform.admin_dsn, platform.api_role, statement_ms=1234, idle_ms=5678)
     try:
-        with conn.cursor() as cur:
-            cur.execute("SHOW statement_timeout")
-            default_value = cur.fetchone()[0]
-        # An explicit, different value from the module-level default proves
-        # the "no configuration" path leaves the server default alone
-        # rather than silently applying some hardcoded literal.
-        assert default_value != "1234ms"
+        sink = PostgresApplicationAuditSink(platform.api_dsn, schema=platform.schema)
+        conn = sink._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SHOW statement_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 1234
+                cur.execute("SHOW idle_in_transaction_session_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 5678
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        _set_role_timeouts(platform.admin_dsn, platform.api_role, statement_ms=5000, idle_ms=5000)
 
 
-def test_control_audit_writer_connection_has_statement_and_idle_timeouts_set(platform: types.SimpleNamespace) -> None:
-    from mitatedb_api.application_audit import _apply_session_timeouts
-
-    conn = psycopg.connect(platform.controlplane_dsn)
+def test_control_audit_writer_connection_reflects_the_controlplane_roles_own_setting(platform: types.SimpleNamespace) -> None:
+    """Same mechanism, the OTHER writer role -- `mitatedbsvc_controlplane`,
+    the role `PostgresControlBackend.unit_of_work`'s own connection logs
+    in as."""
+    _set_role_timeouts(platform.admin_dsn, platform.controlplane_role, statement_ms=2345, idle_ms=6789)
     try:
-        _apply_session_timeouts(conn, 2345, 6789)
-        with conn.cursor() as cur:
-            cur.execute("SHOW statement_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
-            cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+        conn = psycopg.connect(platform.controlplane_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SHOW statement_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
+                cur.execute("SHOW idle_in_transaction_session_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        _set_role_timeouts(platform.admin_dsn, platform.controlplane_role, statement_ms=5000, idle_ms=5000)
+
+
+def test_application_audit_sink_no_longer_accepts_a_timeout_constructor_argument() -> None:
+    """Non-vacuity companion / regression guard: `PostgresApplicationAudit
+    Sink`'s constructor genuinely dropped the two Phase-4 parameters --
+    passing either now raises `TypeError`, rather than silently accepting
+    and ignoring them (which would be a worse, silent-degradation form of
+    the SAME bug this WP exists to close)."""
+    with pytest.raises(TypeError):
+        PostgresApplicationAuditSink("host=/tmp dbname=x", statement_timeout_ms=1000)
+    with pytest.raises(TypeError):
+        PostgresApplicationAuditSink("host=/tmp dbname=x", idle_in_transaction_session_timeout_ms=1000)
 
 
 def _capturing_subclass(base_cls):
@@ -658,20 +717,21 @@ def _closing_build_app(main_module_: Any, env: dict[str, str], monkeypatch: pyte
             cell._backend.close()
 
 
-def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_connection(
+def test_build_app_wires_the_real_writer_connection_to_the_declared_role_setting(
     platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
     main_module: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review M-1: behavioural proof, not source grep -- patches the
-    exact name `main.py` imports and calls
-    (`PostgresApplicationAuditSink`) to CAPTURE the real instance
-    `build_app` constructs, then reads the timeout back from a real
-    connection that SAME instance opens. Exercised for both the default
-    (env unset) and an env override, so a mutation that deletes either
-    `statement_timeout_ms=`/`idle_in_transaction_session_timeout_ms=`
-    keyword from `main.py`'s own `PostgresApplicationAuditSink(...)` call
-    site goes red here (the connection would show the server default,
-    never the env-configured value)."""
+    """Q4 phase (design D-1(b), work order §4 WP-2 変更対象 B/E) --
+    SUPERSEDES the Phase 4 env-configured-timeout test this replaces:
+    `main.build_app` no longer passes ANY timeout keyword to
+    `PostgresApplicationAuditSink(...)` at all (asserted below via the
+    SAME capturing-subclass technique the superseded test used), and the
+    REAL writer connection's own effective value now comes from `mitatedb
+    svc_api`'s PostgreSQL role setting -- proven here for both the shipped
+    5000ms/5000ms default (`platform`'s own `0007` migration) and a
+    role-level override (`_set_role_timeouts`, the SAME `ALTER ROLE ...
+    SET` shape `ops set-platform-timeouts` uses), never a per-connection
+    override `build_app` itself performs."""
 
     def _env(**overrides: str) -> dict[str, str]:
         base = {
@@ -681,17 +741,22 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
-            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+            # Q4 phase: `platform`'s own seeded `surfaces` declaration
+            # includes `control` (matching the common real-deployment
+            # topology this fixture models) -- F-6 requires this
+            # process' own declared status to agree with that.
+            "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
         }
         base.update(overrides)
         return base
 
-    # 1) Default (env unset) -- must equal the shared module constant.
+    # 1) Shipped default (0007's own seed, no override) -- and the
+    # construction call site itself carries no timeout keyword any more.
     capturing_cls, captured = _capturing_subclass(PostgresApplicationAuditSink)
     monkeypatch.setattr(main_module, "PostgresApplicationAuditSink", capturing_cls)
     with _closing_build_app(main_module, _env(), monkeypatch):
-        assert captured["kwargs"]["statement_timeout_ms"] == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-        assert captured["kwargs"]["idle_in_transaction_session_timeout_ms"] == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+        assert "statement_timeout_ms" not in captured["kwargs"]
+        assert "idle_in_transaction_session_timeout_ms" not in captured["kwargs"]
         conn = captured["instance"]._connect()
         try:
             with conn.cursor() as cur:
@@ -702,49 +767,97 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
         finally:
             conn.close()
 
-    # 2) Env override -- must reach the real connection unchanged.
-    capturing_cls, captured = _capturing_subclass(PostgresApplicationAuditSink)
-    monkeypatch.setattr(main_module, "PostgresApplicationAuditSink", capturing_cls)
-    override_env = _env(MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS="4321", MITATEDB_AUDIT_IDLE_TIMEOUT_MS="8765")
-    with _closing_build_app(main_module, override_env, monkeypatch):
-        conn = captured["instance"]._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SHOW statement_timeout")
-                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 4321
-                cur.execute("SHOW idle_in_transaction_session_timeout")
-                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 8765
-        finally:
-            conn.close()
+    # 2) Role-level override -- must reach the real connection unchanged,
+    # with NO env variable involved at all (F-1 rejects the old ones).
+    _set_role_timeouts(platform.admin_dsn, platform.api_role, statement_ms=4321, idle_ms=8765)
+    try:
+        capturing_cls, captured = _capturing_subclass(PostgresApplicationAuditSink)
+        monkeypatch.setattr(main_module, "PostgresApplicationAuditSink", capturing_cls)
+        with _closing_build_app(main_module, _env(), monkeypatch):
+            conn = captured["instance"]._connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SHOW statement_timeout")
+                    assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 4321
+                    cur.execute("SHOW idle_in_transaction_session_timeout")
+                    assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 8765
+            finally:
+                conn.close()
+    finally:
+        _set_role_timeouts(platform.admin_dsn, platform.api_role, statement_ms=5000, idle_ms=5000)
 
 
-def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_control_audit_connection(
-    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("removed_var", ["MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", "MITATEDB_AUDIT_IDLE_TIMEOUT_MS"])
+def test_build_app_rejects_the_removed_timeout_env_vars(
+    platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
+    main_module: Any, removed_var: str,
 ) -> None:
-    """Review M-1: same behavioural proof as the application-plane test
+    """F-1 (design D-1(d)): defined whatever the value -- exercised
+    through the REAL startup path (`main.build_app`), not the fail-fast
+    helper called directly, per this WP's own non-vacuity requirement."""
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+        "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        removed_var: "",
+    }
+    from mitatedb_api.platform_declarations import PlatformDeclarationError
+
+    with pytest.raises(PlatformDeclarationError, match="is no longer read"):
+        main_module.build_app(env)
+
+
+def test_build_app_checks_the_env_mapping_argument_not_os_environ(
+    platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
+    main_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP-1/WP-2 completion condition 4 (design D-1(d)): the removed-env-
+    var check (F-1/F-2) inspects the `env` MAPPING `build_app` was
+    actually called with, never the real process `os.environ` --
+    exercised through the REAL startup path (`main.build_app`), mirroring
+    r2db-api's own `test_application_audit.py::test_build_app_checks_the_
+    env_mapping_argument_not_os_environ` (this peer's own non-vacuity
+    companion to `test_reject_removed_env_checks_the_mapping_argument_
+    not_os_environ`, `test_platform_declarations.py`, which only calls
+    the helper function directly -- never through this composition
+    root)."""
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+        "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+    }
+    monkeypatch.setenv("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", "9999")
+    monkeypatch.setenv("MITATEDB_DATA_BASE_URL", "https://this-must-never-be-read.example.invalid/v1")
+    with _closing_build_app(main_module, env, monkeypatch):
+        pass  # must not raise -- os.environ pollution above is never read
+
+
+def test_build_control_app_wires_the_real_control_audit_connection_to_the_declared_role_setting(
+    platform: types.SimpleNamespace,
+) -> None:
+    """Q4 phase (design D-1(b)) -- SUPERSEDES the Phase 4 env-configured-
+    timeout test this replaces: same proof as the application-plane test
     above, for `control_composition.build_control_service` and the
-    connection that writes `control_audit` (`PostgresControlBackend.
-    unit_of_work`)."""
+    connection that writes `control_audit`
+    (`PostgresControlBackend.unit_of_work`), against `mitatedbsvc_
+    controlplane`'s own role setting."""
     import mitatedb_api.control_composition as control_composition_module
 
-    def _env(**overrides: str) -> dict[str, str]:
-        base = {
-            "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
-            "MITATEDB_CONTROL_CREDENTIAL_PEPPER": "control-audit-postgres-ctl-pepper-x",
-            "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
-            "MITATEDB_PLATFORM_SCHEMA": platform.schema,
-            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
-            "MITATEDB_CONTROL_BASE_URL": _CONTROL_BASE_URL,
-        }
-        base.update(overrides)
-        return base
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": "control-audit-postgres-ctl-pepper-x",
+        "MITATEDB_CONTROLPLANE_DSN": platform.controlplane_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+    }
 
-    capturing_cls, captured = _capturing_subclass(control_composition_module.PostgresControlBackend)
-    monkeypatch.setattr(control_composition_module, "PostgresControlBackend", capturing_cls)
-    control_composition_module.build_control_service(_env())
-    assert captured["kwargs"]["audit_statement_timeout_ms"] == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
-    assert captured["kwargs"]["audit_idle_in_transaction_session_timeout_ms"] == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
-    backend = captured["instance"]
+    backend = control_composition_module.build_control_service(env)._backend
     with backend.unit_of_work() as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW statement_timeout")
@@ -752,18 +865,17 @@ def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_con
             cur.execute("SHOW idle_in_transaction_session_timeout")
             assert ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
 
-    capturing_cls, captured = _capturing_subclass(control_composition_module.PostgresControlBackend)
-    monkeypatch.setattr(control_composition_module, "PostgresControlBackend", capturing_cls)
-    control_composition_module.build_control_service(
-        _env(MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS="2345", MITATEDB_AUDIT_IDLE_TIMEOUT_MS="6789")
-    )
-    backend = captured["instance"]
-    with backend.unit_of_work() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SHOW statement_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
-            cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+    _set_role_timeouts(platform.admin_dsn, platform.controlplane_role, statement_ms=2345, idle_ms=6789)
+    try:
+        backend2 = control_composition_module.build_control_service(env)._backend
+        with backend2.unit_of_work() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SHOW statement_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
+                cur.execute("SHOW idle_in_transaction_session_timeout")
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+    finally:
+        _set_role_timeouts(platform.admin_dsn, platform.controlplane_role, statement_ms=5000, idle_ms=5000)
 
 
 def test_main_wires_the_audit_router_into_both_the_credential_store_and_every_cell(
@@ -798,7 +910,11 @@ def test_main_wires_the_audit_router_into_both_the_credential_store_and_every_ce
             "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
             f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
-            "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+            # Q4 phase: `platform`'s own seeded `surfaces` declaration
+            # includes `control` (matching the common real-deployment
+            # topology this fixture models) -- F-6 requires this
+            # process' own declared status to agree with that.
+            "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
         })
     finally:
         monkeypatch.setattr(main_module.ApplicationCell, "__init__", real_cell_init)
@@ -2055,7 +2171,10 @@ def test_http_response_request_id_matches_the_durable_audit_row(
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        # Q4 phase: `platform`'s own seeded `surfaces` declaration
+        # includes `control` -- F-6 requires this process' own declared
+        # status to agree with that.
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
     }
     collection_name = "reqidprobe" + secrets.token_hex(3)
 
@@ -2123,7 +2242,10 @@ def test_http_service_durably_audits_a_nul_locator_as_auth_invalid_not_503(
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        # Q4 phase: `platform`'s own seeded `surfaces` declaration
+        # includes `control` -- F-6 requires this process' own declared
+        # status to agree with that.
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
     }
 
     async def _call(app: Any, locator: str) -> httpx.Response:
@@ -2436,7 +2558,10 @@ def test_http_buffer_class_event_request_id_matches_the_durable_audit_row(
         "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
         f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
-        "MITATEDB_DATA_BASE_URL": _DATA_BASE_URL,
+        # Q4 phase: `platform`'s own seeded `surfaces` declaration
+        # includes `control` -- F-6 requires this process' own declared
+        # status to agree with that.
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
     }
     collection_name = "bufreqid" + secrets.token_hex(3)
 
