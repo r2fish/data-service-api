@@ -78,16 +78,20 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
 from . import platform_declarations
+from . import platform_upgrades
 from .control_plane import bootstrap_control_credential, issue_audit_credential_ceremony, reset_control_credentials
 from .credential_store import (
     DEFAULT_SCHEMA,
@@ -194,6 +198,37 @@ def _die(message: str) -> NoReturn:
 
 def _control_dsn() -> str:
     return _require_env("R2DB_CONTROL_DSN")
+
+
+# Q4 WP-3 (design D-4(b), work order §4 WP-3 change table E): r2db-api had
+# neither a `psql` subprocess invocation nor a migrations-directory
+# resolver before this WP -- both are new here, modeled on MitateDB-api's
+# own `_run_deprovision_script`/`_migrations_dir` (`MitateDB-api/src/
+# mitatedb_api/ops.py:541-550`/`:373-375`) -- CALL SHAPE ONLY, never `_die`
+# (D-4(b): "`_die`は使わない -- 即時exit 2では全DBを回せない").
+_DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+
+
+def _migrations_dir() -> Path:
+    # `R2DB_MIGRATIONS_DIR` is not part of the documented environment
+    # contract -- added purely so this repository's own tests can point
+    # `upgrade-applications` at a throwaway directory holding a synthetic
+    # per-application upgrade script, the same escape-hatch reasoning
+    # `_schema()`'s own `R2DB_PLATFORM_SCHEMA` comment gives. A real
+    # deployment never sets this.
+    override = os.environ.get("R2DB_MIGRATIONS_DIR")
+    return Path(override) if override else _DEFAULT_MIGRATIONS_DIR
+
+
+def _application_dsn(provision_dsn: str, database_name: str) -> str:
+    """Design D-4(b): `ops` only ever holds a provision DSN pointing at the
+    PLATFORM database -- reaching one application's own database means
+    swapping `dbname` in that same DSN's own connection parameters, never
+    a second, separately-configured credential (`psycopg.conninfo.
+    conninfo_to_dict`/`make_conninfo`, named explicitly by the design)."""
+    params = conninfo_to_dict(provision_dsn)
+    params["dbname"] = database_name
+    return make_conninfo(**params)
 
 
 def _store() -> PostgresCredentialStore:
@@ -1257,6 +1292,322 @@ def cmd_show_declarations(_args: argparse.Namespace) -> int:
     return 0
 
 
+# ===========================================================================
+# Q4 phase WP-3 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-4/D-5,
+# work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md WP-3
+# change table E): bulk-apply/visualize each application's own
+# per-application platform-upgrade ledger. Both subcommands run entirely
+# against the PROVISION DSN (`R2DB_CONTROL_DSN`) -- the running API process
+# never holds this credential (SI-02) -- and neither one changes `list-
+# apps`' own resource/shape (design D-5, work order constraint 17).
+# ===========================================================================
+
+
+def _registry_applications_for_upgrade(conn: "psycopg.Connection", *, application: str | None) -> list[dict[str, Any]]:
+    """Design D-4(a): the default target set is EVERY registered
+    application with a real database (`database_name IS NOT NULL`,
+    `enabled` is NOT a filter here -- "`enabled`は対象選択に影響しない",
+    a disabled application's own DB is still brought up to date). When
+    `--application <id>` names one explicitly, that row is returned
+    regardless of its own `database_name` -- a registered-but-never-
+    provisioned application is reported as a SKIP (design D-4(d)'s own
+    "database_nameがNULL" skip reason), not a silent non-match, only when
+    an operator asked for it by name specifically."""
+    schema = _schema()
+    table = sql.Identifier(schema, "applications")
+    if application is not None:
+        statement = sql.SQL("SELECT application_slug, database_name, runtime_role, developer_role FROM {table} WHERE application_slug = %s").format(table=table)
+        params: Sequence[Any] = [application]
+    else:
+        statement = sql.SQL(
+            "SELECT application_slug, database_name, runtime_role, developer_role FROM {table} "
+            "WHERE database_name IS NOT NULL ORDER BY application_slug"
+        ).format(table=table)
+        params = []
+    with conn.cursor() as cur:
+        cur.execute(statement, params)
+        rows = cur.fetchall()
+    if application is not None and not rows:
+        _die(f"application {application!r} is not registered")
+    return [{"application_slug": r[0], "database_name": r[1], "runtime_role": r[2], "developer_role": r[3]} for r in rows]
+
+
+def _read_ledger_applied(app_dsn: str) -> frozenset[int] | None:
+    conn = psycopg.connect(app_dsn)
+    try:
+        return platform_upgrades.read_applied_upgrade_numbers(conn, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME)
+    finally:
+        conn.close()
+
+
+def _run_upgrade_script(app_dsn: str, script: Path, app_slug: str) -> "subprocess.CompletedProcess[str]":
+    """Call shape ONLY copied from MitateDB-api's own `_run_deprovision_
+    script` (design D-4(b)) -- the psql `-v` variable name is r2db's own
+    (`platform_upgrades.UPGRADE_SCRIPT_VARIABLE`, `app_slug`; MitateDB's
+    own realization uses `app_id` instead, design §3.10's own peer-pair
+    table). Never `_die`s on a non-zero exit -- the caller decides how one
+    application's own failure affects the rest of the run (D-4(c))."""
+    return subprocess.run(
+        ["psql", app_dsn, "-v", "ON_ERROR_STOP=1", "-v", f"{platform_upgrades.UPGRADE_SCRIPT_VARIABLE}={app_slug}", "-f", str(script)],
+        capture_output=True, text=True,
+    )
+
+
+def _print_upgrade_result(result: "platform_upgrades.ApplicationUpgradeResult") -> None:
+    if result.database_name is None:
+        # M-1 fix (supervisor ruling 2026-09-05): only reachable via an
+        # explicit `--application <id>` naming a registered-but-never-
+        # provisioned application (the default enumeration already
+        # excludes these rows entirely, design D-4(a)). Worded as a
+        # FAILURE, not a benign skip -- D-4(e)'s own exit-code table
+        # groups this with a real `psql` failure under exit code `3`
+        # (a real, non-dry-run invocation only; `result.failed` is left
+        # empty for `--dry-run`, see `cmd_upgrade_applications`).
+        verb = "would fail" if not result.failed else "FAILED"
+        print(f"{result.application_id}: {verb} (not provisioned, no database_name on record)")
+        return
+    print(
+        f"{result.application_id}: applied_before={list(result.applied_before)} "
+        f"applied_after={list(result.applied_after)} pending={list(result.pending_after)}"
+        + (f" failed={list(result.failed)}" if result.failed else "")
+        # Design D-4(a) literal text: "台帳に記録済みのDBでは`recorded,
+        # skipped`と出力し、当該DBは成功扱いとする" -- `result.skipped`
+        # is populated ONLY for a number `--script` named that this
+        # application's own ledger already recorded (see the `to_apply`
+        # loop above), which IS this success-not-failure condition.
+        + (f" recorded, skipped={list(result.skipped)}" if result.skipped else "")
+    )
+    if result.failure_detail is not None:
+        # M-3 (supervisor ruling 2026-09-05, review): the failed psql
+        # invocation's own stderr tail, folded into THIS application's
+        # own output block -- printed before the `REVOKE` cleanup line
+        # below (diagnosis before remedy).
+        print(f"  {result.application_id}: psql stderr (tail):")
+        for line in result.failure_detail.splitlines():
+            print(f"    {line}")
+    if result.cleanup_sql is not None:
+        print(f"  {result.cleanup_sql}")
+
+
+def cmd_upgrade_applications(args: argparse.Namespace) -> int:
+    """Design D-4: bulk-applies every per-application upgrade script this
+    package knows about (`platform_upgrades.PLATFORM_UPGRADE_NUMBERS`) to
+    every application named (default: every registered, provisioned
+    application) whose own ledger is missing it -- ascending number order,
+    one `psql` subprocess invocation per (application, number) pair.
+
+    `--script <NNNN>` narrows to exactly ONE number: an application whose
+    own ledger already records it is reported `recorded, skipped` (and
+    counted a SUCCESS, design D-4(a): "台帳に記録済みのDBでは`recorded,
+    skipped`と出力し、当該DBは成功扱いとする") rather than re-run.
+
+    `--dry-run` runs nothing at all -- it reports the exact same `applied`/
+    `pending` set `upgrade-status` would (D-4(a)), ignoring `--script`
+    entirely (there is nothing to apply, so narrowing which script would
+    be applied has no effect on a report that applies none of them).
+
+    Never stops at the first application-level failure (D-4(c): "1つの
+    DBの失敗で止めず全DBを回し、失敗したDBを列挙して非0で終わる") -- a
+    `psql` non-zero exit for one (application, number) pair is recorded as
+    that application's own `failed` entry (with the D-4(c) `REVOKE`
+    clean-up line, since a mid-script failure leaves this run's own
+    temporary developer-role membership standing on the provision role --
+    the failed script's own `REVOKE :"developer_role" FROM CURRENT_USER`
+    line, positioned after `COMMIT`/the failure point, never runs), and the
+    loop moves on to the NEXT number/application rather than aborting.
+    """
+    provision_dsn = _control_dsn()
+    scripts = platform_upgrades.discover_upgrade_scripts(_migrations_dir())
+    if args.script is not None and not args.dry_run and args.script not in scripts:
+        _die(f"no per-application upgrade script found for upgrade number {args.script} under {_migrations_dir()}")
+
+    with psycopg.connect(provision_dsn) as conn:
+        provision_role = conn.info.user
+        apps = _registry_applications_for_upgrade(conn, application=args.application)
+
+    results: list[platform_upgrades.ApplicationUpgradeResult] = []
+    for app in apps:
+        application_id = app["application_slug"]
+        database_name = app["database_name"]
+        if database_name is None:
+            # Design D-4(a)/(d)/(e) fix (supervisor ruling 2026-09-05,
+            # M-1): reachable only via an explicit `--application <id>`
+            # naming a registered-but-never-provisioned application.
+            # `pending_after` is always every number this package
+            # requires (nothing could possibly have been applied to a
+            # database that does not exist) -- this alone is what makes
+            # `--dry-run` return `4` here (D-5: "database_nameがNULLの
+            # 場合はappliedを[]とする").
+            #
+            # `failed` is populated the SAME way -- but ONLY for a real
+            # (non-dry-run) invocation. D-4(e)'s own exit-code table
+            # names `database_name`がNULL explicitly as ONE of the two
+            # conditions exit code `3` covers ("psql exit 3、または
+            # `database_name`がNULL"); populating `failed` is what makes
+            # `summarize_upgrade_run` below -- UNMODIFIED, still the exact
+            # same pinned pure function -- return `3` for this case on
+            # its own, with no special-casing needed at this call site
+            # (the prior form filtered these rows OUT before calling it,
+            # which is why this case silently returned `0`, review M-1).
+            # A `--dry-run` never "fails" anything (nothing is attempted),
+            # so `failed` stays empty there -- `pending_after` alone
+            # already drives that path's own `4`.
+            all_numbers = tuple(sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS))
+            results.append(
+                platform_upgrades.ApplicationUpgradeResult(
+                    application_id=application_id, database_name=None,
+                    applied_before=(), applied_after=(), pending_after=all_numbers,
+                    failed=() if args.dry_run else all_numbers, skipped=(), cleanup_sql=None,
+                )
+            )
+            continue
+
+        app_dsn = _application_dsn(provision_dsn, database_name)
+        applied_before = _read_ledger_applied(app_dsn) or frozenset()
+
+        if args.dry_run:
+            pending_after = platform_upgrades.pending_upgrade_numbers(applied_before, platform_upgrades.PLATFORM_UPGRADE_NUMBERS)
+            results.append(
+                platform_upgrades.ApplicationUpgradeResult(
+                    application_id=application_id, database_name=database_name,
+                    applied_before=tuple(sorted(applied_before)), applied_after=tuple(sorted(applied_before)),
+                    pending_after=pending_after, failed=(), skipped=(), cleanup_sql=None,
+                )
+            )
+            continue
+
+        to_apply = [args.script] if args.script is not None else list(
+            platform_upgrades.pending_upgrade_numbers(applied_before, platform_upgrades.PLATFORM_UPGRADE_NUMBERS)
+        )
+        applied_now = set(applied_before)
+        failed_numbers: list[int] = []
+        skipped_numbers: list[int] = []
+        cleanup_sql: str | None = None
+        failure_detail: str | None = None
+        for number in to_apply:
+            if number in applied_before:
+                skipped_numbers.append(number)
+                continue
+            script_path = scripts.get(number)
+            if script_path is None:
+                failed_numbers.append(number)
+                break
+            # The per-application upgrade script itself looks up
+            # `database_name`/`runtime_role`/`developer_role` from the
+            # REGISTRY (`SELECT ... FROM <schema>.applications WHERE
+            # application_slug = :'app_slug' \gset`, mirroring `0003`/
+            # `0004`'s own `\c :database_name` ritual) -- it must therefore
+            # run against the PROVISION DSN (the platform database), never
+            # `app_dsn` (only used above, by `_read_ledger_applied`, for
+            # the Python-side ledger SELECT -- a separate connection path,
+            # design D-4(b): "台帳の読み出しはPython側で行う。script側の
+            # `\c :database_name`とは別経路である").
+            result = _run_upgrade_script(provision_dsn, script_path, application_id)
+            if result.returncode != 0:
+                failed_numbers.append(number)
+                cleanup_sql = f"REVOKE {app['developer_role']} FROM {provision_role};"
+                # M-3 (supervisor ruling 2026-09-05, review; tail source
+                # unified with MitateDB-api's own `_run_upgrade_script`
+                # by supervisor ruling U-7, 2026-09-05 差し戻し後 delta
+                # 監査): a failed psql invocation's own stdout+stderr is
+                # the ONLY place the actual PostgreSQL error text lives
+                # -- before this fix `_run_upgrade_script`'s own
+                # `CompletedProcess` was discarded except for
+                # `.returncode`, so an operator staring at "failed=[N]"
+                # had no way to learn WHY short of re-running the script
+                # by hand. Both streams are joined (`psql`'s own
+                # `ON_ERROR_STOP=1` failure text can land on either,
+                # depending on the failing statement) before taking the
+                # tail (last ~20 lines), folded into this application's
+                # own output block below (`_print_upgrade_result`), not
+                # the full capture -- an unbounded dump would risk
+                # burying the per-application summary line under an
+                # unrelated wall of output for a script that fails early
+                # with a long preamble already printed.
+                failure_detail = "\n".join(f"{result.stdout}\n{result.stderr}".splitlines()[-20:])
+                break
+            applied_now.add(number)
+        applied_after = frozenset(applied_now)
+        pending_after = platform_upgrades.pending_upgrade_numbers(applied_after, platform_upgrades.PLATFORM_UPGRADE_NUMBERS)
+        results.append(
+            platform_upgrades.ApplicationUpgradeResult(
+                application_id=application_id, database_name=database_name,
+                applied_before=tuple(sorted(applied_before)), applied_after=tuple(sorted(applied_after)),
+                pending_after=pending_after, failed=tuple(failed_numbers), skipped=tuple(skipped_numbers),
+                cleanup_sql=cleanup_sql, failure_detail=failure_detail,
+            )
+        )
+
+    for result in results:
+        _print_upgrade_result(result)
+    # L-... output-format unification (supervisor ruling 2026-09-05,
+    # 裁定 9), counting rule fixed by supervisor ruling U-1 (2026-09-05,
+    # 差し戻し後 delta 監査): same trailing tally SHAPE as MitateDB-api's
+    # own `_print_upgrade_results` ("N succeeded, N failed, N skipped
+    # (...)"), and the SAME counting rule -- each application lands in
+    # EXACTLY one bucket. `failed` always wins first -- this INCLUDES the
+    # `database_name is None` case above (M-1) even under `--dry-run`,
+    # where `result.failed` itself is deliberately left empty (so
+    # `summarize_upgrade_run`'s own exit code stays `4`, never `3`, for a
+    # dry run); the tally line is a separate, purely descriptive surface,
+    # so it counts a never-provisioned application as failed regardless.
+    # Otherwise, an application whose own `applied_after` came back
+    # identical to its own `applied_before` actually applied NOTHING this
+    # run (either nothing was pending at all, or `--script` named a
+    # number this application's own ledger already recorded) -- that is
+    # "skipped" (未適用なし、既に記録済み), never "succeeded" (which
+    # requires having actually run and applied at least one upgrade). The
+    # prior form instead used `result.skipped` (populated ONLY by the
+    # `--script`-already-recorded path, never by "nothing was pending to
+    # begin with") to decide `skipped_count`, which is why a
+    # fully-caught-up application in a bulk (non-`--script`) run was
+    # silently counted "succeeded" despite having applied nothing.
+    failed_count = sum(1 for r in results if r.failed or r.database_name is None)
+    skipped_count = sum(
+        1 for r in results
+        if not r.failed and r.database_name is not None and r.applied_after == r.applied_before
+    )
+    succeeded = len(results) - failed_count - skipped_count
+    verb = "would apply" if args.dry_run else "applied"
+    print(f"{succeeded} succeeded, {failed_count} failed, {skipped_count} skipped ({verb})")
+    # M-1 fix: `results` is passed WHOLE -- a `database_name is None`
+    # row's own populated `failed` (non-dry-run only) is what makes this
+    # UNMODIFIED, still-pinned pure function return `3` on its own;
+    # filtering these rows out before this call (the prior form) is
+    # exactly why the condition was previously invisible to this exit
+    # code (review M-1).
+    return platform_upgrades.summarize_upgrade_run(results, dry_run=args.dry_run)
+
+
+def cmd_upgrade_status(args: argparse.Namespace) -> int:
+    """Design D-5: `applied`/`pending`/`database_name` for every targeted
+    application, provision-DSN-only -- never touches `list-apps`' own
+    resource or shape (design D-5's own reason: this CLI cannot add a
+    column to a contract-shaped `ApplicationsResult` without a contract
+    change, U-1). An application with no ledger table at all reports
+    `applied=[]` (design D-5's own "台帳が無いapplicationはapplied=[]と
+    する")."""
+    provision_dsn = _control_dsn()
+    with psycopg.connect(provision_dsn) as conn:
+        apps = _registry_applications_for_upgrade(conn, application=args.application)
+
+    any_pending = False
+    for app in apps:
+        application_id = app["application_slug"]
+        database_name = app["database_name"]
+        if database_name is None:
+            print(f"{application_id}: database_name=None applied=[] pending={sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)}")
+            any_pending = True
+            continue
+        app_dsn = _application_dsn(provision_dsn, database_name)
+        applied = _read_ledger_applied(app_dsn) or frozenset()
+        pending = platform_upgrades.pending_upgrade_numbers(applied, platform_upgrades.PLATFORM_UPGRADE_NUMBERS)
+        if pending:
+            any_pending = True
+        print(f"{application_id}: database_name={database_name} applied={sorted(applied)} pending={list(pending)}")
+    return 4 if any_pending else 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m r2db_api.ops",
@@ -1441,6 +1792,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Q4 D-1/D-2: show the current platform_declarations rows and the two writer roles' pg_db_role_setting entries",
     )
     p.set_defaults(func=cmd_show_declarations)
+
+    p = sub.add_parser(
+        "upgrade-applications",
+        help=(
+            "Q4 D-4: bulk-apply pending per-application platform upgrades (provision DSN only). Does not stop "
+            "at the first application-level failure -- failed applications are listed with a cleanup REVOKE"
+        ),
+    )
+    p.add_argument("--application", default=None, metavar="ID", help="limit to one application (default: every provisioned application)")
+    p.add_argument("--script", type=int, default=None, metavar="NNNN", help="limit to one upgrade number; already-recorded databases are skipped")
+    p.add_argument("--dry-run", action="store_true", help="report applied/pending only -- applies nothing")
+    p.set_defaults(func=cmd_upgrade_applications)
+
+    p = sub.add_parser(
+        "upgrade-status",
+        help="Q4 D-5: show applied/pending per-application platform upgrades and database_name (provision DSN only)",
+    )
+    p.add_argument("--application", default=None, metavar="ID", help="limit to one application (default: every provisioned application)")
+    p.set_defaults(func=cmd_upgrade_status)
 
     return parser
 

@@ -23,15 +23,16 @@ script yet (r2db's first one, `0009`, ships in WP-3) and so cannot
 exercise 適合 by itself (design §10: "本フェーズ出荷後" is the ONLY
 point at which 適合 >= 1 is expected against the real directory).
 
-xfail bookkeeping (supervisor ruling 2026-09-05, work order §4 WP-0
-完了条件 7/8): the two assertions against the REAL `migrations/`
-directory that cannot yet be true (適合 >= 1, and the three-way match
-against the not-yet-existing `r2db_api.platform_upgrades` package
-constant) are registered `xfail(strict=True)` and removed in the SAME
-commit as WP-3 (`r2db-api/migrations/0009_..._upgrade.sql` + the
-`platform_upgrades.py` module) -- `strict=True` so an accidental early
-green (e.g. from a stray file matching the naming convention) is
-reported as a failure (XPASS), not silently ignored.
+xfail bookkeeping, REMOVED in this same WP-3 commit (supervisor ruling
+2026-09-05, work order §4 WP-0 完了条件 7/8, WP-3 完了条件 12/13): the
+two assertions against the REAL `migrations/` directory that could not
+yet be true as of WP-0 (適合 >= 1, and the three-way match against the
+not-yet-existing `r2db_api.platform_upgrades` package constant) were
+registered `xfail(strict=True)` there and are removed HERE, in the same
+commit that ships `r2db-api/migrations/0009_platform_upgrades_ledger_
+upgrade.sql` and `r2db_api/platform_upgrades.py` -- both now assert
+plainly (`test_real_migrations_dir_has_at_least_one_conforming_script`/
+`test_real_migrations_three_way_match` below), and both are green.
 
 Rework round (supervisor ruling 2026-09-05, work order §4 WP-0 差し戻し
 指示 1 / 裁定 A / 裁定 C): code review round 1 (Opus, mutation-tested)
@@ -64,8 +65,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import pytest
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
@@ -618,47 +617,62 @@ def test_synthetic_three_way_match_concordant_and_discordant_sets(tmp_path):
 
 
 def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
-    """完了条件 6: 実 `migrations/` に対して 違反 0 かつ 免除 = r2db 空。
-    (現時点で per-application upgrade script は 1 つも無いので、走査対象
-    はすべて 対象外 になる -- それ自体が「命名を外れた既存 migration が
-    誤って走査対象に入っていない」ことの実測でもある、完了条件 5 の一部)。
-    """
+    """完了条件 6: 実 `migrations/` に対して 違反 0 かつ 免除 = r2db 空
+    (`ALLOW_LIST_NUMBERS` が空集合であるとおり -- r2db に `0006` 相当の
+    出荷済み免除対象は無い)。
+
+    陳腐化 docstring 訂正 (監査 2026-09-05 証拠不足の指摘): この docstring
+    はかつて「現時点で per-application upgrade script は 1 つも無いので、
+    走査対象はすべて対象外になる」と書いていたが、WP-3 で `0009_platform_
+    upgrades_ledger_upgrade.sql` が出荷された今、実測は
+    `{'適合': 1, '違反': 0, '免除': 0, '対象外': 8}` (`0001`-`0008` の
+    8 本の platform 単発 migration が対象外、`0009` だけが適合) であり、
+    「対象がすべて対象外」はもう成立しない。本テスト自身が検査するのは
+    違反 0 と免除の集合だけであり、適合 >= 1 の実測は `test_real_
+    migrations_dir_has_at_least_one_conforming_script` が別途行う (完了
+    条件 8) -- この docstring は実測値を逐語で記録するにとどめる。"""
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
-    assert result.tally["違反"] == 0
-    assert result.exempted_numbers == ALLOW_LIST_NUMBERS
+    assert result.tally == {"適合": 1, "違反": 0, "免除": 0, "対象外": 8}
+    assert result.exempted_numbers == ALLOW_LIST_NUMBERS == frozenset()
 
 
 def test_naming_convention_excludes_every_current_platform_single_shot_migration():
-    """完了条件 5: platform 単発 migration がこの命名を使っていないこと
-    -- 実 `migrations/` の中で `NAME_RE` に一致するファイルが 1 つも無い
-    (r2db にはまだ per-application upgrade script が無いため)。"""
+    """完了条件 5 (WP-3 で改訂 -- `0009_platform_upgrades_ledger_upgrade.
+    sql` が実 per-application upgrade script として加わったため、「`NAME_
+    RE` に一致するファイルが 1 つも無い」という WP-0 時点の主張はもう成立
+    しない): platform 単発 migration (`0001`-`0008`) はどれもこの命名を
+    使っていないこと -- `NAME_RE` に一致するのは正当な per-application
+    upgrade script (`0009`) だけであること。"""
     matching = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if NAME_RE.match(p.name)}
-    assert matching == set()
+    assert matching == {"0009_platform_upgrades_ledger_upgrade.sql"}
+    platform_single_shot_migrations = (
+        "0001_bootstrap_control_plane.sql",
+        "0002_provisioning_functions.sql",
+        "0003_provision_application.sql",
+        "0004_deprovision_application.sql",
+        "0005_credential_store.sql",
+        "0006_control_plane_http.sql",
+        "0007_application_audit.sql",
+        "0008_platform_declarations_and_writer_timeouts.sql",
+    )
+    for name in platform_single_shot_migrations:
+        assert name not in matching, f"{name} incorrectly matches the per-application upgrade naming convention"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "design §10 / work order §4 WP-0 完了条件 8: real r2db-api/migrations/ has no "
-        "per-application upgrade script yet (0009 ships in WP-3) -- 適合 >= 1 cannot yet "
-        "hold. Removed in the SAME commit as WP-3, which ships 0009_..._upgrade.sql."
-    ),
-)
 def test_real_migrations_dir_has_at_least_one_conforming_script():
+    """完了条件 8/13 (WP-0 の `xfail(strict=True)` を本 WP-3 と同一コミッ
+    トで撤去 -- design §10 / work order §4 WP-0 完了条件 8): `0009_
+    platform_upgrades_ledger_upgrade.sql` が実 `migrations/` に加わり、
+    適合 >= 1 が実際に成立する。"""
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
     assert result.tally["適合"] >= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "design §10 / work order §4 WP-0 完了条件 7: the package constant module "
-        "(r2db_api.platform_upgrades, design D-3 (f)) does not exist until WP-3, and "
-        "0003's seed list is empty until WP-3 -- the three-way match cannot yet hold. "
-        "Removed in the SAME commit as WP-3."
-    ),
-)
 def test_real_migrations_three_way_match():
+    """完了条件 7/12 (WP-0 の `xfail(strict=True)` を本 WP-3 と同一コミッ
+    トで撤去 -- design §10 / work order §4 WP-0 完了条件 7): {`*_upgrade.
+    sql` の番号集合} == {テンプレート `0003` の seed 集合} == {`r2db_api.
+    platform_upgrades.PLATFORM_UPGRADE_NUMBERS`} が実際に成立する。"""
     import importlib
 
     script_numbers = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME).applicable_numbers
@@ -670,3 +684,76 @@ def test_real_migrations_three_way_match():
     package_numbers = frozenset(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)
 
     assert script_numbers == seed_numbers == package_numbers
+
+
+# ===========================================================================
+# L-3 (supervisor ruling 2026-09-05, review): a PG-INDEPENDENT pin of the
+# F-12 message text (design §3.8), mirroring MitateDB-api's own `test_
+# platform_upgrades.py::test_f12_message_matches_design_section_3_8_
+# verbatim` -- r2db previously pinned F-12 only against a REAL PostgreSQL
+# server (`tests/test_postgres.py::test_verify_platform_upgrades_applied_
+# raises_service_unavailable_when_a_number_is_missing`) or via the cross-
+# peer isomorphism table (which pins the FUNCTION BODY of `_f12_message`,
+# never the text `require_application_upgrades_applied` actually raises
+# for THIS peer's own `PLATFORM_UPGRADE_NUMBERS`). This test needs no
+# database at all -- a minimal fake `psycopg.Connection` stand-in whose
+# own ledger table does not exist is enough to exercise `require_
+# application_upgrades_applied`'s pure control flow end to end.
+# ===========================================================================
+
+
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        import psycopg
+
+        raise psycopg.errors.UndefinedTable("relation does not exist")
+
+
+class _FakeConnMissingLedger:
+    """A minimal stand-in for a `psycopg.Connection` whose own ledger
+    table does not exist -- used only to exercise `require_application_
+    upgrades_applied`'s pure control flow (no real PostgreSQL round trip
+    needed for THIS particular case, which is also covered against a
+    real server in `tests/test_postgres.py`)."""
+
+    def cursor(self):
+        return _FakeCursor()
+
+    def rollback(self):
+        pass
+
+
+def test_f12_message_matches_design_section_3_8_verbatim():
+    """設計 §3.8 F-12 の骨子を逐語で assert する (常設規律 4) -- PG 非
+    依存 (L-3, supervisor ruling 2026-09-05, review)。番号列挙・`ops
+    upgrade-applications`・`--dry-run` の案内をすべて含み、DSN・資格情報
+    ・内部ホスト名・宣言値を含まない (SI-10)。"""
+    import importlib
+
+    platform_upgrades = importlib.import_module("r2db_api.platform_upgrades")
+
+    try:
+        platform_upgrades.require_application_upgrades_applied(
+            _FakeConnMissingLedger(),
+            ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME,
+            expected=platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+            application_id="acme",
+            ops_module=platform_upgrades.PEER_MODULE,
+        )
+    except platform_upgrades.PlatformUpgradeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected PlatformUpgradeError")
+    assert message == (
+        "This application's storage is missing platform upgrade(s) 9: the deployment must apply them "
+        "before this application can serve requests. Run 'python -m r2db_api.ops upgrade-applications' "
+        "(its '--dry-run' shows applied and pending per application), then retry."
+    )
+    for forbidden in ("dsn", "DSN=", "password", "://", "host="):
+        assert forbidden not in message

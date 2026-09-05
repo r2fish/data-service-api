@@ -2106,7 +2106,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_66_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2237,10 +2237,34 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
         "src/mitatedb_api/platform_declarations.py",
         "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
     ),
+    # Q4 phase WP-3/WP-4 additions (design docs/design/Q4_DB_SIDE_SINGLE_
+    # TRUTH_V1.md D-3(d)/(f); work order docs/work-orders/
+    # WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4 WP-3/WP-4 変更対象;
+    # surface pinned by monitor ruling 2026-09-05 (design docs/design/
+    # Q4_DB_SIDE_SINGLE_TRUTH_V1.md §5 U-1 / U-2, §3.8 F-12): the pair's
+    # LATER half (this WP, WP-4)
+    # adds both WP-3's and WP-4's own new rows in one commit (work order
+    # §3: "対応表への行追加は「対」の後半WPのみが行う"). Each peer's own new
+    # `platform_upgrades.py` module carries the SAME 8 symbols -- the
+    # cell-open-time ledger-vs-package-constant set difference (D-3(f)),
+    # the F-12 message builder, and the `ops upgrade-applications`
+    # summarizer/result shape (D-4/D-5). `LEDGER_TABLE_NAME`/`PLATFORM_
+    # UPGRADE_NUMBERS`/`UPGRADE_SCRIPT_VARIABLE`/`PEER_MODULE` are
+    # peer-specific VALUES (rulings surface doc: "対応表に載せない") and are
+    # NOT added here, mirroring `platform_declarations.REMOVED_TIMEOUT_ENV`
+    # / `.PEER_MODULE`'s own established exclusion.
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "PlatformUpgradeError"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "discover_upgrade_scripts"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "read_applied_upgrade_numbers"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "pending_upgrade_numbers"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "require_application_upgrades_applied"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "_f12_message"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "summarize_upgrade_run"),
+    ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "ApplicationUpgradeResult"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_58_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_66_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2278,7 +2302,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_58_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_58_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_66_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2350,8 +2374,20 @@ def test_isomorphic_target_table_is_pinned_to_its_current_58_rows() -> None:
             "src/mitatedb_api/platform_declarations.py",
             "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
         ),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "PlatformUpgradeError"),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "discover_upgrade_scripts"),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "read_applied_upgrade_numbers"),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "pending_upgrade_numbers"),
+        (
+            "src/r2db_api/platform_upgrades.py",
+            "src/mitatedb_api/platform_upgrades.py",
+            "require_application_upgrades_applied",
+        ),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "_f12_message"),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "summarize_upgrade_run"),
+        ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "ApplicationUpgradeResult"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 58
+    assert len(_ISOMORPHIC_TARGETS) == 66
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2472,7 +2508,7 @@ def _normalize(source: str) -> str:
     each carry BOTH peers' package names as literal path DATA in the
     SAME tuple (e.g. `"src/r2db_api/main.py"` next to `"src/
     mitatedb_api/main.py"`), and `test_isomorphic_target_table_is_
-    pinned_to_its_current_58_rows` literally asserts that whole table
+    pinned_to_its_current_66_rows` literally asserts that whole table
     -- so its own body mentions both names too. A single-name
     substitution leaves the OTHER peer's name untouched differently
     on each side (r2db's own normalization leaves "mitatedb_api"
@@ -2554,6 +2590,16 @@ def test_peer_local_helpers_are_isomorphic_to_the_sibling_peer() -> None:
     normalizes docstrings out before comparing, or the row-count pin test
     above, which pins the table's
     DATA, not this prose describing it.)
+
+    Q4 phase WP-3/WP-4 (monitor ruling 2026-09-05, design docs/design/
+    Q4_DB_SIDE_SINGLE_TRUTH_V1.md §5 U-1 / U-2, §3.8 F-12) widens the
+    table again, to 66 rows spanning a TENTH file per side --
+    `src/<package>/platform_upgrades.py`
+    (the per-application platform-upgrade ledger's cell-open-time set
+    difference, F-12 message, and `ops upgrade-applications` result/
+    summary shapes, design D-3(f)/D-4/D-5). WP-4 adds this pair's rows for
+    both WPs in the same commit (work order §3), consistent with the
+    established "later half of the pair" convention above.
 
     The sibling side is read as TEXT from its real file path (never
     `importlib.import_module` -- r2db-api's own package name is

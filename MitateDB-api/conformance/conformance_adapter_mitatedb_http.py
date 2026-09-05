@@ -143,6 +143,20 @@ _SCHEMA_REVISION_TABLE = "_mdb_schema_revision"
 # does not reach into a peer's own module internals for a bookkeeping
 # name it needs to exclude from its own privileged reach-around).
 _FIELD_TYPES_TABLE = "_mdb_field_types"
+# Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(a)/(e)(i),
+# work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4
+# WP-4 変更対象 C): the per-application platform-upgrade ledger -- a
+# THIRD bookkeeping table this adapter's own `entities()` reach-around
+# must exclude, same reasoning as the two above (independent literal
+# copy, never importing `backend_postgres`'s/`platform_upgrades`'s own
+# module-private constant). Discovered by this WP's own conformance run:
+# without this exclusion, `test_c01_scope_binding.py`'s `entities()`-
+# driven snapshot treats the ledger table as if it were a real,
+# client-created entity and attempts to `POST /v1/data/_mdb_platform_
+# upgrades/query` against it -- which `VALIDATION_FAILED`s (the reserved
+# leading-underscore prefix, `identifiers._IDENTIFIER`), not because of a
+# scope-binding defect.
+_PLATFORM_UPGRADES_TABLE = "_mdb_platform_upgrades"
 
 # port's own two-member field-type vocabulary (`adapter.COMMON_FIELD_TYPES`)
 # -> this peer's real `SchemaOperationRequest.field_type` wire enum member
@@ -884,7 +898,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 # deployer configured both processes consistently").
                 data_base_url=_DATA_SURFACE_BASE_URL, control_base_url=_CONTROL_SURFACE_BASE_URL,
             ),
-            backend=PostgresBackend(info.runtime_dsn, info.developer_dsn),
+            backend=PostgresBackend(info.runtime_dsn, info.developer_dsn, application_id=application_id),
             audit_router=self._audit_router,
         )
         self._evict_cells_over_cap()
@@ -1519,11 +1533,13 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # developer role/database (never through the real API), after an
         # explicit re-authentication check so a revoked/disabled/
         # unavailable session is denied here exactly as it would be for
-        # any other session operation. Excludes BOTH this peer's own
+        # any other session operation. Excludes THREE of this peer's own
         # bookkeeping tables -- `_mdb_schema_revision` (schema-revision
-        # counter) and `_mdb_field_types` (the declared-type registry
-        # itself, this same WP) -- neither of which is a real entity a
-        # `create_entity`/`create_collection` caller ever created.
+        # counter), `_mdb_field_types` (the declared-type registry itself,
+        # Phase 6 WP-3), and `_mdb_platform_upgrades` (the per-application
+        # platform-upgrade ledger, Q4 phase WP-4, design D-3(a)) -- none
+        # of which is a real entity a `create_entity`/`create_collection`
+        # caller ever created.
         self._send("GET", "/v1/capabilities", session)
         info = self._app_pg[session.application_id]
         conn = psycopg.connect(info.developer_dsn, connect_timeout=5)
@@ -1531,8 +1547,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s)",
-                    [_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE],
+                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s)",
+                    [_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPGRADES_TABLE],
                 )
                 return {row[0] for row in cur.fetchall()}
         finally:

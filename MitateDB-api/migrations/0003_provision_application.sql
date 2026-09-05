@@ -168,6 +168,83 @@ CREATE TABLE public._mdb_field_types (
     PRIMARY KEY (entity, field)
 );
 
+-- Q4-WP4-LEDGER-BEGIN (test harnesses may strip this marked block,
+-- inclusive of both marker lines, to reconstruct a synthetic
+-- "pre-Q4-WP4" provisioning template for an EXISTING-application
+-- backfill test -- `tests/test_platform_upgrades.py`'s own `_legacy_
+-- 0003_text` helper does exactly this; never edit this marker pair
+-- without updating that helper too).
+-- Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-3(a)/(b)(i),
+-- work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4
+-- WP-4 変更対象 A): the per-application platform-upgrade ledger --
+-- records which of this package's own per-application upgrade scripts
+-- (`0006_declared_field_types_upgrade.sql`, `0008_platform_upgrades_
+-- upgrade.sql`, and any later one this package ships) have already been
+-- applied to THIS application's own database. Same bookkeeping-table
+-- treatment as `_mdb_schema_revision`/`_mdb_field_types` immediately
+-- above -- created BEFORE `ALTER DEFAULT PRIVILEGES` so the runtime role
+-- gets no privilege from that statement, and explicitly `REVOKE`d/
+-- `GRANT`ed below instead (design D-3(a): the runtime role needs `SELECT`
+-- on this ONE table, unlike the other two, so it can read its own
+-- application's ledger at cell-open time -- requester ruling 2026-09-05
+-- U-2: "台帳表に対する runtime role の権限は SELECT のみを付与する").
+-- Deliberately NOT wrapped in Row Level Security (design D-3(a), monitor
+-- ruling 2026-09-05): `_mdb_schema_revision`/`_mdb_field_types` already
+-- have none either on this peer (unlike r2db-api's own `_r2db_schema_
+-- revision`), so this table follows the SAME peer-local precedent, not a
+-- new one.
+CREATE TABLE public._mdb_platform_upgrades (
+    upgrade_number integer     PRIMARY KEY,
+    script_name    text        NOT NULL,
+    applied_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- The runtime role gets NO privilege from `ALTER DEFAULT PRIVILEGES`
+-- below (this table is created before that statement runs, same as
+-- `_mdb_schema_revision`/`_mdb_field_types`) -- these two statements
+-- REVOKE any privilege a re-run of this template might otherwise leave
+-- standing, then GRANT exactly `SELECT` (U-2), matching the terminal
+-- state `0008_platform_upgrades_upgrade.sql`'s own identical REVOKE/GRANT
+-- pair brings an EXISTING application to (design D-3(b): both
+-- provisioning paths reach the identical end state).
+REVOKE ALL    ON public._mdb_platform_upgrades FROM :"runtime_role";
+GRANT  SELECT ON public._mdb_platform_upgrades TO :"runtime_role";
+-- `SET LOCAL ROLE :"developer_role"` is in effect (see above), so
+-- CURRENT_USER is the developer role (this table's own owner) and
+-- SESSION_USER is `mitatedbsvc_provision`, the role actually running this
+-- script -- granted `SELECT` here, as the owner, so `ops upgrade-status`/
+-- `upgrade-applications` (provision DSN only, design D-4) can read this
+-- table back after the ritual's own closing `REVOKE :"developer_role"
+-- FROM CURRENT_USER` (below) drops the provision role's temporary
+-- developer membership (design D-3(a)'s own "付与が無いと --dry-run すら
+-- 動かない" note). `USAGE` on the SCHEMA itself is also required --
+-- PostgreSQL checks schema-level `USAGE` before ever consulting a
+-- table-level grant (design §3.9's own DDL is a skeleton; `public` is
+-- owned by the developer role, and database ownership -- which
+-- `mitatedbsvc_provision` does hold, `CREATE DATABASE`'s own default
+-- `OWNER` above -- does NOT itself confer schema-level access to objects
+-- inside that database, so without this line `ops upgrade-status`/
+-- `upgrade-applications` would fail with "permission denied for schema
+-- public" despite the table-level `GRANT SELECT` immediately above).
+GRANT  USAGE  ON SCHEMA public TO SESSION_USER;
+GRANT  SELECT ON public._mdb_platform_upgrades TO SESSION_USER;
+
+-- A NEWLY provisioned application starts out already carrying every
+-- per-application upgrade number this package's own migrations set
+-- currently ships (design D-3(b)(i)) -- `{6, 8}`, kept in three-way sync
+-- with `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` and the real
+-- `migrations/*_upgrade.sql` file-number set by the static scanner
+-- (`tests/test_platform_upgrade_ledger_scan.py::
+-- test_real_migrations_three_way_match`, design §10). Integer-literal
+-- tuples only (design §8.1: a function call, dollar-quote, or nested
+-- parenthesis here would slip past that scanner's own `VALUES (...)`
+-- extraction and fail closed as a three-way mismatch instead).
+INSERT INTO public._mdb_platform_upgrades (upgrade_number, script_name) VALUES
+    (6, '0006_declared_field_types_upgrade.sql'),
+    (8, '0008_platform_upgrades_upgrade.sql')
+ON CONFLICT (upgrade_number) DO NOTHING;
+-- Q4-WP4-LEDGER-END
+
 -- From here on, any table the developer role creates in `public` (i.e.
 -- every entity table `PostgresBackend.create_collection`/`add_field`
 -- creates at request time) automatically grants the runtime role DML --

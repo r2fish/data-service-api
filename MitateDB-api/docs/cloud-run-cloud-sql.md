@@ -780,6 +780,106 @@ this script has not yet reached simply has no rows there until it is run
 (a schema operation issued through the new image writes its own registry
 row automatically; only PRE-EXISTING columns need this backfill).
 
+### 3.4b Per-application platform-upgrade ledger and bulk apply (migration `0008`, Q4 phase WP-4)
+
+Design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-3/D-4/D-5 (work order
+`docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §4 WP-4):
+every application database now carries its own ledger table
+(`public._mdb_platform_upgrades`) recording which of this package's
+per-application upgrade scripts (`0006_declared_field_types_upgrade.sql`,
+`0008_platform_upgrades_upgrade.sql`, and any later one this package
+ships) it has already had applied. A freshly `0003`-provisioned
+application already carries this table, seeded with every number this
+package currently ships (`{6, 8}`) -- this step is for **applications
+provisioned before this WP shipped**, exactly like §3.4a above.
+
+**Data-plane enforcement (no operator action, disclosed for context)**:
+starting with this WP, a served application whose own ledger is missing
+one or more of these numbers (including an application whose ledger table
+does not exist at all) refuses every request with `SERVICE_UNAVAILABLE`
+the moment the data-plane process opens that application's own storage
+boundary -- the response names the missing upgrade number(s) and the
+`ops upgrade-applications` command below. **This does not stop the
+data-plane process from starting, and it does not affect any OTHER served
+application** (supervisor ruling 2026-09-05, review H-1): the process
+starts normally, every other served application's own cell serves exactly
+as before, and only the affected application's own cell refuses -- every
+request against it -- until `ops upgrade-applications` is run and the
+process is restarted. Do not wait for a client report of this to notice a
+missed upgrade; use `ops upgrade-status` (below) as part of every
+deploy's own pre-flight, the same way `ops show-declarations` already is
+(§3.2b).
+
+**Bulk-apply every pending upgrade across every provisioned application**
+(provision DSN only -- never a control credential, SI-02):
+
+```sh
+# Preview first -- applies nothing, reports applied/pending per application.
+python -m mitatedb_api.ops upgrade-applications --dry-run
+
+# Apply. Visits every application; a failure on one does not stop the rest
+# -- failed applications are listed at the end, each with a REVOKE cleanup
+# line (see below).
+python -m mitatedb_api.ops upgrade-applications
+```
+
+`--application <id>` limits either form to one application.
+`enabled` does **not** affect which applications are targeted -- a
+disabled application's own database is still brought current, so
+re-enabling it later never surfaces a stale ledger.
+
+Exit codes: `0` nothing pending, `1` enumeration failed (registry/provision
+DSN unreachable), `2` usage error, `3` at least one application failed to
+apply (see cleanup below), `4` (`--dry-run` only) at least one application
+still has a pending upgrade.
+
+**If an application fails to apply**: the per-application upgrade script's
+own ritual grants `mitatedbsvc_provision` a *temporary* membership in that
+application's own developer role, revoked explicitly at the end of a
+successful run -- a failed run never reaches that closing `REVOKE`, so the
+output for a failed application includes the exact statement to run by
+hand to close it out:
+
+```sql
+REVOKE "<app>_dv" FROM "mitatedbsvc_provision";
+```
+
+Run this (issued on the provision DSN) after diagnosing and fixing
+whatever caused the failure, then re-run `ops upgrade-applications` for
+that application.
+
+**Read-only status** (provision DSN only, no application is ever
+modified):
+
+```sh
+python -m mitatedb_api.ops upgrade-status
+python -m mitatedb_api.ops upgrade-status --application acme
+```
+
+Reports `applied`/`pending`/`database_name` per application (an
+application with no ledger table at all reports `applied: []`). Exit
+codes `0`/`4` mirror `upgrade-applications --dry-run`; this command never
+writes anything, so `1`/`2` are its only other possible outcomes. This is
+the **sole** peer-local visualization of per-application upgrade state
+(design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §5 U-1, requester
+ruling 2026-09-05) -- it is never exposed on any HTTP surface, and
+`list-applications` (§7) is unchanged (still the contract-shaped
+`ApplicationsResult`, no upgrade-state column added).
+
+**`--script <NNNN>` danger, disclosed** (design D-4(f)): this flag applies
+one specific script only to databases that have not yet recorded it --
+never to one that already has (`recorded, skipped`, still counted a
+success). This is the **only** thing standing between `--script 6` and
+data corruption: `0006`'s own backfill scans every column not named
+`_mdb_schema_revision`/`_mdb_field_types` and inserts a declared-type row
+per column found -- run a second time against a database that already
+carries `public._mdb_platform_upgrades`, it would misinterpret that
+table's own three columns as application data and corrupt `_mdb_field_
+types` with three bogus rows. `0006` is already shipped and cannot be
+revised in place; never invoke it by any means other than `ops
+upgrade-applications` (with or without `--script 6`) once this WP has
+shipped.
+
 ## 4. Secret Manager
 
 Six secret families, none of which is ever committed to this repository or

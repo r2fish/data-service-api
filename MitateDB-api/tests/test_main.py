@@ -40,7 +40,7 @@ from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 # bare `from test_postgres import ...` is unsafe under the combined root
 # suite (r2db-api's own, differently-shaped `test_postgres.py` occupies
 # the bare `sys.modules["test_postgres"]` name first).
-from .test_postgres import platform, provision_app  # noqa: F401
+from .test_postgres import MIGRATIONS_DIR, platform, provision_app  # noqa: F401
 
 BASE_URL = "http://mitatedb-main-test.invalid"
 
@@ -235,6 +235,218 @@ def test_build_app_capabilities_document_is_a_startup_snapshot_not_re_read_per_r
                 )
     finally:
         admin.close()
+
+
+# ===========================================================================
+# Q4 rework (supervisor ruling 2026-09-05, H-1 = (a)): the cell-open-time
+# check (F-12, design D-3(f)) exercised through the REAL startup path
+# (`build_app`) AND real HTTP (`httpx.AsyncClient`/`ASGITransport`), not
+# just `test_platform_upgrades.py::test_cell_open_check_raises_service_
+# unavailable_for_missing_upgrade`'s own direct `PostgresBackend(...)`
+# construction -- proving `main.py`'s own per-application loop actually
+# wires the check in AND that ONE application's own missing upgrade never
+# takes the whole process down (never turning `build_app` itself into a
+# `pytest.raises` target, unlike the pre-rework form this replaces --
+# review H-1, `backend_postgres.py`'s own `__init__` no longer raises).
+# Deliberately its OWN, dedicated, never-deprovisioned application pair
+# (`h1_good`/`h1_bad`) -- this file's own module docstring already
+# explains why `test_postgres.py`'s `iso_a`/`iso_b` must not be reused for
+# a `build_app` call that leaks persistent connections.
+# ===========================================================================
+
+
+@pytest.fixture(scope="module")
+def h1_good_app(platform):
+    return provision_app(platform, "h1good")
+
+
+@pytest.fixture(scope="module")
+def h1_bad_app(platform):
+    return provision_app(platform, "h1bad")
+
+
+def _h1_env(platform, good_app, bad_app) -> dict[str, str]:
+    return {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_SERVE_APPS": f"{good_app.app_id},{bad_app.app_id}",
+        f"MITATEDB_APP_{good_app.app_id.upper()}_RUNTIME_DSN": good_app.runtime_dsn,
+        f"MITATEDB_APP_{good_app.app_id.upper()}_DEVELOPER_DSN": good_app.developer_dsn,
+        f"MITATEDB_APP_{bad_app.app_id.upper()}_RUNTIME_DSN": bad_app.runtime_dsn,
+        f"MITATEDB_APP_{bad_app.app_id.upper()}_DEVELOPER_DSN": bad_app.developer_dsn,
+    }
+
+
+def _h1_delete_ledger_upgrade_8(bad_app) -> None:
+    conn = psycopg.connect(bad_app.developer_dsn, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._mdb_platform_upgrades WHERE upgrade_number = 8")
+    finally:
+        conn.close()
+
+
+def _h1_issue_runtime_credential(platform, app) -> str:
+    write_store = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper=_PEPPER, schema=platform.registry_schema,
+    )
+    try:
+        _credential_id, bearer = write_store.issue(app.app_id, Role.RUNTIME)
+    finally:
+        write_store.close()
+    return bearer
+
+
+_F12_MESSAGE_UPGRADE_8 = (
+    "This application's storage is missing platform upgrade(s) 8: the deployment must apply "
+    "them before this application can serve requests. Run 'python -m mitatedb_api.ops "
+    "upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry."
+)
+
+
+def test_build_app_h1_serves_every_application_and_refuses_only_the_one_with_a_pending_upgrade(
+    platform, h1_good_app, h1_bad_app, main_module,
+) -> None:
+    """裁定 1 (H-1 = (a)): `h1_bad_app`'s own upgrade 8 is deleted below
+    before `build_app` ever runs -- `h1_good_app`'s own ledger stays
+    complete (seeded `{6, 8}` by the current `0003`). `build_app` itself
+    must NOT raise (a mutation reverting `backend_postgres.PostgresBackend.
+    __init__` back to raising `StorageConfigurationError` directly, out of
+    `main.py`'s own eager per-application construction loop, would fail
+    THIS test at `build_app(...)` itself, before either HTTP assertion
+    below is ever reached). `GET /v1/catalog` for `h1_good_app` returns
+    200; for `h1_bad_app` it returns 503 with the F-12 message verbatim."""
+    _h1_delete_ledger_upgrade_8(h1_bad_app)
+
+    env = _h1_env(platform, h1_good_app, h1_bad_app)
+    app = main_module.build_app(env)
+
+    bearer_good = _h1_issue_runtime_credential(platform, h1_good_app)
+    bearer_bad = _h1_issue_runtime_credential(platform, h1_bad_app)
+
+    import asyncio
+
+    async def _get(bearer: str):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+            return await client.get("/v1/catalog", headers={"authorization": f"Bearer {bearer}"})
+
+    response_good = asyncio.run(_get(bearer_good))
+    assert response_good.status_code == 200, response_good.text
+
+    response_bad = asyncio.run(_get(bearer_bad))
+    assert response_bad.status_code == 503, response_bad.text
+    body_bad = response_bad.json()
+    assert body_bad["code"] == "SERVICE_UNAVAILABLE"
+    assert body_bad["message"] == _F12_MESSAGE_UPGRADE_8
+
+    # U-2 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査, design
+    # D-3(f) 追記の精密化): H-1's own refusal is scoped to operations that
+    # cross the storage boundary -- `/v1/capabilities` (the discovery
+    # document) never touches the backend, so it must still answer
+    # normally (200) for `h1_bad_app` even while its own `GET /v1/catalog`
+    # is refused above.
+    async def _get_capabilities(bearer: str):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+            return await client.get("/v1/capabilities", headers={"authorization": f"Bearer {bearer}"})
+
+    response_bad_capabilities = asyncio.run(_get_capabilities(bearer_bad))
+    assert response_bad_capabilities.status_code == 200, response_bad_capabilities.text
+
+
+def test_build_app_h1_logs_the_f12_message_verbatim_at_cell_open_time(
+    platform, h1_good_app, h1_bad_app, main_module, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """U-6 (supervisor ruling 2026-09-05, 差し戻し後 delta 監査): H-1's own
+    design-doc claim ("起動時にはログへ F-12 を1行出す (API 応答と同じ
+    文面)") previously had no direct evidence -- `main.py`'s own stderr
+    `print` was a visual-only check (裁定 1 の証拠不足). `main.py`'s own
+    eager per-application construction loop now logs through the standard
+    `logging` module, so `caplog` pins the verbatim F-12 text at cell-open
+    time -- the SAME text `h1_bad_app`'s own HTTP responses carry
+    (companion H-1 test above) -- and confirms `h1_good_app` (whose own
+    ledger is complete) never logs a refusal at all. `_h1_delete_ledger_
+    upgrade_8` is re-run here (independently of test execution order/the
+    companion tests above -- idempotent, a plain `DELETE`)."""
+    _h1_delete_ledger_upgrade_8(h1_bad_app)
+    env = _h1_env(platform, h1_good_app, h1_bad_app)
+
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="mitatedb_api.main")
+    main_module.build_app(env)
+
+    messages = [record.getMessage() for record in caplog.records if record.name == "mitatedb_api.main"]
+    expected = (
+        f"mitatedb_api: application '{h1_bad_app.app_id}' cell refusing requests: {_F12_MESSAGE_UPGRADE_8}"
+    )
+    assert expected in messages
+    assert not any(h1_good_app.app_id in message for message in messages)
+
+
+def test_build_app_h1_after_ops_upgrade_applications_and_a_restart_the_refused_application_serves_normally(
+    platform, h1_bad_app, main_module, monkeypatch, tmp_path,
+) -> None:
+    """裁定 1 (H-1, (i)/(ii)): running the real `ops upgrade-applications`
+    against `h1_bad_app` (whose own upgrade 8 is deleted below,
+    independently of test execution order/the companion test above) and
+    then restarting the data-plane process (a fresh `build_app` call --
+    the only way this rework's own startup snapshot, D-1(e)/D-2(g)/U-3,
+    is ever re-read) makes `h1_bad_app`'s own cell a normal one again:
+    `GET /v1/catalog` now returns 200."""
+    import mitatedb_api.ops as ops
+
+    _h1_delete_ledger_upgrade_8(h1_bad_app)
+
+    # `h1_bad_app` alone is enough to observe both the refusal and the
+    # recovery -- no second, "good" application is needed for this test's
+    # own claim.
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_SERVE_APPS": h1_bad_app.app_id,
+        f"MITATEDB_APP_{h1_bad_app.app_id.upper()}_RUNTIME_DSN": h1_bad_app.runtime_dsn,
+        f"MITATEDB_APP_{h1_bad_app.app_id.upper()}_DEVELOPER_DSN": h1_bad_app.developer_dsn,
+    }
+
+    import asyncio
+
+    async def _get(app, bearer: str):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+            return await client.get("/v1/catalog", headers={"authorization": f"Bearer {bearer}"})
+
+    app_before = main_module.build_app(env)
+    bearer_before = _h1_issue_runtime_credential(platform, h1_bad_app)
+    response_before = asyncio.run(_get(app_before, bearer_before))
+    assert response_before.status_code == 503, response_before.text
+
+    # `ops.py`'s own test-only escape hatch (`MITATEDB_MIGRATIONS_DIR`,
+    # `test_ops_upgrade.py`'s own established convention) -- points
+    # `_migrations_dir()` at a REWRITTEN `0008` (this module's own
+    # throwaway schema/db prefix, the SAME blanket `.replace("mitatedb",
+    # prefix)` step `test_postgres.py::_bootstrap_platform` already
+    # applies to every other migration file) instead of the real
+    # `MitateDB-api/migrations/`, whose `0008` names the real deployment's
+    # literal `mitatedb_registry`/`mitatedb_platform`.
+    rewritten_0008 = tmp_path / "0008_platform_upgrades_upgrade.sql"
+    rewritten_0008.write_text(
+        (MIGRATIONS_DIR / "0008_platform_upgrades_upgrade.sql").read_text().replace("mitatedb", platform.prefix)
+    )
+    monkeypatch.setenv("MITATEDB_PROVISION_DSN", platform.provision_dsn)
+    monkeypatch.setenv("MITATEDB_PLATFORM_SCHEMA", platform.registry_schema)
+    monkeypatch.setenv("MITATEDB_MIGRATIONS_DIR", str(tmp_path))
+    rc = ops.main(["upgrade-applications", "--application", h1_bad_app.app_id])
+    assert rc == 0
+
+    # "Restart" -- a fresh `build_app` call re-reads the ledger this
+    # rework's own startup snapshot only ever reads once per process.
+    app_after = main_module.build_app(env)
+    bearer_after = _h1_issue_runtime_credential(platform, h1_bad_app)
+    response_after = asyncio.run(_get(app_after, bearer_after))
+    assert response_after.status_code == 200, response_after.text
 
 
 def test_build_app_writer_role_dual_check_connects_via_the_sinks_own_connect_method(main_module, platform, probe_app, monkeypatch):

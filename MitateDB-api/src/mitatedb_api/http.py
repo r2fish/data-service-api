@@ -39,7 +39,7 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError,
                      DestructiveConfirmationRequired, FoundationError,
-                     NotFoundError, ResourceLimitError,
+                     NotFoundError, PlatformUpgradePending, ResourceLimitError,
                      StorageConfigurationError, ValidationError)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -159,6 +159,20 @@ def _problem_for_exception(exc: FoundationError, request_id: str) -> JSONRespons
     # ResourceLimitError`/`errors.DestructiveConfirmationRequired` publish
     # (`limit_class` / the four declare-and-echo keys) -- never the raw
     # exception message.
+    #
+    # Q4 rework (supervisor ruling 2026-09-05, H-1; design §3.8's own
+    # "F-12だけは...API応答として利用者に届く"): `PlatformUpgradePending`
+    # is the ONE exception this exemption applies to -- `isinstance`
+    # (never the classified `code`, which is the same `SERVICE_UNAVAILABLE`
+    # every OTHER `StorageConfigurationError` also classifies to) narrows
+    # to exactly this subclass, so this stays a one-exception carve-out,
+    # not a hole every current or future `StorageConfigurationError` site
+    # falls through. `platform_upgrades._f12_message`'s own construction
+    # already excludes DSN/credential/internal-hostname/declared-value
+    # text -- only the missing upgrade numbers and the next `ops` command
+    # appear -- so `str(exc)` is safe to surface verbatim here.
+    if isinstance(exc, PlatformUpgradePending):
+        return _problem(code, str(exc), request_id=request_id, details=getattr(exc, "details", None))
     message = {
         "AUTH_STATE_UNAVAILABLE": "Authorization state is unavailable.",
         "SERVICE_UNAVAILABLE": "The service is temporarily unavailable.",
