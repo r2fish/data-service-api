@@ -125,7 +125,7 @@ WP-1〜WP-4 が乗る**共通の型枠**を先に置く — (a) 両 peer の src
 
 - **現物 (実測)**: 逐語実装は **`MitateDB-api/tests/test_application_audit.py:94`** の `_ms_from_pg_timeout_text` にある。**r2db 側にも独立のコピーが `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py:82` にある** (設計 §3 D-1 (b)(ii) は MitateDB の 1 コピーだけを挙げている)。MitateDB の conformance timeout テストは `:66` で `test_application_audit` から import している。
 - **置き場は確定済み (監督裁定 2026-09-05。実装者提案は不要)**: **両 peer とも新規モジュール `<peer_pkg>/pg_timeouts.py`** — `r2db-api/src/r2db_api/pg_timeouts.py` / `MitateDB-api/src/mitatedb_api/pg_timeouts.py`。**関数名は `ms_from_pg_timeout_text`** (src では先頭アンダースコアを付けない)。既存の timeout 既定定数の所在は `r2db-api/src/r2db_api/credential_store.py` / `MitateDB-api/src/mitatedb_api/application_audit.py` である (設計 §3.10) が、**そこには置かない**。
-- **扱う単位は設計の規範 (設計 §3 D-1 (b)(ii)) を採る — `{ms, s, min, h, d}` と単位無し (= ms)** (**監督裁定 2026-09-05**)。**現行実装は `ms` / `min` / `s` / 単位無しのみを扱う (実測、`MitateDB-api/tests/test_application_audit.py:100-108`)** — `h` / `d` は本 WP で足す。
+- **扱う単位は設計の規範 (設計 §3 D-1 (b)(ii)) を採る — `{us, ms, s, min, h, d}` と単位無し (= ms)** (**監督裁定 2026-09-05**。WP-0 差し戻し裁定 B で PG 16 の受理集合 (HINT 逐語: Valid units for this parameter are "us", "ms", "s", "min", "h", and "d") に合わせ `us` を加え、端数は PG の rint 相当 (round-half-even) で整数化する)。**現行実装は `ms` / `min` / `s` / 単位無しのみを扱う (実測、`MitateDB-api/tests/test_application_audit.py:100-108`)** — `h` / `d` は本 WP で足す。
 - 既存 3 コピー (r2db tests / MitateDB tests / MitateDB conformance test の import) を **src の 1 定義への import に置き換える**。**両 peer の既存テストコピー (`MitateDB-api/tests/test_application_audit.py:94-108` / `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py:82`) は本 WP で撤去し、コピーを 1 つも残さない** (監督裁定 2026-09-05)。
 
 **B. 静的規則スキャナ (設計 D-3 (d) / §8.1 / §10)**
@@ -145,14 +145,14 @@ WP-1〜WP-4 が乗る**共通の型枠**を先に置く — (a) 両 peer の src
 
 **C. 同型性対応表 (設計 D-3 (d))**
 
-- **現物 (実測)**: 対応表は `r2db-api/tests/test_audit_query.py:2298` / `MitateDB-api/tests/test_audit_query.py:2037` の `_ISOMORPHIC_TARGETS` であり、**現在 18 行**である。内容を pin するテストは `test_isomorphic_target_table_is_pinned_to_its_current_18_rows` (r2db `:2335` / MitateDB `:2074`、`len(...) == 18` は r2db `:2377` / MitateDB `:2116`)。**この pin テストの関数名自身が対応表の 18 行目に載っている** (r2db `:2321` / MitateDB `:2060`) ので、**行を足すたびに関数名の行数部分と当該行の両方を改める**。
+- **現物 (実測)**: 対応表は `r2db-api/tests/test_audit_query.py:2298` / `MitateDB-api/tests/test_audit_query.py:2037` の `_ISOMORPHIC_TARGETS` であり、**現在 18 行**である。内容を pin するテストは `test_isomorphic_target_table_is_pinned_to_its_current_18_rows` (r2db `:2335` / MitateDB `:2074`、`len(...) == 18` は r2db `:2377` / MitateDB `:2116`)。**この pin テストの関数名自身が対応表の 18 行目に載っている** (r2db `:2321` / MitateDB `:2060`) ので、**行を足すたびに関数名の行数部分と当該行の両方を改める**。(着手時 18 行 → WP-0 最終追補後 24 行、監督裁定 2026-09-05 裁定 4。改称後の pin テスト名は `test_isomorphic_target_table_is_pinned_to_its_current_24_rows` (r2db `:2394` / MitateDB `:2133`、`len(...) == 24` は r2db `:2465` / MitateDB `:2204`)。)
 - **本 WP で足す行**: `ms_from_pg_timeout_text` (src、両 peer 同名) と、静的規則スキャナの走査ヘルパ (両 peer 同名)。**WP-0 が足すのはこの 2 種だけである** (監督裁定 2026-09-05)。
 - **WP-1〜WP-4 で新設する同名ヘルパ** (宣言表の読み出し/検証、台帳の pending 集合計算、ops の psql 実行/集計) は本 WP では足さない。**監督裁定 (2026-09-05) により、対応表への行追加は「対」の後半 WP のみが行う — WP-2 が WP-1/WP-2 のヘルパ行を、WP-4 が WP-3/WP-4 のヘルパ行を追加し、pin テスト名の行数を改める。WP-1 / WP-3 は対応表を触らない。** 後半 WP の時点では両 peer に同名ヘルパが揃っているので、**`xfail(strict=True)` の placeholder は用いない** (フェーズ6 WP-2 の placeholder 運用は本フェーズでは採らない)。
 - **既存の性質を弱めない** — 行頭インデントの保存、自己比較の構文的禁止、対象シンボルの不在も内容不一致も赤、ソース取得は左右とも `ast.get_source_segment`。
 
 #### 完了条件 (検証可能な形)
 
-1. **ms 正規化ヘルパが両 peer の `src/<peer_pkg>/pg_timeouts.py` に `ms_from_pg_timeout_text` としてあり、`{ms, s, min, h, d}` と単位無しを ms 整数へ正規化する** — **各単位につき個別ケースを両 peer で観測する** (parametrize 可)。
+1. **ms 正規化ヘルパが両 peer の `src/<peer_pkg>/pg_timeouts.py` に `ms_from_pg_timeout_text` としてあり、`{us, ms, s, min, h, d}` と単位無しを ms 整数へ正規化する** — **各単位につき個別ケースを両 peer で観測する** (parametrize 可)。
 2. **テスト側の重複定義が消えている** — **監査照合 (変異を作らない)**: 監査は `grep -rn "def ms_from_pg_timeout_text" r2db-api MitateDB-api` を実行し、**ヒットが各 peer の `src/<peer_pkg>/pg_timeouts.py` の 1 件ずつ、計 2 件**であること、および `grep -rn "def _ms_from_pg_timeout_text" r2db-api MitateDB-api` が **0 件**であることを確認する。あわせて `r2db-api/tests/test_conformance_adapter_r2db_http_audit_writer_timeouts.py` / `MitateDB-api/tests/test_application_audit.py` / `MitateDB-api/tests/test_conformance_adapter_mitatedb_http_audit_writer_timeouts.py` の 3 ファイルが src から import していることを確認する。
 3. **スキャナが規則 (b) を実装している** — 合成 fixture に対し、`INSERT` と `ON CONFLICT` と自番号整数リテラルが**同一文内**に揃う script を **適合**、`ON CONFLICT` を欠く script を **違反**と判定すること。**両方を 1 件以上観測する。**
 4. **ゼロ埋め文字列は不適合** — 合成 fixture の `VALUES ('0009', …)` が **違反**と判定されること。
@@ -376,7 +376,7 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 | `control_composition.py:147-148` の `_optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS"/"…IDLE…", …)`、`main.py:269-270` の同型 | `pg_db_role_setting` からの導出へ差し替え。**env は F-1 で拒否** |
 | 監査 sink のセッション `SET` | **撤去**し、起動時の二重検査へ置き換える |
 
-**C. `MitateDB-api/src/mitatedb_api/ops.py` — 宣言系 4 サブコマンド** — WP-1 の C と同名・同引数。parser 登録は既存の並び (`:752` 以降) に足す。終了コードの既存慣行 (`_die` = 2 (`:234-236`)、`FoundationError` / `psycopg.Error` = 1) を守る。**テストの置き場は確定済み (監督裁定 2026-09-05): 宣言系は両 peer とも新規 `tests/test_ops_declarations.py`** であり、MitateDB も既存 `tests/test_ops.py` に足さず `MitateDB-api/tests/test_ops_upgrade.py` を新設する。
+**C. `MitateDB-api/src/mitatedb_api/ops.py` — 宣言系 4 サブコマンド** — WP-1 の C と同名・同引数。parser 登録は既存の並び (`:752` 以降) に足す。終了コードの既存慣行 (`_die` = 2 (`:234-236`)、`FoundationError` / `psycopg.Error` = 1) を守る。**テストの置き場は確定済み (監督裁定 2026-09-05): 宣言系は両 peer とも新規 `tests/test_ops_declarations.py`** であり、MitateDB も既存 `tests/test_ops.py` に足さず `MitateDB-api/tests/test_ops_declarations.py` を新設する。
 
 **D. HTTP conformance adapter の追随 (`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py`)**
 
@@ -447,7 +447,7 @@ WP-1 と同一。加えて、**MitateDB HTTP plug は composition root を通る
 
 **A. `r2db-api/migrations/0003_provision_application.sql` (テンプレート改訂)**
 
-- 台帳表 `public._r2db_platform_upgrades` を作り、**その時点の全 per-app 番号 (`{9}`) を適用済みとして seed する** (設計 D-3 (b)(i))。
+- 台帳表 `public._r2db_platform_upgrades` を作り、**その時点の全 per-app 番号 (`{9}`) を適用済みとして seed する** (設計 D-3 (b)(i))。**seed の `VALUES` は整数リテラルのタプルのみで書く** (設計 §8.1。関数呼び出し・ドル引用符・入れ子括弧は静的規則の三者一致検査をすり抜けず fail-safe 側で不一致に落ちる)。
 - **RLS 監視ビューの除外名に台帳名を足す** — 現物は **`:234-241` の `CREATE VIEW public._r2db_missing_rls`** であり、**`:240` が `_r2db_schema_revision` 1 件だけを名指しで除外している** (実測)。**この `CREATE VIEW` を `CREATE OR REPLACE VIEW` に変える** (**監督裁定 2026-09-05**。テンプレートは改訂してよい = §7 禁止事項 3)。**per-app `0009` も `CREATE OR REPLACE VIEW` で同じ定義を置く** — テンプレートと per-app script が同一の定義に着く。
 - **台帳表に RLS を付けない** (監督裁定 2026-09-05。FORCE RLS は所有者にも適用されるため provision → `SET ROLE developer` の書き込みが拒まれる)。
 
@@ -455,7 +455,7 @@ WP-1 と同一。加えて、**MitateDB HTTP plug は composition root を通る
 
 - **命名は `NNNN_<name>_upgrade.sql`** (WP-0 の静的規則の走査対象)。
 - 既存儀式 (設計 §1.5 の 5) に従い、`\c :database_name` → `GRANT :"developer_role" TO CURRENT_USER WITH SET TRUE` → `BEGIN; SET LOCAL ROLE :"developer_role";` → 本体 → `COMMIT;` → `REVOKE …`。
-- 台帳表を作り、**自番号 (`9`) を `INSERT … ON CONFLICT DO NOTHING` で記録する**。**DDL と台帳記録を 1 トランザクションで原子にする。**
+- 台帳表を作り、**自番号 (`9`) を `INSERT … ON CONFLICT DO NOTHING` で記録する**。**DDL と台帳記録を 1 トランザクションで原子にする。** **台帳 INSERT の `VALUES` は整数リテラルのタプルのみで書く** (設計 §8.1。関数呼び出し・ドル引用符・入れ子括弧は静的規則の走査対象外になり fail-safe 側で違反に落ちる)。
 - **`_r2db_missing_rls` を `CREATE OR REPLACE VIEW` で更新する** — 既存 application のビューは `0003` 適用時点の定義で固まっているため、**テンプレート改訂と per-app script の両方**が要る (設計 D-3 (e)(ii))。**テンプレート `0003` 側も `CREATE OR REPLACE VIEW` へ改める** (監督裁定 2026-09-05) — **両者は同じ定義**である。
 - **`\q` による skip 経路を持たない** (設計 §1.5 の 7a)。**冪等である。**
 - 権限: `REVOKE ALL … FROM :"runtime_role"` の後に **`GRANT SELECT … TO :"runtime_role"`** (U-2 逐語)、および **`GRANT SELECT … TO SESSION_USER`** (provision role、設計 D-3 (a))。
@@ -589,7 +589,7 @@ WP-1 と同一。加えて、**MitateDB HTTP plug は composition root を通る
 
 #### 変更対象
 
-**A. `MitateDB-api/migrations/0003_provision_application.sql` (テンプレート改訂)** — 台帳表 `public._mdb_platform_upgrades` を作り、**その時点の全 per-app 番号 (`{6, 8}`) を適用済みとして seed する**。**MitateDB に `_r2db_missing_rls` 相当のビューは無い (実測)** ので、ビューの改訂は無い。
+**A. `MitateDB-api/migrations/0003_provision_application.sql` (テンプレート改訂)** — 台帳表 `public._mdb_platform_upgrades` を作り、**その時点の全 per-app 番号 (`{6, 8}`) を適用済みとして seed する**。**seed の `VALUES` は整数リテラルのタプルのみで書く** (設計 §8.1。関数呼び出し・ドル引用符・入れ子括弧は静的規則の三者一致検査をすり抜けず fail-safe 側で不一致に落ちる)。**MitateDB に `_r2db_missing_rls` 相当のビューは無い (実測)** ので、ビューの改訂は無い。
 
 **B. `MitateDB-api/migrations/0008_<name>_upgrade.sql` (新規、per-app upgrade)**
 
