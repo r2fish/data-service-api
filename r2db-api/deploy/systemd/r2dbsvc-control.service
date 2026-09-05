@@ -1,0 +1,192 @@
+# r2dbsvc-control -- r2db-api control-plane HTTP surface (CCR-14, /control/v1)
+# -- systemd unit, second/companion process to r2dbsvc-api.service.
+#
+# Companion documents: docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md (R-1/R-3/
+# R-9/R-10), r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md §§11-14, and
+# r2db-api/deploy/DEPLOYMENT_RUNBOOK.md §7 (install steps, required
+# environment table, port-collision check, verification). This file is the
+# template §7 previously only described in prose ("install a second systemd
+# unit pointing ExecStart= at uvicorn r2db_api.control_main:app on its own
+# internal port, following the same account/port-collision checks as §2
+# steps 1 and 3") -- Phase 7 WP-3 turns that prose into this reproducible
+# artifact.
+#
+# This unit is deliberately isomorphic to deploy/systemd/r2dbsvc-api.service
+# (same [Unit]/[Service] shape, same hardening posture, same PrivateTmp
+# posture B caveat) -- the two processes are peers (R-1's own SI-00 boundary
+# evidence: distinct auth stores/DB roles/AuthorityTopology registration),
+# not one primary and one afterthought. The only differences from
+# r2dbsvc-api.service are: this unit's own name/Description, its internal
+# port, its EnvironmentFile (control.env, never api.env -- see that file's
+# own header: "Never merge this file with the application plane's own
+# api.env"), and its ExecStart module target (control_main:app, not
+# main:app). User/Group/WorkingDirectory and every hardening directive below
+# are unchanged from r2dbsvc-api.service by design (completion condition:
+# the two units differ only in unit name/port/EnvironmentFile/ExecStart).
+#
+# PLACEHOLDERS TO REPLACE BEFORE INSTALLING (see DEPLOYMENT_RUNBOOK.md §7 and
+# deploy/scripts/part2_enable_units_and_nginx.sh):
+#   - WorkingDirectory / ExecStart paths (/opt/r2dbsvc/r2db-api below is
+#     illustrative, identical to r2dbsvc-api.service's own install layout --
+#     both processes share one venv/checkout by default; see DEPLOYMENT_
+#     RUNBOOK.md §7's own "mirrors §2" framing)
+#   - REPLACE_ME_CONTROL_PORT (uvicorn's --port for THIS process; run the
+#     same collision check the runbook's §2 step 3 describes, against a port
+#     distinct from both 8443 and r2dbsvc-api.service's own internal port --
+#     do not guess a port that "should" be free)
+#
+# This unit deliberately does not depend on any unit name from the existing
+# VPS deployment (its actual service/unit name is unconfirmed from this
+# repository and must not be asserted here); After=/Wants= below only
+# reference generic targets, exactly as r2dbsvc-api.service's own header
+# explains.
+
+[Unit]
+Description=r2dbsvc-control -- r2db-api control-plane HTTP surface (Data Service API contract, /control/v1, CCR-14), companion process to r2dbsvc-api.service on its own internal loopback port behind nginx TLS termination
+Documentation=file:/opt/r2dbsvc/r2db-api/deploy/DEPLOYMENT_RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# This process talks to PostgreSQL as the r2dbsvc_controlplane role
+# (R2DB_CONTROLPLANE_DSN, POSTGRES_PROVISIONING_RUNBOOK.md §11 -- posture A:
+# loopback TCP, posture B: UNIX socket, see DEPLOYMENT_RUNBOOK.md §3, same
+# posture decision as the application plane). If the operator's PostgreSQL
+# runs as a systemd unit on the same host, add "postgresql.service" (or
+# whatever the actual unit is named on the target) to both After= and
+# Wants= -- left out here because this repository does not know that unit's
+# real name on the deployment target.
+
+[Service]
+Type=simple
+
+# Dedicated, non-login, non-root service account -- the SAME account
+# r2dbsvc-api.service runs as (deploy/systemd/r2dbsvc-api.service's own
+# Step 1 useradd). This is intentional, not an oversight: the two processes
+# are already separated by DB role (r2dbsvc_controlplane vs r2dbsvc_api),
+# auth store (control_credentials vs credentials), and EnvironmentFile, not
+# by OS identity -- see DEPLOYMENT_RUNBOOK.md §7's own SI-00 boundary-
+# evidence note. Do not create a second OS account for this unit without
+# first re-deriving whether posture B's pg_ident mapping (DEPLOYMENT_
+# RUNBOOK.md §3) would then need a second map entry too.
+User=r2dbsvc
+Group=r2dbsvc
+
+# All application configuration comes from this file, root-owned mode 0600,
+# with no variable inherited from the ambient shell/session environment --
+# the SAME discipline r2dbsvc-api.service's own EnvironmentFile follows
+# (handover §2.5). See deploy/env/control.env.example for the full
+# variable contract. NEVER point this at api.env, and never point api.env's
+# own EnvironmentFile= at this file -- deploy/env/control.env.example's own
+# header explains why the two must stay separate even though several
+# variable *names* overlap.
+EnvironmentFile=/etc/r2dbsvc/control.env
+
+# Illustrative install layout: the SAME dedicated venv under this
+# application's own directory that r2dbsvc-api.service uses, owned by
+# r2dbsvc, not shared with any other deployment (including the existing VPS
+# r2db-api implementation). Co-locating both apps' code in one checkout/venv
+# is safe by construction -- they are two entry points (r2db_api.main /
+# r2db_api.control_main) into the same installed package, not two different
+# packages -- see DEPLOYMENT_RUNBOOK.md §7's own "Process" paragraph.
+WorkingDirectory=/opt/r2dbsvc/r2db-api
+ExecStart=/opt/r2dbsvc/r2db-api/.venv/bin/uvicorn r2db_api.control_main:app --host 127.0.0.1 --port REPLACE_ME_CONTROL_PORT --no-server-header
+
+# REPLACE_ME_CONTROL_PORT is intentionally not a numeric placeholder, for
+# the SAME reason r2dbsvc-api.service's own REPLACE_ME_INTERNAL_PORT is not:
+# uvicorn will fail to parse it and the unit will fail loudly at start if an
+# operator forgets to substitute a real, collision-checked port distinct
+# from the application plane's own internal port, rather than silently
+# binding to whatever a plausible-looking example number happened to be.
+
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=10
+
+# -- Hardening -----------------------------------------------------------------
+# This process is a stateless ASGI application: it holds no local persistent
+# state of its own (persistence lives in PostgreSQL, reached over the
+# network/socket), so every hardening directive below is safe to apply with
+# no ReadWritePaths carve-out -- WITH ONE EXCEPTION, PrivateTmp=true, noted
+# where it appears below (identical caveat to r2dbsvc-api.service, since
+# both processes share the same PostgreSQL-connectivity shape). If a future
+# revision adds local state (e.g. a spool file), add an explicit
+# ReadWritePaths= for exactly that path rather than relaxing ProtectSystem.
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+# CAVEAT (posture B only, DEPLOYMENT_RUNBOOK.md §3): PrivateTmp=true gives
+# this process its own private /tmp/ mount namespace, distinct from the
+# host's real /tmp/. If posture B's PostgreSQL UNIX socket lives under
+# /tmp/ (this is the upstream PostgreSQL / RHEL-family default
+# `unix_socket_directories`, though many distributions -- Debian/Ubuntu
+# among them -- instead default to /var/run/postgresql), every connection
+# this process makes fails, because the socket file the process can see
+# inside its private /tmp/ is not the same filesystem object the real
+# postgres server is listening on. This is not a harmless carve-out gap; it
+# silently breaks all DB connectivity under that specific combination,
+# contradicting the "safe with no carve-out" claim above for that one case.
+#
+# Before adopting posture B, confirm the target cluster's actual
+# `unix_socket_directories` (`SHOW unix_socket_directories;`). If it
+# resolves to a path under /tmp/, either (preferred) reconfigure PostgreSQL
+# to listen under a non-/tmp path such as /var/run/postgresql (a PostgreSQL
+# server-config change, outside this unit), or, if that cannot be changed,
+# replace the line below with an explicit bind carve-out naming the real
+# socket file/directory, e.g.:
+#   BindPaths=/tmp/.s.PGSQL.5432
+# (adjust the path to the cluster's actual socket; BindPaths= -- read-write,
+# since a UNIX-domain stream connection needs both directions -- punches
+# exactly that one path through the private /tmp/ namespace without
+# disabling PrivateTmp entirely). Posture A (loopback TCP, no socket file)
+# is entirely unaffected by PrivateTmp; this caveat does not apply to
+# posture A. This is the SAME caveat as r2dbsvc-api.service's own PrivateTmp
+# line -- the two files must not drift out of sync on this point
+# (r2dbsvc-api.service's own comment makes the identical cross-reference).
+PrivateTmp=true
+
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+UMask=0077
+
+# No capabilities at all: this process never binds a privileged port (it
+# binds 127.0.0.1:REPLACE_ME_CONTROL_PORT, an unprivileged port by
+# construction once a real port >1024 is chosen -- see the runbook's
+# port-selection note), never changes file ownership, and never needs raw
+# sockets.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# AF_UNIX: required both for PostgreSQL UNIX-socket connections (posture B)
+# and for ordinary local IPC used by the Python/asyncio runtime. AF_INET/
+# AF_INET6: required for the uvicorn loopback TCP listener itself and for
+# PostgreSQL over loopback TCP (posture A). No other address family is
+# needed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Without this, the seccomp filter above is only installed for the
+# process's native ABI; a process (or an attacker-influenced code path
+# within it) can still issue syscalls through a secondary ABI the kernel
+# also accepts on this architecture (e.g. the i386/x32 compatibility ABIs
+# on x86_64), bypassing SystemCallFilter= entirely. Restricting to native
+# closes that gap.
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
