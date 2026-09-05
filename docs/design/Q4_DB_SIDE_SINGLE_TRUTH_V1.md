@@ -172,7 +172,7 @@ MitateDB は同じ 4 文を `mitatedbsvc_api` / `mitatedbsvc_controlplane` に�
 - **(i) 宣言の存在と有効性** — `pg_db_role_setting` に自 role の `statement_timeout` と `idle_in_transaction_session_timeout` の 2 設定が**存在し、かつ ms へ正規化した値が 1 以上であること**。**`0` は PostgreSQL では「無制限」を意味する** (レビュー 2 が実測) ので、存在検査だけでは「無音の unbounded」を通してしまう。0 と負数は F-10 で止める。
 - **(ii) 実効値の一致** — **両辺を ms 整数へ正規化したうえで数値比較する**。実効値は `SELECT name, setting FROM pg_settings WHERE name IN ('statement_timeout','idle_in_transaction_session_timeout')` で取る (この列は unit = ms の生整数であり、文字列パースが要らない)。`SHOW` / `current_setting` は**単位が割り切れる表記に丸められる** — `5000ms` は `5s` と表示される (レビュー 2 が PG 16.14 で実測) — ため、**生文字列の比較は禁止する**。
   - **検査を行う接続**: **監査書き手が実際に使う pool の接続、すなわち login role が書き手 role である接続**で行う。role 設定はログイン時にのみ適用されるので、任意の接続や `SET ROLE` した接続で読んでも書き手 role の実効値にはならない。
-  - **catalog 側 (`setconfig`) は文字列パースが避けられない。** `ALTER ROLE … SET` は**書いた文字列をそのまま保存する** (レビュー 2 の実測、§10)。単位表記は PostgreSQL の `{ms, s, min, h, d}` と単位無し (= ms) を扱う。**既存の逐語実装が `MitateDB-api/tests/test_application_audit.py:94-108` の `_ms_from_pg_timeout_text` にある** — これを両 peer の `src` へ引き上げて同名にし、同型性テストの対象 (`_ISOMORPHIC_TARGETS`) に加える (D-3 (d))。
+  - **catalog 側 (`setconfig`) は文字列パースが避けられない。** `ALTER ROLE … SET` は**書いた文字列をそのまま保存する** (レビュー 2 の実測、§10)。単位表記は PostgreSQL の `{us, ms, s, min, h, d}` と単位無し (= ms) を扱う (**監督裁定 2026-09-05、WP-0 差し戻し**: PG 16 の HINT 逐語 `Valid units for this parameter are "us", "ms", "s", "min", "h", and "d".` に合わせ、当初の規範集合が欠いていた `us` を足す)。**既存の逐語実装が `MitateDB-api/tests/test_application_audit.py:94-108` の `_ms_from_pg_timeout_text` にある** — これを両 peer の `src` へ引き上げて同名にし、同型性テストの対象 (`_ISOMORPHIC_TARGETS`) に加える (D-3 (d))。
   - **未知のキーは無視する。** `setconfig` には `search_path` など他の設定が混在し得るので、この 2 キー以外は読み飛ばす (無視しないと将来の `ALTER ROLE` 追加で起動が止まる)。
 
 **どれか一つでも欠ければ fail-fast する** (メッセージは差異の内容を**両辺 ms 表記**で示し、次に打つ ops コマンド名を含む。F-7 / F-9 / F-10 / F-11)。無音の unbounded (timeout 無しの書き込み接続) が危険であり、かつ**宣言と実効値が食い違ったまま動くことも同じ危険**だからである。
@@ -322,7 +322,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **(c) 非空振り** — 本フェーズ出荷後の期待は **適合 ≥ 1** (r2db `0009` / MitateDB `0008`) **かつ 違反 0 かつ 免除 = {MitateDB `0006`}** である (常設規律 8)。**変異先行の完了条件**: 新 script から台帳 INSERT を落とすと違反 1 件が出ること。
 - **(e) 冪等性**は規律として明文化するが静的には検査しない (レビュー証拠として §10 に置く)。
 
-**常設規律 5 に従い、設計を実装に移す前に逐語スキャナのプロトタイプを両 peer に走らせ、出力を §10 に貼る。** 走査ヘルパは両 peer 同名にし、`_ISOMORPHIC_TARGETS` (両 peer の `tests/test_audit_query.py:2298` / MitateDB 同型) に行を足して同型性を固定する — D-1 (b)(ii) の ms 正規化ヘルパも同じ対象に加える。表の内容を pin するテストは行数を名前に持つため (`test_isomorphic_target_table_is_pinned_to_its_current_18_rows`、r2db `tests/test_audit_query.py:2335` / MitateDB `:2074`)、**その関数名も同時に改める**。
+**常設規律 5 に従い、設計を実装に移す前に逐語スキャナのプロトタイプを両 peer に走らせ、出力を §10 に貼る。** 走査ヘルパは両 peer 同名にし、`_ISOMORPHIC_TARGETS` (両 peer の `tests/test_audit_query.py:2298` / MitateDB 同型) に行を足して同型性を固定する — D-1 (b)(ii) の ms 正規化ヘルパも同じ対象に加える。表の内容を pin するテストは行数を名前に持つため (`test_isomorphic_target_table_is_pinned_to_its_current_18_rows`、r2db `tests/test_audit_query.py:2335` / MitateDB `:2074`)、**その関数名も同時に改める**。(着手時 18 行 → WP-0 最終追補後 24 行、監督裁定 2026-09-05 裁定 4。改称後の pin テスト名は `test_isomorphic_target_table_is_pinned_to_its_current_24_rows`、r2db `tests/test_audit_query.py:2394` / MitateDB `:2133`。)
 
 **(e) 既存 backend の除外集合を同じ WP で拡張する** (**監督裁定 2026-09-05**、レビュー 2 本の重大指摘)。台帳表を `public` に作ると、**現物の bookkeeping 除外がどちらも 1 件だけ**であるため、台帳を作った瞬間に既存の機構が壊れる。**この作業を WP-C の完了条件に明記する** (§11)。
 
@@ -721,6 +721,8 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 命名を外した per-app script は静的規則をすり抜けるので、**D-3 (d) の検査項目に「per-app 分類の script がこの命名に一致すること」を含める**。
 
+**per-app upgrade script の台帳 INSERT と `0003` テンプレートの seed 文は `VALUES (n), (m)` の整数リテラルのタプルのみで書く (関数呼び出し・ドル引用符・入れ子括弧を置かない)。逸脱は静的規則で違反 / 不一致 (fail-safe 側) になる** (監督裁定 2026-09-05、WP-0 最終追補。`scan_platform_upgrade_ledger_script` の自番号照合、`template_seed_numbers` の seed 抽出は、いずれも最内の丸括弧 (`\(([^()]*)\)`) しか拾わず `$$…$$` のドル引用符には未対応であるため — `VALUES (9, coalesce(x, 42))` は `42` を拾って `9` を落とし、`$$…;…$$` を含む適合文は誤って違反に落ちる。audit-wp0-delta.log §6 (3)/(4) の実測)。
+
 ---
 
 ## 9. 運用手順の骨子
@@ -784,7 +786,23 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
   対象外(命名不一致): 12
 ```
 
-**規則 (b) に合わせたスキャナ改訂と再実測は WP-C で行い、結果をここに貼る。**
+**規則 (b) に合わせたスキャナ改訂と再実測は WP-0 で行った (レビュー指摘 8 / 監督裁定 2026-09-05、WP-0 差し戻し訂正: 作業指示書 v1.0 で WP-0 へ移ったのは§11 の WP-C 全体ではなく、その一部である静的規則スキャナの改訂・設置だけである -- §11 の WP-C 行と本節直前の :327 の記述は、台帳表・per-app upgrade script・`ops upgrade-applications`/`ops upgrade-status` を含む WP-C の残り部分であり、作業指示書では WP-3/WP-4 に対応する)。改訂版 (`{scratchpad}/proto_ledger_scan_v2.py`、実装は各 peer の `tests/test_platform_upgrade_ledger_scan.py::scan_platform_upgrade_ledger_script`) を両 peer の実 `migrations/` に個別に走らせた結果 (各 peer が自 peer の `migrations/` だけを走査、`{scratchpad}/proto_ledger_scan_v2.out` に保存):**
+
+```
+### r2db-api/migrations  (peer=r2db-api)
+  適合: 0
+  違反: 0
+  免除(許可リストで免除): 0
+  対象外(命名不一致): 7
+
+### MitateDB-api/migrations  (peer=MitateDB-api)
+  適合: 0
+  違反: 0
+  免除(許可リストで免除): 1
+  対象外(命名不一致): 5
+```
+
+**完了条件 6 のとおり**: 違反 0 かつ 免除 = r2db 空 / MitateDB `{6}` (本フェーズにまだ per-application upgrade script が無いため 適合 は両 peer とも 0 — 完了条件 8 のとおり `xfail(strict=True)` で登録し、r2db = WP-3 / MitateDB = WP-4 で撤去する)。
 
 **実 PG での確認項目** (WP で実測し、ここに結果を貼る):
 
@@ -835,6 +853,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **LQ4-18 一括適用の並行実行は保護されていない** (レビュー 2 の両論指摘)。`CREATE TABLE IF NOT EXISTS` は並行実行下で `relation … already exists` 等を返し得る (`IF NOT EXISTS` は競合を完全には吸収しない)。台帳 INSERT 同士は `ON CONFLICT DO NOTHING` で吸収される。1 DB あたり数秒の処理なので現実の衝突確率は低いが、**衝突すると片方の運用者には失敗として見える**。`pg_advisory_xact_lock` を per-app script の規律に足すかは**本設計では決めず、記録に留める**。
 - **LQ4-20 U-1「載せる」案は採用しなかったが、記録として残す** (§5 U-1 の「載せる」側、§6.2)。**将来再検討する場合に先に決める必要がある前提**: (i) **適用レベルを control が得る経路** — control プロセスに全 application DB への到達性を与えるか (単一侵害の影響範囲が広がる)、data-plane が platform DB へ複製する二次情報を置くか (本設計の単一真実の趣旨と衝突する) のいずれかを決めること、(ii) **公開範囲** — `list_applications` は control 資格だけでなく **audit 資格でも読める** (`spec:111` / `:125`) ため、適用状態を audit 資格へ公開してよいかを明示的に決めること (SI-07)、(iii) **契約の形** — `ApplicationStateResult` / `ApplicationsResult.applications[]` は `additionalProperties: false` なので **additive な契約変更 (1.7.0) が必須**であり、1.5.0 / 1.6.0 と同じ版束縛規律 (単独コミットでの契約公開、flip と挙動出荷の同一コミット、vacuity guard) を採ること、(iv) **conformance の射程** — in-process plug は per-application DB を持たないため **4 plug 全数で非空 precondition を持てない可能性が高く**、その場合は射程を `CONDITIONS.md` に開示すること。**骨子は `platform_upgrade: {applied: [<integer>…], pending: [<integer>…]}`** であり (§5 U-1 の契約英文骨子)、**D-4 (b) / D-3 (f) の集合意味に揃える**。
 - **LQ4-19 静的規則の許可リストの鍵は番号の集合である** (§10)。各 peer のテストが自 peer の `migrations/` だけを走査するので、peer 名の導出は要らない。**MitateDB `0006` は自番号の台帳 INSERT を持たないことと `\q` skip 経路を持つことの両方について免除される** (LQ4-10 の許可リストと同一のもの)。
+- **LQ4-21 モジュール定数は同型性対応表の対象外であり、各 peer の単位テストが担保する** (WP-0 最終追補、監督裁定 2026-09-05、裁定 4)。`ms_from_pg_timeout_text` の `_UNIT_MULTIPLIER_MS` / `_PATTERN` はモジュール定数であり、`_ISOMORPHIC_TARGETS` は `ms_from_pg_timeout_text` という**関数**を pin するだけでその内部が参照するモジュール定数までは辿らない。したがって片 peer だけが `_UNIT_MULTIPLIER_MS["h"]` を `3_600_000` から `3_500_000` へドリフトさせても、同型性テストは赤にならない (audit-wp0-delta.log §6 (5) の実測)。**この経路の安全性は各 peer 自身の `tests/test_pg_timeouts.py` の単位別ケース (`h` を含む) が担保する** — 定数を対応表へ追加するのではなく、単位テストの存在が代替の担保であることを記録する。
 
 ---
 

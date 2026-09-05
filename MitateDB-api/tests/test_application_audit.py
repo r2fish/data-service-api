@@ -61,6 +61,7 @@ from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import (AuditSinkUnavailable, AuthenticationError,
                                  AuthorizationError, DestructiveConfirmationRequired,
                                  FoundationError)
+from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -91,23 +92,11 @@ MIGRATION_NAMES = (
 # ===========================================================================
 
 
-def _ms_from_pg_timeout_text(text: str) -> int:
-    """PostgreSQL's `SHOW statement_timeout`/`SHOW idle_in_transaction_
-    session_timeout` render the GUC in whichever unit divides it evenly
-    (e.g. `5000ms` renders as `5s`, but `4321ms` -- not a whole number of
-    seconds -- renders as `4321ms`) -- parsed back to milliseconds here so
-    every SHOW-based assertion in this file compares actual milliseconds,
-    never a unit-dependent string literal."""
-    text = text.strip()
-    if text in ("0", ""):
-        return 0
-    if text.endswith("ms"):
-        return int(text[:-2])
-    if text.endswith("min"):
-        return int(float(text[:-3]) * 60_000)
-    if text.endswith("s"):
-        return int(float(text[:-1]) * 1_000)
-    return int(text)
+# Q4 phase WP-0 (design D-1 (b)(ii), work order §4 WP-0 完了条件 2): the
+# ms-normalization helper this file used to define locally
+# (`_ms_from_pg_timeout_text`) is now `mitatedb_api.pg_timeouts.
+# ms_from_pg_timeout_text` (imported above) -- promoted to `src` so Q4
+# WP-2's own startup double-check can share it. No local copy remains.
 
 
 def _admin_dsn() -> str:
@@ -501,9 +490,9 @@ def test_application_audit_writer_connection_has_statement_and_idle_timeouts_set
     try:
         with conn.cursor() as cur:
             cur.execute("SHOW statement_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 1234
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 1234
             cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 5678
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 5678
     finally:
         conn.close()
 
@@ -531,9 +520,9 @@ def test_control_audit_writer_connection_has_statement_and_idle_timeouts_set(pla
         _apply_session_timeouts(conn, 2345, 6789)
         with conn.cursor() as cur:
             cur.execute("SHOW statement_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
             cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
     finally:
         conn.close()
 
@@ -707,9 +696,9 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
         try:
             with conn.cursor() as cur:
                 cur.execute("SHOW statement_timeout")
-                assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
                 cur.execute("SHOW idle_in_transaction_session_timeout")
-                assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
         finally:
             conn.close()
 
@@ -722,9 +711,9 @@ def test_build_app_wires_env_configured_audit_timeouts_onto_the_real_writer_conn
         try:
             with conn.cursor() as cur:
                 cur.execute("SHOW statement_timeout")
-                assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 4321
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 4321
                 cur.execute("SHOW idle_in_transaction_session_timeout")
-                assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 8765
+                assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 8765
         finally:
             conn.close()
 
@@ -759,9 +748,9 @@ def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_con
     with backend.unit_of_work() as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW statement_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS
             cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == DEFAULT_AUDIT_IDLE_TIMEOUT_MS
 
     capturing_cls, captured = _capturing_subclass(control_composition_module.PostgresControlBackend)
     monkeypatch.setattr(control_composition_module, "PostgresControlBackend", capturing_cls)
@@ -772,9 +761,9 @@ def test_build_control_app_wires_env_configured_audit_timeouts_onto_the_real_con
     with backend.unit_of_work() as conn:
         with conn.cursor() as cur:
             cur.execute("SHOW statement_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 2345
             cur.execute("SHOW idle_in_transaction_session_timeout")
-            assert _ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
+            assert ms_from_pg_timeout_text(cur.fetchone()[0]) == 6789
 
 
 def test_main_wires_the_audit_router_into_both_the_credential_store_and_every_cell(

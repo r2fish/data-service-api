@@ -64,6 +64,7 @@ from r2db_api.credential_store import (  # noqa: E402
     DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
     DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
 )
+from r2db_api.pg_timeouts import ms_from_pg_timeout_text  # noqa: E402
 
 ADMIN_DSN_ENV = "R2DB_TEST_ADMIN_DSN"
 ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
@@ -79,39 +80,16 @@ def _show(conn: "psycopg.Connection", setting: str) -> str:
         return cur.fetchone()[0]
 
 
-def _ms_from_pg_timeout_text(text: str) -> int:
-    """PostgreSQL's `SHOW statement_timeout`/`SHOW idle_in_transaction_
-    session_timeout` render the GUC in whichever unit divides it evenly
-    (`5000ms` renders as `5s`) -- parsed back to milliseconds so this
-    assertion compares actual milliseconds, never a unit-dependent string
-    literal (mirrors MitateDB-api's own `test_application_audit.py::_ms_
-    from_pg_timeout_text`; duplicated here rather than cross-imported
-    because `r2db-api/tests` has no `__init__.py` -- unlike `MitateDB-api/
-    tests`, it is not a package, so a relative `from .test_application_
-    audit import _ms_from_pg_timeout_text` is not available here; review
-    fix M2, correcting the prior docstring's stated reason)."""
-    text = text.strip()
-    if text in ("0", ""):
-        return 0
-    if text.endswith("ms"):
-        return int(text[:-2])
-    if text.endswith("min"):
-        return int(float(text[:-3]) * 60_000)
-    if text.endswith("s"):
-        return int(float(text[:-1]) * 1_000)
-    return int(text)
-
-
 def test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set() -> None:
     with psycopg.connect(_admin_dsn()) as admin_conn:
-        cluster_default_statement_timeout_ms = _ms_from_pg_timeout_text(_show(admin_conn, "statement_timeout"))
-        cluster_default_idle_timeout_ms = _ms_from_pg_timeout_text(_show(admin_conn, "idle_in_transaction_session_timeout"))
+        cluster_default_statement_timeout_ms = ms_from_pg_timeout_text(_show(admin_conn, "statement_timeout"))
+        cluster_default_idle_timeout_ms = ms_from_pg_timeout_text(_show(admin_conn, "idle_in_transaction_session_timeout"))
 
     adapter = _http_module.build_adapter()
     try:
         with adapter._application_durable_audit._pool.connection() as conn:  # noqa: SLF001 -- adapter-internal reach-in, test-only (mirrors test_application_audit.py's own established convention)
-            statement_timeout_ms = _ms_from_pg_timeout_text(_show(conn, "statement_timeout"))
-            idle_timeout_ms = _ms_from_pg_timeout_text(_show(conn, "idle_in_transaction_session_timeout"))
+            statement_timeout_ms = ms_from_pg_timeout_text(_show(conn, "statement_timeout"))
+            idle_timeout_ms = ms_from_pg_timeout_text(_show(conn, "idle_in_transaction_session_timeout"))
     finally:
         adapter.close()
 

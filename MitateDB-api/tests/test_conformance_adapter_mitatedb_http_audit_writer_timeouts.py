@@ -57,13 +57,14 @@ from mitatedb_api.application_audit import (  # noqa: E402
     DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
 )
 
-# Reuses `test_application_audit.py`'s own `_ms_from_pg_timeout_text` --
-# PostgreSQL's `SHOW` renders the GUC in whichever unit divides it evenly
-# ("5000ms" as "5s"), so a bare string-equality assertion would be
-# unit-dependent; re-implementing the same parsing here would duplicate,
-# and risk drifting from, that file's own established, more complete
-# parser (min/s/ms/bare-"0" cases).
-from .test_application_audit import _ms_from_pg_timeout_text  # noqa: E402,F401
+# Q4 phase WP-0 (design D-1 (b)(ii), work order §4 WP-0 完了条件 2): was
+# `from .test_application_audit import _ms_from_pg_timeout_text` -- now
+# imports the same normalization directly from `src` (promoted there so
+# Q4 WP-2's own startup double-check can share it), rather than through
+# a test-file-to-test-file import. PostgreSQL's `SHOW` renders the GUC in
+# whichever unit divides it evenly ("5000ms" as "5s"), so a bare
+# string-equality assertion would be unit-dependent.
+from mitatedb_api.pg_timeouts import ms_from_pg_timeout_text  # noqa: E402
 
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
 ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
@@ -76,7 +77,7 @@ def _admin_dsn() -> str:
 def _show_ms(conn: "psycopg.Connection", setting: str) -> int:
     with conn.cursor() as cur:
         cur.execute(f"SHOW {setting}")
-        return _ms_from_pg_timeout_text(cur.fetchone()[0])
+        return ms_from_pg_timeout_text(cur.fetchone()[0])
 
 
 def test_http_conformance_adapter_audit_writer_connection_has_statement_and_idle_timeouts_set() -> None:
