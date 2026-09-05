@@ -320,17 +320,71 @@ environment variable -- **optional**: unset, `audit_query` stays declared
 audit/query` still exist and still authenticate, answering `CAPABILITY_
 UNSUPPORTED` rather than a bare 404).
 
-The declared `visibility_lag_ms` is derived from `MITATEDB_AUDIT_
-STATEMENT_TIMEOUT_MS` + `MITATEDB_AUDIT_IDLE_TIMEOUT_MS` (both default
-`5000`, read by BOTH the data service and the control service -- they
-must agree) plus a fixed 1000ms clock-skew margin (11000ms at defaults).
+**Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2)
+supersedes the two paragraphs this replaces**: `MITATEDB_AUDIT_STATEMENT_
+TIMEOUT_MS`/`MITATEDB_AUDIT_IDLE_TIMEOUT_MS` and `MITATEDB_DATA_BASE_URL`/
+`MITATEDB_CONTROL_BASE_URL` are **removed** env vars -- defined at all
+(even as an empty string) makes both services refuse to start (F-1/F-2).
+The two writer timeouts and `surfaces` now live in the platform database
+itself, as the single source both processes read at startup, closing the
+former "nothing enforces it"/"must be updated to match by hand" gap this
+section used to document.
 
-**Verify the two timeouts are genuinely applied** (WP-3(b) review finding
-H) -- from a session authenticated as the writer role each service
-actually connects as (`mitatedbsvc_api` for the data service's own
-`application_audit` writer, `mitatedbsvc_controlplane` for the control
-service's own `control_audit` writer), confirm both SESSION-level values
-match the configured/default env vars:
+Apply the platform single-shot migration (idempotent -- safe to re-run):
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0007_platform_declarations.sql
+```
+
+This sets `statement_timeout`/`idle_in_transaction_session_timeout` as
+PostgreSQL role settings on BOTH `mitatedbsvc_api` and
+`mitatedbsvc_controlplane` (shipped default `5000ms`/`5000ms`, matching
+the pre-Q4 default -- no behavior change at deploy time) and creates
+`mitatedb_registry.platform_declarations`, seeding
+`audit_coalescing_window_ms` with the shipped default (`60000`).
+`surfaces` is deployment-specific and is **not** seeded -- declare it once
+both Cloud Run URLs are known:
+
+```sh
+python -m mitatedb_api.ops declare-surfaces \
+  --data-base-url https://mitatedb-data.example.invalid/v1 \
+  --control-base-url https://mitatedb-ctrl.example.invalid/control/v1
+```
+
+(omit `--control-base-url <URL>` entirely -- or pass `--no-control`, an
+explicit, equivalent form of that same omission -- for a deployment with
+no control surface; neither is required, but passing both is a usage
+error, since this command replaces the entire row.)
+
+Change either writer timeout with `set-platform-timeouts` (always both
+roles together -- there is no per-role flag) or the coalescing window with
+`declare-coalescing-window`, and inspect the current state (both the
+declarations table and each role's own `pg_db_role_setting` row) with
+`show-declarations`:
+
+```sh
+python -m mitatedb_api.ops set-platform-timeouts --statement-ms 5000 --idle-ms 5000
+python -m mitatedb_api.ops declare-coalescing-window --ms 60000
+python -m mitatedb_api.ops show-declarations
+```
+
+All four subcommands connect with `MITATEDB_PROVISION_DSN` (the same
+`mitatedbsvc_provision` credential the migrations above already use).
+**Every one of these changes is a startup-time snapshot** (design U-3):
+apply the change, then restart BOTH `mitatedb-app`/`mitatedb-ctrl` for it
+to take effect. Ordering matters when the change narrows a bound:
+restart the DATA service first when **shortening** either timeout
+(otherwise the control service could briefly declare a `visibility_lag_ms`
+shorter than what the still-old data service's pooled connections
+actually honor), and restart the CONTROL service first when
+**lengthening** it (§9.2 of the design).
+
+**Verify the two timeouts are genuinely applied** -- from a session
+authenticated as the writer role each service actually connects as
+(`mitatedbsvc_api` for the data service's own `application_audit` writer,
+`mitatedbsvc_controlplane` for the control service's own `control_audit`
+writer), confirm both effective values match the declaration:
 
 ```sh
 psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_api password=$MITATEDBSVC_API_PASSWORD" -c \
@@ -339,13 +393,22 @@ psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_control
   "SHOW statement_timeout; SHOW idle_in_transaction_session_timeout;"
 ```
 
-Both must report the SAME two values (the default `5s`/`5s`, or whatever
-`MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS`/`MITATEDB_AUDIT_IDLE_TIMEOUT_MS` are
-set to on both Cloud Run services) -- a mismatch between the two
-processes silently invalidates the derived `visibility_lag_ms` this
-section declares (the declaration is computed once, by the control
-service alone, from ITS OWN env; nothing enforces the data service
-agreeing with it).
+Both must report the SAME two values -- but this is now also
+**self-verifying**: each process checks its OWN writer connection's
+effective value against `pg_db_role_setting` at every startup (design
+D-1(b)) and refuses to start on a mismatch (an `options=-c ...` override,
+`PGOPTIONS`, or a stray `ALTER ROLE ... IN DATABASE ...` row all count),
+so a silent drift between "declared" and "effective" can no longer reach
+production undetected the way it could before Q4 -- **for that process'
+own role.** This limitation is real, not editorial caution (design §3.11
+point 9): role settings apply only at login time, so the control service
+can read (but never effective-check) `mitatedbsvc_api`'s catalog
+declaration, and vice versa -- verifying `mitatedbsvc_api`'s own effective
+value is the data service's own job, done on its own next startup, not
+something the control service's startup check can substitute for. The two
+manual `psql`/`SHOW` commands above remain the way to confirm BOTH roles
+together, in one place, at deploy time.
+
 The `audit_requests_per_minute` window is a SEPARATE pre-auth counter from
 `control_requests_per_minute` (`MITATEDB_CONTROL_AUDIT_REQUESTS_PER_
 MINUTE_LIMIT`, default 60) -- never shared, so a high-frequency audit
@@ -355,17 +418,13 @@ an in-process counter too, so it inherits the SAME `--max-instances=1`
 requirement on `mitatedb-ctrl`.
 
 `coalescing_window_ms` (the declared denial-coalescing window, part of the
-`audit_query` capability entry) is derived from the SAME single source
-constant the data-plane's own `AuditRouter` falls back to
-(`application_audit.DEFAULT_DENIAL_COALESCE_WINDOW_S`, 60s) -- the control
-service (a separate process) cannot read the data-plane process' own live
-`AuditRouter` instance. If a future deployment ever constructs `AuditRouter
-(denial_coalesce_window_s=...)` with a non-default value on the data-plane
-side, this declaration must be updated to match by hand (there is no
-env-var knob for it today) -- exactly the same "both processes must agree"
-caveat this section's own `visibility_lag_ms` note above already carries.
-State the rule for both values as one rule: **if you change the value, you
-have changed the declaration, and the declaration must be changed with it.**
+`audit_query` capability entry) now comes from the SAME `platform_
+declarations` row both services read at startup (`audit_coalescing_
+window_ms`, above) -- both processes describe the SAME window by
+construction, closing the former "control cannot read the data-plane
+process' own live `AuditRouter`, so the two can drift" gap this section
+used to document. Change it with `ops declare-coalescing-window` (above),
+never by hand-editing a constant in either service's own source.
 
 **Declared audit vocabularies (contract 1.5.0, subordinate ruling 10 item 1).**
 The same `audit_query` capability entry also publishes THREE vocabularies:
@@ -840,31 +899,51 @@ gcloud run deploy mitatedb-data \
   --service-account=mitatedb-data-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_PLATFORM_DSN=mitatedb-platform-dsn:latest \
-  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled,MITATEDB_DATA_BASE_URL=https://mitatedb-data.example.invalid/v1,MITATEDB_CONTROL_BASE_URL=https://mitatedb-ctrl.example.invalid/control/v1
+  --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled
 # ... plus one --set-secrets pair per onboarded application's own
 # MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN.
 ```
 
-`MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` (Phase 6 WP-3, design
-D-2, contract 1.6.0 `CapabilityDocument.surfaces`) are **required** from
-contract 1.6.0 on -- `main.build_app` fails closed at startup
-(`config.FoundationConfig.from_env`) if `MITATEDB_DATA_BASE_URL` is unset,
-or if `MITATEDB_CONTROL_BASE_URL` is unset while `MITATEDB_CONTROL_PLANE_
-STATUS=enabled`. Both values are **the deployer's own declaration** of
-each surface's real, externally-reachable base URL -- never derived, never
-guessed from a request. `MITATEDB_DATA_BASE_URL` must end at `/v1` (no
-trailing slash); `MITATEDB_CONTROL_BASE_URL` must end at `/control/v1` (no
-trailing slash) -- both checked at startup (form only, never
-reachability). **Both Cloud Run services must be given the SAME two
-values** (§6.2 below repeats them) -- the data service's own capability
-document and the control service's own capability document must return
-the identical `surfaces` object (contract 1.6.0's own unconditional
-obligation); nothing in either process can detect a mismatched pair by
-itself (design D-2 (b)/(c) -- this is a deployer responsibility, not
-something either process cross-validates). Replace the two example
-`https://...example.invalid` values above with this deployment's own real
-Cloud Run service URLs (`gcloud run services describe ... --format='value
-(status.url)'`) before going live.
+**Q4 phase (design D-2) supersedes `MITATEDB_DATA_BASE_URL`/
+`MITATEDB_CONTROL_BASE_URL` as env vars** -- they are now **removed**
+(defined at all, even empty, fails startup loudly, F-2). `surfaces` is
+declared ONCE, in the platform database, and read by BOTH Cloud Run
+services at startup (§3.2b above already covers applying migration
+`0007_platform_declarations.sql` and running `ops declare-surfaces`) --
+never set as a per-service env var on either `gcloud run deploy` command.
+Declare it (or re-declare it, once this deployment's real Cloud Run URLs
+are known) with:
+
+```sh
+python -m mitatedb_api.ops declare-surfaces \
+  --data-base-url https://mitatedb-data.example.invalid/v1 \
+  --control-base-url https://mitatedb-ctrl.example.invalid/control/v1
+```
+
+`--data-base-url` must end at `/v1` (no trailing slash); `--control-base-
+url` must end at `/control/v1` (no trailing slash) -- both checked on
+write AND on every read (form only, never reachability; design D-2(d)).
+Both services reading the SAME row is now **structural, once they are
+both actually pointed at the same platform database** -- not a deployer
+discipline to remember for the row's OWN content any more (design's own
+former "nothing in either process can detect a mismatched pair by
+itself" gap this replaces) -- `surfaces.control`'s presence in that row
+is additionally cross-checked against each process' own `MITATEDB_
+CONTROL_PLANE_STATUS` at startup (F-6): the data service refuses to
+start if the row declares `control` while this service itself declares
+`unavailable`, or vice versa. **This does not close the OUTER gap**
+(design §3.11 point 7): neither process knows the other's own `MITATEDB_
+PLATFORM_DSN`/`MITATEDB_CONTROLPLANE_DSN`, so if the two Cloud Run
+services are ever given DSNs pointing at two DIFFERENT platform
+databases (a stale secret-manager value on one side, say), each reads
+its OWN row consistently but the two rows can still disagree -- this
+remains a deployer responsibility, verified only by the post-deploy
+`/capabilities` cross-check both surfaces already receive (§6.3 below),
+never by either process itself. Replace the two example `https://...
+example.invalid` values above with this deployment's own real Cloud Run
+service URLs (`gcloud run services describe ... --format='value
+(status.url)'`) before going live, then restart BOTH services (design
+U-3: startup snapshot).
 
 Invoker binding: **only `mitate-application`'s own service account**, never
 `allUsers` and never a broad project role:
@@ -886,15 +965,22 @@ gcloud run deploy mitatedb-ctrl \
   --service-account=mitatedb-ctrl-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --max-instances=1 \
-  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest \
-  --set-env-vars=MITATEDB_DATA_BASE_URL=https://mitatedb-data.example.invalid/v1,MITATEDB_CONTROL_BASE_URL=https://mitatedb-ctrl.example.invalid/control/v1
+  --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_CONTROL_CREDENTIAL_PEPPER=mitatedb-control-credential-pepper:latest,MITATEDB_CONTROLPLANE_DSN=mitatedb-controlplane-dsn:latest,MITATEDB_AUDIT_DSN=mitatedb-audit-dsn:latest
 ```
 
-`MITATEDB_DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are **required** here
-too, from contract 1.6.0 on (`control_composition.build_control_service`
-fails closed at startup if either is unset) -- see §6.1 above for the full
-explanation. **The SAME two values as §6.1**, not independently chosen
-ones.
+No `surfaces`-related env var on this command either (Q4 phase, design
+D-2) -- `control_composition.build_control_service` reads the SAME
+`platform_declarations` row §6.1 above declares (`control_composition.
+build_control_service` fails closed at startup if that row is absent, or
+if it has no `control` entry -- this composition root always requires a
+control surface unconditionally, unlike the data service's own
+status-conditional check, F-3c). There is nothing to keep "the SAME
+value as §6.1" by deployer discipline any more, **as long as
+`MITATEDB_CONTROLPLANE_DSN` on this service and `MITATEDB_PLATFORM_DSN`
+on §6.1's service name the same platform database** -- neither process
+verifies that of the other (design §3.11 point 7; the same limitation
+§6.1 above states, restated here because this command is the other half
+of the pair it applies to).
 
 `MITATEDB_AUDIT_DSN` (Phase 4 WP-3(b), §3.2b above) is optional -- omit the
 `--set-secrets` entry entirely to leave `audit_query` declared

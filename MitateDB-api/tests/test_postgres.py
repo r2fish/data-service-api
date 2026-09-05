@@ -160,6 +160,13 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         "0002_registry_and_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
+        # declarations table + the two service writer roles' timeout role
+        # settings -- every test in this repository that calls `main.
+        # build_app`/`control_composition.build_control_service` (directly
+        # or via this shared `platform` fixture) now depends on this
+        # migration having been applied (F-3/F-7 otherwise).
+        "0007_platform_declarations.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -190,6 +197,33 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
                 _execute(cur, sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
         finally:
             admin.close()
+        _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --
+        # a real deployment declares this with `ops declare-surfaces`.
+        # DATA ONLY (no `control` key) -- this shared fixture's own
+        # consumers (`test_main.py`) default to `MITATEDB_CONTROL_PLANE_
+        # STATUS` UNSET ("unavailable"), matching the design's own F-6
+        # requirement that surfaces.control's presence and this process'
+        # own declared status agree. A test that needs `control_plane:
+        # enabled` (`test_main.py::test_build_app_control_plane_status_
+        # env_flip_is_reflected_in_a_real_request`) re-declares this SAME
+        # row with a `control` key added, first -- exactly what a real
+        # deployment's own `ops declare-surfaces --control-base-url <URL>`
+        # would do (§9.2), never a silent per-process env-only flip.
+        surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
+        try:
+            with surfaces_conn.cursor() as cur:
+                _execute(
+                    cur,
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', {value})").format(
+                        table=sql.Identifier(registry_schema, "platform_declarations"),
+                        value=sql.Literal(
+                            '{"data":{"base_url":"https://data.mitatedb-postgres-test.example.invalid/v1"}}'
+                        ),
+                    ),
+                )
+        finally:
+            surfaces_conn.close()
     except Exception:
         _sweep_prefix(admin_dsn, prefix)
         raise
@@ -202,7 +236,9 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         platform_db=platform_db,
         registry_schema=registry_schema,
         api_dsn=_dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db),
+        api_role=api_role,
         controlplane_dsn=_dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db),
+        controlplane_role=controlplane_role,
         provision_script=rewritten["0003_provision_application.sql"],
         deprovision_script=rewritten["0004_deprovision_application.sql"],
     )

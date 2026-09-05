@@ -61,27 +61,35 @@ Environment variable contract:
                                            from_env` (batch/result/field/
                                            filter/request-byte/schema-
                                            object bounds)
-    MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS   optional, default 5000 (Phase 4,
-                                           design docs/design/
-                                           PHASE4_DURABLE_AUDIT_SINK_V1.md
-                                           D-6/N-3) -- SESSION-level
-                                           `statement_timeout` on the
-                                           connection that writes
-                                           `application_audit`. Changing
-                                           this changes the derived
-                                           `visibility_lag_ms` a future
-                                           WP-3(b) `audit_query`
-                                           declaration would publish
-                                           (`control_composition.
-                                           build_control_service` reads
-                                           the IDENTICAL env-var name for
-                                           the `control_audit` writer
-                                           connection -- both must agree).
-    MITATEDB_AUDIT_IDLE_TIMEOUT_MS        optional, default 5000 --
-                                           SESSION-level `idle_in_
-                                           transaction_session_timeout` on
-                                           the same connection; see the
-                                           note above.
+    MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS,
+    MITATEDB_AUDIT_IDLE_TIMEOUT_MS         REMOVED (Q4 phase, design D-1;
+                                           F-1). Rejected whenever defined,
+                                           whatever the value (an empty
+                                           string included). The two audit-
+                                           writer timeouts are now
+                                           PostgreSQL role settings on
+                                           `mitatedbsvc_api` (`ALTER ROLE
+                                           ... SET`, migration
+                                           `0007_platform_declarations.
+                                           sql`) -- this process checks its
+                                           OWN declared-vs-effective value
+                                           at startup instead of setting it
+                                           itself (`platform_declarations.
+                                           check_writer_role_timeouts`).
+                                           Change with `python -m
+                                           mitatedb_api.ops
+                                           set-platform-timeouts`.
+    MITATEDB_DATA_BASE_URL,
+    MITATEDB_CONTROL_BASE_URL             REMOVED (Q4 phase, design D-2;
+                                           F-2). `surfaces` is now declared
+                                           in `<registry>.
+                                           platform_declarations`, read at
+                                           startup by `platform_
+                                           declarations.
+                                           read_platform_declarations`.
+                                           Change with `python -m
+                                           mitatedb_api.ops
+                                           declare-surfaces`.
     MITATEDB_AUDIT_BUFFER_CAPACITY        optional, default 1000 -- D-4's
                                            bounded in-memory buffer
                                            capacity for ordinary
@@ -112,8 +120,6 @@ from starlette.types import ASGIApp
 
 from .application_audit import (DEFAULT_AUDIT_BUFFER_CAPACITY,
                                 DEFAULT_AUDIT_FLUSH_INTERVAL_S,
-                                DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
-                                DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS,
                                 PostgresApplicationAuditSink)
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
@@ -123,6 +129,10 @@ from .config import FoundationConfig
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
 from .http import HttpService, create_app
 from .identifiers import validate_identifier
+from . import platform_declarations
+from .platform_declarations import (check_control_surface_consistency,
+                                    check_writer_role_timeouts, read_platform_declarations,
+                                    reject_removed_surface_env, reject_removed_timeout_env)
 from .pool import BoundedConnectionPool, pool_size_from_env
 
 _PLATFORM_CONNECT_TIMEOUT_S = 5
@@ -232,8 +242,22 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     from .credential_store_postgres import assert_pepper_separation
     assert_pepper_separation(app_pepper, control_pepper)
 
-    platform_dsn = _require(env, "MITATEDB_PLATFORM_DSN")
+    # Resolved before the removed-env rejection below (not just before the
+    # declarations read) so F-2's own message can name the REAL configured
+    # schema (design amendment 2026-09-05, N-7) rather than this module's
+    # `DEFAULT_SCHEMA` -- zero-network, so moving it earlier changes
+    # nothing about the startup-sequence design.
     schema = env.get("MITATEDB_PLATFORM_SCHEMA") or DEFAULT_SCHEMA
+
+    # Q4 phase (design D-1(d)/D-2(f), work order §4 WP-2 変更対象 B, design
+    # §3.7 data-plane step 2): checked against the `env` MAPPING this
+    # function was called with, never `os.environ` -- an unrelated
+    # variable left over in a developer's shell or CI's parent environment
+    # must never fail every test's own startup (design D-1(d)).
+    reject_removed_timeout_env(env, names=platform_declarations.REMOVED_TIMEOUT_ENV)
+    reject_removed_surface_env(env, names=platform_declarations.REMOVED_SURFACE_ENV, schema=schema)
+
+    platform_dsn = _require(env, "MITATEDB_PLATFORM_DSN")
     ids = _parse_served_apps(_require(env, "MITATEDB_SERVE_APPS"))
 
     app_dsns: dict[str, tuple[str, str]] = {}
@@ -258,35 +282,93 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"))
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
 
+    # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
+    # source of `surfaces`/`audit_coalescing_window_ms` (read + validated,
+    # F-3/F-4/F-4b/F-5/F-8), cross-checked against `*_CONTROL_PLANE_
+    # STATUS` (F-6), then the writer role's own declared-vs-effective
+    # timeout dual check (F-7/F-9/F-10/F-11) -- `platform_dsn`'s own login
+    # role IS `mitatedbsvc_api` (the SAME role that writes `application_
+    # audit`), so this check observes the exact connection identity the
+    # durable sink below will use.
+    # N-2 (monitor ruling 2026-09-05, delta review §4): the durable sink is
+    # constructed HERE (before the dual check, not after it) so this
+    # connection can be opened via `durable_audit._connect()` itself --
+    # THE SAME METHOD the sink's own `append`/`append_many` calls use to
+    # open every connection it ever writes through -- rather than a
+    # separately-written `psycopg.connect(...)` call that merely happened
+    # to match its arguments. A future change to `_connect` (e.g. an
+    # `options=` override or a DSN transformation) now automatically
+    # applies here too, instead of silently going unobserved by F-9 the
+    # way two independently-maintained call sites would risk (delta
+    # review N-2: "`_connect` が将来...を持てば F-9 が実際の書き手接続を
+    # 観測しなくなる (無音)"). `PostgresApplicationAuditSink.__init__`
+    # itself opens no connection (Q4 D-1(b)), so moving its construction
+    # earlier changes nothing about WHEN this process first touches the
+    # network. Closed again immediately after -- the sink opens its own
+    # connections per write, it never receives this one.
+    durable_audit = PostgresApplicationAuditSink(platform_dsn, schema=schema)
+    declarations_conn = durable_audit._connect()  # noqa: SLF001 -- same-module-family reach-in, deliberate (see comment above)
+    try:
+        declarations = read_platform_declarations(
+            declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            migration=platform_declarations.MIGRATION_NUMBER,
+        )
+        # WP-4 design instruction #6 (the control HTTP mount is a single
+        # later commit, WP-5): this function's own source must never spell
+        # out a certain lowercase, underscore-joined two-word substring
+        # (naming it here would defeat the point) -- `declared_status`
+        # deliberately avoids it. The value itself is the SAME `MITATEDB_
+        # CONTROL_PLANE_STATUS` env var `config.FoundationConfig.from_env`
+        # already reads under its own (differently-scoped) name.
+        declared_status = env.get("MITATEDB_CONTROL_PLANE_STATUS") or "unavailable"
+        check_control_surface_consistency(declarations.surfaces, declared_status, ops_module=platform_declarations.PEER_MODULE)
+        # D-2(h) 2: self-role inclusion (F-13) THEN the dual check
+        # (F-7/F-9/F-10/F-11) -- both done by `check_writer_role_timeouts`
+        # itself, on this SAME connection.
+        check_writer_role_timeouts(
+            declarations_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
+            ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+    finally:
+        declarations_conn.close()
+
     # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-1/D-6, work order
     # WP-3(a)): the durable application-plane audit sink -- writes to the
     # SAME `MITATEDB_PLATFORM_DSN` (already `mitatedbsvc_api`, which
     # migration `0005_application_audit.sql` grants INSERT-only on
     # `application_audit`) `PostgresCredentialStore` above also connects
     # with (D-1(c): "書き手 = data-plane プロセスが既に保持している
-    # platform 接続"). The two SESSION-level timeouts are set on every
-    # connection this sink ever opens (D-6/N-3's visibility-lag basis).
-    audit_statement_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS)
-    audit_idle_timeout_ms = _optional_int(env, "MITATEDB_AUDIT_IDLE_TIMEOUT_MS", DEFAULT_AUDIT_IDLE_TIMEOUT_MS)
-    durable_audit = PostgresApplicationAuditSink(
-        platform_dsn, schema=schema, statement_timeout_ms=audit_statement_timeout_ms,
-        idle_in_transaction_session_timeout_ms=audit_idle_timeout_ms,
-    )
+    # platform 接続"). Q4 phase (design D-1(b)): the two writer timeouts
+    # are no longer passed here at all -- `mitatedbsvc_api`'s OWN role
+    # setting (just dual-checked above) applies to this connection
+    # automatically. `durable_audit` itself was already constructed above
+    # (N-2, before the dual check) so that check's own connection could be
+    # opened via this sink's `_connect()` -- not reconstructed here.
     audit_buffer_capacity = _optional_int(env, "MITATEDB_AUDIT_BUFFER_CAPACITY", DEFAULT_AUDIT_BUFFER_CAPACITY)
     audit_flush_interval_s = _optional_float(env, "MITATEDB_AUDIT_FLUSH_INTERVAL_S", DEFAULT_AUDIT_FLUSH_INTERVAL_S)
+    # Q4 phase (design D-2(e)): `denial_coalesce_window_s` now comes from
+    # the SAME single-source declaration `audit_query`'s own control-plane
+    # declaration reads (`declarations["audit_coalescing_window_ms"]`),
+    # not a peer-local constant -- both processes describe the same
+    # window (§1.2's own former "別プロセスだから読めない" drift this
+    # phase closes).
     # ONE shared router (design D-3/D-4's own "process-local" scoping) --
     # handed to `credentials` below AND to every `ApplicationCell` this
     # process builds, so denial coalescing and the buffer are shared
     # process-wide, not duplicated per credential store/cell.
     audit_router = AuditRouter(
         durable_audit, buffer_capacity=audit_buffer_capacity, alert_min_interval_s=audit_flush_interval_s,
+        denial_coalesce_window_s=declarations.audit_coalescing_window_ms / 1000,
     )
 
     credentials = PostgresCredentialStore(
         platform_dsn, pepper=app_pepper, schema=schema, pool=platform_pool, audit_router=audit_router,
     )
 
-    config = FoundationConfig.from_env(env)
+    config = FoundationConfig.from_env(
+        env, data_base_url=declarations.surfaces.data_base_url,
+        control_base_url=declarations.surfaces.control_base_url,
+    )
     audit = AuditSink()
 
     # Every served application's own `PostgresBackend` (two persistent
