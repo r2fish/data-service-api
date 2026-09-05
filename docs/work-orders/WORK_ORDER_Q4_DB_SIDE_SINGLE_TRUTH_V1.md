@@ -1,7 +1,8 @@
 # Q4 フェーズ 作業指示書 — 宣言と適用状態の根拠を DB 側の一次情報へ寄せる
 
-- 版数: **v1.0 (2026-09-05、起草)**。**起草者疑義 6 点への監督裁定 (2026-09-05) 反映済み** (`{scratchpad}/rulings-q4-workorder.md` が正本)
-- 正本設計: `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` (**v1.2 — 依頼者裁定 U-1/U-2/U-3 を確定として反映し、§8 の migration 番号を本フェーズの割当として確定した版**)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・fail-fast メッセージの骨子は設計文書が正本であり、本書はそれを重複させない。**設計と本書が食い違ったら設計が正**であり、本書の誤りとして監督へ差し戻すこと
+- 版数: **v1.1 (2026-09-05、監督裁定 D-2 (h) — 書き手 role の宣言表化 — の追補を反映)**。v1.0 からの変更点: **WP-1 に完了条件 19〜23 と変異 16〜20、WP-2 に完了条件 21〜22 と変異 18〜23 を追補した** (既存の条件番号・変異番号は変えない)。**起草者疑義 6 点への監督裁定 (2026-09-05) 反映済み** (`{scratchpad}/rulings-q4-workorder.md` が正本)。**D-2 (h) の裁定は `{scratchpad}/rulings-q4-writer-roles.md` が正本**。**同日追補 (版数据え置き、2026-09-05 の WP-1 / WP-2 差し戻し裁定 `{scratchpad}/rulings-q4-wp12-rework.md` と確定文 `{scratchpad}/q4-f3c-and-amendments.md`)**: **§1.2 の D-2 要約に `audit_writer_roles` を加え、§9 の確定文言表に F-3c / F-13 を加え、WP-1 に完了条件 24〜32 / 変異 21〜28、WP-2 に追加条件 23 / 変異 24〜31 を追補した** (既存の条件番号・変異番号は変えない)
+- 版数履歴: **v1.0 (2026-09-05、起草)**
+- 正本設計: `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` (**v1.3 — 依頼者裁定 U-1/U-2/U-3 と §8 の migration 番号の割当に加え、監督裁定 D-2 (h) (書き手 role を宣言表 `audit_writer_roles` で特定する) を反映した版**)。**本書は WP 分割と発注のみを扱う** — 裁定の根拠・却下案・実装の具体形・fail-fast メッセージの骨子は設計文書が正本であり、本書はそれを重複させない。**設計と本書が食い違ったら設計が正**であり、本書の誤りとして監督へ差し戻すこと
 - 前提となる引き継ぎ: `docs/work-orders/HANDOVER_20260904_FABLE2.md` (第13次)。**契約は 1.6.0 のまま (本フェーズは契約無変更、U-1)**。ブランチ `q4-db-single-truth`
 - 体制: Fable 監督/判断/コミット、Sonnet 実装 (コミットしない)、Opus 起草/独立レビュー/受け入れ監査
 - 先行作業指示書: `docs/work-orders/WORK_ORDER_PHASE6_CONTRACT_160_V1.md` (v1.3)。**§0.1 の常設規律 7 項目・完了ゲートの実測規律・禁止事項・コミット規律・「完了条件番号 → 変異」対応表の書式を本書がそのまま引き継ぐ**
@@ -61,7 +62,7 @@
 ### 1.2 設計 §3 の確定事項 (要約。根拠は設計が正本)
 
 - **D-1**: 書き手 role (`*svc_api` / `*svc_controlplane`) の `statement_timeout` / `idle_in_transaction_session_timeout` を **PostgreSQL の role 設定**に固定し唯一の真実とする。書き手プロセスはセッション `SET` をやめ、起動時に **(i) 宣言の存在と有効性 (ii) 実効値の ms 整数一致**を二重検査する。control は `pg_db_role_setting` から `visibility_lag_ms` を導出する。**timeout の 4 env は廃止**し、定義されていれば値によらず fail-fast する (検査対象は composition root に渡された env mapping)。
-- **D-2**: platform 宣言表 `<registry>.platform_declarations` を新設し、`surfaces` と `audit_coalescing_window_ms` の単一の真実とする。`key` は名前付き CHECK で閉じ、値の検証は Python 側に一本化する (書き込み時と読み出し時が同じ関数を通る)。**`*_DATA_BASE_URL` / `*_CONTROL_BASE_URL` は廃止**し、定義されていれば fail-fast する。**フェーズ6 監督裁定 5 (stale な `*_CONTROL_BASE_URL` を黙って無視する) を上書きする。**
+- **D-2**: platform 宣言表 `<registry>.platform_declarations` を新設し、`surfaces` と `audit_coalescing_window_ms`、**および `audit_writer_roles` (D-2 (h)) の単一の真実**とする。**`audit_writer_roles` 行は platform 単発 migration だけが書き**、`ALTER ROLE` を発行した role 名と**同じ psql 変数から同じトランザクションで** seed する。**書き手プロセスは起動時に自 `current_user` がこの宣言に含まれることを確認し (F-13)、control は宣言された各 role の catalog から `visibility_lag_ms` を導出する** — **role 名をコード内の命名規則から導出する経路は両 peer から撤去する**。`key` は名前付き CHECK (許容集合に `audit_writer_roles` を含む) で閉じ、値の検証は Python 側に一本化する (書き込み時と読み出し時が同じ関数を通る。`audit_writer_roles` は非空・重複なし・PG 識別子妥当で、落ちれば F-4b)。**`*_DATA_BASE_URL` / `*_CONTROL_BASE_URL` は廃止**し、定義されていれば fail-fast する。**フェーズ6 監督裁定 5 (stale な `*_CONTROL_BASE_URL` を黙って無視する) を上書きする。**
 - **D-3**: per-application platform upgrade 台帳 `public._<peer>_platform_upgrades` を各 application DB に置く。**テンプレート `0003` の改訂と per-app upgrade script を対で出す。** 台帳表に RLS は付けず、代わりに **両 peer の backend の bookkeeping 除外集合**と **r2db の `_r2db_missing_rls` の除外名**を同じ WP で拡張する。以後の per-app script の規律 (自番号の台帳 INSERT / 冪等 / `\q` 経路を持たない / 命名) を**静的規則テスト**で固定する。
 - **D-4**: `ops upgrade-applications` を両 peer に新設する。**provision DSN のみで動く。** 未適用は**集合差**で定義する。**1 つの DB の失敗で止めず全 DB を回し、失敗した DB を列挙して非 0 で終わる。** 失敗した application ごとに `REVOKE <developer_role> FROM <provision role>;` を出力に含める。
 - **D-5**: `ops upgrade-status [--application <id>]` を両 peer に新設する。**既存の application 一覧コマンドは変更しない。**
@@ -77,7 +78,7 @@
 2. **監査読み手 role (`*_auditreader`) の timeout** — 宣言は書き手についての主張である (設計 §1.5 の 3)。
 3. **provision role (`r2dbsvc_control` / `mitatedbsvc_provision`) への timeout 設定** — 長時間 DDL を流す役であり、置くと migration 自体が止まる (設計 LQ4-6)。
 4. **`_r2db_schema_revision` の runtime `UPDATE` 付与と MitateDB 側の非対称** (LQ4-8) — 本設計の対象外。「ついでに」揃えない。
-5. **r2db の `_validate_surface_base_url` 2 コピーの統合** (L6-17 / LQ4-7) — 動機は強まるが本フェーズの発注事項ではない。**統合したくなったら実装前に監督へ上げる** (常設規律 7)。
+5. **r2db の `_validate_surface_base_url` 2 コピーの統合** (L6-17 / LQ4-7) — 動機は強まるが本フェーズの発注事項ではない。**統合したくなったら実装前に監督へ上げる** (常設規律 7)。 **【監督裁定 2026-09-05 (WP-1 差し戻し) で上書き】: 本フェーズで統合する — `platform_declarations.validate_surfaces_value` に URL 検証の本体を置き、`main.py` / `control_main.py` / `ops.py` の 3 か所はそれを呼ぶ (設計 v1.3 §3.10 同型面、§12 LQ4-23。rulings-q4-wp12-rework.md §2)。**
 6. **`pg_advisory_xact_lock` による一括適用の並行実行保護** (LQ4-18) — 本設計では決めない。記録に留める。
 7. **一括適用失敗時の membership を「次回実行の先頭で自動的に掃除する」形** (LQ4-14) — 本フェーズは ops 出力に `REVOKE` 文を含める形で扱う。
 8. **接続プーラ下での起動時検査の射程** (LQ4-15) — 現配備にプーラがあるかは未確認である。開示のみを行う。
@@ -246,7 +247,7 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 |---|---|
 | `main.py:250` `_surfaces(env, *, control_plane_status)`、`:265-269` が `R2DB_DATA_BASE_URL` / `R2DB_CONTROL_BASE_URL` を読む | 宣言表からの読み出しへ差し替え。**env は F-2 で拒否** |
 | `control_main.py:261` `_surfaces(env)`、`:276-280` が同 2 変数を無条件必須で読む | 同 |
-| `main.py:208` / `control_main.py:238` の `_validate_surface_base_url` (**2 コピー**) | **統合しない** (§2 の 5)。**両コピーが宣言表の値を検証する形**にする |
+| `main.py:208` / `control_main.py:238` の `_validate_surface_base_url` (**2 コピー**) | **統合する** (§2 の 5 の上書き裁定 2026-09-05): 両コピーと `ops.py` の 3 コピー目を `platform_declarations.validate_surfaces_value` の呼び出しに置き換える (L6-17 閉止、設計 §12 LQ4-23) |
 | `control_main.py:368-369` の `statement_ms + idle_ms` 導出、`:429-430` の `_optional_int(env, "R2DB_AUDIT_STATEMENT_TIMEOUT_MS"/"R2DB_AUDIT_IDLE_TIMEOUT_MS", …)` | `pg_db_role_setting` からの導出へ差し替え。**env は F-1 で拒否** |
 | 監査 sink のセッション `SET` (設計 §1.5 の 1 / D-1 (b)) | **撤去**し、起動時の二重検査へ置き換える |
 
@@ -256,7 +257,7 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 **C. `r2db-api/src/r2db_api/ops.py` — 宣言系 4 サブコマンド**
 
 - `set-platform-timeouts --statement-ms <N> --idle-ms <N>` — **2 つのサービス書き手 role に同じ 2 値を置く単一ノブ。`0` と負数を拒否する。role 別の指定は設けない。**
-- `declare-surfaces --data-base-url <URL> [--control-base-url <URL> | --no-control]` — **書き込み時に D-2 (d) の検証関数を通す。**
+- `declare-surfaces --data-base-url <URL> [--control-base-url <URL> | --no-control]` — **書き込み時に D-2 (d) の検証関数を通す。** **引数の意味は設計 D-2 (e) の直後の段落 (監督裁定訂正 2026-09-05) に従う** — **`--control-base-url` は任意** (省略 = `control` 行なし)、**`--no-control` は省略と等価の明示形**として受け付ける (F-2 / F-3 / F-6 の文面が提示するため)、**両方を同時に渡したら使い方の誤り (終了コード 2)**。**必須の相互排他にはしない。**
 - `declare-coalescing-window --ms <N>` — **同じ検証関数を通す。**
 - `show-declarations` — 宣言表と role 設定の現状を出す。
 - parser 登録は既存の並び (`ops.py:1056` 以降) に足す。**終了コードの既存慣行を守る** — `_die` = 2 (`:179-181`)、`FoundationError` / `psycopg.Error` = 1。
@@ -295,15 +296,38 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 17. **対応表に対応の無い行が無いこと** (メタ条件)。
 18. **完了ゲート** — 監督が root suite を単独実行する。
 
+**追補 (監督裁定 2026-09-05、設計 v1.3 の D-2 (h) を発注する。既存 1〜18 の番号と内容は変えない)**
+
+19. **`0008` が `audit_writer_roles` 行を seed し、`key` の CHECK がこの key を許すこと** — migration が **role 名を psql 変数で受け** (既存様式)、`ALTER ROLE` 4 文の対象と seed 値が**同じ変数から組まれ、同じトランザクション内**にあること。**throwaway prefix の role 名を変数で渡して流すと、`ALTER ROLE` の対象と `audit_writer_roles` 行の値がその名前で一致する**こと (実 PG)。**2 回適用して終状態が同一である**こと (条件 1 と同じ冪等性を本行についても観測する)。
+20. **書き手プロセスの自 role 包含確認 (F-13)** — 宣言された書き手でない role で起動すると、**二重検査 (F-7 / F-9 / F-10 / F-11) より前に** F-13 で止まること。**`audit_writer_roles` 行が無い場合も F-13 である**こと (設計 §3.8 の条件は「行が無い場合を含む」)。**F-13 を条件 12 の文字列ピンに加える** — migration 番号と `ops set-platform-timeouts` が含まれること。
+21. **control の導出が宣言表の role 集合から来ること** — **role 名をコード内の命名規則から導出する経路が残っていないこと** (schema 名の `removesuffix` / 接尾辞の書き換えによる導出が**両 composition root と control 側で 0 件**であることを `grep` で示す)。throwaway prefix の 2 role を宣言し**それぞれ異なる timeout** を置くと、`visibility_lag_ms` が**宣言された全 role の `max(statement + idle)` + 1000** になること (実 PG)。
+22. **ops `set-platform-timeouts` の対象が宣言表から来ること** — **role 名の引数を持たず**、`audit_writer_roles` の**各 role**に `ALTER ROLE` を発行すること。throwaway prefix で seed した宣言表に対して実行すると、**その 2 role の `pg_db_role_setting` が変わる**こと (実 PG)。
+23. **`audit_writer_roles` 行の検証 (F-4b)** — **非空の文字列配列でない / 重複がある / 要素が識別子として妥当でない**の 3 拒否をそれぞれ観測すること。**識別子検証は既存のものを再利用している**こと。検証は**行を読むすべての経路** (両プロセスの起動時、ops `set-platform-timeouts` / `show-declarations`) が**同じ関数**を通ること。
+
+**追補 2 (監督裁定 2026-09-05、WP-1 / WP-2 差し戻し。`{scratchpad}/rulings-q4-wp12-rework.md` §4 の追加テストを発注する。既存 1〜23 の番号と内容は変えない)**
+
+**併せて、本 WP の実装は同裁定 §1 の関数分解 (設計 §3.10「同型性の面」の表) と §2 の r2db 固有裁定に従う** — **control の検査は `build_control_app()` で同期的に行い lifespan へ遅延させない** (設計 §4 の却下案)、**zero-network の既存テストは明示注入の `assemble_control_stack(…)` を使う形に書き換える**、**`service._surfaces` 等の private reach-in は撤去しコンストラクタ引数で渡す**、**control の兄弟 role の catalog 検査は `audit_reader` の有無に依らず無条件**、**adapter の `1000` リテラルは `VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS` を import する**、**`0008` の docstring / コメントが挙げるテスト名は実在テストを作ってから実名に直す**。
+
+24. **廃止 env の起動経路テスト (裁定 §4 (a))** — **`build_app` / `build_control_*` の実経路**で、**{timeout 2 変数, surfaces 2 変数} × {空文字列, 実値} = 8 ケース**を観測すること (条件 3 を実経路で固定し直すものであり、検査関数の直接呼び出しでは満たさない)。
+25. **読み側検証 (裁定 §4 (b))** — **実 PG の宣言表に不正値**を入れて `read_platform_declarations` が F-4b / F-5 を出すこと。**窓**: 文字列 / 負 / 小数 / `true`、**surfaces**: 非絶対 / 接尾辞違い / 末尾スラッシュ、**writer_roles**: 空 / 重複 / 不正識別子。
+26. **migration の DDL テスト (裁定 §4 (c))** — **2 回適用の終状態一致** (**間に `ops set-platform-timeouts` で値を変える**)、**名前付き CHECK の存在と語彙外 `key` の DB 拒否**、**2 role への `GRANT SELECT`**、**seed** (窓の既定値、`writer_roles` = 渡した role 名、`surfaces` 行なし) をそれぞれ観測すること。
+27. **起動時スナップショット (裁定 §4 (d))** — 起動後に宣言表を書き換えても **capability 文書 (data / control の両方)** が不変であること。
+28. **F-9 の実 PG 観測 (裁定 §4 (e))** — 接続に **`options=-c statement_timeout=30000`** を注入して起動が止まること。
+29. **F-13 の実 PG 観測 (裁定 §4 (f))** — **`current_user` を含まない `writer_roles`** を seed して起動が止まること。
+30. **未適用 platform DB (裁定 §4 (g))** — **migration 未適用**の platform DB で **F-7 (または F-8)** により起動しない実 PG テストがあること。
+31. **文字列ピン (裁定 §4 (h))** — **F-1〜F-13 (+ F-3c)** の骨子を**設計 §3.8 から逐語で assert** すること (**部分一致は不可**)。条件 12 / 20 の文字列ピンを **F-3c と F-12 以外の全項目**へ広げるものである。
+32. **変異表の全件実施 (裁定 §4 (i))** — **本 WP の変異表 (追補 16〜20 と追補 2 の 21〜28 を含む) を全件実施し、赤の集計行を報告に貼る**こと。**監査照合 (変異を作らない)**: 監査は報告の集計行と変異表の行数を突き合わせる。
+
 #### 非 vacuity 要件
 
 - fail-fast のテストは**実際の起動経路** (`build_app(env)` / `build_control_app(env)` 相当) を通して観測する。検査関数を直接呼ぶだけで済ませる場合は、**その関数が起動経路から実際に呼ばれていること**を別途 assert する。
 - 二重検査 (条件 8) の (iv) は**実 PG に上書きを注入して**観測する (設計 §10 の実 PG 確認項目 3)。合成 stub で済ませない。
 - 条件 9 は**実 PG で `0008` 未適用の platform DB を作り**、F-7 で起動しないことを観測する。
+- **追補**: 条件 19 / 21 / 22 は**実 PG に throwaway prefix の role を作り、その名前を psql 変数で migration へ渡して**観測する。**逐語の本番 role 名 (`r2dbsvc_api` / `r2dbsvc_controlplane`) をテストへ焼き付けない** (設計 D-2 (h) の 5)。合成 stub で済ませない。
 
 #### 同型性テスト対象
 
-**本 WP で新設する同名ヘルパ** — 宣言表の読み出し/検証ヘルパ、`pg_db_role_setting` からの導出ヘルパ、ops の宣言書き込みヘルパ。**本 WP は対応表 (`_ISOMORPHIC_TARGETS`) を触らない** (**監督裁定 2026-09-05**) — これらの行は **WP-2 が WP-2 自身のヘルパ行とまとめて追加**し、pin テスト名の行数を改める。**したがって本 WP は `xfail(strict=True)` の placeholder を登録せず、`xfailed` は WP-0 分から増えない。** 実装者は**新設した同名ヘルパの一覧 (関数名とファイル)** を完了報告に列挙し、WP-2 の発注へ引き渡すこと。
+**本 WP で新設する同名ヘルパ** — 宣言表の読み出し/検証ヘルパ、`pg_db_role_setting` からの導出ヘルパ、ops の宣言書き込みヘルパ、**`audit_writer_roles` の読み出し/検証/自 role 包含確認のヘルパ (追補、D-2 (h))**。**`platform_declarations.py` の同名ヘルパは名前・シグネチャ・ロジックを WP-2 と揃える** (**監督裁定 2026-09-05**) — 本 WP が先行するので、**WP-2 が採る名前に合わせられるよう完了報告で一覧を引き渡す**。**本 WP は対応表 (`_ISOMORPHIC_TARGETS`) を触らない** (**監督裁定 2026-09-05**) — これらの行は **WP-2 が WP-2 自身のヘルパ行とまとめて追加**し、pin テスト名の行数を改める。**したがって本 WP は `xfail(strict=True)` の placeholder を登録せず、`xfailed` は WP-0 分から増えない。** 実装者は**新設した同名ヘルパの一覧 (関数名とファイル)** を完了報告に列挙し、WP-2 の発注へ引き渡すこと。
 
 #### 変異注入 (必須。scratchpad へ復元。`git checkout` 不使用)
 
@@ -327,8 +351,22 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 | 16 MitateDB 不干渉 | **監査照合** |
 | 17 対応表が全行埋まる | 本表そのもの (メタ条件) |
 | 18 完了ゲート | **監査照合** |
+| **19** `audit_writer_roles` の seed と CHECK | **変異 16** (`0008` の `key` の CHECK 集合から `audit_writer_roles` を落とす → 同じ migration の seed が制約違反になり、当該 migration テストが赤) |
+| **20** 自 role 包含確認 (F-13) | **変異 17** (起動経路から包含確認を外す → 宣言されていない role で起動してしまい F-13 のテストが赤) |
+| **21** control の導出が宣言表由来 | **変異 18** (seed の role 名を 1 つ落とす → 導出が宣言された全 role の max を取らなくなり、control の導出テストが赤) |
+| **22** ops の対象が宣言表由来 | **変異 19** (`set-platform-timeouts` の対象 role を宣言表からではなく定数から取る形へ戻す → throwaway prefix の宣言に対する条件 22 のテストが赤) |
+| **23** 行の検証 (F-4b) | **変異 20** (`audit_writer_roles` の検証から重複検査を落とす → 重複を入れたケースが起動してしまい赤) |
+| **24** 廃止 env の起動経路 (§4 (a)) | **変異 21** (composition root の `reject_*` 呼び出しを外す → 8 ケースが赤) |
+| **25** 読み側検証 (§4 (b)) | **変異 22** (読み側の `validate_*` を素通しにする → 不正値で起動してしまい赤) |
+| **26** migration の DDL (§4 (c)) | **変異 23** (`ALTER ROLE` を条件付きにする → 2 回適用の終状態一致が赤) + **変異 24** (`CHECK` 名を外す → 名前付き制約の存在テストが赤) |
+| **27** 起動時スナップショット (§4 (d)) | **変異 25** (文書組み立て時に宣言表を再読する → 条件 27 が赤) |
+| **28** F-9 の実 PG 観測 (§4 (e)) | **変異 26** (実効値との比較を落とす → `options=-c` を注入したケースが起動してしまい赤) |
+| **29** F-13 の実 PG 観測 (§4 (f)) | **変異 27** (自 role の包含確認を外す → 条件 29 が赤) |
+| **30** 未適用 platform DB (§4 (g)) | **既存の変異 10** (sink にセッション `SET` を戻す → migration 未適用 DB で起動してしまい、条件 9 と条件 30 の両方が赤。**裁定 §4 (g) は専用の変異を指定していないため、同一状態を固定する既存変異を対応付ける**) |
+| **31** 文字列ピン (§4 (h)) | **変異 28** (F-1〜F-13 / F-3c の**任意の 1 文を言い換える** → 当該文字列ピンが赤) |
+| **32** 変異表の全件実施 (§4 (i)) | **監査照合** (メタ条件。報告の集計行と本表の行数を突き合わせる) |
 
-#### テストコマンド
+**追補 2 の変異についての運用注記**: **変異 23 / 24 / 25 / 27 は既存の変異 1 / 2 / 14 / 17 と同じ注入である。** 同じ注入で**既存条件と追補 2 の条件の両方**が赤になるので、**注入は 1 回でよいが、赤になったテスト名を両方の行について報告する** (空振り禁止、常設規律 1)。
 
 ```
 ./.venv/bin/python -m pytest -q r2db-api/tests
@@ -376,7 +414,7 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 | `control_composition.py:147-148` の `_optional_int(env, "MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS"/"…IDLE…", …)`、`main.py:269-270` の同型 | `pg_db_role_setting` からの導出へ差し替え。**env は F-1 で拒否** |
 | 監査 sink のセッション `SET` | **撤去**し、起動時の二重検査へ置き換える |
 
-**C. `MitateDB-api/src/mitatedb_api/ops.py` — 宣言系 4 サブコマンド** — WP-1 の C と同名・同引数。parser 登録は既存の並び (`:752` 以降) に足す。終了コードの既存慣行 (`_die` = 2 (`:234-236`)、`FoundationError` / `psycopg.Error` = 1) を守る。**テストの置き場は確定済み (監督裁定 2026-09-05): 宣言系は両 peer とも新規 `tests/test_ops_declarations.py`** であり、MitateDB も既存 `tests/test_ops.py` に足さず `MitateDB-api/tests/test_ops_declarations.py` を新設する。
+**C. `MitateDB-api/src/mitatedb_api/ops.py` — 宣言系 4 サブコマンド** — WP-1 の C と同名・同引数。**`declare-surfaces` の `--no-control` は廃止しない** (**監督裁定訂正 2026-09-05**) — WP-1 の C と同じく、**`--control-base-url` は任意 (省略 = `control` 行なし)、`--no-control` は省略と等価の明示形、両方同時は使い方の誤り (終了コード 2)** であり、**必須の相互排他にはしない** (設計 D-2 (e) の直後の段落)。parser 登録は既存の並び (`:752` 以降) に足す。終了コードの既存慣行 (`_die` = 2 (`:234-236`)、`FoundationError` / `psycopg.Error` = 1) を守る。**テストの置き場は確定済み (監督裁定 2026-09-05): 宣言系は両 peer とも新規 `tests/test_ops_declarations.py`** であり、MitateDB も既存 `tests/test_ops.py` に足さず `MitateDB-api/tests/test_ops_declarations.py` を新設する。
 
 **D. HTTP conformance adapter の追随 (`MitateDB-api/conformance/conformance_adapter_mitatedb_http.py`)**
 
@@ -397,6 +435,9 @@ r2db の `visibility_lag_ms` / `coalescing_window_ms` / `surfaces` の根拠を 
 - **条件 16 (不干渉)** — 監査は `git diff --name-only` に **`r2db-api/` が 1 件も現れない**ことを確認する。
 - **追加条件 19: フェーズ6 監督裁定 5 の上書きの記録** — **監査照合 (変異を作らない)**: 監査は `MitateDB-api/src/mitatedb_api/config.py:150-157` 相当の箇所と r2db の同型のゲートについて、**「宣言表では行の存在自体を矛盾として拒否する」形へ改まったことが日付付きで記録されている**ことを確認する。
 - **追加条件 20: 対応表への行追加 (WP-1 分 + WP-2 分)** — **監督裁定 2026-09-05 により、対「WP-1 / WP-2」のヘルパ行は後半 WP である本 WP がまとめて追加する。** WP-1 が新設した同名ヘルパ (宣言表の読み出し/検証、`pg_db_role_setting` からの導出、ops の宣言書き込み) と本 WP の対応するヘルパの行を `_ISOMORPHIC_TARGETS` へ足し、**pin テスト関数名の行数部分と当該行の両方を改め**、対応表が両 peer で緑になること。**`xfail(strict=True)` の placeholder は用いない** (両 peer に実物が揃っているため)。**既存行が 1 対も落ちていない**こと。
+- **追加条件 21 (追補。監督裁定 2026-09-05、設計 v1.3 の D-2 (h))**: **WP-1 の追補条件 19〜23 を MitateDB の名前で読み替えたもの**を用いる — migration は **`0007`**、本番の seed 値は **`["mitatedbsvc_api", "mitatedbsvc_controlplane"]`** (設計 §3.10)、ops は同名の `set-platform-timeouts`。**非 vacuity も WP-1 の追補と同じく、throwaway prefix の role 名を psql 変数で migration へ渡して実 PG で観測する** (逐語の本番 role 名をテストへ焼き付けない)。
+- **追加条件 22 (追補)**: **`audit_writer_roles` 系ヘルパの対応表への追加と名前の統一** — 条件 20 で本 WP が足す行に、**`audit_writer_roles` の読み出し / 検証 / 自 role 包含確認のヘルパ**を含めること。**`platform_declarations.py` の同名ヘルパは両 peer で名前・シグネチャ・ロジックが揃っている**こと (**監督裁定 2026-09-05**。**WP-1 側は WP-2 と同名にする** — WP-1 の完了報告が引き渡したヘルパ一覧を出発点にする)。**そのために `r2db-api/` を変更する必要が生じたら条件 16 (不干渉) と衝突するので、実装前に監督へ上げる** (常設規律 7)。
+- **追加条件 23 (追補 2。監督裁定 2026-09-05、WP-1 / WP-2 差し戻し `{scratchpad}/rulings-q4-wp12-rework.md` §4)**: **WP-1 の追補 2 条件 24〜32 を MitateDB の名前で読み替えたもの**を用いる — migration は **`0007`**、廃止 env は `MITATEDB_*`、実経路は `build_app` / `build_control_service` (composition root)、文字列ピンは **F-1〜F-13 (+ F-3c)** を設計 §3.8 から**逐語**で (部分一致不可)。**本 WP は同裁定 §1 の関数分解 (設計 §3.10「同型性の面」の表) の参照実装を持つ** — `platform_declarations.py` を表のシンボルどおりに置き、**peer 差を引数 (schema 名、peer 名、ops モジュール名) と呼び出し側だけに閉じる**こと。**対応表 (`_ISOMORPHIC_TARGETS`) の行を §3.10 の表の全シンボル (「載せる」の行) に更新し、pin テスト名を改める** (条件 20 / 22 と同じ編集点)。
 
 #### 非 vacuity 要件
 
@@ -415,6 +456,33 @@ WP-1 と同一。加えて、**MitateDB HTTP plug は composition root を通る
 | 14 HTTP adapter の追随 | **変異 16** (fixture の宣言表 seed を落とす → adapter が F-3 で起動せず conformance が赤。**宣言表の読み出しが load-bearing であることの実測**) |
 | 20 対応表への行追加 (WP-1 分 + WP-2 分) | **変異 17** (**WP-1 由来の新規行**について片 peer のヘルパを 1 箇所変える → 対応表の当該行が赤。**WP-1 のヘルパが本当に突き合わされていることの実測**) |
 | 19 裁定 5 の上書きの記録 | **監査照合** |
+
+**追補 (監督裁定 2026-09-05、D-2 (h))。WP-1 の追補変異 16〜20 は本 WP では 18〜22 と番号し直す** — 本 WP の既存 変異 16 / 17 と衝突させないためであり、**既存番号は変えない**。
+
+| 完了条件 | 対応する変異 |
+|---|---|
+| 21 (WP-1 追補条件 19 の読み替え) | **変異 18** (`0007` の `key` の CHECK 集合から `audit_writer_roles` を落とす → 同じ migration の seed が制約違反になり当該 migration テストが赤) |
+| 21 (同 20 の読み替え) | **変異 19** (起動経路から自 role 包含確認を外す → F-13 のテストが赤) |
+| 21 (同 21 の読み替え) | **変異 20** (seed の role 名を 1 つ落とす → control の導出テストが赤) |
+| 21 (同 22 の読み替え) | **変異 21** (`set-platform-timeouts` の対象 role を定数から取る形へ戻す → throwaway prefix の宣言に対する当該テストが赤) |
+| 21 (同 23 の読み替え) | **変異 22** (`audit_writer_roles` の検証から重複検査を落とす → 当該ケースが赤) |
+| 22 対応表への `audit_writer_roles` 系ヘルパ行 | **変異 23** (**WP-1 由来の `audit_writer_roles` ヘルパ**について片 peer を 1 箇所変える → 対応表の当該行が赤。**両 peer の同名ヘルパが本当に突き合わされていることの実測**) |
+
+**追補 2 (監督裁定 2026-09-05、WP-1 / WP-2 差し戻し §4)。WP-1 の追補 2 変異 21〜28 は本 WP では 24〜31 と番号し直す** — 本 WP の既存 変異 16〜23 と衝突させないためであり、**既存番号は変えない**。
+
+| 完了条件 | 対応する変異 |
+|---|---|
+| 23 (WP-1 追補 2 条件 24 の読み替え、§4 (a)) | **変異 24** (composition root の `reject_*` 呼び出しを外す → 8 ケースが赤) |
+| 23 (同 25 の読み替え、§4 (b)) | **変異 25** (読み側の `validate_*` を素通しにする → 不正値で起動してしまい赤) |
+| 23 (同 26 の読み替え、§4 (c)) | **変異 26** (`ALTER ROLE` を条件付きにする → 2 回適用の終状態一致が赤) + **変異 27** (`CHECK` 名を外す → 名前付き制約の存在テストが赤) |
+| 23 (同 27 の読み替え、§4 (d)) | **変異 28** (文書組み立て時に宣言表を再読する → 当該条件が赤) |
+| 23 (同 28 の読み替え、§4 (e)) | **変異 29** (実効値との比較を落とす → `options=-c statement_timeout=30000` を注入したケースが起動してしまい赤) |
+| 23 (同 29 の読み替え、§4 (f)) | **変異 30** (自 role の包含確認を外す → 当該条件が赤) |
+| 23 (同 30 の読み替え、§4 (g)) | **既存の変異 10 の読み替え** (sink にセッション `SET` を戻す → migration 未適用 DB で起動してしまい赤。**裁定 §4 (g) は専用の変異を指定していない**) |
+| 23 (同 31 の読み替え、§4 (h)) | **変異 31** (F-1〜F-13 / F-3c の**任意の 1 文を言い換える** → 当該文字列ピンが赤) |
+| 23 (同 32 の読み替え、§4 (i)) | **監査照合** (メタ条件。報告の集計行と本表の行数を突き合わせる) |
+
+**運用注記**: **変異 26 / 27 / 28 / 30 は WP-2 の既存変異 (WP-1 の 1 / 2 / 14 / 17 を読み替えたもの) と同じ注入である。注入は 1 回でよいが、赤になったテスト名を両方の行について報告する。**
 
 #### テストコマンド
 
@@ -753,7 +821,7 @@ WP-0〜4 の実測を正本へ落とし、配備手順と対応表を現在形�
 1. **SI-14 の置換文言の強さ** — 「解消した」と無限定に書いていないか。**限定 (同一 platform DB 前提) が落ちていないか。**
 2. **記録と実装の乖離** — CONTROL_MAPPING / 設計 §13 / 台帳が主張する evidence が、実在し実際に走るテストへ解決するか。**各 WP で採ったテスト名と本書の完了条件に書いた予定名が食い違っていないか** (食い違うなら**記録側を実装に合わせる**)。
 3. **廃止 env の掃討漏れ** — 実値で設定した行が 1 つでも残っていないか。**残ると次回配備が必ず止まる。**
-4. **範囲外項目の扱い** — LQ4-14 / LQ4-18 / L6-17 / LQ4-8 が「対応不要」ではなく**将来課題 / 依頼者判断待ち**として保たれているか。
+4. **範囲外項目の扱い** — LQ4-14 / LQ4-18 / LQ4-8 が「対応不要」ではなく**将来課題 / 依頼者判断待ち**として保たれているか (L6-17 は本フェーズで閉じる — §2 の 5 の上書き裁定)。
 5. **代償の記録** — **`ALTER ROLE … SET` の射程が監査書き込みに限られない**こと (LQ4-4: credential store 照会と control-plane registry 操作もこの timeout の下に入る) が、runbook に**運用者責任として**書かれているか。「対称化した」だけの記述に化けていないか。
 6. **台帳の性質** — 「台帳は運用の一次記録であって改竄不能な証拠ではない」(設計 §3.9) が保たれているか。過大に「証跡」と書いていないか。
 
@@ -839,6 +907,9 @@ WP-0〜4 の実測を正本へ落とし、配備手順と対応表を現在形�
 | **起草者疑義 6 点への監督裁定 (置き場・単位規範・対応表の編集主体とマージ順・`CREATE OR REPLACE VIEW`)** | **`{scratchpad}/rulings-q4-workorder.md`** | 本書は反映済み (v1.0、2026-09-05)。**該当箇所は「監督裁定 2026-09-05」と明記してある** |
 | **fail-fast メッセージ (F-1〜F-11)** | **設計 `Q4_DB_SIDE_SINGLE_TRUTH_V1.md` §3.8** | 実装はここから複製する。**文字列ピンのテストを WP-1 / WP-2 の完了条件 12 に置く** |
 | **cell open 時メッセージ (F-12)** | **同 §3.8 (F-12 の行と直後の注記)** | **起動時ではなく cell open 時であり API 応答に現れる唯一の項目**である。実装はここから複製し、**文字列ピンのテストを WP-3 / WP-4 の完了条件 11 に置く** |
+| **F-13 (自 role が `audit_writer_roles` に含まれない)** | **同 §3.8 (F-13 の行と直前の注記)** | **監督裁定 2026-09-05 (D-2 (h)) による確定文であり、依頼者裁定ではない**。起動時の出力であり API 応答には現れない。**文字列ピンは WP-1 の完了条件 20 / WP-2 の追加条件 21 が課す** (条件 12 の対象へ F-13 を加える) |
+| **F-3c (`surfaces` 行はあるが `control` が無く、それが control-plane プロセスである)** | **同 §3.8 (F-3c の行と「F-3c についての注記」)。原文は `{scratchpad}/q4-f3c-and-amendments.md`** | **監督確定文 2026-09-05。逐語複製し、言い換えない** (常設規律 4)。**`<registry>` は実 schema 名、`<peer>` は `r2db_api` / `mitatedb_api` に置換する。両 peer で同じ文面**。**文字列ピンの対象に加える** (WP-1 完了条件 31 / WP-2 追加条件 23) |
+| **`ops declare-surfaces` の引数 (`--control-base-url` 任意 / `--no-control` は省略と等価の明示形 / 両方同時は使い方の誤り = 終了コード 2)** | **設計 D-2 (e) の直後の段落 (監督裁定訂正 2026-09-05)** | **必須の相互排他にはしない**。両 peer 同じ |
 | **静的規則の規則文と期待集計** | 設計 §10 (規則) / §8.1 (命名規範) | WP-0 が改訂したスキャナの実測出力を §10 へ貼る |
 | **SI-14 行の置換文言** | 設計 §3 D-6 の 1 | **限定 (「同一の platform データベースを前提に」) を落とさない** |
 | **起動シーケンスと検査順** | 設計 §3.7 | data-plane 1〜8 / control-plane 1〜8 |

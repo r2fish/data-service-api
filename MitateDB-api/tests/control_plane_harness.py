@@ -123,6 +123,15 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # requires. This harness never provisions a per-application database
         # (this module's own docstring), so `0003`/`0004` stay unneeded here.
         "0005_application_audit.sql",
+        # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
+        # declarations table + the two service writer roles' timeout role
+        # settings -- run AFTER 0002 (its own two `ALTER ROLE` targets,
+        # `<prefix>svc_api`/`<prefix>svc_controlplane`, must already
+        # exist). Every test that calls `build_control_service` (directly
+        # or via `_postgres_harness`) now depends on this migration having
+        # been applied, or it fails startup with F-7/F-3/F-4 (by design --
+        # `platform_declarations` is the single source those checks read).
+        "0007_platform_declarations.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -136,11 +145,23 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
     auditreader_role = f"{prefix}svc_auditreader"
     registry_schema = f"{prefix}_registry"
 
+    # Q4 phase (design D-2(c)): a synthetic, example.invalid `surfaces`
+    # declaration -- `build_control_service`/`main.build_app` both now
+    # require a `surfaces` row to exist at all (F-3) before anything else
+    # can be tested. Public-repository-safe (`example.invalid`, never a
+    # real domain, mirrors this repository's own established fixture
+    # convention).
+    surfaces_json = (
+        '{"data":{"base_url":"https://data.mitatedb-control-platform.example.invalid/v1"},'
+        '"control":{"base_url":"https://control.mitatedb-control-platform.example.invalid/control/v1"}}'
+    )
+
     try:
         _run_psql(dsn, rewritten["0001_bootstrap_platform.sql"], {"provision_password": provision_password})
         provision_dsn = _dsn_with(dsn, user=provision_role, password=provision_password, dbname=platform_db)
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
         _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+        _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         admin = psycopg.connect(dsn, autocommit=True)
         try:
             with admin.cursor() as cur:
@@ -151,6 +172,16 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
                     sql.Identifier(auditreader_role), sql.Literal(auditreader_password)))
         finally:
             admin.close()
+        provision_conn = psycopg.connect(provision_dsn, autocommit=True)
+        try:
+            with provision_conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', %s)").format(
+                        table=sql.Identifier(registry_schema, "platform_declarations")),
+                    [surfaces_json],
+                )
+        finally:
+            provision_conn.close()
     except Exception:
         sweep_prefix(dsn, prefix)
         raise
@@ -160,10 +191,31 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         admin_dsn=dsn,
         provision_dsn=provision_dsn,
         registry_schema=registry_schema,
+        api_role=api_role,
+        controlplane_role=controlplane_role,
         api_dsn=_dsn_with(dsn, user=api_role, password=api_password, dbname=platform_db),
         controlplane_dsn=_dsn_with(dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db),
         auditreader_dsn=_dsn_with(dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db),
     )
+
+
+def set_role_timeouts(admin_dsn: str, role: str, *, statement_ms: int, idle_ms: int) -> None:
+    """Q4 phase test helper (design D-1(a)): issues the SAME `ALTER ROLE
+    ... SET` shape `ops set-platform-timeouts`/migration `0007` use,
+    against ONE role -- lets a test override the shipped 5000ms/5000ms
+    default (e.g. to keep a visibility-lag-dependent test's own wall-clock
+    wait short) the same way a real deployment would, rather than a
+    per-connection override product code no longer supports (design
+    D-1(b): the SET-SESSION mechanism this replaces was removed)."""
+    admin = psycopg.connect(admin_dsn, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = {}").format(
+                sql.Identifier(role), sql.Literal(f"{statement_ms}ms")))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = {}").format(
+                sql.Identifier(role), sql.Literal(f"{idle_ms}ms")))
+    finally:
+        admin.close()
 
 
 @pytest.fixture(scope="module")

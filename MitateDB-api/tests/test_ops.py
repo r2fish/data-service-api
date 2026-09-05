@@ -48,13 +48,19 @@ def _run_ops(control_platform, *args: str, control_pepper: str = _CONTROL_PEPPER
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
     env["MITATEDB_CONTROLPLANE_DSN"] = control_platform.controlplane_dsn
     env["MITATEDB_PLATFORM_SCHEMA"] = control_platform.registry_schema
-    # Phase 6 WP-3 (design D-2): both required unconditionally from here
-    # on (`control_composition.build_control_service`) -- supplied for
-    # every subprocess this helper launches so a break-glass command's
-    # OWN missing-actor-credential checks (this file's own intended
-    # target) are what actually fires, not this newer requirement.
-    env["MITATEDB_DATA_BASE_URL"] = "http://mitatedb-ops-cli-test.example.invalid/v1"
-    env["MITATEDB_CONTROL_BASE_URL"] = "http://mitatedb-ops-cli-test.example.invalid/control/v1"
+    # Q4 phase (design D-2, work order §4 WP-2 変更対象 D): `MITATEDB_
+    # DATA_BASE_URL`/`MITATEDB_CONTROL_BASE_URL` are REMOVED env vars
+    # (F-2, rejected whenever defined) -- `surfaces` now comes from
+    # `<registry>.platform_declarations`, already seeded (both `data`/
+    # `control`) by `control_plane_harness.bootstrap_control_platform`.
+    # Explicitly unset here in case the PARENT `os.environ` this dict is
+    # copied from happens to carry either (a real deployment's own shell,
+    # say) -- this subprocess must observe the SAME F-2 rejection any
+    # other caller does, not a silently-inherited leftover.
+    env.pop("MITATEDB_DATA_BASE_URL", None)
+    env.pop("MITATEDB_CONTROL_BASE_URL", None)
+    env.pop("MITATEDB_AUDIT_STATEMENT_TIMEOUT_MS", None)
+    env.pop("MITATEDB_AUDIT_IDLE_TIMEOUT_MS", None)
     if control_pepper is not None:
         env["MITATEDB_CONTROL_CREDENTIAL_PEPPER"] = control_pepper
     else:

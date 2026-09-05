@@ -149,11 +149,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn, Sequence
+from typing import NoReturn, Optional, Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Json
 
+from . import platform_declarations
 from .control_audit import insert_control_audit_row, read_control_audit_events
 from .control_composition import build_control_service
 from .control_credential_store_postgres import DEFAULT_SCHEMA, PostgresControlCredentialStore
@@ -738,6 +740,236 @@ def cmd_unfreeze_issuance(args: argparse.Namespace) -> int:
     return 0
 
 
+# ===========================================================================
+# Q4 phase (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2, work
+# order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4 WP-2
+# 変更対象 C): declaration-management subcommands. All four connect with
+# `MITATEDB_PROVISION_DSN` -- `mitatedbsvc_provision` (or its throwaway-
+# prefixed test equivalent) is the owner of both new objects migration
+# `0007_platform_declarations.sql` creates. Terminal-facing prose ("next
+# ops command") is never written twice: `platform_declarations.py`'s own
+# fail-fast messages already name every one of these subcommands verbatim
+# (design §3.8) -- these subcommands are simply what those messages point
+# an operator AT.
+# ===========================================================================
+
+
+def _read_audit_writer_roles(conn: "psycopg.Connection") -> tuple[str, ...]:
+    """D-2(h) 4: the target of `set-platform-timeouts` comes from the
+    `audit_writer_roles` row itself -- never a role-name argument, never a
+    naming-convention derivation from `current_user`/schema. Raw read +
+    the SAME `validate_audit_writer_roles_value` the read/write paths use
+    (design D-2(h) 6: "行の検証は...同じ関数を通る")."""
+    schema = _schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT value FROM {table} WHERE key = 'audit_writer_roles'").format(
+                    table=sql.Identifier(schema, platform_declarations.TABLE_NAME)))
+            row = cur.fetchone()
+    except psycopg.errors.UndefinedTable:
+        conn.rollback()
+        _die(
+            f"relation {schema}.{platform_declarations.TABLE_NAME} does not exist: apply migration "
+            f"{platform_declarations.MIGRATION_NUMBER} to this platform database first."
+        )
+    if row is None:
+        _die(
+            f"no 'audit_writer_roles' row in {schema}.{platform_declarations.TABLE_NAME}: migration "
+            f"{platform_declarations.MIGRATION_NUMBER} seeds this row in the same transaction as its own "
+            f"ALTER ROLE statements. Apply that migration to this platform database first."
+        )
+    try:
+        return platform_declarations.validate_audit_writer_roles_value(
+            row[0], schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    except platform_declarations.PlatformDeclarationError as exc:
+        _die(str(exc))
+
+
+def _read_audit_writer_roles_lenient(conn: "psycopg.Connection") -> Optional[tuple[str, ...]]:
+    """`show-declarations`'s own lenient variant of `_read_audit_writer_
+    roles` -- a diagnostic must still print SOMETHING for a row that is
+    absent or fails validation, rather than dying (this command's own
+    docstring: "does not itself enforce...validation"). Returns `None`
+    (never a guessed role-name pair) when the row is absent or invalid --
+    D-2(h) 3's "role 名の導出規則はコードから撤去する" applies to a
+    DIAGNOSTIC command exactly as much as to a fail-fast one: a deployment
+    whose real writer roles are not the production seed names must never
+    have this command print settings for roles that do not exist on it
+    (monitor ruling 2026-09-05, N-6). Raises `psycopg.errors.UndefinedTable`
+    (uncaught) so the caller's own existing table-not-found handling
+    applies uniformly."""
+    schema = _schema()
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT value FROM {table} WHERE key = 'audit_writer_roles'").format(
+                table=sql.Identifier(schema, platform_declarations.TABLE_NAME)))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    try:
+        return platform_declarations.validate_audit_writer_roles_value(
+            row[0], schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    except platform_declarations.PlatformDeclarationError:
+        return None
+
+
+def cmd_set_platform_timeouts(args: argparse.Namespace) -> int:
+    """D-1(a)/D-2(h) 4: the single ALTER-ROLE knob -- one pair of values,
+    EVERY role in the declared `audit_writer_roles` row, always together
+    (design §3.10: "role 別の指定は設けない"). Takes no role-name
+    argument -- the target comes from the declaration table itself, never
+    a naming-convention derivation. Rejects 0 and negative values (F-10's
+    own precondition: an audit writer must never be configured
+    unbounded)."""
+    if args.statement_ms <= 0:
+        _die("--statement-ms must be a positive integer")
+    if args.idle_ms <= 0:
+        _die("--idle-ms must be a positive integer")
+    dsn = _provision_dsn()
+    conn = psycopg.connect(dsn)
+    try:
+        roles = _read_audit_writer_roles(conn)
+        statement_literal = f"{args.statement_ms}ms"
+        idle_literal = f"{args.idle_ms}ms"
+        with conn.cursor() as cur:
+            for role in roles:
+                cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = {}").format(
+                    sql.Identifier(role), sql.Literal(statement_literal)))
+                cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = {}").format(
+                    sql.Identifier(role), sql.Literal(idle_literal)))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print(
+        f"statement_timeout = {statement_literal}, idle_in_transaction_session_timeout = {idle_literal} set on "
+        f"{', '.join(roles)}. Restart both processes for this to take effect (D-1(e): startup snapshot)."
+    )
+    return 0
+
+
+def _upsert_declaration(conn: "psycopg.Connection", *, schema: str, key: str, value: object) -> None:
+    table = sql.Identifier(schema, platform_declarations.TABLE_NAME)
+    statement = sql.SQL(
+        "INSERT INTO {table} (key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
+    ).format(table=table)
+    with conn.cursor() as cur:
+        cur.execute(statement, (key, Json(value)))
+    conn.commit()
+
+
+def cmd_declare_surfaces(args: argparse.Namespace) -> int:
+    """D-2(c)/(d): writes the single `surfaces` row both processes read --
+    this command REPLACES the entire row (design D-2: "この表には...
+    deployment固有" value). `--control-base-url` is OPTIONAL (omitted =
+    no control row declared); `--no-control` is an explicit, equivalent
+    form of that same omission (supervisor ruling correction 2026-09-05,
+    `{scratchpad}/q4-f3c-and-amendments.md`: "`--no-control` は廃止"の旧
+    裁定は撤回され、「省略と等価の明示形」として受け付ける). Passing BOTH
+    is a usage error (argparse's own mutually-exclusive-group behavior,
+    exit 2) -- neither is required. Validated through the SAME function
+    (`platform_declarations.validate_surfaces_value`) the read path uses
+    (D-2(d): "書き込み時と読み出し時の両方で...同じ Python の検証関数を
+    通る")."""
+    value: dict = {"data": {"base_url": args.data_base_url}}
+    if args.control_base_url is not None:
+        value["control"] = {"base_url": args.control_base_url}
+    schema = _schema()
+    try:
+        platform_declarations.validate_surfaces_value(value, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    except platform_declarations.PlatformDeclarationError as exc:
+        _die(str(exc))
+    dsn = _provision_dsn()
+    conn = psycopg.connect(dsn)
+    try:
+        _upsert_declaration(conn, schema=schema, key="surfaces", value=value)
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print(f"surfaces declared: {json.dumps(value, sort_keys=True)}")
+    print("Restart both processes for this to take effect (D-2(g): startup snapshot).")
+    return 0
+
+
+def cmd_declare_coalescing_window(args: argparse.Namespace) -> int:
+    """D-2(c)/(d): writes `audit_coalescing_window_ms`. Validated through
+    the SAME function the read path uses."""
+    schema = _schema()
+    try:
+        platform_declarations.validate_coalescing_window_value(args.ms, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    except platform_declarations.PlatformDeclarationError as exc:
+        _die(str(exc))
+    dsn = _provision_dsn()
+    conn = psycopg.connect(dsn)
+    try:
+        _upsert_declaration(conn, schema=schema, key="audit_coalescing_window_ms", value=args.ms)
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print(f"audit_coalescing_window_ms declared: {args.ms}")
+    print("Restart both processes for this to take effect (D-2(g): startup snapshot).")
+    return 0
+
+
+def cmd_show_declarations(_args: argparse.Namespace) -> int:
+    """Read-only diagnostic: the current `platform_declarations` row
+    contents (raw, unvalidated -- this command's own job is to show what
+    IS there, including a malformed hand-edited value, not to enforce
+    F-3/F-4b/F-5 the way a composition root's own startup path does) and
+    every declared writer role's `pg_db_role_setting` declarations
+    (D-2(h): read from the `audit_writer_roles` row itself, never a
+    naming-convention derivation -- role-name derivation is removed from
+    this code path entirely, not just from the fail-fast one: when the
+    row is itself absent/invalid, `role_settings` reports that fact
+    instead of guessing a role-name pair that may not exist on this
+    deployment, monitor ruling 2026-09-05 N-6)."""
+    dsn = _provision_dsn()
+    schema = _schema()
+    conn = psycopg.connect(dsn)
+    try:
+        try:
+            roles = _read_audit_writer_roles_lenient(conn)
+        except psycopg.errors.UndefinedTable:
+            conn.rollback()
+            roles = None
+        payload: dict = {"platform_declarations": None, "role_settings": {}}
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT key, value, updated_at FROM {table} ORDER BY key").format(
+                        table=sql.Identifier(schema, platform_declarations.TABLE_NAME)))
+                payload["platform_declarations"] = [
+                    {"key": key, "value": value, "updated_at": updated_at} for key, value, updated_at in cur.fetchall()
+                ]
+        except psycopg.errors.UndefinedTable:
+            conn.rollback()
+            payload["platform_declarations"] = f"table does not exist (migration {platform_declarations.MIGRATION_NUMBER} not applied)"
+        if roles is None:
+            payload["role_settings"] = (
+                f"(no audit_writer_roles row -- apply migration {platform_declarations.MIGRATION_NUMBER} "
+                f"with this deployment's writer role names)"
+            )
+        else:
+            for role in roles:
+                rows = platform_declarations._role_setting_rows(conn, role)  # noqa: SLF001 -- ops-internal reach-in, same module family
+                payload["role_settings"][role] = [
+                    {"setdatabase": setdatabase, "database": datname, "setconfig": setconfig}
+                    for setdatabase, datname, setconfig in rows
+                ]
+    finally:
+        conn.close()
+    _print_json(payload)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m mitatedb_api.ops",
@@ -885,6 +1117,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="echo the required_confirmation phrase from a prior refusal's stderr declaration to proceed",
     )
     p.set_defaults(func=cmd_deprovision)
+
+    # ---- Q4 phase declaration-management command family (design D-1/D-2)
+    # -- provision DSN only, no control credential needed for any of these
+    # (`MITATEDB_PROVISION_DSN`, the same env var `deprovision`/`audit-
+    # report` above already require).
+
+    p = sub.add_parser(
+        "set-platform-timeouts",
+        help="set BOTH service writer roles' statement_timeout / idle_in_transaction_session_timeout as "
+             "PostgreSQL role settings (design D-1(a)) -- one pair of values for both mitatedbsvc_api and "
+             "mitatedbsvc_controlplane, no per-role override. Rejects 0 and negative values. Requires "
+             "MITATEDB_PROVISION_DSN. Restart both processes afterward (D-1(e): startup snapshot)",
+    )
+    p.add_argument("--statement-ms", type=int, required=True, metavar="N")
+    p.add_argument("--idle-ms", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_set_platform_timeouts)
+
+    p = sub.add_parser(
+        "declare-surfaces",
+        help="declare the single, shared `surfaces` row both processes read (design D-2) -- REPLACES the "
+             "entire row. --control-base-url is OPTIONAL (omit it to declare no control surface); "
+             "--no-control is an explicit, equivalent form of that same omission (supervisor ruling "
+             "correction 2026-09-05). Passing both is a usage error. Requires MITATEDB_PROVISION_DSN. "
+             "Restart both processes afterward (D-2(g): startup snapshot)",
+    )
+    p.add_argument("--data-base-url", required=True, metavar="URL")
+    control_group = p.add_mutually_exclusive_group(required=False)
+    control_group.add_argument("--control-base-url", default=None, metavar="URL")
+    control_group.add_argument("--no-control", dest="control_base_url", action="store_const", const=None)
+    p.set_defaults(func=cmd_declare_surfaces)
+
+    p = sub.add_parser(
+        "declare-coalescing-window",
+        help="declare `audit_coalescing_window_ms` (design D-2) -- a non-negative integer, 0 meaning no "
+             "coalescing. Requires MITATEDB_PROVISION_DSN. Restart both processes afterward (D-2(g): startup "
+             "snapshot)",
+    )
+    p.add_argument("--ms", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_declare_coalescing_window)
+
+    p = sub.add_parser(
+        "show-declarations",
+        help="print the current platform_declarations row contents and both service writer roles' "
+             "pg_db_role_setting declarations (read-only diagnostic; shows raw values, including a malformed "
+             "hand-edited one -- does not itself enforce startup validation). Requires MITATEDB_PROVISION_DSN",
+    )
+    p.set_defaults(func=cmd_show_declarations)
 
     return parser
 
