@@ -121,3 +121,42 @@ with `r2db-api/tests/test_postgres.py`) rather than hard-coded, so the
 adapter can be pointed at a different reachable server, but there is no
 path that turns "PostgreSQL is unreachable" into "this adapter's coverage
 is silently absent."
+
+## Running against real PostgreSQL
+
+Both peers' HTTP+PostgreSQL adapters need a real PostgreSQL server reachable
+through a superuser-equivalent DSN, one environment variable per peer:
+
+- `R2DB_TEST_ADMIN_DSN` (shared with `r2db-api/tests/test_postgres.py`)
+- `MITATEDB_TEST_ADMIN_DSN` (shared with `MitateDB-api/tests/test_postgres.py`)
+
+Both default to a local unix-socket DSN (`host=/tmp port=5432 dbname=postgres`)
+when unset. That default does not reach a server started in a container on a
+published loopback port -- set both variables explicitly to a loopback TCP
+DSN whenever PostgreSQL is not reachable over `/tmp`.
+
+The server must be started with `max_connections=300`. The completion gate
+runs the suite with `-n 5 --dist loadgroup` (see `conftest.py`'s
+`pytest_collection_modifyitems`), which confines each adapter's own
+session-scoped connection pool to one worker process but still runs five
+adapters' worth of real PostgreSQL connections concurrently against the
+same server; the default `max_connections=100` was measured (Phase 6) at
+64 of 100 connections used, which `-n 5`'s concurrent adapters are
+expected to exceed. An unreachable or under-provisioned PostgreSQL server
+must fail the run, never skip it -- the same fail-loud rule as the adapter
+construction check above.
+
+Both peers' HTTP+PostgreSQL adapters also shell out to a real `psql`
+client on `PATH` to apply migrations (`conformance_adapter_r2db_http.py:230`,
+`conformance_adapter_mitatedb_http.py:167`); install a PostgreSQL client
+package before running the gate. Install the peers themselves with
+`pip install -c constraints.txt -e './r2db-api[test]' -e './MitateDB-api[test]'`
+(each extras argument is quoted so zsh does not treat `[test]` as a glob).
+
+The completion gate command is `python -m pytest -q -n 5 --dist loadgroup`,
+run solo (no other pytest process concurrently against the same server).
+CI (`.github/workflows/ci.yml`) runs this identical command against a
+`postgres:16` container started with `-c max_connections=300` and DSNs
+overridden to that container's loopback address; CI's Python 3.11 job's
+pass/fail/skipped/xfailed tally is the authoritative record of the gate,
+and the Python 3.12 job is required to reproduce the identical tally.
