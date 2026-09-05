@@ -1,7 +1,8 @@
 # Q4 フェーズ 実施設計: 宣言と適用状態の根拠を DB 側の一次情報へ寄せる
 
-- 版数: **v1.1 (2026-09-05、設計レビュー 2 本を反映)**。v1.0 (2026-09-05、初版) からの変更点: **(1)** D-3 に新項 (e) — 台帳表を作ると r2db の catalog / RLS 監視が恒久的に落ちるため、両 peer の backend の bookkeeping 除外集合と r2db の `_r2db_missing_rls` ビューを同じ WP で拡張する。**(2)** 台帳表の DDL に provision role への `GRANT SELECT` を足し、§3.9 の権限表と「書き込み経路」の記述を現物 (所有者 = developer role) に合わせた。**(3)** 「未適用」を**集合差**で定義し直し、`applied_level` 単一値を廃して applied / pending の集合表示にした (D-4 / D-5)。適用状態の可視化は既存の一覧コマンドを触らず新サブコマンド `ops upgrade-status` に分けた。**(4)** timeout の比較を**両辺 ms 整数の数値比較**に確定し、実効値の取得を `pg_settings` に、GUC 優先順位の記述を訂正し、`0` (無制限) と per-database role 設定を fail-fast (F-10 / F-11) にした。**(5)** ops コマンドを `set-platform-timeouts` に改名し射程を明記。**(6)** 廃止 env の検査対象を composition root に渡された env mapping に限定し、`deploy/env/*.example` を成果物に加えた。**(7)** F-6 の推奨を「`*_CONTROL_PLANE_STATUS` を直す」に反転。**(8)** 宣言表の値検査を Python 側に一本化し F-4b を追加。**(9)** 静的規則の規則文・命名規範・非空振り条件を確定 (§8 / §10 / D-3 (d))。**(10)** §3.11 に射程と残余を 4 項追加し、§12 に LQ4-14〜LQ4-19 を起票。**(11)** §4 / §5 / §7 の SI-02 参照を「invariant の禁止」ではなく**運用上の代償**の記述に書き改めた (Security Invariants を許可リストに使わない)。**U-1〜U-3 は引き続き未確定である。**
-- 位置づけ: **監督が確定した枠 (2026-09-05 裁定) の実施設計**である。§3 の D-1〜D-6 は監督裁定を受けた確定であり、**§5 に挙げる U-1〜U-3 のみが依頼者確定待ち**である。WP 分割は §11 に素案のみを置き、作業指示書は別途起こす。フェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) の構成・粒度・文体をそのまま踏襲する
+- 版数: **v1.2 (2026-09-05、依頼者裁定 U-1〜U-3 を反映、契約無変更で確定)**。v1.1 からの変更点: **(1)** §5 の U-1〜U-3 を**【依頼者裁定 2026-09-05】**で確定にした (両論は経緯として残す)。**(2) U-1 = 載せない (peer-local)** — 適用状態の可視化は両 peer の `ops upgrade-status` (provision DSN) のみ。**共通契約は 1.6.0 のまま無変更、conformance の vector / port も無変更**であり、§6 は 6.1 が本線、6.2 は**採用せず (記録)** となった (§6、D-5、D-6 の 4)。**(3) U-2 = 台帳表に runtime role の `SELECT` のみ付与** — §3.9 の権限表と D-3 (a) の DDL 骨子を確定し、**cell を開く時点の集合検査**を §3.7 と D-3 (f) に置き、§3.8 に **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を示す) を追加した。パッケージ定数と `migrations/` の同期義務は **§10 / D-3 (d) の三者一致静的検査**が担保する。**(4) U-3 = 起動時スナップショット** — D-1 (e) / D-2 (g) / §9.2 を確定にし、live 案の差し替え注記を削除した。**(5)** §8 の migration 番号を**本フェーズの割当**として確定した (r2db `0008` / `0009`、MitateDB `0007` / `0008`。L6-2 に従い本フェーズが先に出荷する)。**(6)** §12 の LQ4-1〜LQ4-3 を裁定の記録に改め、**LQ4-20** (U-1「載せる」案を将来再検討する場合の前提) を起票した。
+- 版数履歴: **v1.1 (2026-09-05、設計レビュー 2 本を反映)**。v1.0 (2026-09-05、初版) からの変更点: **(1)** D-3 に新項 (e) — 台帳表を作ると r2db の catalog / RLS 監視が恒久的に落ちるため、両 peer の backend の bookkeeping 除外集合と r2db の `_r2db_missing_rls` ビューを同じ WP で拡張する。**(2)** 台帳表の DDL に provision role への `GRANT SELECT` を足し、§3.9 の権限表と「書き込み経路」の記述を現物 (所有者 = developer role) に合わせた。**(3)** 「未適用」を**集合差**で定義し直し、`applied_level` 単一値を廃して applied / pending の集合表示にした (D-4 / D-5)。適用状態の可視化は既存の一覧コマンドを触らず新サブコマンド `ops upgrade-status` に分けた。**(4)** timeout の比較を**両辺 ms 整数の数値比較**に確定し、実効値の取得を `pg_settings` に、GUC 優先順位の記述を訂正し、`0` (無制限) と per-database role 設定を fail-fast (F-10 / F-11) にした。**(5)** ops コマンドを `set-platform-timeouts` に改名し射程を明記。**(6)** 廃止 env の検査対象を composition root に渡された env mapping に限定し、`deploy/env/*.example` を成果物に加えた。**(7)** F-6 の推奨を「`*_CONTROL_PLANE_STATUS` を直す」に反転。**(8)** 宣言表の値検査を Python 側に一本化し F-4b を追加。**(9)** 静的規則の規則文・命名規範・非空振り条件を確定 (§8 / §10 / D-3 (d))。**(10)** §3.11 に射程と残余を 4 項追加し、§12 に LQ4-14〜LQ4-19 を起票。**(11)** §4 / §5 / §7 の SI-02 参照を「invariant の禁止」ではなく**運用上の代償**の記述に書き改めた (Security Invariants を許可リストに使わない)。(v1.1 時点では U-1〜U-3 が未確定であった。)
+- 位置づけ: **監督が確定した枠 (2026-09-05 裁定) の実施設計**である。§3 の D-1〜D-6 は監督裁定を受けた確定であり、**§5 の U-1〜U-3 も依頼者裁定 (2026-09-05) で確定した** — 本設計に未確定事項は無い。WP 分割は §11 に素案のみを置き、作業指示書は別途起こす。フェーズ6 設計文書 (`docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md`) の構成・粒度・文体をそのまま踏襲する
 - テーマ: **「宣言 (または適用状態の判定根拠) を持つプロセスと、値が実際に効いているプロセスが別で、どちらも他方を検証できない」構造の解消**
 - 出所と範囲 (**依頼者裁定 2026-09-05**、`PHASE4_DURABLE_AUDIT_SINK_V1.md:1077` / `PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md:855`): 次の 3 件を **1 つの設計**として扱う。
   1. **Q4 案 B** — `visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合 (`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4、:1067-1077)
@@ -121,7 +122,7 @@ SELECT attname, attacl FROM pg_attribute
 
 → **一括適用コマンドは registry を列挙して `database_name` が NULL でない行だけを対象にできる** (MitateDB `0006` の `\if :{?database_name}` ガードと同じ判定)。
 
-**9. 契約側の現況。** `spec/data-service-api.v1.json` に `visibility_lag_ms` / `coalescing_window_ms` の直接記載は無い (`capabilities().audit_query` の値側、open key space)。`surfaces` の契約文 (:284) は「配備者が宣言する。両文書が同じ object を返す」であり**保管場所を規定しない** — したがって D-1/D-2 は契約を変えない。`ApplicationStateResult` と `ApplicationsResult.applications[]` はともに `additionalProperties: false` で `["application_id","enabled"]` のみを持つ (実測) — **U-1 で適用レベルを載せるなら契約変更が要る**。
+**9. 契約側の現況。** `spec/data-service-api.v1.json` に `visibility_lag_ms` / `coalescing_window_ms` の直接記載は無い (`capabilities().audit_query` の値側、open key space)。`surfaces` の契約文 (:284) は「配備者が宣言する。両文書が同じ object を返す」であり**保管場所を規定しない** — したがって D-1/D-2 は契約を変えない。`ApplicationStateResult` と `ApplicationsResult.applications[]` はともに `additionalProperties: false` で `["application_id","enabled"]` のみを持つ (実測) — **適用レベルを載せるなら契約変更が要る。U-1 の裁定により本フェーズは載せないので、契約は 1.6.0 のまま無変更である。**
 
 **10. conformance plug の実測 (D-1/D-2 の射程に効く)。**
 
@@ -139,7 +140,7 @@ SELECT attname, attacl FROM pg_attribute
 2. **契約 1.6.0 の義務を変えない** — 両文書が同じ `surfaces` を返すこと、`surfaces` は配備者の宣言であること、`visibility_lag_ms` は導出値であること。
 3. **新しい共通 Security Invariant を足さない。** 台帳表と宣言表は SI-12 に、一括適用は SI-02 に、既存のまま載る (§7)。
 4. **peer 間でコードを共有しない。** 同名ヘルパは同型性テストで固定する (要請者決定 2026-09-03)。両 peer は同じ安全成果を**同じ形で**満たす。
-5. **conformance の in-process plug は composition root を通らない** (§1.5 の 10)。本機構の検証は両 peer のテスト (実 PG) と HTTP plug が担い、共通 conformance は**契約フィールドを足す場合 (U-1) のみ**触る。
+5. **conformance の in-process plug は composition root を通らない** (§1.5 の 10)。本機構の検証は両 peer のテスト (実 PG) と HTTP plug が担う。**U-1 の裁定 (2026-09-05) により契約は無変更なので、`conformance-tests/` の vector と port は触らない** — 触るのは adapter の構成側だけである (§6.1)。
 6. **公開リポジトリ規律。** 実 credential・実 DSN・実ホスト名を文書にもテストにも置かない。`example.invalid` 等の偽ドメインと合成値のみを使う。
 7. **fail-fast のメッセージは次に打つ ops コマンド名まで示す** (利用者・運用者は AI エージェント前提。宣言で誘導するガードレール)。
 8. **常設規律 7 項目**を継承する (`docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md` §0.1): 空振り禁止 / 変異先行で完了条件 / 主張は実測の後 / 確定文言はファイル経由 / **静的規則は逐語プロトタイプ後** / 同型性テスト / 設計外の拡張は実装前に上げる。
@@ -153,10 +154,10 @@ SELECT attname, attacl FROM pg_attribute
 
 **決定**: `application_audit` と `control_audit` の各書き手 role の 2 つの timeout を **PostgreSQL の role 設定**に固定し、それを唯一の真実とする。書き手はセッションでの `SET` をやめ、control はその role 設定から `visibility_lag_ms` を導出する。
 
-**(a) platform 単発 migration** (r2db 見込み `0008` / MitateDB 見込み `0007`、§8) が role 設定を置く。既定値は**現行定数と同一 (5000ms / 5000ms)** であり、**出荷時に挙動は変わらない**。
+**(a) platform 単発 migration** (r2db `0008` / MitateDB `0007`、§8 で確定) が role 設定を置く。既定値は**現行定数と同一 (5000ms / 5000ms)** であり、**出荷時に挙動は変わらない**。
 
 ```sql
--- r2db-api: platform 単発 migration (見込み 0008)。R2DB_CONTROL_DSN (r2dbsvc_control) で実行する。
+-- r2db-api: platform 単発 migration 0008 (§8 で確定)。R2DB_CONTROL_DSN (r2dbsvc_control) で実行する。
 -- ALTER ROLE ... SET は上書き代入であり、再実行しても同じ終状態になる (冪等)。
 ALTER ROLE r2dbsvc_api          SET statement_timeout                     = '5000ms';
 ALTER ROLE r2dbsvc_api          SET idle_in_transaction_session_timeout   = '5000ms';
@@ -209,7 +210,7 @@ visibility_lag_ms = max( statement_timeout_ms(role) + idle_in_transaction_sessio
 
 変更手段は **ops サブコマンド (provision DSN で `ALTER ROLE` を発行) + 両プロセス再起動**の 1 経路だけになる。
 
-**(e) 読みは起動時スナップショットである** (U-3 の見立てに沿う既定。依頼者確定待ち)。role 設定は**新規接続から効く**ため、ops で変えたら両プロセス再起動が runbook の手順になる。これにより**プール済み接続の実効値と宣言が同じ時点を指す**。
+**(e) 読みは起動時スナップショットである** (**依頼者裁定 2026-09-05**、U-3)。role 設定は**新規接続から効く**ため、ops で変えたら両プロセス再起動が runbook の手順になる (順序は §9.2)。これにより**プール済み接続の実効値と宣言が同じ時点を指す**。
 
 **根拠**: `statement_timeout` / `idle_in_transaction_session_timeout` は **PostgreSQL 自身が意味を持つ設定**であり、role 設定は「実効値そのもの」である。control が読むのは catalog であって、新しい書き込み面を作らない (案 C との違い、§4)。
 
@@ -266,7 +267,7 @@ ON CONFLICT (key) DO NOTHING;
 
 **これは Phase 6 監督裁定 5 を上書きする** (記録として明示する)。現行実装は「`*_CONTROL_BASE_URL` が環境に残っていても `control_plane_status == 'unavailable'` なら**決して採用しない**」を明示の裁定として持つ (`MitateDB-api/src/mitatedb_api/config.py:146-158` のコメントが逐語で「a stale/leftover value from a previous configuration, say — it is never adopted」と書く。r2db `main.py` の `_surfaces` も同型のゲートを持つ)。宣言が env から**両プロセス共通の 1 行**へ移る以上、「黙って無視する」ではなく**行の存在自体を矛盾として拒否する**形に改める。単一の宣言表では、無視した側が兄弟プロセスの宣言と食い違ったまま動くことになるからである。
 
-**(g) 読みは起動時スナップショットである** (D-1 (e) と同じ。U-3)。
+**(g) 読みは起動時スナップショットである** (D-1 (e) と同じ。**依頼者裁定 2026-09-05**、U-3)。宣言表を変えたら**両プロセス再起動**が要る (§9.2)。
 
 ### D-3 per-application platform upgrade 台帳を各 application DB に置く
 
@@ -282,7 +283,10 @@ CREATE TABLE IF NOT EXISTS public._r2db_platform_upgrades (   -- MitateDB は pu
     script_name    text        NOT NULL,
     applied_at     timestamptz NOT NULL DEFAULT now()
 );
-REVOKE ALL    ON public._r2db_platform_upgrades FROM :"runtime_role";  -- U-2 が「SELECT のみ」なら直後に GRANT SELECT
+REVOKE ALL    ON public._r2db_platform_upgrades FROM :"runtime_role";
+-- 依頼者裁定 2026-09-05 (U-2): runtime role には SELECT のみを付与する。
+-- ALTER DEFAULT PRIVILEGES 由来の DML を REVOKE で打ち消したうえで読み取りだけを戻す。
+GRANT  SELECT ON public._r2db_platform_upgrades TO :"runtime_role";
 -- `SET LOCAL ROLE :"developer_role"` の内側なので CURRENT_USER は developer role、
 -- SESSION_USER は script を流している provision role である。
 GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
@@ -292,12 +296,12 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **台帳表に RLS は付けない** (**監督裁定 2026-09-05**)。`_r2db_schema_revision` と同型にして `FORCE ROW LEVEL SECURITY` を置くと、provision → `SET ROLE developer` での書き込みがポリシー無しで拒まれる (FORCE RLS は所有者にも適用される)。代わりに r2db の RLS 監視ビューの除外名を増やす ((e))。
 
-`REVOKE` が要る理由は `0006` が逐語で書いているとおりである — 既存 application では `ALTER DEFAULT PRIVILEGES FOR ROLE developer_role` が既に立っており、表を作った瞬間に runtime role へ DML が自動付与されてしまうため、**両 provisioning 経路が同一の終状態に着くように明示的に打ち消す**。**runtime / developer role の最終的な権限は U-2 (未確定) に従う。**
+`REVOKE` が要る理由は `0006` が逐語で書いているとおりである — 既存 application では `ALTER DEFAULT PRIVILEGES FOR ROLE developer_role` が既に立っており、表を作った瞬間に runtime role へ DML が自動付与されてしまうため、**両 provisioning 経路が同一の終状態に着くように明示的に打ち消す**。**打ち消したうえで runtime role へ `SELECT` を戻すのが U-2 の裁定 (2026-09-05) である** — 終状態は「runtime role は台帳を読めるが書けない」であり、developer role は所有者として既存 bookkeeping 表と同じ射程を持つ (§3.9)。
 
 **(b) 出し方は §2 制約 8 の「対」である。**
 
-- **(i) provisioning テンプレート `0003_provision_application.sql` を改訂する** — 新規 application は台帳付きで provision され、かつ**その時点で存在する per-app upgrade 番号をすべて「適用済み」として記録**した状態で生まれる (テンプレートは終状態を直接作るため)。MitateDB の seed は `{0006, <本フェーズの per-app 番号>}`、r2db は `{<本フェーズの per-app 番号>}` である (r2db には先行 per-app upgrade が無い)。
-- **(ii) 既存 application 用の per-app upgrade script** (r2db 見込み `0009` / MitateDB 見込み `0008`) が台帳を作り、**自番号を記録する**。**MitateDB はさらに `0006` の適用済みを backfill する** — 判定は `public._mdb_field_types` の存在 (`to_regclass('public._mdb_field_types') IS NOT NULL`)。r2db には backfill 対象が無い。**`_mdb_field_types` が無ければ 6 を記録しない** — これは D-4 (b) の集合差による「未適用」定義と組み合わさって正しく機能する: 台帳が `{8}` になった DB では 6 が**未適用として残り**、`ops upgrade-applications` が後から `0006` を当てる。v1.0 の「最大番号」定義ではこの穴が永久に検出されなかった。
+- **(i) provisioning テンプレート `0003_provision_application.sql` を改訂する** — 新規 application は台帳付きで provision され、かつ**その時点で存在する per-app upgrade 番号をすべて「適用済み」として記録**した状態で生まれる (テンプレートは終状態を直接作るため)。**MitateDB の seed は `{6, 8}`、r2db は `{9}`** である (§8 の割当。r2db には先行 per-app upgrade が無い)。
+- **(ii) 既存 application 用の per-app upgrade script** (r2db `0009` / MitateDB `0008`、§8 で確定) が台帳を作り、**自番号を記録する**。**MitateDB はさらに `0006` の適用済みを backfill する** — 判定は `public._mdb_field_types` の存在 (`to_regclass('public._mdb_field_types') IS NOT NULL`)。r2db には backfill 対象が無い。**`_mdb_field_types` が無ければ 6 を記録しない** — これは D-4 (b) の集合差による「未適用」定義と組み合わさって正しく機能する: 台帳が `{8}` になった DB では 6 が**未適用として残り**、`ops upgrade-applications` が後から `0006` を当てる。v1.0 の「最大番号」定義ではこの穴が永久に検出されなかった。
 
 **(c) 規律** (以後の per-app upgrade script が満たすもの):
 
@@ -314,8 +318,8 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 - **(b) 走査規則** — 各 script が `INSERT INTO public._{r2db,mdb}_platform_upgrades` を含む**1 つの文**の中に、**自番号の整数リテラル (ゼロ埋めを外したもの)** と **`ON CONFLICT`** の両方を含むこと。`VALUES ('0009', …)` のようなゼロ埋め文字列は**不適合**である。
 - **トランザクション内の位置は静的には検査しない。** 規律ではあるが (上の 1)、静的に見るのは脆い。代わりに**実 PG テスト「本体が失敗したとき台帳行が残らない」**で担保する。
-- **(d) 三者一致** — {`*_upgrade.sql` の番号集合} == {テンプレート `0003` の seed 集合} == {パッケージ定数の集合} を静的に照合する。per-app 番号は (1) script のファイル名、(2) テンプレートの seed リスト、(3) U-2 で `SELECT` を採る場合の「パッケージが知る番号」定数 (§12 LQ4-2) の 3 か所に散るため、同期漏れを機械的に閉じる。
-- **(c) 非空振り** — 本フェーズ出荷後の期待は **適合 ≥ 1** (r2db `0009` 見込み / MitateDB `0008` 見込み) **かつ 違反 0 かつ 免除 = {MitateDB `0006`}** である (常設規律 8)。**変異先行の完了条件**: 新 script から台帳 INSERT を落とすと違反 1 件が出ること。
+- **(d) 三者一致** — {`*_upgrade.sql` の番号集合} == {テンプレート `0003` の seed 集合} == {パッケージ定数の集合} を静的に照合する。per-app 番号は (1) script のファイル名、(2) テンプレートの seed リスト、(3) 「パッケージが知る番号」定数 (D-3 (f)、§12 LQ4-2) の 3 か所に散るため、同期漏れを機械的に閉じる。**(3) は U-2 の裁定 (runtime `SELECT` + cell open 時の集合検査) により無条件に存在する** — 三者一致は本フェーズの必須検査である。
+- **(c) 非空振り** — 本フェーズ出荷後の期待は **適合 ≥ 1** (r2db `0009` / MitateDB `0008`) **かつ 違反 0 かつ 免除 = {MitateDB `0006`}** である (常設規律 8)。**変異先行の完了条件**: 新 script から台帳 INSERT を落とすと違反 1 件が出ること。
 - **(e) 冪等性**は規律として明文化するが静的には検査しない (レビュー証拠として §10 に置く)。
 
 **常設規律 5 に従い、設計を実装に移す前に逐語スキャナのプロトタイプを両 peer に走らせ、出力を §10 に貼る。** 走査ヘルパは両 peer 同名にし、`_ISOMORPHIC_TARGETS` (両 peer の `tests/test_audit_query.py:2298` / MitateDB 同型) に行を足して同型性を固定する — D-1 (b)(ii) の ms 正規化ヘルパも同じ対象に加える。表の内容を pin するテストは行数を名前に持つため (`test_isomorphic_target_table_is_pinned_to_its_current_18_rows`、r2db `tests/test_audit_query.py:2335` / MitateDB `:2074`)、**その関数名も同時に改める**。
@@ -326,6 +330,15 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
   - **r2db**: `r2db-api/src/r2db_api/postgres.py:139` の `_REVISION_TABLE` (`_r2db_schema_revision`) が**唯一の除外名**であり、3 か所で除外に使われている — `_load_catalog` の表列挙 (`:861` の `t.table_name <> {revision_table}`)、同じく列の収集 (`:891`)、そして RLS 検査 `_rls_offenders` (`:1780`)。除外用の**名前の集合**を新設し (`_REVISION_TABLE` 自体は `:1861` / `:1869` の当該表への実アクセスで名前として使われ続けるため残す)、この 3 か所を集合に対する除外へ改める。**放置すると**: 台帳表は `id bigint GENERATED ALWAYS AS IDENTITY` も `_r2db_revision` も持たないので `offenders` に入り (`:915-925`)、`application_catalog` と catalog を読む**すべての schema operation** (`:1589` 近傍の `schema_objects` 会計は `_load_catalog` を呼ぶ) が恒久的に `SERVICE_UNAVAILABLE` (503) になる。**共通 conformance の catalog 系 vector も落ちる。** さらに `_rls_offenders` は `verify_row_level_security` (`:1783`) だけでなく `_create_entity` の直後検査 (`:1724`) からも呼ばれるので、除外しないと**すべての `create_entity` が 503 になる** (§8.5 condition 3(b) の inline 検査)。
   - **MitateDB**: `MitateDB-api/src/mitatedb_api/backend_postgres.py:384-391` の `schema_count()` が `table_name NOT IN (%s, %s)` で `_SCHEMA_REVISION_TABLE` (`:329`) と `_FIELD_TYPES_TABLE` (`:338`) の 2 件だけを除いている。**第 3 の名前を足す。** 足さないと全 application の `schema_objects` 会計が +1 ずれる (SI-08 の限度検査に効く)。catalog 本体は `_mdb_field_types` 由来なので entity 列挙には出ない (peer 非対称、§3.10)。
 - **(ii) r2db の RLS 監視ビュー `public._r2db_missing_rls` の除外名に台帳名を加える。** ビューは `r2db-api/migrations/0003_provision_application.sql:234-241` で `_r2db_schema_revision` **1 件だけ**を名指しで除外し、RLS が enable / force でない `public` の表を列挙する「live view, not a point-in-time claim」(§8.5 condition 3(b) の運用証拠)。台帳表に RLS を付けない ((a)) 以上、除外しないと**全 application で 1 行が恒久的に残る** — `r2db-api/tests/test_postgres.py:519-520` の clean-state assert が落ち、runbook の運用証拠が恒常的な偽陽性を出し続ける。**既存 application のビューは `0003` 適用時点の定義で固まっている**ので、**テンプレート `0003` の改訂と per-app upgrade script の両方**で `CREATE OR REPLACE VIEW` が要る (§2 制約 1 の「対」の規律がビューにも及ぶ)。**MitateDB に同型のビューは無い** (実測) — §3.10 に非対称として記録する。
+
+**(f) data-plane は cell を開く時点で台帳を検査する** (**依頼者裁定 2026-09-05**、U-2)。
+
+- **比較は D-4 (b) と同じ集合差である** — 未適用 = {パッケージ定数が持つ per-app 番号の集合} − {台帳に行が存在する番号の集合}。**台帳表が無い application DB は `applied = {}`** として扱い、全 per-app 番号が未適用になる。
+- **未適用が空でなければ、その cell を開く時点で `SERVICE_UNAVAILABLE` を返す** — 最初のリクエストが storage の深部で失敗するのを待たない (現状は `StorageConfigurationError` → `SERVICE_UNAVAILABLE` として最初のリクエストで判明する、§1.4)。メッセージは**未適用の番号**と**次に打つコマンド `ops upgrade-applications`** を示す (§3.8 の **F-12**、制約 7)。
+- **検査を起動時ではなく cell open 時に置く理由**: 台帳は **application DB の中**にあり、data-plane プロセスは cell を開くまでその DB へ接続しない。起動時に全 application を走査すると、data-plane に registry の列挙と全 application DB への到達を新たに要求することになる (§4 で退けた「到達範囲を広げる」形と同じ代償である)。
+- **読み取りは runtime role の `SELECT` 1 本**である ((a) の `GRANT SELECT` はこの目的で置く)。読み取りは迂回経路にならない (SI-12 が禁じるのは runtime が**特権を行使する**経路である、§7)。
+- **パッケージ定数の置き場は WP が決める**が、**その集合が `migrations/` の per-app script 番号および `0003` の seed リストと一致することは D-3 (d) 規則 (d) の三者一致静的検査が無条件に担保する** (§10、§9.4 の 5、§12 LQ4-2) — これが U-2 の裁定が名指しした「代償の固定」である。
+- **台帳にパッケージが知らない番号がある配備は止めない** — 集合差の向きは D-4 (b) と同じ「パッケージが要求する番号がすべて記録されているか」だからである。
 
 ### D-4 ops 一括適用コマンド
 
@@ -374,11 +387,11 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 通常経路 (台帳が無い DB に全 per-app script を番号順に当てる) ではこの穴に落ちない。台帳が無い既存 MitateDB DB では `0006` が再実行され得るが、その時点では台帳表がまだ無いので混入は起きず、台帳 init script (`(b)(ii)`) の backfill と同じ終状態に収束する。
 
-### D-5 適用状態の可視化 (peer-local 分)
+### D-5 適用状態の可視化 (peer-local。**U-1 の裁定によりこれが唯一の可視化経路である**)
 
 **決定**: **既存の application 一覧コマンドは変更しない** (r2db `list-apps` / `cmd_list_apps` (`ops.py:737-750`)、MitateDB `list-applications` / `cmd_list_applications` (`ops.py:382-387`、CLI 登録は `:805-806`))。代わりに**両 peer に新サブコマンド `ops upgrade-status [--application <id>]` を新設する**。
 
-理由は**既存 2 コマンドの非対称**にある (§1.5 の 7)。r2db の `list-apps` は provision DSN で registry を SQL 直読みするが、**MitateDB の `list-applications` は control credential で `ControlPlaneService.list_applications` を呼び、契約 shape の `ApplicationsResult` をそのまま出す**。ここに列を足すと、(i) service の返り値にキーを足す = `additionalProperties: false` の**契約変更**になる (U-1 を「載せない」とした場合と矛盾する)、または (ii) このコマンドに provision DSN を新たに要求することになり、「control credential だけで application 一覧を見る」という現在の資格要件が変わる。**どちらも避ける。**
+理由は**既存 2 コマンドの非対称**にある (§1.5 の 7)。r2db の `list-apps` は provision DSN で registry を SQL 直読みするが、**MitateDB の `list-applications` は control credential で `ControlPlaneService.list_applications` を呼び、契約 shape の `ApplicationsResult` をそのまま出す**。ここに列を足すと、(i) service の返り値にキーを足す = `additionalProperties: false` の**契約変更**になる (U-1 の裁定「載せない」と矛盾する)、または (ii) このコマンドに provision DSN を新たに要求することになり、「control credential だけで application 一覧を見る」という現在の資格要件が変わる。**どちらも避ける。**
 
 **`ops upgrade-status`**:
 
@@ -389,7 +402,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **MitateDB の `list-applications` は契約 shape のまま**である (§3.10 に非対称として記録)。
 
-**契約への露出は U-1、起動 / readiness 時の検出は U-2 — いずれも未確定である。**
+**契約への露出は行わない** (U-1 の裁定: peer-local に留める。共通契約は 1.6.0 のまま無変更)。**cell を開く時点の検出は行う** (U-2 の裁定。D-3 (f)、§3.7、§3.8 の F-12) — 適用漏れは `ops upgrade-status` で見えるだけでなく、当該 application の cell を開く時点で `SERVICE_UNAVAILABLE` として現れる。
 
 ### D-6 文書と対応表
 
@@ -397,7 +410,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 1. **`security/CONTROL_MAPPING.md`**
    - **SI-02 行** — `ops upgrade-applications` が provision DSN のみで動き、API プロセスがその資格を持たないこと。
-   - **SI-12 行** — 台帳表と宣言表の権限 (runtime role の扱いは U-2 の裁定に従う。宣言表は application role が接続しない platform DB にある)。
+   - **SI-12 行** — 台帳表と宣言表の権限 (**台帳表の runtime role は `SELECT` のみ**、依頼者裁定 U-2。宣言表は application role が接続しない platform DB にある)。**cell open 時の集合検査 (D-3 (f)) と F-12 も併せて記す** — runtime 資格から見えるのは自 application の台帳の読み取り 1 本だけであり、特権を行使する経路は増えない。
    - **SI-14 行の点 (12)** — 逐語 "nothing enforces it" を改める。**置換文言は限定付きである**: 「**同一の platform データベースを前提に**、宣言の根拠と実効値の根拠が**同一の catalog** になった。両プロセスは同じ一次情報から導出し、各プロセスは自身の実効値との一致を起動時に検査する」。**両プロセスが同じ platform DB を指していること自体は本設計が検証しない** (§3.11 の 7) ので、この限定を落とすと過大主張になる。**この点は本フェーズの成果そのものであり、更新を落とすと文書が現物と逆になる。**
 2. **runbook と配備設定の例** — `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`、`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md`、`MitateDB-api/docs/cloud-run-cloud-sql.md`、DEPLOY 系作業指示書に、**「ops declare → 両プロセス再起動」「ops upgrade-applications」「ops upgrade-status」の手順**と**廃止 env の一覧**を置く (§9)。
 
@@ -411,7 +424,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
    → **MitateDB 側は上記 runbook 1 本の改訂で覆われ、新たに触る example ファイルは無い。** r2db 側は runbook 2 本に加えて `deploy/env/*.example` 2 本を改訂する (廃止 4 変数の削除と、代わりに打つ ops コマンドの案内)。
 3. **正本 2 文書への日付付き注記** (本文は書き換えない、既存規律) — `PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4、`PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 L6-5a と L6-20 (f) に閉止注記を置く。
-4. **契約バージョン** — **U-1 で契約に載せる場合のみ 1.7.0 (additive)**。載せない場合は**契約無変更**であり、その旨を §6 に明記する。
+4. **契約バージョン** — **契約無変更 (1.6.0 のまま)** である (**依頼者裁定 2026-09-05**、U-1)。`spec/data-service-api.v1.json` も `conformance-tests/` の vector / port も触らない (§6.1)。**本フェーズは契約公開コミットも版束縛の追記も伴わない。**
 
 ### 3.7 起動シーケンス
 
@@ -426,6 +439,13 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 7. audit sink を構築する。**セッション `SET` はしない** (D-1 (b))。
 8. `DataService` / `AuditRouter` へ窓を渡し、capability document へ `surfaces` を注入する。
 
+**1〜8 はすべて起動時であり、読みは起動時スナップショットである** (D-1 (e) / D-2 (g)、依頼者裁定 U-3)。
+
+**data-plane プロセスの cell open 時** (application ごと。起動シーケンスの後、当該 application の cell を初めて開くとき)
+
+9. **台帳 `public._<peer>_platform_upgrades` の番号集合を読む** (runtime role の `SELECT`、D-3 (a))。**台帳表が無ければ `applied = {}` として扱う。**
+10. **未適用 = {パッケージ定数の番号集合} − {台帳の番号集合}** を求め、**空でなければその cell を提供せず `SERVICE_UNAVAILABLE` を返す** (**F-12**。メッセージは未適用の番号と `ops upgrade-applications` を示す)。D-3 (f)、依頼者裁定 U-2。
+
 **control-plane プロセス** (`r2db_api.control_main` / `mitatedb_api.control_composition`)
 
 1〜5 は同じ (control プロセスは自らの control surface を必ず持つので、`surfaces.control` は**無条件必須**)。
@@ -435,9 +455,11 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ### 3.8 fail-fast メッセージ一覧
 
-すべて起動時に、**env 名 / migration 番号 / 次に打つ ops コマンド名**を含めて出す (制約 7)。`<peer>` は `r2db_api` / `mitatedb_api`、`<NNNN>` は §8 で確定する番号に置き換える。
+**env 名 / migration 番号 / 次に打つ ops コマンド名**を含めて出す (制約 7)。`<peer>` は `r2db_api` / `mitatedb_api`、`<NNNN>` は §8 が確定した番号 (r2db `0008` / `0009`、MitateDB `0007` / `0008`) に置き換える。
 
-**これらはプロセス起動時の出力であり、API 応答や公開 endpoint には現れない** (SI-10)。F-5 / F-9 のように宣言値そのものをメッセージに含めるものがあるため、readiness / health endpoint へ転記しないことを規律として明記する。
+**F-1〜F-11 はプロセス起動時の出力であり、API 応答や公開 endpoint には現れない** (SI-10)。F-5 / F-9 のように宣言値そのものをメッセージに含めるものがあるため、readiness / health endpoint へ転記しないことを規律として明記する。
+
+**F-12 だけは起動時ではなく cell open 時であり、API 応答として利用者に届く** (依頼者裁定 2026-09-05、U-2)。**F-12 のメッセージは未適用の番号と ops コマンド名を示す** (裁定文のとおり)。API 応答に現れる以上、**DSN・資格情報・内部ホスト名・宣言値は置かない** (SI-10)。
 
 | # | 条件 | 出す側 | メッセージ骨子 |
 |---|---|---|---|
@@ -453,6 +475,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | F-9 | 実効値が `pg_db_role_setting` の値と食い違う (D-1 (b)(ii)) | 両 | `role 'r2dbsvc_api' declares statement_timeout = 5000 ms in pg_db_role_setting but this connection's effective value is 30000 ms (both shown in milliseconds; PostgreSQL renders these settings in whichever unit divides evenly, so never compare the rendered strings): the declared visibility_lag_ms would not describe the effective connection. Remove the override -- a connection-string 'options=-c …', PGOPTIONS, or an 'ALTER ROLE … IN DATABASE … SET' row -- so the role setting is the effective value, or change the role setting with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>', then restart both processes. Note this setting also bounds every other connection made by this role.` |
 | **F-10** | 書き手 role の設定はあるが **ms 値が 0 または負数** | 両 | `role 'r2dbsvc_api' declares statement_timeout = 0 in pg_db_role_setting, which PostgreSQL reads as "no limit": an audit writer must never run unbounded, and the declared visibility_lag_ms would describe a bound that does not exist. Set a positive value with 'python -m <peer>.ops set-platform-timeouts --statement-ms <N> --idle-ms <N>' (the command rejects 0 and negative values), then restart both processes.` |
 | **F-11** | 書き手 role に **per-database の role 設定行が存在する** (`pg_db_role_setting.setdatabase ≠ 0`) | 両 | `role 'r2dbsvc_api' has an 'ALTER ROLE … IN DATABASE …' setting row for database '<db>', which takes precedence over the database-independent role setting this deployment declares. The role setting must be a single database-independent row. Remove it with 'ALTER ROLE r2dbsvc_api IN DATABASE <db> RESET statement_timeout, idle_in_transaction_session_timeout;' (issued on the provision DSN), then restart both processes.` |
+| **F-12** | **cell open 時**: 台帳の番号集合に対して**未適用の per-app upgrade がある** (台帳表が無い場合を含む) | data-plane (**起動時ではなく cell open 時。API 応答に現れる唯一の項目**) | `This application's storage is missing platform upgrade(s) <未適用の番号…>: the deployment must apply them before this application can serve requests. Run 'python -m <peer>.ops upgrade-applications' (its '--dry-run' shows applied and pending per application), then retry.` — HTTP 503 / `SERVICE_UNAVAILABLE` (D-3 (f)、§3.7 の 9〜10) |
+
+**F-12 についての注記** (**依頼者裁定 2026-09-05**、U-2): 現状の検出は**最初のリクエスト**が storage の深部で `StorageConfigurationError` になる形であり (§1.4)、原因も次に打つ手も応答から読み取れない。F-12 は同じ `SERVICE_UNAVAILABLE` を**適用漏れという原因と `ops upgrade-applications` という手当て付き**で、cell を開く時点に前倒しする。**止めるときは必ず次に打つコマンドを示す** (決定軸、制約 7)。
 
 **F-6 の推奨の向きについての注記**: **既定の推奨は「`*_CONTROL_PLANE_STATUS` を直す」である** (**監督裁定 2026-09-05**)。宣言表の `surfaces` 行は**両プロセス共通の 1 行**なので、`--no-control` で再宣言すると control 行が消え、**次に再起動した control プロセスが F-3 で起動不能になる** (§3.7 control 1〜5 は `surfaces.control` を無条件必須とする)。運用者は AI エージェント前提であり提示されたコマンドを素直に打つので、破壊的でない側を既定に置く。
 
@@ -463,7 +488,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | 表 | 位置 | 所有者 | provision role | data-plane platform role | control-plane role | runtime role | developer role |
 |---|---|---|---|---|---|---|---|
 | `<registry>.platform_declarations` (D-2) | platform DB / registry スキーマ | provision role | 全権 (owner) | `SELECT` | `SELECT` | 接続しない | 接続しない |
-| `public._<peer>_platform_upgrades` (D-3) | 各 application DB / `public` | **developer role** (§1.5 の 5 の儀式により構造的にこうなる) | **`GRANT SELECT`** (D-3 (a))。書きは儀式で developer role を一時 assume して行う | 接続しない | 接続しない | **U-2** | **所有者** (既存 bookkeeping 表と同じ射程) |
+| `public._<peer>_platform_upgrades` (D-3) | 各 application DB / `public` | **developer role** (§1.5 の 5 の儀式により構造的にこうなる) | **`GRANT SELECT`** (D-3 (a))。書きは儀式で developer role を一時 assume して行う | 接続しない | 接続しない | **`SELECT` のみ** (**依頼者裁定 2026-09-05**、U-2。cell open 時の集合検査のため。D-3 (f)) | **所有者** (既存 bookkeeping 表と同じ射程) |
 
 **台帳表の書き込み経路について** (v1.0 の記述を現物に合わせて訂正する)。
 
@@ -472,7 +497,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **application API から到達する経路は無い** — 両 peer とも `_` で始まる識別子を構造的に拒否する (r2db は `structured.py:59` の `_reject_reserved_prefix` が `IDENTIFIER_INVALID` を返し、MitateDB は `identifiers.py:19` の `_IDENTIFIER = ^[a-z][a-z0-9_]{0,62}$` が `[a-z]` 始まりを要求する)。
 - したがって **台帳は運用の一次記録であって、改竄不能な証拠ではない。** 脅威モデルが明示的に想定する「application-facing implementation defect が 1 つ起こる」(`security/SECURITY_INVARIANTS_V1.md:58`) の下では、台帳行は当該 application の DB 内で改竄され得る — 射程は既存 bookkeeping 表と同一である。
 
-**U-2 が選ぶのは runtime role の権限だけ**である。developer role については既存 bookkeeping 表と同じ射程 (所有者) を追認する。
+**runtime role の権限は `SELECT` のみである** (**依頼者裁定 2026-09-05**、U-2)。**書き込みは付与しない**ので、上の「運用上の書き込み経路は provision DSN に閉じる」は runtime 側からも構造的に保たれる。developer role については既存 bookkeeping 表と同じ射程 (所有者) を追認する。
 
 ### 3.10 両 peer の対応表
 
@@ -541,42 +566,76 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ---
 
-## 5. 未確定 (依頼者判断。両論のまま残す)
+## 5. 依頼者裁定 (U-1〜U-3、2026-09-05 に確定)
+
+**本節の 3 件は依頼者裁定で確定した。裁定文は逐語で置き、両論は経緯として残す。**
 
 ### U-1 per-application の適用レベルを契約に載せるか、peer-local に留めるか
+
+**【依頼者裁定 2026-09-05】**
+
+> per-application の upgrade 適用状態は **peer-local に留める**。共通契約は無変更 (1.6.0 のまま)。可視化は両 peer の `ops upgrade-status` (provision DSN) のみ。§6.2 (契約に載せる場合) は「採用せず」として記録に残す。
+
+**帰結**: §6 は **6.1 が本線**であり、6.2 は**採用せず (記録)** である。`conformance-tests/` の vector と port は**無変更**、`spec/data-service-api.v1.json` も**無変更**である (D-6 の 4)。適用状態の可視化は D-5 の `ops upgrade-status` のみが担う。**WP-E は着手しない** (§11)。将来再検討する場合の前提は §12 LQ4-20 に記録する。
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 - **載せる**: `ApplicationStateResult` / `ApplicationsResult.applications[]` の行に additive フィールドを足す (**契約 1.7.0**)。骨子は `platform_upgrade: {applied: [<integer>…], pending: [<integer>…]}` である (D-4 (b) の集合意味に揃える。v1.0 の `applied_level: <integer>` / `pending: <boolean>` は最大番号方式の名残なので廃する)。
   - **利点**: control 資格を持つ AI エージェント運用者が **API だけで適用漏れを見られる**。ただし **非破壊的に読める経路は `list_applications` だけ**である — 契約の application 系 endpoint は `register_application` / `list_applications` / `disable_application` / `enable_application` の 4 つであり (`spec/data-service-api.v1.json:110-113` 実測)、**`get_application` は存在しない**。`ApplicationStateResult` を返す 3 つはいずれも状態を変える操作である。
   - **代償 (1) 経路**: **control-plane プロセスが application DB の台帳を読む経路が要る**。現状 control は application DB に接続しない — **全 application DB への到達性を control プロセスに与えると単一侵害の影響範囲が広がる**か (§4 の却下理由と同じ運用上の代償。invariant が禁じているわけではない)、data-plane 側が platform DB へ状態を複製する**二次情報**が要る (単一真実という本設計の趣旨と衝突する)。**この代償は重い。**
   - **代償 (2) 公開範囲**: **`list_applications` は control 資格だけでなく audit 資格でも読める** (`spec:111`、`:125` が逐語で「An audit credential is accepted only on the read-only control_capabilities, list_applications, list_credentials, …」)。したがって載せると、**各 application の platform 適用状態が audit 資格にも公開される**。意図した公開であれば問題ないが、**決めずに載せると公開範囲が既定で広がる** (SI-07)。
-  - **契約英文の骨子 (最終文言は依頼者確定待ち)** — 1.3.0 の `target_id` / `must_rotate` と同じ「OPTIONAL、省略も適合」の形に寄せる:
+  - **契約英文の骨子 (採用せず。将来再検討する場合の記録として残す)** — 1.3.0 の `target_id` / `must_rotate` と同じ「OPTIONAL、省略も適合」の形に寄せる:
     > `platform_upgrade` is an OPTIONAL per-application operational field. An implementation that does not track this state omits the key entirely, and omitting it is conformant. When present, it reports the deployment's own record of which platform upgrades have been applied to that application's storage: `applied` lists the upgrade numbers the implementation has recorded for this application, and `pending` lists the upgrade numbers the implementation ships that this application has not recorded. It is not a capability declaration — `capabilities()` remains the only place capability status is declared — and a client MUST NOT condition contract behavior on it.
 - **載せない (peer-local)**: `ops upgrade-status` の出力だけ (D-5)。
   - **利点**: 機構が provision DSN の中に閉じ、**契約は無変更**である。
   - **代償**: API からは見えない。
-- **監督の見立て (見立てであり決定ではない)**: **載せない方が本設計の原則 (単一真実、control-plane の到達範囲を広げない) と整合する。** 載せるなら二次情報の是非と audit 資格への公開範囲を別途決める必要がある。
+- **監督の見立て (見立てであり決定ではない)**: **載せない方が本設計の原則 (単一真実、control-plane の到達範囲を広げない) と整合する。** 載せるなら二次情報の是非と audit 資格への公開範囲を別途決める必要がある。**→ 依頼者裁定は「載せない」であった。**
 
 ### U-2 台帳表に対する runtime / developer role の権限
+
+**【依頼者裁定 2026-09-05】**
+
+> 台帳表に対する runtime role の権限は **SELECT のみ付与**。data-plane は cell を開く時点で台帳の番号集合をパッケージ定数 (最新 per-app 番号集合) と比べ、未適用があれば最初のリクエストを待たずに `ops upgrade-applications` を示す明示メッセージで SERVICE_UNAVAILABLE を返す。代償 (パッケージ定数と migrations/ の同期義務) は §10 の三者一致静的検査で固定する。
+
+**帰結**: D-3 (a) の DDL 骨子は `REVOKE ALL` の直後に **`GRANT SELECT … TO :"runtime_role"`** を置く (確定)。§3.9 の権限表の runtime role 列は **`SELECT`** である。cell を開く時点の集合検査は **D-3 (f)** と **§3.7** に置き、その応答は **§3.8 の F-12** である。パッケージ定数と `migrations/` の同期は **D-3 (d) 規則 (d) の三者一致静的検査**が無条件に担保する (§10、§9.4 の 5)。developer role については既存 bookkeeping 表と同じ射程 (所有者) を追認する。
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 **前提 (監督裁定 2026-09-05 で確定した所有と書き込み経路)**: 台帳表の**所有者は developer role** であり (§1.5 の 5 の儀式により構造的にそうなる)、**書き込み経路は provision DSN に閉じる** (§3.9)。所有者が developer role である以上、**developer 資格は自 DB の台帳を書ける** — これは application isolation の**内側に閉じる**性質であり、`_mdb_schema_revision` / `_r2db_schema_revision` と**同じ射程**である (どちらも当該 application の DB の中だけで完結し、他 application にも platform DB にも届かない)。したがって U-2 が選ぶのは **runtime role の権限**であり、developer role については既存 bookkeeping 表と同じ射程を追認する。
 
 - **無権限** (`_mdb_schema_revision` / `_mdb_field_types` と同型): 厳格。data-plane は適用漏れを**最初のリクエスト**の `StorageConfigurationError` → `SERVICE_UNAVAILABLE` で検出する (現状どおり)。
 - **`SELECT` のみ付与**: data-plane が cell を開くときに台帳の番号集合を**パッケージが知る per-app 番号の集合**と比べ、差があれば最初のリクエストを待たずに**明示メッセージ** (`ops upgrade-applications` を示す) 付きで `SERVICE_UNAVAILABLE` にできる。読み取り 1 本は迂回経路にならない (SI-12 が禁じるのは runtime が**特権を行使する経路**である)。
   - **この側の代償**: **パッケージ定数 (per-app 番号の集合) と `migrations/` の同期義務が data-plane 側にも生じる**。定数の置き場と、番号を増やし忘れたときの挙動を WP が決める必要があり、静的規則の三者一致検査 (D-3 (d)) がその同期を担保する対象に加わる (§12 LQ4-2)。
-- **監督の見立て (見立てであり決定ではない)**: **`SELECT` のみ付与が「宣言で誘導する」原則に合う。** ただし `_r2db_schema_revision` の runtime `UPDATE` 付与 (既存、`0003:216`) との整合は本設計の対象外である。
+- **監督の見立て (見立てであり決定ではない)**: **`SELECT` のみ付与が「宣言で誘導する」原則に合う。** ただし `_r2db_schema_revision` の runtime `UPDATE` 付与 (既存、`0003:216`) との整合は本設計の対象外である。**→ 依頼者裁定は「`SELECT` のみ付与」であった。**
 
 ### U-3 宣言 (D-1 / D-2) の読みをスナップショットにするか live にするか
+
+**【依頼者裁定 2026-09-05】**
+
+> 宣言 (timeout catalog と宣言表) の読み出しは **起動時スナップショット**。ops で変えたら両プロセス再起動 (縮めるときは data-plane 先、伸ばすときは control 先)。
+
+**帰結**: D-1 (e) / D-2 (g) は**起動時スナップショットで確定**であり、live 案を採る場合の差し替え注記は削除した。§9.2 の「宣言 → 両プロセス再起動」の 1 組と再起動順序 (**timeout を縮めるときは data-plane 先、伸ばすときは control 先**) が定常運用の手順として確定する。
+
+**経緯 (両論。裁定前の記述をそのまま残す)**
 
 - **起動時スナップショット**: 単純。ops で変えたら**両プロセス再起動**が要る (runbook)。プール済み接続の実効値と宣言が**同じ時点**を指す。
 - **live 読み**: capability document の要求ごとに 1 `SELECT` (+ catalog 1 本)。再起動は要らないが、**書き手のプール済み接続は古い timeout のまま動く**ので宣言が先行し得る (ドリフトが逆向きに再発する)。
 - **どちらを採っても残るもの**: **片側だけ再起動した窓の過渡的なずれ** (§3.11 の 10)、および **pool が後から張った接続は起動時検査を通らない**こと (§3.11 の 9)。両論の比較はこの残余を差し引いたうえで行う。
-- **監督の見立て (見立てであり決定ではない)**: **スナップショット。** §3 の記述はこの見立てに沿って書いてあり、live を採る場合は D-1 (e) / D-2 (g) と §9 の再起動手順を差し替える。
+- **監督の見立て (見立てであり決定ではない)**: **スナップショット。** §3 の記述はこの見立てに沿って書いてある。**→ 依頼者裁定は「起動時スナップショット」であった** (§3 の記述がそのまま確定になる)。
+
+**帰結 (監督、2026-09-05)**
+
+> 契約に触らないので設計レビューは 2 本で完了。作業指示書へ進む。migration 番号は本フェーズ内で r2db 0008 (platform 単発) / 0009 (per-app 台帳 init)、MitateDB 0007 (platform 単発) / 0008 (per-app 台帳 init) を割り当てる (L6-2: 本フェーズが先に出荷する。以後の予約ではなく本フェーズの割当)。
+
+→ migration 番号は §8 に**本フェーズの割当**として確定で置いた。
 
 ---
 
 ## 6. conformance への影響
 
-### 6.1 契約無変更の場合 (U-1 で「載せない」を採る場合)
+**依頼者裁定 2026-09-05 (U-1) により、本フェーズは 6.1 が本線である。共通契約 (`spec/data-service-api.v1.json`) は 1.6.0 のまま無変更、`conformance-tests/` の vector と port も無変更である。6.2 は採用せず、記録として残す。**
+
+### 6.1 契約無変更の場合 (本線。U-1 の裁定 = 「載せない」)
 
 **前提**: **D-3 は application DB のスキーマを変える**ので、**両 peer の backend の bookkeeping 除外集合を更新して初めて** (D-3 (e)) vector が無変更で通る。除外を落とすと r2db の catalog 系 vector が 503 になり、MitateDB の `schema_objects` 会計が +1 ずれる。
 
@@ -589,7 +648,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **上記 adapter の改修は本フェーズの成果物である**。「conformance は契約無変更なら触らない」の**例外ではなく、adapter 構成側の必須作業**として WP の完了条件に載る (§11 WP-B)。**vector と port は変更しない。**
 - **CONDITIONS.md**: 新しい条件は増えない。C-19 の限界の記述 (「宣言が実在を保証しない」) は**そのまま残る** (§3.11 の 6)。
 
-### 6.2 U-1 で契約に載せる場合
+### 6.2 契約に載せる場合 (**採用せず。記録として残す**)
+
+**本項は U-1 の裁定により採用しない。** 将来再検討する場合の前提は §12 LQ4-20 に記録する。以下は裁定前の検討をそのまま残したものである。
 
 - **契約 1.7.0 (additive)** となり、1.5.0 / 1.6.0 と同じ版束縛規律を採る — 契約公開は単独コミット、各 peer の flip は挙動出荷と同一コミット、`versioning.version_binding` に 1.7.0 の義務を逐条列挙、全体 vacuity guard を `xfail(strict=True)` で先置きして最後の flip と同一コミットで撤去する。
 - `ApplicationStateResult` と `ApplicationsResult.applications[]` はともに `additionalProperties: false` である (§1.5 の 9) ので、**キーを足す契約変更なしには 1 バイトも足せない**。
@@ -605,7 +666,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | 新要素 | 載る invariant | 根拠 |
 |---|---|---|
 | 書き手 role の timeout を role 設定に固定し、control が `pg_db_role_setting` を読む (D-1) | **SI-14** (Security-Relevant Auditability) | 監査証拠の**可視性についての宣言**が現物と一致することを機構で担保する。`CONTROL_MAPPING.md` SI-14 行の点 (12) の "nothing enforces it" が**解消される** (D-6)。invariant 本文 (`security/SECURITY_INVARIANTS_V1.md:355-378`) は「十分な証拠が残ること / 秘密を記録しないこと」を求めており、本設計はそのどちらも弱めない — 読むのは catalog であって秘密ではない |
-| platform 宣言表 (D-2)、per-application 台帳表 (D-3) | **SI-12** (No Data-Service Bypass、`:319-335`) | どちらも **application-facing API から到達できない**。宣言表は application role が接続しない platform DB にあり、台帳表は application DB 内にあり、**U-2 が選ぶのは runtime role の権限だけ**である — **developer role は表の所有者**であり (§1.5 の 5 の儀式の構造的帰結)、その射程は `_r2db_schema_revision` / `_mdb_field_types` と同一で、当該 application の DB の中に閉じる (§3.9)。SI-12 が禁じるのは「DB 資格情報 / 無制限の接続能力 / 特権的な private endpoint / 認可モデルを迂回できる鍵」を application API から得られることであり、**bookkeeping 行の読み取りはそのいずれでもない**。invariant 本文の "Operational administrators may have separately governed maintenance paths; those paths are outside the Application API and must not be derivable from Application credentials" (`:330-331`) が、provision DSN 経由の書き込み経路をそのまま覆う |
+| platform 宣言表 (D-2)、per-application 台帳表 (D-3) | **SI-12** (No Data-Service Bypass、`:319-335`) | どちらも **application-facing API から到達できない**。宣言表は application role が接続しない platform DB にあり、台帳表は application DB 内にあり、**runtime role が持つのは `SELECT` のみ** (依頼者裁定 2026-09-05、U-2。cell open 時の集合検査のため — 読み取り 1 本は特権の行使ではない) である — **developer role は表の所有者**であり (§1.5 の 5 の儀式の構造的帰結)、その射程は `_r2db_schema_revision` / `_mdb_field_types` と同一で、当該 application の DB の中に閉じる (§3.9)。SI-12 が禁じるのは「DB 資格情報 / 無制限の接続能力 / 特権的な private endpoint / 認可モデルを迂回できる鍵」を application API から得られることであり、**bookkeeping 行の読み取りはそのいずれでもない**。invariant 本文の "Operational administrators may have separately governed maintenance paths; those paths are outside the Application API and must not be derivable from Application credentials" (`:330-331`) が、provision DSN 経由の書き込み経路をそのまま覆う |
 | `ops upgrade-applications` による一括適用 (D-4) | **SI-02** (Control Plane Isolation、`:111-129`) | SI-02 が禁じるのは逐語で「Application-facing Runtime and Developer APIs MUST NOT provide a route to Control Plane data or administrative capability」であり、主語は application 資格・application API である。本コマンドは **provision DSN のみで動き、API プロセスはその資格を持たない**ので、その禁止に触れない。`CONTROL_MAPPING.md` SI-02 行が既に「provisioning とは application の database と 2 つの role を作ることであり、だからこそ API プロセスはこの資格情報を決して持たない」と記述しており、**本コマンドはその既存の境界の内側に増える 1 操作**である。application DB へ `\c` できるのは provision role だけなので、境界の形は変わらない |
 
 **「bookkeeping 表規律 (runtime role 無権限)」という語は invariant 本文には無い** (起草時に確認) — それは migration コメントに書かれた実装側の慣行 (`0003` の両 peer、`0006`) であり、**共通 invariant として昇格させる必要はない**。SI-12 の下位の実装選択として `CONTROL_MAPPING.md` に記述するのが正しい位置である (D-6)。
@@ -620,7 +681,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ## 8. migration 一覧と番号規則
 
-**規則 (L6-2、監督裁定 2026-09-04)**: **文書上の予約は番号の割当てではなく、先に出荷したフェーズが次の空き番号を取る。** 本節の番号はすべて**見込み**であり、**作業指示書が出荷順に確定する**。
+**規則 (L6-2、監督裁定 2026-09-04)**: **文書上の予約は番号の割当てではなく、先に出荷したフェーズが次の空き番号を取る。**
+
+**本フェーズの割当 (2026-09-05 確定)**: **r2db `0008` (platform 単発) / `0009` (per-app 台帳 init)、MitateDB `0007` (platform 単発) / `0008` (per-app 台帳 init)。** L6-2 の規則に従い、**本フェーズが先に出荷する**ことによる割当であり、以後のフェーズのための予約ではない。他フェーズが先に出荷する事態が生じた場合は、そのときの空き番号を本フェーズが取り直す。
 
 **現存 (実測)**
 
@@ -636,11 +699,13 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **本フェーズが出す migration (3 分類のうち 2 つに属する)**
 
-| 種別 | 内容 | r2db 見込み | MitateDB 見込み |
+| 種別 | 内容 | r2db (確定) | MitateDB (確定) |
 |---|---|---|---|
-| **platform 単発** | D-1 の `ALTER ROLE … SET` 4 文 + D-2 の宣言表 + 窓の seed 行 | `0008` | `0007` |
+| **platform 単発** | D-1 の `ALTER ROLE … SET` 4 文 + D-2 の宣言表 + 窓の seed 行 | **`0008`** | **`0007`** |
 | **provisioning テンプレート改訂** | D-3 (b)(i) — 新規 application に台帳を作り、現時点の全 per-app 番号を適用済みとして記録 | `0003` の改訂 (番号を取らない) | `0003` の改訂 (番号を取らない) |
-| **per-application upgrade script** | D-3 (b)(ii) — 既存 application に台帳を作り、自番号を記録 (MitateDB は `0006` を backfill) | `0009` | `0008` |
+| **per-application upgrade script** | D-3 (b)(ii) — 既存 application に台帳を作り、自番号を記録 (MitateDB は `0006` を backfill) | **`0009`** | **`0008`** |
+
+→ したがって **D-3 (b)(i) のテンプレート seed は r2db が `{9}`、MitateDB が `{6, 8}`** であり、**D-3 (f) のパッケージ定数も同じ集合**である (三者一致、D-3 (d) 規則 (d))。
 
 **platform 単発を 1 本にまとめる理由**: D-1 と D-2 は**同じ配備手順の同じ時点**で当たり、どちらも「両プロセス再起動」を要求する。2 本に割ると、片方だけ適用した中間状態 (宣言表はあるが role 設定が無い、等) が運用上あり得てしまう。
 
@@ -651,7 +716,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 静的規則 (D-3 (d)) は**命名で走査対象を決める**ので、命名を規範として置かないと規則が空振りにも誤検出にもなる (レビュー 2 の指摘)。
 
 1. **per-application upgrade script は `NNNN_<name>_upgrade.sql` と命名する。**
-2. **platform 単発 migration は `_upgrade.sql` で終わる名前を使わない。** 使うと走査対象に入り、「自番号の台帳 INSERT が無い」= 違反として即座に落ちる (本フェーズの platform 単発、r2db 見込み `0008` / MitateDB 見込み `0007` が該当し得た)。
+2. **platform 単発 migration は `_upgrade.sql` で終わる名前を使わない。** 使うと走査対象に入り、「自番号の台帳 INSERT が無い」= 違反として即座に落ちる (本フェーズの platform 単発、r2db `0008` / MitateDB `0007` が該当し得た)。
 3. **provisioning テンプレートは `0003_provision_application.sql` / `0004_deprovision_application.sql` に固定**であり、番号を取らない (既存)。
 
 命名を外した per-app script は静的規則をすり抜けるので、**D-3 (d) の検査項目に「per-app 分類の script がこの命名に一致すること」を含める**。
@@ -664,10 +729,10 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ### 9.1 本フェーズの適用 (既存配備)
 
-1. **platform 単発 migration を当てる** — `psql "$R2DB_CONTROL_DSN" -f r2db-api/migrations/<NNNN>_….sql` (MitateDB は `$MITATEDB_PROVISION_DSN`)。role 設定と宣言表ができ、窓の既定行が入る。
+1. **platform 単発 migration を当てる** — `psql "$R2DB_CONTROL_DSN" -f r2db-api/migrations/0008_….sql` (MitateDB は `$MITATEDB_PROVISION_DSN` で `0007_….sql`)。role 設定と宣言表ができ、窓の既定行が入る。
 2. **`surfaces` を宣言する** — `python -m <peer>.ops declare-surfaces --data-base-url https://data.example.invalid/v1 --control-base-url https://control.example.invalid/control/v1` (control surface を持たない配備は `--no-control`)。**この時点で ops が形式検査を行う** (D-2 (d))。
 3. **廃止 env を配備設定から外す** — `*_AUDIT_STATEMENT_TIMEOUT_MS` / `*_AUDIT_IDLE_TIMEOUT_MS` / `*_DATA_BASE_URL` / `*_CONTROL_BASE_URL` の 4 本。**残っていると次の起動が F-1 / F-2 で止まる。**
-4. **per-application upgrade を当てる** — `python -m <peer>.ops upgrade-applications` (まず `--dry-run` で確認する。未適用があれば `--dry-run` は 3 を返す)。**失敗した application があれば、出力に含まれる `REVOKE <developer_role> FROM <provision role>;` を発行して一時 membership を掃除する** (§3.11 の 8) — 失敗時は script の `REVOKE` に到達しないためである。
+4. **per-application upgrade を当てる** — `python -m <peer>.ops upgrade-applications` (まず `--dry-run` で確認する。未適用があれば `--dry-run` は 4 を返す — D-4 (e) の表)。**失敗した application があれば、出力に含まれる `REVOKE <developer_role> FROM <provision role>;` を発行して一時 membership を掃除する** (§3.11 の 8) — 失敗時は script の `REVOKE` に到達しないためである。**この手順を飛ばした application は、data-plane 再起動後に cell を開く時点で F-12 (`SERVICE_UNAVAILABLE`) になる** (D-3 (f)、依頼者裁定 U-2) — 応答が `ops upgrade-applications` を示すので、そこから復旧できる。
 5. **両プロセスを再起動する** (初回適用では値が変わらないので順序は問わない。**値を変える定常運用の順序は §9.2**)。
 6. **確認** — `python -m <peer>.ops show-declarations` と `python -m <peer>.ops upgrade-status`、および両 surface の `/capabilities` が同じ `surfaces` と `visibility_lag_ms` を返すこと (既存の配備後チェック手順、`DEPLOY_PHASE6_20260904.md:1184-1206` と同じ形)。**この突合は依然として必要である** — 両プロセスが同じ platform DB を指していること自体は本設計が検証しないからである (§3.11 の 7)。
 
@@ -676,9 +741,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **timeout を変える**: `ops set-platform-timeouts --statement-ms <N> --idle-ms <N>` → **両プロセス再起動**。**このコマンドは 2 つのサービス書き手 role (`*svc_api` / `*svc_controlplane`) に同じ 2 値を置く単一ノブである。射程はその role の全接続であり、監査書き込みに限られない — credential store 照会と control-plane registry 操作もこの timeout の下に入る** (§3.11 の 1)。**`0` と負数は拒否する** (`0` は PostgreSQL では無制限を意味する。F-10)。**role 別の指定は設けない** — 導出式が 2 role の max を取る以上、role ごとに別値を置く利点が無いからである。
 - **`surfaces` を変える**: `ops declare-surfaces …` → **両プロセス再起動**。**`surfaces` 行は両プロセス共通の 1 行である** — `--no-control` は control プロセスの起動条件も同時に消す (F-6 の注記)。
 - **窓を変える**: `ops declare-coalescing-window --ms <N>` → **両プロセス再起動**。
-- **いずれも「宣言 → 再起動」の 1 組**である。U-3 で live 読みを採る場合はこの再起動が不要になり、代わりに §3.11 の 2 とは別種の「宣言が先行し得る」性質が入る。
+- **いずれも「宣言 → 再起動」の 1 組**である (**依頼者裁定 2026-09-05**、U-3: 読みは起動時スナップショット)。
 
-**再起動の順序** (**監督裁定 2026-09-05**。timeout を変える場合):
+**再起動の順序** (**監督裁定 2026-09-05、依頼者裁定 2026-09-05 が追認**。timeout を変える場合):
 
 - **timeout を縮めるときは data-plane を先、control を後。**
 - **timeout を伸ばすときは control を先、data-plane を後。**
@@ -695,7 +760,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 2. script の本体を `\c` 後の 1 トランザクションに包む。**skip 経路 (`\q`) を持たない** (§1.5 の 7a)。
 3. **冪等にする** (再実行で終状態が変わらない)。
 4. **末尾で自番号を台帳へ `INSERT … ON CONFLICT DO NOTHING` する** (D-3 (c))。静的テストがこれを検査する — **自番号はゼロ埋めを外した整数リテラル**で書く。
-5. `0003` テンプレートの seed リストに自番号を足す (**対で出す**、制約 1)。U-2 で `SELECT` を採る場合はパッケージ定数にも足す。静的テストが三者一致を検査する (D-3 (d))。
+5. `0003` テンプレートの seed リストに自番号を足す (**対で出す**、制約 1)。**パッケージ定数 (D-3 (f)) にも足す** (依頼者裁定 U-2 により無条件)。静的テストが三者一致を検査する (D-3 (d))。**足し忘れると CI が落ちる** — 足し忘れたまま出荷すれば cell open 時の検査が新番号を要求しないので、規律ではなく検査で閉じる。
 6. 配備時に `ops upgrade-applications` を流し、`ops upgrade-status` で確認する。
 
 ---
@@ -705,9 +770,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 **常設規律 5** (静的規則は逐語プロトタイプの後に確定する) に従い、D-3 (d) のスキャナを両 peer に走らせる。
 
 - 走査対象: `r2db-api/migrations/NNNN_<name>_upgrade.sql`、`MitateDB-api/migrations/NNNN_<name>_upgrade.sql` (各 peer のテストが**自 peer の `migrations/` だけ**を走査する)
-- 検査: D-3 (d) の規則 (b) — `INSERT INTO public._{r2db,mdb}_platform_upgrades` を含む 1 文の中に、自番号の整数リテラル (ゼロ埋めを外したもの) と `ON CONFLICT` の両方があること。加えて規則 (d) の三者一致。
+- 検査: D-3 (d) の規則 (b) — `INSERT INTO public._{r2db,mdb}_platform_upgrades` を含む 1 文の中に、自番号の整数リテラル (ゼロ埋めを外したもの) と `ON CONFLICT` の両方があること。加えて**規則 (d) の三者一致** = {`*_upgrade.sql` の番号集合} == {テンプレート `0003` の seed 集合} == {**パッケージ定数の集合** (D-3 (f))}。**この三者一致が U-2 の裁定 (2026-09-05) が名指しした「代償を固定する検査」である** — パッケージ定数と `migrations/` の同期義務はここで機械的に閉じる。本フェーズ出荷後の期待値は **r2db = `{9}`、MitateDB = `{6, 8}`** (§8)。
 - 許可リスト: **番号の集合**。MitateDB = `{6}` (`0006_declared_field_types_upgrade.sql`、出荷済み、in-place で触らない)、r2db = 空
-- **期待 (本フェーズ出荷後)**: **適合 ≥ 1** (r2db `0009` 見込み / MitateDB `0008` 見込み) **かつ 違反 0 かつ 免除 = {MitateDB `0006`}**。**変異先行の完了条件**: 新 script から台帳 INSERT を落とすと違反 1 件が出ること。
+- **期待 (本フェーズ出荷後)**: **適合 ≥ 1** (r2db `0009` / MitateDB `0008`) **かつ 違反 0 かつ 免除 = {MitateDB `0006`}**。**変異先行の完了条件**: 新 script から台帳 INSERT を落とすと違反 1 件が出ること。
 
 **現時点 (規則確定前) のプロトタイプ出力** — 本フェーズの新 per-app script がまだ無いため、**検査が成立した script は 1 つも無い**:
 
@@ -728,20 +793,21 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 3. **F-9 の変異先行検証** — 上書きを注入して F-9 が出ること (§12 LQ4-5)。
 4. **本体失敗時に台帳行が残らないこと** — D-3 (d) がトランザクション内位置を静的に検査しない代わりの担保。
 5. **台帳表を作っても catalog / RLS 監視が壊れないこと** — D-3 (e) の変異先行テスト (台帳表がある DB で `application_catalog` が 200 を返し台帳表が entities に現れないこと、`_r2db_missing_rls` が空のままであること、`schema_objects` 会計がずれないこと)。
+6. **cell open 時の集合検査 (D-3 (f)) が効くこと** — 変異先行テスト: 台帳から 1 番号を削った application DB では cell を開く時点で **F-12** (`SERVICE_UNAVAILABLE`、メッセージが `ops upgrade-applications` を含む) になり、台帳が揃った DB では通常どおり通ること。**runtime role の `SELECT` だけで台帳を読めること**も併せて実測する (D-3 (a) の `GRANT SELECT`、依頼者裁定 U-2)。
 
 ---
 
 ## 11. WP 分割の素案 (作業指示書で確定する)
 
-**本節は素案であり、着手順・粒度・完了条件は作業指示書が確定する** (依頼者裁定 2026-09-05: 「着手順は Q4 フェーズの作業指示書で決める」)。U-1〜U-3 の裁定が出るまで確定できない部分がある (下表の「依存」列)。
+**本節は素案であり、着手順・粒度・完了条件は作業指示書が確定する** (依頼者裁定 2026-09-05: 「着手順は Q4 フェーズの作業指示書で決める」)。**U-1〜U-3 は 2026-09-05 に確定したので、下表の「依存」列の未確定依存は解消した。**
 
 | WP | 内容 | 依存 |
 |---|---|---|
 | **WP-A** | 両 peer の platform 単発 migration (D-1 の `ALTER ROLE` + D-2 の宣言表と seed) と、ops の宣言系サブコマンド (`set-platform-timeouts` / `declare-surfaces` / `declare-coalescing-window` / `show-declarations`)。値の検証関数 (D-2 (d)) と ms 正規化ヘルパ (D-1 (b)(ii)) を src に置く。**この時点ではまだプロセスは env を読む** (出荷順の安全のため) | — |
-| **WP-B** | 両 peer の composition root を宣言表 + `pg_db_role_setting` 読みへ切り替え、廃止 env の fail-fast (env mapping 対象) を入れ、セッション `SET` を撤去し、**D-1 (b) の二重検査 (存在 + 有効性 + per-database 行の不在 + 実効値の ms 一致。F-7 / F-9 / F-10 / F-11) を入れる**。**HTTP adapter の改修をこの WP の成果物に含める** — MitateDB は `control_env` から廃止 env を除き fixture に宣言表と role 設定を seed (α)、**r2db は `os.environ.setdefault` の撤去のみ (γ) で、宣言表の読み出しは peer-local 実 PG テストが担う** (§6.1)。**U-3 の裁定がここに効く** | U-3 |
-| **WP-C** | D-3 の台帳表 (テンプレート改訂 + per-app upgrade script) と静的規則テスト、D-4 の `ops upgrade-applications`、D-5 の `ops upgrade-status`。**完了条件に D-3 (e) を明記する** — **(i) 両 peer の backend の bookkeeping 除外集合に台帳名を加える** (r2db `postgres.py` の `:861` / `:891` / `:1780`、MitateDB `backend_postgres.py:384-391`)、**(ii) r2db の `public._r2db_missing_rls` の除外名に台帳名を加える** (テンプレート `0003` の改訂と per-app script の両方で `CREATE OR REPLACE VIEW`)。いずれも**変異先行テスト**を伴う (§10 の実 PG 確認項目 5)。**U-2 の裁定が権限行に効く** | U-2 |
+| **WP-B** | 両 peer の composition root を宣言表 + `pg_db_role_setting` 読みへ切り替え、廃止 env の fail-fast (env mapping 対象) を入れ、セッション `SET` を撤去し、**D-1 (b) の二重検査 (存在 + 有効性 + per-database 行の不在 + 実効値の ms 一致。F-7 / F-9 / F-10 / F-11) を入れる**。**HTTP adapter の改修をこの WP の成果物に含める** — MitateDB は `control_env` から廃止 env を除き fixture に宣言表と role 設定を seed (α)、**r2db は `os.environ.setdefault` の撤去のみ (γ) で、宣言表の読み出しは peer-local 実 PG テストが担う** (§6.1)。**U-3 の裁定 (起動時スナップショット) がここに効く** — 読みは起動時 1 回であり、live 読みの経路は作らない | (U-3 確定済み) |
+| **WP-C** | D-3 の台帳表 (テンプレート改訂 + per-app upgrade script) と静的規則テスト、D-4 の `ops upgrade-applications`、D-5 の `ops upgrade-status`。**完了条件に D-3 (e) を明記する** — **(i) 両 peer の backend の bookkeeping 除外集合に台帳名を加える** (r2db `postgres.py` の `:861` / `:891` / `:1780`、MitateDB `backend_postgres.py:384-391`)、**(ii) r2db の `public._r2db_missing_rls` の除外名に台帳名を加える** (テンプレート `0003` の改訂と per-app script の両方で `CREATE OR REPLACE VIEW`)。いずれも**変異先行テスト**を伴う (§10 の実 PG 確認項目 5)。**U-2 の裁定 (runtime `SELECT` + cell open 時の集合検査) がここに効く** — 台帳 DDL の `GRANT SELECT`、D-3 (f) の検査と F-12、パッケージ定数と三者一致静的検査 (D-3 (d) 規則 (d)) を完了条件に含める | (U-2 確定済み) |
 | **WP-D** | 文書 (D-6) — `CONTROL_MAPPING.md` の 3 行、runbook 3 本 + `r2db-api/deploy/env/*.example` 2 本、正本 2 文書への閉止注記、本設計の §10 / §12 / §13 の確定 | WP-A〜C |
-| **(WP-E)** | **U-1 で「載せる」を採る場合のみ** — 契約 1.7.0 の公開、control が適用レベルを得る経路の設計と実装、conformance vector | U-1 |
+| ~~**(WP-E)**~~ | **着手しない** — U-1 の裁定は「載せない (peer-local)」であり、契約 1.7.0 も control が適用レベルを得る経路も本フェーズでは作らない (§6.2 は採用せず、記録)。将来再検討する場合の前提は §12 LQ4-20 | — |
 
 **両 peer 同時性**: D-1 / D-2 / D-3 はいずれも「両 peer が同じ安全成果を同じ形で満たす」対象であり (制約 4)、**片 peer だけ出荷した中間状態を長く置かない**。WP 内での peer 分割は作業指示書の判断とする。
 
@@ -749,9 +815,9 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ## 12. 台帳 (本フェーズの起票項目)
 
-- **LQ4-1 U-1 (適用レベルの契約露出) は未確定**である。§5 U-1。載せる場合、control が application DB の台帳を読む経路か、data-plane が platform DB へ複製する二次情報が要る — **後者は本設計の単一真実の趣旨と衝突する**。裁定まで D-5 (peer-local) の形で実装する。
-- **LQ4-2 U-2 (台帳表に対する runtime role の権限) は未確定**である。§5 U-2 (**developer role は所有者であり U-2 の対象ではない**、§3.9)。`SELECT` のみを採る場合、data-plane に「パッケージが持つ per-app 番号の集合」を定数で持つ必要が生じる (その定数の置き場と、番号を増やし忘れたときの挙動を WP で決める)。**同期漏れは D-3 (d) の三者一致検査が機械的に閉じる。**
-- **LQ4-3 U-3 (スナップショット / live) は未確定**である。§5 U-3。live を採る場合、§3.7 の起動シーケンスと §9.2 の再起動手順を差し替える。
+- **LQ4-1 U-1 は確定した (2026-09-05、依頼者裁定)** — **適用状態は peer-local に留め、共通契約は 1.6.0 のまま無変更**である。可視化は D-5 の `ops upgrade-status` のみ。**control が application DB の台帳を読む経路も、data-plane が platform DB へ複製する二次情報も作らない。** §5 U-1、§6。**将来再検討する場合の前提は LQ4-20。**
+- **LQ4-2 U-2 は確定した (2026-09-05、依頼者裁定)** — 台帳表に対する **runtime role の権限は `SELECT` のみ**であり、data-plane は **cell を開く時点で集合検査を行い、未適用があれば `ops upgrade-applications` を示して `SERVICE_UNAVAILABLE` を返す** (D-3 (f)、§3.7 の 9〜10、§3.8 の F-12)。**developer role は所有者であり U-2 の対象ではない** (§3.9)。**代償は「パッケージが持つ per-app 番号の集合」定数と `migrations/` の同期義務**であり、**D-3 (d) 規則 (d) の三者一致静的検査が機械的に閉じる** (§10)。**定数の置き場は WP が決める** (集合の内容は §8 の割当より r2db `{9}` / MitateDB `{6, 8}`)。
+- **LQ4-3 U-3 は確定した (2026-09-05、依頼者裁定)** — **読みは起動時スナップショット**であり、ops で変えたら**両プロセス再起動** (縮めるときは data-plane 先、伸ばすときは control 先) である。§5 U-3、D-1 (e)、D-2 (g)、§9.2。**live 読みの経路は作らない。**
 - **LQ4-4 `ALTER ROLE … SET` の射程は監査書き込みに限られない**。`*svc_api` は credential store の接続 role、`*svc_controlplane` は control-plane registry 操作の role でもある (§1.5 の 2a、§3.11 の 1)。**「既定値では実害が無い」は見立てであって実測ではない** — credential store 照会が接続確立を含めて 5s に収まるかは配備依存である (Cloud SQL のコールドスタート等)。ops コマンド名を `set-platform-timeouts` に改め、F-1 / F-7 / F-9 のメッセージと §9.2 の runbook に射程を明記することで、**宣言でこの帰結を運用者に伝える**。**将来 timeout を大きく縮める運用があれば、その影響は監査以外の経路にも及ぶ。**
 - **LQ4-5 `pg_db_role_setting` は role 設定を映すのであって接続の実効値そのものではない**。**上書きし得るのは `ALTER ROLE … IN DATABASE … SET` と接続時 `options=-c …` / `PGOPTIONS` である** (`postgresql.conf` / `ALTER DATABASE … SET` は `ALTER ROLE … SET` より優先順位が**低い**ので上書きにならない。§3.11 の 2)。**この点は設計で閉じた (D-1 (b)、監督裁定 2026-09-05)** — 書き手プロセスは catalog の 2 設定の存在と有効性、per-database 行の不在、および**書き手 pool の接続の実効値が catalog 値と ms 整数で一致すること**を起動時に検査し、どれか欠ければ fail-fast する (F-7 / F-9 / F-10 / F-11)。WP への持ち越しは無く、**WP は実装と実 PG テスト (上書きを注入して F-9 が出ることの変異先行検証) を負う**。
 - **LQ4-6 r2db は provision role にも `application_audit` への `INSERT` を持つ** (`0007:186`、break-glass 用)。MitateDB は持たない (実測)。**宣言 `visibility_lag_ms` はこの帯域外経路について何も主張しない** (§3.11 の 3)。peer 非対称としても記録する。**`r2dbsvc_control` に timeout を置かない理由**: これは provisioning role であり、長時間かかる DDL (`\c` して application DB を作る / 落とす、テンプレートと per-app upgrade の適用) を流す役である。`statement_timeout` を置くと **migration 自体が途中で止まる**ので、D-1 (a) の 4 文は 2 つの**サービス**書き手 role にのみ置く。
@@ -767,6 +833,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **LQ4-16 「単一の真実」は両プロセスが同じ platform DB を見ていることに依存する** (§3.11 の 7)。どちらのプロセスも相手の DSN を知らないので、control プロセスにだけ古い platform DSN を渡す配備では **L6-5a のドリフトがそのままの形で再発する**。検出は配備後チェック (両 surface の `/capabilities` 突合) のままであり、**`CONTROL_MAPPING.md` SI-14 行の置換文言はこの限定を含める** (D-6 の 1)。
 - **LQ4-17 宣言変更時の過渡的なずれは残る** (§3.11 の 10)。機構は片側再起動を止めない。**危険な向きのずれは §9.2 の再起動順序で避ける**が、ずれ自体は消えない。U-3 でスナップショットを採っても live を採っても残る性質である。
 - **LQ4-18 一括適用の並行実行は保護されていない** (レビュー 2 の両論指摘)。`CREATE TABLE IF NOT EXISTS` は並行実行下で `relation … already exists` 等を返し得る (`IF NOT EXISTS` は競合を完全には吸収しない)。台帳 INSERT 同士は `ON CONFLICT DO NOTHING` で吸収される。1 DB あたり数秒の処理なので現実の衝突確率は低いが、**衝突すると片方の運用者には失敗として見える**。`pg_advisory_xact_lock` を per-app script の規律に足すかは**本設計では決めず、記録に留める**。
+- **LQ4-20 U-1「載せる」案は採用しなかったが、記録として残す** (§5 U-1 の「載せる」側、§6.2)。**将来再検討する場合に先に決める必要がある前提**: (i) **適用レベルを control が得る経路** — control プロセスに全 application DB への到達性を与えるか (単一侵害の影響範囲が広がる)、data-plane が platform DB へ複製する二次情報を置くか (本設計の単一真実の趣旨と衝突する) のいずれかを決めること、(ii) **公開範囲** — `list_applications` は control 資格だけでなく **audit 資格でも読める** (`spec:111` / `:125`) ため、適用状態を audit 資格へ公開してよいかを明示的に決めること (SI-07)、(iii) **契約の形** — `ApplicationStateResult` / `ApplicationsResult.applications[]` は `additionalProperties: false` なので **additive な契約変更 (1.7.0) が必須**であり、1.5.0 / 1.6.0 と同じ版束縛規律 (単独コミットでの契約公開、flip と挙動出荷の同一コミット、vacuity guard) を採ること、(iv) **conformance の射程** — in-process plug は per-application DB を持たないため **4 plug 全数で非空 precondition を持てない可能性が高く**、その場合は射程を `CONDITIONS.md` に開示すること。**骨子は `platform_upgrade: {applied: [<integer>…], pending: [<integer>…]}`** であり (§5 U-1 の契約英文骨子)、**D-4 (b) / D-3 (f) の集合意味に揃える**。
 - **LQ4-19 静的規則の許可リストの鍵は番号の集合である** (§10)。各 peer のテストが自 peer の `migrations/` だけを走査するので、peer 名の導出は要らない。**MitateDB `0006` は自番号の台帳 INSERT を持たないことと `\q` skip 経路を持つことの両方について免除される** (LQ4-10 の許可リストと同一のもの)。
 
 ---
