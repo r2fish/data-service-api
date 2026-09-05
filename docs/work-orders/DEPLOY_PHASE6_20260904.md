@@ -1,5 +1,7 @@
 # フェーズ6 成果の配備実機適用手順 (2026-09-04)
 
+> **実値の置換 (2026-09-05、公開リポジトリ規律の適用)**。本書は配備記録であり、`docs/security/public-repository-policy.md` の Ongoing rule、CLAUDE.md の Public Repository Security Gate (fake domains only)、第1次引き継ぎ (`HANDOVER_20260828.md`) の規約 (実ホスト名・実ドメイン・実データを置かない) に従い、配備固有の実値を placeholder に置換した。`<GCP_PROJECT_ID>` / `<GCP_PROJECT_NUMBER>` / `<REGION>` / `<RUN_HASH>` (Cloud Run の旧形式 URL のハッシュ) / `db.example.invalid` (VPS の公開ホスト名) / `<VPS_PROVIDER>` / `<VPS_USER>` (VPS の OS ユーザー = 既存 PG role 名) / `<EXISTING_APP_PORT>` (既存 443 の proxy 先) / `<OPERATOR_ACCOUNT_EMAIL>` (Cloud Run invoker の principal) / `ctl_<REDACTED_n>` `crd_<REDACTED_n>` (credential_id は locator 形 bearer の前半なので伏せる) / `entity_a`〜`entity_d` と `<json_field_n>` (統合側 application の実 entity / field 名) が置換記号で、Cloud Run revision 名の末尾 3 文字は `xxx` に潰した。`mitate` / `sandbox` (application slug) と `mitate-application` (統合側サービス名) は製品名由来の識別子として残した (設計文書・`spec/CCR_DISPOSITION.md` と同じ扱い)。実値の対応表は運用者の私的記録 (リポジトリ外) にあり、本書からは復元できない。**置換前の版は Git 履歴に残っている** — 公開前に履歴の書換が要る (フェーズ7 の公開規律 WP)。
+
 対象: `MitateDB-api` (Cloud Run / Cloud SQL) と `r2db-api` (VPS) の両 peer。
 適用するもの: **フェーズ4 / フェーズ5 / フェーズ6 を一括**で実配備へ載せる —
 耐久 audit sink + `audit_query` (契約 1.4.0)、`audit_query` の宣言語彙 2 本
@@ -79,7 +81,7 @@ bearer は 1 文字も書かない。**それらは Secret Manager と `/etc/r2d
    | 同 env | `MITATEDB_SERVE_APPS=mitate`、`MITATEDB_CONTROL_PLANE_STATUS=unavailable` |
    | 同 secrets | `MITATEDB_CREDENTIAL_PEPPER<-mitatedb-credential-pepper`、`MITATEDB_PLATFORM_DSN<-mitatedb-platform-dsn`、`MITATEDB_APP_MITATE_RUNTIME_DSN<-mitatedb-app-mitate-runtime-dsn`、`MITATEDB_APP_MITATE_DEVELOPER_DSN<-mitatedb-app-mitate-developer-dsn` |
    | 同 URL | `https://mitatedb-data-<GCP_PROJECT_NUMBER>.<REGION>.run.app` (旧形式 `https://mitatedb-data-<RUN_HASH>-an.a.run.app` も同一サービス) |
-   | Cloud Run `mitatedb-ctrl` | **未配備** → **(2026-09-05) 配備済み**。revision `mitatedb-ctrl-00001-m8s` (image `1.6.0-control`、`--max-instances=1`、`--no-allow-unauthenticated`、SA `mitatedb-ctrl-runtime@<GCP_PROJECT_ID>.iam.gserviceaccount.com`、Cloud SQL 接続あり、audit DSN 無し)。詳細は §2(g) |
+   | Cloud Run `mitatedb-ctrl` | **未配備** → **(2026-09-05) 配備済み**。revision `mitatedb-ctrl-00001-xxx` (image `1.6.0-control`、`--max-instances=1`、`--no-allow-unauthenticated`、SA `mitatedb-ctrl-runtime@<GCP_PROJECT_ID>.iam.gserviceaccount.com`、Cloud SQL 接続あり、audit DSN 無し)。詳細は §2(g) |
    | Secret Manager (名前のみ) | `mitatedb-credential-pepper` / `mitatedb-control-credential-pepper` / `mitatedb-controlplane-dsn` / `mitatedb-platform-dsn` / `mitatedb-provision-dsn` / `mitatedb-postgres-bootstrap` / `mitatedb-control-credential` (version 1、bootstrap 済み) / `mitatedb-app-mitate-runtime-credential` / `mitatedb-app-mitate-developer-credential` (ともに version 1) / `mitatedb-app-mitate-{runtime,developer}-dsn`。**`mitatedb-audit-dsn` は存在しない** |
    | 利用側 | Cloud Run `mitate-application` が `MITATE_DATA_SERVICE_URL=https://mitatedb-data-<RUN_HASH>-an.a.run.app` と `MITATE_DATA_SERVICE_RUNTIME_CREDENTIAL<-mitatedb-app-mitate-runtime-credential` で MitateDB を使う (`mitate-agent` は `mitate-application` 経由) |
    | application DB | **1 つ (`mitate`)** → migration `0006` の適用は 1 回 |
@@ -499,9 +501,9 @@ SELECT count(*) FROM information_schema.columns
 
 ### (c) [監督] `mitatedb-data` の 1.6.0 revision を `--no-traffic` で作る — **[実施済み 2026-09-05]**
 
-> **実測。** revision **`mitatedb-data-00004-wh4`** を `1.6.0-data` イメージで
+> **実測。** revision **`mitatedb-data-00004-xxx`** を `1.6.0-data` イメージで
 > `--no-traffic --tag=v160` で作成した。
-> - **traffic は `mitatedb-data-00003-6vj` (`phase-b` = フェーズ4 前のコード) が
+> - **traffic は `mitatedb-data-00003-xxx` (`phase-b` = フェーズ4 前のコード) が
 >   100% のままである。**`mitate-application` が見ているのは依然として旧コード。
 > - tag URL の実測: `https://v160---mitatedb-data-<RUN_HASH>-an.a.run.app`
 >   (旧形式。決定的 URL 形式ではなくこちらが払い出された)。
@@ -718,7 +720,7 @@ secret を実行中に差し替えない。特定 version 番号で参照して�
 >    切り分けを可能にするため)。
 >
 > **3 つが揃っていないなら (f) を実行しない。**戻す手段は §6.1 のとおり
-> `--to-revisions=mitatedb-data-00003-6vj=100` であり、credential 操作は要らない
+> `--to-revisions=mitatedb-data-00003-xxx=100` であり、credential 操作は要らない
 > (§6.3)。
 
 ```sh
@@ -748,7 +750,7 @@ gcloud run services describe mitatedb-data --project=<GCP_PROJECT_ID> \
 >   (プロジェクト全体へではない)。**この 3 本は下の `--set-secrets` が参照する
 >   ものと一致する。**元の手順にこの step が無かったのは漏れであり、
 >   **無いと revision は起動できない。**
-> - **(g-3) 配備**: revision **`mitatedb-ctrl-00001-m8s`**
+> - **(g-3) 配備**: revision **`mitatedb-ctrl-00001-xxx`**
 >   (`1.6.0-control`、`--max-instances=1`、`--no-allow-unauthenticated`、
 >   Cloud SQL 接続あり、**`MITATEDB_AUDIT_DSN` は付けていない** = 裁定 F)。
 >   **起動ログにエラーは無い。**
@@ -1443,9 +1445,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 | (b-3) **X = Y か** | ` ` (未実施) |
 | (b-4) 手で直した行 (entity.field → declared_type) | ` ` (未実施) |
 | (b-4) `boolean` と backfill された列の一覧と、目視の結論 | ` ` (未実施) |
-| (c) 新 revision 名 | **`mitatedb-data-00004-wh4`** (`--no-traffic --tag=v160`) |
+| (c) 新 revision 名 | **`mitatedb-data-00004-xxx`** (`--no-traffic --tag=v160`) |
 | (c) tag URL の実測 | **`https://v160---mitatedb-data-<RUN_HASH>-an.a.run.app`** (旧形式が払い出された) |
-| (c) 切替前の traffic | **`mitatedb-data-00003-6vj` (`phase-b`) が 100%** |
+| (c) 切替前の traffic | **`mitatedb-data-00003-xxx` (`phase-b`) が 100%** |
 | (c) 無資格 probe の status (`gcloud run services proxy --tag=v160` 経由) | **`503` `SERVICE_UNAVAILABLE`** — **期待は `401`。合格していない。**(b) 未適用が最有力の説明 (`0006` 未適用 → `StorageConfigurationError`) |
 | **(b) 完了後の無資格 probe 再実行 (2026-09-05 に足した必須項目)** | ` ` — **`401` + `application/problem+json` になること。これが (f) の前提である** |
 | (c) `describe` で読んだ env と secret の集合が §2(c) と一致するか | ` ` (未確認。**(f) の前に読む**) |
@@ -1459,7 +1461,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 | (g-1) ctrl の SA 名 | **`mitatedb-ctrl-runtime@<GCP_PROJECT_ID>.iam.gserviceaccount.com`** (新規作成) |
 | (g-2) `roles/cloudsql.client` 付与 | **data / ctrl の両 SA に付与済み。**ctrl 側は**1 回目が無音で失敗し、再実行で成功**した (新規 SA の伝播遅延) |
 | (g-2b) `roles/secretmanager.secretAccessor` 付与 | **ctrl SA に、`mitatedb-credential-pepper` / `mitatedb-control-credential-pepper` / `mitatedb-controlplane-dsn` の 3 secret へ個別に付与済み** |
-| (g-3) ctrl の revision 名 / `maxScale` (**1 であること**) | **`mitatedb-ctrl-00001-m8s`** / **1** (`--max-instances=1`、`--no-allow-unauthenticated`、Cloud SQL 接続あり、`MITATEDB_AUDIT_DSN` 無し) |
+| (g-3) ctrl の revision 名 / `maxScale` (**1 であること**) | **`mitatedb-ctrl-00001-xxx`** / **1** (`--max-instances=1`、`--no-allow-unauthenticated`、Cloud SQL 接続あり、`MITATEDB_AUDIT_DSN` 無し) |
 | (g-3) ctrl の起動ログ | **エラー無し** |
 | (g-4) invoker principal | **`user:<OPERATOR_ACCOUNT_EMAIL>`** (運用者本人。`allUsers` でも `mitate-application` の SA でもない) |
 | (g-5) **`status.url` の実測値**と、`MITATEDB_CONTROL_BASE_URL` との一致 | 実測 **`https://mitatedb-ctrl-<RUN_HASH>-an.a.run.app`** (旧形式) / **文字列としては不一致だが直していない** — 決定的 URL `https://mitatedb-ctrl-<GCP_PROJECT_NUMBER>.<REGION>.run.app` も同一サービスへ到達する (未認証 `curl` が **`403`** = front end の IAM 拒否 = ルーティング成立)。**(g-6) で決定的 URL 経由の `200` を確認して閉じる** |
@@ -1533,8 +1535,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 
 1. **§2(b) [運用者] 完了** — `cloud-sql-proxy --gcloud-auth --port 15432 <GCP_PROJECT_ID>:<REGION>:mitatedb-platform` (ADC 不在のため `--gcloud-auth` を使用。ローカル PostgreSQL が 5432 を占有するため別ポート)。`0005_application_audit.sql` → `CREATE TABLE` / `REVOKE` / `GRANT`×6 / `DO` / `assert_role_has_no_memberships` 1 行 (空 = 合格)。`0006_declared_field_types_upgrade.sql -v app_id='mitate'` → `mitatedb_app_mitate` に接続、`CREATE TABLE`、**`INSERT 0 19`** (backfill 19 列)、`COMMIT`。
 2. **§2(f) 前提の再 probe** — `gcloud run services proxy --tag=v160` 経由 `GET /v1/capabilities` (credential なし) → **401 `AUTH_REQUIRED`** (適用前は 503。§2(c) の観測どおり 0006 が前提だった)。
-3. **§2(f) [監督] 完了** — `update-traffic --to-revisions=mitatedb-data-00004-wh4=100`。直後 1 分のログ: data 00004 に WARNING 1 件 (本文空、無害)、`mitate-application` に ERROR なし。
-4. **§2(h) [監督] 完了** — `gcloud run services update mitatedb-data --update-env-vars=MITATEDB_CONTROL_PLANE_STATUS=enabled` → revision **`mitatedb-data-00005-pcz`** (image 1.6.0-data、env 4 本確認)。**注意 (手順書への教訓)**: 3 で traffic を revision 固定にしたため、新 revision は 0% で作られた。`update-traffic --to-latest` で **`00005-pcz` = 100%**。以後は `LATEST` 追従。再 probe → 401。data / ctrl / mitate-application にエラーなし。
+3. **§2(f) [監督] 完了** — `update-traffic --to-revisions=mitatedb-data-00004-xxx=100`。直後 1 分のログ: data 00004 に WARNING 1 件 (本文空、無害)、`mitate-application` に ERROR なし。
+4. **§2(h) [監督] 完了** — `gcloud run services update mitatedb-data --update-env-vars=MITATEDB_CONTROL_PLANE_STATUS=enabled` → revision **`mitatedb-data-00005-xxx`** (image 1.6.0-data、env 4 本確認)。**注意 (手順書への教訓)**: 3 で traffic を revision 固定にしたため、新 revision は 0% で作られた。`update-traffic --to-latest` で **`00005-pcz` = 100%**。以後は `LATEST` 追従。再 probe → 401。data / ctrl / mitate-application にエラーなし。
 5. **Secret Manager の事故と復旧 (運用者作業中)** — `mitatedb-control-credential` の形式確認は `dots=1 length=72` (= 合成形、再発行不要)。ところが確認用の「dots=0 のときだけ」の合成コマンドがプレースホルダ未置換のまま実行され、**version 2 に壊れた値**が登録された (稼働サービスはこの secret を読まないので影響なし)。復旧 = version 1 の値を version 3 として再登録し、version 2 を disable。`latest` が `dots=1 length=72` に戻ることを確認する。
 6. **未実施** — credential を伴う検証 (両文書の `surfaces` 一致、`GET /v1/catalog` の `field_types`、β / γ の確認) は運用者が proxy 経由で実行し結果を本表へ転記する。r2db は §3 の初回導入 (運用者)。裁定 D (alert 結線) は未結線。
 
@@ -1549,4 +1551,4 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 
 12. **credential の最終状態 (2026-09-05 08:10 JST、運用者)** — control credential を `POST /control/v1/credentials/{id}/rotate` で初回 rotate (`ctl_<REDACTED_1>` が有効・`must_rotate: false`、bootstrap 時の `ctl_<REDACTED_2>` は reset により失効)。`GET /control/v1/credentials?application_id=sandbox` の一覧で `sandbox` の runtime credential は **`crd_<REDACTED_1>` の 1 本のみ**で、再発行分の id と一致 — 項目 10 で「値不明のまま有効」と書いた 1 本目は**そもそも発行されていなかった** (part2 のブロック 8 は nginx `-t` 失敗後に到達していない) ため、**revoke は不要**。残: 秘密の秘密管理への転記と `shred -u` (運用者)。
 
-**ロールバック (現時点)**: r2db は `sudo systemctl disable --now r2dbsvc-api.service r2dbsvc-control.service` + `sites-enabled/r2dbsvc-api-8443.conf` の削除 + `nginx -t && reload` (既存 443 は無影響。`r2dbsvc_*` の DB / role は残してよい)。MitateDB は `gcloud run services update-traffic mitatedb-data --region=<REGION> --to-revisions=mitatedb-data-00003-6vj=100` (旧 phase-b。0005 / 0006 は残してよい)。ctrl を止める場合は同時に data の `MITATEDB_CONTROL_PLANE_STATUS=unavailable`。
+**ロールバック (現時点)**: r2db は `sudo systemctl disable --now r2dbsvc-api.service r2dbsvc-control.service` + `sites-enabled/r2dbsvc-api-8443.conf` の削除 + `nginx -t && reload` (既存 443 は無影響。`r2dbsvc_*` の DB / role は残してよい)。MitateDB は `gcloud run services update-traffic mitatedb-data --region=<REGION> --to-revisions=mitatedb-data-00003-xxx=100` (旧 phase-b。0005 / 0006 は残してよい)。ctrl を止める場合は同時に data の `MITATEDB_CONTROL_PLANE_STATUS=unavailable`。

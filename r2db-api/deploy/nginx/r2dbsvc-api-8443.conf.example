@@ -83,15 +83,19 @@ server {
     # ------------------------------------------------------------------------
     client_max_body_size 1100k;
 
-    # Only the contract's data-plane path is proxied. No control-plane location
-    # exists here by construction: this implementation has no HTTP control
-    # surface at all (CCR-14 is undecided -- docs/design/
-    # R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md §0), and the
-    # runtime's only HTTP endpoints are under /v1/ (r2db-api/src/r2db_api/
-    # http.py `_ROUTES`: /v1/capabilities, /v1/data/*, /v1/catalog,
-    # /v1/schema/operations, /v1/audit/query). This block does not add a
-    # location for anything else, and the explicit catch-all below returns 404
-    # for any other path rather than silently proxying it.
+    # Only the contract's data-plane path is proxied by THIS template. The
+    # control-plane surface (/control/v1, CCR-14 -- docs/design/
+    # R2DB_CCR14_CONTROL_PLANE_V1.md) is a SEPARATE process (`r2db_api.
+    # control_main:app`, DEPLOYMENT_RUNBOOK.md §7) on its own internal
+    # port; when it is deployed on the same listener, a second
+    # `location /control/v1/ { proxy_pass http://127.0.0.1:<control port>; }`
+    # block with the same proxy_* settings as below is added to the
+    # installed copy. That block is not yet part of this template (tracked
+    # as Phase 7 deploy-asset work, 2026-09-05; the earlier comment here
+    # citing "CCR-14 is undecided" was stale). The data plane's own HTTP
+    # endpoints are under /v1/ only (r2db-api/src/r2db_api/http.py
+    # `_ROUTES`), and the explicit catch-all below returns 404 for any other
+    # path rather than silently proxying it.
     location /v1/ {
         proxy_pass http://127.0.0.1:REPLACE_ME_INTERNAL_PORT;
 

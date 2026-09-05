@@ -919,14 +919,14 @@ class DataService:
                     "row_addressability": {"status": "enabled"},
                     # `cross_entity_mutation` needs the new `POST /v1/data/
                     # mutations` endpoint (stubbed in `http.py` as
-                    # CAPABILITY_UNSUPPORTED, not executable); `control_
-                    # plane` needs the `/control/v1` surface (still the
-                    # provisional out-of-band CLI, `ops.py`, per docs/
-                    # design/R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_
-                    # ROOT_V1.md §0's "no HTTP control plane" constraint,
-                    # unresolved until CCR-14's in-band-issuance dependent
-                    # judgment is implemented). Both remain `unavailable`:
-                    # neither has any executable operation at all.
+                    # CAPABILITY_UNSUPPORTED, not executable), so it stays
+                    # `unavailable` here: it has no executable operation at
+                    # all. (`control_plane`, immediately below, is NOT in
+                    # the same position any more: CCR-14 shipped the
+                    # `/control/v1` surface as a separate process, and its
+                    # status is the deployer's own R-9 declaration -- the
+                    # pre-CCR-14 wording that once grouped the two as "both
+                    # remain unavailable" was corrected 2026-09-05.)
                     "cross_entity_mutation": {"status": "unavailable"},
                     # R-9: reflects this instance's own constructor-injected
                     # deployer declaration -- never hardcoded (see __init__'s
