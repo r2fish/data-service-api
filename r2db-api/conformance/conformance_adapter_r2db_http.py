@@ -113,15 +113,21 @@ from adapter import (  # noqa: E402
 os.environ.setdefault("R2DB_CONTROLPLANE_DSN", "host=/tmp port=1 dbname=r2db_http_conformance_import_placeholder")
 os.environ.setdefault("R2DB_CONTROL_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-ctl-pepper")
 os.environ.setdefault("R2DB_CREDENTIAL_PEPPER", "r2db-http-conformance-import-placeholder-app-pepper")
-# Phase 6 WP-2 (design docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_
-# V1.md D-2): same import-time hazard, same placeholder discipline --
-# `build_control_app`'s own surfaces validation runs before any network
-# call (see `control_main.py`'s own docstring), so these values are never
-# actually read by anything this adapter constructs (its own real control
-# stack is `assemble_control_stack(..., surfaces=_SURFACES)`, defined
-# below).
-os.environ.setdefault("R2DB_DATA_BASE_URL", "https://r2db-http-conformance-import-placeholder.example.invalid/v1")
-os.environ.setdefault("R2DB_CONTROL_BASE_URL", "https://r2db-http-conformance-import-placeholder.example.invalid/control/v1")
+# Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-2(f)):
+# the two surfaces-base-URL env vars main.py/control_main.py used to read
+# are REMOVED -- both composition roots now reject either outright (F-2)
+# if still defined, whatever its value, so the two `os.environ.setdefault`
+# calls a prior phase placed here (to satisfy `build_control_app`'s own
+# then-required env vars at import time) are gone (completion condition 14:
+# neither name appears anywhere in this file below this point).
+# `assemble_control_stack`'s own `surfaces` parameter -- explicitly
+# injected below as `_SURFACES` -- was always this adapter's real source
+# for its own control stack; only the now-deleted placeholder values
+# existed purely to satisfy the OTHER, unused module-level `app = build_
+# control_app()` statement `r2db_api.control_main` ends with (still true
+# after Q4 WP-1: `build_control_app()` itself remains zero-network -- see
+# that module's own docstring -- so this import-time construction still
+# never actually reads either variable for anything this adapter uses).
 
 from r2db_api import ControlAuthority, DataService  # noqa: E402
 from r2db_api.control_http import create_control_app  # noqa: E402
@@ -136,6 +142,7 @@ from r2db_api.credential_store import (  # noqa: E402
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
 from r2db_api.limits import ControlPlaneLimits  # noqa: E402
+from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
 BASE_URL = "http://r2db-http-pg.conformance.invalid"
@@ -881,17 +888,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # (observing a destructive delete through `audit_query`) could
             # never see them for THIS (HTTP) adapter -- only for the in-
             # process one.
-            # WP-2(b) review M-7 (major, supervisor ruling 2026-09-03): the
-            # SAME two SESSION-level timeouts the real composition root
-            # (`r2db_api.main.build_app`) sets on this exact writer
-            # connection -- without them, this adapter's own application-
-            # plane writer transactions can stay open unboundedly, which
-            # has no relationship at all to the `visibility_lag_ms` the
-            # control side (`_build_control_stack`, default timeouts too)
-            # declares. Both sides now share the identical default pair.
+            # Q4 phase WP-1 (design D-1(b)): `PostgresApplicationAuditSink`
+            # no longer accepts or issues a per-connection SESSION `SET`
+            # for either timeout -- a REAL deployment's `r2dbsvc_api` role
+            # now carries both as a `pg_db_role_setting` role setting
+            # (migration `0008`), double-checked at startup by `r2db_api.
+            # main.build_app`. This adapter's own throwaway platform
+            # database is provisioned only through migration `0007`
+            # (`MIGRATION_NAMES` below), never `0008` -- it deliberately
+            # never exercises that DB-side declaration/double-check path at
+            # all (design §3.11 point 4: "r2db HTTP plugは...宣言表の読み出
+            # し経路を通らない"; peer-local real-PG tests, `r2db-api/tests/
+            # test_ops_declarations.py`/`test_application_audit.py`, cover
+            # that path instead). This writer connection therefore now runs
+            # with whatever `statement_timeout`/`idle_in_transaction_
+            # session_timeout` the bare PostgreSQL cluster default happens
+            # to be -- ordinary, since this adapter's own conformance
+            # traffic never depends on either timeout actually firing.
             self._application_durable_audit = PostgresApplicationAuditSink(
                 self._platform.api_dsn, schema=self._platform.schema, pool_size=2,
-                statement_timeout_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS, idle_in_transaction_session_timeout_ms=DEFAULT_AUDIT_IDLE_TIMEOUT_MS,
             )
             self._service = DataService(
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
@@ -1059,6 +1074,17 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             audit_dsn=self._platform.auditreader_dsn,
             audit_reader_pool_size=self._control_pool_size,
             surfaces=_SURFACES,
+            # Q4 phase WP-1 (design D-1(c)): this adapter's control stack
+            # never reads the DB-side writer-role catalog (design §3.11
+            # point 4, see this file's own note at `_application_durable_
+            # audit`'s construction site above) -- it passes the SAME
+            # fixed value (5000 + 5000 + margin) the pre-Q4 internal
+            # derivation always produced from these same two module
+            # constants, so `capabilities().audit_query.visibility_lag_ms`
+            # is unchanged for this adapter. The margin itself is imported
+            # from `platform_declarations` (rulings-q4-wp12-rework.md §2),
+            # never a repeated literal `1000`.
+            audit_visibility_lag_ms=DEFAULT_AUDIT_STATEMENT_TIMEOUT_MS + DEFAULT_AUDIT_IDLE_TIMEOUT_MS + VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS,
         )
         app = create_control_app(service)
         return app, stores

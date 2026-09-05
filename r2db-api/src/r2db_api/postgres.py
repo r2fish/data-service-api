@@ -305,7 +305,7 @@ class _RolePool:
     from either one reports its own fixed role/schema, never the other's.
     """
 
-    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4, connect_timeout: int = _DEFAULT_CONNECT_TIMEOUT_S, acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_S, statement_timeout_ms: int | None = None, idle_in_transaction_session_timeout_ms: int | None = None) -> None:
+    def __init__(self, dsn: str, *, schema: str, maxconn: int = 4, connect_timeout: int = _DEFAULT_CONNECT_TIMEOUT_S, acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_S) -> None:
         self._dsn = dsn
         self._schema = schema
         self._maxconn = max(1, maxconn)
@@ -314,25 +314,18 @@ class _RolePool:
         self._created = 0
         self._connect_timeout = connect_timeout
         self._acquire_timeout = acquire_timeout
-        # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-6/N-3): SESSION-
-        # level (not `SET LOCAL` -- these must survive for this connection's
-        # entire lifetime, not just one transaction, unlike `PostgresCell.
-        # _set_timeouts`'s per-request `SET LOCAL`) `statement_timeout`/
-        # `idle_in_transaction_session_timeout`, set once at connect time
-        # (below) and never touched again. `None` (the default -- every
-        # `_RolePool` caller except the two audit-writer sinks) means "do
-        # not set either" -- this pool is otherwise used for ordinary
-        # application data-plane connections, which must not silently
-        # acquire a new timeout policy as a side effect of this WP. Only
-        # `PostgresApplicationAuditSink`/`PostgresControlAuditSink`
-        # (`credential_store.py`) pass a concrete value here: D-6's
-        # visibility-lag derivation (`statement_timeout +
-        # idle_in_transaction_session_timeout + 1s`) depends on both being
-        # enforced on the connection that writes `application_audit`/
-        # `control_audit`, never on an unrelated pool silently inheriting
-        # them.
-        self._statement_timeout_ms = statement_timeout_ms
-        self._idle_in_transaction_session_timeout_ms = idle_in_transaction_session_timeout_ms
+        # Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md
+        # D-1(b)): this pool no longer accepts or issues a per-connection
+        # SESSION `SET` for `statement_timeout`/`idle_in_transaction_
+        # session_timeout` -- the two audit-writer sinks that used to pass
+        # `statement_timeout_ms`/`idle_in_transaction_session_timeout_ms`
+        # here (`PostgresApplicationAuditSink`/`PostgresControlAuditSink`,
+        # `credential_store.py`) now rely ENTIRELY on the PostgreSQL role
+        # setting migration `0008` applies (`ALTER ROLE ... SET`) plus each
+        # composition root's own startup double-check (`r2db_api.platform_
+        # declarations`) that the writer connection's effective value
+        # agrees with that role setting -- there is no longer a second,
+        # independent code path that could disagree with it.
         # Set by `retire()` (called only by `SharedPoolManager`, below, when
         # this pool is evicted -- idle timeout or LRU cap). A retired pool
         # keeps serving any connection a caller already checked out (see
@@ -355,21 +348,6 @@ class _RolePool:
         conn = psycopg.connect(self._dsn, autocommit=False, connect_timeout=self._connect_timeout)
         with conn.cursor() as cur:
             _run(cur, sql.SQL("SET search_path TO {}").format(sql.Identifier(self._schema)))
-            # Phase 4 (design D-6/N-3): SESSION-level, set once here (never
-            # `SET LOCAL` -- unlike `PostgresCell._set_timeouts`'s
-            # per-request `SET LOCAL statement_timeout`, this must survive
-            # every transaction this pooled connection is ever reused for,
-            # for its entire lifetime -- this connection is never reused by
-            # a different role/purpose, `_RolePool`'s own class docstring).
-            # `SHOW statement_timeout`/`SHOW idle_in_transaction_session_
-            # timeout` against a connection from this pool is the executable
-            # check (`r2db-api/tests/test_application_audit.py::test_audit_
-            # write_connections_have_statement_and_idle_in_transaction_
-            # timeouts_set`).
-            if self._statement_timeout_ms is not None:
-                _run(cur, sql.SQL("SET SESSION statement_timeout = {t}").format(t=sql.Literal(f"{self._statement_timeout_ms}ms")))
-            if self._idle_in_transaction_session_timeout_ms is not None:
-                _run(cur, sql.SQL("SET SESSION idle_in_transaction_session_timeout = {t}").format(t=sql.Literal(f"{self._idle_in_transaction_session_timeout_ms}ms")))
         conn.commit()
         return conn
 

@@ -85,7 +85,9 @@ from typing import Any, NoReturn, Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Json
 
+from . import platform_declarations
 from .control_plane import bootstrap_control_credential, issue_audit_credential_ceremony, reset_control_credentials
 from .credential_store import (
     DEFAULT_SCHEMA,
@@ -96,6 +98,15 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .errors import FoundationError, fail
+from .platform_declarations import (
+    MIGRATION_NUMBER,
+    PEER_MODULE,
+    PlatformDeclarationError,
+    read_declared_role_timeouts,
+    validate_audit_writer_roles_value,
+    validate_coalescing_window_value,
+    validate_surfaces_value,
+)
 from .structured import RESET_CONTROL_CREDENTIALS, delete_credential_confirmation_phrase
 
 _CREDENTIAL_ID_PREFIX = "crd_"
@@ -1038,6 +1049,214 @@ def cmd_rotate_control_credential(args: argparse.Namespace) -> int:
     return 0
 
 
+# ===========================================================================
+# Q4 phase WP-1 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md D-1/D-2,
+# work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md
+# WP-1 change table C; rework round, rulings-q4-wp12-rework.md sec.1,
+# rulings-q4-writer-roles.md D-2(h)): declaration subcommands -- the ONLY
+# way to change the declared audit writer roles' timeouts or the
+# platform's `surfaces`/`audit_coalescing_window_ms` declaration, now that
+# both processes reject their own former env vars outright (F-1/F-2).
+# Every subcommand below connects with `R2DB_CONTROL_DSN` (`r2dbsvc_
+# control`, this schema's owner -- the only role with write access to
+# `platform_declarations`, migration `0008`'s own GRANTs) and writes NO
+# `control_audit` event (these are provisioning-time/rare operations
+# against a schema-owned table, not an authenticated-principal operation
+# this schema's audit trail is designed to cover -- the same "list系
+# （読み取り）は監査不要" reasoning `cmd_list_apps`/`cmd_audit_report`
+# already follow extends here to the ONE write path this table has).
+#
+# Rework round: role names are no longer derived from `_schema()` by a
+# naming-convention rewrite (`_platform_writer_roles`, removed) -- D-2(h)
+# requires reading the declared `audit_writer_roles` row instead, the SAME
+# row migration `0008` seeds from the very `-v api_role=.../-v
+# controlplane_role=...` variables it issues `ALTER ROLE` for. URL-shape
+# validation for `declare-surfaces` now calls `platform_declarations.
+# validate_surfaces_value` -- the SAME function `r2db_api.main`/`r2db_api.
+# control_main` call at READ time (design D-2(d): "書き込み時と読み出し時
+# の両方で行い、両方が同じ Python の検証関数を通る") -- rather than keeping
+# a third independent copy of the same three SHAPE checks.
+#
+# Q4 WP-1 does not import `r2db_api.main`/`r2db_api.control_main` here (or
+# anywhere else in this file) -- both of those modules build a real ASGI
+# app as an import-time side effect (`app = build_app()`/`app = build_
+# control_app()`), which this CLI must never trigger merely by being
+# invoked.
+# ===========================================================================
+
+
+def _read_audit_writer_roles(conn: "psycopg.Connection") -> tuple[str, ...]:
+    """D-2(h) point 6: reads and validates the `audit_writer_roles` row
+    through the SAME `validate_audit_writer_roles_value` function every
+    read path uses (F-4b). Unlike `cmd_show_declarations` (which must
+    degrade gracefully so an operator can SEE a broken row), this helper
+    is used by `cmd_set_platform_timeouts`, which has actual work to do
+    and nothing sensible to fall back to -- so it `_die`s (exit 2) on a
+    missing or malformed row."""
+    schema = _schema()
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT value FROM {table} WHERE key = 'audit_writer_roles'").format(table=_platform_declarations_table()))
+        row = cur.fetchone()
+    if row is None:
+        _die(
+            f"'audit_writer_roles' row is missing from {schema}.platform_declarations: migration {MIGRATION_NUMBER} "
+            f"seeds this row in the same transaction as its own ALTER ROLE statements. Apply migration "
+            f"{MIGRATION_NUMBER} to this platform database, then retry."
+        )
+    try:
+        return validate_audit_writer_roles_value(row[0], schema=schema, ops_module=PEER_MODULE)
+    except PlatformDeclarationError as exc:
+        _die(str(exc))
+
+
+def _platform_declarations_table() -> "sql.Composable":
+    return sql.Identifier(_schema(), "platform_declarations")
+
+
+def cmd_set_platform_timeouts(args: argparse.Namespace) -> int:
+    """D-1 (design §3, WP-1 change table C; rework D-2(h) point 4): a
+    single knob that places the SAME two ms values onto EVERY role listed
+    in the declared `audit_writer_roles` row's `pg_db_role_setting` via
+    `ALTER ROLE ... SET` (an assignment, not an increment -- idempotent,
+    matching migration `0008`'s own idempotency). Rejects `0` and negative
+    values outright (`_die`, exit 2) -- PostgreSQL reads `0` as "no limit"
+    (F-10's own hazard), and an audit writer must never run unbounded. No
+    per-role override is offered (design §9.2: "導出式が2roleのmaxを取る以
+    上、roleごとに別値を置く利点が無い"), and no role-name ARGUMENT is
+    offered either (design D-2(h) point 4: "role 名を引数で受けない") --
+    the target role set comes exclusively from the declaration table."""
+    if args.statement_ms <= 0:
+        _die(f"--statement-ms must be a positive integer, got {args.statement_ms}")
+    if args.idle_ms <= 0:
+        _die(f"--idle-ms must be a positive integer, got {args.idle_ms}")
+    dsn = _control_dsn()
+    with psycopg.connect(dsn) as conn:
+        roles = _read_audit_writer_roles(conn)
+        with conn.cursor() as cur:
+            for role in roles:
+                cur.execute(sql.SQL("ALTER ROLE {role} SET statement_timeout = {val}").format(role=sql.Identifier(role), val=sql.Literal(f"{args.statement_ms}ms")))
+                cur.execute(sql.SQL("ALTER ROLE {role} SET idle_in_transaction_session_timeout = {val}").format(role=sql.Identifier(role), val=sql.Literal(f"{args.idle_ms}ms")))
+        conn.commit()
+    print(f"statement_timeout={args.statement_ms}ms idle_in_transaction_session_timeout={args.idle_ms}ms set for: {', '.join(roles)}")
+    print("restart both r2db_api.main and r2db_api.control_main for the new values to take effect (U-3, startup snapshot)")
+    return 0
+
+
+def _upsert_declaration(conn: "psycopg.Connection", *, schema: str, key: str, value: object) -> None:
+    table = sql.Identifier(schema, platform_declarations.TABLE_NAME)
+    statement = sql.SQL(
+        "INSERT INTO {table} (key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
+    ).format(table=table)
+    with conn.cursor() as cur:
+        cur.execute(statement, (key, Json(value)))
+    conn.commit()
+
+
+def cmd_declare_surfaces(args: argparse.Namespace) -> int:
+    """D-2 (design §3, WP-1 change table C; amendment, q4-f3c-and-
+    amendments.md): writes the SINGLE `surfaces` row both processes read
+    at startup (design D-2(c): shared by BOTH, never a per-process value).
+    `--control-base-url <URL>` is now OPTIONAL (omission = no `control`
+    row, same as before this amendment); `--no-control` is accepted as an
+    explicit, equivalent spelling of that same omission (design §3.8 F-6's
+    own message text tells an operator to re-declare with `--no-control`,
+    so this command must accept it) -- passing BOTH at once is a usage
+    error (exit 2, now enforced by argparse's own `add_mutually_exclusive_
+    group` -- G9, wp12-audit-gaps.md -- rather than a hand-rolled check
+    here), but neither is REQUIRED any longer."""
+    schema = _schema()
+    value: dict[str, Any] = {"data": {"base_url": args.data_base_url}}
+    # N-5 (monitor ruling 2026-09-05): `is not None`, never truthiness --
+    # `--control-base-url ""` must reach `validate_surfaces_value` and hit
+    # F-5 like every other malformed value, not be silently treated as
+    # "no control" the way a falsy-but-defined value would be under a bare
+    # `and` check. Mirrors MitateDB-api's own `is not None` check.
+    # `--no-control` shares `--control-base-url`'s own dest and stores
+    # `None`, indistinguishable at this point from plain omission (both
+    # mean "no control" -- G9, mirrors MitateDB-api's identical `dest=
+    # "control_base_url"` sharing).
+    if args.control_base_url is not None:
+        value["control"] = {"base_url": args.control_base_url}
+    try:
+        validate_surfaces_value(value, schema=schema, ops_module=PEER_MODULE)
+    except PlatformDeclarationError as exc:
+        _die(str(exc))
+    with psycopg.connect(_control_dsn()) as conn:
+        _upsert_declaration(conn, schema=schema, key="surfaces", value=value)
+    print(f"surfaces declared: {json.dumps(value)}")
+    print("restart both r2db_api.main and r2db_api.control_main for the new value to take effect (U-3, startup snapshot)")
+    return 0
+
+
+def cmd_declare_coalescing_window(args: argparse.Namespace) -> int:
+    """D-2 (design §3, WP-1 change table C): writes the `audit_coalescing_
+    window_ms` row through the SAME validation function (`validate_
+    coalescing_window_value`, `r2db_api.platform_declarations`) both
+    composition roots run on READ (design D-2(d): "書き込み時と読み出し時
+    の両方で行い、両方が同じPythonの検証関数を通る") -- a value this command
+    itself would reject can never enter the table."""
+    schema = _schema()
+    try:
+        value = validate_coalescing_window_value(args.ms, schema=schema, ops_module=PEER_MODULE)
+    except PlatformDeclarationError as exc:
+        _die(str(exc))
+    with psycopg.connect(_control_dsn()) as conn:
+        _upsert_declaration(conn, schema=schema, key="audit_coalescing_window_ms", value=value)
+    print(f"audit_coalescing_window_ms declared: {value}")
+    print("restart both r2db_api.main and r2db_api.control_main for the new value to take effect (U-3, startup snapshot)")
+    return 0
+
+
+def cmd_show_declarations(_args: argparse.Namespace) -> int:
+    """D-1/D-2 (design §3, WP-1 change table C; rework D-2(h)): a read-only
+    diagnostic -- the current `platform_declarations` rows and every
+    declared `audit_writer_roles` role's `pg_db_role_setting` entries.
+    Deliberately does NOT run the F-3/F-4/F-8/F-4b fail-fast checks a
+    composition root's own startup runs: an operator diagnosing a broken
+    deployment needs to SEE a missing or malformed row printed out, not
+    have this command itself refuse to run over the very condition it
+    exists to surface."""
+    dsn = _control_dsn()
+    schema = _schema()
+    print(f"{schema}.platform_declarations:")
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("SELECT key, value, updated_at FROM {table} ORDER BY key").format(table=_platform_declarations_table()))
+                rows = cur.fetchall()
+    except psycopg.errors.UndefinedTable:
+        rows = None
+    if rows is None:
+        print(f"  ({schema}.platform_declarations does not exist -- migration {MIGRATION_NUMBER} has not been applied)")
+        return 0
+    elif not rows:
+        print("  (no rows)")
+    else:
+        for key, value, updated_at in rows:
+            print(f"  {key} = {json.dumps(value)} (updated_at={updated_at})")
+
+    print("writer role settings (pg_db_role_setting):")
+    declared = {key: value for key, value, _updated_at in rows}
+    if "audit_writer_roles" not in declared:
+        print("  (no audit_writer_roles row -- apply migration 0008 with this deployment's writer role names)")
+        return 0
+    try:
+        roles = validate_audit_writer_roles_value(declared["audit_writer_roles"], schema=schema, ops_module=PEER_MODULE)
+    except PlatformDeclarationError as exc:
+        print(f"  (audit_writer_roles row is invalid: {exc})")
+        return 0
+    with psycopg.connect(dsn) as conn:
+        for role in roles:
+            try:
+                catalog = read_declared_role_timeouts(conn, role, ops_module=PEER_MODULE, migration=MIGRATION_NUMBER)
+            except PlatformDeclarationError as exc:
+                print(f"  {role}: {exc}")
+                continue
+            print(f"  {role}: statement_timeout={catalog.statement_ms}ms idle_in_transaction_session_timeout={catalog.idle_ms}ms")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m r2db_api.ops",
@@ -1174,6 +1393,54 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("credential_id")
     p.set_defaults(func=cmd_rotate_control_credential)
+
+    p = sub.add_parser(
+        "set-platform-timeouts",
+        help=(
+            "Q4 D-1: set statement_timeout/idle_in_transaction_session_timeout (ALTER ROLE ... SET) on EVERY role "
+            "declared in audit_writer_roles to the same two values -- rejects 0 and negative values. Restart "
+            "both r2db_api.main and r2db_api.control_main afterward (startup snapshot)"
+        ),
+    )
+    p.add_argument("--statement-ms", type=int, required=True, metavar="N")
+    p.add_argument("--idle-ms", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_set_platform_timeouts)
+
+    p = sub.add_parser(
+        "declare-surfaces",
+        help=(
+            "Q4 D-2: declare the surfaces row both processes read at startup. --control-base-url is optional "
+            "(omit for no control surface); --no-control is an equivalent, explicit way to say the same thing. "
+            "Restart both r2db_api.main and r2db_api.control_main afterward"
+        ),
+    )
+    p.add_argument("--data-base-url", required=True, metavar="URL")
+    # G9 (wp12-audit-gaps.md, structural-symmetry-only ruling -- this row
+    # is outside the isomorphism table): mirrors MitateDB-api's own
+    # `add_mutually_exclusive_group` + `store_const` shape -- `--no-
+    # control` shares `--control-base-url`'s OWN dest and argparse itself
+    # rejects passing both (SystemExit(2)), rather than a hand-rolled
+    # `args.no_control and args.control_base_url is not None: _die(...)`
+    # check in `cmd_declare_surfaces` below. `--control-base-url ""` still
+    # stores the empty string (distinct from `--no-control`'s `None`), so
+    # F-5 still fires on it (N-5 below is unaffected).
+    control_group = p.add_mutually_exclusive_group(required=False)
+    control_group.add_argument("--control-base-url", dest="control_base_url", default=None, metavar="URL")
+    control_group.add_argument("--no-control", dest="control_base_url", action="store_const", const=None)
+    p.set_defaults(func=cmd_declare_surfaces)
+
+    p = sub.add_parser(
+        "declare-coalescing-window",
+        help="Q4 D-2: declare audit_coalescing_window_ms (0 or a positive integer). Restart both processes afterward",
+    )
+    p.add_argument("--ms", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_declare_coalescing_window)
+
+    p = sub.add_parser(
+        "show-declarations",
+        help="Q4 D-1/D-2: show the current platform_declarations rows and the two writer roles' pg_db_role_setting entries",
+    )
+    p.set_defaults(func=cmd_show_declarations)
 
     return parser
 
