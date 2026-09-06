@@ -36,10 +36,19 @@
 -- (database) instead. Re-running this file is a no-op if 0001 already
 -- succeeded.
 --
--- Run with, e.g.:
---   psql "$R2DBSVC_BOOTSTRAP_ADMIN_DSN" \
---     -v control_password="$R2DBSVC_CONTROL_PASSWORD" \
---     -f 0001_bootstrap_control_plane.sql
+-- Run with, e.g. (Phase 8 WP-4, design PHASE8_EFFECTIVE_BOUNDS_AND_
+-- HYGIENE_V1.md D-5: `\getenv`, not `-v`, so the password never sits on
+-- this psql process' own argv, visible in `ps` output for its lifetime;
+-- WP-4 rework round 2, supervisor ruling 2026-09-06, wp4-rework-2.md #2:
+-- `\set ON_ERROR_STOP on` must be the FIRST line piped in -- without it,
+-- psql exits 0 even when `\i` names a missing file or `\getenv` reads an
+-- unset/unexported env var, silently leaving `:'control_password'`
+-- unresolved as a literal in the migration that ran anyway):
+--   printf '%s\n' \
+--       "\set ON_ERROR_STOP on" \
+--       "\getenv control_password R2DBSVC_CONTROL_PASSWORD" \
+--       "\i 0001_bootstrap_control_plane.sql" \
+--     | psql "$R2DBSVC_BOOTSTRAP_ADMIN_DSN"
 --
 -- `R2DBSVC_BOOTSTRAP_ADMIN_DSN` and `R2DBSVC_CONTROL_PASSWORD` are
 -- environment-variable *names*; see r2db-api/docs/ for the full runbook.

@@ -2106,7 +2106,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_67_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_86_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2280,10 +2280,92 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
         "conformance/conformance_adapter_mitatedb_http.py",
         "_live_pg_backend_count",
     ),
+    # Phase 8 WP-4 (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_
+    # V1.md D-5 decision 1/2; work order docs/work-orders/
+    # WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md §2 WP-4 "同型性テストの対
+    # 象"): `ops verify-declarations`'s own peer-independent pieces -- the
+    # F-number -> exit code table, the `read_platform_declarations` check
+    # order, and the two print/lookup helpers the command's own driver
+    # calls. `cmd_verify_declarations` itself is deliberately NOT a row
+    # here -- it calls this peer's own provision-DSN accessor (`_provision_
+    # dsn` on this peer, `_control_dsn` on r2db-api), a real per-peer name
+    # the isomorphism normalizer (package-name substitution only) does not
+    # paper over.
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_VERIFY_DECLARATIONS_EXIT_CODES"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_VERIFY_DECLARATIONS_READ_ORDER"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_ok"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_fail"),
+    # WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #8): the
+    # code review's own normalize-and-diff run found these 8 same-named
+    # symbols in the two new `tests/test_ops_verify_declarations.py` files
+    # (fixture helpers this WP's own test file needed, plus 3 `test_*`
+    # bodies whose text is identical once `_normalize` strips each side's
+    # own docstring and package name) actually match byte-for-byte after
+    # normalization -- verified directly (`_isomorphic_symbol_source` +
+    # `_normalize`, both sides) before adding these rows, not assumed from
+    # the row's own name. The work order's own "同型性テストの対象" text
+    # ("`ops verify-declarations` のテストと、その中で使う同名ヘルパ")
+    # covers both halves of that sentence: the fixture helpers below ARE
+    # "同名ヘルパ", and these 3 `test_*` functions ARE part of "`ops
+    # verify-declarations` のテスト" itself -- so both halves are pinned,
+    # not only the helpers. The file's OWN remaining 19 same-named `test_*`
+    # functions (one per F-number, `_run_verify`, the two fixtures, etc.)
+    # are NOT rows here: their bodies carry real per-peer differences
+    # (env var names, `platform.control_dsn` vs `platform.provision_dsn`/
+    # `platform.dsn`, migration file names) that `_normalize` does not fold
+    # away, so a normalize-and-diff run against them is a real (and
+    # correct) mismatch, not an oversight.
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_admin_dsn"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_dsn_with"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_run_psql"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_require_admin_connection"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_sweep_prefix"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_platform_declaration_error_code_attribute_is_not_paraphrased"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_f9_when_effective_value_disagrees_with_declared"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_exits_0_when_every_check_passes"),
+    # WP-4 rework round 2 (supervisor ruling 2026-09-06, wp4-rework-2.md
+    # #1, acceptance audit completion condition 9 finding): the audit's
+    # own 変異 B (renaming a loop variable INSIDE `_verify_declarations_
+    # checks` on one peer only, behavior unchanged) left every existing
+    # test green, including this isomorphism check -- `ops.py`'s own
+    # header comment above already NAMED `_verify_declarations_checks` as
+    # "pinned isomorphic" (and, after this round, `cmd_verify_
+    # declarations` too, once its own env-var-name literal was replaced
+    # with a reference to `platform_declarations.PROVISION_DSN_ENV`, the
+    # same peer-specific-VALUE-constant technique `PEER_MODULE`/
+    # `MIGRATION_NUMBER`/`CONTROL_PLANE_STATUS_ENV` already use) but
+    # neither row had actually been added here -- a claim in a comment,
+    # unchecked. Verified normalize-and-diff equal (`_isomorphic_symbol_
+    # source` + `_normalize`, both sides) before adding. The audit's own
+    # 変異 A (rewriting ONLY the F-1/F-2/F-12 out-of-scope reason text on
+    # one peer, inside `cmd_verify_declarations`'s own trailing `print`)
+    # is now caught by this same new `cmd_verify_declarations` row, not a
+    # separate one -- that reason text is part of this function's own
+    # body, not a standalone symbol.
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_checks"),
+    ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "cmd_verify_declarations"),
+    # Same round, same ruling item 1's second half: five same-named
+    # `tests/test_ops_verify_declarations.py` module-level constants the
+    # rework round's own normalize-and-diff run found byte-identical
+    # after normalization but never added -- `ADMIN_DSN_DEFAULT` (the
+    # shared throwaway-admin-connection fallback DSN, identical literal
+    # both sides), `MIGRATIONS_DIR` (identical `Path(__file__).resolve()
+    # .parents[1] / "migrations"` expression -- the migration FILE NAMES
+    # it is later indexed with, `MIGRATION_NAMES`, are real per-peer data
+    # and stay unpinned), `MIGRATION_NAMES_WITHOUT_DECLARATIONS` (a bare
+    # `MIGRATION_NAMES[:-1]` slice expression referencing that same
+    # per-peer tuple by name only, so its OWN text does not carry the
+    # per-peer difference), and `_CONTROL_URL`/`_DATA_URL` (identical
+    # `*.example.invalid` synthetic fixture URLs both sides).
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "ADMIN_DSN_DEFAULT"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
+    ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_DATA_URL"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_67_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_86_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2292,7 +2374,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_67_rows() -> None:
     5 -- the pair's later half adds both WP-1's and WP-2's own new rows in
     one commit; widened a fifth time by phase 7 WP-4, supervisor supplement
     2026-09-06, 差し戻し指示 9: `_live_pg_backend_count`, byte-identical on
-    both peers' own HTTP conformance plug): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
+    both peers' own HTTP conformance plug; widened a sixth time by phase 8
+    WP-4 rework round 2, supervisor ruling 2026-09-06, wp4-rework-2.md #1
+    (acceptance audit completion condition 9 finding): `_verify_
+    declarations_checks`/`cmd_verify_declarations` and five same-named
+    `tests/test_ops_verify_declarations.py` constants, verified normalize-
+    and-diff equal before adding, not assumed from `ops.py`'s own header
+    comment that already claimed them "pinned"): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
     CONTENT (not merely its length) catches that. One-time human
@@ -2323,7 +2411,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_67_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_67_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_86_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2412,8 +2500,47 @@ def test_isomorphic_target_table_is_pinned_to_its_current_67_rows() -> None:
             "conformance/conformance_adapter_mitatedb_http.py",
             "_live_pg_backend_count",
         ),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_VERIFY_DECLARATIONS_EXIT_CODES"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_VERIFY_DECLARATIONS_READ_ORDER"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_ok"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_fail"),
+        # WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #8): the
+        # code review's own normalize-and-diff run found these 8 same-named
+        # symbols in the two new `tests/test_ops_verify_declarations.py` files
+        # (fixture helpers this WP's own test file needed, plus 3 `test_*`
+        # bodies whose text is identical once `_normalize` strips each side's
+        # own docstring and package name) actually match byte-for-byte after
+        # normalization -- verified directly (`_isomorphic_symbol_source` +
+        # `_normalize`, both sides) before adding these rows, not assumed from
+        # the row's own name. The work order's own "同型性テストの対象" text
+        # ("`ops verify-declarations` のテストと、その中で使う同名ヘルパ")
+        # covers both halves of that sentence: the fixture helpers below ARE
+        # "同名ヘルパ", and these 3 `test_*` functions ARE part of "`ops
+        # verify-declarations` のテスト" itself -- so both halves are pinned,
+        # not only the helpers. The file's OWN remaining 19 same-named `test_*`
+        # functions (one per F-number, `_run_verify`, the two fixtures, etc.)
+        # are NOT rows here: their bodies carry real per-peer differences
+        # (env var names, `platform.control_dsn` vs `platform.provision_dsn`/
+        # `platform.dsn`, migration file names) that `_normalize` does not fold
+        # away, so a normalize-and-diff run against them is a real (and
+        # correct) mismatch, not an oversight.
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_admin_dsn"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_dsn_with"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_run_psql"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_require_admin_connection"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_sweep_prefix"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_platform_declaration_error_code_attribute_is_not_paraphrased"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_f9_when_effective_value_disagrees_with_declared"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "test_verify_declarations_exits_0_when_every_check_passes"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_verify_declarations_checks"),
+        ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "cmd_verify_declarations"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "ADMIN_DSN_DEFAULT"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATIONS_DIR"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
+        ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_DATA_URL"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 67
+    assert len(_ISOMORPHIC_TARGETS) == 86
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
