@@ -10,7 +10,11 @@
 -- OR REPLACE FUNCTION`, so re-running it is a no-op beyond refreshing the
 -- function bodies.
 --
---   psql "$R2DBSVC_CONTROL_DSN" -f 0002_provisioning_functions.sql
+-- WP-4 rework round 2 (supervisor ruling 2026-09-06, wp4-rework-2.md #2):
+-- `-v ON_ERROR_STOP=1` must be passed on every `-f` invocation -- without
+-- it, psql exits 0 even when a statement in this file errors out.
+--
+--   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0002_provisioning_functions.sql
 --
 -- `R2DBSVC_CONTROL_DSN` is an environment-variable name (the DSN for the
 -- `r2dbsvc_control` role against `r2dbsvc_platform`); see r2db-api/docs/.
