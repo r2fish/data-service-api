@@ -49,6 +49,10 @@ repository's "空振り禁止" discipline).
 """
 from __future__ import annotations
 
+import ast
+import inspect
+from pathlib import Path
+
 import pytest
 
 from adapter import (
@@ -297,61 +301,81 @@ def _drive_schema_objects(adapter: ConformanceAdapter) -> bool:
 
 
 def _drive_operation_depth(adapter: ConformanceAdapter) -> bool:
+    """Phase 8 WP-1b (R-A 監督裁定 2026-09-06): recipe replaced. The
+    pre-WP-1b recipe (flat insert = declared bound 4, the same insert
+    plus a `where` filter = bound+1) forced the isolated profile's
+    `operation_depth` down to 4 -- but at 4, EVERY `where`-carrying
+    mutation (`update`/`delete`, MitateDB's own only destructive
+    operation included) sits at REAL depth 5 on the wire and was
+    therefore spuriously `LIMIT_EXCEEDED`(`operation_depth`) on the
+    isolated surface, not merely the deliberately-oversized N+1 probe
+    (measured, WP-1a rework: `MitateDB-api-http`'s own real `delete()`
+    probe in `test_c04_unsupported_and_safe_errors.py` was failing for
+    exactly this reason). The isolated profile's `operation_depth` is
+    raised to 5 (every adapter's own isolated-profile comment) and this
+    driver's own recipe moves onto a genuinely valid, `where`-carrying
+    mutation instead of a structurally-invalid one.
+
+    New recipe: N is an ordinary `update` with a real, scalar `where`
+    filter -- measured (below) to sit EXACTLY at real depth 5 on every
+    plug (`{"entity":..., "operations": [{"operation": "update",
+    "values": {...}, "where": [{"field":..., "operator": "eq", "value":
+    ...}]}]}`: request(1)->operations list(2)->operation dict(3)->where
+    list(4)->predicate dict(5) -- identical structure/depth on r2db (this
+    is r2db's own SOLE mutation dispatch shape, both plugs) and on
+    MitateDB (the real HTTP wire dispatch, `http.py::post_mutate`'s own
+    `_mutation_item`/`session.transact()`, and -- as of this WP --
+    the in-process plug's own `attempt_mutation`, routed through the
+    SAME `transact()` entry point for `operation="update"` with a filter,
+    `conformance_adapter_mitatedb.py::_attempt_mutation_outcome`'s own
+    comment has the full trace). N+1 is the SAME update with its
+    predicate's `value` itself replaced by a one-element container (a
+    list) -- adds exactly one nesting level (the predicate dict's own
+    `value` slot, checked at nesting level 6) -- deterministically
+    `LIMIT_EXCEEDED`(`operation_depth`), before any content validation of
+    that (semantically invalid for an `eq` predicate) container value
+    ever runs, on every plug this driver is invoked against -- the depth
+    check precedes content validation on both peers (r2db `service.py`'s
+    own call order; MitateDB `cell.py::ApplicationCell._limit_gate`'s
+    identical ordering, Phase 8 WP-1a D-1)."""
     with adapter.isolated_application_surface() as iso:
         doc = iso.capability_document()
         if doc.get("limit_enforcement", {}).get("operation_depth") != "enforced":
             return False
-        # 差し戻し指示 5(c): read the declared bound from the capability
-        # document (never trust it only by comment) and assert BOTH the
-        # same exercisability ceiling every other count-valued driver in
-        # this file asserts (mirrors `test_c14_authority_boundary.py:141`/
-        # `:476`'s own identical `_MAX_EXERCISABLE_LIMIT` check) AND the
-        # "flat insert sits at exactly the declared bound" premise the
-        # N/N+1 recipe below depends on -- silently trusting the prose
-        # comment (review finding F5(c): no bound was ever read here at
-        # all) would let a profile/port-shape drift go undetected.
+        # 差し戻し指示 5(c) (unchanged rationale, carried over WP-1b): read
+        # the declared bound from the capability document (never trust it
+        # only by comment) and assert BOTH the same exercisability
+        # ceiling every other count-valued driver in this file asserts
+        # AND the "update+where sits at exactly the declared bound"
+        # premise the N/N+1 recipe below depends on.
         bound = doc["limits"]["operation_depth"]
         assert bound <= _MAX_EXERCISABLE_LIMIT, f"{adapter.name}: operation_depth={bound} exceeds {_MAX_EXERCISABLE_LIMIT}"
-        # A flat `{"entity": ..., "operations": [{"operation": "insert",
-        # "values": {field: value}}]}` mutation request is measured
-        # (`r2db-api/src/r2db_api/limits.py::check_depth`, `service.py`'s
-        # own `_mutate_outcome`) to sit at REAL depth 4: the request dict
-        # itself (1) -> its `operations` list (2) -> one operation dict
-        # (3) -> that operation's own `values` dict (4). Both r2db
-        # conformance plugs' own isolated profiles declare
-        # `operation_depth=4` (`conformance_adapter_r2db.py:149`/
-        # `conformance_adapter_r2db_http.py:759`) for exactly this reason
-        # -- asserting the correspondence here, not only stating it in a
-        # comment, is what turns "flat insert = declared N" into a real,
-        # checkable premise rather than an assumption this driver's N/N+1
-        # recipe silently depends on.
-        assert bound == 4, (
-            f"{adapter.name}: operation_depth isolated profile bound is {bound}, but this driver's flat-"
-            "insert recipe is measured (r2db limits.py::check_depth) to sit at real depth 4 -- update BOTH "
-            "the isolated profile's operation_depth and this assertion together if the recipe's measured "
-            "depth ever changes"
+        assert bound == 5, (
+            f"{adapter.name}: operation_depth isolated profile bound is {bound}, but this driver's update-"
+            "with-where recipe is measured (this module's own docstring above) to sit at real depth 5 -- "
+            "update BOTH the isolated profile's operation_depth and this assertion together if the "
+            "recipe's measured depth ever changes"
         )
         dev, rt, _ = _provision_pair(iso)
         entity = fresh_identifier("c05od")
         iso.create_entity(dev, entity, {"label": "text"})
+        iso.insert(rt, entity, {"label": "seed"})
 
-        # N: an ordinary, flat insert -- by construction of the isolated
-        # profile's own `operation_depth` bound, this is EXACTLY at the
-        # declared position (adapter.py's own isolated_application_
-        # surface() docstring / each plug's own module comment / the
-        # bound-vs-recipe assertion above).
-        iso.attempt_mutation(rt, entity, "insert", values={"label": "x"}, where_field=None, where_value=None)
+        # N: an ordinary, genuinely valid `update` with a real scalar
+        # `where` filter -- by construction of the isolated profile's own
+        # `operation_depth` bound, this sits EXACTLY at the declared
+        # position (this driver's own docstring / each plug's own module
+        # comment / the bound-vs-recipe assertion above). Content is as
+        # valid as it looks: the filter matches the row just inserted.
+        iso.attempt_mutation(rt, entity, "update", values={"label": "n"}, where_field="label", where_value="seed")
 
-        # N+1: the SAME insert, with an added `where` filter -- adds one
-        # nesting level. `insert` does not accept a filter at all
-        # (semantically invalid), but `check_depth` runs BEFORE that
-        # content check on both peers (r2db `service.py`'s own call
-        # order; MitateDB has no such check at all -- excluded above by
-        # its own `unavailable` declaration), so the REAL, observed
-        # denial is deterministically LIMIT_EXCEEDED, never
-        # VALIDATION_FAILED.
+        # N+1: the SAME update, with the where-clause's own `value`
+        # replaced by a one-element list -- adds exactly one nesting
+        # level under the predicate dict. See this function's own
+        # docstring for why the observed denial is deterministically
+        # LIMIT_EXCEEDED, never VALIDATION_FAILED, on every plug.
         with pytest.raises(ConformanceDenial) as excinfo:
-            iso.attempt_mutation(rt, entity, "insert", values={"label": "x"}, where_field="label", where_value="x")
+            iso.attempt_mutation(rt, entity, "update", values={"label": "n"}, where_field="label", where_value=["seed"])
         _assert_limit_exceeded(excinfo.value, "operation_depth", adapter_name=adapter.name)
         return True
 
@@ -372,14 +396,40 @@ def _drive_requests_per_minute(adapter: ConformanceAdapter) -> bool:
         # needed for it (condition 13(b)'s own "検算した headroom 前提").
         iso.create_entity(dev, entity, {"label": "text"})
 
-        # Measured (WP-4): both HTTP plugs' own `authenticate()` (above,
-        # via `_provision_pair`) is a REAL `GET /v1/capabilities` round
-        # trip under the SAME runtime credential -- it consumes exactly 1
-        # unit of the SAME rate window this drive measures (unlike the
-        # in-process plugs' own `authenticate()`, a bare local lookup that
-        # never touches `_slot()`/`_acquire_rate` at all). The exact
-        # position this drive must observe is therefore `bound - 1` on an
-        # HTTP plug, `bound` on an in-process one.
+        # Measured (WP-4, r2db-api-http): `r2db-api-http`'s own
+        # `authenticate()` (above, via `_provision_pair`) is a REAL
+        # `GET /v1/capabilities` round trip under the SAME runtime
+        # credential -- it consumes exactly 1 unit of the SAME rate
+        # window this drive measures (unlike the in-process plugs' own
+        # `authenticate()`, a bare local lookup that never touches
+        # `_slot()`/`_acquire_rate` at all), because r2db's own
+        # capabilities-equivalent call passes through the SAME `_slot`
+        # every other application-plane operation does.
+        #
+        # Re-measured for MitateDB-api-http (Phase 8 WP-1a rework 1,
+        # 裁定 3, 監督裁定 2026-09-06, design D-2 "検査の形" `already_
+        # consumed`再測定, work order §2 WP-1a 完了条件 13): the WP-1a
+        # report's original measurement here (`ApplicationRuntime.
+        # capabilities()` deliberately NOT wrapped by `_limit_gate`, so
+        # `already_consumed=0` on this plug) was true of THAT commit but
+        # is no longer true after 裁定 3 -- `capabilities()`/`catalog()`/
+        # `schema_revision()` are now wrapped by `_limit_gate` (rate/
+        # concurrency only) on BOTH MitateDB surfaces, matching r2db's own
+        # `capabilities()` (`service.py:877`, inside `_slot`) -- so
+        # `HttpService.authenticate`'s own `GET /v1/capabilities` round
+        # trip now consumes exactly 1 unit of the SAME `requests_per_
+        # minute` window this drive measures, under the SAME runtime
+        # credential, on `MitateDB-api-http` too. Confirmed empirically
+        # (WP-1a rework report): at `bound=50`, `MitateDB-api-http`
+        # observes exactly `49` successful inserts before the denial, not
+        # `50`. `already_consumed` is therefore `1` for EVERY HTTP plug
+        # (both peers alike) and `0` for every in-process plug (both
+        # peers' own in-process `authenticate()` stays a bare local
+        # lookup that never touches the gate at all) -- a genuinely
+        # TRANSPORT-specific fact now, not a peer-specific one; the
+        # earlier peer-name pin (`adapter.name == "r2db-api
+        # (http+postgres)"`) is reverted to the general, transport-keyed
+        # check it replaced.
         already_consumed = 1 if "http" in adapter.name else 0
         expected_successes = bound - already_consumed
 
@@ -461,17 +511,47 @@ def _drive_request_bytes(adapter: ConformanceAdapter) -> bool:
 
 
 def _drive_result_items(adapter: ConformanceAdapter) -> bool:
-    # design D-6.2: one-sided ONLY on `r2db-api` (both plugs) -- MitateDB's
-    # own `result_items` enforcement (`cell.py`) triggers on the
-    # REQUESTED page/limit value, which this port's `select_eq`/`attempt_
-    # filter` never expose a parameter for at all; there is structurally
-    # no request this file can construct through the port that would ever
-    # reach MitateDB's own check. Disclosed in CONDITIONS.md's C-05 row
-    # (differs from the design's own draft table, which did not carry
-    # this port-shape detail -- 両側化ではなく「駆動しない」への格下げで
-    # あり、理由を開示する, 完了条件16).
-    if not adapter.name.startswith("r2db-api"):
-        return False
+    """Phase 8 WP-1b (R-C, port v1.12 L7-21): two-sided on all 4 plugs, as
+    of port v1.12's own `limit` optional field on `select_eq`. Previously
+    one-sided and peer-name-excluded to `r2db-api` alone (this port had
+    no way at all to carry a client-requested page size to MitateDB's own
+    REQUESTED-limit-value check, `cell.py::ApplicationCell.read`'s own
+    `limit > self.config.max_result_rows` guard) -- `select_eq`'s new
+    `limit` keyword removes that port-shape gap entirely, and the two
+    peers' own real checks (measured, design D-2/§6.2) agree at the
+    SAME N/N+1 position for this recipe: r2db checks `min(len(rows),
+    page_size)` against the bound (`postgres.py:1069`/`structured.py:
+    1198`) -- with `bound+1` ACTUAL rows present, `min(bound+1,
+    page_size)` equals `page_size` for both `page_size=bound` (succeeds)
+    and `page_size=bound+1` (denied); MitateDB checks the REQUESTED
+    `limit` value directly, independent of how many rows actually match
+    (`cell.py`'s own guard fires before the backend read runs at all) --
+    so both peers deny the SAME `page_size=bound+1` request and permit
+    the SAME `page_size=bound` one.
+
+    Phase 8 WP-1 rework 3 (裁定 4(乙), 監督裁定 2026-09-07): the table gets
+    exactly `bound + 1` matching rows inserted ONCE, and the two calls
+    below differ ONLY in the `limit` they request -- the success call
+    uses `limit=bound`, the denied call uses `limit=bound+1`, against the
+    SAME unchanged row count both times. The earlier recipe instead held
+    the row count fixed at `limit` for each call (insert `bound` rows,
+    drive `limit=bound`; insert one more, drive `limit=bound+1`), which
+    left `limit` un-load-bearing on r2db-api specifically: mutation-
+    verified (dropping r2db in-process `select_eq`'s own `limit` kwarg
+    entirely, defaulting `page_size` to `DataService.query`'s own
+    pre-existing default of 100) that the OLD recipe stayed green even
+    with `limit` completely ignored, because r2db's own check compares
+    the ACTUAL returned row count against the bound, and the actual row
+    count alone (bound vs. bound+1) already determined the N/N+1 outcome
+    regardless of what page size was requested -- the default of 100 was
+    generously larger than either row count either way. Fixing the row
+    count at `bound + 1` for BOTH calls removes that degree of freedom:
+    if `limit` were ignored now, the success call's own default page size
+    (100) would return all `bound + 1` matching rows, which exceeds the
+    bound and would wrongly deny the success call -- `limit` is therefore
+    now load-bearing on r2db-api too, not only on MitateDB-api (where the
+    REQUESTED `limit` value was always checked directly, independent of
+    row count, and remains so under this recipe)."""
     with adapter.isolated_application_surface() as iso:
         doc = iso.capability_document()
         if doc.get("limit_enforcement", {}).get("result_items") != "enforced":
@@ -481,48 +561,162 @@ def _drive_result_items(adapter: ConformanceAdapter) -> bool:
         dev, rt, _ = _provision_pair(iso)
         entity = fresh_identifier("c05ri")
         iso.create_entity(dev, entity, {"probe": "text"})
-        for _ in range(bound):
+        # `bound + 1` matching rows, inserted exactly once -- the row
+        # count never changes between the two calls below (see this
+        # function's own docstring, 裁定 4(乙)).
+        for _ in range(bound + 1):
             iso.insert(rt, entity, {"probe": "same"})
 
-        rows = iso.select_eq(rt, entity, ["probe"], "probe", "same")
-        assert len(rows) == bound, f"{adapter.name}: expected exactly {bound} matching rows, got {len(rows)}"
+        # N: `limit=bound` against `bound + 1` actual matching rows -- both
+        # peers' own checks agree this succeeds ONLY because `limit`
+        # itself caps what is considered (r2db: `page_size` bounds the
+        # actual query result to `bound` rows before the length check
+        # runs; MitateDB: the requested value is checked directly against
+        # the bound, before the backend read even runs).
+        rows = iso.select_eq(rt, entity, ["probe"], "probe", "same", limit=bound)
+        assert len(rows) == bound, f"{adapter.name}: expected exactly {bound} matching rows at page size {bound}, got {len(rows)}"
 
-        iso.insert(rt, entity, {"probe": "same"})
+        # N+1: the SAME `bound + 1` actual matching rows, `limit=bound+1`
+        # -- both peers' own checks agree this is denied (see this
+        # function's own docstring for why the two peers' real check
+        # shapes agree at this exact position).
         with pytest.raises(ConformanceDenial) as excinfo:
-            iso.select_eq(rt, entity, ["probe"], "probe", "same")
+            iso.select_eq(rt, entity, ["probe"], "probe", "same", limit=bound + 1)
         _assert_limit_exceeded(excinfo.value, "result_items", adapter_name=adapter.name)
         return True
 
 
 def _drive_query_complexity(adapter: ConformanceAdapter) -> bool:
-    # design D-6.2: one-sided ONLY on `r2db-api` (both plugs) -- r2db's own
-    # complexity metric (`len(where) + len(select) + order_by_count`,
-    # `structured.py`) can be driven purely through `select_eq`'s own
-    # `select` list length; MitateDB's own metric is `len(filters)` ONLY
-    # (`cell.py`), and this port's `select_eq`/`attempt_filter` can never
-    # present more than ONE filter predicate in a single call, so no
-    # request this file can construct through the port ever reaches
-    # MitateDB's own check either. Same disclosed downgrade as
-    # `result_items` above.
-    if not adapter.name.startswith("r2db-api"):
-        return False
+    """Phase 8 WP-1b (R-C, port v1.12 L7-21): peer-name exclusion removed
+    (this driver now runs, and observes, on every plug whose declaration
+    is `enforced`) -- but the recipe STAYS ONE-SIDED, a CONCLUSION, not an
+    artifact of the exclusion that used to sit here (design D-2's own
+    "算術的理由": r2db's metric is `len(where) + len(select) +
+    order_by_count`, MitateDB's is `len(filters)` alone -- a single
+    identical request cannot occupy the SAME N/N+1 position on both
+    peers' own arithmetic at once). Driven via port v1.12's own
+    `attempt_filter(..., extra_predicates=...)` (L7-21) instead of the
+    pre-v1.12 recipe's `select`-list-length trick (which only ever
+    inflated r2db's own metric; MitateDB's metric ignores `select`
+    length entirely) -- predicate COUNT inflates both peers' own metric
+    (`len(where)` directly for r2db, `len(filters)` directly for
+    MitateDB), so the SAME request construction now drives both.
+
+    Both sides are constructed RELATIVE TO `bound` (not a small fixed
+    constant) -- `bound - 1` total predicates for the safe side, `bound
+    + 1` for the refused side -- deliberately, not merely for tightness:
+    a fixed, bound-independent safe request (e.g. always exactly 1
+    predicate) would never notice a peer that declares a `query_
+    complexity` bound larger than what it actually enforces (a real,
+    observed WP-1b mutation: inflating a declared bound by 1 while the
+    real check stays at the OLD value). Scaling with `bound` keeps this
+    one-sided check honest about the declared VALUE itself, not merely
+    about "some construction gets refused eventually"."""
     with adapter.isolated_application_surface() as iso:
         doc = iso.capability_document()
         if doc.get("limit_enforcement", {}).get("query_complexity") != "enforced":
             return False
         bound = doc["limits"]["query_complexity"]
         assert bound <= _MAX_EXERCISABLE_LIMIT, f"{adapter.name}: query_complexity={bound} exceeds {_MAX_EXERCISABLE_LIMIT}"
+        assert bound >= 2, f"{adapter.name}: query_complexity={bound} is too small for this driver's bound-1/bound+1 recipe"
         dev, rt, _ = _provision_pair(iso)
         entity = fresh_identifier("c05qc")
-        field_names = [f"f{i}" for i in range(bound + 2)]
-        iso.create_entity(dev, entity, {name: "text" for name in field_names})
-        iso.insert(rt, entity, {name: "x" for name in field_names})
+        iso.create_entity(dev, entity, {"probe": "text"})
+        iso.insert(rt, entity, {"probe": "x"})
 
-        iso.select_eq(rt, entity, [field_names[0]], None, None)
+        # one-sided (D-6.2, capability-判定化, not peer-name exclusion):
+        # `bound - 1` total predicates (the primary + `bound - 2` extra)
+        # is a safe request that stays under the bound on both peers'
+        # own real metrics -- MitateDB: `len(filters) = bound - 1 <=
+        # bound`; r2db: `len(where) + len(select) + order_by = (bound -
+        # 1) + 1 + 0 = bound <= bound` (this profile's own single-field
+        # `select` contributes exactly 1 -- the tightest margin r2db's
+        # own metric allows without a peer-specific offset, D-2's own
+        # "算術的理由").
+        safe_extra = [("probe", "eq", "x") for _ in range(bound - 2)]
+        iso.attempt_filter(rt, entity, ["probe"], "probe", "eq", "x", extra_predicates=safe_extra)
 
+        # ...`bound + 1` total predicates (one past the safe side above)
+        # is refused on every plug -- MitateDB's own `len(filters)`
+        # metric exceeds `bound` by exactly 1; r2db's own `len(where)`
+        # term ALONE already exceeds `bound` by 1 too (`order_by`/
+        # `select` need not even be considered). This does not attempt
+        # to make the two peers' N/N+1 POSITIONS coincide (this
+        # function's own docstring: they cannot, by construction), only
+        # that both refuse a request exactly 1 past their own declared
+        # bound -- tight enough that an inflated declaration is caught
+        # on the safe side above instead of masked by a generous margin.
+        refused_extra = [("probe", "eq", "x") for _ in range(bound)]
         with pytest.raises(ConformanceDenial) as excinfo:
-            iso.select_eq(rt, entity, field_names, None, None)
+            iso.attempt_filter(rt, entity, ["probe"], "probe", "eq", "x", extra_predicates=refused_extra)
         _assert_limit_exceeded(excinfo.value, "query_complexity", adapter_name=adapter.name)
+        return True
+
+
+def _drive_concurrency(adapter: ConformanceAdapter) -> bool:
+    """Phase 8 WP-1b (R-C, port v1.12 D-2): the ONE application-plane
+    class no prior port revision could drive at all -- `port.hold_in_
+    flight(session, n)` (new in v1.12) genuinely holds `n` real
+    application-plane requests in-flight (see that method's own
+    docstring, `adapter.py`, for the exact stop-point contract every
+    plug realizes it against). Recipe: bound N held in flight -> N+1st
+    ordinary request denied (`concurrency`) -> release -> the N held
+    requests all complete successfully AND an ordinary request succeeds
+    again."""
+    with adapter.isolated_application_surface() as iso:
+        doc = iso.capability_document()
+        if doc.get("limit_enforcement", {}).get("concurrency") != "enforced":
+            return False
+        bound = doc["limits"]["concurrency"]
+        assert bound <= _MAX_EXERCISABLE_LIMIT, f"{adapter.name}: concurrency={bound} exceeds {_MAX_EXERCISABLE_LIMIT}"
+        assert bound >= 1, f"{adapter.name}: concurrency bound {bound!r} is not >= 1 -- cannot hold anything in flight"
+
+        dev, rt, _ = _provision_pair(iso)
+        entity = fresh_identifier("c05cc")
+        iso.create_entity(dev, entity, {"label": "text"})
+
+        # Rate headroom (design D-2 検査の形): r2db's own `_slot` checks
+        # `requests_per_minute` BEFORE `concurrency` -- if this drive's
+        # own `bound` held requests plus the N+1 probe below would
+        # exhaust the SAME runtime credential's rate window first, the
+        # observed denial would be `requests_per_minute`, not
+        # `concurrency`, for a reason unrelated to what this driver
+        # means to exercise. `create_entity` above runs under the
+        # DEVELOPER credential's own separate window (unrelated to `rt`'s
+        # own), so no headroom needs subtracting for it.
+        if doc.get("limit_enforcement", {}).get("requests_per_minute") == "enforced":
+            rpm_bound = doc["limits"]["requests_per_minute"]
+            assert rpm_bound >= bound + 1, (
+                f"{adapter.name}: requests_per_minute headroom ({rpm_bound}) is not >= concurrency bound+1 "
+                f"({bound + 1}) -- the N+1 probe below could be denied by requests_per_minute instead of "
+                "concurrency, making the observed denial ambiguous"
+            )
+
+        # Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): `held` is the
+        # `as`-bound value `hold_in_flight` itself yields -- the REAL,
+        # measured count of requests that reached the stall point
+        # (`entered_count`, from each realization's own `threading.
+        # Semaphore`-driven wait loop), never a copy of `bound` assigned
+        # by this test. The previous `held = bound; assert held >= 1` was
+        # a tautology restating `bound >= 1` (already asserted above) --
+        # it would stay green even if `hold_in_flight` held ZERO requests
+        # in practice, because `held` was never anything but `bound`
+        # itself. Asserting the yielded value instead makes this a
+        # genuine non-vacuity check on the primitive's own real behavior.
+        with iso.hold_in_flight(rt, bound) as held:
+            assert held >= 1, f"{adapter.name}: hold_in_flight held zero requests -- nothing was exercised"
+            with pytest.raises(ConformanceDenial) as excinfo:
+                iso.insert(rt, entity, {"label": "n_plus_1"})
+            _assert_limit_exceeded(excinfo.value, "concurrency", adapter_name=adapter.name)
+        # Released: `hold_in_flight.__exit__` has already joined every one
+        # of the `bound` held requests and re-raised on any failure (its
+        # own docstring's "抜ける時点で n 個の完了を待ち合わせる") -- an
+        # ordinary request succeeding again, right after, is this
+        # driver's own OBSERVABLE confirmation that release genuinely
+        # freed the counter back down (a broken realization that does
+        # not actually wait for the held requests to unwind would still
+        # be occupying the counter here, denying this exact call).
+        iso.insert(rt, entity, {"label": "after_release"})
         return True
 
 
@@ -535,6 +729,7 @@ _V2_DRIVERS = {
     "request_bytes": _drive_request_bytes,
     "result_items": _drive_result_items,
     "query_complexity": _drive_query_complexity,
+    "concurrency": _drive_concurrency,
 }
 
 
@@ -581,6 +776,41 @@ def test_c05_all_plug_names_match_the_registry() -> None:
     assert len(_ALL_PLUG_NAMES) == 4
 
 
+# Phase 8 WP-1 rework 3 (裁定 1, 監督裁定 2026-09-07): the sentence below is
+# a literal, character-for-character copy of docs/design/PHASE8_EFFECTIVE_
+# BOUNDS_AND_HYGIENE_V1.md §3 D-2 決定 1's own decision text (via the
+# supervisor's own confirmed-text copy of it) -- pinned here so this test
+# fails loud the moment `ConformanceAdapter.hold_in_flight`'s own port
+# docstring (`adapter.py`) stops carrying it unparaphrased. 常設規律 4
+# forbids paraphrasing a confirmed decision; this constant itself must
+# therefore never be edited to "improve" wording -- only to follow a new,
+# later, equally-verbatim supervisor ruling that supersedes this one.
+_HOLD_IN_FLIGHT_RULING_SENTENCE_VERBATIM = (
+    "n 個の application plane 要求を、service の in-flight 窓の内側で停止させ"
+    "たまま保持する。保持中に n+1 個目を出すと `LIMIT_EXCEEDED`(`concurrency`)"
+    " で拒否される。解放後、保持していた n 個はすべて正常に完了する"
+)
+
+
+def test_c05_hold_in_flight_port_docstring_carries_the_ruling_sentence_verbatim() -> None:
+    """裁定 1 (監督裁定 2026-09-07): `phase8-ruling-verbatim.txt`'s own
+    confirmed `hold_in_flight` decision sentence must appear in `Conformance
+    Adapter.hold_in_flight`'s own port-level docstring UNPARAPHRASED --
+    `CONFORMANCE_ADAPTER_V1.md` §22.1 already claims this ("carried into
+    the port docstring unparaphrased, per 常設規律 4"); this test is what
+    makes that claim checked, not merely asserted in prose. A plain
+    substring check (not a word-diff/fuzzy match) is deliberate: anything
+    short of an exact, contiguous character match IS a paraphrase for this
+    purpose."""
+    doc = ConformanceAdapter.hold_in_flight.__doc__ or ""
+    occurrences = doc.count(_HOLD_IN_FLIGHT_RULING_SENTENCE_VERBATIM)
+    assert occurrences >= 1, (
+        "ConformanceAdapter.hold_in_flight's own docstring no longer carries "
+        "the confirmed ruling sentence verbatim (observed count "
+        f"{occurrences}) -- 常設規律 4 violation"
+    )
+
+
 def test_c05_v1_application_plane_self_consistency(adapter: ConformanceAdapter) -> None:
     document = adapter.capability_document()
     _assert_v1_self_consistency(
@@ -618,16 +848,24 @@ def test_c05_v1_d_unavailable_class_may_still_publish_a_limits_value(adapter: Co
     honest declaration ("this surface publishes a bound, but has no
     enforcement layer for it"), not a contradiction -- the WITHDRAWN rule
     ("unavailable classes carry no limits value") must not have silently
-    come back. `MitateDB-api` (in-process)'s own real `request_bytes`
-    (`cell.py:1491` publishes a value, `:1502` declares `unavailable`) is
-    the one currently-registered case.
+    come back. Phase 8 WP-1 rework 3 (裁定 3, 監督裁定 2026-09-07,
+    correcting this docstring's own stale claim): no adapter currently
+    registered exhibits this combination any more. `MitateDB-api`
+    (in-process)'s own former `request_bytes` case (`cell.py:1491`
+    published a value, `:1502` declared `unavailable`, at the time this
+    docstring was first written) was WP-1a's own one currently-registered
+    instance; Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06) then
+    flipped this same peer's `operation_depth` to `enforced` too, so the
+    combination this test protects is now observed on none of the 4 plugs
+    (see this function's own body comment below for the measured trace).
 
     差し戻し指示 6 (review finding F6): the previous body's only assertion
     was a bare `assert True` inside an `if` -- a tautology that would stay
     green NO MATTER WHAT `_assert_v1_self_consistency` did internally,
     directly contradicting this test's own (now corrected) docstring claim
     that it protects against (d)'s withdrawn rule being re-imposed INSIDE
-    that helper. Made genuinely effective two ways: (1) actually CALL
+    that helper. Made genuinely effective the one way that still applies
+    now that the combination is vacuous on every plug: actually CALL
     `_assert_v1_self_consistency` (with `required_fixed=()` / `capability_
     conditioned=None` / `audit_conditioned=False` -- this function's own
     defaults, deliberately keeping (e)'s required-entry sets out of scope,
@@ -635,27 +873,35 @@ def test_c05_v1_d_unavailable_class_may_still_publish_a_limits_value(adapter: Co
     adapter's own real declaration may carry such a combination on --
     if a future edit ever added a rejection of the unavailable+value
     combination inside that helper, THIS call raises and this test goes
-    red, exactly what the docstring claims; (2) a real, non-tautological
-    non-vacuity assertion on `MitateDB-api` specifically (the one plug the
-    docstring already names as genuinely non-vacuous) that the combination
-    is actually observed -- harmless on every other plug, per the
-    docstring, because `required=False` there, not because the assertion
-    itself is vacuous."""
+    red, exactly what the docstring claims. The former second half (a
+    non-vacuity assertion on `MitateDB-api` specifically) is REMOVED
+    below, for the same reason this docstring's opening paragraph now
+    states: the combination it checked for is no longer observed
+    anywhere."""
     document = adapter.capability_document()
     _assert_v1_self_consistency(document, adapter_name=adapter.name, plane="application")
 
-    limits = document.get("limits", {}) or {}
-    enforcement = document.get("limit_enforcement", {}) or {}
-    found = any(
-        status in ("unavailable", "deployment_required") and cls in limits
-        for cls, status in enforcement.items()
-    )
-    if adapter.name == "MitateDB-api":
-        assert found, (
-            f"{adapter.name}: expected an unavailable/deployment_required class to still publish a "
-            "limits value (cell.py's own request_bytes) -- this is the ONE currently-registered case "
-            "this control test exists to protect"
-        )
+    # Phase 8 WP-1a (design D-1 "検査の形"/work order §2 WP-1a 完了条件 10):
+    # the V1 statistical-control assert this block used to carry ("at
+    # least one unavailable/deployment_required class still publishes a
+    # `limits` value") is REMOVED in the same commit that flips `request_
+    # bytes` to `enforced` on this peer -- that flip was the combination's
+    # ONE currently-registered real-world instance AT THE TIME (this
+    # test's own former docstring named it explicitly). Phase 8 WP-1a
+    # rework 1 (裁定 1, 監督裁定 2026-09-06) then flipped this same peer's
+    # `operation_depth` to `enforced` too (measured: `_check_operation_
+    # depth` genuinely runs in-process via `_limit_gate`, wired at
+    # `cell.py:531`, and traverses the real request dict every in-process
+    # `insert`/`update`/`delete`/`transact` call site builds -- see that
+    # class's own `limit_enforcement` comment, `cell.py:1875-1926`, for
+    # the full trace), so as of Phase 8 WP-1 rework 3 (裁定 3, 監督裁定
+    # 2026-09-07) the combination is observed on NEITHER class, on NO
+    # plug. The PROPOSITION this control protected -- V1 (d): an
+    # `unavailable`/`deployment_required` entry MAY still carry a `limits`
+    # value, it is not REQUIRED to -- remains fully enforced by `_assert_
+    # v1_self_consistency` above (every plug, unconditionally); only the
+    # non-vacuity OBSERVATION that some real declaration exercises that
+    # allowance is what this WP removes.
 
 
 # ---------------------------------------------------------------------------
@@ -684,30 +930,251 @@ def test_c05_v2_declaration_and_position_agree(adapter: ConformanceAdapter) -> N
 
 
 # ---------------------------------------------------------------------------
+# L7-21 (Phase 8 WP-1b, R-C, design D-2 実装の形 (c)): peer-name-gated
+# drive-or-not is closed as a STATIC property of this module's own source,
+# not merely an absence observed at runtime on the currently-registered 4
+# plugs. Two propositions, each its own test (design's own instruction:
+# do NOT collapse this into "zero `adapter.name.startswith(` in the whole
+# file" -- that form would also flag the 3 allowlisted, genuinely
+# peer-specific FACTS below, none of which decide "drive or not").
+# ---------------------------------------------------------------------------
+
+# The allowlist (design D-2 実装の形 (c) 表, WP-1b): every remaining
+# `adapter.name` READ in this module that survives after `_drive_result_
+# items`'/`_drive_query_complexity`'s own peer-name exclusions are
+# removed (this WP) and `test_c05:646-659`'s V1 statistical control is
+# removed (WP-1a) -- 3 functions, each reading `adapter.name` for a
+# genuine peer-specific FACT (a counting rule, a transport-specific
+# already-consumed correction, an observation-mechanism difference),
+# never to decide whether a class is driven at all.
+_ADAPTER_NAME_READ_ALLOWLIST = {
+    "_schema_objects_unit_cost": (
+        "peer ごとの実測計数規則 (r2db は entity+field 数で 3、MitateDB は table 1 個で 1) -- "
+        "駆動可否ではなく期待値の計算である"
+    ),
+    "_drive_requests_per_minute": (
+        "HTTP plug の authenticate() が同じ rate 窓を1単位消費することの補正 (already_consumed) -- "
+        "駆動可否ではなく観測位置の補正である (transport-specific, peer非依存)"
+    ),
+    "test_c05_e_isolated_application_surface_releases_resources": (
+        "MitateDB in-process (SQLite) 固有の資源解放観測経路 -- 駆動可否ではなく観測手段の違いである"
+    ),
+}
+
+# Phase 8 WP-1 rework 2 (裁定 5, 監督裁定 2026-09-07): replaces the prior
+# `_ADAPTER_NAME_DECISION_PATTERN` regex-over-raw-source approach, which
+# the review found matched inside COMMENTS and DOCSTRINGS as readily as
+# inside real code (a function whose only real-code `adapter.name` read
+# is `"http" in adapter.name` -- a membership test the regex's own
+# `.startswith(`/`==` alternation never covered -- passed the old scan
+# only because an unrelated comment a few lines above happened to
+# contain the literal text `adapter.name == "r2db-api (http+postgres)"`
+# -- a citation of a name this WP's own predecessor already removed,
+# not a live decision). This visitor walks REAL AST NODES only
+# (`ast.Compare`/`ast.Call`) -- a comment or docstring is not parsed
+# into any node at all, so it structurally cannot produce a match here.
+
+
+def _is_adapter_name_attr(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "name"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "adapter"
+    )
+
+
+class _AdapterNameReadVisitor(ast.NodeVisitor):
+    """L7-21 (ii) (design D-2 実装の形 (c), 裁定 5 訂正): walks every
+    `ast.FunctionDef` / `ast.AsyncFunctionDef` scope AND module-level
+    (top-level, outside any function -- `<module>`) statements, and
+    records a match only for a genuine peer-name EQUALITY (`adapter.name
+    == "..."`), MEMBERSHIP (`"..." in adapter.name`), or PREFIX
+    (`adapter.name.startswith(...)`) test found as a real `ast.Compare`/
+    `ast.Call` node -- never a textual scan over the function's raw
+    source (which would also match inside a comment or docstring; see
+    this module's own history for why that mattered). Each match is
+    attributed to its own INNERMOST enclosing function/async-function
+    name (or `"<module>"`)."""
+
+    def __init__(self) -> None:
+        self.matches: list[tuple[str, int]] = []
+        self._scope_stack: list[str] = ["<module>"]
+
+    def _enter_scope(self, node: ast.AST, name: str) -> None:
+        self._scope_stack.append(name)
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._enter_scope(node, node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self._enter_scope(node, node.name)
+
+    def visit_Compare(self, node: ast.Compare) -> None:  # noqa: N802
+        operands = [node.left, *node.comparators]
+        if any(_is_adapter_name_attr(operand) for operand in operands):
+            if any(isinstance(op, (ast.Eq, ast.In)) for op in node.ops):
+                self.matches.append((self._scope_stack[-1], node.lineno))
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "startswith"
+            and _is_adapter_name_attr(node.func.value)
+        ):
+            self.matches.append((self._scope_stack[-1], node.lineno))
+        self.generic_visit(node)
+
+
+def _if_gates_return_false_on_adapter_name(if_node: ast.If) -> bool:
+    """Real-AST check (裁定 5, 監督裁定 2026-09-07): does this `If` node's
+    own `test` read `adapter.name` in a genuine peer-name equality
+    (`==`)/membership (`in`)/prefix (`.startswith(`) comparison -- the
+    SAME `ast.Compare`/`ast.Call` shapes `_AdapterNameReadVisitor` above
+    recognizes for L7-21 (ii), reused here rather than re-implemented --
+    AND does its own `body` (the statements INSIDE the `if`, not any
+    nested scope) contain a bare `return False`. This is the "drive or
+    not, decided by which peer this is" shape L7-21 (i) forbids inside a
+    `_V2_DRIVERS` function body."""
+    test_visitor = _AdapterNameReadVisitor()
+    test_visitor.visit(if_node.test)
+    if not test_visitor.matches:
+        return False
+    return any(
+        isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant) and stmt.value.value is False
+        for stmt in if_node.body
+    )
+
+
+def test_c05_l7_21_v2_drivers_do_not_gate_drive_or_not_on_peer_name() -> None:
+    """L7-21 (i) (design D-2 実装の形 (c)): none of `_V2_DRIVERS`' own
+    driver function BODIES contains an early `if <adapter.name
+    comparison>: return False` -- whether a class is driven at all is
+    decided purely by this plug's own LIVE declaration
+    (`limit_enforcement`) and (for `result_items`/`query_complexity`)
+    port v1.12's own optional fields, never by which peer this is.
+
+    Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): replaces the
+    prior TEXT-line scan (`inspect.getsource(...).splitlines()` + string
+    `in`/`==` matching over raw source text) with the SAME real-AST-node
+    discipline `test_c05_l7_21_adapter_name_reads_are_allowlisted` (L7-21
+    (ii), immediately below) already uses, via the shared `_AdapterName
+    ReadVisitor` -- the prior text scan was asymmetric with (ii) exactly
+    the way (ii)'s own docstring criticizes the OLD regex-over-raw-source
+    approach it replaced: a comment or docstring line containing the
+    literal text `adapter.name`/`return False` is not an AST node and
+    structurally cannot match here, unlike a plain text scan.
+
+    Mutation (design's own): reintroduce `if not adapter.name.startswith
+    ("r2db-api"): return False` at the top of `_drive_result_items` ->
+    this test goes red."""
+    assert _V2_DRIVERS, "no V2 drivers registered -- this scan would be vacuous"
+    offenders = []
+    for name, driver in _V2_DRIVERS.items():
+        func_node = ast.parse(inspect.getsource(driver)).body[0]
+        assert isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)), (
+            f"{name}: expected a plain function definition, got {type(func_node).__name__}"
+        )
+        if any(
+            isinstance(node, ast.If) and _if_gates_return_false_on_adapter_name(node)
+            for node in ast.walk(func_node)
+        ):
+            offenders.append(name)
+    assert not offenders, (
+        f"V2 driver(s) still gate whether they drive at all on adapter.name: {offenders!r} -- decide via "
+        "this plug's own live declaration/port capability instead"
+    )
+
+
+def test_c05_l7_21_adapter_name_reads_are_allowlisted() -> None:
+    """L7-21 (ii) (design D-2 実装の形 (c), 裁定 5 訂正 監督裁定
+    2026-09-07): every peer-name equality/membership/prefix test this
+    module's own source performs against the adapter's own `name`
+    attribute, found by `_AdapterNameReadVisitor` as a REAL `ast.Compare`
+    (`==`/`in`) or `ast.Call` (`.startswith(`) node -- never a comment or
+    docstring, which are not AST nodes at all -- is inside one of the 3
+    allowlisted scopes above. The walk covers `ast.FunctionDef`,
+    `ast.AsyncFunctionDef`, AND module-level (top-level) statements
+    (`裁定 5`: the prior scan covered only `ast.FunctionDef`). A SECOND
+    assertion (`裁定 5`) closes the inverse gap the prior scan's own
+    review finding exposed: every allowlist entry must itself be hit by
+    a REAL-CODE match, not merely declared -- `_drive_requests_per_
+    minute`'s own real code (`"http" in adapter.name`) previously only
+    satisfied the old regex-over-raw-source scan via an unrelated
+    COMMENT a few lines above it (a citation of a peer-name literal this
+    WP's predecessor already removed); this visitor's own `ast.Compare`
+    handling for `ast.In` now matches that real code directly, so the
+    allowlist entry is backed by an actual finding, not a comment
+    artifact. Mutation (design's own): add a fresh MitateDB-api
+    name-equality test inside some OTHER function in this file -> the
+    first assertion goes red. Mutation (裁定 5's own): remove `ast.In`
+    from `_AdapterNameReadVisitor.visit_Compare`'s accepted ops -> the
+    second assertion goes red (`_drive_requests_per_minute` loses its
+    only real-code match). (This docstring itself deliberately never
+    spells the two matched code shapes out adjacently -- doing so would
+    make this very test flag its own function.)"""
+    source = Path(__file__).read_text()
+    tree = ast.parse(source)
+    visitor = _AdapterNameReadVisitor()
+    visitor.visit(tree)
+    assert visitor.matches, (
+        "no peer-name equality/membership/prefix reads found in real code at all -- this scan would be vacuous"
+    )
+    matched_scopes = {scope for scope, _ in visitor.matches}
+    offenders = sorted(matched_scopes - set(_ADAPTER_NAME_READ_ALLOWLIST))
+    assert not offenders, f"peer-name equality/membership/prefix read outside the allowlist, in: {offenders!r}"
+    unmatched_allowlist_entries = sorted(set(_ADAPTER_NAME_READ_ALLOWLIST) - matched_scopes)
+    assert not unmatched_allowlist_entries, (
+        f"allowlist entrie(s) with no REAL-CODE adapter.name match at all (comment-only citation, or stale "
+        f"after an edit): {unmatched_allowlist_entries!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # V3 -- fail-loud: the fixed 9 are never `unavailable`, STATIC parametrize.
 # ---------------------------------------------------------------------------
 
-# design D-6.1 V3 / §7.4: MitateDB in-process is `unavailable` for 5 of the
-# fixed 9 (execution_ms/concurrency/requests_per_minute/operation_depth --
-# L7-1 -- plus request_bytes, which this peer's own `request_bytes: value +
-# unavailable` in-process declaration means V3 (unlike V1 (d)) treats as
-# indistinguishable from "not implemented", D-6.1 V3's own final
-# paragraph); MitateDB HTTP is `unavailable` for 4 (request_bytes is
-# `enforced` there, `http.py:591`'s own override). Total 5 + 4 = 9.
-# `operation_depth`'s branch was MEASURED (WP-4, not assumed): no code
-# path anywhere in `MitateDB-api/src` bounds operation/filter nesting
-# depth at all (contrast r2db's real, enforced `limits.py:88-90`).
-_V3_KNOWN_UNAVAILABLE = frozenset({
-    ("MitateDB-api", "execution_ms"),
-    ("MitateDB-api", "concurrency"),
-    ("MitateDB-api", "requests_per_minute"),
-    ("MitateDB-api", "operation_depth"),
-    ("MitateDB-api", "request_bytes"),
-    ("MitateDB-api-http", "execution_ms"),
-    ("MitateDB-api-http", "concurrency"),
-    ("MitateDB-api-http", "requests_per_minute"),
-    ("MitateDB-api-http", "operation_depth"),
-})
+# Phase 8 WP-1a (design D-1, U-1 (A) 依頼者裁定 2026-09-06): 8 of the
+# original 9 xfail'd (plug, class) pairs are REMOVED in this same commit
+# as their enforcement -- `requests_per_minute`/`concurrency`/`request_
+# bytes` are now genuinely `enforced` on BOTH MitateDB plugs (`cell.py`'s
+# own `_LimitStateHolder`/`_measure_request_bytes`), and `execution_ms`
+# is now genuinely declared `reference_wall_clock` (no longer bare
+# `unavailable`) on both, matching r2db's own identical declaration.
+#
+# `("MitateDB-api", "operation_depth")` was, at that point, the ONE pair
+# WP-1a's own report left xfail'd -- that report's own premise ("in-
+# process has no request dict to bound, because `insert`/`update`/
+# `delete` take positional/keyword ARGUMENTS, not a single dict") was
+# factually wrong, per the code review that sent WP-1a back: `_limit_gate`
+# is passed a REAL dict on every one of those call sites (`insert` builds
+# `{"collection": ..., "values": ...}`, `cell.py:770`; `update`/`delete`
+# likewise). Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06) wired
+# `_check_operation_depth` into `_limit_gate` (`cell.py:531`) for BOTH
+# surfaces and measured it directly: with the default `max_operation_
+# depth=8`, a bare `session.insert("t", {"doc": <7-levels-deep value>})`
+# deterministically raises `LIMIT_EXCEEDED`/`operation_depth`, in-process,
+# no HTTP transport involved. `("MitateDB-api", "operation_depth")` is
+# therefore ALSO removed -- `cell.py`'s own `limit_enforcement` comment
+# (`cell.py:1875-1926`) has the full trace, including the one real
+# asymmetry that DOES remain between the two surfaces (which port
+# ENTRY POINT a depth attack must use, not whether the peer enforces the
+# bound at all).
+# `("MitateDB-api-http", "operation_depth")` was already removed for its
+# own, unrelated reason: `http.py::get_capabilities` overrides this one
+# key to `enforced` for the HTTP surface (same override shape `request_
+# bytes` used to need before this WP, now retired for THAT class since
+# its own base declaration is symmetric).
+#
+# Net effect, Phase 8 WP-1 rework 3 (裁定 3, 監督裁定 2026-09-07): all 9
+# of the original xfail'd pairs are now removed -- every one of the fixed
+# 9 classes is non-`unavailable` on all 4 registered plugs (V3: `xfail`
+# count is 0, `test_c05_v3_fixed_nine_are_not_unavailable` collects no
+# `xfail`-marked case at all; see `CONDITIONS.md`'s own C-05 row).
+_V3_KNOWN_UNAVAILABLE = frozenset()
 
 
 def _v3_cases():

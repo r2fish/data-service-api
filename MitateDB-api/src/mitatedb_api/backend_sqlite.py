@@ -13,11 +13,26 @@ DATA_SERVICE_FOUNDATION.md`) -- never the production persistence topology
 """
 
 import sqlite3
+import time
 
 from .backend import SQL_OPERATOR_TOKENS
-from .errors import ConflictError, NotFoundError, ValidationError
+from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
+
+
+def _check_deadline(deadline):
+    """Phase 8 WP-1a (design D-1 "実装の形" 5: "変更はapp側deadline検査の
+    呼び出しのみ"): this backend has no native query-timeout API
+    (`sqlite3` offers none) -- unlike `backend_postgres.py`'s own real
+    `SET LOCAL statement_timeout`/`lock_timeout`, this is the app-side
+    wall-clock check `cell.ApplicationCell._limit_gate`'s own computed
+    `deadline` (`time.monotonic()` seconds) is handed to. `deadline=None`
+    (a direct caller of this backend that supplies no deadline -- this
+    repository's own tests) skips the check entirely, mirroring `backend_
+    postgres.py`'s identical `None`-means-unbounded convention."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
 
 # R-3 (design v1.1, WP-0 m-7): this set is backend-specific, unlike the
 # shared syntax allowlist in identifiers.py. `sqlite_sequence` is a real
@@ -153,7 +168,8 @@ class SQLiteBackend:
             self._db.rollback()
         self._db.execute("BEGIN")
 
-    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, audit_hook=None, deadline=None):
+        _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
             definitions.append(quote_identifier(field) + " " + _TYPES[field_type])
@@ -201,7 +217,8 @@ class SQLiteBackend:
             resolved.setdefault(field, FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
         self._declared_types[name] = resolved
 
-    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None, deadline=None):
+        _check_deadline(deadline)
         table = quote_identifier(collection)
         statement = "ALTER TABLE " + table + " ADD COLUMN " + \
             quote_identifier(field) + " " + _TYPES[field_type]
@@ -308,7 +325,8 @@ class SQLiteBackend:
             )
         return value
 
-    def insert(self, collection, fields, params):
+    def insert(self, collection, fields, params, *, deadline=None):
+        _check_deadline(deadline)
         table = quote_identifier(collection)
         columns = ", ".join(quote_identifier(field) for field in fields)
         marks = ", ".join("?" for _ in fields)
@@ -385,7 +403,8 @@ class SQLiteBackend:
                 params.append(item.value)
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
-    def read(self, collection, selected, filters, order_by, limit):
+    def read(self, collection, selected, filters, order_by, limit, *, deadline=None):
+        _check_deadline(deadline)
         table = quote_identifier(collection)
         statement = "SELECT " + ", ".join(quote_identifier(x) for x in selected) + " FROM " + table
         where, params = self._where_sql(filters)
@@ -418,7 +437,8 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return [dict(row) for row in rows]
 
-    def update(self, collection, fields, params, filters):
+    def update(self, collection, fields, params, filters, *, deadline=None):
+        _check_deadline(deadline)
         table = quote_identifier(collection)
         where, where_params = self._where_sql(filters)
         statement = "UPDATE " + table + " SET " + ", ".join(
@@ -430,7 +450,8 @@ class SQLiteBackend:
             raise NotFoundError("collection not found")
         return {"updated": cursor.rowcount}
 
-    def delete(self, collection, filters, audit_hook=None):
+    def delete(self, collection, filters, audit_hook=None, *, deadline=None):
+        _check_deadline(deadline)
         table = quote_identifier(collection)
         where, params = self._where_sql(filters)
         statement = "DELETE FROM " + table + where
@@ -451,7 +472,8 @@ class SQLiteBackend:
             raise
         return {"deleted": cursor.rowcount}
 
-    def begin(self):
+    def begin(self, *, deadline=None):
+        _check_deadline(deadline)
         # M-7 (independent review round 2): defense in depth against ANY
         # future case (not just the `OverflowError` this same round's fix
         # closes off at `encode_value`) that raises an exception `cell.

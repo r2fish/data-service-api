@@ -125,7 +125,7 @@ from .application_audit import (DEFAULT_AUDIT_BUFFER_CAPACITY,
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
-from .cell import ApplicationCell
+from .cell import ApplicationCell, _LimitStateHolder
 from .config import FoundationConfig
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
 from .http import HttpService, create_app
@@ -388,6 +388,15 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # (no in-band `register_application`/`provision_application` exists
     # yet), so there is no "unknown application shows up later" case to
     # handle lazily.
+    # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス1個)"):
+    # exactly ONE limit-state holder for this whole process -- the same
+    # one-per-process injection shape `audit_router` above already
+    # established (`cell.py`'s own pre-existing `:308-318` comment).
+    # Handed to every `ApplicationCell` this loop builds below, so
+    # `requests_per_minute`/`concurrency` are bounded across this
+    # deployment's WHOLE served application set, never per-application.
+    limit_holder = _LimitStateHolder()
+
     cells: dict[str, ApplicationCell] = {}
     for application_id in ids:
         runtime_dsn, developer_dsn = app_dsns[application_id]
@@ -419,7 +428,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             )
         cells[application_id] = ApplicationCell(
             application_id, config, audit, guard=credentials.assert_active, backend=backend,
-            audit_router=audit_router,
+            audit_router=audit_router, limit_holder=limit_holder,
         )
 
     def _cell_factory(application_id: str) -> ApplicationCell:
