@@ -49,6 +49,28 @@ test = [
     # `anyio`'s own already-symmetric placement: this tool serves the one
     # shared `conformance-tests/` suite, not either peer specifically.
     "pytest-xdist>=3.6",
+    # Phase 7 WP-6 (docs/work-orders/WORK_ORDER_PHASE7_EVIDENCE_AND_
+    # PUBLICATION_V1.md, D-4(b)(iii)): starlette.testclient's `TestClient`
+    # (21 call sites, 4 files, this peer only) prefers `httpx2` as its
+    # first import path and falls back to `httpx` with a
+    # `StarletteDeprecationWarning` when `httpx2` is absent. Declared on
+    # BOTH peers' identically-named `test` extra (mirroring this file's own
+    # already-symmetric placement of `pytest`/`httpx`/`anyio`/
+    # `pytest-xdist`) even though MitateDB-api's own tests do not import
+    # `starlette.testclient` today. `StarletteDeprecationWarning` is a
+    # `UserWarning` subclass, not a `DeprecationWarning`, so root
+    # `pyproject.toml`'s `filterwarnings = ["error::DeprecationWarning",
+    # ...]` (D-4(b)(iii)) was never going to catch the httpx fallback
+    # warning either way; `httpx2`'s actual role here is to keep that
+    # upstream fallback warning out of the warnings summary, to cover the
+    # `RuntimeError` Starlette raises if a future release drops the
+    # `httpx` fallback path outright, and to keep both peers' `[test]`
+    # extras symmetric. Evidence (wheel METADATA): `Author-email: Tom
+    # Christie`, `Maintainer-email: "Pydantic
+    # Services Inc."`, `Homepage: https://
+    # github.com/pydantic/httpx2`; Starlette 1.6.0's own `testclient.py`
+    # imports `httpx2` as its first import path.
+    "httpx2>=2.12",
 ]
 
 [tool.setuptools.package-data]
@@ -62,3 +84,11 @@ r2db_api = ["contract/*.json"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 anyio_mode = "auto"
+# Phase 7 WP-6 (D-4(b)(iii)): identical 2 lines on root pyproject.toml,
+# r2db-api/pyproject.toml and MitateDB-api/pyproject.toml -- pinned equal
+# by conformance-tests/test_pytest_config_symmetry.py. The `ignore` entry
+# is scoped to the single known upstream warning (starlette.testclient's
+# own module-level `anyio.abc.BlockingPortal` alias access, emitted once
+# at import time regardless of `httpx2`'s presence); every other
+# DeprecationWarning still fails the suite.
+filterwarnings = ["error::DeprecationWarning", "ignore:.*BlockingPortal.*:DeprecationWarning:starlette.testclient"]

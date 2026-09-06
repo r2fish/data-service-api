@@ -38,6 +38,18 @@ test = [
     # Phase 6 WP-1 addendum B -- mirrors r2db-api/pyproject.toml's
     # identically-named extra and its own identical comment.
     "pytest-xdist>=3.6",
+    # Phase 7 WP-6 -- mirrors r2db-api/pyproject.toml's identically-named
+    # extra and its own identical comment (this peer's own tests do not
+    # import `starlette.testclient` today; declared here anyway to keep
+    # both peers' `[test]` extras symmetric. `StarletteDeprecationWarning`
+    # is a `UserWarning` subclass, not a `DeprecationWarning`, so root
+    # `pyproject.toml`'s `filterwarnings = ["error::DeprecationWarning",
+    # ...]` was never at risk of failing this peer's collection over the
+    # httpx fallback warning either way; `httpx2`'s actual role is to keep
+    # that upstream fallback warning out of the warnings summary and to
+    # cover the `RuntimeError` Starlette raises if a future release drops
+    # the `httpx` fallback path outright).
+    "httpx2>=2.12",
 ]
 
 [tool.setuptools.package-data]
@@ -51,3 +63,8 @@ mitatedb_api = ["contract/*.json"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Phase 7 WP-6 -- identical 2 lines on root pyproject.toml, r2db-api/
+# pyproject.toml and this file, pinned equal by conformance-tests/
+# test_pytest_config_symmetry.py. See r2db-api/pyproject.toml's own
+# identically-named section for the rationale.
+filterwarnings = ["error::DeprecationWarning", "ignore:.*BlockingPortal.*:DeprecationWarning:starlette.testclient"]
