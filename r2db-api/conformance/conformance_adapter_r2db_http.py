@@ -86,11 +86,13 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    apply_limits_override,
     fresh_identifier,
     load_contract_error_codes,
     resolve_valid_confirmation,
@@ -1069,7 +1071,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     # backend wiring (design R2DB_SERVICE_LAYER_ARCHITECTURE Task 1)
     # ------------------------------------------------------------------
 
-    def _build_control_stack(self):
+    def _build_control_stack(self, *, limits: "ControlPlaneLimits | None" = None):
         """Assembles one real `/control/v1` ASGI app via `r2db_api.
         control_main.assemble_control_stack` (WP-5 round-2 review MINOR-3)
         -- the exact same shared product-code assembly core `build_control_
@@ -1078,14 +1080,22 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         is called with no `lifespan` argument: this adapter does not drive
         ASGI lifespan at all (see `__init__`'s own note on why), so `stores`
         is closed directly by this adapter's own code instead (`close()`/
-        the rebuild path in `_privileged_control_send`)."""
+        the rebuild path in `_privileged_control_send`).
+
+        `limits` (port v1.11 addendum, supervisor ruling 2026-09-06 item 1):
+        defaults to `self._control_limits` (every pre-addendum call site,
+        `__init__`'s own rebuild path, and `_privileged_control_send`'s own
+        rebuild all omit it, so behavior there is unchanged) -- `isolated_
+        control_surface(limits_override=...)` below is this parameter's
+        only caller that ever passes something else, a `dataclasses.
+        replace`d copy from `apply_limits_override`."""
         service, stores = assemble_control_stack(
             controlplane_dsn=self._platform.controlplane_dsn,
             app_pepper=self._control_app_pepper,
             control_pepper=self._control_pepper,
             schema=self._platform.schema,
             pool_size=self._control_pool_size,
-            limits=self._control_limits,
+            limits=limits if limits is not None else self._control_limits,
             # Phase 4 WP-2(b) (design D-5): the real `<prefix>_auditreader`
             # DSN -- `visibility_lag_ms` is derived (D-6 point 3) from the
             # two writer-connection timeout defaults `assemble_control_
@@ -1811,29 +1821,79 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     # the SHARED surface every other control-plane method on this adapter
     # still targets.
     @contextmanager
-    def isolated_control_surface(self):
-        app, stores = self._build_control_stack()
+    def isolated_control_surface(self, *, limits_override: Mapping[str, int] | None = None):
+        # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): the
+        # only change from the pre-addendum construction is passing the
+        # (possibly overridden) `limits` through to `_build_control_stack`
+        # -- `apply_limits_override` returns `self._control_limits` itself,
+        # unchanged, when `limits_override` is `None` (every pre-addendum
+        # call site), so this is behavior-preserving for the `control_
+        # requests_per_minute` vector.
+        effective_limits = apply_limits_override(self._control_limits, limits_override)
+        app, stores = self._build_control_stack(limits=effective_limits)
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
-        try:
-            def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-                request = client.build_request(
-                    "GET", "/control/v1/capabilities", headers=[("authorization", f"Bearer {actor.secret}")]
-                )
-                response = self._run(client.send(request))
-                if response.status_code >= 400:
-                    failure = _HttpFailure(response)
-                    raise ConformanceDenial(
-                        code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
-                        details=_failure_details(failure),
-                    ) from failure
-                return response.json()
+        # This primitive's OWN residue list (supervisor ruling 2026-09-06
+        # item 2): applications `register_application` below registers
+        # successfully are recorded here and deprovisioned on exit -- never
+        # left for a caller to clean up itself (that would risk a double
+        # deprovision attempt against an application this primitive already
+        # removed).
+        driven_applications: list[str] = []
 
-            yield call
+        def _isolated_send(
+            method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
+            json_body: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            request = client.build_request(
+                method, path, json=json_body, headers=[("authorization", f"Bearer {actor.secret}")]
+            )
+            response = self._run(client.send(request))
+            if response.status_code >= 400:
+                failure = _HttpFailure(response)
+                raise ConformanceDenial(
+                    code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                    details=_failure_details(failure),
+                ) from failure
+            if not response.content:
+                return {}
+            return response.json()
+
+        def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+            return _isolated_send("GET", "/control/v1/capabilities", actor)
+
+        def register_application(
+            actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+        ) -> Mapping[str, Any]:
+            result = _isolated_send(
+                "POST", "/control/v1/applications", actor, json_body={"application_id": application_id}
+            )
+            driven_applications.append(application_id)
+            return result
+
+        def list_applications(actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+            result = _isolated_send("GET", "/control/v1/applications", actor)
+            return result["applications"]
+
+        try:
+            yield IsolatedControlHandle(
+                capabilities=call, register_application=register_application, list_applications=list_applications,
+            )
         finally:
             self._run(client.aclose())
             for store in stores:
                 if store is not None:
                     store.close()
+            errors: list[str] = []
+            for application_id in driven_applications:
+                try:
+                    self.deprovision_application(application_id)
+                except Exception as exc:  # noqa: BLE001 - report, never swallow.
+                    errors.append(f"{application_id!r}: {exc!r}")
+            if errors:
+                raise RuntimeError(
+                    "isolated_control_surface() failed to deprovision one or more applications its own "
+                    "handle registered:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
 
     # port v1.11 (design D-6.1 V2/D-6.5 addendum (1)/(4)): unlike
     # `isolated_control_surface()` above, this does NOT reuse `_build_
@@ -2082,6 +2142,42 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     #       credentials it issued), mirroring what an operator's real
     #       deprovisioning runbook step would do.
     def deprovision_application(self, application_id: str) -> None:
+        # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1): closes
+        # any of THIS instance's own `_provisioned_cells` that belong to
+        # `application_id` before the DROP DATABASE below -- previously
+        # only `isolated_application_surface()`'s own hand-written exit
+        # sequence did this (that context manager's own `_provisioned_
+        # cells`/`_app_pg` are private to the isolated instance it
+        # constructs, never these attributes). A cell's own two pools are
+        # cached in the module-level `SharedPoolManager`
+        # (`r2db_api.postgres.default_pool_manager`) keyed by
+        # `application_id`, independent of the `PostgresCell` Python
+        # object's own lifetime -- dropping the object (or this method's
+        # own pre-existing `self._app_pg.pop(...)` below) does not, by
+        # itself, release those pooled connections back to the manager;
+        # only `PostgresCell.close()` does. Without this, any caller that
+        # deprovisions an application this SHARED, session-scoped adapter
+        # already served real data-plane traffic for (every ordinary
+        # `fx`-based test's own `app_a`/`app_b`, once WP-5's own generic
+        # residue-cleanup teardown starts calling this on every test's
+        # applications, not just this file's own already-cell-free
+        # control-plane-only throwaway apps) hits a real `DROP DATABASE
+        # ... is being accessed by other users` failure -- exactly the
+        # failure WP-5 round 3 measured and, before this fix, could only
+        # route around by using `isolated_application_surface()` instead
+        # of this method directly. Fixing it here, once, makes this
+        # method itself safe for every caller (this WP-5 rework's own
+        # residue-cleanup teardown included) rather than requiring each
+        # caller to separately rediscover the same close-then-deprovision
+        # ordering `isolated_application_surface()`'s exit already knew.
+        remaining_cells = []
+        for cell in self._provisioned_cells:
+            if cell.application_id == application_id:
+                cell.close()
+            else:
+                remaining_cells.append(cell)
+        self._provisioned_cells = remaining_cells
+
         provisioned_statement = sql.SQL("SELECT database_name IS NOT NULL FROM {table} WHERE application_slug = {ph}").format(
             table=sql.Identifier(self._platform.schema, "applications"), ph=sql.Placeholder()
         )
@@ -2092,7 +2188,33 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             if row is None:
                 return  # already gone -- nothing to clean up
             provisioned = row[0]
+            delete_credentials_statement = sql.SQL("DELETE FROM {table} WHERE application_slug = {ph}").format(
+                table=sql.Identifier(self._platform.schema, "credentials"), ph=sql.Placeholder()
+            )
+            with conn.cursor() as cur:
+                cur.execute(delete_credentials_statement, [application_id])
             if not provisioned:
+                # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1,
+                # first-execution finding): a "registered, not yet
+                # provisioned" Application can still have real in-band
+                # credentials issued against it (design R-4: "登録済みだが
+                # 未 provisioning の Application への credential 発行は許
+                # す") -- `test_c14_authority_boundary.py::test_c14_
+                # declared_status_agrees_with_actual_surface` and
+                # `test_c15_bootstrap_reset_lifecycle.py`'s own audit test
+                # both do exactly this. Before this fix, this branch's own
+                # `DELETE FROM applications` ran with no credentials
+                # cleanup first, and hit `credentials_application_slug_
+                # fkey` (`ForeignKeyViolation`) the moment WP-5's own
+                # generic residue-cleanup teardown started calling this
+                # method on such an application for the first time -- the
+                # existing, narrower callers of this method (this file's
+                # own `test_c14_authority_boundary.py`) never happened to
+                # combine "registered-only" with "has a live credential"
+                # in one call site before. The credentials delete above now
+                # runs unconditionally, before this branch's own
+                # applications-row delete, exactly mirroring the
+                # already-provisioned branch below.
                 delete_statement = sql.SQL("DELETE FROM {table} WHERE application_slug = {ph}").format(
                     table=sql.Identifier(self._platform.schema, "applications"), ph=sql.Placeholder()
                 )
@@ -2100,11 +2222,6 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                     cur.execute(delete_statement, [application_id])
                 conn.commit()
                 return
-            delete_credentials_statement = sql.SQL("DELETE FROM {table} WHERE application_slug = {ph}").format(
-                table=sql.Identifier(self._platform.schema, "credentials"), ph=sql.Placeholder()
-            )
-            with conn.cursor() as cur:
-                cur.execute(delete_credentials_statement, [application_id])
             conn.commit()
         _run_psql(self._platform.control_dsn, self._platform.deprovision_script, {"app_slug": application_id})
         self._app_pg.pop(application_id, None)

@@ -51,11 +51,13 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    apply_limits_override,
     fresh_identifier,
     resolve_valid_confirmation,
 )
@@ -564,17 +566,60 @@ class R2DBConformanceAdapter(ConformanceAdapter):
     # authenticate against it, but its own `_rate_window` starts empty.
     # No real resource to release on exit (in-memory construction only).
     @contextmanager
-    def isolated_control_surface(self):
+    def isolated_control_surface(self, *, limits_override: Mapping[str, int] | None = None):
+        # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): the
+        # ONLY change from the pre-addendum construction above this line is
+        # `limits=effective_limits` instead of `limits=self._control_limits`
+        # -- `apply_limits_override` returns `self._control_limits` itself,
+        # unchanged, when `limits_override` is `None` (every pre-addendum
+        # call site), so this is behavior-preserving for the `control_
+        # requests_per_minute` vector.
+        effective_limits = apply_limits_override(self._control_limits, limits_override)
         fresh_service = ControlPlaneService(
-            self._control_backend, audit=self._control_audit, limits=self._control_limits,
+            self._control_backend, audit=self._control_audit, limits=effective_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             surfaces=_SURFACES,
         )
+        # This primitive's OWN residue list (supervisor ruling 2026-09-06
+        # item 2): applications `register_application` below registers
+        # successfully are recorded here and deprovisioned on exit, before
+        # this generator is torn down further -- never left for a caller
+        # to clean up itself (that would risk a double deprovision attempt
+        # against an application this primitive already removed).
+        driven_applications: list[str] = []
 
         def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
             return self._call(lambda: fresh_service.capabilities(self._actor_secret(actor)))
 
-        yield call
+        def register_application(
+            actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+        ) -> Mapping[str, Any]:
+            result = self._call(
+                lambda: fresh_service.register_application(self._actor_secret(actor), application_id)
+            )
+            driven_applications.append(application_id)
+            return result
+
+        def list_applications(actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+            result = self._call(lambda: fresh_service.list_applications(self._actor_secret(actor)))
+            return result["applications"]
+
+        try:
+            yield IsolatedControlHandle(
+                capabilities=call, register_application=register_application, list_applications=list_applications,
+            )
+        finally:
+            errors: list[str] = []
+            for application_id in driven_applications:
+                try:
+                    self.deprovision_application(application_id)
+                except Exception as exc:  # noqa: BLE001 - report, never swallow.
+                    errors.append(f"{application_id!r}: {exc!r}")
+            if errors:
+                raise RuntimeError(
+                    "isolated_control_surface() failed to deprovision one or more applications its own "
+                    "handle registered:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
 
     # port v1.11 (design D-6.1 V2/D-6.5 addendum (4)): a genuinely FRESH,
     # throwaway `R2DBConformanceAdapter` -- true self-similarity (the

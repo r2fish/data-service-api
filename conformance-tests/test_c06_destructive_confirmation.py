@@ -136,7 +136,7 @@ from adapter import (
     parse_semver,
     resolve_valid_confirmation,
 )
-from conftest import registered_adapters
+from conftest import registered_adapters, residue_tracking_suppressed
 
 pytestmark = pytest.mark.condition("C-06")
 
@@ -203,7 +203,18 @@ def fx(adapter) -> Fixture:
     cached = _SHARED_FIXTURE_CACHE.get(adapter.name)
     if cached is not None:
         return cached
-    fixture = adapter.build_fixture()
+    # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1, first
+    # full-suite-run finding): this module's own `_SHARED_FIXTURE_CACHE`
+    # deliberately provisions `app_a`/`app_b` ONCE and reuses them for
+    # every vector test in this file (this fixture's own module -- see
+    # `_capability_document`'s docstring just below for the measured
+    # reason). conftest.py's new generic residue-cleanup guard would
+    # otherwise sweep these two applications at the FIRST test's own
+    # teardown, since it has no way to see this module-level cache --
+    # `residue_tracking_suppressed()` is the same opt-out `capability_
+    # document()`'s own internal probe-application cache already needed.
+    with residue_tracking_suppressed():
+        fixture = adapter.build_fixture()
     _SHARED_FIXTURE_CACHE[adapter.name] = fixture
     return fixture
 
