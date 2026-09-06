@@ -293,6 +293,76 @@ def test_at_least_one_adapter_exercises_a_positive_control_mutation():
     )
 
 
+# --- 4b. update reports the REAL number of rows affected, not the count of
+#         batch operations submitted (Phase 8 WP-1 rework 2, 裁定 1) -------
+
+
+def test_update_reports_the_real_number_of_rows_affected(adapter, fx: Fixture):
+    """Phase 8 WP-1 rework 2 (裁定 1, 監督裁定 2026-09-07): port
+    `adapter.py`'s own `attempt_mutation` docstring (~:2028) is "return
+    the number of rows affected". Test 1 above
+    (`test_declared_mutation_operations_match_observed_behavior`) is a
+    positive control for "update is declared supported", but its own
+    recipe seeds and matches EXACTLY ONE row, so it cannot itself catch
+    a peer that always reports a constant `1` regardless of how many
+    rows a real update actually touched (a `len(batch_operations)`
+    confusion, not `len(rows_affected)`) -- 1 row affected and "1
+    operation submitted" are indistinguishable at that recipe's own
+    scale. This test drives an update whose predicate matches TWO real
+    rows (must report 2) and a second update whose predicate matches
+    ZERO rows (must report 0), on every adapter that declares "update"
+    supported -- the two values a single-operation-count confusion can
+    never produce together (a constant would have to equal both 2 and 0).
+
+    Mutation (裁定 1's own, measured this WP): reverting `MitateDB-api`'s
+    in-process `_attempt_mutation_outcome`'s `dispatched_op` to
+    `len(session.transact([item]))` turns BOTH assertions below red for
+    `MitateDB-api` (2-row case reports 1, not 2; 0-row case reports 1,
+    not 0) -- see this WP's own report for the observed pytest output."""
+    contract = load_contract()
+    capability_document = adapter.capability_document()
+    declared = _declared_mutation_operations(capability_document, contract)
+    if "update" not in declared:
+        pytest.skip(f"{adapter.name}: does not declare 'update' supported")
+
+    entity = fresh_identifier("c12_update_rowcount")
+    group_field = "group"
+    adapter.create_entity(fx.developer_a, entity, {group_field: "text", "tag": "text"})
+
+    for _ in range(2):
+        affected = adapter.attempt_mutation(
+            fx.runtime_a, entity, "insert",
+            values={group_field: "match", "tag": "orig"}, where_field=None, where_value=None,
+        )
+        assert affected == 1, f"{adapter.name}: seed insert reported affected={affected!r}, expected 1"
+
+    observed_affected_counts: list[int] = []
+
+    affected_two = adapter.attempt_mutation(
+        fx.runtime_a, entity, "update",
+        values={"tag": "changed"}, where_field=group_field, where_value="match",
+    )
+    observed_affected_counts.append(affected_two)
+    assert affected_two == 2, (
+        f"{adapter.name}: an update whose predicate matches 2 real rows reported affected={affected_two!r}, "
+        "expected 2 (port adapter.py::attempt_mutation: 'return the number of rows affected')"
+    )
+
+    affected_zero = adapter.attempt_mutation(
+        fx.runtime_a, entity, "update",
+        values={"tag": "changed-again"}, where_field=group_field, where_value="does-not-exist",
+    )
+    observed_affected_counts.append(affected_zero)
+    assert affected_zero == 0, (
+        f"{adapter.name}: an update whose predicate matches 0 rows reported affected={affected_zero!r}, "
+        "expected 0"
+    )
+
+    assert len(observed_affected_counts) >= 1, (
+        f"{adapter.name}: this test observed zero affected-count values -- would be vacuous"
+    )
+
+
 # --- 5. cross_entity_mutation declaration agreement (phase 3.5 WP-3) -------
 #
 # design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md section 3:

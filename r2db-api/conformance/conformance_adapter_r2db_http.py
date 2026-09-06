@@ -55,6 +55,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -703,6 +704,99 @@ def _failure_details(failure: "_HttpFailure") -> Mapping[str, Any]:
     return details if isinstance(details, dict) else {}
 
 
+# Phase 8 WP-1 rework 2 (裁定 3, 監督裁定 2026-09-07): see
+# `conformance_adapter_r2db.py`'s own identical-named constant for the
+# full rationale (a bounded wait for the background threads to reach
+# the stall point, in place of an unbounded `entered.acquire()`, so a
+# stall-point regression fails loud instead of hanging the whole test
+# process -- `.github/workflows/ci.yml` has no `timeout-minutes` and
+# this repository has no pytest-timeout plugin, review finding 3).
+_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_in_flight_via_http_requests(
+    cell_obj: object, method_name: str, app: Any, secret: str, path: str, n: int,
+    classify: Callable[[BaseException], str], adapter_name: str,
+):
+    """port v1.12 `hold_in_flight` realization for the HTTP plug
+    (adapter-internal plumbing, never port-visible -- design docs/design/
+    PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 実装の形 (b)): identical
+    stall-and-wait shape to `conformance_adapter_r2db.py`'s own in-process
+    twin, except each of the `n` held requests is a REAL `GET <path>` HTTP
+    round trip, issued from its own OS thread against its OWN fresh event
+    loop + `httpx.AsyncClient(ASGITransport(app=app))` -- the shared
+    adapter's single `self._loop.run_until_complete` cannot itself hold
+    more than one request in flight (D-2's own "HTTP plug の単一loop構造
+    との折り合い"), so genuine concurrency needs one loop per held
+    request, never the shared one."""
+    original = getattr(cell_obj, method_name)
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def _stalled(*args: Any, **kwargs: Any) -> Any:
+        entered.release()
+        release.wait()
+        return original(*args, **kwargs)
+
+    setattr(cell_obj, method_name, _stalled)
+
+    def _run() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            async def _once() -> None:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                    response = await client.get(path, headers=[("authorization", f"Bearer {secret}")])
+                    if response.status_code >= 400:
+                        failure = _HttpFailure(response)
+                        raise ConformanceDenial(
+                            code=classify(failure), adapter=adapter_name, native_type=type(failure).__name__,
+                            details=_failure_details(failure),
+                        ) from failure
+
+            loop.run_until_complete(_once())
+        except BaseException as exc:  # noqa: BLE001 -- collected, never swallowed; re-raised below after every thread is joined and the method is restored.
+            errors.append(exc)
+        finally:
+            loop.close()
+
+    threads = [threading.Thread(target=_run, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    entered_count = 0
+    for entered_count in range(n):
+        if not entered.acquire(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S):
+            break
+    else:
+        entered_count = n
+    try:
+        if entered_count < n:
+            raise AssertionError(
+                f"hold_in_flight: only {entered_count} of {n} held HTTP requests "
+                f"reached the concurrency-gate stall point within "
+                f"{_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S}s (expected every one of them to "
+                "stall inside DataService._slot's own counter increment -- see this "
+                "helper's own docstring); failing loud instead of hanging (裁定 3, "
+                "監督裁定 2026-09-07)"
+            )
+        # Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): yields the
+        # REAL measured count of held requests (`entered_count`, from the
+        # semaphore-acquire loop above) -- never a bare `None` a caller
+        # could only pair with a tautological `n >= 1` check. By this
+        # point `entered_count == n` always holds (the `AssertionError`
+        # above already fired otherwise), but the caller sees the
+        # MEASUREMENT, not an echo of its own input.
+        yield entered_count
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S)
+        setattr(cell_obj, method_name, original)
+    if errors:
+        raise errors[0]
+
+
 def _stringify_for_path(payload: Any) -> str:
     """A URL path segment is always text on the wire: any real HTTP client
     placing a non-string value into a path must serialize it first. `str()`
@@ -742,23 +836,24 @@ _SURFACES = {
     "control": {"base_url": "https://r2db-http-pg-control.conformance.invalid/control/v1"},
 }
 
-# port v1.11 (design D-6.1 V2/D-6.2) -- same small profile, same
-# `operation_depth=4` reasoning, as `conformance_adapter_r2db.py`'s own
-# identical constant (this peer's `ResourceLimits.check_depth` is
-# backend-independent, `service.py`, so the position is identical over
-# HTTP). Every COUNT-valued class <= C-14's `_MAX_EXERCISABLE_LIMIT` (200) --
-# `request_bytes` (byte-valued) is 4096; see the sibling in-process
-# adapter's identical constant for the measured reason.
+# port v1.12 (Phase 8 WP-1b, R-A/R-C 監督裁定 2026-09-06) -- same small
+# profile, same `operation_depth=5`/`concurrency=3` reasoning, as
+# `conformance_adapter_r2db.py`'s own identical constant (this peer's
+# `ResourceLimits.check_depth` is backend-independent, `service.py`, so
+# the position is identical over HTTP; see the sibling in-process
+# adapter's identical constant for the full measured reason). Every
+# COUNT-valued class <= C-14's `_MAX_EXERCISABLE_LIMIT` (200) --
+# `request_bytes` (byte-valued) is 4096.
 _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     request_bytes=4096,
     batch_items=5,
     result_items=5,
     query_complexity=5,
     execution_ms=5_000,
-    concurrency=32,
+    concurrency=3,
     requests_per_minute=50,
     schema_objects=20,
-    operation_depth=4,
+    operation_depth=5,
 )
 
 
@@ -1989,6 +2084,34 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 iso.deprovision_application(app_id)
             iso._loop.close()
 
+    # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
+    # SAME per-application `PostgresCell.catalog()` `DataService._slot`'s
+    # own dispatch calls into (`service.py:1095`), after the concurrency
+    # counter's own increment and BEFORE any backend/DB call (`catalog()`
+    # needs no live connection at all on this backend either -- it reads
+    # the cell's own in-memory schema view). Each held request is a REAL
+    # `GET /v1/catalog` HTTP round trip, issued from its OWN OS thread
+    # with its OWN event loop + `httpx.AsyncClient(ASGITransport(...))`
+    # against the SAME running ASGI app (`self._loop.run_until_complete`
+    # on the shared, single loop `_send()` uses cannot itself hold more
+    # than one request in flight -- design D-2's own "HTTP plug の単一
+    # loop 構造との折り合い"). Never touches the shared adapter's own
+    # `self._loop`/`self._client` -- entirely self-contained within this
+    # call.
+    def hold_in_flight(self, session, n: int):
+        """See `ConformanceAdapter.hold_in_flight`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point and line references are documented
+        on the comment immediately above this method."""
+        assert isinstance(session, _Session)
+        app_id = self.scope_of(session).application_id
+        cell = self._service._cells[app_id]  # noqa: SLF001 -- adapter-internal plumbing, same convention isolated_application_surface() above already uses.
+        app = self._app
+        secret = session.secret
+        classify = self.classify
+        adapter_name = self.name
+        return _hold_in_flight_via_http_requests(cell, "catalog", app, secret, "/v1/catalog", n, classify, adapter_name)
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
@@ -2277,15 +2400,29 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         self._mutate_request(session, entity, [{"operation": "insert", "values": dict(values)}])
 
     def select_eq(
-        self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any
+        self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any, *, limit: int | None = None
     ) -> list[dict]:
         assert isinstance(session, _Session)
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
-        result = self._query_request(session, entity, select=list(select), where=where)
+        # port v1.12 (L7-21): `limit` maps directly onto `_query_request`'s
+        # own pre-existing `page_size` keyword (`:1308`, unchanged by this
+        # WP), which in turn puts `{"page": {"size": page_size}}` on the
+        # real wire body (`QueryRequest.page.size`, `spec/data-service-
+        # api.v1.json`) -- `None` omits it, exactly as every pre-v1.12
+        # caller here already observed.
+        result = self._query_request(session, entity, select=list(select), where=where, page_size=limit)
         return result["items"]
 
     def attempt_filter(
-        self, session: object, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
     ) -> list[dict]:
         assert isinstance(session, _Session)
         # Same real query endpoint `select_eq` above already uses,
@@ -2293,6 +2430,11 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # conformance_adapter_r2db.py's identical method for the full
         # rationale.
         where = [{"field": field, "operator": operator, "value": value}]
+        # port v1.12 (L7-21): additional predicates appended to the SAME
+        # real `where` array the wire body already carries (`QueryRequest.
+        # where`, `maxItems: 50`) -- never a second request.
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
         result = self._query_request(session, entity, select=list(select), where=where)
         return result["items"]
 

@@ -81,13 +81,15 @@ design v1.1 §7, not this WP's own containment boundary).
 """
 
 import functools
+import time
 
 import psycopg
 from psycopg import sql
 
 from .backend import SQL_OPERATOR_TOKENS
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
-                     PlatformUpgradePending, StorageConfigurationError, ValidationError)
+                     PlatformUpgradePending, ResourceLimitError,
+                     StorageConfigurationError, ValidationError)
 from .identifiers import validate_identifier
 from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
@@ -662,7 +664,7 @@ class PostgresBackend:
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
     @_guard_pending_platform_upgrades
-    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, audit_hook=None, deadline=None):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -699,8 +701,11 @@ class PostgresBackend:
         # committed to correct) from "the durable write succeeded but
         # THIS backend's own commit then failed" (D-2's error-row case).
         hook_fired = False
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._developer.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
                 # Phase 6 WP-3 (design D-3): the declared-type registry
@@ -713,6 +718,9 @@ class PostgresBackend:
                 audit_hook.pre_commit()
                 hook_fired = True
             self._developer.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.DuplicateTable:
             self._developer.rollback()
             raise ConflictError("collection already exists")
@@ -734,7 +742,7 @@ class PostgresBackend:
             raise
 
     @_guard_pending_platform_upgrades
-    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None, deadline=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
@@ -750,8 +758,11 @@ class PostgresBackend:
         # Phase 4: same `commit()`-inside-`try` + pre-commit-hook structure
         # as `create_collection` above -- see that method's own comment.
         hook_fired = False
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._developer.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
                 # Phase 6 WP-3 (design D-3): same-transaction registry
@@ -761,6 +772,9 @@ class PostgresBackend:
                 audit_hook.pre_commit()
                 hook_fired = True
             self._developer.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.DuplicateColumn:
             self._developer.rollback()
             raise ConflictError("field already exists")
@@ -814,7 +828,7 @@ class PostgresBackend:
         return sql.SQL(" WHERE ") + sql.SQL(" AND ").join(clauses), params
 
     @_guard_pending_platform_upgrades
-    def insert(self, collection, fields, params):
+    def insert(self, collection, fields, params, *, deadline=None):
         # PostgreSQL 12+ has no per-row OID by default and this
         # foundation's own entity tables carry no server-assigned primary
         # key/serial column of any kind (unlike r2db-api's own `address`
@@ -838,10 +852,16 @@ class PostgresBackend:
         statement = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING ctid").format(
             sql.Identifier(collection), columns, placeholders
         )
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._runtime.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement, params)
                 rowid = str(cur.fetchone()[0])
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._runtime.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UniqueViolation:
             self._runtime.rollback()
             raise ConflictError("write conflicts with a constraint")
@@ -880,6 +900,22 @@ class PostgresBackend:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, params)
                 rowid = str(cur.fetchone()[0])
+        # Phase 8 WP-1a rework 1 (裁定 2, 監督裁定 2026-09-06): the SAME
+        # `execution_ms` mapping `insert()` above already has -- not rolled
+        # back here either (same B-1 (ii) reasoning as every other
+        # `except` clause in this method: the OUTER `transact()`
+        # (`cell.py`) is the single rollback point for the whole batch).
+        # `begin()`'s own `SET LOCAL statement_timeout`/`lock_timeout`
+        # (module-level comment above `_timeout_ms`) is what makes this
+        # exception reachable from an operation running INSIDE a batch,
+        # not only a standalone single-operation call -- every HTTP
+        # mutation reaches the database through this exact `..._in_
+        # transaction` family (`cell.py::transact`, `http.py::post_mutate`
+        # always dispatches through it), so leaving this mapping out here
+        # left the whole HTTP mutation surface unable to ever observe a
+        # real `LIMIT_EXCEEDED`/`execution_ms` denial (review finding 2).
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UniqueViolation:
             raise ConflictError("write conflicts with a constraint")
         except psycopg.errors.UndefinedTable:
@@ -909,6 +945,13 @@ class PostgresBackend:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, list(params) + where_params)
                 updated = cur.rowcount
+        # Phase 8 WP-1a rework 1 (裁定 2): see `insert_in_transaction`'s own
+        # identical `except` clause immediately above for why this mapping
+        # (not rolled back here -- the outer `transact()` is the single
+        # rollback point) is required on every `..._in_transaction` method,
+        # not only the standalone `update()`.
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
@@ -932,6 +975,12 @@ class PostgresBackend:
             with self._runtime.cursor() as cur:
                 _execute(cur, statement, params)
                 deleted = cur.rowcount
+        # Phase 8 WP-1a rework 1 (裁定 2): see `insert_in_transaction`'s own
+        # identical `except` clause for why this mapping is required here
+        # too (not rolled back here -- the outer `transact()` is the
+        # single rollback point).
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             raise NotFoundError("collection not found")
         except psycopg.Error as exc:
@@ -939,7 +988,7 @@ class PostgresBackend:
         return {"deleted": deleted}
 
     @_guard_pending_platform_upgrades
-    def read(self, collection, selected, filters, order_by, limit):
+    def read(self, collection, selected, filters, order_by, limit, *, deadline=None):
         columns = sql.SQL(", ").join(sql.Identifier(x) for x in selected)
         statement = sql.SQL("SELECT {} FROM {}").format(columns, sql.Identifier(collection))
         where, where_params = self._where_sql(filters)
@@ -971,11 +1020,17 @@ class PostgresBackend:
             statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
         params = list(where_params) + [limit]
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._runtime.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement, params)
                 columns_desc = [c.name for c in cur.description]
                 rows = [dict(zip(columns_desc, row)) for row in cur.fetchall()]
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._runtime.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             self._runtime.rollback()
             raise NotFoundError("collection not found")
@@ -987,17 +1042,23 @@ class PostgresBackend:
         return rows
 
     @_guard_pending_platform_upgrades
-    def update(self, collection, fields, params, filters):
+    def update(self, collection, fields, params, filters, *, deadline=None):
         assignments = sql.SQL(", ").join(
             sql.SQL("{} = %s").format(sql.Identifier(f)) for f in fields
         )
         statement = sql.SQL("UPDATE {} SET {}").format(sql.Identifier(collection), assignments)
         where, where_params = self._where_sql(filters)
         statement = statement + where
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._runtime.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement, list(params) + where_params)
                 updated = cur.rowcount
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._runtime.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             self._runtime.rollback()
             raise NotFoundError("collection not found")
@@ -1009,7 +1070,7 @@ class PostgresBackend:
         return {"updated": updated}
 
     @_guard_pending_platform_upgrades
-    def delete(self, collection, filters, audit_hook=None):
+    def delete(self, collection, filters, audit_hook=None, *, deadline=None):
         statement = sql.SQL("DELETE FROM {}").format(sql.Identifier(collection))
         where, params = self._where_sql(filters)
         statement = statement + where
@@ -1020,14 +1081,20 @@ class PostgresBackend:
         # ever called, so every call here is confirmed-destructive and
         # therefore unconditionally fail-closed class (D-2 item 1).
         hook_fired = False
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with self._runtime.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement, params)
                 deleted = cur.rowcount
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True
             self._runtime.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._runtime.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.errors.UndefinedTable:
             self._runtime.rollback()
             raise NotFoundError("collection not found")
@@ -1044,12 +1111,49 @@ class PostgresBackend:
             raise
         return {"deleted": deleted}
 
+    # ------------------------------------------------------------------
+    # execution_ms (Phase 8 WP-1a, design D-1 "実装の形" 3): a real
+    # `SET LOCAL statement_timeout`/`lock_timeout`, computed from the
+    # residual budget `cell.ApplicationCell._limit_gate`'s own wall-clock
+    # `deadline` still has left -- r2db `postgres.py::_timeout_ms`/`_set_
+    # timeouts` (`:1936-1959`) is the matching reference realization
+    # (independent code, P-6).
+    # ------------------------------------------------------------------
+
+    def _timeout_ms(self, deadline):
+        if deadline is None:
+            return None
+        remaining_ms = max(0.0, (deadline - time.monotonic()) * 1000)
+        return max(1, int(remaining_ms))
+
+    def _set_timeouts(self, cur, timeout_ms):
+        """`SET LOCAL` (not session-wide `SET`): scoped to the current
+        transaction only, automatically discarded on commit/rollback --
+        never leaking onto the next call this persistent connection
+        serves. `timeout_ms` is always a server-computed `int` (from
+        `_timeout_ms` above), never request content, so `sql.Literal`
+        (necessary -- PostgreSQL's `SET` grammar has no bind-placeholder
+        position here) composes a trusted value, not untrusted text."""
+        statement_timeout = sql.SQL("SET LOCAL statement_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
+        lock_timeout = sql.SQL("SET LOCAL lock_timeout = {t}").format(t=sql.Literal(f"{timeout_ms}ms"))
+        _execute(cur, statement_timeout)
+        _execute(cur, lock_timeout)
+
     @_guard_pending_platform_upgrades
-    def begin(self):
+    def begin(self, *, deadline=None):
         # psycopg3 connections (`autocommit=False`) already implicitly
         # start a transaction on first use; nothing to do beyond ensuring
         # no stale transaction is left open from a previous call.
         self._runtime.rollback()
+        # Phase 8 WP-1a: `transact()`'s own multi-operation envelope sets
+        # the timeout ONCE, here, for the whole batch's transaction --
+        # `SET LOCAL` stays in effect for every statement `insert_in_
+        # transaction`/`update_in_transaction`/`delete_in_transaction`
+        # below run until this same transaction commits or rolls back.
+        timeout_ms = self._timeout_ms(deadline)
+        if timeout_ms is not None:
+            with self._runtime.cursor() as cur:
+                self._set_timeouts(cur, timeout_ms)
 
     def commit(self):
         self._runtime.commit()

@@ -62,6 +62,7 @@ import copy
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -106,7 +107,7 @@ from mitatedb_api.application_audit import PostgresApplicationAuditSink  # noqa:
 from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
 from mitatedb_api.auth import Role  # noqa: E402
 from mitatedb_api.backend_postgres import PostgresBackend  # noqa: E402
-from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime  # noqa: E402
+from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, _LimitStateHolder  # noqa: E402
 from mitatedb_api.config import FoundationConfig  # noqa: E402
 from mitatedb_api.control_audit import read_control_audit_events  # noqa: E402
 from mitatedb_api.control_composition import build_control_service  # noqa: E402
@@ -565,6 +566,131 @@ def _failure_details(failure: "_HttpFailure") -> Mapping[str, Any]:
     return details if isinstance(details, dict) else {}
 
 
+class _StalledGateContextManager:
+    """port v1.12 `hold_in_flight` plumbing (adapter-internal, never
+    port-visible) -- identical shape/rationale to `conformance_adapter_
+    mitatedb.py`'s own identical-named class (this peer's own `ApplicationCell.
+    _limit_gate` is the correct wrap point on BOTH plugs, not any one
+    operation method wholesale, for the identical structural reason that
+    file's own docstring states -- see `_hold_in_flight_via_http_requests_
+    over_stalled_gate` below)."""
+
+    __slots__ = ("_inner", "_entered", "_release")
+
+    def __init__(self, inner_cm, entered: threading.Semaphore, release: threading.Event) -> None:
+        self._inner = inner_cm
+        self._entered = entered
+        self._release = release
+
+    def __enter__(self):
+        value = self._inner.__enter__()
+        self._entered.release()
+        self._release.wait()
+        return value
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._inner.__exit__(exc_type, exc, tb)
+
+
+# Phase 8 WP-1 rework 2 (裁定 3, 監督裁定 2026-09-07): see
+# `conformance_adapter_mitatedb.py`'s own identical-named constant for
+# the full rationale (a bounded wait for the background threads to
+# reach the stalled `_limit_gate`, in place of an unbounded `entered.
+# acquire()`, so a stall-point regression fails loud instead of hanging
+# the whole test process -- `.github/workflows/ci.yml` has no
+# `timeout-minutes` and this repository has no pytest-timeout plugin,
+# review finding 3).
+_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_in_flight_via_http_requests_over_stalled_gate(
+    cell_obj: object, app: Any, bearer: str, path: str, n: int,
+    classify: Callable[[BaseException], str], adapter_name: str,
+):
+    """port v1.12 `hold_in_flight` realization for the HTTP plug
+    (adapter-internal plumbing, never port-visible -- design docs/design/
+    PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 実装の形 (b)). Wraps
+    `cell_obj`'s own `_limit_gate` (see `conformance_adapter_mitatedb.py`'s
+    own identical-named helper for the full "why the gate, not an
+    operation method" rationale -- IDENTICAL on this plug: the real HTTP
+    dispatch (`http.py::get_catalog` -> `session.catalog()` ->
+    `ApplicationRuntime.catalog()` -> `ApplicationCell.catalog()`) reaches
+    the SAME `_limit_gate` call, on the SAME `ApplicationCell` class).
+    Each of the `n` held requests is a REAL `GET <path>` HTTP round trip,
+    issued from its own OS thread against its OWN fresh event loop +
+    `httpx.AsyncClient(ASGITransport(app=app))` -- the shared adapter's
+    single `self._loop.run_until_complete` cannot itself hold more than
+    one request in flight (D-2's own "HTTP plug の単一loop構造との折り
+    合い"), so genuine concurrency needs one loop per held request, never
+    the shared one."""
+    original_gate = cell_obj._limit_gate  # noqa: SLF001 -- adapter-internal plumbing, same convention this file's own isolated_application_surface() already uses.
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def _stalled_limit_gate(principal, request=None, *, request_id=None):
+        inner = original_gate(principal, request, request_id=request_id)
+        return _StalledGateContextManager(inner, entered, release)
+
+    cell_obj._limit_gate = _stalled_limit_gate  # noqa: SLF001
+
+    def _run() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            async def _once() -> None:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                    response = await client.get(path, headers=[("authorization", f"Bearer {bearer}")])
+                    if response.status_code >= 400:
+                        failure = _HttpFailure(response)
+                        raise ConformanceDenial(
+                            code=classify(failure), adapter=adapter_name, native_type=type(failure).__name__,
+                            details=_failure_details(failure),
+                        ) from failure
+
+            loop.run_until_complete(_once())
+        except BaseException as exc:  # noqa: BLE001 -- collected, never swallowed; re-raised below after every thread is joined and the gate is restored.
+            errors.append(exc)
+        finally:
+            loop.close()
+
+    threads = [threading.Thread(target=_run, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    entered_count = 0
+    for entered_count in range(n):
+        if not entered.acquire(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S):
+            break
+    else:
+        entered_count = n
+    try:
+        if entered_count < n:
+            raise AssertionError(
+                f"hold_in_flight: only {entered_count} of {n} held HTTP requests "
+                f"reached the stalled `_limit_gate` within "
+                f"{_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S}s (expected every one of them to "
+                "stall inside ApplicationCell._limit_gate's own counter increment, "
+                "AFTER the real gate's __enter__ -- see this helper's own "
+                "docstring); failing loud instead of hanging (裁定 3, 監督裁定 "
+                "2026-09-07)"
+            )
+        # Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): yields the
+        # REAL measured count of held requests (`entered_count`, from the
+        # semaphore-acquire loop above) -- never a bare `None` a caller
+        # could only pair with a tautological `n >= 1` check. By this
+        # point `entered_count == n` always holds (the `AssertionError`
+        # above already fired otherwise), but the caller sees the
+        # MEASUREMENT, not an echo of its own input.
+        yield entered_count
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S)
+        cell_obj._limit_gate = original_gate  # noqa: SLF001
+    if errors:
+        raise errors[0]
+
+
 class _AuthGate:
     """Wraps the real, read-only `PostgresCredentialStore` this composition's
     `HttpService` authenticates through, adding one adapter-only,
@@ -658,6 +784,17 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 control_plane_status="enabled",
                 data_base_url=_DATA_SURFACE_BASE_URL, control_base_url=_CONTROL_SURFACE_BASE_URL,
             )
+            # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス
+            # 1個)"): this adapter (unlike the in-process one, which routes
+            # every cell through `service.ProvisioningFacade` -- now the
+            # single place that constructs and shares its own holder
+            # internally) builds `ApplicationCell` instances directly in
+            # `provision_application` below, so this instance owns the
+            # holder explicitly -- exactly one, shared by every cell THIS
+            # adapter provisions. `isolated_application_surface()` below
+            # gives its own `iso` a FRESH one (never this shared surface's
+            # own instance).
+            self._limit_holder = _LimitStateHolder()
             self._contract_version_cache: str | None = None
             self._capability_probe_session: "_Session | None" = None
             self._capability_probe_app_id: "str | None" = None
@@ -935,7 +1072,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `FoundationConfig(...)` this line used to construct inline.
             application_id, self._application_config,
             backend=PostgresBackend(info.runtime_dsn, info.developer_dsn, application_id=application_id),
-            audit_router=self._audit_router,
+            audit_router=self._audit_router, limit_holder=self._limit_holder,
         )
         self._evict_cells_over_cap()
         # Registry row: written by `mitatedb_registry.begin_provision_
@@ -1461,10 +1598,37 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         iso = copy.copy(self)
         iso._app_pg = {}
         iso._cells = OrderedDict()
+        # Phase 8 WP-1a (design D-1 "隔離instance は自分専用のホルダを1個
+        # 持つ"): `copy.copy(self)` above is a SHALLOW copy -- without this
+        # line `iso._limit_holder` would still be the SAME object as the
+        # shared, session-scoped surface's own holder. A fresh instance
+        # here is what keeps a `hold_in_flight`/rate-window drive against
+        # `iso` from ever touching the shared surface's own in-flight
+        # counter or rate windows.
+        iso._limit_holder = _LimitStateHolder()
         iso._application_config = replace(
             self._application_config,
             max_batch_items=10, max_batch_entities=5, max_result_rows=5,
             max_filter_terms=5, max_request_bytes=4096, max_schema_objects=20,
+            # Phase 8 WP-1a: same values/rationale as the in-process
+            # plug's own isolated profile (`conformance_adapter_mitatedb.
+            # py::isolated_application_surface`) -- see that profile's own
+            # comment for why each value was chosen. `max_requests_per_
+            # minute=50` is safe on THIS surface too (unlike an earlier
+            # draft of this profile, measured too low): `schema_revision`/
+            # `catalog` are deliberately NOT wrapped by `ApplicationCell.
+            # _limit_gate` (`cell.py`'s own comment on those two methods),
+            # so `http.py::post_schema`'s own post-op revision read-back
+            # costs nothing extra here -- a port `create_entity()` call
+            # (1 `_schema` op + 1 `add_field` op per field) costs exactly
+            # 2 gate hits on this surface, matching `_drive_schema_
+            # objects`'s own `(bound // unit + 2) = 22` iterations *
+            # 2 = 44, comfortably under 50.
+            # `max_operation_depth=5` (Phase 8 WP-1b, R-A 監督裁定
+            # 2026-09-06, raised from 4) -- see the in-process plug's own
+            # isolated profile comment for the full measured reason (a
+            # `where`-carrying mutation's real wire depth is 5, not 4).
+            max_requests_per_minute=50, max_concurrency=3, max_execution_ms=5000, max_operation_depth=5,
         )
 
         def _cell_factory(application_id: str) -> ApplicationCell:
@@ -1497,6 +1661,23 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 for cell in iso._cells.values():
                     cell._backend.close()  # noqa: SLF001
                 iso._loop.close()
+
+    # port v1.12 (design D-2 実装の形 (b), work order WP-1b): see
+    # `_hold_in_flight_via_http_requests_over_stalled_gate`'s own
+    # docstring above for the full rationale (wraps `ApplicationCell.
+    # _limit_gate`, the SAME real gate the real `GET /v1/catalog` request
+    # each held thread issues reaches).
+    def hold_in_flight(self, session, n: int):
+        """See `ConformanceAdapter.hold_in_flight`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on `_hold_in_flight_
+        via_http_requests_over_stalled_gate` and the comment immediately
+        above this method."""
+        assert isinstance(session, _Session)
+        cell = self._cells[session.application_id]
+        return _hold_in_flight_via_http_requests_over_stalled_gate(
+            cell, self._app, session.bearer, "/v1/catalog", n, self.classify, self.name,
+        )
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
@@ -1655,15 +1836,36 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         self._mutate(session, entity, [{"operation": "insert", "values": dict(values)}])
 
-    def select_eq(self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any) -> list[dict]:
+    def select_eq(
+        self, session: object, entity: str, select: Sequence[str], field: str | None, value: Any, *, limit: int | None = None
+    ) -> list[dict]:
         assert isinstance(session, _Session)
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
-        result = self._query(session, entity, select=select, where=where)
+        # port v1.12 (L7-21): `limit` maps directly onto `_query`'s own
+        # pre-existing `page_size` keyword (`:971`, unchanged by this WP),
+        # which puts `{"page": {"size": page_size}}` on the real wire body
+        # (`QueryRequest.page.size`) -- `None` omits it.
+        result = self._query(session, entity, select=select, where=where, page_size=limit)
         return result["items"]
 
-    def attempt_filter(self, session: object, entity: str, select: Sequence[str], field: str, operator: str, value: Any) -> list[dict]:
+    def attempt_filter(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
+    ) -> list[dict]:
         assert isinstance(session, _Session)
-        result = self._query(session, entity, select=select, where=[{"field": field, "operator": operator, "value": value}])
+        where = [{"field": field, "operator": operator, "value": value}]
+        # port v1.12 (L7-21): additional predicates appended to the SAME
+        # real `where` array the wire body already carries.
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
+        result = self._query(session, entity, select=select, where=where)
         return result["items"]
 
     def delete(self, session: object, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:

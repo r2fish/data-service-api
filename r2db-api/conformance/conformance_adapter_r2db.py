@@ -22,6 +22,7 @@ from __future__ import annotations
 import gc
 import os
 import sys
+import threading
 import uuid
 import weakref
 from contextlib import contextmanager
@@ -125,31 +126,137 @@ _SURFACES = {
 # drive over in one test) does not map onto a byte-sized class the same
 # way it does a count (test_c05_limit_declaration_agreement.py's own
 # `_drive_request_bytes` docstring/comment states this explicitly).
-# `operation_depth=4` matches this peer's OWN real, natural structural
-# depth for a single-field, filter-less `insert` request (measured:
-# `{"entity":..., "operations":[{"operation":"insert","values":{"field":
-# "x"}}]}` reaches exactly depth 4 under `ResourceLimits.check_depth`'s own
-# counting -- request(1)->operations list(2)->operation dict(3)->values
-# dict(4)) -- an ordinary flat insert therefore sits EXACTLY at the
-# declared bound (a genuine "N succeeds" position), while the SAME insert
-# with an added (semantically invalid, but structurally real) `where`
-# filter reaches depth 5 (`check_depth` runs before the "insert does not
-# accept a filter" content check, `structured.py`, so the REAL, observed
-# denial is `LIMIT_EXCEEDED`/`operation_depth`, not `VALIDATION_FAILED`) --
-# this is the "N+1" position. `execution_ms`/`concurrency` are left at
-# this peer's own production defaults (unchanged, D-6.2: "駆動しない" --
-# no test ever drives either through this profile).
+# `operation_depth=5` (Phase 8 WP-1b, R-A 監督裁定 2026-09-06: raised from
+# the pre-WP-1b value of 4). At 4, a `where`-carrying mutation (`update`/
+# `delete`) sits at REAL depth 5 on the wire (`{"entity":...,
+# "operations":[{"operation":"update","values":{...},"where":[{"field":
+# ...,"operator":"eq","value":...}]}]}` -- request(1)->operations list
+# (2)->operation dict(3)->where list(4)->predicate dict(5)), so EVERY such
+# mutation was spuriously `LIMIT_EXCEEDED`(`operation_depth`) at bound=4,
+# not merely the deliberately-oversized N+1 probe. Raised to 5 so an
+# ordinary, semantically valid `where`-carrying mutation is exactly the
+# "N succeeds" position (measured, `ResourceLimits.check_depth`'s own
+# counting, above), while the SAME update with its predicate's `value`
+# itself replaced by a one-element container (a list/dict) reaches depth 6
+# (`check_depth` runs before any content validation of that -- for an
+# `eq` predicate -- semantically invalid value, `structured.py`, so the
+# REAL, observed denial is `LIMIT_EXCEEDED`/`operation_depth`, never
+# `VALIDATION_FAILED`) -- this is the new "N+1" position (`test_c05_
+# limit_declaration_agreement.py::_drive_operation_depth`'s own updated
+# recipe). `execution_ms` is left at this peer's own production default
+# (unchanged, D-6.2: "駆動しない" -- no test ever drives it through this
+# profile). `concurrency=3` (lowered from 32, WP-1b R-C: `hold_in_flight`'s
+# own N-thread recipe holds this many requests in flight at once --
+# holding 32 real threads/connections at a time is avoidable).
 _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     request_bytes=4096,
     batch_items=5,
     result_items=5,
     query_complexity=5,
     execution_ms=5_000,
-    concurrency=32,
+    concurrency=3,
     requests_per_minute=50,
     schema_objects=20,
-    operation_depth=4,
+    operation_depth=5,
 )
+
+
+# Phase 8 WP-1 rework 2 (裁定 3, 監督裁定 2026-09-07): a bounded wait for
+# the background threads to reach the stall point, in place of an
+# unbounded `entered.acquire()`. If the concurrency gate this probe
+# depends on ever stops stalling calls where this helper expects (a
+# genuine product regression, or a future change to this stall point's
+# own placement), the previous unbounded wait hung the WHOLE test
+# process forever -- `.github/workflows/ci.yml` has no `timeout-minutes`
+# and this repository has no pytest-timeout plugin (review finding 3),
+# so that hang was never observed as a red test, only as an indefinite
+# CI job. 30s is generous for a handful of already-started local threads
+# to reach a stall point that is normally reached in well under a
+# second.
+_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, make_request: Callable[[], None], n: int):
+    """port v1.12 `hold_in_flight` realization (adapter-internal plumbing,
+    never port-visible -- design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_
+    HYGIENE_V1.md D-2 実装の形 (b)): stalls the first `n` real calls into
+    `cell_obj`'s own `method_name` bound method by replacing it with an
+    instance-attribute proxy that blocks on a shared `threading.Event`
+    before delegating to the ORIGINAL method -- `n` real background OS
+    threads each issue one genuine, full port-level request
+    (`make_request()`, e.g. `DataService.catalog(session)`) that reaches
+    this stall point ONLY after passing through `DataService._slot`'s own
+    concurrency-counter increment (`self._active += 1`, `service.py:1139`)
+    -- both of this helper's current callers pass `method_name="catalog"`,
+    whose real dispatch to `self._cells[app_id].catalog()` sits INSIDE
+    that same `with self._slot(context)` block at `service.py:1095`
+    (Phase 8 WP-1 rework 3, 裁定 3, 監督裁定 2026-09-07: corrected from
+    this docstring's own former, unrelated `:1000`/`:1048`/`:1079`
+    citations -- those are the SAME `_slot`-guarded dispatch pattern's
+    other three call sites, for `query`/`mutate`/`schema` respectively,
+    none of which this helper ever actually stalls),
+    so the counter stays incremented for as long as the calls stay
+    stalled. Waits for every one of the `n` threads to have genuinely
+    entered the stalled method (a `threading.Semaphore`, not a fixed
+    sleep) before yielding, so the caller's own N+1 probe inside the
+    `with` block is guaranteed to observe the counter already at `n`.
+    Releases and joins every thread before returning control, re-raising
+    the first background thread exception (if any) only after the
+    method is restored and every thread has been joined -- never
+    swallowed."""
+    original = getattr(cell_obj, method_name)
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def _stalled(*args: Any, **kwargs: Any) -> Any:
+        entered.release()
+        release.wait()
+        return original(*args, **kwargs)
+
+    setattr(cell_obj, method_name, _stalled)
+
+    def _run() -> None:
+        try:
+            make_request()
+        except BaseException as exc:  # noqa: BLE001 -- collected, never swallowed; re-raised below after every thread is joined and the method is restored.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    entered_count = 0
+    for entered_count in range(n):
+        if not entered.acquire(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S):
+            break
+    else:
+        entered_count = n
+    try:
+        if entered_count < n:
+            raise AssertionError(
+                f"hold_in_flight: only {entered_count} of {n} held requests reached "
+                f"the concurrency-gate stall point within "
+                f"{_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S}s (expected every one of them to "
+                "stall inside DataService._slot's own counter increment -- see this "
+                "helper's own docstring); failing loud instead of hanging (裁定 3, "
+                "監督裁定 2026-09-07)"
+            )
+        # Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): yields the
+        # REAL measured count of held requests (`entered_count`, from the
+        # semaphore-acquire loop above) -- never a bare `None` a caller
+        # could only pair with a tautological `n >= 1` check. By this
+        # point `entered_count == n` always holds (the `AssertionError`
+        # above already fired otherwise), but the caller sees the
+        # MEASUREMENT, not an echo of its own input.
+        yield entered_count
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S)
+        setattr(cell_obj, method_name, original)
+    if errors:
+        raise errors[0]
 
 
 class R2DBConformanceAdapter(ConformanceAdapter):
@@ -653,6 +760,25 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         finally:
             fresh.close()
 
+    # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps the
+    # SAME per-application cell object `DataService._slot`'s own dispatch
+    # (`service.py:1000`/`:1048`/`:1079`/`:1095`) calls INTO -- so the
+    # stall point sits after the concurrency counter's own increment
+    # (`_slot`), before any backend call. `catalog()` is the stalled
+    # method: parameter-less, needs no pre-existing entity/row, and is a
+    # real, already-present dispatch (`self._cells[app_id].catalog()`,
+    # `service.py:1095`) -- not a method invented for this primitive.
+    def hold_in_flight(self, session, n: int):
+        """See `ConformanceAdapter.hold_in_flight`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point and line references are documented
+        on `_hold_in_flight_via_stalled_cell_method` and the comment
+        immediately above this method."""
+        cell = self._service._cells[session.application_id]  # noqa: SLF001 -- adapter-internal plumbing, same "reach into the peer's own composition" convention `isolated_application_surface()` above already uses.
+        return _hold_in_flight_via_stalled_cell_method(
+            cell, "catalog", lambda: self._call(lambda: self._service.catalog(session)), n,
+        )
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # `ControlPlaneService` now declares `audit_query: {"status":
@@ -846,12 +972,28 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             session, entity, [{"operation": "insert", "values": dict(values)}]
         ))
 
-    def select_eq(self, session, entity: str, select: Sequence[str], field: str | None, value: Any) -> list[dict]:
+    def select_eq(
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any, *, limit: int | None = None
+    ) -> list[dict]:
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
-        return self._call(lambda: self._service.query(session, entity, select=list(select), where=where))
+        # port v1.12 (L7-21): `limit` maps directly onto `DataService.
+        # query`'s own pre-existing `page_size` keyword (`service.py:957`,
+        # unchanged by this WP) -- `None` omits it, letting that method's
+        # own default (100) apply exactly as every pre-v1.12 caller here
+        # already observed.
+        kwargs: dict[str, Any] = {} if limit is None else {"page_size": limit}
+        return self._call(lambda: self._service.query(session, entity, select=list(select), where=where, **kwargs))
 
     def attempt_filter(
-        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
     ) -> list[dict]:
         # The same real, single query entry point `select_eq` above already
         # uses, generalized to an arbitrary operator -- an operator this
@@ -860,6 +1002,13 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # whatever `DataService.query` itself produces (success or
         # `ConformanceDenial`) is returned, never fabricated.
         where = [{"field": field, "operator": operator, "value": value}]
+        # port v1.12 (L7-21): additional predicates are appended to the
+        # SAME real `where` list `DataService.query` already accepts
+        # (`service.py:995`, `len(where)` already folds into this peer's
+        # own `query_complexity` metric, `structured.py:1183`) -- never a
+        # second query stitched together by this adapter.
+        if extra_predicates:
+            where.extend({"field": f, "operator": o, "value": v} for f, o, v in extra_predicates)
         return self._call(lambda: self._service.query(session, entity, select=list(select), where=where))
 
     def _declared_contract_version(self) -> str:
