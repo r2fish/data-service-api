@@ -551,6 +551,11 @@ class Scanner:
 
         # R1 email
         for m in R1_EMAIL_RE.finditer(residual_line):
+            if not re.search(r'[A-Za-z0-9]', m.group(0).split('@', 1)[0]):
+                # A local part made only of symbols ('+', '-', '.') is not an
+                # e-mail address; it is a diff marker or punctuation glued to an
+                # '@'-decorator (WP-9 preflight, 2026-09-06).
+                continue
             val = m.group(0)
             self.counts["R1_email:total"] += 1
             domain = val.split("@", 1)[1]
