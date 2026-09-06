@@ -1500,7 +1500,37 @@ class ApplicationRuntime:
                 # wired into any request path yet (no caller in `cell.py` /
                 # `service.py`): reporting "enforced" here would be false.
                 "request_bytes": "unavailable",
-                "schema_objects": "enforced"
+                "schema_objects": "enforced",
+                # Phase 7 WP-4 (design docs/design/PHASE7_EVIDENCE_
+                # REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6.1, §6 (β)):
+                # explicit entries for the 4 classes this peer's own
+                # `limit_enforcement` block previously left out entirely --
+                # C-05 V1 (e) requires every one of the contract's fixed 9
+                # application-plane classes to carry an explicit entry, and
+                # a silently-missing key is indistinguishable from "not
+                # implemented" without one. `execution_ms`/`concurrency`/
+                # `requests_per_minute` are genuinely unimplemented on this
+                # peer (no caller anywhere in this module or `backend_
+                # sqlite.py`/`backend_postgres.py` measures wall-clock
+                # execution time, tracks in-flight request count, or
+                # enforces a rate window against any application-plane
+                # request) -- next-phase candidate L7-1 (design §11).
+                "execution_ms": "unavailable",
+                "concurrency": "unavailable",
+                "requests_per_minute": "unavailable",
+                # `operation_depth` -- measured, not assumed (WP-4): grep
+                # across this module and `backend_sqlite.py`/`backend_
+                # postgres.py` finds no code path that computes or bounds
+                # filter/operation nesting depth at all (contrast `r2db_
+                # api/src/r2db_api/limits.py:88-90`'s real, enforced depth
+                # check) -- this peer's `Filter`/mutation shapes are flat
+                # (a list of single-level predicates; `_plan_operation`'s
+                # own per-op-type key allowlists have no nested-operation
+                # concept whatsoever). Since there is no finite structure
+                # this peer could even be said to bound, `unavailable` is
+                # the only honest declaration -- L7-1's 4th class (design
+                # D-6.1's own two-branch instruction).
+                "operation_depth": "unavailable"
             },
             # `CredentialStore.assert_active` (auth.py) is invoked by
             # `__authorize` above on every single session operation, with

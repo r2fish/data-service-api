@@ -19,9 +19,11 @@ Public Repository Security Gate).
 """
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
@@ -69,7 +71,7 @@ from r2db_api.control_plane import (  # noqa: E402
     reset_control_credentials,
 )
 from r2db_api.errors import FoundationError  # noqa: E402
-from r2db_api.limits import ControlPlaneLimits  # noqa: E402
+from r2db_api.limits import ControlPlaneLimits, ResourceLimits  # noqa: E402
 
 
 # port v1.3 (WP-5a, design docs/design/R2DB_CCR13_STORAGE_V1.md M-8
@@ -107,6 +109,46 @@ _SURFACES = {
     "control": {"base_url": "https://r2db-inprocess-control.conformance.invalid/control/v1"},
 }
 
+# port v1.11 (design D-6.1 V2/D-6.2, D-6.5 addendum): the SMALL conformance
+# profile `isolated_application_surface()` gives its own fresh `DataService`
+# -- deliberately small enough that every driven class's own D-6.2 two-
+# sided/one-sided recipe can exhaust it within one test, and every COUNT-
+# valued class here is <= C-14's own `_MAX_EXERCISABLE_LIMIT` (200,
+# condition 13(a)) -- `request_bytes` (byte-valued, one-sided) is the one
+# exception: 200 BYTES is too small even for this profile's own ordinary
+# `create_entity`/`insert` setup traffic to fit under (measured: a single-
+# field `create_entity` request alone is ~230 bytes under `check_request`'s
+# own len*4/2-per-container estimate), so it uses 4096 instead -- the
+# `_MAX_EXERCISABLE_LIMIT` ceiling's own rationale (a bound too large to
+# drive over in one test) does not map onto a byte-sized class the same
+# way it does a count (test_c05_limit_declaration_agreement.py's own
+# `_drive_request_bytes` docstring/comment states this explicitly).
+# `operation_depth=4` matches this peer's OWN real, natural structural
+# depth for a single-field, filter-less `insert` request (measured:
+# `{"entity":..., "operations":[{"operation":"insert","values":{"field":
+# "x"}}]}` reaches exactly depth 4 under `ResourceLimits.check_depth`'s own
+# counting -- request(1)->operations list(2)->operation dict(3)->values
+# dict(4)) -- an ordinary flat insert therefore sits EXACTLY at the
+# declared bound (a genuine "N succeeds" position), while the SAME insert
+# with an added (semantically invalid, but structurally real) `where`
+# filter reaches depth 5 (`check_depth` runs before the "insert does not
+# accept a filter" content check, `structured.py`, so the REAL, observed
+# denial is `LIMIT_EXCEEDED`/`operation_depth`, not `VALIDATION_FAILED`) --
+# this is the "N+1" position. `execution_ms`/`concurrency` are left at
+# this peer's own production defaults (unchanged, D-6.2: "駆動しない" --
+# no test ever drives either through this profile).
+_ISOLATED_APPLICATION_LIMITS = ResourceLimits(
+    request_bytes=4096,
+    batch_items=5,
+    result_items=5,
+    query_complexity=5,
+    execution_ms=5_000,
+    concurrency=32,
+    requests_per_minute=50,
+    schema_objects=20,
+    operation_depth=4,
+)
+
 
 class R2DBConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to the r2db-api foundation.
@@ -118,7 +160,14 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
     name = "r2db-api"
 
-    def __init__(self) -> None:
+    def __init__(self, *, limits: ResourceLimits | None = None) -> None:
+        # port v1.11 (design D-6.1/D-6.5 addendum (1)): `limits` is how
+        # `isolated_application_surface()` below gives its own fresh
+        # instance a SMALL conformance profile -- `None` (every
+        # pre-WP-4 caller, this repository's own session-scoped
+        # construction included) keeps `DataService`'s own default
+        # (`ResourceLimits()`, `service.py:828`), unchanged.
+        #
         # Synthetic pepper for this conformance run only; never a real
         # deployment secret and never read from the environment.
         self._credentials = CredentialStore(pepper="synthetic-conformance-pepper-r2db-0000")
@@ -129,7 +178,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # this adapter fabricates only in `capability_document()` -- see
         # `service.py`'s own `DataService.__init__` docstring for why this
         # is the one honest way to make that declaration.
-        self._service = DataService(self._credentials, control_plane_status="enabled", surfaces=_SURFACES)
+        self._service = DataService(self._credentials, limits=limits, control_plane_status="enabled", surfaces=_SURFACES)
         self._control = ControlAuthority(self._service)
         self._counter = 0
 
@@ -527,6 +576,38 @@ class R2DBConformanceAdapter(ConformanceAdapter):
 
         yield call
 
+    # port v1.11 (design D-6.1 V2/D-6.5 addendum (4)): a genuinely FRESH,
+    # throwaway `R2DBConformanceAdapter` -- true self-similarity (the
+    # SAME class, not a bespoke stand-in), built via this class's own
+    # ordinary constructor with the SMALL `_ISOLATED_APPLICATION_LIMITS`
+    # profile. Unlike `isolated_control_surface()` above (which shares
+    # backend/application/credential state with the SHARED surface on
+    # purpose, so the SAME applications/credentials authenticate against
+    # it), this isolated instance shares NOTHING with `self` -- its own
+    # `CredentialStore`/`DataService`/`ControlAuthority` are entirely
+    # separate objects (`__init__`'s own construction, unchanged), which
+    # is what makes it a genuinely low-cardinality surface a V2 drive can
+    # exhaust exactly at its own declared bound: no other test's fixture
+    # churn shares this instance's counters. This construction never goes
+    # through `main.py`'s `build_app` composition root -- addendum (1):
+    # "この経路は composition root を通らない" -- so it never faces the
+    # deprecated-env/platform-declaration/writer-role machinery `build_app`
+    # would otherwise require.
+    #
+    # No real resource to release on exit (in-memory construction only,
+    # same as `isolated_control_surface()` above) -- D-6.6's own
+    # supervisor note: "r2db-api (in-process) は資源ゼロ...観測できるのは
+    # 生存Pythonオブジェクトの数だけ". `close()` on this peer is a no-op
+    # (see `close()` below), so this primitive's own (e) resource check
+    # observes Python object liveness via a weakref, not an external pool.
+    @contextmanager
+    def isolated_application_surface(self):
+        fresh = R2DBConformanceAdapter(limits=_ISOLATED_APPLICATION_LIMITS)
+        try:
+            yield fresh
+        finally:
+            fresh.close()
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # `ControlPlaneService` now declares `audit_query: {"status":
@@ -857,6 +938,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         confirmation: Any = None,
         session: object = None,
         entity: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         item: dict[str, Any] = {"operation": operation}
         if values is not None:
@@ -922,6 +1004,15 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             # same real parameter position, same "never interpreted here"
             # treatment.
             item["unique_key"] = unique_key
+        if idempotency_key is not None:
+            # port v1.11 (design D-6.7 C-07 (ii)): `structured.py`'s own
+            # `_MUTATION_KEYS`/`bind_mutation` already recognize this key
+            # on this peer's internal (non-HTTP) mutation-item shape and
+            # refuse it with a real, present `CAPABILITY_UNSUPPORTED`
+            # BEFORE execution (`idempotency: unavailable`) -- carried
+            # through exactly like `expected_revision`/`unique_key` above,
+            # never interpreted by this adapter.
+            item["idempotency_key"] = idempotency_key
         return item
 
     def attempt_mutation(
@@ -975,7 +1066,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
                 op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
                 expected_revision=op.expected_revision, unique_key=op.unique_key,
                 destructive=op.destructive, confirmation=op.confirmation,
-                session=session, entity=entity,
+                session=session, entity=entity, idempotency_key=op.idempotency_key,
             )
             for op in operations
         ]

@@ -45,6 +45,7 @@ values (CLAUDE.md Public Repository Security Gate).
 from __future__ import annotations
 
 import asyncio
+import copy
 import atexit
 import json
 import os
@@ -141,7 +142,7 @@ from r2db_api.credential_store import (  # noqa: E402
 )
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
-from r2db_api.limits import ControlPlaneLimits  # noqa: E402
+from r2db_api.limits import ControlPlaneLimits, ResourceLimits  # noqa: E402
 from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
@@ -738,6 +739,25 @@ _SURFACES = {
     "data": {"base_url": "https://r2db-http-pg-data.conformance.invalid/v1"},
     "control": {"base_url": "https://r2db-http-pg-control.conformance.invalid/control/v1"},
 }
+
+# port v1.11 (design D-6.1 V2/D-6.2) -- same small profile, same
+# `operation_depth=4` reasoning, as `conformance_adapter_r2db.py`'s own
+# identical constant (this peer's `ResourceLimits.check_depth` is
+# backend-independent, `service.py`, so the position is identical over
+# HTTP). Every COUNT-valued class <= C-14's `_MAX_EXERCISABLE_LIMIT` (200) --
+# `request_bytes` (byte-valued) is 4096; see the sibling in-process
+# adapter's identical constant for the measured reason.
+_ISOLATED_APPLICATION_LIMITS = ResourceLimits(
+    request_bytes=4096,
+    batch_items=5,
+    result_items=5,
+    query_complexity=5,
+    execution_ms=5_000,
+    concurrency=32,
+    requests_per_minute=50,
+    schema_objects=20,
+    operation_depth=4,
+)
 
 
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
@@ -1815,6 +1835,100 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 if store is not None:
                     store.close()
 
+    # port v1.11 (design D-6.1 V2/D-6.5 addendum (1)/(4)): unlike
+    # `isolated_control_surface()` above, this does NOT reuse `_build_
+    # control_stack()`-style product code and does NOT go through
+    # `main.py`'s `build_app` composition root -- addendum (1)'s own
+    # per-plug table: "data plane は直接構築...composition root を通らな
+    # い", and `build_app` has no `limits=` parameter to inject a small
+    # profile through in the first place (addendum (1)). Instead, a
+    # SECOND, throwaway `DataService`/`ControlAuthority`/ASGI app/httpx
+    # client, constructed the SAME way `__init__` above constructs the
+    # SHARED ones -- true self-similarity -- but bound to the SMALL
+    # `_ISOLATED_APPLICATION_LIMITS` profile and its OWN, empty `_app_pg`/
+    # `_provisioned_cells` registries (so a fresh `provision_application`
+    # here never collides with the shared surface's own churn).
+    #
+    # REUSES the shared, already-bootstrapped PG platform (`self._
+    # platform`/`self._credentials`/`self._write_credentials`/`self._
+    # application_durable_audit`) rather than re-provisioning a second
+    # platform database from scratch -- addendum (1): "この経路が要求す
+    # るものは無し" (no additional platform-DB seed) is exactly this:
+    # `_provision_pg_app` (the real per-application PostgreSQL
+    # provisioning this isolated instance's own `provision_application`
+    # still goes through, via `_make_cell` below) only ever needs the
+    # ALREADY-bootstrapped platform/migrations, never a second bootstrap.
+    # Built via `object.__new__` (not `R2DBHttpConformanceAdapter()`)
+    # specifically so it does NOT repeat the real, expensive PostgreSQL
+    # platform bootstrap (`_bootstrap_platform`: fresh prefix, advisory
+    # lock, migrations 0001-0007) on every call -- this primitive is
+    # expected to be entered once per D-6.2 driven class, so repeating
+    # that bootstrap each time would make the common suite's own runtime
+    # scale with the number of driven classes for no real isolation
+    # benefit (the platform itself carries no per-application state this
+    # isolated instance's OWN small `DataService.limits`/empty cell
+    # registry does not already isolate).
+    #
+    # On exit: closes ONLY what this isolated instance itself opened (its
+    # own httpx client, its own event loop, its own `PostgresCell` pools
+    # -- `pool_size=2` each, `_make_cell`'s own real per-application
+    # connection pool, D-6.5 addendum (3)) -- never `self.close()` (which
+    # would drop the SHARED platform database this isolated instance
+    # borrows).
+    @contextmanager
+    def isolated_application_surface(self):
+        # `copy.copy(self)` (shallow) rather than `object.__new__` +
+        # selective attribute assignment: this peer's `issue_credential`
+        # (WP-5 C-08 upgrade) is itself an IN-BAND `/control/v1/
+        # credentials` HTTP call -- it needs the SAME real control-plane
+        # client/app/credential-ref state `self` already holds (borrowing
+        # the shared control surface for setup is explicitly fine here,
+        # D-6.5 addendum's own table: "無し" -- no extra control seed is
+        # needed to build the ISOLATED APPLICATION surface). A shallow
+        # copy shares every one of those references by construction
+        # (control client/app/pepper/credential-ref/stores, `self.
+        # _platform`, `self._credentials`/`self._write_credentials`,
+        # `self._application_durable_audit`) so nothing about the control
+        # plane needs to be named here at all -- only the DATA-plane
+        # pieces below are deliberately overwritten with fresh, isolated
+        # ones.
+        iso = copy.copy(self)
+        iso._app_pg = {}
+        iso._provisioned_cells = []
+        iso._counter = 0
+        iso._service = DataService(
+            iso._credentials, limits=_ISOLATED_APPLICATION_LIMITS, cell_factory=iso._make_cell,
+            control_plane_status="enabled", durable_audit=iso._application_durable_audit, surfaces=_SURFACES,
+        )
+        iso._control = ControlAuthority(iso._service)
+        app = create_app(iso._service)
+        iso._app = app
+        iso._loop = asyncio.new_event_loop()
+        iso._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        try:
+            yield iso
+        finally:
+            # WP-4 fix (first-execution finding): this isolated instance's
+            # own `provision_application` writes into the SHARED platform
+            # database's `applications` registry table (D-6.5 addendum
+            # (1): "この経路が要求するものは無し" means no EXTRA seed is
+            # needed, not that writes stay private) -- the SAME table
+            # C-14 vector 5's own `n_existing < apps_limit` precondition
+            # reads. Left uncleaned, C-05's own repeated per-class isolated
+            # surfaces silently saturate that shared bound for every LATER
+            # test in the session. Deprovisioned the same way C-14 vector
+            # 5 cleans up its own throwaway Applications. Cells' own pool
+            # connections are closed FIRST -- `deprovision_application`
+            # drops the per-application PostgreSQL database, which fails
+            # ("being accessed by other users") while this instance's own
+            # pool still holds live connections to it.
+            iso._run(iso._client.aclose())
+            for cell in iso._provisioned_cells:
+                cell.close()
+            for app_id in list(iso._app_pg):
+                iso.deprovision_application(app_id)
+            iso._loop.close()
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
     # Real HTTP POST /v1/audit/query -- against the CONTROL client (`self.
@@ -2271,11 +2385,23 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             )
             for op in operations
         ]
+        # port v1.11 (design D-6.7 C-07 (ii)): the contract's own
+        # `idempotency_key` is a REQUEST-level field
+        # (`MutationRequest.idempotency_key`, `additionalProperties:
+        # false` on the per-operation `Mutation` shape has no slot for
+        # it) -- never placed inside an individual operation item. Hoisted
+        # from whichever operation(s) in this batch carry one; every
+        # currently-registered caller of this port method sends exactly
+        # one operation when it wants this field exercised at all.
+        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
         # Same real HTTP mutation endpoint as `attempt_mutation_with_
         # addresses` above, given every operation in one request body --
         # exactly what a real client sending a multi-operation atomic batch
         # over HTTP would do.
-        result = self._mutate_request(session, entity, items)
+        result = self._mutate_request(
+            session, entity, items,
+            extra_body={"idempotency_key": idempotency_key} if idempotency_key is not None else None,
+        )
         return result["affected"], result.get("assigned_addresses")
 
     def attempt_cross_entity_batch(self, session: object, operations: Sequence[ScopedBatchOperation]) -> int:
@@ -2321,7 +2447,16 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             if op.unique_key is not None:
                 item["unique_key"] = op.unique_key
             items.append(item)
-        result = self._send("POST", "/v1/data/mutations", session, json_body={"operations": items})
+        # port v1.11 (design D-6.7 C-07 (ii)): `idempotency_key` is a
+        # REQUEST-level field on `ScopedMutationRequest`
+        # (`additionalProperties: false` on the per-operation
+        # `ScopedMutation` shape has no slot for it) -- same hoist as
+        # `attempt_batch_with_addresses` above.
+        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
+        body: dict[str, Any] = {"operations": items}
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
+        result = self._send("POST", "/v1/data/mutations", session, json_body=body)
         return result["affected"]
 
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
@@ -2900,6 +3035,31 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             a_only_entity=a_only_entity,
             b_only_entity=b_only_entity,
         )
+
+    # port v1.11 (design D-6.6 (e)): non-normative, duck-typed accessor
+    # (mirrors the existing "optional raw-accessor methods" convention
+    # below, e.g. `_find_all_adapters_with`) -- counts REAL PostgreSQL
+    # backends, used only by C-05's own (e) resource-release check
+    # (`test_c05_limit_declaration_agreement.py`), never by any other
+    # condition test. WP-4 rework (完了条件 15 / F1 差し戻し 2 巡目): a bare
+    # `f"{prefix}%"` pattern ALSO matched the shared PLATFORM database
+    # (`<prefix>_platform`), where the shared control stack's own lazily-
+    # opened connections live -- counting those made the (e) assertion
+    # depend on whether an earlier test in the same worker process had
+    # already warmed that shared pool (a cold process measured `after !=
+    # before` even with no leak at all; a warm one did not). The caller
+    # now supplies a pattern scoped to ONLY the per-application database(s)
+    # the isolated instance itself provisioned (`<prefix>_app_<application_
+    # id>`, `_provision_pg_app`'s own naming, never the bare prefix), so
+    # this accessor never sees the shared control pool's own connections.
+    def _live_pg_backend_count(self, datname_like: str) -> int:
+        with psycopg.connect(self._platform.admin_dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname LIKE %s",
+                    (datname_like,),
+                )
+                return cur.fetchone()[0]
 
     def close(self) -> None:
         try:
