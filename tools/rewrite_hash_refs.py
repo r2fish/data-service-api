@@ -161,7 +161,12 @@ def default_allow_reason(line: str, start: int, end: int, token: str) -> str | N
     # git object name, so never in a commit-map (WP-9 rehearsal, 2026-09-06).
     # Also the prose form "sha256 `968d…`" / "sha256=…" used when a checksum
     # is quoted (truncated with an ellipsis) in design records.
-    if "sha256" in line[max(0, start - 12):start].lower():
+    if "sha256" in line[max(0, start - 40):start].lower():
+        return "content_digest"
+    # A token immediately followed by an ellipsis is a truncated checksum
+    # quoted in prose ("`968d3c72…45e6`"); git short names are never
+    # written that way in this repository.
+    if line[end:end + 1] in ("\u2026", "…"):
         return "content_digest"
 
     # obviously_synthetic: the ascending digit run or a single repeated
