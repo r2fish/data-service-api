@@ -1,9 +1,10 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.0 (2026-09-06)**。外部提案 2 本の評価と依頼者の目標宣言を受けて起草。
+- 版数: **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
+- 旧 **v1.0 (2026-09-06)**。外部提案 2 本の評価と依頼者の目標宣言を受けて起草。
 - 起草: Fable (監督)。依頼者の目標 (§0) は逐語。判定 (§3, §6) は本会話での監督評価であり、各フェーズの設計文書で再審議してよい。
 - 位置づけ: 本書は **計画文書**であり、`CLAUDE.md` の source-of-truth 順位には入らない。各フェーズの正本は、そのフェーズの設計文書 (`docs/design/PHASE*_V1.md`) と作業指示書である。本書はそれらの**着手順・範囲・着手条件・守るべき条件**を先に固定し、次フェーズの設計起草者が「何を、なぜ、どの順で」を再導出せずに済むようにする。
-- 前提となる main: `a8353fe` (フェーズ7 WP-7 マージ後。gate 2265 passed / 9 xfailed)。
+- 前提となる main: `ef9cade` (フェーズ7 WP-8 マージ後。WP-7 の gate 2265 passed / 9 xfailed)。
 
 ---
 
@@ -27,8 +28,9 @@
 ## 1. 現状 (2026-09-06)
 
 - **契約**: 1.6.0。能力 11 種、error code 17 種、limit class 16 種、共通条件 C-00〜C-19 の 20 件は**全件が共通 suite で実行可能** (four adapters)。
-- **フェーズ7**: 7-A (WP-1〜3) と 7-B の WP-4〜7 は main マージ済み。**残るのは WP-8 (記録・第 14 次引き継ぎ) と WP-9 (公開ゲート。着手条件は依頼者の実行合図のみ)**。
-- **台帳の最優先候補**: **L7-1** (MitateDB application plane の `execution_ms` / `concurrency` / `requests_per_minute` の実 enforcement + concurrency probe の port primitive)。C-05 V3 の `xfail(strict=True)` 9 件が撤去の合図。
+- **フェーズ7**: 7-A (WP-1〜3) と 7-B の WP-4〜8 は main マージ済み (第 14 次引き継ぎ = `docs/work-orders/HANDOVER_20260906_FABLE.md`)。**残るのは WP-9 (公開ゲート) だけで、着手条件は依頼者の実行合図のみ**。
+- **台帳の最優先候補**: **L7-1** (MitateDB application plane の `execution_ms` / `concurrency` / `requests_per_minute` / `operation_depth` の 4 class の実 enforcement + concurrency probe の port primitive。`operation_depth` は WP-4 の実測で `unavailable` と確定)。C-05 V3 の `xfail(strict=True)` 9 件が撤去の合図。
+- **第 14 次引き継ぎ §4-2 で開いている項目**: L7-2 (実 socket HTTP plug)、L7-18 (`ops verify-declarations` が両 peer に無い)、L7-19 (上流 DeprecationWarning の狭い ignore、撤去条件未達)、L7-21 (C-05 V2 の除外判定が peer 名固定。port v1.12 で能力判定へ)、L7-22 (現行行から落ちた台帳 ID 2 件)、L7-23 (register テストは単独実行で緑にならない。収集 0 件ガードが未設置)。
 - **契約済みだが両 peer 未実装の能力**: `idempotency` (両 peer `unavailable`、L7-8)、`best_effort_transactions`。
 - **既知の構造課題**: `surfaces` の 2 プロセス間ドリフト (L6-5a、手当ては Q4 と同じ DB 側単一真実)、実 socket HTTP plug の不在 (L7-2)、r2db に宣言検証の終了コード付き ops が無い (L7-18)。
 - **性能**: 計測ハーネス・基準値ともに無い。
@@ -121,18 +123,18 @@
 
 ### フェーズ7 残 (変更なし)
 
-- **WP-8** 記録・第 14 次引き継ぎ。**本書への参照を引き継ぎに載せる。**
+- **WP-8** は完了した (main `ef9cade`)。本書への参照は第 14 次引き継ぎ §4-2 の末尾に 1 行で置いた。
 - **WP-9** 公開ゲート。着手条件は依頼者の実行合図のみ (L7-12 状態注記)。**公開は G-2 の「人から見て」を成立させる前提**であり、フェーズ8 以降のどの機能よりも先に価値を生む。フェーズ8 の着手を WP-9 の完了に**依存させない** (触るファイルが重ならない) が、順序としては WP-9 を先に置くことを推奨する。
 
 ### フェーズ8 — 実効 bound と基盤衛生 (契約変更なし)
 
 - **目的**: G-2 と G-4 の土台。宣言した bound が全 peer で実効であること、以後の契約改版に耐える計測と検知を置くこと。
-- **着手条件**: WP-8 完了 (7-B の記録が閉じていること)。WP-9 との並行可。
+- **着手条件**: 依頼者の着手裁定。WP-9 との並行可 (触るファイルが重ならない)。
 - **範囲**:
-  - **L7-1** MitateDB application plane の `execution_ms` / `concurrency` / `requests_per_minute` の実 enforcement (`operation_depth` と in-process `request_bytes` は WP-4 の実測に従い副項目) + port への in-flight 保持 primitive + C-05 V3 xfail の class ごとの撤去。
-  - **R-9** CI のテスト総数下限 (前回 main の `--collect-only` 件数を下限とし、減少は明示の更新なしに赤)。
+  - **L7-1** MitateDB application plane の `execution_ms` / `concurrency` / `requests_per_minute` / `operation_depth` の実 enforcement (in-process `request_bytes` は副項目) + port への in-flight 保持 primitive + C-05 V3 xfail の class ごとの撤去。**L7-21** (V2 の除外判定を peer 名固定から能力判定へ、port v1.12) を同梱する。同じ C-05 を触るためである。
+  - **R-9** CI のテスト総数下限 (前回 main の `--collect-only` 件数を下限とし、減少は明示の更新なしに赤)。**L7-23** (register テストの収集 0 件ガード) と **L7-22** (現行行へ台帳 ID 2 件を戻す) を同梱する。
   - **R-10** 契約 JSON の現行/履歴分離。WP-7 の companion 方式 (`*_HISTORY.md`、ID ごとの anchor、register テスト) を `spec/` に適用。**契約の意味は 1 文字も変えない** (1.6.0 のまま)。分離の検査は「現行 JSON から経緯マーカーが消えたこと」と「companion に逐語で残ること」。
-  - **R-11** r2db 運用項目: deployment smoke test (provision 後に capabilities / catalog / 1 query を実打ちして終了コードで返す。L7-18 の `ops verify-declarations` を同梱)、backup/restore の手順と実証記録、ops CLI の引数に secret を取る経路の検査。
+  - **R-11** 運用項目: deployment smoke test (provision 後に capabilities / catalog / 1 query を実打ちして終了コードで返す)、**L7-18** の `ops verify-declarations` を**両 peer に同型で**追加、backup/restore の手順と実証記録 (r2db)、ops CLI の引数に secret を取る経路の検査 (両 peer)。**L7-19** は constraints の Starlette 更新と同一コミットで ignore を外す (撤去条件が満たせる版があれば本フェーズで行う)。
   - **R-12** 性能基準値: 両 peer × 4 plug に対する query / mutate / cross-entity の p50 / p95 を測る使い捨てでないハーネス (`tools/`) と、完了ゲートに添える集計行の形式。**閾値は置かない** (P-8)。
 - **守るべき条件**: 契約変更ゼロ。L7-1 は C-05 の既存の駆動集合規則に従う。R-10 は WP-7 の規約を再利用し新方式を作らない。
 - **完了条件**: C-05 V3 の xfail が 0 (または実測で残る class とその理由が台帳に載る)、CI に総数下限 job、`spec/` に companion、R-12 の基準値が設計 §13 に記録される。
@@ -212,9 +214,9 @@
 | **R-6** | request budget (3 class から) | フェーズ9 |
 | **R-7** | 成功応答の `request_id` | フェーズ9 |
 | **R-8** | 契約 JSON から派生する機械可読の操作カタログ + 再生成一致テスト | フェーズ9 |
-| **R-9** | CI のテスト総数下限 | フェーズ8 |
+| **R-9** | CI のテスト総数下限 (+ L7-23 収集 0 件ガード、L7-22 台帳 ID 復帰) | フェーズ8 |
 | **R-10** | 契約 JSON の現行/履歴分離 (WP-7 方式) | フェーズ8 |
-| **R-11** | r2db 運用項目: smoke test (L7-18 同梱)、backup/restore 実証、ops CLI 引数の secret 経路検査 | フェーズ8 |
+| **R-11** | 運用項目: smoke test、L7-18 `ops verify-declarations` (両 peer)、backup/restore 実証 (r2db)、ops CLI 引数の secret 経路検査、L7-19 の撤去 | フェーズ8 |
 | **R-12** | 性能基準値ハーネスと集計行形式 | フェーズ8 |
 | **R-13** | 保留項目 (§3.2) の実需記録の置き場。公開後の実利用で現行契約では表現できない要求が出たとき、本表に日付・要求・不足する契約要素を 1 行で記す。これが CCR-01 の「表現力不足の実証」になる | フェーズ11 以降 |
 | **R-14** | 本書の改版規約: 判定 (§3, §6) を覆すときは、覆した根拠と日付を該当行に残し版数を上げる。行を消さない | 本書 |
