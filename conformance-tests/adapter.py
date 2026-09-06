@@ -754,6 +754,23 @@ class BatchOperation:
     unique_key: str | None = None
     destructive: bool = False
     confirmation: Any = None
+    # port v1.11 (design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_
+    # PUBLICATION_V1.md D-6.7 C-07 (ii)): carries the contract's own
+    # `idempotency_key` (`Mutation.idempotency_key`) through to whatever
+    # real entry point already receives the rest of this operation --
+    # never interpreted, stored, or compared by the adapter itself,
+    # exactly like `expected_revision`/`unique_key` above. Exists ONLY so
+    # C-07's declare-first idempotency vector can present a real,
+    # key-bearing request and observe the peer's own real refusal (both
+    # currently-registered peers declare `idempotency: unavailable` and
+    # refuse this key with `CAPABILITY_UNSUPPORTED` before execution) --
+    # the positive-side primitive (key generation/storage/replay/result
+    # comparison) is deliberately NOT added here (design principle,
+    # supervisor ruling S-4): nothing on either peer would exercise it
+    # yet, and adding it now would grow the port's surface with no real
+    # caller. `None` (the default) omits the key from the presented
+    # request entirely, identical to every other optional field here.
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -784,6 +801,9 @@ class ScopedBatchOperation:
     unique_key: str | None = None
     destructive: bool = False
     confirmation: Any = None
+    # port v1.11 -- identical field, identical rationale, as `BatchOperation.
+    # idempotency_key` above.
+    idempotency_key: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1248,6 +1268,119 @@ class ConformanceAdapter(ABC):
         target) -- the isolated surface is additive, constructed
         alongside it, sharing only read/write access to the same
         underlying application/credential state, never replacing it.
+        """
+
+    @abstractmethod
+    def isolated_application_surface(self) -> AbstractContextManager["ConformanceAdapter"]:
+        """C-05's OWN test primitive (port v1.11, design docs/design/
+        PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6.1 V2) --
+        the application-plane sibling of `isolated_control_surface()`
+        above, but shaped differently on purpose (design review 1, B-5):
+        that method yields a single callable because its own drive class
+        (`control_requests_per_minute`) is the only one it ever needs to
+        present; the application plane's own drive recipes (D-6.2) need
+        row insertion, entity/schema-object creation, batch mutation,
+        cross-entity batch mutation, and query, plus a read of the
+        isolated instance's OWN `capability_document()` -- more surface
+        than any single callable could honestly present. A context
+        manager that, on entry, builds a FRESH, throwaway data-plane
+        instance bound to its OWN, small conformance profile (its own
+        `limits`/resource-class configuration, deliberately small enough
+        for C-05's V2 vectors to drive every applicable class past its
+        declared bound within one test) and yields a SECOND, self-similar
+        object that itself conforms to this exact `ConformanceAdapter`
+        ABC -- a test drives it with the SAME ordinary port operations
+        (`authenticate`/`create_entity`/`insert`/`attempt_batch_with_
+        addresses`/`attempt_cross_entity_batch`/`select_eq`/`attempt_
+        filter`/`capability_document`/...) it already uses against the
+        shared, session-scoped adapter, never a bespoke, drive-recipe-
+        specific method added to this port. `capability_document()` read
+        against the YIELDED instance is what C-05 V2 compares its own
+        drive's observed refusal position against -- this is this
+        primitive's entire reason to exist: the declaration and the
+        surface under test must be the SAME instance's, never a shared
+        surface's declaration compared against a different, isolated
+        surface's behavior (or vice versa).
+
+        Constructed the same way `isolated_control_surface()` is
+        constructed for a peer with no real control-plane composition
+        root to reuse (design D-6.5 "Q4 確定後の追補"): a direct,
+        out-of-band construction of this peer's own service/foundation
+        object, never the peer's real composition root
+        (`main.py`'s `build_app`/`MitateDB-api`'s `build_control_
+        service`) -- reaching for the composition root here would pull in
+        requirements (platform-declaration reads, writer-role checks,
+        deprecated-env rejection) this primitive has no need of and, for
+        at least one plug, cannot even satisfy (no way to inject a small
+        `limits` profile through that path at all).
+
+        Resource-sharing shape differs by plug (D-6.5 addendum's own
+        "(推測)" point -- WP-4 decided it by measurement, corrected here
+        WP-4 rework 2026-09-06, 差し戻し 2 巡目, F-port-docstring: this
+        paragraph previously claimed uniform "shares nothing", which was
+        true for the two in-process plugs but FALSE for the two HTTP
+        plugs). **In-process** (`r2db-api`, `MitateDB-api`): the isolated
+        instance is built from a wholly fresh service/foundation object
+        with NO reference back to the shared, session-scoped adapter at
+        all -- every credential, application, and cell registry it touches
+        is its own, genuinely private, from construction through exit.
+        **HTTP** (`r2db-api-http`, `MitateDB-api-http`): the isolated
+        instance is a SHALLOW copy (`copy.copy(self)`) of the shared
+        adapter -- only the DATA-plane pieces (the `DataService`/
+        `ControlAuthority` pair, the ASGI app, the httpx client, and the
+        per-application cell registry) are freshly constructed and bound
+        to the SMALL profile; the control-plane client/app, the credential
+        stores, and the shared, already-bootstrapped PostgreSQL PLATFORM
+        database are the SAME objects the shared surface already holds.
+        This borrowing is deliberate, not an oversight: the isolated
+        instance's own in-band `issue_credential()` is itself a real
+        `/control/v1/credentials` HTTP call, and it needs the shared
+        control-plane state to authenticate at all -- re-bootstrapping a
+        second platform per isolated surface would add real PostgreSQL
+        provisioning cost for no isolation benefit the small `limits`
+        profile does not already provide (D-6.5 addendum: "この経路が要求
+        するものは無し", no EXTRA platform seed is needed). One concrete
+        consequence: the isolated instance's own `provision_application`
+        writes into the SAME shared platform `applications` registry table
+        the shared surface (and C-14's own vectors) read -- so, on exit,
+        the isolated instance deprovisions every application ID it itself
+        provisioned (never touching any application the shared surface
+        provisioned), so this borrowing never accumulates across the many
+        isolated surfaces one C-05 run opens and closes in sequence. In
+        both shapes, the whole point of the SMALL profile is a low-
+        cardinality surface a V2 drive can genuinely exhaust; only the
+        HTTP plugs additionally share control-plane/platform state that
+        this primitive's own drives never exhaust (they never touch
+        `applications`/`credentials_per_application` bounds), so sharing
+        it costs nothing to the positional exactness V2 depends on.
+
+        Test code obtains its own application/credential state against
+        the yielded instance the ordinary way (`provision_application`/
+        `issue_credential`), exactly as it would against the shared
+        adapter -- this primitive contributes only the ISOLATION and the
+        SMALL profile, never a shortcut around the normal port dispatch
+        it otherwise makes available.
+
+        On exit, releases whatever real resources building the isolated
+        instance opened (an HTTP+PostgreSQL plug's own fresh connection
+        pool(s); an in-memory plug's own live per-cell connection(s) --
+        design D-6.6/D-6.5 addendum (3)); never mutates, rebuilds, or
+        otherwise disturbs the adapter's own SHARED application surface.
+
+        Design condition 13(b) choice, stated here per that condition's own
+        instruction ("どちらを採ったかを port の docstring に明記する"):
+        C-05's own V2 drivers each open a FRESH instance of this primitive
+        PER driven class -- no two classes' drives ever share one isolated
+        instance. This is the "class ごとに新しい isolated_application_
+        surface() を張る" branch, not the alternative (one shared isolated
+        instance across classes, requiring a checked headroom precondition
+        for every later class's drive to account for what earlier classes'
+        drives already consumed of a shared rate window). The one exception
+        that DOES need (and asserts) a headroom precondition is `requests_
+        per_minute`'s own driver, entirely WITHIN its own single isolated
+        instance: setup traffic (`create_entity`/an HTTP plug's own
+        `authenticate()` round trip) against that SAME instance can consume
+        part of the very rate window the drive then measures.
         """
 
     # ------------------------------------------------------------------

@@ -634,17 +634,37 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
                     "control_requests_per_minute class (it may be a different class's bound, or a wrongly-"
                     "configured isolated surface, firing early)"
                 )
-                # Review F4 (2026-09-04): same soft-check shape C-16's own
-                # `batch_entities` LIMIT_EXCEEDED assertion already uses
-                # (`test_c16_cross_entity_atomicity.py`'s `limit_class`
-                # check) -- `limit_class` carries no contract guarantee
-                # (`errors.shape`'s `details` is a free-form object), so a
-                # peer omitting it is not itself a violation, but BOTH
-                # currently-registered peers do emit it
-                # (`r2db-api/src/r2db_api/control_plane.py:1574`,
+                # Review F4 (2026-09-04), CORRECTED phase 7 WP-4 (design
+                # docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_
+                # PUBLICATION_V1.md D-6.4, closing PHASE6_CONTRACT_160_
+                # CLIENT_DISCOVERY_V1.md §11 L6-19): this comment
+                # previously read "`limit_class` carries no contract
+                # guarantee (`errors.shape`'s `details` is a free-form
+                # object)" -- that premise was stale/incorrect. The
+                # contract's `errors.details_vocabulary.LIMIT_EXCEEDED.
+                # limit_class` is "string, required", and `versioning.
+                # version_binding` lists it as an unconditional 1.2.0
+                # obligation ("errors.details_vocabulary's LIMIT_EXCEEDED.
+                # limit_class requirement") -- both currently-registered
+                # peers declare `contract_version` 1.6.0, so they claim
+                # conformance to it. The check below therefore stays a
+                # SOFT check (`if limit_class is not None`) not because
+                # the contract permits omission, but because widening it
+                # to a hard, unconditional assertion is left to C-14's own
+                # scope (this correction is C-05's own D-6.4 cross-
+                # reference; it does not itself escalate this assert --
+                # phase 7 WP-4 explicitly does not decide that). Same
+                # soft-check shape C-16's own `batch_entities` LIMIT_
+                # EXCEEDED assertion uses (`test_c16_cross_entity_
+                # atomicity.py`'s `limit_class` check, same correction
+                # applies there). Both currently-registered peers do emit
+                # it (`r2db-api/src/r2db_api/control_plane.py:1574`,
                 # `MitateDB-api/src/mitatedb_api/control_plane.py:1146`),
                 # so this is a real, reachable-once-provided-branch check,
-                # not a dead assertion.
+                # not a dead assertion. `conformance-tests/test_c05_limit_
+                # declaration_agreement.py`'s own V2 vector is the common
+                # suite's first HARD `limit_class` check (application
+                # plane), grounded in this same contract obligation.
                 limit_class = exc.details.get("limit_class")
                 if limit_class is not None:
                     assert limit_class == "control_requests_per_minute", (
