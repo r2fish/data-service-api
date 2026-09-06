@@ -1074,7 +1074,7 @@ bash -n r2db-api/deploy/scripts/<各 script>
 
 ---
 
-## 4. 訂正註 (2026-09-05 追記、7-A 実装中)
+## 4. 訂正註 (2026-09-05 追記、7-A 実装中。2026-09-06 に 7-B 分を追記)
 
 **訂正註は 6 件であり、いずれも実装物の欠陥ではなく、本書側の誤りか、本書の発注後に監督が下した裁定である** (フェーズ6 §11 **L6-18** の流儀 —「実装 / レビュー / 監査が実測で見つけた発注文書側の誤り。設計が正」)。**本文の発注内容は書き換えていない。** **版数行は v1.1 のまま据え置く** (監督裁定。7-A の実装中であり、7-A 完了時にまとめて版数を上げる)。
 
@@ -1109,5 +1109,6 @@ bash -n r2db-api/deploy/scripts/<各 script>
    - **裁定**: **監督が事後承認。** **check 4 (`ExecStart` 非空検査)** と **`--require-tools`** は D-5 に無い拡張だが、**変異 1 の実測可能性と lint の非 vacuity を成立させるために必要**である。**設計 D-5 が挙げる 3 検査は撤去せず、その上に足す**形とする。
 7. **WP-6 の着手条件「WP-5 の完了後」— 実装は branch で並行、main マージのみ WP-5 の後 (監督裁定 2026-09-06)。** 発注文書の記述 → 実装担当が字句どおり「WP-5 未完了のため着手不可」と差し戻した (正しい読み)。実際 → この条件の趣旨は §1 依存順の根拠に書いたとおり「`error::DeprecationWarning` を main に先に載せて他 WP の完了ゲートを塞がない」ことにあり、branch `phase7-wp6` 上の実装は誰のゲートも塞がない。裁定 → 実装は Q4 マージ後ただちに branch で行ってよい。**main へのマージは WP-5 のマージの後**に置き、完了条件 4 (4 数一致) は**マージ時点の main の集計行**に対して監督が評価する。実装報告では着手時点の main (`a6de3e3`) と有効化後の両 peer suite の集計行一致を示す。
 8. **WP-6 の前提 3 点が現物と違う (実装担当の実測 2026-09-06、監督裁定)。** 発注文書の記述 → `TestClient(` は 3 ファイル 12 箇所 / root `pyproject.toml` の `filterwarnings` で全体に効く / httpx2 を入れれば警告は消える。実際 → (i) `TestClient(` は **4 ファイル 21 箇所** (`test_application_audit.py` 7 箇所と `test_surfaces_env.py` 6 呼び出しが漏れていた)、(ii) pytest は最寄りの inifile を採るため **peer 単体実行では root の `filterwarnings` は効かない** (`r2db-api/pyproject.toml` が configfile になる)、(iii) httpx2 (提供元確認: Starlette 1.6.0 の `testclient.py` 自身が `import httpx2` を第一経路にし、著者は httpx / Starlette の原作者) を入れても `starlette/testclient.py:53` の `anyio.abc.BlockingPortal` (anyio 4.15 で deprecated) が**上流由来の第 2 の DeprecationWarning** を出し、error 化すると 5 ファイルが収集エラーになる。裁定 → httpx2 を採用し TestClient は維持 (ASGITransport への置換は lifespan 駆動の有無が変わり空振りの危険がある — 実装担当の指摘 5)。`filterwarnings = ["error::DeprecationWarning", "ignore:.*BlockingPortal.*:DeprecationWarning:starlette.testclient"]` の形で **root と両 peer の pyproject に同じ設定を置く** (ignore は上流 1 件に限定し、台帳 L7-19 で追跡。Starlette が直せば撤去)。完了条件 4 の「12 箇所」は 21 に読み替える。 **追記 (レビュー指摘 1、同日)**: (iii) の「httpx2 を入れても第 2 の警告で落ちる」は正しいが、「httpx2 が無いと落ちる」は誤り — `StarletteDeprecationWarning` は `UserWarning` 派生で `error::DeprecationWarning` の対象外。httpx2 の役割は設計 D-4 の監督訂正のとおり (警告の除去と fallback 撤去への備え)。
+9. **WP-5 の (d) L6-17 (r2db の `surfaces` 検証ヘルパの重複解消) は Q4 フェーズが先に閉じていた (実装担当の実測 2026-09-06、監督裁定)。** 発注文書の記述 → WP-5 で r2db `main.py` / `control_main.py` の重複コピーを 1 モジュールへ寄せ同型性対応表に行を足す。実際 → Q4 WP-1 が `platform_declarations.py::validate_surfaces_value` へ統合済み (Q4 設計 §12 LQ4-23)、同型性対応表にも既に行がある。裁定 → WP-5 の (d) はコード変更なし。PHASE6 設計 §11 L6-17 に日付付き閉止注記を追記するのみ (WP-5 の成果物 11〜13 と変異 9/10 は対象消滅として N/A)。**あわせて WP-5 に資源管理を追加** (監督裁定 2026-09-06): 共有 platform の `applications` 枠が既存テストの provision 累積で枯渇し (`LIMIT_EXCEEDED applications limit=115`)、新規テストファイルを 2 つ足すだけで C-15 の r2db 2 plug が赤になった。限度値を上げず、conformance の fixture 層でテストが provision した application を teardown で deprovision する (外部評価 指摘 1 の本体)。
 
 **実装担当が本書の誤りを見つけたら、本書の記述を独断で読み替えず監督へ差し戻し、監督が本節に訂正註を追加する** (フェーズ6 §11 L6-18 の流儀)。**本文の発注内容は書き換えず、誤りと判明した箇所に【訂正註 YYYY-MM-DD】を置き、本節に理由を書く** — 発注時の記述と実測の差を消さないためである。**訂正註を追加したときは本書の版数を上げる。**
