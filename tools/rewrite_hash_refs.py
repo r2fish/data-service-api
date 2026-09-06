@@ -159,7 +159,9 @@ def default_allow_reason(line: str, start: int, end: int, token: str) -> str | N
     # content_digest: a container-image / artifact digest written as
     # "sha256:<hex>" (possibly truncated with an ellipsis in prose). Not a
     # git object name, so never in a commit-map (WP-9 rehearsal, 2026-09-06).
-    if line[max(0, start - 7):start].lower() == "sha256:":
+    # Also the prose form "sha256 `968d…`" / "sha256=…" used when a checksum
+    # is quoted (truncated with an ellipsis) in design records.
+    if "sha256" in line[max(0, start - 12):start].lower():
         return "content_digest"
 
     # obviously_synthetic: the ascending digit run or a single repeated
