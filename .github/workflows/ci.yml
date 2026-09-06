@@ -63,6 +63,9 @@ jobs:
   conformance:
     name: conformance (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Phase 8 WP-1 review finding 3: a broken hold_in_flight premise hangs
+    # rather than fails; bound the whole job so the hang surfaces as red.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
