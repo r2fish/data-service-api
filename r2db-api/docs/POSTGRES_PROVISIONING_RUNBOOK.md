@@ -460,6 +460,11 @@ described the application process's own environment variables as
 `r2db_api.main:app`) now exists; §10 is the current, accurate reference
 for it, not this section.
 
+`R2DB_MIGRATIONS_DIR` is likewise listed in §10's table below (supervisor
+ruling 2026-09-06 M-2(a)) even though, like `R2DBSVC_BOOTSTRAP_ADMIN_DSN`/
+`R2DBSVC_CONTROL_DSN` above, it is not read by `r2db_api.main` itself --
+it is read only by `python -m r2db_api.ops` (the CLI), detailed in §17.
+
 ## 7. Network isolation (§5.3 C-3) -- verify, do not assume
 
 This runbook and the migration SQL cannot prove PostgreSQL is unreachable
@@ -598,6 +603,7 @@ not a partial startup:
 | `R2DB_CONTROL_PLANE_STATUS` | no, default `unavailable` | CCR-14 (R-9, `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`). Allowed values are exactly `enabled`/`unavailable`; anything else is a startup failure, never a silent fallback. This is a **deployer declaration**, not a detected fact -- this process cannot verify on its own whether a `/control/v1` control-plane process (`r2db_api.control_main`) is actually reachable. Set it to `enabled` only once that process is genuinely deployed and reachable (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7); the authoritative check for "is a control plane actually reachable" in a separated deployment is always the control plane's own `GET /control/v1/capabilities`, never this declaration. |
 | ~~`R2DB_DATA_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2)** | **No longer read. This process now REFUSES TO START whenever this variable is defined at all, whatever its value (an empty string included)** -- fail-fast F-2, which names the `ops` command below. `surfaces.data.base_url` (contract 1.6.0, unconditional obligation) is now the `surfaces` row of `r2dbsvc_registry.platform_declarations` (migration `0008`), a SINGLE row **both** this process and `r2db_api.control_main` read at startup. Declare it with `python -m r2db_api.ops declare-surfaces --data-base-url <URL> [--control-base-url <URL>]` and restart both processes -- §16 below. The same shape rules still apply, now checked on the declared value (absolute URL, ends `/v1`, no trailing slash) and on the write path as well as the read path. **Still a deployer-stated fact, never derived from a request's Host header.** |
 | ~~`R2DB_CONTROL_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design D-2)** | **No longer read; defining it at all fails startup (F-2), exactly as above.** `surfaces.control.base_url` is the `control` half of that same single declared row, shared with `r2db_api.control_main` -- which is why re-declaring without `--control-base-url` (or with the explicit `--no-control`) also removes the control declaration for the control-plane process, whose own startup then fails with F-3c. The suffix requirement is unchanged (`/control/v1`, no trailing slash). **The one thing this phase did NOT close (design §3.11 point 7, ledger LQ4-16): that both processes read the SAME platform database is not verified by either of them** -- a control process pointed at a stale platform DSN reproduces the old L6-5a drift. Diffing `surfaces` between `.../v1/capabilities` and `.../control/v1/capabilities` after any change therefore REMAINS a required post-deploy check (`docs/work-orders/DEPLOY_Q4_20260905.md` §4-1). |
+| `R2DB_MIGRATIONS_DIR` | no, default resolves this package's own packaged `migrations/` directory (Phase 7 WP-3, ledger LQ4-24; supervisor ruling 2026-09-06 M-2(a)) | **Not read by `r2db_api.main` -- read only by `python -m r2db_api.ops` (the CLI)**, listed here for the same reason `R2DB_PLATFORM_SCHEMA` above is: an operational escape hatch worth documenting alongside the rest of this contract even though it is scoped to one consumer. Overrides the directory `ops upgrade-applications`/`upgrade-status --script` resolve per-application upgrade scripts under. Required whenever `r2db-api` is installed non-editable into a venv (`ops`'s own default resolution assumes a source-checkout layout and does not find the migrations directory once this package is `pip install`ed) -- `deploy/scripts/part1_provision_host_and_db.sh` sets it explicitly around its own `ops upgrade-applications` call for exactly this reason. See §17 for the full command shapes. |
 
 The corresponding synthetic entries already exist in `deploy/env/api.env.example`
 (P3-D8), following the existing repository-root `.env.example` pattern --
@@ -1549,12 +1555,21 @@ ships exactly one such script, `0009`, so the complete set is `{9}`.
 
 ```
 # Preview: applies nothing, reports applied/pending per application.
-python -m r2db_api.ops upgrade-applications --dry-run
+R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications --dry-run
 
 # Apply. Visits every registered application; one failure does not stop the
 # rest -- failed applications are listed at the end with a cleanup line.
-python -m r2db_api.ops upgrade-applications
+R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications
 ```
+
+`R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR>` (pointing at this package's `migrations/`
+directory) is required whenever `r2db-api` was installed non-editable into a
+venv (`pip install <install root>`, as `part1_provision_host_and_db.sh`
+does) -- `ops`'s own default migrations-directory resolution assumes a
+source checkout layout and does not find the migrations directory in that
+case (`r2db_api.ops._migrations_dir`'s own comment). Omit it only when
+running against an editable/source checkout, where the default resolution
+already finds it.
 
 `--application <slug>` limits either form to one application. `enabled` does
 **not** affect which applications are targeted -- a disabled application's
@@ -1622,8 +1637,10 @@ report it.
 
 1. `python -m r2db_api.ops upgrade-status --application <slug>` -- confirm
    which numbers are pending (exit 4 means at least one is).
-2. `python -m r2db_api.ops upgrade-applications --application <slug>
-   --dry-run`, then the same command without `--dry-run`.
+2. `R2DB_MIGRATIONS_DIR=<MIGRATIONS_DIR> python -m r2db_api.ops upgrade-applications
+   --application <slug> --dry-run`, then the same command without
+   `--dry-run` (see the `R2DB_MIGRATIONS_DIR` note above -- required for a
+   non-editable install).
 3. If it exits 3, read the failure block: fix the cause, issue the printed
    `REVOKE`, re-run step 2.
 4. `sudo systemctl restart r2dbsvc-api.service` -- the check is a cell-open

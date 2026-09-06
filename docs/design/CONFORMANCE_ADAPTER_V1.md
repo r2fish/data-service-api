@@ -2,8 +2,10 @@
 
 ## 文書情報
 
-- 版数: 1.8 (§18 を新設。port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02
+- 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
+- §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
+- port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -2604,3 +2606,323 @@ composes it too (this file's 5th such site -- §20.4, as corrected by
 review finding F3 / audit finding (iv), 2026-09-04, now records all
 5 from the start, this one included) -- removed together with the
 other 4 in WP-3.
+
+## 21. v1.11 port revision (coordinated with docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md phase 7 WP-4)
+
+`docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` D-6
+requires the common suite to executable-ify C-05 (SI-08's "finite,
+discoverable resource bounds" evidence) for the first time. Two additions,
+no removals.
+
+### 21.1 `isolated_application_surface()` (D-6.1 V2, D-6.5 addendum)
+
+Added to `ConformanceAdapter` immediately after `isolated_control_surface()`:
+
+```python
+def isolated_application_surface(self) -> AbstractContextManager["ConformanceAdapter"]
+```
+
+A context manager that, on entry, builds a FRESH, throwaway data-plane
+instance bound to its OWN small conformance profile (small enough that
+C-05's V2 vectors can drive every applicable resource class past its
+declared bound within one test), and yields a SECOND object that itself
+conforms to this exact `ConformanceAdapter` ABC -- self-similar, not a
+bespoke stand-in. A test drives the yielded instance with the SAME
+ordinary port operations it already uses against the shared, session-
+scoped adapter (`authenticate`/`create_entity`/`insert`/`attempt_batch_
+with_addresses`/`attempt_cross_entity_batch`/`select_eq`/`attempt_filter`/
+`capability_document`/...) -- no drive-recipe-specific method was added to
+this port for this purpose.
+
+**Shape differs deliberately from `isolated_control_surface()`** (design
+review 1, B-5): that method yields a single callable because its own
+driven class (`control_requests_per_minute`) is the only one it ever
+presents; the application plane's own D-6.2 drive recipes need row
+insertion, entity/schema-object creation, batch mutation, cross-entity
+batch mutation, query, and a read of the isolated instance's own
+`capability_document()` -- more surface than any single callable could
+honestly present without becoming a second, adapter-invented
+implementation of "drive a resource class."
+
+**Resource-sharing shape differs by plug** (D-6.5 addendum's own "(推測)"
+point, resolved by WP-4 measurement; corrected here WP-4 rework 2026-09-
+06, 差し戻し 2 巡目, F-port-docstring: an earlier draft of this paragraph
+claimed uniform "shares nothing with the shared, session-scoped adapter's
+own application/credential registry", which was true only for the two
+in-process plugs). **In-process** (`r2db-api`, `MitateDB-api`): the
+isolated instance is built from a wholly fresh service/foundation object
+with no reference back to the shared adapter at all -- every credential,
+application, and cell registry it touches is genuinely private, from
+construction through exit. **HTTP** (`r2db-api-http`, `MitateDB-api-
+http`): the isolated instance is a shallow copy (`copy.copy(self)`) of
+the shared adapter -- only the data-plane pieces are freshly constructed
+and bound to the small profile, while the control-plane client/app, the
+credential stores, and the shared, already-bootstrapped PostgreSQL
+platform database are the SAME objects the shared surface already holds
+(see the per-plug realization below for why this borrowing is necessary,
+not an oversight). In both shapes, the whole point of the small profile
+is a low-cardinality surface a V2 drive can genuinely exhaust; the HTTP
+plugs' additional control-plane/platform sharing costs nothing to that
+positional exactness because V2's own drives never touch the
+`applications`/`credentials_per_application` bounds the shared state
+carries. Test code obtains its own application/credential state against
+the yielded instance the ordinary way (`provision_application`/
+`issue_credential`).
+
+**Per-plug realization** (D-6.5 addendum, "Q4 確定後の追補"): none of the
+four plugs' own construction goes through a composition root (`main.py`'s
+`build_app`/`MitateDB-api`'s `build_control_service`) -- addendum (1)'s
+own per-plug table found that path either unavailable (no `limits=`
+injection point) or unnecessarily heavy (deprecated-env rejection,
+platform-declaration reads, writer-role checks the isolated surface has
+no need of). Instead:
+
+- `r2db-api` (in-process): a genuinely fresh `R2DBConformanceAdapter(
+  limits=_ISOLATED_APPLICATION_LIMITS)` -- the class's own ordinary
+  constructor, now accepting an optional `limits` keyword. True self-
+  similarity, no shared state at all. No real resource to release on exit
+  (in-memory construction only, D-6.6's own supervisor note) -- the (e)
+  resource check for this plug observes Python object liveness via a
+  weakref instead.
+- `r2db-api-http`: `copy.copy(self)` (a shallow copy, so the control-
+  plane client/app/pepper/credential-ref/stores and the already-
+  bootstrapped PG platform are shared by construction) with the DATA-
+  plane pieces (`_app_pg`, `_provisioned_cells`, `_counter`, `_service`,
+  `_app`, `_loop`, `_client`) deliberately overwritten with fresh ones
+  bound to the small profile. `copy.copy`, not `object.__new__` +
+  selective assignment, because `issue_credential` on this plug is
+  itself an IN-BAND `/control/v1/credentials` HTTP call that needs the
+  real control-plane client/credential-ref state `self` already holds --
+  D-6.5 addendum's own finding that no extra control seed is needed to
+  build the isolated APPLICATION surface. On exit: closes its own httpx
+  client and `PostgresCell` pools (`pool_size=2` each) FIRST, then
+  deprovisions every application it provisioned (order matters: a
+  provisioned application's PostgreSQL database cannot be dropped while
+  its own pool still holds live connections to it) -- WP-4's own first-
+  execution finding: `provision_application` writes into the SAME shared
+  platform database's `applications` registry table C-14 vector 5's own
+  `n_existing < apps_limit` precondition reads, so leaving those
+  uncleaned silently saturates that shared bound for every later test in
+  the session.
+- `MitateDB-api` (in-process): a fresh `MitateDBConformanceAdapter(
+  config=small_foundation_config)` -- mirrors the r2db in-process
+  realization; `FoundationConfig` is a pure, local dataclass, so no Q4
+  platform-declaration/role-setting machinery is ever reached (addendum
+  (4): "Q4 の宣言表・role設定はこの経路に一切現れない"). This adapter's
+  own `close()` is a documented no-op for the SHARED surface (correct
+  there -- the whole process exits anyway); the isolated surface instead
+  closes every real per-cell `SQLiteBackend` connection it provisioned
+  directly, so the (e) resource check has something real to observe.
+- `MitateDB-api-http`: same `copy.copy(self)` shape as `r2db-api-http`,
+  for the identical reason (`issue_credential` is a direct write against
+  a shared `PostgresCredentialStore`, costing nothing to share, kept
+  consistent with the sibling peer's own construction). `provision_
+  application`'s own per-cell `FoundationConfig` was moved from an inline
+  literal to a named `self._application_config` instance attribute
+  (constructor-set) specifically so the isolated copy can override just
+  that one attribute with the small profile, with no other change to
+  `provision_application` itself. Same deprovision-after-close-then-
+  deprovision ordering and same shared-registry cleanup fix as `r2db-api-
+  http` above.
+
+**Per-class isolation choice (work order completion condition 13(b))**:
+C-05's own V2 drivers each open a FRESH `isolated_application_surface()`
+PER driven resource class -- no two classes' drives ever share one
+isolated instance. This is the "class ごとに新しい isolated_application_
+surface() を張る" branch condition 13(b) offers, not the alternative (one
+shared isolated instance reused across every driven class, which would
+need a checked headroom precondition on EVERY later class's drive to
+account for what earlier classes' drives already consumed of a shared
+rate window). The one exception that DOES need, and asserts, a headroom
+precondition is `requests_per_minute`'s own driver, entirely WITHIN its
+own single isolated instance: setup traffic against that SAME instance
+(`create_entity` under the developer credential, an HTTP plug's own real
+`authenticate()` round trip under the SAME runtime credential the drive
+then measures) can consume part of the very rate window being driven --
+measured (WP-4) at exactly 1 unit on an HTTP plug (a real `GET /v1/
+capabilities`), 0 on an in-process plug (a bare local lookup that never
+touches the rate-window primitive at all), so the driver's own expected
+success count is `bound - already_consumed` rather than a bare `bound`.
+This choice, and the reasoning above, is stated identically in the port's
+own `isolated_application_surface()` docstring (`conformance-tests/
+adapter.py`).
+
+**(e) resource check** (D-6.6): each plug's own real, measured resource
+(D-6.5 addendum (3)) -- PG plug: `pg_stat_activity` count matching a
+caller-supplied `datname_like` pattern (a new non-normative `_live_pg_
+backend_count(datname_like)` accessor on each HTTP plug, mirroring the
+existing "optional raw-accessor methods" convention; **WP-4 rework 2026-
+09-06, 完了条件 15/F1**: the caller scopes the pattern to ONLY the one
+per-application database the isolated instance itself provisioned
+(`<prefix>_app_<application_id>`), never a bare `<prefix>%` pattern --
+that also matched the shared PLATFORM database (`<prefix>_platform`)
+where the shared control stack's own lazily-opened connections live,
+making the check's `before`/`after` depend on whether an earlier test in
+the same worker process had already warmed that shared pool); in-memory
+plug: live per-cell connection liveness (`SQLiteBackend`'s own sqlite
+connection) or Python object liveness (r2db in-process, which owns no
+real resource at all).
+
+**Load-bearing scope of (e), disclosed** (差し戻し指示 1, 監督裁定 2 回
+目, `conformance-tests/CONDITIONS.md`'s own C-05 row carries the same
+disclosure): a removed `close()`/pool-release step turns this check red
+on 2 of the 4 plugs only -- `r2db-api-http` (mutation-verified: the
+context-manager protocol is driven by hand, `__enter__`/`__exit__`,
+specifically so the resource-leak assertion is reached and asserted EVEN
+WHEN `__exit__` itself subsequently raises, decoupling the leak
+measurement from `deprovision_application()`'s own downstream failure to
+DROP a still-in-use database) and `MitateDB-api` in-process (mutation-
+verified: a live per-cell sqlite connection). It is NOT load-bearing on
+the other 2, for two different structural reasons: `r2db-api` in-process
+owns no external resource at all to leak (D-6.6's own supervisor note,
+"資源ゼロ") -- no close-removal mutation can even be constructed there,
+so its own half of (e) observes Python object liveness (a `weakref`)
+instead; `MitateDB-api-http`'s own `deprovision_application()`
+(`0004_deprovision_application.sql`) issues `pg_terminate_backend`
+directly against the application's PostgreSQL database as part of the
+DROP, so its connection-count guarantee holds structurally REGARDLESS of
+whether the pool's own `close()` ran first -- accepted as a genuine
+acceptance boundary rather than a test defect to force red (監督裁定 2
+回目: MitateDB's own deprovision path independently guarantees the
+outcome close would have guaranteed).
+
+### 21.2 `idempotency_key` optional field (D-6.7 C-07 (ii))
+
+Added as an optional field (default `None`) to `BatchOperation` and
+`ScopedBatchOperation`: carries the contract's own `Mutation.idempotency_
+key`/`MutationRequest.idempotency_key` through to whatever real entry
+point already receives the rest of the operation -- never interpreted by
+the adapter itself, exactly like `expected_revision`/`unique_key`.
+**Addition is this one field only; no positive-side primitive (key
+generation/storage/replay/result comparison) was added** (裁定 S-4) --
+nothing on either currently-registered peer would exercise it yet.
+
+**Contract placement note**: the contract's own `idempotency_key` is a
+REQUEST-level field (`MutationRequest`/`ScopedMutationRequest`), not a
+per-operation (`Mutation`/`ScopedMutation`) one -- those two definitions
+are `additionalProperties: false` closed shapes with no slot for it. Each
+plug's own wiring reflects this: the two in-process plugs place it inside
+the per-operation dict (their own internal dispatch convention, pre-
+existing, already rejects it there with a real `CAPABILITY_UNSUPPORTED`);
+the two HTTP plugs hoist it to the request body's own top-level key
+before sending, matching the real wire shape.
+
+### 21.3 Compatibility impact
+
+Additive to the ABC (§20.6's own first bullet applies identically -- a
+plug not implementing `isolated_application_surface()` fails to
+instantiate; all four now do). No peer's PRODUCT code changed for either
+§21.1 or §21.2 -- §21.1's own `MitateDB-api-http` realization required
+its conformance PLUG's `provision_application` to read a named `self.
+_application_config` attribute instead of an inline literal
+(conformance plug code only, not `mitatedb_api`'s own package); §21.2
+required each plug's own mutation-item construction to carry through one
+additional optional field. Peer-local declaration additions (`MitateDB-
+api/src/mitatedb_api/cell.py`'s `limit_enforcement` block, four missing
+classes) are a separate, peer-local change tracked in the phase 7 WP-4
+completion report, not a port revision.
+
+### 21.4 `isolated_control_surface()` `limits_override` addendum (WP-5 rework round 2, supervisor ruling 2026-09-06 item 1)
+
+Diagnosed problem (WP-5 rework, round 2): the WP-5 rework round 1 fix
+(a conftest-level `_ApplicationResidueTracker` deprovisioning every
+Application a tracked adapter's own `provision_application`/`register_
+application_inband` leaves behind at each test's own teardown) correctly
+stopped the SHARED, session-scoped adapter's own `applications` registry
+from growing unboundedly across the whole suite -- but that same fix had
+a second-order effect: `test_c14_authority_boundary.py::test_c14_
+resource_bounds_published_and_enforced`'s own `applications` drive
+(§4 vector 5) reads the registry's own pre-existing count (`n_existing`)
+before driving to the declared bound, and with the registry no longer
+padded by leftover Applications from earlier tests, `n_existing` dropped
+close to zero -- so this drive, for the first time, actually registered
+close to the FULL declared `applications` bound (115 on both r2db-api
+plugs) in a single test. That is 100+ real `/control/v1` calls against
+the SHARED adapter's own `control_requests_per_minute` window (200 on
+both r2db-api plugs) within the same test, leaving too little headroom
+for whatever OTHER test happens to share that window within the same
+60-second period -- measured directly: 24 unrelated tests failing with
+`LIMIT_EXCEEDED`, reproduced 3 times.
+
+**Fix**: extend `isolated_control_surface()` (§20.7) -- already the
+`control_requests_per_minute` vector's own primitive for driving a
+resource class to its exact declared bound without touching the shared
+window -- with an optional, keyword-only `limits_override: Mapping[str,
+int] | None = None` parameter (default `None`, so every pre-addendum call
+site, in particular the `control_requests_per_minute` vector's own, is
+unaffected). When given, the ISOLATED surface's own control-plane limits
+profile is built with the named fields replaced by the override's own
+values (`adapter.py`'s new `apply_limits_override` helper, a type-agnostic
+`dataclasses.replace` -- both peers' own `ControlPlaneLimits` dataclasses
+share the same 3 control-plane field names) before the isolated surface
+is constructed; every field NOT named in the override keeps the shared
+surface's own value. `test_c14_authority_boundary.py`'s own `applications`
+vector now drives an isolated surface overridden to a small value derived,
+not hardcoded (WP-5 rework, supervisor ruling 2026-09-06 item 2 --
+corrected from an earlier, now-removed `_ISOLATED_APPLICATIONS_OVERRIDE =
+8` constant that a review finding showed could be padded out from under
+by leftover Applications from earlier tests): `n_existing_shared +
+_APPLICATIONS_OVERRIDE_MARGIN`, where `n_existing_shared` is a fresh
+`len(adapter.list_applications(control_actor))` read via the SHARED
+surface and `_APPLICATIONS_OVERRIDE_MARGIN = 3` is the small, fixed
+headroom above whatever the registry already holds -- rather than the
+real, large declared bound. This is the same precedent `isolated_
+application_surface()`'s own small conformance profile already
+established for the application plane (D-6.1 V2): the ENFORCEMENT
+MECHANISM is what the vector proves, not the literal production-
+configured value (the "classes" loop in the same test separately
+confirms the real, large value is a positive, discoverable, `enforced`-
+labeled, conformance-buildable int).
+
+The isolated surface's own `applications` bound still counts against the
+SAME underlying application registry the shared surface reads (§20.7's
+own "sharing this adapter's own real registered application/credential
+state" -- unchanged by this addendum), so a vector driving it still needs
+the same headroom arithmetic C-14's own `control_requests_per_minute`
+vector never needed (that class's own isolated rate window always starts
+genuinely empty) but the ORIGINAL, pre-addendum `applications` vector
+always did: read the current count through the isolated surface's own
+`list_applications` first, then expected successes = override − that
+count.
+
+**Shape**: since the `applications` drive needs `register_application`/
+`list_applications` in addition to the pre-existing `capabilities`
+(`control_capabilities`-equivalent) call, the context manager's own yield
+type changes from a bare callable to a new, non-normative dataclass,
+`IsolatedControlHandle` (`capabilities`, `register_application`, `list_
+applications`, all `Callable`s against the SAME isolated instance) --
+`IsolatedControlHandle.__call__` delegates to `.capabilities`, so
+`isolated_call(actor)` (the `control_requests_per_minute` vector's own
+pre-existing call shape) is unchanged syntactically and behaviorally.
+
+**Residue**: `isolated_control_surface()` now tracks, internally, every
+application `register_application` on its own yielded handle registers
+successfully, and deprovisions every one of them on the context
+manager's own `with`-block exit -- after releasing whatever connection
+pools it opened (WP-5 rework, review finding 8: corrected from an earlier
+"before releasing..." wording that had the order backwards; both HTTP
+plugs' own `finally` blocks close the client/connection pools FIRST, then
+deprovision -- `close -> deprovision`, matching `test_c05_limit_
+declaration_agreement.py`'s own module docstring, which documents this
+identical order for `isolated_application_surface()`. No code changes to
+match: the two currently-registered HTTP plugs already implemented
+`close -> deprovision`; only this design text's own description of that
+order was wrong). A caller must not also deprovision an application it
+registered through this handle itself (a double deprovision attempt
+against an application the primitive already removed); the `applications`
+vector's own pre-addendum `finally: adapter.deprovision_application(...)`
+loop is removed accordingly.
+
+**Compatibility impact**: additive/optional -- `limits_override` is
+keyword-only with a `None` default, and `None` produces the exact
+pre-addendum construction on every plug (`apply_limits_override(limits,
+None) is limits`). The yielded type change (bare callable ->
+`IsolatedControlHandle`) is a plug/common-suite-internal detail:
+`isolated_control_surface()` is never part of the normative contract
+surface (§20.7's own "not a contract capability"), and its only two
+callers (`test_c14_authority_boundary.py`'s `control_requests_per_minute`
+and `applications` vectors) are both updated in the same change. All 4
+registered plugs implement the new signature and yield shape (r2db-api
+in-process/HTTP, MitateDB-api in-process/HTTP) -- a plug that has not
+been updated fails to instantiate, the same §20.6 compatibility rule
+every other addition to this ABC already follows.

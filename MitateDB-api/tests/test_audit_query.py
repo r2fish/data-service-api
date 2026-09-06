@@ -2106,7 +2106,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_66_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_67_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2261,17 +2261,38 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "_f12_message"),
     ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "summarize_upgrade_run"),
     ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "ApplicationUpgradeResult"),
+    # Phase 7 WP-4 addition (design docs/design/PHASE7_EVIDENCE_
+    # REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6.6 (e); supervisor
+    # supplement 2026-09-06, 差し戻し指示 9; WP-4 rework 完了条件 15/F1,
+    # 差し戻し 2 巡目): `_live_pg_backend_count` is a byte-identical,
+    # independently-authored helper on BOTH peers' own HTTP conformance
+    # plug (counts real PostgreSQL backends matching a caller-supplied
+    # `datname_like` pattern via `pg_stat_activity`, used only by C-05's
+    # own (e) resource-release check -- the caller scopes the pattern to
+    # ONLY the per-application database the isolated instance itself
+    # provisioned, `<prefix>_app_<application_id>`, never the shared
+    # PLATFORM database the control stack's own connections live against)
+    # -- exactly the kind of accidentally-duplicated logic this table
+    # exists to pin, so a future edit to one side's counting query cannot
+    # silently drift from the other's.
+    (
+        "conformance/conformance_adapter_r2db_http.py",
+        "conformance/conformance_adapter_mitatedb_http.py",
+        "_live_pg_backend_count",
+    ),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_66_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_67_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
     time by the WP-0 最終追補, supervisor ruling 2026-09-05, 裁定 4;
     widened a fourth time by Q4 phase WP-2, monitor ruling 2026-09-05, 裁定
     5 -- the pair's later half adds both WP-1's and WP-2's own new rows in
-    one commit): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
+    one commit; widened a fifth time by phase 7 WP-4, supervisor supplement
+    2026-09-06, 差し戻し指示 9: `_live_pg_backend_count`, byte-identical on
+    both peers' own HTTP conformance plug): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
     CONTENT (not merely its length) catches that. One-time human
@@ -2302,7 +2323,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_66_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_66_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_67_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2386,8 +2407,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_66_rows() -> None:
         ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "_f12_message"),
         ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "summarize_upgrade_run"),
         ("src/r2db_api/platform_upgrades.py", "src/mitatedb_api/platform_upgrades.py", "ApplicationUpgradeResult"),
+        (
+            "conformance/conformance_adapter_r2db_http.py",
+            "conformance/conformance_adapter_mitatedb_http.py",
+            "_live_pg_backend_count",
+        ),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 66
+    assert len(_ISOMORPHIC_TARGETS) == 67
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2420,7 +2446,21 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
     only function/class definitions any more (`VISIBILITY_LAG_CLOCK_SKEW_
     MARGIN_MS = 1000` is a plain module constant), and the prior form
     returned `None` for any such row, silently excusing it from the
-    isomorphism check rather than comparing it."""
+    isomorphism check rather than comparing it.
+
+    Phase 7 WP-4 (supervisor supplement 2026-09-06, 差し戻し指示 9): if no
+    module-level match is found, ALSO matches a method defined directly in
+    a top-level class's own body (one explicit level of nesting, never
+    deeper -- still not `ast.walk`, which would also match a same-named
+    method nested arbitrarily deep inside an unrelated class and silently
+    diff the wrong one). `_live_pg_backend_count` is a method of each
+    peer's own HTTP conformance adapter class (`R2DBHttpConformance
+    Adapter` / `MitateDBHttpConformanceAdapter`) -- those two classes are
+    named DIFFERENTLY per peer, so the table's own single shared `symbol`
+    string cannot itself be class-qualified; searching every top-level
+    class's own direct body for a same-named method keeps this exactly as
+    deliberate as the module-level match above, while staying agnostic to
+    which class each peer happens to name it under."""
     path = peer_root / relative_path
     if not path.exists():
         return None
@@ -2435,6 +2475,17 @@ def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) 
         ),
         None,
     )
+    if node is None:
+        node = next(
+            (
+                m
+                for c in tree.body
+                if isinstance(c, _ast.ClassDef)
+                for m in c.body
+                if isinstance(m, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and m.name == symbol
+            ),
+            None,
+        )
     if node is None:
         return None
     return _ast.get_source_segment(source, node)

@@ -19,6 +19,7 @@ from adapter import (
     load_contract_error_codes,
     signature_forbids_parameters,
 )
+from conftest import assert_runtime_credential_denied_schema_authority
 
 pytestmark = pytest.mark.condition("C-01")
 
@@ -165,13 +166,17 @@ def test_structurally_absent_vectors_have_no_forbidden_parameters(adapter, fx: F
 
 
 def test_runtime_credential_cannot_self_elevate_to_schema_authority(adapter, fx: Fixture):
-    entities_before = set(adapter.entities(fx.developer_a))
+    # WP-5 rework (review finding 10): the denial-half assertion here is
+    # IDENTICAL to `test_c02_runtime_privilege_negative.py`'s own probe --
+    # factored into one shared `conftest.assert_runtime_credential_denied_
+    # schema_authority` rather than kept as two near-copies. This test's
+    # own, non-duplicated contribution is exercising it against the
+    # shared, session-scoped `adapter`/`fx` fixture; C-02's own test adds
+    # a positive control on top that this one does not run.
     entity = fresh_identifier("c01_role_probe")
-    with pytest.raises(ConformanceDenial) as ei:
-        adapter.create_entity(fx.runtime_a, entity, {"label": "text"})
-    _assert_is_contract_code(ei.value.code)
-    entities_after = set(adapter.entities(fx.developer_a))
-    assert entities_after == entities_before, "schema state changed despite denial of runtime schema attempt"
+    assert_runtime_credential_denied_schema_authority(
+        adapter, fx.developer_a, fx.runtime_a, entity, adapter_name=adapter.name,
+    )
 
 
 # --- 7. cross-application unreachability ------------------------------------

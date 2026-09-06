@@ -53,11 +53,13 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    apply_limits_override,
     fresh_identifier,
     resolve_valid_confirmation,
 )
@@ -323,7 +325,15 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
     name = "MitateDB-api"
 
-    def __init__(self) -> None:
+    def __init__(self, *, config: FoundationConfig | None = None) -> None:
+        # port v1.11 (design D-6.1/D-6.5 addendum (1)): `config` is how
+        # `isolated_application_surface()` below gives its own fresh
+        # instance a SMALL conformance profile (the `max_*` fields) while
+        # keeping the SAME `control_plane_status`/synthetic `surfaces`
+        # every pre-WP-4 caller (this repository's own session-scoped
+        # construction included) already used. `None` keeps this
+        # constructor's own long-standing default, unchanged.
+        #
         # Synthetic pepper for this conformance run only; never a real
         # deployment secret and never read from the environment.
         # WP-5 flip (design v1.2 R-7): `control_plane_status="enabled"` is
@@ -347,7 +357,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         self._audit_router = AuditRouter(durable_sink=self._application_durable_audit)
         self._control = ControlPlane(
             "synthetic-conformance-pepper-mitatedb-0000000",
-            config=FoundationConfig(
+            config=config or FoundationConfig(
                 control_plane_status="enabled",
                 # Phase 6 WP-3 (design D-2, §6.1 (b)): this plug has no
                 # real host at all -- a synthetic, unreachable pair of
@@ -746,19 +756,102 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     # against it, but its own `_rate_window` starts empty. No real resource
     # to release on exit (in-memory construction only).
     @contextmanager
-    def isolated_control_surface(self):
+    def isolated_control_surface(self, *, limits_override: Mapping[str, int] | None = None):
+        # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): the
+        # ONLY change from the pre-addendum construction above is `limits=
+        # effective_limits` instead of `limits=self._control_limits` --
+        # `apply_limits_override` returns `self._control_limits` itself,
+        # unchanged, when `limits_override` is `None` (every pre-addendum
+        # call site), so this is behavior-preserving for the `control_
+        # requests_per_minute` vector.
+        effective_limits = apply_limits_override(self._control_limits, limits_override)
         fresh_service = ControlPlaneService(
-            self._control_backend, limits=self._control_limits,
+            self._control_backend, limits=effective_limits,
             audit_reader=self._audit_reader, audit_visibility_lag_ms=0,
             audit_coalescing_window_ms=int(self._audit_router.denial_coalesce_window_s * 1000),
             surfaces=build_surfaces(data_url=_SYNTHETIC_DATA_BASE_URL, control_url=_SYNTHETIC_CONTROL_BASE_URL),
         )
+        # This primitive's OWN residue list (supervisor ruling 2026-09-06
+        # item 2): applications `register_application` below registers
+        # successfully are recorded here and deprovisioned on exit -- never
+        # left for a caller to clean up itself (that would risk a double
+        # deprovision attempt against an application this primitive already
+        # removed).
+        driven_applications: list[str] = []
 
         def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
             secret = self._actor_secret(actor)
             return self._call(lambda: fresh_service.control_capabilities(secret))
 
-        yield call
+        def register_application(
+            actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+        ) -> Mapping[str, Any]:
+            secret = self._actor_secret(actor)
+            result = self._call(lambda: fresh_service.register_application(secret, application_id))
+            driven_applications.append(application_id)
+            return result
+
+        def list_applications(actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+            secret = self._actor_secret(actor)
+            result = self._call(lambda: fresh_service.list_applications(secret))
+            return result["applications"]
+
+        try:
+            yield IsolatedControlHandle(
+                capabilities=call, register_application=register_application, list_applications=list_applications,
+            )
+        finally:
+            errors: list[str] = []
+            for application_id in driven_applications:
+                try:
+                    self.deprovision_application(application_id)
+                except Exception as exc:  # noqa: BLE001 - report, never swallow.
+                    errors.append(f"{application_id!r}: {exc!r}")
+            if errors:
+                raise RuntimeError(
+                    "isolated_control_surface() failed to deprovision one or more applications its own "
+                    "handle registered:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
+
+    # port v1.11 (design D-6.1 V2/D-6.5 addendum (1)/(4)): a genuinely
+    # FRESH, throwaway `MitateDBConformanceAdapter` -- true self-
+    # similarity, built via this class's own ordinary constructor with a
+    # SMALL `FoundationConfig` profile. "Q4の宣言表・role設定はこの経路に
+    # 一切現れない" (addendum (4)) -- this never touches platform DB
+    # declarations at all, `FoundationConfig` is a pure, local dataclass.
+    # Shares nothing with the shared surface: its own `ControlPlane`/
+    # `MitateDataService`/`cells` dict are entirely separate objects.
+    #
+    # On exit: this adapter's own `close()` (below) is a documented
+    # no-op ("in-memory sqlite; nothing external to release... each
+    # build_adapter() call gets a fresh ControlPlane") -- correct for the
+    # SESSION-scoped adapter (the whole process exits anyway), but this
+    # primitive's own (e) resource check (D-6.6's supervisor note: "in-
+    # memory plug は...cellごとのsqlite3.connect(':memory:')...計数対象は
+    # このlive なsqlite接続数") needs a REAL release to be observable, so
+    # this closes every real per-cell `SQLiteBackend` connection this
+    # isolated instance provisioned directly, rather than relying on
+    # `close()`.
+    @contextmanager
+    def isolated_application_surface(self):
+        small_config = FoundationConfig(
+            control_plane_status="enabled",
+            data_base_url=_SYNTHETIC_DATA_BASE_URL,
+            control_base_url=_SYNTHETIC_CONTROL_BASE_URL,
+            max_batch_items=10,
+            max_batch_entities=5,
+            max_result_rows=5,
+            max_fields=64,
+            max_filter_terms=5,
+            max_request_bytes=4096,
+            max_schema_objects=20,
+        )
+        fresh = MitateDBConformanceAdapter(config=small_config)
+        try:
+            yield fresh
+        finally:
+            for cell in fresh._control.cells.values():  # noqa: SLF001
+                cell._backend.close()  # noqa: SLF001
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
@@ -1294,6 +1387,15 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     item["confirm"] = peer_confirm
                 else:
                     item["confirm"] = op.confirmation
+            if op.idempotency_key is not None:
+                # port v1.11 (design D-6.7 C-07 (ii)): `_plan_operation`'s
+                # own `_TRANSACT_*_KEYS` excess-key check (cell.py) already
+                # refuses ANY unrecognized operation-dict key -- including
+                # this one -- with a real, present `CapabilityError`
+                # BEFORE this operation's own row is ever built (`idempotency:
+                # unavailable`). Carried through unevaluated, exactly like
+                # `expected_revision`/`unique_key` above.
+                item["idempotency_key"] = op.idempotency_key
             items.append(item)
 
         def op() -> int:
@@ -1348,6 +1450,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     item["confirm"] = peer_confirm
                 else:
                     item["confirm"] = op.confirmation
+            if op.idempotency_key is not None:
+                # port v1.11 (design D-6.7 C-07 (ii)): same real
+                # `_TRANSACT_*_KEYS` excess-key rejection as `attempt_
+                # batch_with_addresses` above -- this dispatcher is the
+                # identical `session.transact` entry point.
+                item["idempotency_key"] = op.idempotency_key
             items.append(item)
 
         # m-1 (phase 3.5 WP-3 review): the real summed `affected` -- 1 per
