@@ -160,3 +160,45 @@ CI (`.github/workflows/ci.yml`) runs this identical command against a
 overridden to that container's loopback address; CI's Python 3.11 job's
 pass/fail/skipped/xfailed tally is the authoritative record of the gate,
 and the Python 3.12 job is required to reproduce the identical tally.
+
+## `COLLECTION_FLOOR` (R-9, evidence-loss detection)
+
+`conformance-tests/COLLECTION_FLOOR` holds a single decimal integer: a
+floor on the number of tests the *root* pytest session (run from the
+repository root, not just this directory) collects. `tools/check_collection_floor.py`
+(standard library only) re-runs `python -m pytest --collect-only -q` from
+the repository root, reads pytest's own trailing `<N> tests collected`
+line, and compares it against that floor. CI (`.github/workflows/ci.yml`,
+`conformance` job) runs this check in both the 3.11 and 3.12 matrix jobs,
+after PostgreSQL is up and dependencies are installed but before the
+conformance gate itself -- `--collect-only` builds all four adapters at
+collection time (`conftest.py`'s `_discover_and_build`) and performs
+connection verification against PostgreSQL, so this step needs the same
+PostgreSQL server and DSN environment variables as the gate proper. It
+does not provision disposable databases (measured: 0 diff in
+`pg_database` / `pg_roles` before and after a `--collect-only` run). This
+is accepted as a known price of measuring the floor from outside pytest
+itself rather than as an in-suite test (a floor check that only runs when
+some subset of the suite happens to be selected would not be a floor
+check at all).
+
+The operating convention:
+
+1. The value is the previously-recorded main-branch measurement. It is
+   updated only at a phase's completion gate, by the supervisor -- never
+   mid-WP (raising it mid-WP would make every other in-flight WP's merge
+   go red against a floor it never measured against).
+2. Lowering the floor requires an explicit commit, and that commit's
+   message must state the reason. Lowering is not forbidden -- deleting
+   tests is a legitimate thing to do -- but it must never happen silently.
+3. Raising the floor is free to do (collecting more tests than the floor
+   is always fine, and does not fail the check on its own), but the
+   commit that raises it to match a new measurement is likewise made only
+   at a completion gate, by the supervisor, for the same reason as (1).
+4. **Residual risk (disclosed, not fixed by this mechanism):** the path
+   from a real collected count back down to the recorded floor is
+   entirely manual. Between two completion gates, any test-count decrease
+   up to `(actual collected count at gate time) - (recorded floor)` goes
+   undetected -- the floor catches a *large* drop, not "not one test was
+   removed." Shortening the interval between gates is the only mitigation;
+   there is no mechanical fix for this gap.
