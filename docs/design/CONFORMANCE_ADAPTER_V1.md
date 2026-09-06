@@ -3,6 +3,7 @@
 ## 文書情報
 
 - 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
+- §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
 - 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
@@ -2820,3 +2821,108 @@ additional optional field. Peer-local declaration additions (`MitateDB-
 api/src/mitatedb_api/cell.py`'s `limit_enforcement` block, four missing
 classes) are a separate, peer-local change tracked in the phase 7 WP-4
 completion report, not a port revision.
+
+### 21.4 `isolated_control_surface()` `limits_override` addendum (WP-5 rework round 2, supervisor ruling 2026-09-06 item 1)
+
+Diagnosed problem (WP-5 rework, round 2): the WP-5 rework round 1 fix
+(a conftest-level `_ApplicationResidueTracker` deprovisioning every
+Application a tracked adapter's own `provision_application`/`register_
+application_inband` leaves behind at each test's own teardown) correctly
+stopped the SHARED, session-scoped adapter's own `applications` registry
+from growing unboundedly across the whole suite -- but that same fix had
+a second-order effect: `test_c14_authority_boundary.py::test_c14_
+resource_bounds_published_and_enforced`'s own `applications` drive
+(§4 vector 5) reads the registry's own pre-existing count (`n_existing`)
+before driving to the declared bound, and with the registry no longer
+padded by leftover Applications from earlier tests, `n_existing` dropped
+close to zero -- so this drive, for the first time, actually registered
+close to the FULL declared `applications` bound (115 on both r2db-api
+plugs) in a single test. That is 100+ real `/control/v1` calls against
+the SHARED adapter's own `control_requests_per_minute` window (200 on
+both r2db-api plugs) within the same test, leaving too little headroom
+for whatever OTHER test happens to share that window within the same
+60-second period -- measured directly: 24 unrelated tests failing with
+`LIMIT_EXCEEDED`, reproduced 3 times.
+
+**Fix**: extend `isolated_control_surface()` (§20.7) -- already the
+`control_requests_per_minute` vector's own primitive for driving a
+resource class to its exact declared bound without touching the shared
+window -- with an optional, keyword-only `limits_override: Mapping[str,
+int] | None = None` parameter (default `None`, so every pre-addendum call
+site, in particular the `control_requests_per_minute` vector's own, is
+unaffected). When given, the ISOLATED surface's own control-plane limits
+profile is built with the named fields replaced by the override's own
+values (`adapter.py`'s new `apply_limits_override` helper, a type-agnostic
+`dataclasses.replace` -- both peers' own `ControlPlaneLimits` dataclasses
+share the same 3 control-plane field names) before the isolated surface
+is constructed; every field NOT named in the override keeps the shared
+surface's own value. `test_c14_authority_boundary.py`'s own `applications`
+vector now drives an isolated surface overridden to a small value derived,
+not hardcoded (WP-5 rework, supervisor ruling 2026-09-06 item 2 --
+corrected from an earlier, now-removed `_ISOLATED_APPLICATIONS_OVERRIDE =
+8` constant that a review finding showed could be padded out from under
+by leftover Applications from earlier tests): `n_existing_shared +
+_APPLICATIONS_OVERRIDE_MARGIN`, where `n_existing_shared` is a fresh
+`len(adapter.list_applications(control_actor))` read via the SHARED
+surface and `_APPLICATIONS_OVERRIDE_MARGIN = 3` is the small, fixed
+headroom above whatever the registry already holds -- rather than the
+real, large declared bound. This is the same precedent `isolated_
+application_surface()`'s own small conformance profile already
+established for the application plane (D-6.1 V2): the ENFORCEMENT
+MECHANISM is what the vector proves, not the literal production-
+configured value (the "classes" loop in the same test separately
+confirms the real, large value is a positive, discoverable, `enforced`-
+labeled, conformance-buildable int).
+
+The isolated surface's own `applications` bound still counts against the
+SAME underlying application registry the shared surface reads (§20.7's
+own "sharing this adapter's own real registered application/credential
+state" -- unchanged by this addendum), so a vector driving it still needs
+the same headroom arithmetic C-14's own `control_requests_per_minute`
+vector never needed (that class's own isolated rate window always starts
+genuinely empty) but the ORIGINAL, pre-addendum `applications` vector
+always did: read the current count through the isolated surface's own
+`list_applications` first, then expected successes = override − that
+count.
+
+**Shape**: since the `applications` drive needs `register_application`/
+`list_applications` in addition to the pre-existing `capabilities`
+(`control_capabilities`-equivalent) call, the context manager's own yield
+type changes from a bare callable to a new, non-normative dataclass,
+`IsolatedControlHandle` (`capabilities`, `register_application`, `list_
+applications`, all `Callable`s against the SAME isolated instance) --
+`IsolatedControlHandle.__call__` delegates to `.capabilities`, so
+`isolated_call(actor)` (the `control_requests_per_minute` vector's own
+pre-existing call shape) is unchanged syntactically and behaviorally.
+
+**Residue**: `isolated_control_surface()` now tracks, internally, every
+application `register_application` on its own yielded handle registers
+successfully, and deprovisions every one of them on the context
+manager's own `with`-block exit -- after releasing whatever connection
+pools it opened (WP-5 rework, review finding 8: corrected from an earlier
+"before releasing..." wording that had the order backwards; both HTTP
+plugs' own `finally` blocks close the client/connection pools FIRST, then
+deprovision -- `close -> deprovision`, matching `test_c05_limit_
+declaration_agreement.py`'s own module docstring, which documents this
+identical order for `isolated_application_surface()`. No code changes to
+match: the two currently-registered HTTP plugs already implemented
+`close -> deprovision`; only this design text's own description of that
+order was wrong). A caller must not also deprovision an application it
+registered through this handle itself (a double deprovision attempt
+against an application the primitive already removed); the `applications`
+vector's own pre-addendum `finally: adapter.deprovision_application(...)`
+loop is removed accordingly.
+
+**Compatibility impact**: additive/optional -- `limits_override` is
+keyword-only with a `None` default, and `None` produces the exact
+pre-addendum construction on every plug (`apply_limits_override(limits,
+None) is limits`). The yielded type change (bare callable ->
+`IsolatedControlHandle`) is a plug/common-suite-internal detail:
+`isolated_control_surface()` is never part of the normative contract
+surface (§20.7's own "not a contract capability"), and its only two
+callers (`test_c14_authority_boundary.py`'s `control_requests_per_minute`
+and `applications` vectors) are both updated in the same change. All 4
+registered plugs implement the new signature and yield shape (r2db-api
+in-process/HTTP, MitateDB-api in-process/HTTP) -- a plug that has not
+been updated fails to instantiate, the same §20.6 compatibility rule
+every other addition to this ABC already follows.

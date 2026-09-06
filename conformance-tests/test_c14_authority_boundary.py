@@ -140,6 +140,39 @@ _FAIL_CLOSED_CODES = frozenset({"AUTH_INVALID", "AUTH_REVOKED", "AUTH_REQUIRED",
 # bounds must be small enough to actually drive over in one test run.
 _MAX_EXERCISABLE_LIMIT = 200
 
+# Supervisor ruling 2026-09-06 item 1 (design docs/design/
+# CONFORMANCE_ADAPTER_V1.md §21.4): the `applications` vector below drives
+# a small, overridden bound on an `isolated_control_surface()` instead
+# of the real, shared-surface `limits["applications"]` value -- driving a
+# three-digit real bound to its exact position (as this vector did before
+# this ruling) costs 100+ control-plane calls, which starves the SHARED
+# `control_requests_per_minute` window every other test/vector on this
+# session-scoped adapter depends on (the diagnosed cause of 24 unrelated
+# failures, WP-5 rework round 2). Same precedent `isolated_application_
+# surface()`'s own small conformance profile already established for the
+# application plane (C-05 V2): the ENFORCEMENT MECHANISM is what this
+# vector proves, not the literal production-configured value, which the
+# "classes" loop below already separately confirms is a positive,
+# discoverable, `enforced`-labeled, `_MAX_EXERCISABLE_LIMIT`-bounded int.
+#
+# WP-5 rework (review finding 2): the override itself is no longer a
+# fixed guess -- it used to be a hardcoded `8`, and this suite's own
+# permanent, module-cached residue (measured, mutation M4:
+# `test_c06_destructive_confirmation.py`'s own `_SHARED_FIXTURE_CACHE`
+# plus MitateDB's own capability-probe application) already sits at
+# exactly 5 pre-existing applications by the time this vector runs on
+# EVERY one of the 4 currently-registered plugs, leaving the old fixed
+# override only 3 applications of real headroom. A future module adding
+# a few more of that same permanent-residue shape would silently exhaust
+# that fixed headroom and fail this vector with a message that reads as
+# "a prior test's own cleanup failed" even though nothing actually
+# failed. Fixed by deriving the override from an OBSERVED count instead:
+# `n_existing_shared + _APPLICATIONS_OVERRIDE_MARGIN`, read fresh, below,
+# every time this vector runs. The isolated surface's own rate window is
+# always empty (never the shared one), so this margin costs nothing to
+# widen -- there is no reason for it to ever be tight again.
+_APPLICATIONS_OVERRIDE_MARGIN = 3
+
 
 def _control_plane_status(adapter) -> str:
     """The peer's own declared `control_plane` capability status, read from
@@ -446,10 +479,15 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
     declared bound predicts; any earlier refusal cannot be attributed to
     the class under test (design's own words: "refused before the
     declared bound -- cannot attribute the refusal to the applications
-    class"). The `applications` drive registers real Applications and
-    cleans them up via `deprovision_application` in a `finally`, so this
-    test does not permanently saturate the session-scoped adapter's
-    registry for whatever runs after it.
+    class"). The `applications` drive (supervisor ruling 2026-09-06 item 1)
+    runs on an `isolated_control_surface(limits_override=...)` -- its own
+    small, overridden bound, its own empty rate window -- rather than
+    driving the real, large declared bound on the shared surface; whatever
+    Applications it registers are cleaned up by that primitive's own
+    `with`-block exit, not by this test, so this test does not permanently
+    saturate the session-scoped adapter's registry for whatever runs after
+    it, and does not spend the SHARED `control_requests_per_minute`
+    window's own budget doing so.
     """
     if _control_plane_status(adapter) != "enabled":
         _assert_uniform_absence_form(adapter, {
@@ -486,17 +524,16 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
     cred_limit = limits["credentials_per_application"]
     rate_limit = limits["control_requests_per_minute"]
 
-    # Positional-arithmetic headroom precondition (B-1/B-2): the
-    # applications and credentials_per_application drives below must not
-    # themselves get rate-limited before reaching their own declared
-    # bound, or their own LIMIT_EXCEEDED could not be attributed to their
-    # own class either. Worst-case request counts: `applications`
-    # (1 list_applications + up to apps_limit+1 register attempts);
-    # `credentials_per_application` (up to cred_limit+1 issue attempts +
-    # cred_limit in-band revoke-cleanup calls). `deprovision_application`
-    # cleanup is the peer's operator-privileged, out-of-band path (like
-    # `provision_application`), not a rate-limited `/control/v1` call, so
-    # it is excluded from this arithmetic.
+    # Positional-arithmetic headroom precondition (B-1/B-2), NARROWED by
+    # supervisor ruling 2026-09-06 item 1: the `applications` drive no
+    # longer runs on the SHARED surface at all (it now runs on an
+    # `isolated_control_surface()`, below, with its own empty rate window)
+    # -- only `credentials_per_application` still spends the shared
+    # window's own budget. `applications_headroom_drive` below is
+    # therefore retained purely as EXTRA margin (a real conformance build
+    # that also satisfies the pre-ruling inequality has strictly more
+    # headroom than this narrowed vector actually needs), never a
+    # requirement this vector's own drive still creates.
     applications_headroom_drive = apps_limit + 2
     credentials_drive = 2 * cred_limit + 1
     margin = 64
@@ -510,25 +547,75 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
         "blockers B-1/B-2)"
     )
 
-    # -- applications: read current count, drive to the exact bound, clean up. --
-    existing_applications = adapter.list_applications(control_actor)
-    n_existing = len(existing_applications)
-    assert n_existing < apps_limit, (
-        f"{adapter.name}: the registry already holds {n_existing!r} applications, at or past the declared "
-        f"applications bound {apps_limit!r}, before this test even started driving it -- the suite has "
-        "already saturated the registry (a prior test's own cleanup failed, or the conformance build's "
-        "bound is too small for the suite's own fixture/application churn)"
-    )
-    required_successes = apps_limit - n_existing
-    registered_apps: list[str] = []
-    try:
+    # -- applications: driven on an ISOLATED control surface (supervisor
+    # ruling 2026-09-06 items 1/2, design docs/design/
+    # CONFORMANCE_ADAPTER_V1.md §21.4) -- registering up to the REAL,
+    # large `apps_limit` on the SHARED surface (as this vector did before
+    # this ruling) costs 100+ control-plane calls inside the SAME shared
+    # `control_requests_per_minute` window every other test/vector in this
+    # file (and every other file -- this adapter is session-scoped)
+    # depends on, starving them (measured: 24 unrelated test failures,
+    # WP-5 rework round 2 diagnosis). `isolated_control_surface(limits_
+    # override=...)`'s own empty rate window and small, overridden
+    # `applications` bound mean driving to the EXACT declared position now
+    # costs a handful of calls, never touching the shared window at all.
+    #
+    # The isolated surface shares the SAME underlying application registry
+    # as the shared surface (`isolated_control_surface()`'s own docstring:
+    # "sharing this adapter's own real registered application/credential
+    # state"), so `n_existing` (read via the isolated surface's own
+    # `list_applications`) still reflects real, pre-existing registrations
+    # -- the SAME headroom arithmetic this vector always used, just
+    # against the isolated surface's own (small, overridden) declared
+    # bound rather than the real, large one (item 2's own "既存の登録数
+    # k を読んでから期待成功数 = limit − k とする headroom 算術").
+    # `deprovision_application` cleanup for whatever this drive registers
+    # is `isolated_control_surface()`'s OWN responsibility, on its own
+    # `with`-block exit (its docstring's own "residue list") -- this
+    # vector must NOT also deprovision them itself, or it would attempt a
+    # double deprovision against an application the primitive already
+    # removed.
+    # WP-5 rework (review finding 2): the override is derived from an
+    # OBSERVED pre-existing count, read via the SHARED surface's own
+    # `list_applications`, rather than a fixed guess -- one cheap read,
+    # well inside the `margin`-request allowance already asserted above
+    # (this vector's own isolated-surface work below spends none of the
+    # shared rate window at all, so this single extra shared-surface call
+    # is the only cost). The isolated surface shares the SAME underlying
+    # registry (`isolated_control_surface()`'s own docstring), so this
+    # count is the same one the isolated surface's own re-read, just
+    # below, is expected to reproduce.
+    n_existing_shared = len(adapter.list_applications(control_actor))
+    isolated_applications_override = n_existing_shared + _APPLICATIONS_OVERRIDE_MARGIN
+
+    with adapter.isolated_control_surface(limits_override={"applications": isolated_applications_override}) as isolated:
+        isolated_document = isolated.capabilities(control_actor)
+        isolated_apps_limit = isolated_document.get("limits", {}).get("applications")
+        assert isolated_apps_limit == isolated_applications_override, (
+            f"{adapter.name}: isolated_control_surface(limits_override={{'applications': "
+            f"{isolated_applications_override!r}}}) did not take effect -- the isolated surface's own "
+            f"control_capabilities() declared applications={isolated_apps_limit!r}, expected the override "
+            f"{isolated_applications_override!r} (the declaration and the surface under test must be the "
+            "SAME instance's)"
+        )
+
+        existing_applications = isolated.list_applications(control_actor)
+        n_existing = len(existing_applications)
+        assert n_existing < isolated_applications_override, (
+            f"{adapter.name}: the registry held {n_existing_shared!r} applications when read via the shared "
+            f"surface immediately before this override was computed ({isolated_applications_override!r} = "
+            f"{n_existing_shared!r} + {_APPLICATIONS_OVERRIDE_MARGIN!r} margin), but re-reading via the "
+            f"isolated surface's own list_applications() now shows {n_existing!r} -- either the registry grew "
+            "between the two reads (unexpected within one, single-threaded test), or the margin itself has "
+            "been reduced to 0"
+        )
+        required_successes = isolated_applications_override - n_existing
         successes = 0
         limit_hit = False
         for _ in range(required_successes + 1):
             app_id = fresh_identifier("c14_bound_app")
             try:
-                adapter.register_application_inband(control_actor, app_id)
-                registered_apps.append(app_id)
+                isolated.register_application(control_actor, app_id)
                 successes += 1
             except ConformanceDenial as exc:
                 _assert_is_contract_code(exc.code)
@@ -538,21 +625,19 @@ def test_c14_resource_bounds_published_and_enforced(adapter, fx: Fixture):
                 )
                 assert successes == required_successes, (
                     f"{adapter.name}: applications drive was refused with LIMIT_EXCEEDED after only "
-                    f"{successes!r} success(es), but the declared bound {apps_limit!r} (with {n_existing!r} "
-                    f"pre-existing) predicts exactly {required_successes!r} -- refused before the declared "
-                    "bound: cannot attribute the refusal to the applications class (it may be a different "
-                    "class's bound, e.g. the rate limiter, firing early)"
+                    f"{successes!r} success(es), but the isolated surface's own overridden bound "
+                    f"{isolated_applications_override!r} (with {n_existing!r} pre-existing) predicts exactly "
+                    f"{required_successes!r} -- refused before the declared bound: cannot attribute the "
+                    "refusal to the applications class (it may be a different class's bound firing early)"
                 )
                 limit_hit = True
                 break
         assert limit_hit, (
-            f"{adapter.name}: registering {required_successes + 1!r} new applications never triggered "
-            f"LIMIT_EXCEEDED for the declared applications bound {apps_limit!r} (with {n_existing!r} "
-            "pre-existing) -- the declared limit is not actually enforced"
+            f"{adapter.name}: registering {required_successes + 1!r} new applications on the isolated "
+            f"surface never triggered LIMIT_EXCEEDED for its own overridden applications bound "
+            f"{isolated_applications_override!r} (with {n_existing!r} pre-existing) -- the declared limit is "
+            "not actually enforced"
         )
-    finally:
-        for app_id in registered_apps:
-            adapter.deprovision_application(app_id)
 
     # -- credentials_per_application: fresh application, drive to the exact bound, clean up. --
     cred_app = fresh_identifier("c14_bound_cred_app")

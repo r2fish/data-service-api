@@ -92,6 +92,7 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
     ScopeView,
@@ -122,6 +123,23 @@ BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 # suffixed on), never a second, independently-chosen pair of strings.
 _DATA_SURFACE_BASE_URL = BASE_URL + "/v1"
 _CONTROL_SURFACE_BASE_URL = BASE_URL + "/control/v1"
+
+# port v1.11 addendum (supervisor ruling 2026-09-06 item 1): `isolated_
+# control_surface(limits_override=...)`'s only way to inject a small
+# control-plane limits profile on this plug -- unlike the in-process plug
+# and r2db-api's own HTTP plug (both of which construct a real
+# `ControlPlaneLimits` object directly and can `dataclasses.replace` it),
+# this peer's `build_control_service` (`mitatedb_api.control_composition`)
+# derives `ControlPlaneLimits` from environment variable NAMES, read from
+# its own `env` argument -- never from a `limits=` parameter (it has none).
+# This maps the 3 `ControlPlaneLimits` field names `apply_limits_override`
+# (the shared, type-agnostic helper) is ever asked to override to the exact
+# env var name `build_control_service`'s own docstring documents for it.
+_CONTROL_LIMIT_ENV_NAMES: Mapping[str, str] = {
+    "applications": "MITATEDB_CONTROL_APPLICATIONS_LIMIT",
+    "credentials_per_application": "MITATEDB_CONTROL_CREDENTIALS_PER_APPLICATION_LIMIT",
+    "control_requests_per_minute": "MITATEDB_CONTROL_REQUESTS_PER_MINUTE_LIMIT",
+}
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 
@@ -933,7 +951,23 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # migration script this adapter's own `close()` sweep uses --
         # C-14 vector 5's own `applications`-bound drive must genuinely
         # free registry+database+role state, not merely hide a row.
-        self._cells.pop(application_id, None)
+        #
+        # Phase 7 WP-5 rework (supervisor ruling 2026-09-06 item 1):
+        # explicitly closes the popped cell's own two persistent
+        # connections (`_evict_cells_over_cap`'s own `evicted_cell.
+        # _backend.close()` pattern, reused here) BEFORE the real DROP
+        # DATABASE below, rather than relying on Python reference-count
+        # deallocation to close them in time -- this method is about to
+        # gain callers (WP-5's own generic residue-cleanup teardown) that
+        # deprovision applications this SHARED, session-scoped adapter
+        # already served real data-plane traffic for, not only this
+        # file's own already-narrowly-scoped throwaway apps, so closing
+        # explicitly here removes any dependence on GC timing for a
+        # not-yet-evicted cell still holding open connections to the
+        # database this call is about to drop.
+        cell = self._cells.pop(application_id, None)
+        if cell is not None:
+            cell._backend.close()  # noqa: SLF001
         self._app_pg.pop(application_id, None)
         _deprovision_pg_app(self._platform, application_id)
 
@@ -1315,28 +1349,86 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # already the complete bearer (this file's own module-level note) --
     # presented verbatim, never recomposed here.
     @contextmanager
-    def isolated_control_surface(self):
-        service = build_control_service(self._control_env)
+    def isolated_control_surface(self, *, limits_override: Mapping[str, int] | None = None):
+        # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): this
+        # plug's own `build_control_service` derives `ControlPlaneLimits`
+        # from environment variable NAMES (its own docstring's table), not
+        # from a `limits=` parameter -- so overriding a field means passing
+        # a COPY of `self._control_env` with that field's own env var name
+        # set to the override value, via `_CONTROL_LIMIT_ENV_NAMES` above.
+        # `limits_override=None` (every pre-addendum call site) leaves
+        # `self._control_env` itself unchanged and unreferenced-by-copy,
+        # so this is behavior-preserving for the `control_requests_per_
+        # minute` vector.
+        if limits_override:
+            env = dict(self._control_env)
+            for field_name, value in limits_override.items():
+                env[_CONTROL_LIMIT_ENV_NAMES[field_name]] = str(value)
+        else:
+            env = self._control_env
+        service = build_control_service(env)
         app = create_control_app(service, request_bytes_limit=service.limits.request_bytes)
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
-        try:
-            def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
-                bearer = actor.secret
-                request = client.build_request(
-                    "GET", "/control/v1/capabilities", headers=[("authorization", f"Bearer {bearer}")]
-                )
-                response = self._run(client.send(request))
-                if response.status_code >= 400:
-                    failure = _HttpFailure(response)
-                    raise ConformanceDenial(
-                        code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
-                        details=_failure_details(failure),
-                    ) from failure
-                return response.json()
+        # This primitive's OWN residue list (supervisor ruling 2026-09-06
+        # item 2): applications `register_application` below registers
+        # successfully are recorded here and deprovisioned on exit -- never
+        # left for a caller to clean up itself (that would risk a double
+        # deprovision attempt against an application this primitive already
+        # removed).
+        driven_applications: list[str] = []
 
-            yield call
+        def _isolated_send(
+            method: str, path: str, actor: "CredentialHandle | ControlCredentialHandle", *,
+            json_body: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            bearer = actor.secret
+            request = client.build_request(
+                method, path, json=json_body, headers=[("authorization", f"Bearer {bearer}")]
+            )
+            response = self._run(client.send(request))
+            if response.status_code >= 400:
+                failure = _HttpFailure(response)
+                raise ConformanceDenial(
+                    code=self.classify(failure), adapter=self.name, native_type=type(failure).__name__,
+                    details=_failure_details(failure),
+                ) from failure
+            if not response.content:
+                return {}
+            return response.json()
+
+        def call(actor: "CredentialHandle | ControlCredentialHandle") -> Mapping[str, Any]:
+            return _isolated_send("GET", "/control/v1/capabilities", actor)
+
+        def register_application(
+            actor: "CredentialHandle | ControlCredentialHandle", application_id: str
+        ) -> Mapping[str, Any]:
+            result = _isolated_send(
+                "POST", "/control/v1/applications", actor, json_body={"application_id": application_id}
+            )
+            driven_applications.append(application_id)
+            return result
+
+        def list_applications(actor: "CredentialHandle | ControlCredentialHandle") -> Sequence[Mapping[str, Any]]:
+            result = _isolated_send("GET", "/control/v1/applications", actor)
+            return result["applications"]
+
+        try:
+            yield IsolatedControlHandle(
+                capabilities=call, register_application=register_application, list_applications=list_applications,
+            )
         finally:
             self._run(client.aclose())
+            errors: list[str] = []
+            for application_id in driven_applications:
+                try:
+                    self.deprovision_application(application_id)
+                except Exception as exc:  # noqa: BLE001 - report, never swallow.
+                    errors.append(f"{application_id!r}: {exc!r}")
+            if errors:
+                raise RuntimeError(
+                    "isolated_control_surface() failed to deprovision one or more applications its own "
+                    "handle registered:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
 
     # port v1.11 (design D-6.1 V2/D-6.5 addendum (1)/(4)): `copy.copy(self)`
     # (mirrors `conformance_adapter_r2db_http.py`'s identical pattern and
