@@ -173,6 +173,25 @@ def _collect_marked_condition_ids(request: pytest.FixtureRequest) -> set[str]:
         marker = item.get_closest_marker("condition")
         if marker and marker.args:
             ids.add(marker.args[0])
+    # L7-23 (Phase 8 WP-2, design D-3): running this file on its own
+    # collects zero @pytest.mark.condition(...) markers, because every
+    # marked test lives in OTHER files under conformance-tests/. Before
+    # this guard, that produced a misleading red (or worse, a vacuous
+    # green -- see test_every_marked_condition_id_is_registered_in_conditions_md
+    # and test_every_marked_condition_id_maps_to_an_executable_status
+    # below, which pass trivially against an empty `marked_ids` set) that
+    # looked like "all 20 conditions are missing their marker" instead of
+    # what actually happened: this test is meaningless outside the full
+    # conformance run. Fail loud with the real reason instead of skipping
+    # (constant discipline 1, no vacuous pass).
+    assert ids, (
+        "_collect_marked_condition_ids observed 0 @pytest.mark.condition(...) "
+        "ids. This test is only meaningful evaluated inside a full "
+        "conformance-tests/ run (or the whole repository root suite) -- "
+        "every @pytest.mark.condition(...) marker lives in OTHER files in "
+        "this directory, not in test_conditions_register.py itself. Run it "
+        "together with the rest of conformance-tests/, not standalone."
+    )
     return ids
 
 
