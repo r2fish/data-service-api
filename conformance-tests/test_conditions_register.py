@@ -16,20 +16,77 @@ section 9 adds it in a later step). Per the implementation instructions,
 this parser reads a `Status` column and fails with a clear, actionable
 message when the column is absent, rather than working around its absence --
 so the CONDITIONS.md -> executable-suite wiring stays explicit.
+
+Phase 7 WP-7 (i) extension (design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md
+D-7): CONDITIONS.md's rows were split into a short current-state cell plus a
+`[history](CONDITIONS_HISTORY.md#<id>)` link to verbatim historical text
+moved into a companion file. The mechanical guarantees that split depends on
+are pinned below: every row's link resolves to a real companion heading,
+the companion has exactly the main table's IDs (no more, no fewer), no
+table cell exceeds the agreed length cap, and no ID row is duplicated
+(the dict-based parser above would otherwise silently keep only the last
+one).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 CONDITIONS_PATH = Path(__file__).parent / "CONDITIONS.md"
+CONDITIONS_HISTORY_PATH = Path(__file__).parent / "CONDITIONS_HISTORY.md"
+
+# Design D-7: the cap applies per cell, not per row. Set PER FILE (差し戻し
+# rework round 3, 監督裁定 2026-09-06, item C-1): CONDITIONS.md's own longest
+# cell is far shorter than CONTROL_MAPPING.md's (SI-14's r2db-api cell), so a
+# single cap shared across both files left this file's own re-accumulation
+# guard almost inert (5.7x headroom over the measured max). Each register
+# file therefore carries its own constant, measured independently.
+#
+# Measured 2026-09-06 (after restoring the four dropped-constraint items
+# A-1..A-4 and four lower-severity ones, A-5, that this same rework round
+# put back onto their current rows): this file's own longest cell is
+# C-09's Status cell at 2,948 characters (C-19: 2,942). MAX_CELL_LENGTH = 3,000 is that
+# measurement plus a 58-character margin. This same (ID, length, cap, date)
+# record is also written to CONDITIONS.md's own preamble (before its table,
+# per instruction B-2), so the two stay in agreement rather than one
+# drifting silently out of date the way this comment's own predecessor
+# value (12,631 / a shared 14,300 cap) did.
+MAX_CELL_LENGTH = 3000
+
+_HISTORY_LINK_RE = re.compile(r"\[history\]\(CONDITIONS_HISTORY\.md#([a-z0-9\-]+)\)")
+_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _github_slug(text: str) -> str:
+    """Approximate GitHub's own heading-anchor slug algorithm: lowercase,
+    drop anything that is not a word character/space/hyphen, then turn
+    spaces into hyphens. ID-only headings (`## SI-14`, `## C-19`) reduce to
+    a plain lowercase of the ID, so this is intentionally simple -- but it
+    is still the slugifier, not a hardcoded id->slug table, so a heading
+    that grows a title (`## SI-14 -- Title`) changes its own slug and a
+    link written against the bare ID stops resolving."""
+    text = text.strip().lower()
+    text = re.sub(r"[^\w\- ]", "", text)
+    text = re.sub(r"\s+", "-", text)
+    return text
+
+
+def _split_table_row(line: str) -> list[str]:
+    s = line.strip()
+    inner = s[1:-1] if s.startswith("|") and s.endswith("|") else s.strip("|")
+    return [c.strip() for c in inner.split("|")]
+
+
+def _table_lines(path: Path) -> list[str]:
+    text = path.read_text()
+    return [line for line in text.splitlines() if line.strip().startswith("|")]
 
 
 def _parse_conditions_md() -> dict[str, str]:
     """Parse CONDITIONS.md's markdown table into {condition_id: status}."""
-    text = CONDITIONS_PATH.read_text()
-    table_lines = [line for line in text.splitlines() if line.strip().startswith("|")]
+    table_lines = _table_lines(CONDITIONS_PATH)
     if len(table_lines) < 2:
         raise AssertionError(f"{CONDITIONS_PATH} contains no markdown table to parse")
 
@@ -59,6 +116,51 @@ def _parse_conditions_md() -> dict[str, str]:
         if cid:
             result[cid] = status
     return result
+
+
+def _parse_conditions_rows() -> list[dict[str, str]]:
+    """Parse CONDITIONS.md into a list of {column_name: cell_text} dicts,
+    one per data row, preserving row order and every column (not just ID
+    and Status) -- used by the WP-7 (i) mechanical checks below, which
+    reason over the whole row (cell-length cap, the history link, which can
+    live in any cell) rather than only the two columns the traceability
+    checks above need."""
+    table_lines = _table_lines(CONDITIONS_PATH)
+    if len(table_lines) < 2:
+        raise AssertionError(f"{CONDITIONS_PATH} contains no markdown table to parse")
+    header = _split_table_row(table_lines[0])
+    rows: list[dict[str, str]] = []
+    for line in table_lines[2:]:
+        cells = _split_table_row(line)
+        if len(cells) != len(header):
+            continue
+        rows.append(dict(zip(header, cells)))
+    return rows
+
+
+def _companion_heading_slugs(path: Path) -> set[str]:
+    text = path.read_text()
+    return {_github_slug(m.group(1)) for m in _HEADING_RE.finditer(text)}
+
+
+def _companion_sections(path: Path) -> dict[str, str]:
+    """{heading_slug: section_body} for every '## <heading>' section in a
+    companion file -- the body is everything between that heading line and
+    the next '## ' heading (or end of file), with a trailing '---'
+    separator line stripped off since it is pure markdown furniture, not
+    section content."""
+    text = path.read_text()
+    matches = list(_HEADING_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end]
+        # drop a single trailing '---' separator line (with surrounding
+        # blank lines), which is not section content.
+        body = re.sub(r"\n\s*---\s*\n?\s*$", "", body)
+        sections[_github_slug(m.group(1))] = body.strip()
+    return sections
 
 
 def _collect_marked_condition_ids(request: pytest.FixtureRequest) -> set[str]:
@@ -134,4 +236,115 @@ def test_every_marked_condition_id_maps_to_an_executable_status(request: pytest.
         f"@pytest.mark.condition(...) id(s) are collected/marked in the suite, but {CONDITIONS_PATH} does "
         f"not record an 'executable' Status for them (either missing entirely or downgraded): "
         f"{sorted(not_executable)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 WP-7 (i): current-conclusions/history split, mechanical fixation.
+# ---------------------------------------------------------------------------
+
+def test_conditions_md_has_a_single_table():
+    """D-7's `CONDITIONS.md` decision ("the file has exactly one `|`-started
+    table") is load-bearing for every parser above and below -- a second
+    table (e.g. the update-convention preamble written as a table instead
+    of prose) would silently corrupt header/divider detection. Checked
+    directly: every `|`-prefixed line in the file must be part of one
+    contiguous block."""
+    text = CONDITIONS_PATH.read_text()
+    lines = text.splitlines()
+    pipe_line_nums = [i for i, line in enumerate(lines) if line.strip().startswith("|")]
+    assert pipe_line_nums, f"{CONDITIONS_PATH} has no '|'-started table at all"
+    span = pipe_line_nums[-1] - pipe_line_nums[0] + 1
+    assert span == len(pipe_line_nums), (
+        f"{CONDITIONS_PATH} appears to have more than one '|'-started table "
+        f"(pipe-prefixed lines are not contiguous): {pipe_line_nums}"
+    )
+
+
+def test_conditions_md_has_no_duplicate_ids():
+    """The pre-existing `_parse_conditions_md` dict comprehension silently
+    keeps only the last row for a repeated ID (`result[cid] = status`) --
+    this test makes a repeated ID row a hard failure instead, since D-7
+    splitting a row across two ID rows (rather than one row plus a history
+    link) would otherwise regress silently."""
+    rows = _parse_conditions_rows()
+    ids = [row["ID"] for row in rows if row.get("ID")]
+    duplicates = sorted({cid for cid in ids if ids.count(cid) > 1})
+    assert not duplicates, f"duplicate ID row(s) in {CONDITIONS_PATH}: {duplicates}"
+
+
+def test_conditions_md_cells_do_not_exceed_the_length_cap():
+    """D-7 machine fixation item 4: the length cap applies per CELL, not
+    per row -- a single long cell must fail even if every other cell in
+    that row is short."""
+    rows = _parse_conditions_rows()
+    offenders = [
+        (row.get("ID", "?"), column, len(value))
+        for row in rows
+        for column, value in row.items()
+        if len(value) > MAX_CELL_LENGTH
+    ]
+    assert not offenders, (
+        f"cell(s) in {CONDITIONS_PATH} exceed the {MAX_CELL_LENGTH}-character cap "
+        f"(id, column, length): {offenders}"
+    )
+
+
+def test_every_conditions_row_has_a_resolving_history_link():
+    """D-7 machine fixation items 1-2: every ID row carries a
+    `[history](CONDITIONS_HISTORY.md#<slug>)` link, and the link fragment
+    must resolve to a REAL companion heading (slug equality), not merely to
+    the existence of *some* heading with that ID's text somewhere in the
+    title."""
+    rows = _parse_conditions_rows()
+    companion_slugs = _companion_heading_slugs(CONDITIONS_HISTORY_PATH)
+    missing_link: list[str] = []
+    unresolved: list[tuple[str, str]] = []
+    for row in rows:
+        cid = row.get("ID", "?")
+        row_text = " ".join(row.values())
+        match = _HISTORY_LINK_RE.search(row_text)
+        if not match:
+            missing_link.append(cid)
+            continue
+        if match.group(1) not in companion_slugs:
+            unresolved.append((cid, match.group(1)))
+    assert not missing_link, f"row(s) in {CONDITIONS_PATH} have no [history](...) link: {missing_link}"
+    assert not unresolved, (
+        f"row(s) in {CONDITIONS_PATH} whose history link fragment does not resolve to a heading "
+        f"in {CONDITIONS_HISTORY_PATH} (id, fragment): {unresolved}"
+    )
+
+
+def test_conditions_history_has_exactly_the_main_tables_ids():
+    """D-7 machine fixation item 2, the coverage half: the companion has a
+    heading for every ID in the main table, and no extra ones (the
+    "过不足なし" requirement) -- an extra heading would usually mean a
+    stale ID left behind after a row was renamed or removed."""
+    rows = _parse_conditions_rows()
+    main_slugs = {_github_slug(row["ID"]) for row in rows if row.get("ID")}
+    companion_slugs = _companion_heading_slugs(CONDITIONS_HISTORY_PATH)
+    missing = sorted(main_slugs - companion_slugs)
+    extra = sorted(companion_slugs - main_slugs)
+    assert not missing and not extra, (
+        f"mismatch between {CONDITIONS_PATH} IDs and {CONDITIONS_HISTORY_PATH} headings: "
+        f"missing_from_companion={missing} extra_in_companion={extra}"
+    )
+
+
+def test_conditions_history_every_heading_section_is_non_empty():
+    """WP-7 差し戻し rework, 監督裁定 2026-09-06 item 3(e): a heading with an
+    empty body underneath it (a mutation deleting a section's content but
+    leaving the '## <ID>' marker behind) would still satisfy every other
+    check above -- the ID-set-equality check only looks at heading text,
+    never at what follows it. This closes that "空振り" gap: every
+    companion heading's own section body (up to the next heading) must be
+    non-empty after stripping whitespace and the trailing '---' separator.
+    A row with genuinely nothing moved out of it still carries an explicit
+    placeholder sentence ("No historical narrative was separated out of
+    this row's current text...") rather than an empty section, by design."""
+    sections = _companion_sections(CONDITIONS_HISTORY_PATH)
+    empty = sorted(slug for slug, body in sections.items() if not body)
+    assert not empty, (
+        f"{CONDITIONS_HISTORY_PATH} has heading(s) with an empty section body: {empty}"
     )

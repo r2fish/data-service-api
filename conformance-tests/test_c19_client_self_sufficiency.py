@@ -9,7 +9,8 @@ three vectors) and item 8 (the two `xfail(strict=True)` registrations in
 this file). Every real (non-guard, non-static) test here carries
 `@pytest.mark.condition("C-19")` via the module-level `pytestmark`.
 
-C-19's own proposition (CONDITIONS.md, wording narrowed 2026-09-05): a
+C-19's own proposition (CONDITIONS.md's C-19 row; the 2026-09-05 narrowing
+is recorded in CONDITIONS_HISTORY.md#c-19): a
 client holding only the common contract, one base URL, and one
 credential -- with no peer-specific knowledge -- can authenticate with
 that credential, verbatim, on the surface its authority class admits

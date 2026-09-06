@@ -596,8 +596,11 @@ def _assert_wire_verb_rejected(adapter, control_actor, method: str, path: str) -
 def test_c09_v4_no_audit_mutation_or_deletion_surface_exists(adapter):
     """Declared scope, fixed by supervisor ruling P4-D18 (2026-09-03,
     `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §5.1 / §11.1 L4-8; the
-    same wording is on the C-09 row of `CONDITIONS.md`, and the two must
-    not drift apart). What this vector guarantees adapter-independently is
+    same disposition (P4-D18 by name, and that it DEFERS rather than
+    closes the ledger item) is condensed onto the C-09 row of
+    `CONDITIONS.md`, with the verbatim ruling text kept in
+    `CONDITIONS_HISTORY.md#c-09` -- keep the disposition in agreement,
+    not the wording). What this vector guarantees adapter-independently is
     a STRUCTURAL property of the common port itself (the ABC check above);
     what it adds per adapter -- real wire verbs on both audit paths, or
     introspection of the real audit objects an in-process adapter reads --
