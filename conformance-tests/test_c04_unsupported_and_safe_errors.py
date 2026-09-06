@@ -52,25 +52,46 @@ Two, independent propositions, each with its own test function:
      that class), producing `LIMIT_EXCEEDED` instead of the denial this
      test is checking for. `drop_entity()`'s own request shape is a flat,
      single-level dict on every peer, so it is used for the `r2db-api`
-     pair instead; `MitateDB-api`/`MitateDB-api-http` do not enforce
-     `operation_depth` at all, so `delete()` is safe (and used) there --
-     `drop_entity` is `SurfaceAbsent` specifically on `MitateDB-api`
-     in-process, which would need its own extra absence-handling for no
-     benefit, since `delete()` already works cleanly on both MitateDB
-     plugs.
+     pair instead; `MitateDB-api`/`MitateDB-api-http` route to `delete()`
+     because `drop_entity` is declared structurally unsupported on both
+     (`_peer_declares_drop_entity_supported`'s own docstring). **Measured,
+     Phase 8 WP-1a follow-on (this ruling's own re-run) -- disclosed here,
+     not fixed here (out of this ruling's file scope)**: `delete()` is
+     genuinely safe on `MitateDB-api` in-process (its own `request` dict
+     nests to depth 3: `{collection,filters,...} -> filters[] -> Filter`,
+     comfortably under the bound=4), but its `MitateDB-api-http` HTTP-wire
+     counterpart is NOT -- the JSON body `{"operations": [{"operation":
+     "delete", "where": [{"field", "operator", "value"}], ...}]}` nests to
+     depth 5 (`operations[] -> op -> where[] -> filter-dict`), one level
+     past the bound, and `operation_depth` is `enforced` on this transport
+     (`cell.py` comment above `"operation_depth": "enforced"`) -- this is
+     the SAME structural fact the `r2db-api` paragraph above already
+     names, now also reachable on `MitateDB-api-http` specifically. This
+     surfaces only now: the pre-ruling `_operation_depth_enforced` proxy
+     misrouted this plug into `drop_entity()` (`SurfaceAbsent`) instead,
+     which masked it behind a different failure. `test_c04_error_details_
+     carry_no_unsafe_diagnostic_content[MitateDB-api-http]` stays red
+     after this ruling's fix for this reason; resolving it needs either a
+     different wire shape or a different isolated `operation_depth` bound
+     for this transport -- both out of `_peer_declares_drop_entity_
+     supported`'s own file-scoped mandate, so left for a follow-on
+     decision rather than patched here.
 
-     **Branch condition, WP-5 rework (review finding 3)**: this choice is
-     driven by the SAME declared, observable property the paragraph above
-     already reasons from -- `limit_enforcement.operation_depth ==
-     "enforced"` in the plug's own `capability_document()` -- never by the
-     plug's own name. `r2db-api`/`r2db-api-http` are the only two
-     currently-registered plugs that declare `operation_depth` enforced,
-     which is exactly why they are the ones that need the flat
-     `drop_entity()` probe instead of the deeper `delete()` one; this is
-     the same correspondence `test_c05_limit_declaration_agreement.py::
-     _drive_operation_depth` already asserts, read here rather than
-     re-derived. A future plug is routed correctly by what it declares,
-     not by whether its name happens to start with `"r2db-api"`.
+     **Branch condition, supervisor ruling 2026-09-06 (Phase 8 WP-1a
+     follow-on; supersedes the WP-5 rework 2's `limit_enforcement.
+     operation_depth` proxy)**: `operation_depth` enforcement stopped
+     correlating with `drop_entity` support the moment WP-1a's own rework
+     made `MitateDB-api` also enforce `operation_depth` -- that proxy then
+     misrouted both MitateDB plugs into the `drop_entity()` probe below,
+     where `drop_entity` is `SurfaceAbsent`. The branch is now keyed on
+     the ACTUALLY DECLARED capability instead: `_peer_declares_drop_
+     entity_supported` below reads whether `drop_entity` is a schema
+     operation the plug's own capability document reports it executes,
+     never the plug's own name and never a proxy signal. `r2db-api`/
+     `r2db-api-http` declare it supported, `MitateDB-api`/`MitateDB-api-
+     http` declare it structurally unsupported -- see that helper's own
+     docstring for the exact key and the contract/source line references
+     backing each side.
 
 Uses `conftest.isolated`/`provision_pair` (port v1.11's own `isolated_
 application_surface()`, C-05's primitive) rather than the ordinary `fx`
@@ -96,13 +117,67 @@ pytestmark = pytest.mark.condition("C-04")
 _ACCEPTED_UNSUPPORTED_OPERATION_CODES = frozenset({"CAPABILITY_UNSUPPORTED", "VALIDATION_FAILED"})
 
 
-def _operation_depth_enforced(iso: ConformanceAdapter) -> bool:
-    """WP-5 rework (review finding 3): the declared, observable property
-    this file's own destructive-probe branch is keyed on, replacing the
-    earlier `adapter.name.startswith("r2db-api")` check. Mirrors
-    `test_c05_limit_declaration_agreement.py::_drive_operation_depth`'s
-    own read of the identical field."""
-    return iso.capability_document().get("limit_enforcement", {}).get("operation_depth") == "enforced"
+def _peer_declares_drop_entity_supported(iso: ConformanceAdapter) -> bool:
+    """Supervisor ruling 2026-09-06 (Phase 8 WP-1a follow-on): replaces
+    `_operation_depth_enforced` (removed here), the WP-5 rework 2 proxy
+    that keyed this file's own destructive-probe branch on `limit_
+    enforcement.operation_depth == "enforced"` as a stand-in for "is this
+    the `r2db-api` pair, the one that supports `drop_entity`". That proxy
+    broke the moment it stopped being a proxy for anything: Phase 8 WP-1a
+    made `MitateDB-api`/`MitateDB-api-http` also declare `operation_depth`
+    `enforced`, so both took the `drop_entity()` branch below too, where
+    `drop_entity` is `SurfaceAbsent` on `MitateDB-api` in-process (2 of
+    this file's tests went red on a full `conformance-tests` run --
+    `test_c04_error_details_carry_no_unsafe_diagnostic_content
+    [MitateDB-api]`/`[MitateDB-api-http]`).
+
+    This reads the ACTUALLY DECLARED capability instead: whether
+    `drop_entity` -- one of the six schema operations `SchemaOperation
+    Request.operation` names (`spec/data-service-api.v1.json:283`) -- is
+    an operation this peer really executes, per its own capability
+    document's `capabilities.schema_operations` entry (a peer-published
+    key inside `CapabilityDocument.capabilities`'s deliberately open
+    shape, `spec/data-service-api.v1.json:40`'s own note on `operations`
+    applies identically to its sibling `unsupported`).
+
+    That entry publishes the vocabulary two ways, and only one is usable
+    through `capability_document()`: `operations` (the executable subset)
+    is gated on the CALLING session's own role -- `r2db_api/service.py:
+    914`'s `schema_ops = [...] if canonical.role == "developer" else []`,
+    `mitatedb_api/cell.py:1751`'s identical `is_developer` gate -- and
+    every one of the four adapters' own `capability_document()` always
+    probes with a `"runtime"`-role credential (measured by reading each:
+    `conformance_adapter_r2db.py:328`, `conformance_adapter_r2db_http.py:
+    1605`, `conformance_adapter_mitatedb.py:487`, `conformance_adapter_
+    mitatedb_http.py` around its own `_capability_probe_session` cache),
+    so `operations` reads back empty through this call on every plug and
+    cannot distinguish anything. `unsupported` is NOT role-gated on
+    either peer (same two source lines): it is a fixed list published
+    regardless of who is asking, so it is the one reliable read available
+    here. r2db-api's own `unsupported` (`service.py:914`) is `["alter_
+    field", "jobs"]` -- `drop_entity` absent, i.e. declared supported;
+    MitateDB-api's own (`cell.py:1751`) is `["alter_field", "create_
+    index", "drop_index", "drop_entity", "jobs"]` -- `drop_entity`
+    present, i.e. declared genuinely unsupported, matching the structural
+    `SurfaceAbsent` fact this module's own header docstring already
+    measured.
+
+    Mirrors `test_c05_limit_declaration_agreement.py::_v3_cases`'s own
+    per-plug (not cross-plug) non-vacuity discipline -- the `assert`
+    below only proves THIS plug's own read is real (a present, non-`None`
+    `unsupported` list), never that both branches are exercised across
+    the whole file: that cross-plug fact does not survive `-n 5 --dist
+    loadgroup` (each plug is its own `xdist_group`/worker, `conftest.py::
+    pytest_collection_modifyitems`), so it is confirmed by running this
+    module and reading which adapter took which branch, not by an
+    in-process aggregate."""
+    schema_operations = iso.capability_document().get("capabilities", {}).get("schema_operations", {})
+    unsupported = schema_operations.get("unsupported")
+    assert unsupported is not None, (
+        f"{iso.name}: capability_document()['capabilities']['schema_operations'] carries no 'unsupported' "
+        "key to read -- this branch condition needs a real, peer-published vocabulary, not a silent default"
+    )
+    return "drop_entity" not in unsupported
 
 
 def test_c04_operation_outside_the_mutation_vocabulary_is_refused_before_execution(
@@ -147,7 +222,7 @@ def test_c04_error_details_carry_no_unsafe_diagnostic_content(adapter: Conforman
     entity = fresh_identifier("c04safe")
     iso.create_entity(developer, entity, {"label": "text"})
 
-    if _operation_depth_enforced(iso):
+    if _peer_declares_drop_entity_supported(iso):
         # `drop_entity` -- flat, single-level request dict, safe under the
         # isolated profile's small operation_depth bound on this peer (see
         # this module's own docstring / conftest.provision_pair's).
@@ -172,8 +247,12 @@ def test_c04_error_details_carry_no_unsafe_diagnostic_content(adapter: Conforman
         )
         return
 
-    # `MitateDB-api`/`MitateDB-api-http`: `delete()` (no operation_depth
-    # enforcement on either plug, so no depth pitfall here).
+    # `MitateDB-api`/`MitateDB-api-http`: `drop_entity` is declared
+    # unsupported (structurally `SurfaceAbsent` in-process), so `delete()`
+    # is the probe -- its request shape stays within the isolated
+    # profile's `operation_depth` bound on this peer regardless of that
+    # peer's own `operation_depth` enforcement status (see this module's
+    # own header docstring / `_peer_declares_drop_entity_supported`'s).
     iso.attempt_mutation(
         runtime, entity, "insert", values={"label": "seed"}, where_field=None, where_value=None,
     )

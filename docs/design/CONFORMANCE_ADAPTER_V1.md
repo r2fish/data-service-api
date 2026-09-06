@@ -2,10 +2,11 @@
 
 ## 文書情報
 
+- 版数: 1.12 (§22 を新設。port v1.12: phase 8 WP-1b、design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 由来の coordinated revision -- 2 新規追加: `hold_in_flight(session, n)` (C-05 V2 の in-flight 保持 primitive、`concurrency` を初めて駆動可能にする) と `select_eq`/`attempt_filter` への `limit`/`extra_predicates` optional フィールド (L7-21、`result_items` 両側化・`query_complexity` の能力判定化)。削除は無い。詳細は §22
 - 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) 追記日: 2026-09-07
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -2926,3 +2927,162 @@ registered plugs implement the new signature and yield shape (r2db-api
 in-process/HTTP, MitateDB-api in-process/HTTP) -- a plug that has not
 been updated fails to instantiate, the same §20.6 compatibility rule
 every other addition to this ABC already follows.
+
+## 22. v1.12 port revision (Phase 8 WP-1b, coordinated with docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2)
+
+Phase 8's own D-2 requires the common suite to executable-ify `concurrency`
+(SI-08's own resource-bound evidence, the one application-plane class port
+v1.11 had no primitive to drive at all) and to close L7-21 (`result_items`/
+`query_complexity`'s peer-name-keyed drive exclusions, replaced by a
+port-level capability). Two additions, no removals.
+
+### 22.1 `hold_in_flight(session, n)` (D-2 決定 1/2, 実装の形 (a)/(b))
+
+Added to `ConformanceAdapter` immediately after `isolated_application_
+surface()`:
+
+```python
+def hold_in_flight(self, session, n: int) -> AbstractContextManager[None]
+```
+
+Meaning (verbatim, design §3 D-2 決定 1 -- carried into the port docstring
+unparaphrased, per this repository's own 常設規律 4): "n 個の application
+plane 要求を、service の in-flight 窓の内側で停止させたまま保持する。保持
+中に n+1 個目を出すと `LIMIT_EXCEEDED`(`concurrency`) で拒否される。解放
+後、保持していた n 個はすべて正常に完了する。"
+
+**Realization is adapter-internal, never a product-code hook** (design §4):
+each plug wraps a real object it already constructs out-of-band for
+`isolated_application_surface()` (a cell/backend object), replacing one of
+its own bound methods (or, on `MitateDB-api`, its own `_limit_gate`) with a
+small proxy that blocks the first `n` real calls on a shared `threading.
+Event` until released. `n` real background OS threads each issue one
+genuine, full port-level request that reaches this stall point; the
+primitive waits for all `n` to have genuinely entered the stall (a
+`threading.Semaphore`, never a fixed sleep) before yielding, and on exit
+releases them, joins every thread, and re-raises the first background
+failure (if any) only after every thread has been joined.
+
+**Per-plug stall-point realization** (design D-2 実装の形 (b), measured):
+
+| plug | wraps | why the stop point sits inside the counter, before backend/DB | concurrency mechanism |
+|---|---|---|---|
+| `r2db-api` (in-process) | the isolated instance's own per-application cell object's `catalog()` method (whole-method wrap: stall before delegating to the original) | `DataService._slot` (external to the cell) increments `self._active` and dispatches to the cell object ONLY after that increment -- by the time the cell's own method runs, the counter is already +1 | `n` real `threading.Thread`s, each a plain synchronous `DataService.catalog(session)` call |
+| `r2db-api-http` | the SAME per-application cell object (a `PostgresCell`), same wrap shape as the in-process plug (the underlying `DataService`/`_slot` is identical regardless of transport) | identical to the in-process plug's own reasoning | `n` real `GET /v1/catalog` HTTP round trips, each issued from its own OS thread against its own fresh event loop + `httpx.AsyncClient(ASGITransport(app=...))` -- the shared adapter's single `self._loop.run_until_complete` cannot itself hold more than one request in flight |
+| `MitateDB-api` (in-process) | the cell's own `_limit_gate` bound method (NOT any one operation method wholesale) -- a wrapper that calls the REAL `_limit_gate` generator context manager's own `__enter__()` first (rate acquire + in-flight counter increment + request_bytes/operation_depth checks, all real), THEN stalls, THEN returns the real `deadline` value back to the caller | this peer's own gate is entered FROM INSIDE an operation method's own body (`ApplicationCell.catalog`/`.insert`/...), unlike r2db's external `_slot` -- wrapping a whole operation method wholesale would stall BEFORE the counter increment ever ran; wrapping `_backend` instead would hang permanently at `n >= 2` (the first held thread would hold `ApplicationCell._lock` stalled inside `_backend`, and the second held thread would then block forever on `_lock.acquire()`, never reaching this primitive's own stall point at all -- the SAME structural reason D-1 already forbids wrapping `_backend` for this peer) | `n` real `threading.Thread`s, each a plain synchronous `session.catalog()` call (parameterless, needs no pre-existing entity) |
+| `MitateDB-api-http` | the SAME per-application `ApplicationCell`'s own `_limit_gate`, identical wrap shape to the in-process plug (the real HTTP dispatch reaches the SAME `ApplicationCell` class through `http.py::get_catalog` -> `session.catalog()`) | identical to the in-process plug's own reasoning | `n` real `GET /v1/catalog` HTTP round trips, each from its own OS thread + fresh event loop + `httpx.AsyncClient`, identical shape to `r2db-api-http` |
+
+**Disclosed limits** (design D-2 開示事項, carried verbatim in meaning into
+the port docstring and `CONDITIONS.md`'s own C-05 row):
+
+1. The concurrency `hold_in_flight` creates is IN-PROCESS concurrency only
+   -- every plug realizes it with real OS threads calling directly into
+   the same process's own service/foundation object (an HTTP plug's own
+   `ASGITransport`, never a real socket). Genuine wire-level/reverse-proxy
+   concurrency stays out of this primitive's scope until a future phase's
+   own multi-transport work (L7-2).
+2. `MitateDB-api` allows at most ONE in-flight operation per cell
+   (`ApplicationCell._lock`) -- `hold_in_flight`'s own stop point sits
+   BEFORE that lock is acquired, so holding `n > 1` in flight against one
+   cell is still structurally possible (the held requests queue behind the
+   lock once released), but the `concurrency` bound this peer declares is
+   therefore a REFUSAL THRESHOLD, never a claim of `n`-way parallel
+   EXECUTION capacity.
+3. The scope of the counter a bound protects (a per-deployment in-flight
+   count; a per-credential rate window) is not observable by the common
+   suite from the outside -- the isolated surface's own application/
+   credential population is deliberately small (often exactly one of
+   each).
+
+**`_drive_concurrency`'s own recipe** (`test_c05_limit_declaration_
+agreement.py`, `_V2_DRIVERS`): declared bound `N` held in flight via
+`hold_in_flight` -> an ordinary N+1st request denied (`LIMIT_EXCEEDED`/
+`concurrency`) -> release -> the `N` held requests all complete
+successfully AND an ordinary request succeeds again (this last check is
+this driver's own OBSERVABLE confirmation that `hold_in_flight.__exit__`
+genuinely joined every held thread before returning, not merely set the
+release event and moved on). A rate-headroom precondition is asserted
+before holding (r2db's own `_slot` checks `requests_per_minute` BEFORE
+`concurrency`, so an under-provisioned rate window would make the N+1st
+probe's denial ambiguous) -- the identical "assert the precondition, don't
+silently depend on it" discipline `isolated_application_surface()`'s own
+docstring already established for `requests_per_minute`'s own driver.
+
+### 22.2 `select_eq`/`attempt_filter` optional fields (D-2 決定 4, L7-21 実装の形 (c))
+
+Two OPTIONAL, keyword-only fields, additive to both existing signatures --
+no existing call site's behavior changes when they are omitted:
+
+```python
+def select_eq(self, session, entity, select, field, value, *, limit: int | None = None) -> list[dict]
+def attempt_filter(self, session, entity, select, field, operator, value, *,
+                    extra_predicates: Sequence[tuple[str, str, Any]] | None = None) -> list[dict]
+```
+
+`limit` is the client's own requested page size, presented to the peer's
+real page-size parameter verbatim (`QueryRequest.page.size` on the wire,
+`spec/data-service-api.v1.json`) -- `None` omits it, exactly the
+pre-v1.12 behavior. `extra_predicates` is zero or more additional
+`(field, operator, value)` predicates, ANDed with the primary predicate and
+presented as additional entries of the SAME real `where`/filter-list entry
+point (`QueryRequest.where`, `maxItems: 50`) -- `None`/empty is exactly the
+pre-v1.12 single-predicate behavior. Both map directly onto a pre-existing,
+unexposed parameter each of the 4 plugs' own real query methods already
+had (r2db's `DataService.query(..., page_size=...)`; MitateDB's
+`session.read(..., limit=...)`; both HTTP plugs' own internal `_query`/
+`_query_request` helpers already accepted `page_size`) -- port v1.12 only
+exposes what was already there, on every plug, uniformly.
+
+**L7-21's own capability-判定化** (replacing the peer-name exclusion these
+two fields make possible to remove): a V2 driver's decision of WHETHER to
+drive a class is now the plug's own LIVE `limit_enforcement` declaration
+alone -- never `adapter.name`. `_drive_result_items` is now two-sided on
+all 4 plugs (the port-shape gap that kept it r2db-only is closed: r2db's
+own check is `min(len(rows), page_size)` against the bound, MitateDB's own
+check is the REQUESTED `limit` value directly -- with `bound + 1` actual
+rows present, both peers agree `page_size = bound` succeeds and `page_size
+= bound + 1` is denied). `_drive_query_complexity` stays ONE-SIDED on all
+4 plugs -- a CONCLUSION from the two peers' own incompatible metric
+definitions (r2db: `len(where) + len(select) + order_by_count`; MitateDB:
+`len(filters)` alone), never an artifact of the removed exclusion -- but is
+now driven (and observed) on MitateDB too, via `extra_predicates` inflating
+`len(filters)` directly (the pre-v1.12 recipe's `select`-list-length trick
+only ever inflated r2db's own metric).
+
+Two static assertions in `test_c05_limit_declaration_agreement.py` pin
+L7-21's own proposition going forward (design D-2 実装の形 (c), limited
+to "駆動可否を peer 名で決めない" -- deliberately NOT "zero `adapter.name`
+reads in this file", which would also flag legitimate, non-exclusionary
+peer-specific facts): (i) no `_V2_DRIVERS` driver body contains an early
+`return False` guarded by reading `adapter.name`; (ii) every peer-name
+equality/prefix read in the module is inside one of 3 allowlisted
+functions (`_schema_objects_unit_cost`'s own counting-rule fact;
+`_drive_requests_per_minute`'s own `already_consumed` transport-specific
+correction; `test_c05_e_isolated_application_surface_releases_resources`'s
+own observation-mechanism difference) -- AST-scoped, not a line-number pin,
+so the check survives the file being edited/reflowed.
+
+### 22.3 Compatibility impact
+
+Additive to the ABC (§20.6's own first bullet applies identically -- a
+plug not implementing `hold_in_flight()` fails to instantiate; all four
+now do). `select_eq`/`attempt_filter`'s two new fields are optional
+keyword-only additions with `None`/empty defaults -- every pre-v1.12 call
+site (every condition file besides `test_c05_limit_declaration_
+agreement.py`) is unaffected, byte-for-byte. No peer's PRODUCT code
+changed for §22.1 -- `hold_in_flight` is realized entirely inside each
+peer's own conformance PLUG (`*/conformance/conformance_adapter_*.py`),
+wrapping objects those plugs already construct out-of-band, never a
+test-only hook added to `r2db_api`/`mitatedb_api` themselves. §22.2 is
+likewise plug-only: each plug's own query helper already accepted the
+underlying `page_size`/`limit` parameter before this port revision: only
+the plug method's own signature (an optional keyword forwarded through)
+changed. `MitateDB-api`'s own `_attempt_mutation_outcome` (used by
+`_drive_operation_depth`'s own updated recipe, R-A) additionally routes an
+`operation="update"` attempt with a real filter through `session.
+transact()` (matching the pre-existing `operation="insert"`+filter
+routing) -- a conformance-PLUG dispatch-routing change, not a port
+signature change, and verified (by inspection) not to affect any other
+caller in this repository: every "update" attempt anywhere else that
+carries a real `where_field` is gated behind `revision_preconditions:
+enabled`, which this peer declares `unavailable`.

@@ -2,7 +2,7 @@
 
 from .audit import AuditSink
 from .auth import CredentialStore, Role
-from .cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
+from .cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, _LimitStateHolder
 from .config import FoundationConfig
 from .errors import AuthenticationError, ConflictError
 from .identifiers import validate_identifier
@@ -37,6 +37,14 @@ class ProvisioningFacade:
         # to build their own private, unshared default router each --
         # unchanged behavior for every caller that does not opt in.
         self._audit_router = audit_router
+        # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス
+        # 1個)"): exactly one limit-state holder for this whole facade --
+        # the SAME one-per-composition-root injection shape `audit_router`
+        # immediately above already established. Every `ApplicationCell`
+        # this facade ever provisions (below) shares this single instance,
+        # so `requests_per_minute`/`concurrency` are bounded across the
+        # WHOLE facade, never re-initialized per application.
+        self._limit_holder = _LimitStateHolder()
         self.credentials = CredentialStore(pepper, self.audit, audit_router=audit_router)
         self.cells = {}
 
@@ -53,7 +61,8 @@ class ProvisioningFacade:
         self.credentials.provision_application(application_id)
         self.cells[application_id] = ApplicationCell(
             application_id, self.config, self.audit,
-            guard=self.credentials.assert_active, audit_router=self._audit_router)
+            guard=self.credentials.assert_active, audit_router=self._audit_router,
+            limit_holder=self._limit_holder)
 
     def issue_credential(self, application_id, role, expires_at=None):
         return self.credentials.issue(application_id, role, expires_at)

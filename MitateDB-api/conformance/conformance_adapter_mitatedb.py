@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
@@ -312,6 +313,148 @@ class _ReconciledControlBackend:
 
     def append_audit(self, *, work=None, **fields):
         return self._audit.append(work=work, **fields)
+
+
+class _StalledGateContextManager:
+    """The per-call context-manager object `_stalled_limit_gate` (below)
+    returns -- delegates BOTH `__enter__`/`__exit__` to the REAL `_limit_
+    gate` generator context manager it wraps, but blocks on a shared
+    `threading.Event` INSIDE `__enter__`, after the real gate's own
+    `__enter__` has already run (rate acquire + in-flight counter
+    increment + request_bytes/operation_depth checks, `cell.py::
+    ApplicationCell._limit_gate`) and returned its own `deadline` value,
+    and BEFORE returning that value back to the real caller (`catalog`/
+    `insert`/.../`ApplicationRuntime.capabilities`'s own `with self.
+    _limit_gate(...) as deadline:` block) -- which is exactly what lets
+    `ApplicationCell._lock` (`cell.py:329`, acquired by the caller only
+    AFTER that `with` block's own body starts) stay unacquired for as
+    long as this stalls."""
+
+    __slots__ = ("_inner", "_entered", "_release")
+
+    def __init__(self, inner_cm, entered: threading.Semaphore, release: threading.Event) -> None:
+        self._inner = inner_cm
+        self._entered = entered
+        self._release = release
+
+    def __enter__(self):
+        value = self._inner.__enter__()
+        self._entered.release()
+        self._release.wait()
+        return value
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._inner.__exit__(exc_type, exc, tb)
+
+
+# Phase 8 WP-1 rework 2 (裁定 3, 監督裁定 2026-09-07): a bounded wait for
+# the background threads to reach the stall point, in place of an
+# unbounded `entered.acquire()`. If the gate this probe depends on ever
+# stops stalling calls where this helper expects (a genuine product
+# regression, or a future change to this stall point's own placement --
+# this peer's 2 plugs are exactly the ones review finding 3 measured
+# actually deadlocking pre-fix, since `hold_in_flight`'s own `with`
+# block waits for `n` real threads to finish, and those threads in turn
+# wait on `release`, which this context manager only ever sets after
+# its own body runs -- a probe assertion failing INSIDE that body used
+# to leave the `finally` unreached only in the sense that it still ran,
+# but the N+1 probe itself never got a chance to observe anything before
+# the whole test process hung on `entered.acquire()` if the stall point
+# moved outside the counter), the previous unbounded wait hung the WHOLE
+# test process forever -- `.github/workflows/ci.yml` has no
+# `timeout-minutes` and this repository has no pytest-timeout plugin,
+# so that hang was never observed as a red test, only as an indefinite
+# CI job. 30s is generous for a handful of already-started local threads
+# to reach a stall point that is normally reached in well under a
+# second.
+_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[], None], n: int):
+    """port v1.12 `hold_in_flight` realization (adapter-internal plumbing,
+    never port-visible -- design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_
+    HYGIENE_V1.md D-2 実装の形 (b)). Wraps `cell_obj`'s (an `Application
+    Cell`) own `_limit_gate` bound method -- the single choke EVERY
+    application-plane operation on this peer passes through (`cell.py::
+    ApplicationCell._limit_gate`'s own docstring lists every caller) --
+    with an instance-attribute proxy returning `_StalledGateContextManager`
+    above, rather than wrapping any ONE operation method wholesale: this
+    peer's own gate (rate/concurrency/request_bytes/operation_depth) is
+    entered FROM INSIDE an operation method's own body (unlike r2db-api,
+    whose equivalent `_slot` wraps the CELL DISPATCH from the OUTSIDE,
+    `conformance_adapter_r2db.py`'s own identical-named helper), so
+    stalling before delegating to the whole original operation method
+    would stall BEFORE the gate's own counter increment ever ran --
+    exactly the "operation methods 入口 (lock 取得前)" placement D-2's own
+    table requires must sit AFTER the counter, not before it. Wrapping
+    `_backend` instead would hang permanently at `n >= 2` (D-2's own
+    explicit prohibition: a second held thread would block forever
+    trying to acquire `ApplicationCell._lock` while the first one holds
+    it stalled inside `_backend`, never reaching this proxy's own release
+    wait at all).
+
+    `n` real background OS threads each issue one genuine, full port-
+    level request (`make_request()`, e.g. `session.catalog()` -- needs no
+    pre-existing entity/row) that reaches this stall point via the SAME
+    real `_limit_gate` call its own real operation method already makes.
+    Waits for every one of the `n` threads to have genuinely entered the
+    stalled gate (a `threading.Semaphore`, not a fixed sleep) before
+    yielding. Releases and joins every thread before returning control,
+    re-raising the first background thread exception (if any) only after
+    the gate is restored and every thread has been joined -- never
+    swallowed."""
+    original_gate = cell_obj._limit_gate  # noqa: SLF001 -- adapter-internal plumbing, same convention this file's own `isolated_application_surface()` teardown already uses (`cell._backend.close()`).
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def _stalled_limit_gate(principal, request=None, *, request_id=None):
+        inner = original_gate(principal, request, request_id=request_id)
+        return _StalledGateContextManager(inner, entered, release)
+
+    cell_obj._limit_gate = _stalled_limit_gate  # noqa: SLF001
+
+    def _run() -> None:
+        try:
+            make_request()
+        except BaseException as exc:  # noqa: BLE001 -- collected, never swallowed; re-raised below after every thread is joined and the gate is restored.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    entered_count = 0
+    for entered_count in range(n):
+        if not entered.acquire(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S):
+            break
+    else:
+        entered_count = n
+    try:
+        if entered_count < n:
+            raise AssertionError(
+                f"hold_in_flight: only {entered_count} of {n} held requests reached "
+                f"the stalled `_limit_gate` within {_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S}s "
+                "(expected every one of them to stall inside ApplicationCell."
+                "_limit_gate's own counter increment, AFTER the real gate's __enter__ "
+                "-- see this helper's own docstring); failing loud instead of hanging "
+                "(裁定 3, 監督裁定 2026-09-07)"
+            )
+        # Phase 8 WP-1 rework 3 (裁定 5, 監督裁定 2026-09-07): yields the
+        # REAL measured count of held requests (`entered_count`, from the
+        # semaphore-acquire loop above) -- never a bare `None` a caller
+        # could only pair with a tautological `n >= 1` check. By this
+        # point `entered_count == n` always holds (the `AssertionError`
+        # above already fired otherwise), but the caller sees the
+        # MEASUREMENT, not an echo of its own input.
+        yield entered_count
+    finally:
+        release.set()
+        for t in threads:
+            t.join(timeout=_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S)
+        cell_obj._limit_gate = original_gate  # noqa: SLF001
+    if errors:
+        raise errors[0]
 
 
 class MitateDBConformanceAdapter(ConformanceAdapter):
@@ -845,6 +988,38 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             max_filter_terms=5,
             max_request_bytes=4096,
             max_schema_objects=20,
+            # Phase 8 WP-1a (design D-1 実装の形 7): all 4 new count values
+            # stay <= `_MAX_EXERCISABLE_LIMIT` (200, `test_c05_limit_
+            # declaration_agreement.py:70`). `concurrency=3`: `hold_in_
+            # flight` (WP-1b) genuinely holds this many threads/connections
+            # open, so a small, realistic count keeps the drive cheap.
+            # `requests_per_minute=50` matches r2db's own 2 plug isolated
+            # values (`conformance_adapter_r2db.py:150`/`conformance_
+            # adapter_r2db_http.py:757`) -- the rate-headroom assert WP-1b
+            # adds needs room above `concurrency`'s own bound. `execution_
+            # ms=5000` mirrors this same profile's r2db counterpart
+            # (unused by any V2 driver -- `reference_wall_clock`, never
+            # `enforced` -- but must stay comfortably larger than a slow
+            # CI iteration to avoid a false peer-local `execution_ms`
+            # denial). `operation_depth=5` (Phase 8 WP-1b, R-A 監督裁定
+            # 2026-09-06, raised from 4): `_drive_operation_depth`
+            # (`test_c05_limit_declaration_agreement.py`) asserts this
+            # EXACT value against its own update+where recipe's measured
+            # real depth (entity/request -> operations[] -> operation
+            # dict -> where[] -> predicate dict = depth 5) -- at the
+            # pre-WP-1b value of 4, EVERY `where`-carrying mutation
+            # (`update`/`delete`) was spuriously `LIMIT_EXCEEDED`(
+            # `operation_depth`) on this surface, not merely a
+            # deliberately-oversized N+1 probe (measured, WP-1a rework:
+            # `MitateDB-api-http`'s own `delete()` probe in
+            # `test_c04_unsupported_and_safe_errors.py` sits at this same
+            # real depth 5 and was failing for exactly this reason before
+            # this raise). Matches both r2db plugs' identical isolated
+            # profile value.
+            max_requests_per_minute=50,
+            max_concurrency=3,
+            max_execution_ms=5000,
+            max_operation_depth=5,
         )
         fresh = MitateDBConformanceAdapter(config=small_config)
         try:
@@ -852,6 +1027,22 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         finally:
             for cell in fresh._control.cells.values():  # noqa: SLF001
                 cell._backend.close()  # noqa: SLF001
+
+    # port v1.12 (design D-2 実装の形 (b), work order WP-1b): wraps this
+    # cell's own `_limit_gate` (see `_hold_in_flight_via_stalled_gate`'s
+    # own docstring above for why the gate itself, not any one operation
+    # method, is the correct wrap point on THIS peer). Each held request
+    # is a real `session.catalog()` call -- parameterless, needs no
+    # pre-existing entity, and is a genuine gated operation (`cell.py::
+    # ApplicationCell.catalog`'s own Phase 8 WP-1a rework 1 comment).
+    def hold_in_flight(self, session, n: int):
+        """See `ConformanceAdapter.hold_in_flight`'s own docstring
+        (`adapter.py`) for this primitive's port-level meaning; this
+        realization's own stall point is documented on `_hold_in_flight_
+        via_stalled_gate` and the comment immediately above this
+        method."""
+        cell = self._control.cells[session.principal.application_id]
+        return _hold_in_flight_via_stalled_gate(cell, lambda: self._call(lambda: session.catalog()), n)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
@@ -1017,12 +1208,27 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     def insert(self, session, entity: str, values: Mapping[str, Any]) -> None:
         self._call(lambda: session.insert(entity, dict(values)))
 
-    def select_eq(self, session, entity: str, select: Sequence[str], field: str | None, value: Any) -> list[dict]:
+    def select_eq(
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any, *, limit: int | None = None
+    ) -> list[dict]:
         filters = [Filter(field, "eq", value)] if field is not None else None
-        return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
+        # port v1.12 (L7-21): `limit` maps directly onto `session.read()`'s
+        # own pre-existing `limit` keyword (`cell.py::ApplicationCell.read`,
+        # unchanged by this WP -- `None` -> that method's own default,
+        # `config.max_result_rows`, exactly as every pre-v1.12 caller here
+        # already observed).
+        return self._call(lambda: session.read(entity, fields=list(select), filters=filters, limit=limit))
 
     def attempt_filter(
-        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
     ) -> list[dict]:
         # Same real `session.read()` entry point `select_eq` above already
         # uses, generalized to an arbitrary operator -- an operator this
@@ -1032,6 +1238,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # would be, and whatever `cell.py::_where` itself produces is
         # returned, never fabricated.
         filters = [Filter(field, operator, value)]
+        # port v1.12 (L7-21): additional predicates appended to the SAME
+        # real `filters` list `session.read()` already accepts
+        # (`len(filters)` is this peer's OWN `query_complexity` metric,
+        # `cell.py::_bind_filters`) -- never a second query.
+        if extra_predicates:
+            filters.extend(Filter(f, o, v) for f, o, v in extra_predicates)
         return self._call(lambda: session.read(entity, fields=list(select), filters=filters))
 
     def delete(self, session, entity: str, field: str, value: Any, *, destructive: bool, confirmation: str | None) -> int:
@@ -1169,7 +1381,96 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     ) -> int:
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
 
-        if expected_revision is not None or unique_key is not None:
+        # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06): a `filters`
+        # value on an "insert" attempt is now ALSO routed to `transact()`
+        # below, not silently dropped -- `session.insert()` (the plain-
+        # mutation branch further down) has no parameter position for a
+        # `where`/`filters` clause at all, so silently ignoring it here
+        # would hide whatever the peer's own real dispatcher does with an
+        # insert-plus-filter shape, exactly the failure mode this
+        # function's own pre-existing comment on `expected_revision`/
+        # `unique_key` already rejects ("an adapter that denies this
+        # without ever presenting it to the peer hides whatever the peer's
+        # own dispatcher actually does with it").
+        #
+        # Phase 8 WP-1b (R-A 監督裁定 2026-09-06): `operation == "update"`
+        # is now ALSO routed to `transact()` when a filter is present, for
+        # the identical structural reason -- `session.update()` (the
+        # dedicated real entry point the plain-mutation branch below
+        # would otherwise use) has NO `operations[]` wrapping at all
+        # (its own request dict is `{"collection":..., "values":...,
+        # "filters":...}`, real depth 3 for an ordinary scalar filter
+        # value), so it sits at a STRUCTURALLY SHALLOWER depth than the
+        # real wire shape a real HTTP client presents for the identical
+        # request (`http.py::post_mutate`'s own `_mutation_item` always
+        # builds `{"operations": [{"type": "update", "collection":...,
+        # "values":..., "filters":...}]}`, and dispatches through this
+        # SAME `transact()` -- real depth 5 for the identical scalar
+        # filter value, MEASURED, `_check_operation_depth`'s own
+        # counting: request(1)->operations list(2)->operation dict(3)
+        # ->filters list(4)->predicate-as-dict(5)). Routing this
+        # in-process plug's own "update"+filter attempt through the SAME
+        # `transact()` entry point the HTTP plug's real wire dispatch
+        # already uses makes `test_c05_limit_declaration_agreement.py::
+        # _drive_operation_depth`'s own update+where recipe sit at the
+        # IDENTICAL real depth on every one of the 4 plugs (contract-
+        # level meaning agreement, P-6) -- exactly the same rationale as
+        # the pre-existing "insert"+filter routing immediately above,
+        # generalized to the class of operation the new recipe uses.
+        # Corrected 2026-09-07 (裁定 2, 監督裁定 2026-09-07; supersedes the
+        # WP-1a rework comment this replaces, which the review found
+        # factually wrong -- its single-line `grep -rn 'attempt_mutation(
+        # .*"update"'` regex only matches a call whose `"update"` literal
+        # sits on the SAME source line as `attempt_mutation(`, so it
+        # silently missed every multi-line call (the dominant style in
+        # this repository) and undercounted). Real measurement (AST walk
+        # of every `conformance-tests/*.py` file, every `Call` node whose
+        # callee is `attempt_mutation`, keeping calls whose `where_field`
+        # keyword is present and not the literal `None`, then narrowing
+        # the `operation` argument to "update" either from its own string
+        # literal or -- for `test_c12_capability_agreement.py:95` only --
+        # from the single enclosing `elif operation == "update":` branch,
+        # a purely static narrowing that needs no capability-document
+        # knowledge; script kept at
+        # {scratchpad}/ast_scan_where_field2.py): a real, non-`None`
+        # `where_field` on an "update" attempt occurs at TWELVE call
+        # sites across FOUR files, not "two" in "one, fully-gated file":
+        # `test_c05_limit_declaration_agreement.py:371,379`,
+        # `test_c12_capability_agreement.py:95`,
+        # `test_c17_declaration_agreement.py:283`, and
+        # `test_c18_revision_precondition_semantics.py:81,124,145,190,
+        # 209,294,326,337` (a further call, `test_c18_...py:360`, carries
+        # a real `where_field` but is a "delete", which this `if` never
+        # routes here in the first place -- `operation in ("insert",
+        # "update")` -- so it is excluded from this tally as irrelevant
+        # to this branch, not missed).
+        #
+        # Of those twelve, `test_c12_capability_agreement.py:95` is the
+        # one that actually matters for this change: it is NOT gated
+        # behind `revision_preconditions` at all (that guard is
+        # `test_c18`'s own, not `test_c12`'s) and it IS a positive
+        # control that must observe a real, successful, non-fabricated
+        # affected-row count (`:125-130`'s `assert affected and affected
+        # >= 1`) -- exactly the call this fix's `dispatched_op` change
+        # above (裁定 1) makes correct again (it was silently returning a
+        # constant `1` via `len(results)` before this fix, which this
+        # positive control could not distinguish from a real update). The
+        # eight `test_c18` call sites remain gated behind
+        # `_revision_preconditions_enabled(adapter)` (this peer declares
+        # `revision_preconditions: unavailable`, unchanged by this WP),
+        # so all eight still take the early-return branch to
+        # `_assert_expected_revision_is_capability_unsupported_and_
+        # state_unchanged` and never reach this dispatcher's success path
+        # on this peer; `test_c05:371,379` and `test_c17:283` are
+        # unaffected by 裁定 1 (`test_c05` exercises `operation_depth`, a
+        # count-blind LIMIT_EXCEEDED probe; `test_c17:283` -- see its own
+        # call site -- is itself a denial expectation, not a
+        # success-path count assertion). `wp1b-report.md`'s "設計への疑義
+        # 2" repeated the same undercounted grep conclusion and is
+        # corrected the same way in this WP's report.
+        if expected_revision is not None or unique_key is not None or (
+            operation in ("insert", "update") and filters is not None
+        ):
             # Conformance-review finding (correction B-2): this is a real,
             # present entry point for a revision precondition (and, port
             # v1.3, for `unique_key`), not a structural absence.
@@ -1203,9 +1504,32 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             if filters is not None:
                 item["filters"] = filters
 
+            # Phase 8 WP-1 rework 2 (裁定 1, 監督裁定 2026-09-07): return the
+            # real number of rows affected (port `adapter.py`'s own
+            # `attempt_mutation` docstring, ~:2028: "return the number of
+            # rows affected"), not `len(results)` (= the number of batch
+            # OPERATIONS, always 1 here since this dispatcher only ever
+            # submits a single-item batch). `results[0]` is exactly the
+            # dict `ApplicationCell.transact`'s own pass-2 execution loop
+            # appends for this one operation (`cell.py`'s own
+            # `insert_in_transaction`/`update_in_transaction`/
+            # `delete_in_transaction` call sites) -- `{"rowid": ...}` for
+            # "insert" (always exactly 1 row), `{"updated": n}` for
+            # "update", `{"deleted": n}` for "delete" (both backends'
+            # own `cursor.rowcount`/`RETURNING`-derived real count, never
+            # fabricated by this adapter). "upsert" never reaches this
+            # `return` at all -- `ApplicationCell._plan_operation` raises
+            # `CapabilityError` for it during `transact()`'s own pass-1
+            # validation (this peer has no upsert execution path), which
+            # `self._call` below translates to `ConformanceDenial` before
+            # `dispatched_op` could ever produce a value.
             def dispatched_op() -> int:
-                results = session.transact([item])
-                return len(results)
+                result = session.transact([item])[0]
+                if operation == "update":
+                    return result["updated"]
+                if operation == "delete":
+                    return result["deleted"]
+                return 1
             return self._call(dispatched_op)
 
         if operation == "insert":

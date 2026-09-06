@@ -581,14 +581,27 @@ async def get_capabilities(request: Request) -> Response:
     # credential here even as a co-hosting convenience.
     session = _authenticate(request)
     document = dict(session.capabilities(request_id=_request_id(request)))
-    # R-7: the enforcement side of `request_bytes` is a fact about THIS
-    # HTTP composition (the middleware below genuinely measures and
-    # enforces it), not about `cell.py`'s own backend-independent
-    # declaration -- `ApplicationRuntime.capabilities()` remains the
-    # single source of truth for capability CONTENT (R-3); this is the
-    # one enforcement-layer fact the wire adds on top, in the same commit
-    # as the real enforcement it declares.
-    document = {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
+    # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06): `request_bytes`
+    # is `enforced` from `cell.py`'s own single-source declaration on BOTH
+    # surfaces (the in-process structural estimate `ApplicationCell.
+    # _limit_gate` runs is transport-independent) -- the former
+    # enforcement-layer override that used to flip this key from
+    # `unavailable` to `enforced` for the HTTP surface only is REMOVED in
+    # this same commit (R-3: a meaningless, redundant re-declaration of
+    # what the single source of truth already says, once that source
+    # itself says `enforced`).
+    #
+    # `operation_depth` is now the SAME -- `cell.py`'s own single-source
+    # declaration is `enforced` on BOTH surfaces too (see `cell.py::
+    # ApplicationRuntime.capabilities()`'s own `limit_enforcement.
+    # operation_depth` comment for why the WP-1a report's original
+    # "in-process has no request dict" premise was factually wrong:
+    # `_check_operation_depth` genuinely runs, in-process included, on
+    # every request shape `_limit_gate`'s own callers build -- `insert`'s
+    # own `{"collection": ..., "values": ...}` is a real request dict, not
+    # an absent one). This wire layer therefore no longer overrides
+    # `operation_depth` either, for the identical reason it stopped
+    # overriding `request_bytes` above.
     return JSONResponse(document, status_code=200)
 
 
@@ -901,7 +914,13 @@ async def post_schema(request: Request) -> Response:
         # `cell.py`'s own delete-confirmation fingerprint reads) -- never a
         # hardcoded placeholder that would falsely claim the same "revision"
         # after every schema change.
-        return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
+        # Phase 8 WP-1a rework 1 (裁定 3): `_post_schema_revision`, NOT
+        # `schema_revision` -- this readback is not a second client
+        # request (see `cell.py::ApplicationRuntime._post_schema_
+        # revision`'s own docstring); routing it through the now-gated
+        # `schema_revision()` would double the rate/concurrency cost of
+        # every HTTP schema operation relative to the in-process surface.
+        return JSONResponse({"committed": True, "revision": str(session._post_schema_revision(request_id=_request_id(request)))}, status_code=200)  # noqa: SLF001
 
     if schema_operation == "add_field":
         field = body.get("field")
@@ -911,7 +930,13 @@ async def post_schema(request: Request) -> Response:
         session.add_field(
             entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type],
             contract_type=field_type, request_id=_request_id(request))
-        return JSONResponse({"committed": True, "revision": str(session.schema_revision(request_id=_request_id(request)))}, status_code=200)
+        # Phase 8 WP-1a rework 1 (裁定 3): `_post_schema_revision`, NOT
+        # `schema_revision` -- this readback is not a second client
+        # request (see `cell.py::ApplicationRuntime._post_schema_
+        # revision`'s own docstring); routing it through the now-gated
+        # `schema_revision()` would double the rate/concurrency cost of
+        # every HTTP schema operation relative to the in-process surface.
+        return JSONResponse({"committed": True, "revision": str(session._post_schema_revision(request_id=_request_id(request)))}, status_code=200)  # noqa: SLF001
 
     # C-17 present-denial form (design R-8 item 1): `alter_field`/
     # `create_index`/`drop_index`/`drop_entity` are all real, contract-

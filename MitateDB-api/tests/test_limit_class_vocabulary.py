@@ -116,17 +116,23 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 12, (
-        f"expected exactly 12 ResourceLimitError(...) call sites (Q1-D11 count, design v1.5 §7: cell.py x5, "
-        f"config.py x1 -- down from WP-5's original 9 after Q1-D11 reclassified 3 shape-boundary checks in "
-        f"cell.py to ValidationError -- plus WP-3's own http.py x1, the ASGI request-byte-bound middleware's "
-        f"real `request_bytes` enforcement, design v1.2 R-5 -- plus WP-4's own control_plane.py x3 (design v1.2 "
-        f"R-6's three finite resource classes: `control_requests_per_minute`'s rate-limiter, `applications`'s "
-        f"registration bound, `credentials_per_application`'s issuance bound) -- plus P35 WP-2's own cell.py x1 "
-        f"(design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md §2 R-2, `ApplicationCell.transact`'s "
-        f"new `batch_entities` distinct-collection-count bound) -- plus Phase 4 WP-3(b)'s own control_plane.py x1 "
-        f"(`_check_audit_rate`'s `audit_requests_per_minute` window, design D-5)), found {len(findings)}: "
-        f"{findings!r} -- if a new call site was added or removed intentionally, update this count in the same commit"
+    assert len(findings) == 28, (
+        f"expected exactly 28 ResourceLimitError(...) call sites (pre-Phase-8 count was 12: Q1-D11's cell.py x5 + "
+        f"config.py x1 + WP-3's http.py x1 + WP-4's control_plane.py x3 + P35 WP-2's cell.py x1 + Phase 4 "
+        f"WP-3(b)'s control_plane.py x1 -- see git history for that count's own full breakdown) -- Phase 8 WP-1a "
+        f"(design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-1, L7-1) adds 13 new call sites for the "
+        f"4 previously-`unavailable` application-plane classes this WP wires up real enforcement for: cell.py x6 "
+        f"(`_measure_request_bytes` x3 -- container-count/dict/list early-reject and total-overflow -- `_check_"
+        f"operation_depth` x1, `_LimitStateHolder.acquire_rate` x1 `requests_per_minute`, `_LimitStateHolder."
+        f"concurrency_slot` x1 `concurrency`), backend_sqlite.py x1 (`_check_deadline`'s app-side `execution_ms` "
+        f"wall-clock check), backend_postgres.py x6 (`insert`/`read`/`update`/`delete`/`create_collection`/"
+        f"`add_field`, each mapping a real `QueryCanceled`/`LockNotAvailable` to `execution_ms`). "
+        f"12 + 13 = 25 -- plus WP-1a REWORK 1's own 3 more (裁定 2, 監督裁定 2026-09-06): backend_postgres.py x3 "
+        f"(`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction`, the SAME `QueryCanceled`/"
+        f"`LockNotAvailable` -> `execution_ms` mapping the 6 standalone methods above already had, previously "
+        f"missing from the transact-batch path every HTTP mutation actually uses). 25 + 3 = 28, "
+        f"found {len(findings)}: {findings!r} -- if a new call site was added or removed "
+        f"intentionally, update this count in the same commit"
     )
 
     violations = []

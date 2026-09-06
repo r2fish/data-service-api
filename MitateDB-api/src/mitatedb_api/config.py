@@ -33,6 +33,50 @@ class FoundationConfig:
     max_filter_terms: int = 32
     max_request_bytes: int = 1_048_576
     max_schema_objects: int = 128
+    # Phase 8 WP-1a (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_
+    # HYGIENE_V1.md D-1, work order L7-1): the 4 application-plane
+    # resource classes this deployment declaration previously left
+    # entirely unimplemented (`cell.py`'s own prior "next-phase candidate
+    # L7-1" comment). Deliberately finite, deployment-configurable
+    # defaults -- same convention as every other `max_*` field above --
+    # never a final public-contract number. `max_requests_per_minute` and
+    # `max_concurrency` are r2db-matching in MEANING (P-6: same contract
+    # semantics, independent realization) -- a credential-keyed 60s
+    # sliding window and a process-wide in-flight counter respectively
+    # (design D-1 "カウンタのスコープ").
+    #
+    # Phase 8 WP-1a rework 1 (裁定 6, 監督裁定 2026-09-06): the code
+    # review that sent this WP back found the ORIGINAL wording here
+    # ("not in numeric default -- r2db's own `ResourceLimits` defaults
+    # are unrelated deployment numbers this peer does not have to
+    # match") stated the opposite of the measured fact -- all 4 of these
+    # defaults are IDENTICAL, digit for digit, to r2db's own
+    # `ResourceLimits` defaults (`r2db-api/src/r2db_api/limits.py:16-20
+    # `: `requests_per_minute=600`, `concurrency=32`, `execution_ms=5_000`,
+    # `operation_depth=8`). This is a deliberate, unforced coincidence in
+    # each peer's own independent "reasonable deployment default" choice
+    # (P-6: the CONTRACT semantics match by design; a shared default
+    # NUMBER matching too is not itself required by anything, but nothing
+    # here relies on it staying that way either -- an operator is free to
+    # configure either peer's own value independently, exactly like
+    # `max_batch_entities`'s own precedent above; this comment only
+    # corrects the earlier, factually-backwards claim, it does not
+    # introduce a new coupling). `max_execution_ms` bounds the wall-clock
+    # deadline
+    # `cell.py`'s own limit gate computes and hands to the storage
+    # backend (`backend_postgres.py`'s `SET LOCAL statement_timeout`/
+    # `lock_timeout`, `backend_sqlite.py`'s app-side check) -- declared
+    # `reference_wall_clock`, never `enforced` (design D-1: wall-clock
+    # cannot construct a deterministic N+1, matching r2db's own
+    # `execution_ms` declaration). `max_operation_depth` bounds the
+    # recursive nesting `cell.py`'s own gate measures on the request
+    # structure it builds internally for insert/read/update/delete/
+    # transact/schema calls (r2db `limits.py::check_depth`-equivalent,
+    # independent realization, P-6).
+    max_requests_per_minute: int = 600
+    max_concurrency: int = 32
+    max_execution_ms: int = 5_000
+    max_operation_depth: int = 8
     # WP-5 (design v1.2 R-7): "control_plane は WP-5 の flip まで両
     # composition とも unavailable のまま。flip は...単一コミットで行う".
     # Defaults `"unavailable"` so an operator who does not explicitly opt
@@ -108,6 +152,12 @@ class FoundationConfig:
             "max_filter_terms": "MITATEDB_MAX_FILTER_TERMS",
             "max_request_bytes": "MITATEDB_MAX_REQUEST_BYTES",
             "max_schema_objects": "MITATEDB_MAX_SCHEMA_OBJECTS",
+            # Phase 8 WP-1a (L7-1): same env-var convention as every field
+            # above -- an unset env var keeps the dataclass default.
+            "max_requests_per_minute": "MITATEDB_MAX_REQUESTS_PER_MINUTE",
+            "max_concurrency": "MITATEDB_MAX_CONCURRENCY",
+            "max_execution_ms": "MITATEDB_MAX_EXECUTION_MS",
+            "max_operation_depth": "MITATEDB_MAX_OPERATION_DEPTH",
         }
         parsed = {}
         for field, name in names.items():

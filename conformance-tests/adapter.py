@@ -1517,6 +1517,94 @@ class ConformanceAdapter(ABC):
         part of the very rate window the drive then measures.
         """
 
+    @abstractmethod
+    def hold_in_flight(self, session, n: int) -> AbstractContextManager[int]:
+        """n 個の application plane 要求を、service の in-flight 窓の内側で停止させたまま保持する。保持中に n+1 個目を出すと `LIMIT_EXCEEDED`(`concurrency`) で拒否される。解放後、保持していた n 個はすべて正常に完了する。
+
+        Verbatim above (Phase 8 WP-1 rework 3, 裁定 1, 監督裁定 2026-09-07):
+        docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md §3 D-2
+        決定 1's own sentence, carried into this port docstring
+        unparaphrased per 常設規律 4 (word-for-word from `phase8-ruling-
+        verbatim.txt`'s own quoted copy of that decision -- see also
+        `docs/design/CONFORMANCE_ADAPTER_V1.md` §22.1, which makes the
+        same claim about this docstring and must stay true of it).
+
+        Implementation detail this port adds beyond that sentence (the
+        design text above leaves the exact stall point to the port): the
+        stop point sits AFTER the concurrency counter is acquired and
+        BEFORE DB execution (concurrency カウンタ取得後、DB 実行前).
+
+        - `with` の内側では、n 個が in-flight のまま保持されている。
+        - その状態で通常の port 操作を 1 つ出すと `ConformanceDenial`
+          (`LIMIT_EXCEEDED` / `details.limit_class == "concurrency"`) になる。
+        - `with` を抜けると保持していた n 個はすべて解放され、正常に完了する
+          (例外を上げない)。抜ける時点で n 個の完了を待ち合わせる。
+        - `n` は、この instance が宣言する `limits.concurrency` 以下でなければ
+          ならない (呼び出し側が assert する)。
+        - `as` で束縛される値 (`AbstractContextManager[int]`) は、実際に
+          stall point へ到達したと実測された保持数 (`entered_count`,
+          `threading.Semaphore`経由の実測値であって `n` の単なるコピーでは
+          ない) を返す -- Phase 8 WP-1 rework 3 (裁定 5, 監督裁定
+          2026-09-07): 呼び出し側がこの primitive を実際に何か保持したかを
+          非トートロジーに確認できるようにするため。実測が `n` 未満なら
+          既にこの primitive 自身が `AssertionError` を上げている (各
+          realization 自身の docstring 参照) ので、正常に `yield` された
+          時点でこの値は常に `n` と一致する -- それでも、呼び出し側の
+          assert は `n` を折り返すのではなく、この実測値そのものを見る。
+
+        port v1.12 (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_
+        V1.md D-2, work order docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_
+        BOUNDS_V1.md §2 WP-1b): `isolated_application_surface()`'s own
+        sibling primitive for the ONE application-plane resource class no
+        prior port revision could drive at all -- `concurrency`. C-05's
+        own `_drive_concurrency` calls this against a FRESH `isolated_
+        application_surface()` instance, exactly like every other V2
+        driver in that file.
+
+        Called against the YIELDED instance of `isolated_application_
+        surface()`, never against the shared, session-scoped adapter --
+        the same convention every other drive-recipe method on this ABC
+        already follows.
+
+        Three points this instruction's own three bullets above leave
+        undecided, disclosed here (also carried into `conformance-tests/
+        CONDITIONS.md`'s own C-05 row):
+
+        (i) The concurrency this creates is IN-PROCESS concurrency only --
+            every one of the 4 registered plugs realizes this primitive
+            with real OS threads calling straight into the same process's
+            own service/foundation object (an HTTP plug's own `httpx.
+            AsyncClient(ASGITransport(app))`, never a real socket) -- not
+            concurrency across a real socket or a reverse proxy. Genuine
+            wire-level concurrency is out of this primitive's scope until
+            L7-2 (a future phase's own multi-plug/real-transport work).
+        (ii) `MitateDB-api` holds at most one in-flight operation PER CELL
+             at a time (`ApplicationCell._lock`) -- this primitive's own
+             stop point sits BEFORE that lock is acquired (concurrency-
+             counter-side, not lock-side), so holding N > 1 in-flight
+             requests against ONE cell is still structurally possible
+             (the held requests simply queue behind the lock once
+             released), but the `concurrency` bound this peer declares is
+             therefore a REFUSAL THRESHOLD, not a claim of N-way parallel
+             EXECUTION capacity.
+        (iii) The scope of the counter this primitive holds open (a
+              per-deployment in-flight counter; a per-credential rate
+              window) is not something the common suite can observe
+              directly -- the isolated surface's own application/
+              credential population is deliberately small (often exactly
+              one of each), so no drive here distinguishes "one counter
+              shared by every application on this deployment" from "one
+              counter per application" from the OUTSIDE.
+
+        An adapter realizes the stop point by wrapping the real cell/
+        backend object it already constructs out-of-band for `isolated_
+        application_surface()` -- never by adding a test-only hook, delay
+        endpoint, or callable to the peer's own PRODUCT code (design §4).
+        See each plug's own implementation comment for exactly which
+        object is wrapped and why that wrap point sits inside the
+        concurrency counter's own window.
+        """
+
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-1, design docs/design/
     # PHASE4_DURABLE_AUDIT_SINK_V1.md §8.3, work order docs/work-orders/
@@ -1719,12 +1807,34 @@ class ConformanceAdapter(ABC):
 
     @abstractmethod
     def select_eq(
-        self, session, entity: str, select: Sequence[str], field: str | None, value: Any
-    ) -> list[dict]: ...
+        self, session, entity: str, select: Sequence[str], field: str | None, value: Any, *, limit: int | None = None
+    ) -> list[dict]:
+        """`limit` (port v1.12, L7-21, optional keyword-only, default
+        `None`): the client's own requested page size -- presented to the
+        peer's real page-size/`page.size` parameter verbatim, exactly as
+        `values`/`where_field`/`where_value` are never interpreted by the
+        adapter itself. `None` means the call carries no page-size request
+        at all (byte-for-byte the pre-v1.12 behavior: whatever default
+        page size the peer's own real entry point applies on its own).
+        Added so `test_c05_limit_declaration_agreement.py`'s own
+        `result_items` V2 drive can present a REAL, client-controlled page
+        size to every plug (previously only reachable on `r2db-api`, whose
+        own `query`/`query_page` already took a `page_size` keyword no
+        port method exposed) -- an adapter's own capability to carry this
+        field through, not a peer-name exclusion, is what a driver now
+        checks (L7-21 能力判定化)."""
 
     @abstractmethod
     def attempt_filter(
-        self, session, entity: str, select: Sequence[str], field: str, operator: str, value: Any
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str,
+        operator: str,
+        value: Any,
+        *,
+        extra_predicates: Sequence[tuple[str, str, Any]] | None = None,
     ) -> list[dict]:
         """`select_eq` generalized to an arbitrary predicate operator (port
         v1.3, docs/design/CONFORMANCE_ADAPTER_V1.md section 13): presents a
@@ -1743,6 +1853,24 @@ class ConformanceAdapter(ABC):
         uses -- never fabricated as a denial by the adapter itself, per the
         same principle `attempt_mutation`'s docstring states for the
         mutation vocabulary.
+
+        `extra_predicates` (port v1.12, L7-21, optional keyword-only,
+        default `None`): zero or more additional `(field, operator,
+        value)` predicates, ANDed with the primary `(field, operator,
+        value)` predicate above -- presented to the peer's real multi-
+        predicate `where`/filter-list entry point verbatim (the SAME
+        `QueryRequest.where` array `spec/data-service-api.v1.json`
+        already declares, `maxItems: 50`), never synthesized as several
+        separate single-predicate calls. `None`/empty means exactly the
+        one predicate (byte-for-byte the pre-v1.12 behavior). Added so a
+        `query_complexity` V2 drive can present a genuine multi-predicate
+        request to a peer whose own complexity metric counts predicates
+        (`MitateDB-api`'s `len(filters)`), not only one whose metric can
+        be driven through `select`'s own length alone (`r2db-api`'s
+        `len(where) + len(select) + order_by_count`) -- an adapter's own
+        capability to carry more than one predicate through, not a
+        peer-name exclusion, is what a driver now checks (L7-21 能力
+        判定化).
         """
 
     @abstractmethod

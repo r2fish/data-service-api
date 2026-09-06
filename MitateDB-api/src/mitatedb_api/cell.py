@@ -20,10 +20,12 @@ WP wires into the public in-process composition -- or
 `sqlite3`/`psycopg` or references either driver's own exception types.
 """
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
-from threading import RLock
+import time
+from threading import Lock, RLock
 
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
@@ -287,6 +289,168 @@ class Filter:
     value: object
 
 
+def _as_traversable(item):
+    """Phase 8 WP-1a (design D-1): `_measure_request_bytes`/`_check_
+    operation_depth` below traverse the JSON-safe request structures this
+    module's own gate builds internally (a plain dict of the method's own
+    arguments) -- but those arguments legitimately carry this module's own
+    `Filter` frozen dataclass (both `read`/`update`/`delete`/`transact`
+    reach the gate with `filters` already bound to `Filter` instances,
+    never plain dicts -- see `http.py::_predicate_to_filter`/the
+    in-process conformance adapter, both of which construct `Filter`
+    objects before calling into this module). A generic dataclass ->
+    dict conversion here (rather than a `Filter`-specific special case)
+    keeps both traversal functions correct for any dataclass value a
+    future request shape might carry, with no second, type-specific
+    branch to keep in sync."""
+    if is_dataclass(item) and not isinstance(item, type):
+        return asdict(item)
+    return item
+
+
+def _measure_request_bytes(request, bound):
+    """r2db `limits.py::ResourceLimits.check_request` (`:37-70`) and this
+    peer's own structural estimate (design D-1 "実現方式") are
+    independent realizations of the SAME measurement (P-6): str is
+    `len * 4`, bytes is `len`, a scalar/`None`/bool is 8, a container
+    (dict/list/tuple/set) costs 2 plus an early per-container
+    `bound // 8` element-count reject -- so both peers refuse the same
+    clearly-oversized request shape at the same class (`request_bytes`),
+    even though neither shares code. Raises `errors.ResourceLimitError`
+    (`limit_class="request_bytes"`) the moment either the running total or
+    a single container's own element count crosses `bound`.
+
+    Cycle detection is scoped to the CURRENT ANCESTOR PATH (each stack
+    frame carries its own `frozenset` of container ids seen on the way
+    down to it), not to every container ever visited across the whole
+    structure -- the same object legitimately appearing more than once as
+    UNRELATED siblings (e.g. a batch built from `[operation] * n`, a real
+    shape this package's own tests construct) is not a cycle and must not
+    be rejected as one; only a container that is its own ancestor (truly
+    self-referential) is."""
+    total = 0
+    stack = [(request, frozenset())]
+    while stack:
+        raw_item, ancestors = stack.pop()
+        item = _as_traversable(raw_item)
+        child_ancestors = ancestors
+        if isinstance(item, (dict, list, tuple, set)):
+            marker = id(item)
+            if marker in ancestors:
+                raise ValidationError("cyclic request structures are not supported")
+            child_ancestors = ancestors | {marker}
+        if isinstance(item, dict):
+            total += 2
+            if len(item) > bound // 8:
+                raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
+            stack.extend((k, child_ancestors) for k in item.keys())
+            stack.extend((v, child_ancestors) for v in item.values())
+        elif isinstance(item, (list, tuple, set)):
+            total += 2
+            if len(item) > bound // 8:
+                raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
+            stack.extend((c, child_ancestors) for c in item)
+        elif isinstance(item, str):
+            total += len(item) * 4
+        elif isinstance(item, (bytes, bytearray)):
+            total += len(item)
+        elif item is None or isinstance(item, (bool, int, float)):
+            total += 8
+        else:
+            total += 8
+        if total > bound:
+            raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
+
+
+def _check_operation_depth(request, bound):
+    """r2db `limits.py::ResourceLimits.check_depth` (`:77-90`), same
+    "independent realization of the same contract-level measurement"
+    relationship as `_measure_request_bytes` above (P-6): counts nesting
+    levels across dict/list/tuple/set containers (a `Filter` dataclass
+    counts as one such container, via `_as_traversable`), raising
+    `errors.ResourceLimitError` (`limit_class="operation_depth"`) the
+    moment the nesting exceeds `bound`. Runs BEFORE any content
+    validation of `request` (design D-1 "検査の形": the depth check is
+    part of the gate, which runs before `_prepare_values`/`_bind_filters`/
+    `_validate_update`/`_validate_delete_confirmation`), mirroring r2db's
+    own call order (`service.py`: `check_request` / `check_depth` both
+    precede the backend dispatch that would otherwise reject a malformed
+    shape first).
+
+    Cycle detection is scoped to the current ancestor path, exactly like
+    `_measure_request_bytes` above -- see that function's own docstring
+    for why (the same object appearing more than once as unrelated
+    siblings, e.g. `[operation] * n`, is not a cycle)."""
+    stack = [(request, 0, frozenset())]
+    while stack:
+        raw_item, current, ancestors = stack.pop()
+        item = _as_traversable(raw_item)
+        if not isinstance(item, (dict, list, tuple, set)):
+            continue
+        marker = id(item)
+        if marker in ancestors:
+            raise ValidationError("cyclic request structures are not supported")
+        child_ancestors = ancestors | {marker}
+        next_depth = current + 1
+        if next_depth > bound:
+            raise ResourceLimitError("operation nesting exceeds the configured limit", limit_class="operation_depth")
+        children = item.values() if isinstance(item, dict) else item
+        stack.extend((child, next_depth, child_ancestors) for child in children)
+
+
+class _LimitStateHolder:
+    """Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス1個)"):
+    the process-wide (one per composition root / one per isolated
+    conformance-adapter instance) limit-enforcement STATE this WP adds --
+    as distinct from the per-request CHECKS (`_measure_request_bytes`/
+    `_check_operation_depth` above), which need no shared state at all.
+
+    Holds exactly two things, both scoped per design D-1 "カウンタの
+    スコープ": (i) a `requests_per_minute` sliding window PER CREDENTIAL
+    (`principal.credential_id`-keyed, r2db `service.py::_acquire_rate`
+    `:1156-1163` equivalent), and (ii) a single `concurrency` in-flight
+    counter for the WHOLE deployment/process (r2db `service.py::_slot`
+    `:1133-1144` equivalent) -- never per-application, never per-request.
+
+    Deliberately NOT a method on `ApplicationRuntime` (rebuilt fresh on
+    every request -- `__slots__` has no room, design D-1 "状態の置き場")
+    and NOT a method on a single `ApplicationCell` (would only bound one
+    application's own traffic, not the deployment as a whole). Built
+    exactly once by the composition root (`main.build_app`) or by a
+    conformance adapter's own `__init__`/`isolated_application_surface`,
+    and injected into every `ApplicationCell` that instance constructs --
+    the same one-per-process injection shape `audit_dispatch.AuditRouter`
+    already established (`cell.py`'s own pre-existing `:308-318` comment,
+    `main.py`'s identical wiring)."""
+
+    def __init__(self):
+        self._rate_windows: dict = {}
+        self._rate_lock = Lock()
+        self._active = 0
+        self._active_lock = Lock()
+
+    def acquire_rate(self, credential_id, bound):
+        now = time.monotonic()
+        with self._rate_lock:
+            window = self._rate_windows.setdefault(credential_id, [])
+            window[:] = [stamp for stamp in window if now - stamp < 60]
+            if len(window) >= bound:
+                raise ResourceLimitError("request rate limit exceeded", limit_class="requests_per_minute")
+            window.append(now)
+
+    @contextmanager
+    def concurrency_slot(self, bound):
+        with self._active_lock:
+            if self._active >= bound:
+                raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
+            self._active += 1
+        try:
+            yield
+        finally:
+            with self._active_lock:
+                self._active -= 1
+
+
 class ApplicationCell:
     """A private application storage boundary.
 
@@ -298,7 +462,7 @@ class ApplicationCell:
     """
 
     def __init__(self, application_id, config=None, audit=None, guard=None, backend=None,
-                 audit_router=None):
+                 audit_router=None, limit_holder=None):
         validate_identifier(application_id, "application_id")
         self.application_id = application_id
         self.config = config or FoundationConfig()
@@ -327,6 +491,55 @@ class ApplicationCell:
         # backend.
         self._db = getattr(self._backend, "raw_connection", None)
         self._lock = RLock()
+        # Phase 8 WP-1a (design D-1): `None` (every pre-WP-1a caller --
+        # this repository's own tests, any direct construction) gets a
+        # PRIVATE, unshared holder -- exactly like `audit_router=None`
+        # already defaults to a private `AuditRouter()` two lines above --
+        # so a lone `ApplicationCell()` still enforces its own 4 classes
+        # correctly, just without sharing state with any sibling cell (the
+        # composition root is what actually needs the SHARED instance;
+        # see `main.py`/`service.py`/both conformance adapters, which all
+        # construct exactly one holder and pass it to every cell they
+        # build).
+        self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
+
+    @contextmanager
+    def _limit_gate(self, principal, request=None, *, request_id=None):
+        """Phase 8 WP-1a rework 1 (裁定 5, 監督裁定 2026-09-06; design D-1
+        "順序"/"実装の形"): the single choke every application-plane
+        operation below (`insert`/`read`/`update`/`delete`/`transact`,
+        `catalog`/`schema_revision` immediately above, `ApplicationRuntime.
+        capabilities()`, and `ApplicationDeveloper`'s own schema
+        operations) passes through, immediately after its own
+        `_require_data`/`_require_developer` call -- in the r2db-matching
+        order `requests_per_minute -> concurrency -> request_bytes ->
+        operation_depth -> deadline` (r2db `service.py::_slot`
+        `:1133-1144`/`:1156-1163`, `_query_outcome`/`_mutate_outcome`
+        `:996-999`/`:1037-1039`).
+
+        `request` is the JSON-safe structure this call's own arguments
+        amount to (built by the caller, immediately before this is
+        entered) -- `None` for an operation with no client-supplied
+        structure to bound (`catalog`/`schema_revision`/`capabilities`):
+        those still pass through the rate/concurrency wrap (mirrors r2db
+        `catalog()`/`schema()`/`capabilities()`, which all wrap with
+        `_slot` but never call `check_request`/`check_depth`), just never
+        the request_bytes/operation_depth checks. (裁定 5 correction: an
+        earlier revision of this docstring already stated this, but the
+        code did not yet match it -- `catalog`/`schema_revision`/
+        `capabilities` were NOT actually wrapped by this gate until this
+        rework commit; see each of those three methods' own docstrings
+        for the measured, pre-rework gap this closes.)
+
+        Yields the computed wall-clock `deadline` (`time.monotonic()`
+        seconds) for the caller to hand to `self._backend`."""
+        self.__limit_holder.acquire_rate(principal.credential_id, self.config.max_requests_per_minute)
+        with self.__limit_holder.concurrency_slot(self.config.max_concurrency):
+            if request is not None:
+                _measure_request_bytes(request, self.config.max_request_bytes)
+                _check_operation_depth(request, self.config.max_operation_depth)
+            deadline = time.monotonic() + self.config.max_execution_ms / 1000
+            yield deadline
 
     def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
         """Phase 4 (design D-2): builds the `audit_hook.ApplicationAuditHook`
@@ -396,39 +609,42 @@ class ApplicationCell:
         backfill rule `migrations/0006_...upgrade_declared_types.sql`
         applies to pre-existing columns (design §1.5 finding 2a)."""
         self._require_developer(principal, request_id=request_id)
-        name = self._identifier(name, "collection")
-        if not isinstance(fields, dict) or not fields:
-            raise ValidationError("fields must be a non-empty object")
-        if len(fields) > self.config.max_fields:
-            # Q1-D11 (design v1.5 §7, supersedes the WP-5 body's own
-            # `query_complexity` tagging): this bounds how many columns a
-            # single collection DEFINITION may name in one `create_
-            # collection` call -- a one-time shape bound on the request
-            # itself, not a repeated, finite-resource consumption class.
-            raise ValidationError("field limit exceeded")
-        if self._backend.schema_count() >= self.config.max_schema_objects:
-            raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
-        validated_fields = {}
-        declared_types = {}
-        for field, field_type in fields.items():
-            field = self._identifier(field, "field")
-            if field_type not in _FIELD_TYPE_VOCABULARY:
-                raise ValidationError("unsupported field type")
-            validated_fields[field] = field_type
-            declared_types[field] = (
-                field_types.get(field) if field_types is not None and field in field_types
-                else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+        request = {"name": name, "fields": fields}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            name = self._identifier(name, "collection")
+            if not isinstance(fields, dict) or not fields:
+                raise ValidationError("fields must be a non-empty object")
+            if len(fields) > self.config.max_fields:
+                # Q1-D11 (design v1.5 §7, supersedes the WP-5 body's own
+                # `query_complexity` tagging): this bounds how many columns a
+                # single collection DEFINITION may name in one `create_
+                # collection` call -- a one-time shape bound on the request
+                # itself, not a repeated, finite-resource consumption class.
+                raise ValidationError("field limit exceeded")
+            if self._backend.schema_count() >= self.config.max_schema_objects:
+                raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
+            validated_fields = {}
+            declared_types = {}
+            for field, field_type in fields.items():
+                field = self._identifier(field, "field")
+                if field_type not in _FIELD_TYPE_VOCABULARY:
+                    raise ValidationError("unsupported field type")
+                validated_fields[field] = field_type
+                declared_types[field] = (
+                    field_types.get(field) if field_types is not None and field in field_types
+                    else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+                )
+            # Phase 4 (design D-2 item 2): every schema operation is
+            # unconditionally fail-closed class -- the hook's own `pre_commit()`
+            # is called by `self._backend.create_collection` itself, as the
+            # last thing it does before its own commit point.
+            hook = self._make_audit_hook(
+                principal, event_class="schema_change", operation="create_collection",
+                target_kind="collection", target_id=name, request_id=request_id,
             )
-        # Phase 4 (design D-2 item 2): every schema operation is
-        # unconditionally fail-closed class -- the hook's own `pre_commit()`
-        # is called by `self._backend.create_collection` itself, as the
-        # last thing it does before its own commit point.
-        hook = self._make_audit_hook(
-            principal, event_class="schema_change", operation="create_collection",
-            target_kind="collection", target_id=name, request_id=request_id,
-        )
-        with self._lock:
-            self._backend.create_collection(name, validated_fields, field_types=declared_types, audit_hook=hook)
+            with self._lock:
+                self._backend.create_collection(
+                    name, validated_fields, field_types=declared_types, audit_hook=hook, deadline=deadline)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="create_collection")
 
@@ -473,31 +689,34 @@ class ApplicationCell:
         uses.
         """
         self._require_developer(principal, request_id=request_id)
-        collection = self._identifier(collection, "collection")
-        field = self._identifier(field, "field")
-        if field_type not in _FIELD_TYPE_VOCABULARY:
-            raise ValidationError("unsupported field type")
-        declared_type = contract_type if contract_type is not None else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
-        # Q1-D11-consistent shape bound (same reasoning as `create_
-        # collection`'s own field-count check above): the total column
-        # count this collection would carry AFTER this call mirrors the
-        # same fixed contract shape dimension `max_fields` already gates
-        # at definition time -- not a repeated, finite-resource
-        # consumption class, so `ValidationError`, not `ResourceLimitError`
-        # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
-        # `ResourceLimitError` call-site count unaffected by this WP).
-        current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
-        if len(current) >= self.config.max_fields:
-            raise ValidationError("field limit exceeded")
-        # Phase 4 (design D-2 item 2): same unconditional fail-closed
-        # pre-commit hook as `create_collection` above.
-        hook = self._make_audit_hook(
-            principal, event_class="schema_change", operation="add_field",
-            target_kind="collection", target_id=collection, request_id=request_id,
-        )
-        with self._lock:
-            # ConflictError if `field` already exists
-            self._backend.add_field(collection, field, field_type, contract_type=declared_type, audit_hook=hook)
+        request = {"collection": collection, "field": field, "field_type": field_type}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            collection = self._identifier(collection, "collection")
+            field = self._identifier(field, "field")
+            if field_type not in _FIELD_TYPE_VOCABULARY:
+                raise ValidationError("unsupported field type")
+            declared_type = contract_type if contract_type is not None else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+            # Q1-D11-consistent shape bound (same reasoning as `create_
+            # collection`'s own field-count check above): the total column
+            # count this collection would carry AFTER this call mirrors the
+            # same fixed contract shape dimension `max_fields` already gates
+            # at definition time -- not a repeated, finite-resource
+            # consumption class, so `ValidationError`, not `ResourceLimitError`
+            # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
+            # `ResourceLimitError` call-site count unaffected by this WP).
+            current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+            if len(current) >= self.config.max_fields:
+                raise ValidationError("field limit exceeded")
+            # Phase 4 (design D-2 item 2): same unconditional fail-closed
+            # pre-commit hook as `create_collection` above.
+            hook = self._make_audit_hook(
+                principal, event_class="schema_change", operation="add_field",
+                target_kind="collection", target_id=collection, request_id=request_id,
+            )
+            with self._lock:
+                # ConflictError if `field` already exists
+                self._backend.add_field(
+                    collection, field, field_type, contract_type=declared_type, audit_hook=hook, deadline=deadline)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
 
@@ -512,8 +731,54 @@ class ApplicationCell:
         never actually change (a false declaration: the contract's own
         `SchemaOperationResult.revision` field implies a real, observable
         value, and always returning the same literal after every schema
-        change is not honest about what the peer just did)."""
+        change is not honest about what the peer just did).
+
+        Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by
+        `_limit_gate` (rate/concurrency only -- `request=None`, exactly
+        like `catalog` immediately below and r2db's own `catalog()`/
+        `schema()`, which wrap `_slot` but never call `check_request`/
+        `check_depth`, `service.py:996-1000`/`:1072-1074`): this is a
+        real, client-callable, authenticated application-plane query
+        (`ApplicationRuntime.schema_revision()`, the in-process port's own
+        `session.schema_revision()`), not exempt from the request-rate/
+        concurrency bound SI-08 requires on every credentialed call --
+        r2db's own equivalent (`schema()`/`catalog()`) is bound this way
+        too (`service.py:1133-1144`/`:1156-1163`'s `_slot`), so leaving
+        THIS peer's version unbound left an authenticated credential able
+        to hit `schema_revision`/`catalog` at unlimited rate/concurrency
+        while every other application-plane call was bound -- a real,
+        peer-specific gap the code review that sent this WP back found
+        (measured: `rpm=50` with `catalog()` called 500 times in a row,
+        zero denials, zero window consumption, pre-rework).
+
+        `http.py::post_schema`'s OWN post-op revision readback does NOT
+        go through this method any more -- see `_schema_revision_
+        uncounted` below and `ApplicationRuntime._post_schema_revision`'s
+        own docstring for why that separate, ungated internal accessor
+        exists (this method's own gating would otherwise silently double
+        the effective `requests_per_minute`/`concurrency` cost of every
+        HTTP schema operation relative to the in-process surface, whose
+        own `create_entity`/`add_field` never make this extra call at
+        all -- the SAME asymmetry finding the WP-1a report already made,
+        just resolved the other way: gate the real client-facing query,
+        exempt the internal wire-formatting readback, rather than
+        exempting both)."""
         self._require_data(principal, request_id=request_id)
+        with self._limit_gate(principal, None, request_id=request_id):
+            return self._schema_revision_uncounted()
+
+    def _schema_revision_uncounted(self):
+        """Phase 8 WP-1a rework 1 (裁定 3): the actual backend read
+        `schema_revision` above now wraps with `_limit_gate` -- this
+        private accessor is the UNGATED remainder, called ONLY by
+        `ApplicationRuntime._post_schema_revision` (`http.py::post_schema`'s
+        own post-op revision readback, never a client-initiated call in
+        its own right: it reports the real consequence of the
+        `create_entity`/`add_field` call that ALREADY passed through the
+        gate earlier in this SAME request, not a second, independent
+        client request of its own). Deliberately takes no `principal` --
+        callers are expected to have already authorized/gated the
+        surrounding operation; this is a pure backend read, nothing more."""
         with self._lock:
             return self._backend.schema_revision()
 
@@ -527,10 +792,19 @@ class ApplicationCell:
         `application_catalog`-conditional keys this peer can honestly
         populate (`mutation_class`/`address_fields`/`address_reuse`/
         `unique_keys` are all OMITTED -- `row_addressability:
-        unavailable`, design §1.5 finding 4)."""
+        unavailable`, design §1.5 finding 4).
+
+        Phase 8 WP-1a rework 1 (裁定 3): WRAPPED by `_limit_gate`
+        (rate/concurrency only -- `request=None`, no client-supplied
+        structure to bound with `request_bytes`/`operation_depth`) --
+        see `schema_revision`'s own docstring immediately above for the
+        full reasoning (r2db bounds its own `catalog()` the same way,
+        `service.py:1079` inside `_slot`; this peer's own pre-rework
+        `catalog()` did not, a real, measured gap)."""
         self._require_data(principal, request_id=request_id)
-        with self._lock:
-            all_types = self._backend.all_field_types()
+        with self._limit_gate(principal, None, request_id=request_id):
+            with self._lock:
+                all_types = self._backend.all_field_types()
         return [
             {"entity": entity, "fields": sorted(types), "field_types": dict(types)}
             for entity, types in sorted(all_types.items())
@@ -538,9 +812,10 @@ class ApplicationCell:
 
     def insert(self, principal, collection, values, *, request_id=None):
         self._require_data(principal, request_id=request_id)
-        collection, fields, params = self._prepare_values(collection, values)
-        with self._lock:
-            result = self._backend.insert(collection, fields, params)
+        with self._limit_gate(principal, {"collection": collection, "values": values}, request_id=request_id) as deadline:
+            collection, fields, params = self._prepare_values(collection, values)
+            with self._lock:
+                result = self._backend.insert(collection, fields, params, deadline=deadline)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- a NEW
         # emit site (this peer recorded no query/insert/update success
         # before Phase 4).
@@ -550,16 +825,18 @@ class ApplicationCell:
     def read(self, principal, collection, fields=None, filters=None,
              order_by=None, limit=None, *, request_id=None):
         self._require_data(principal, request_id=request_id)
-        collection = self._identifier(collection, "collection")
-        selected = self._select_fields(collection, fields)
-        bound_filters = self._bind_filters(collection, filters)
-        order = self._bind_order_by(collection, order_by)
-        if limit is None:
-            limit = self.config.max_result_rows
-        if not isinstance(limit, int) or limit <= 0 or limit > self.config.max_result_rows:
-            raise ResourceLimitError("result limit exceeded", limit_class="result_items")
-        with self._lock:
-            rows = self._backend.read(collection, selected, bound_filters, order, limit)
+        request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by, "limit": limit}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            collection = self._identifier(collection, "collection")
+            selected = self._select_fields(collection, fields)
+            bound_filters = self._bind_filters(collection, filters)
+            order = self._bind_order_by(collection, order_by)
+            if limit is None:
+                limit = self.config.max_result_rows
+            if not isinstance(limit, int) or limit <= 0 or limit > self.config.max_result_rows:
+                raise ResourceLimitError("result limit exceeded", limit_class="result_items")
+            with self._lock:
+                rows = self._backend.read(collection, selected, bound_filters, order, limit, deadline=deadline)
         rows = self._decode_rows(collection, rows)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- "query"
         # is this peer's own contract-vocabulary operation name for this
@@ -597,9 +874,11 @@ class ApplicationCell:
 
     def update(self, principal, collection, values, filters, *, request_id=None):
         self._require_data(principal, request_id=request_id)
-        collection, fields, values_params, bound_filters = self._validate_update(collection, values, filters)
-        with self._lock:
-            result = self._backend.update(collection, fields, values_params, bound_filters)
+        request = {"collection": collection, "values": values, "filters": filters}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            collection, fields, values_params, bound_filters = self._validate_update(collection, values, filters)
+            with self._lock:
+                result = self._backend.update(collection, fields, values_params, bound_filters, deadline=deadline)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit.
         self._push_data_operation_event(principal, operation="update", target_id=collection, request_id=request_id)
         return result
@@ -686,25 +965,27 @@ class ApplicationCell:
         `transact()`'s own batch-embedded delete (P3-D2, WP-1.5).
         """
         self._require_data(principal, request_id=request_id)
-        try:
-            collection, bound_filters = self._validate_delete_confirmation(
-                collection, filters, destructive, confirm)
-        except DestructiveConfirmationRequired:
-            # Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
-            # a durable-range denial code -- routed (coalesced) before
-            # re-raising, unchanged, to the caller.
-            self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
-            raise
-        # Phase 4 (design D-2 item 1): delete is fail-closed class only
-        # once it has passed the confirmation choke (this point) -- the
-        # hook's own `pre_commit()` is called by `self._backend.delete`
-        # itself, as the last thing it does before its own commit point.
-        hook = self._make_audit_hook(
-            principal, event_class="destructive_data_operation", operation="delete",
-            target_kind="collection", target_id=collection, request_id=request_id,
-        )
-        with self._lock:
-            result = self._backend.delete(collection, bound_filters, audit_hook=hook)
+        request = {"collection": collection, "filters": filters, "destructive": destructive, "confirm": confirm}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            try:
+                collection, bound_filters = self._validate_delete_confirmation(
+                    collection, filters, destructive, confirm)
+            except DestructiveConfirmationRequired:
+                # Phase 4 (design D-3): `DESTRUCTIVE_CONFIRMATION_REQUIRED` is
+                # a durable-range denial code -- routed (coalesced) before
+                # re-raising, unchanged, to the caller.
+                self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+                raise
+            # Phase 4 (design D-2 item 1): delete is fail-closed class only
+            # once it has passed the confirmation choke (this point) -- the
+            # hook's own `pre_commit()` is called by `self._backend.delete`
+            # itself, as the last thing it does before its own commit point.
+            hook = self._make_audit_hook(
+                principal, event_class="destructive_data_operation", operation="delete",
+                target_kind="collection", target_id=collection, request_id=request_id,
+            )
+            with self._lock:
+                result = self._backend.delete(collection, bound_filters, audit_hook=hook, deadline=deadline)
         self.__record("destructive_data_operation", self.application_id,
                       principal.credential_id, detail="delete_rows")
         return result
@@ -874,180 +1155,182 @@ class ApplicationCell:
         fails validation).
         """
         self._require_data(principal, request_id=request_id)
-        if not isinstance(operations, list) or not operations:
-            raise ValidationError("operations must be a non-empty list")
-        if len(operations) > self.config.max_batch_items:
-            raise ResourceLimitError("batch limit exceeded", limit_class="batch_items")
-        if len(self._distinct_batch_entities(operations)) > self.config.max_batch_entities:
-            raise ResourceLimitError("batch entity limit exceeded", limit_class="batch_entities")
+        request = {"operations": operations}
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            if not isinstance(operations, list) or not operations:
+                raise ValidationError("operations must be a non-empty list")
+            if len(operations) > self.config.max_batch_items:
+                raise ResourceLimitError("batch limit exceeded", limit_class="batch_items")
+            if len(self._distinct_batch_entities(operations)) > self.config.max_batch_entities:
+                raise ResourceLimitError("batch entity limit exceeded", limit_class="batch_entities")
 
-        # Pass 1: validate every operation, across every entity, before
-        # any execution begins (P35-D9/P35-D10 above). Nothing below this
-        # line has touched `self._backend`'s own transaction state yet.
-        # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
-        # raise `DestructiveConfirmationRequired` (via `_validate_delete_
-        # confirmation`, the same choke `delete()` uses) -- routed
-        # (coalesced) here, at the one call site with `principal` in
-        # scope, mirroring `delete()`'s own identical wrapping.
-        plan = []
-        for operation in operations:
-            try:
-                plan.append(self._plan_operation(operation))
-            except DestructiveConfirmationRequired:
-                collection = operation.get("collection") if isinstance(operation, dict) else None
-                self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
-                raise
+            # Pass 1: validate every operation, across every entity, before
+            # any execution begins (P35-D9/P35-D10 above). Nothing below this
+            # line has touched `self._backend`'s own transaction state yet.
+            # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
+            # raise `DestructiveConfirmationRequired` (via `_validate_delete_
+            # confirmation`, the same choke `delete()` uses) -- routed
+            # (coalesced) here, at the one call site with `principal` in
+            # scope, mirroring `delete()`'s own identical wrapping.
+            plan = []
+            for operation in operations:
+                try:
+                    plan.append(self._plan_operation(operation))
+                except DestructiveConfirmationRequired:
+                    collection = operation.get("collection") if isinstance(operation, dict) else None
+                    self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+                    raise
 
-        # Phase 4 (design D-2's normative rule): the confirmation choke,
-        # not `event_class`, is the fail-closed/buffer-class dispatch
-        # point -- a batch containing at least one "delete" kind is
-        # fail-closed class for the WHOLE batch (D-10: at most one durable
-        # row per operation, so the batch gets exactly one pre-commit row,
-        # never one per individual delete inside it); a batch with none is
-        # buffer-class (P4-D5's new emit site).
-        destructive = any(kind == "delete" for kind, _ in plan)
-        hook = None
-        if destructive:
-            hook = self._make_audit_hook(
-                principal, event_class="destructive_data_operation", operation="transact",
-                target_kind="collection", target_id=None, request_id=request_id,
-            )
-
-        # Pass 2: execute the fully-bound plan inside the begin/commit/
-        # rollback envelope -- unchanged from before this WP other than
-        # reading its arguments from `plan` instead of re-validating them
-        # from the raw operation dicts inline.
-        with self._lock:
-            self._backend.begin()
-            # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
-            # "the durable pre-commit write itself failed" (nothing was
-            # committed to correct -- the batch is simply refused) from
-            # "the durable write succeeded but this backend's own commit
-            # then failed" (D-2's error-row case) -- mirrors `backend_
-            # postgres.PostgresBackend`'s identical single-operation
-            # pattern, here at the batch level since `transact`'s own
-            # begin/commit/rollback envelope lives in `cell.py`, not
-            # either backend module.
-            hook_fired = False
-            try:
-                results = []
-                for kind, payload in plan:
-                    if kind == "insert":
-                        collection, fields, params = payload
-                        results.append(self._backend.insert_in_transaction(collection, fields, params))
-                    elif kind == "update":
-                        collection, fields, values_params, bound_filters = payload
-                        results.append(self._backend.update_in_transaction(
-                            collection, fields, values_params, bound_filters))
-                    else:  # "delete"
-                        collection, bound_filters = payload
-                        results.append(self._backend.delete_in_transaction(collection, bound_filters))
-                # Phase 4 (design D-2/D-10): the pre-commit hook is the
-                # LAST thing this method does before its own commit point
-                # -- a raise here (an `errors.AuditSinkUnavailable`) is
-                # caught by the `except Exception` below, which rolls
-                # back exactly like any other mid-batch failure (fail-
-                # closed by construction). The pre-existing 6-field-sink
-                # `destructive_data_operation` record (below, post-commit)
-                # is unaffected either way (D-10: that sink's own
-                # behaviour is completely unchanged by this WP).
-                if destructive and hook is not None:
-                    hook.pre_commit()
-                    hook_fired = True
-                self._backend.commit()
-            except Exception as exc:
-                # Independent review B-2 (WP-2 follow-up -- the
-                # atomicity hole, largest safety fix of that review):
-                # rollback is now UNCONDITIONAL. The pre-fix `except`
-                # tuple listed only `errors.FoundationError` subclasses;
-                # a non-`FoundationError` exception reaching this point
-                # used to skip `self._backend.rollback()` entirely and
-                # escape this method uncaught -- measured concretely: a
-                # lone UTF-16 surrogate code point in a value's own text
-                # (e.g. `"\ud800"`) escapes both backend drivers' own
-                # parameter-binding step as a raw `UnicodeEncodeError`
-                # (neither a `sqlite3.Error` nor a `psycopg.Error`
-                # subclass), on BOTH backends. With the pre-fix narrow
-                # `except`, that left every EARLIER, individually-valid
-                # operation's own write sitting UNCOMMITTED but already
-                # VISIBLE on this same connection (both SQLite and
-                # PostgreSQL give a transaction read-your-own-writes
-                # visibility before `COMMIT`) -- a real partial-effect
-                # breach of the "whole batch commits or rolls back as one
-                # unit" invariant this method's own docstring promises.
-                # B-2(ii) below (`encode_value`, both backends) now closes
-                # THIS specific case deterministically at validation time
-                # (pass 1, before `self._backend.begin()` is ever called),
-                # but the unconditional rollback here is the actual safety
-                # backstop -- it must hold for ANY exception a backend
-                # could ever raise during pass 2, known or not, not only
-                # the one concrete case that happened to be found.
-                #
-                # P3-D2 (WP-1.5) / m-2 (WP-2 review correction):
-                # `DestructiveConfirmationRequired` is not actually
-                # reachable from pass 2 at all -- `_plan_operation` (pass
-                # 1) is the ONLY site that ever evaluates a destructive
-                # confirmation (`_validate_delete_confirmation`), so a
-                # schema change racing pass 1/pass 2 (§2 PG note) surfaces
-                # here as a `NotFoundError`/`ConflictError` from the
-                # backend's own DML instead (the table/column the plan
-                # was bound against no longer matches reality), never as
-                # a re-evaluated confirmation mismatch; it stays listed
-                # here only for defensive symmetry with `_plan_operation`'s
-                # own vocabulary, not because this `except Exception:`
-                # needs it to reach that branch specifically (every
-                # `Exception` already does). `ConflictError`/`NotFoundError`
-                # (a unique-constraint conflict / a collection that
-                # stopped existing between this call's own validation pass
-                # and its execution pass) and `ValidationError`/
-                # `ResourceLimitError`/`CapabilityError` (this file names
-                # no backend-native exception type at all -- every backend
-                # translates its own low-level, EXPECTED failures into
-                # this shared `errors.FoundationError` vocabulary before
-                # this point) remain the classified, expected outcomes;
-                # anything else (like the `UnicodeEncodeError` above, pre
-                # B-2(ii)) rolls back and re-raises unclassified, exactly
-                # as before -- this method itself never reclassifies an
-                # exception type, only guarantees rollback runs first.
-                self._backend.rollback()
-                # Phase 4 (design D-2, error-row rule): `hook_fired` is
-                # only `True` once the durable pre-commit row has already
-                # committed on its own (separate) connection -- so an
-                # exception reaching here after that point can only be
-                # this method's own `self._backend.commit()` failing.
-                # Record the durable `outcome="error"` row for the same
-                # operation's fields (still fail-closed: `commit_failed()`
-                # never raises -- see `audit_hook.py` -- but the response
-                # is `AuditSinkUnavailable` regardless of whether that
-                # write itself succeeds).
-                if hook_fired:
-                    hook.commit_failed()
-                    raise AuditSinkUnavailable(
-                        "the durable audit sink recorded this batch but the data commit failed"
-                    ) from exc
-                raise
-            # Phase 4 (design D-10): the pre-existing 6-field-sink record
-            # is unconditional and unchanged -- it fires for a
-            # batch-embedded delete exactly as it did before this WP,
-            # now safely AFTER `self._backend.commit()` has actually
-            # succeeded (no `pending_audit` deferral needed any more: the
-            # hook above already gave the durable trail its own, separate,
-            # PRE-commit guarantee, so this post-commit legacy record
-            # never needs to claim a write a later operation rolled back
-            # -- if we are here at all, `self._backend.commit()` already
-            # succeeded for the whole batch).
+            # Phase 4 (design D-2's normative rule): the confirmation choke,
+            # not `event_class`, is the fail-closed/buffer-class dispatch
+            # point -- a batch containing at least one "delete" kind is
+            # fail-closed class for the WHOLE batch (D-10: at most one durable
+            # row per operation, so the batch gets exactly one pre-commit row,
+            # never one per individual delete inside it); a batch with none is
+            # buffer-class (P4-D5's new emit site).
+            destructive = any(kind == "delete" for kind, _ in plan)
+            hook = None
             if destructive:
-                self.__record("destructive_data_operation", self.application_id,
-                              principal.credential_id, detail="delete_rows")
-            else:
-                # Phase 4 (design D-4/P4-D5): a non-destructive batch
-                # (insert/update only) is buffer-class -- exactly ONE
-                # `data_operation` event for the whole batch (D-10: at
-                # most one durable row per operation), mirroring
-                # r2db-api's own identical "one row per mutate batch"
-                # rule.
-                self._push_data_operation_event(principal, operation="transact", target_id=None, request_id=request_id)
-            return results
+                hook = self._make_audit_hook(
+                    principal, event_class="destructive_data_operation", operation="transact",
+                    target_kind="collection", target_id=None, request_id=request_id,
+                )
+
+            # Pass 2: execute the fully-bound plan inside the begin/commit/
+            # rollback envelope -- unchanged from before this WP other than
+            # reading its arguments from `plan` instead of re-validating them
+            # from the raw operation dicts inline.
+            with self._lock:
+                self._backend.begin(deadline=deadline)
+                # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
+                # "the durable pre-commit write itself failed" (nothing was
+                # committed to correct -- the batch is simply refused) from
+                # "the durable write succeeded but this backend's own commit
+                # then failed" (D-2's error-row case) -- mirrors `backend_
+                # postgres.PostgresBackend`'s identical single-operation
+                # pattern, here at the batch level since `transact`'s own
+                # begin/commit/rollback envelope lives in `cell.py`, not
+                # either backend module.
+                hook_fired = False
+                try:
+                    results = []
+                    for kind, payload in plan:
+                        if kind == "insert":
+                            collection, fields, params = payload
+                            results.append(self._backend.insert_in_transaction(collection, fields, params))
+                        elif kind == "update":
+                            collection, fields, values_params, bound_filters = payload
+                            results.append(self._backend.update_in_transaction(
+                                collection, fields, values_params, bound_filters))
+                        else:  # "delete"
+                            collection, bound_filters = payload
+                            results.append(self._backend.delete_in_transaction(collection, bound_filters))
+                    # Phase 4 (design D-2/D-10): the pre-commit hook is the
+                    # LAST thing this method does before its own commit point
+                    # -- a raise here (an `errors.AuditSinkUnavailable`) is
+                    # caught by the `except Exception` below, which rolls
+                    # back exactly like any other mid-batch failure (fail-
+                    # closed by construction). The pre-existing 6-field-sink
+                    # `destructive_data_operation` record (below, post-commit)
+                    # is unaffected either way (D-10: that sink's own
+                    # behaviour is completely unchanged by this WP).
+                    if destructive and hook is not None:
+                        hook.pre_commit()
+                        hook_fired = True
+                    self._backend.commit()
+                except Exception as exc:
+                    # Independent review B-2 (WP-2 follow-up -- the
+                    # atomicity hole, largest safety fix of that review):
+                    # rollback is now UNCONDITIONAL. The pre-fix `except`
+                    # tuple listed only `errors.FoundationError` subclasses;
+                    # a non-`FoundationError` exception reaching this point
+                    # used to skip `self._backend.rollback()` entirely and
+                    # escape this method uncaught -- measured concretely: a
+                    # lone UTF-16 surrogate code point in a value's own text
+                    # (e.g. `"\ud800"`) escapes both backend drivers' own
+                    # parameter-binding step as a raw `UnicodeEncodeError`
+                    # (neither a `sqlite3.Error` nor a `psycopg.Error`
+                    # subclass), on BOTH backends. With the pre-fix narrow
+                    # `except`, that left every EARLIER, individually-valid
+                    # operation's own write sitting UNCOMMITTED but already
+                    # VISIBLE on this same connection (both SQLite and
+                    # PostgreSQL give a transaction read-your-own-writes
+                    # visibility before `COMMIT`) -- a real partial-effect
+                    # breach of the "whole batch commits or rolls back as one
+                    # unit" invariant this method's own docstring promises.
+                    # B-2(ii) below (`encode_value`, both backends) now closes
+                    # THIS specific case deterministically at validation time
+                    # (pass 1, before `self._backend.begin()` is ever called),
+                    # but the unconditional rollback here is the actual safety
+                    # backstop -- it must hold for ANY exception a backend
+                    # could ever raise during pass 2, known or not, not only
+                    # the one concrete case that happened to be found.
+                    #
+                    # P3-D2 (WP-1.5) / m-2 (WP-2 review correction):
+                    # `DestructiveConfirmationRequired` is not actually
+                    # reachable from pass 2 at all -- `_plan_operation` (pass
+                    # 1) is the ONLY site that ever evaluates a destructive
+                    # confirmation (`_validate_delete_confirmation`), so a
+                    # schema change racing pass 1/pass 2 (§2 PG note) surfaces
+                    # here as a `NotFoundError`/`ConflictError` from the
+                    # backend's own DML instead (the table/column the plan
+                    # was bound against no longer matches reality), never as
+                    # a re-evaluated confirmation mismatch; it stays listed
+                    # here only for defensive symmetry with `_plan_operation`'s
+                    # own vocabulary, not because this `except Exception:`
+                    # needs it to reach that branch specifically (every
+                    # `Exception` already does). `ConflictError`/`NotFoundError`
+                    # (a unique-constraint conflict / a collection that
+                    # stopped existing between this call's own validation pass
+                    # and its execution pass) and `ValidationError`/
+                    # `ResourceLimitError`/`CapabilityError` (this file names
+                    # no backend-native exception type at all -- every backend
+                    # translates its own low-level, EXPECTED failures into
+                    # this shared `errors.FoundationError` vocabulary before
+                    # this point) remain the classified, expected outcomes;
+                    # anything else (like the `UnicodeEncodeError` above, pre
+                    # B-2(ii)) rolls back and re-raises unclassified, exactly
+                    # as before -- this method itself never reclassifies an
+                    # exception type, only guarantees rollback runs first.
+                    self._backend.rollback()
+                    # Phase 4 (design D-2, error-row rule): `hook_fired` is
+                    # only `True` once the durable pre-commit row has already
+                    # committed on its own (separate) connection -- so an
+                    # exception reaching here after that point can only be
+                    # this method's own `self._backend.commit()` failing.
+                    # Record the durable `outcome="error"` row for the same
+                    # operation's fields (still fail-closed: `commit_failed()`
+                    # never raises -- see `audit_hook.py` -- but the response
+                    # is `AuditSinkUnavailable` regardless of whether that
+                    # write itself succeeds).
+                    if hook_fired:
+                        hook.commit_failed()
+                        raise AuditSinkUnavailable(
+                            "the durable audit sink recorded this batch but the data commit failed"
+                        ) from exc
+                    raise
+                # Phase 4 (design D-10): the pre-existing 6-field-sink record
+                # is unconditional and unchanged -- it fires for a
+                # batch-embedded delete exactly as it did before this WP,
+                # now safely AFTER `self._backend.commit()` has actually
+                # succeeded (no `pending_audit` deferral needed any more: the
+                # hook above already gave the durable trail its own, separate,
+                # PRE-commit guarantee, so this post-commit legacy record
+                # never needs to claim a write a later operation rolled back
+                # -- if we are here at all, `self._backend.commit()` already
+                # succeeded for the whole batch).
+                if destructive:
+                    self.__record("destructive_data_operation", self.application_id,
+                                  principal.credential_id, detail="delete_rows")
+                else:
+                    # Phase 4 (design D-4/P4-D5): a non-destructive batch
+                    # (insert/update only) is buffer-class -- exactly ONE
+                    # `data_operation` event for the whole batch (D-10: at
+                    # most one durable row per operation), mirroring
+                    # r2db-api's own identical "one row per mutate batch"
+                    # rule.
+                    self._push_data_operation_event(principal, operation="transact", target_id=None, request_id=request_id)
+                return results
 
     def _select_fields(self, collection, requested):
         available = self._backend.field_domains(collection)
@@ -1353,6 +1636,28 @@ class ApplicationRuntime:
         self.__authorize(request_id=request_id)
         return self.__cell.schema_revision(self.__principal, request_id=request_id)
 
+    def _post_schema_revision(self, *, request_id=None):
+        """Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): the
+        UNGATED counterpart of `schema_revision` above, for exactly one
+        caller -- `http.py::post_schema`'s own post-op revision readback,
+        immediately after a `create_entity`/`add_field` call that has
+        ALREADY passed through `_limit_gate` earlier in this SAME wire
+        request. That readback is not itself a second client request (no
+        `GET .../schema-revision` endpoint exists; nothing on the wire
+        asks for it independently of the schema-mutation call it reports
+        the consequence of) -- routing it through the now-gated
+        `schema_revision()` above would silently double the effective
+        `requests_per_minute`/`concurrency` cost of every HTTP schema
+        operation relative to the in-process surface, whose own
+        `create_entity`/`add_field` never make this extra call at all
+        (the asymmetry the original WP-1a report measured; 裁定 3 resolves
+        it by gating the real client-facing query and exempting only
+        this one internal wire-formatting readback, rather than exempting
+        both, since `catalog`/`schema_revision` themselves ARE real,
+        independently client-callable queries r2db bounds too)."""
+        self.__authorize(request_id=request_id)
+        return self.__cell._schema_revision_uncounted()  # noqa: SLF001
+
     def insert(self, collection, values, *, request_id=None):
         self.__authorize(request_id=request_id)
         return self.__cell.insert(self.__principal, collection, values, request_id=request_id)
@@ -1390,9 +1695,23 @@ class ApplicationRuntime:
         composition and the PostgreSQL-backed composition
         (`tests/test_postgres.py`) share this exact method -- there is no
         second copy anywhere that could drift out of agreement with it.
-        """
+
+        Phase 8 WP-1a rework 1 (裁定 3, 監督裁定 2026-09-06): WRAPPED by
+        `_limit_gate` (rate/concurrency only -- `request=None`) for the
+        SAME reason as `ApplicationCell.catalog`/`.schema_revision`
+        (those methods' own docstrings carry the full trace): r2db bounds
+        its own `capabilities()` this way too (`service.py:877` inside
+        `_slot`), and this is a real, client-callable, authenticated
+        query, not a discovery-time exemption -- the pre-rework version
+        left it entirely outside the gate (measured, pre-rework:
+        `rpm=50` with 500 consecutive `capabilities()` calls, zero
+        denials)."""
         self.__authorize(request_id=request_id)
         principal = self.__principal
+        with self.__cell._limit_gate(principal, None, request_id=request_id):  # noqa: SLF001
+            return self.__build_capabilities_document(principal)
+
+    def __build_capabilities_document(self, principal):
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
         return {
@@ -1489,48 +1808,123 @@ class ApplicationRuntime:
                 "result_items": config.max_result_rows,
                 "query_complexity": config.max_filter_terms,
                 "request_bytes": config.max_request_bytes,
-                "schema_objects": config.max_schema_objects
+                "schema_objects": config.max_schema_objects,
+                # Phase 8 WP-1a (design docs/design/PHASE8_EFFECTIVE_
+                # BOUNDS_AND_HYGIENE_V1.md D-1): the 4 application-plane
+                # classes this peer previously left entirely unimplemented
+                # (see this dict's own sibling `limit_enforcement` block
+                # below for the per-class enforcement story). Values come
+                # from `FoundationConfig`'s own new fields -- the single
+                # source of truth `_limit_gate`/`backend_postgres.py`
+                # actually enforce against, never a second, independently
+                # drifting literal.
+                "execution_ms": config.max_execution_ms,
+                "concurrency": config.max_concurrency,
+                "requests_per_minute": config.max_requests_per_minute,
+                # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06):
+                # published on BOTH surfaces, matching every sibling class
+                # above -- `_check_operation_depth` genuinely runs (via
+                # `_limit_gate`) on both, so `operation_depth` moved from
+                # `unavailable` to `enforced` below, and V1 (c) requires an
+                # `enforced` entry to carry this finite value. See
+                # `limit_enforcement` below for the full empirical trace.
+                "operation_depth": config.max_operation_depth,
             },
             "limit_enforcement": {
                 "batch_items": "enforced",
                 "batch_entities": "enforced",
                 "result_items": "enforced",
                 "query_complexity": "enforced",
-                # `FoundationConfig.validate_request_size` exists but is not
-                # wired into any request path yet (no caller in `cell.py` /
-                # `service.py`): reporting "enforced" here would be false.
-                "request_bytes": "unavailable",
+                # Phase 8 WP-1a (design D-1): `ApplicationCell._limit_gate`
+                # now measures every request's own structural byte estimate
+                # (`_measure_request_bytes`) on BOTH the in-process and HTTP
+                # surface -- the same gate every method below passes
+                # through, unconditionally on transport. `http.py`'s own
+                # former enforcement-layer override (unconditionally
+                # flipping this one key to `"enforced"` for the HTTP
+                # surface only, because in-process was genuinely
+                # unenforced) is removed in this same commit -- keeping it
+                # would have been a meaningless, redundant re-declaration
+                # of what this single source of truth already says (R-3).
+                "request_bytes": "enforced",
                 "schema_objects": "enforced",
-                # Phase 7 WP-4 (design docs/design/PHASE7_EVIDENCE_
-                # REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6.1, §6 (β)):
-                # explicit entries for the 4 classes this peer's own
-                # `limit_enforcement` block previously left out entirely --
-                # C-05 V1 (e) requires every one of the contract's fixed 9
-                # application-plane classes to carry an explicit entry, and
-                # a silently-missing key is indistinguishable from "not
-                # implemented" without one. `execution_ms`/`concurrency`/
-                # `requests_per_minute` are genuinely unimplemented on this
-                # peer (no caller anywhere in this module or `backend_
-                # sqlite.py`/`backend_postgres.py` measures wall-clock
-                # execution time, tracks in-flight request count, or
-                # enforces a rate window against any application-plane
-                # request) -- next-phase candidate L7-1 (design §11).
-                "execution_ms": "unavailable",
-                "concurrency": "unavailable",
-                "requests_per_minute": "unavailable",
-                # `operation_depth` -- measured, not assumed (WP-4): grep
-                # across this module and `backend_sqlite.py`/`backend_
-                # postgres.py` finds no code path that computes or bounds
-                # filter/operation nesting depth at all (contrast `r2db_
-                # api/src/r2db_api/limits.py:88-90`'s real, enforced depth
-                # check) -- this peer's `Filter`/mutation shapes are flat
-                # (a list of single-level predicates; `_plan_operation`'s
-                # own per-op-type key allowlists have no nested-operation
-                # concept whatsoever). Since there is no finite structure
-                # this peer could even be said to bound, `unavailable` is
-                # the only honest declaration -- L7-1's 4th class (design
-                # D-6.1's own two-branch instruction).
-                "operation_depth": "unavailable"
+                # Phase 8 WP-1a (design D-1 "実装の形" `execution_ms` row):
+                # `_limit_gate` computes a wall-clock deadline
+                # (`time.monotonic() + max_execution_ms`) and hands it to
+                # `self._backend` on every call; `backend_postgres.py`
+                # additionally converts it into a real `SET LOCAL
+                # statement_timeout`/`lock_timeout`, `backend_sqlite.py`
+                # checks it app-side (no native timeout API to delegate
+                # to). Declared `reference_wall_clock`, never `enforced` --
+                # matching r2db's own identical declaration
+                # (`r2db_api/service.py:936-937`) -- because a wall-clock
+                # budget cannot be driven to a deterministic N/N+1
+                # boundary the way a COUNT-valued bound can (design §4).
+                "execution_ms": "reference_wall_clock",
+                # Phase 8 WP-1a (design D-1): `_LimitStateHolder.
+                # concurrency_slot` (one holder per process/composition
+                # root, injected into every `ApplicationCell` -- never
+                # per-application, never per-request) now bounds in-flight
+                # application-plane requests for real, released in a
+                # `finally` on every exit path (success or exception).
+                "concurrency": "enforced",
+                # Phase 8 WP-1a (design D-1): `_LimitStateHolder.
+                # acquire_rate` now bounds a credential-keyed 60s sliding
+                # window for real.
+                "requests_per_minute": "enforced",
+                # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06):
+                # `enforced` on BOTH surfaces -- `_check_operation_depth`
+                # (module-level, above) is wired into `_limit_gate`
+                # (`:531`) and genuinely bounds nesting on EVERY request
+                # shape every method below builds, in-process included.
+                #
+                # The WP-1a report's original claim here ("in-process has
+                # no request dict to bound, because `insert`/`update`/
+                # `delete` take positional/keyword ARGUMENTS, not a single
+                # dict") was factually wrong, per the code review that sent
+                # this WP back: `_limit_gate` is passed a REAL dict on
+                # every one of those call sites -- `insert` builds
+                # `{"collection": collection, "values": values}` (`:770`),
+                # `update` builds `{"collection": ..., "values": ...,
+                # "filters": ...}` (`:832`), `delete` and `transact`
+                # likewise -- and `_check_operation_depth` traverses that
+                # dict exactly like it traverses any other. Measured
+                # directly (WP-1a rework report): with the default
+                # `max_operation_depth=8`, a bare `session.insert("t",
+                # {"doc": <a value nested 7 dict/list levels deep>})`
+                # deterministically raises `LIMIT_EXCEEDED` with
+                # `details.limit_class == "operation_depth"` -- no HTTP
+                # transport, no `transact()`, involved at all.
+                #
+                # The asymmetry the ORIGINAL U-1 ruling text anticipated
+                # ("in-process 経路に要求 dict が無い形であれば...") does not
+                # apply here -- that premise (no request dict in-process)
+                # does not hold, so the rework ruling (裁定 1) directs this
+                # WP not to invoke that escape hatch. What DOES differ
+                # between the two surfaces is only WHICH nesting position a
+                # depth attack has to use to reach the same bound: the
+                # in-process `insert`/`update`/`delete` methods have no
+                # parameter position for an added `where`/`filters` clause
+                # on `insert` specifically (so a depth attack against THAT
+                # one operation, via THAT one added nesting level, can only
+                # be presented through `session.transact()`, exactly like
+                # the HTTP surface's own `post_mutate` always does) -- but
+                # arbitrarily deep VALUE content (e.g. a nested JSON
+                # column) is a real, present nesting vector on every
+                # in-process entry point already, and that is what the
+                # measurement above exercises. `test_c05_limit_declaration_
+                # agreement.py::_drive_operation_depth`'s own flat-insert-
+                # plus-`where` recipe is confirmed (WP-1a rework report) to
+                # drive this class successfully for `MitateDB-api` too, via
+                # `iso.attempt_mutation`'s "insert"+`where_field` path,
+                # which the in-process conformance adapter itself routes
+                # through `session.transact()` whenever a filter is
+                # supplied for `insert` -- the SAME dispatcher
+                # `expected_revision`/`unique_key` already route through,
+                # for the SAME "present it to the real dispatcher, do not
+                # decide the answer in the adapter" reason (this module's
+                # own pre-existing comment on that dispatcher).
+                "operation_depth": "enforced",
             },
             # `CredentialStore.assert_active` (auth.py) is invoked by
             # `__authorize` above on every single session operation, with

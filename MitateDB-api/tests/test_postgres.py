@@ -927,10 +927,10 @@ def test_transact_pass_boundary_schema_change_window_yields_not_found_and_siblin
         backend = cell._backend
         real_begin = backend.begin
 
-        def dropping_begin():
+        def dropping_begin(*, deadline=None):
             with admin_conn.cursor() as cur:
                 cur.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier("window_target")))
-            return real_begin()
+            return real_begin(deadline=deadline)
 
         backend.begin = dropping_begin
         try:
