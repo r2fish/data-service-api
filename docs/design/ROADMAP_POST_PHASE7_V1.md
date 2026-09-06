@@ -1,6 +1,7 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
+- 版数: **v1.2 (2026-09-07)**。v1.1 からの変更: **フェーズ8 が完了した**ので §1「現状」を更新し (§9 の 6)、§5 のフェーズ8 節に完了と完了条件の充足を書き、§8 の R-9〜R-12 の行き先を「フェーズ8 完了」に改めた。**R-14 に従い、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行を、根拠と日付を添えて改版した** (フェーズ8 設計 §10 L8-8)。**行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。
+- 旧 **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
 - 旧 **v1.0 (2026-09-06)**。外部提案 2 本の評価と依頼者の目標宣言を受けて起草。
 - 起草: Fable (監督)。依頼者の目標 (§0) は逐語。判定 (§3, §6) は本会話での監督評価であり、各フェーズの設計文書で再審議してよい。
 - 位置づけ: 本書は **計画文書**であり、`CLAUDE.md` の source-of-truth 順位には入らない。各フェーズの正本は、そのフェーズの設計文書 (`docs/design/PHASE*_V1.md`) と作業指示書である。本書はそれらの**着手順・範囲・着手条件・守るべき条件**を先に固定し、次フェーズの設計起草者が「何を、なぜ、どの順で」を再導出せずに済むようにする。
@@ -25,7 +26,24 @@
 
 ---
 
-## 1. 現状 (2026-09-06)
+## 1. 現状
+
+### 1.0 更新 (2026-09-07、フェーズ8 完了。§9 の 6)
+
+**§1.1 (2026-09-06 時点) は下に残す。以下が現在形である。**
+
+- **フェーズ8 は完了した (2026-09-07)。** main の最新 merge は **`9f75428`** (WP-1 = L7-1 + port v1.12 + L7-21)。完了ゲート (root suite 単独実行) は **`2340 passed, 5 warnings in 349.31s (0:05:49)`**、**failed 0 / xfailed 0 / skipped 0**。
+- **契約は 1.6.0 のまま 1 バイトも動いていない。** 契約 JSON と両 peer の packaged 複製 2 本の sha256 は 3 本とも `968d3c72…45e6` である (フェーズ8 設計 §11.1)。**能力 11 種、error code 17 種、limit class 16 種、共通条件 C-00〜C-19 の 20 件が全件 four adapters で実行可能**という状態も変わらない (新しい共通条件は足していない)。
+- **宣言した bound が全 peer で実効になった (G-2 の土台)。** **L7-1 が閉じた** — MitateDB の application plane が `execution_ms` (`reference_wall_clock`) / `concurrency` / `requests_per_minute` / `operation_depth` と in-process の `request_bytes` を実際に強制し、**C-05 V3 の `xfail(strict=True)` は 9 → 0 になった**。**`operation_depth` は in-process / HTTP の両面で `enforced` であり、非対称は残っていない。**
+- **`concurrency` が共通 suite で初めて駆動されるようになった。** **port は v1.12** — `hold_in_flight` (in-flight 保持 primitive、4 plug すべてが実装、待ち上限 30 秒) と、要求側の optional フィールド (`limit` / `extra_predicates`) が入った。**L7-21 が閉じた** — V2 の除外判定は peer 名固定から能力判定になり、**`test_c05` の `adapter.name` 読みは allowlist 3 行だけである** (AST 走査で固定)。
+- **CI にテスト総数の下限が入った (R-9)。** `conformance-tests/COLLECTION_FLOOR` = **2340** (フェーズ8 のゲート時実測)。検査は `tools/check_collection_floor.py` で、CI の 3.11 / 3.12 の両 job が pytest の前に走らせる。**減少は明示の更新コミット無しに赤である。** **L7-23 (register テストの収集 0 件ガード) も閉じた。** **CI の `conformance` job には `timeout-minutes: 30` が入った。**
+- **`spec/` に provenance companion が入った (R-10 (A))。** `spec/CONTRACT_HISTORY.md` が **29 個の JSON パス anchor** を持ち、各 anchor が値の全文の逐語複製・該当する subordinate ruling・導入版を記録する。**契約 JSON は 0 バイト動いていない。** 常設スキャナと companion の anchor 集合の一致、引用の byte 一致、導入版の照合 (17 件) を register テスト 7 本が固定する。
+- **運用項目が揃った (R-11)。** 両 peer に **`ops verify-declarations`** (F 番号ごとの固定終了コード、同型) が入り、`tools/deploy_smoke.py`、`docs/ops/BACKUP_RESTORE_R2DB.md` (実証記録付き)、argv secret の常設静的検査が入った。**provision script の psql argv から secret が消えた** (6 件 → 0 件、`\getenv` + `ON_ERROR_STOP`)。**L7-18 は閉じた。L7-19 は撤去条件未達のまま据え置き** (上流の Starlette 待ち)。**L7-22 は起票時点で既に充足していたことが判明し、記述訂正で閉じた。**
+- **性能基準値がある (R-12、G-4 の土台)。** `tools/perf_baseline.py` と、**4 plug × 3 op (`query` / `mutate` / `batch`) = 12 行 + MitateDB 2 plug × `cross_entity` = 2 行、計 14 行**の基準値がフェーズ8 設計 §11.2 に記録された (`--warmup 20 --n 200`、`commit=2ab4edc-dirty`)。**閾値は置いていない** (P-8)。**この基準値が §7 の 3 が言う「2 フェーズ安定」の起点である** — フェーズ9 と フェーズ10 の完了ゲートが同じ形で差分を添えた後に、ゲート化を審議する。
+- **フェーズ7 の残は WP-9 (公開ゲート) だけであり、着手条件は依然として依頼者の実行合図のみである。** フェーズ8 とは触るファイルが重ならなかった。
+- **開いている台帳項目**: **L7-2** (実 socket HTTP plug、フェーズ10)、**L7-19** (上流待ち)、**L6-5a** (`surfaces` の DB 側単一真実、フェーズ10)、および フェーズ8 が起票した **L8-2 / L8-3 (閉) / L8-5 / L8-6 / L8-10 / L8-11 / L8-12 / L8-13** — 詳細はフェーズ8 設計 §10。
+
+### 1.1 現状 (2026-09-06 時点。§1.0 が上書きする)
 
 - **契約**: 1.6.0。能力 11 種、error code 17 種、limit class 16 種、共通条件 C-00〜C-19 の 20 件は**全件が共通 suite で実行可能** (four adapters)。
 - **フェーズ7**: 7-A (WP-1〜3) と 7-B の WP-4〜8 は main マージ済み (第 14 次引き継ぎ = `docs/work-orders/HANDOVER_20260906_FABLE.md`)。**残るのは WP-9 (公開ゲート) だけで、着手条件は依頼者の実行合図のみ**。
@@ -126,16 +144,24 @@
 - **WP-8** は完了した (main `ef9cade`)。本書への参照は第 14 次引き継ぎ §4-2 の末尾に 1 行で置いた。
 - **WP-9** 公開ゲート。着手条件は依頼者の実行合図のみ (L7-12 状態注記)。**公開は G-2 の「人から見て」を成立させる前提**であり、フェーズ8 以降のどの機能よりも先に価値を生む。フェーズ8 の着手を WP-9 の完了に**依存させない** (触るファイルが重ならない) が、順序としては WP-9 を先に置くことを推奨する。
 
-### フェーズ8 — 実効 bound と基盤衛生 (契約変更なし)
+### フェーズ8 — 実効 bound と基盤衛生 (契約変更なし) 【完了 (2026-09-07)】
+
+**【状態注記 2026-09-07】本節は完了した。** 正本は `docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` (**v1.3**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` (訂正註は §5) である。**main の最新 merge は `9f75428`、完了ゲートは `2340 passed, 5 warnings in 349.31s (0:05:49)` (failed 0 / xfailed 0 / skipped 0)。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
+
+- **完了条件 1「C-05 V3 の xfail が 0 (または実測で残る class とその理由が台帳に載る)」= 充足。** **xfail は 0 である。** `operation_depth` が in-process / HTTP の両面で `enforced` になったため、残った class は無い (設計 §5 U-1 状態注記、§10 L8-3)。
+- **完了条件 2「CI に総数下限 job」= 充足。** `tools/check_collection_floor.py` を CI の 3.11 / 3.12 の両 job が pytest の前に走らせる。`conformance-tests/COLLECTION_FLOOR` = **2340**。
+- **完了条件 3「`spec/` に companion」= 充足。** `spec/CONTRACT_HISTORY.md` (**29 anchor**)。**契約 JSON は 0 バイト不変** (3 複製の sha256 が付録 A §A.0 と一致)。
+- **完了条件 4「R-12 の基準値が設計に記録される」= 充足。** **フェーズ8 設計 §11.2 に PERFRUN 行 + PERF 14 行**を記録した (本書 §5 が言う「設計 §13」はフェーズ7 の節番号の慣行であり、フェーズ8 では §11.2 である)。
+- **「再検討事項」の 2 件も決着した。** **`operation_depth` の枝** = 依頼者裁定 (A)、実装して両面 `enforced` (逃げ枝は条件不成立)。**性能ハーネスの plug 選択** = **4 plug 全部を測り、HTTP 2 plug は `transport=asgi-inprocess` とラベルして L7-2 前であることを記録した。**
 
 - **目的**: G-2 と G-4 の土台。宣言した bound が全 peer で実効であること、以後の契約改版に耐える計測と検知を置くこと。
 - **着手条件**: 依頼者の着手裁定。WP-9 との並行可 (触るファイルが重ならない)。
 - **範囲**:
   - **L7-1** MitateDB application plane の `execution_ms` / `concurrency` / `requests_per_minute` / `operation_depth` の実 enforcement (in-process `request_bytes` は副項目) + port への in-flight 保持 primitive + C-05 V3 xfail の class ごとの撤去。**L7-21** (V2 の除外判定を peer 名固定から能力判定へ、port v1.12) を同梱する。同じ C-05 を触るためである。
   - **R-9** CI のテスト総数下限 (前回 main の `--collect-only` 件数を下限とし、減少は明示の更新なしに赤)。**L7-23** (register テストの収集 0 件ガード) と **L7-22** (現行行へ台帳 ID 2 件を戻す) を同梱する。
-  - **R-10** 契約 JSON の現行/履歴分離。WP-7 の companion 方式 (`*_HISTORY.md`、ID ごとの anchor、register テスト) を `spec/` に適用。**契約の意味は 1 文字も変えない** (1.6.0 のまま)。分離の検査は「現行 JSON から経緯マーカーが消えたこと」と「companion に逐語で残ること」。
+  - **R-10** 契約 JSON の現行/履歴分離。WP-7 の companion 方式 (`*_HISTORY.md`、ID ごとの anchor、register テスト) を `spec/` に適用。**契約の意味は 1 文字も変えない** (1.6.0 のまま)。分離の検査は「現行 JSON から経緯マーカーが消えたこと」と「companion に逐語で残ること」。 **【改版 2026-09-07 (R-14)。上の文は起票時の原文であり、消さずに残す】** **本フェーズの R-10 は「provenance companion (契約 JSON は 0 バイト不変) + register テストによる網羅性の固定」である。** **検査文「現行 JSON から経緯マーカーが消えたこと」は不成立であり、採らなかった** — 根拠は**逐語インベントリ (フェーズ8 設計 付録 A、2026-09-06)** であり、**マーカーを含む 29 値のうち「値全体が経緯叙述」であるものは 0 件、29 値すべてにマーカーと現行の規範文が同居し、18 件は `test_contract.py` の PIN = 依頼者確定文言として逐語固定されている**。したがって**規範文を書き換えずに消せるマーカーは 0 件**である。**採った検査は (i) 常設スキャナが列挙する JSON パス集合 = companion の anchor 集合 (過不足なし)、(ii) 各 anchor の引用が契約値と byte 一致、(iii) 導入版が `Since X.Y.Z` と一致 (対象 17 件)、(iv) ruling 参照が `CCR_DISPOSITION.md` の見出しに実在、(v) 見出しの重複なし・配下が非空**である。**(B) (29 値の接頭辞 / 挿入句の剥離) はフェーズ9 (契約 1.7.0) へ送った** — 18 件の PIN = 依頼者確定文言の再確定が要るため、版が上がるフェーズで扱えば再確定が 1 回で済むからである (依頼者裁定 2026-09-06 = 監督推奨どおり、フェーズ8 設計 §5 U-2 / §10 L8-4 / L8-8)。
   - **R-11** 運用項目: deployment smoke test (provision 後に capabilities / catalog / 1 query を実打ちして終了コードで返す)、**L7-18** の `ops verify-declarations` を**両 peer に同型で**追加、backup/restore の手順と実証記録 (r2db)、ops CLI の引数に secret を取る経路の検査 (両 peer)。**L7-19** は constraints の Starlette 更新と同一コミットで ignore を外す (撤去条件が満たせる版があれば本フェーズで行う)。
-  - **R-12** 性能基準値: 両 peer × 4 plug に対する query / mutate / cross-entity の p50 / p95 を測る使い捨てでないハーネス (`tools/`) と、完了ゲートに添える集計行の形式。**閾値は置かない** (P-8)。
+  - **R-12** 性能基準値: 両 peer × 4 plug に対する query / mutate / cross-entity の p50 / p95 を測る使い捨てでないハーネス (`tools/`) と、完了ゲートに添える集計行の形式。**閾値は置かない** (P-8)。 **【改版 2026-09-07 (R-14)。上の文は起票時の原文であり、消さずに残す】** **op 名は「query / mutate / batch (+ `cross_entity` は `cross_entity_mutation` が `unavailable` でない plug のみ)」である。** **根拠: r2db は `cross_entity_mutation: unavailable` を宣言しており、拒否経路の費用は性能基準値の対象ではない** (拒否の費用を測っても意味のある比較にならない)。**3 列目は両 peer で比較可能な唯一の複数操作単位である `batch` (単一 entity の atomic mutation batch、操作数 5) を採った。** **監督裁定 2026-09-06、フェーズ8 設計 D-6。出力は 4 plug × 3 op = 12 行 + MitateDB 2 plug × `cross_entity` = 2 行、計 14 行である。**
 - **守るべき条件**: 契約変更ゼロ。L7-1 は C-05 の既存の駆動集合規則に従う。R-10 は WP-7 の規約を再利用し新方式を作らない。
 - **完了条件**: C-05 V3 の xfail が 0 (または実測で残る class とその理由が台帳に載る)、CI に総数下限 job、`spec/` に companion、R-12 の基準値が設計 §13 に記録される。
 - **再検討事項**: `operation_depth` の枝 (L7-1)。性能ハーネスの plug 選択 (HTTP plug を含めるか。L7-2 前なので in-process TestClient 経路になる点を記録する)。
@@ -195,7 +221,7 @@
 
 依頼者は高性能を大前提と述べたが、**現時点でリポジトリに計測は存在しない**。既知の観測は L6-15 (MitateDB の宣言型 registry 参照が insert 2 回・query 3 回の往復を増やす) のみで、数値は無い。したがって、
 
-1. フェーズ8 の R-12 で基準値を取る。対象は両 peer × 4 plug の query / mutate / cross-entity、指標は p50 / p95 と 1 要求あたりの DB 往復数。
+1. フェーズ8 の R-12 で基準値を取る。対象は両 peer × 4 plug の query / mutate / cross-entity、指標は p50 / p95 と 1 要求あたりの DB 往復数。 **【訂正註 2026-09-07 (R-14)。上の文は起票時の原文であり、消さずに残す】** **実際の op 名は「query / mutate / batch (+ `cross_entity` は `cross_entity_mutation` が `unavailable` でない plug = MitateDB 2 plug のみ)」である** (§5 の R-12 行の改版と同じ。根拠: r2db は `cross_entity_mutation: unavailable` であり、拒否経路の費用は対象外。監督裁定 2026-09-06、フェーズ8 設計 D-6)。**指標名も「DB 往復数」ではなく `backend_calls` (backend 呼び出し回数) である** — **ラップ点の粒度が 4 plug で揃わないので plug 間で比較してはならず、比較の意味を持つのは同一 plug の版間の差分だけである** (フェーズ8 設計 §10 L8-11 / §11.2 の注記)。**基準値は 2026-09-07 に取得済みであり (フェーズ8 設計 §11.2)、下記 3 の「2 フェーズ安定」の起点は本基準値である。**
 2. 以後の各フェーズは完了ゲートに差分を添える (P-8)。
 3. 退行の扱いは初期は記録のみとし、基準値が 2 フェーズ安定した後にゲート化を審議する。**閾値を先に置かない**のは、閾値が bound として機能を縛る形 (P-5) になるのを避けるためである。
 4. 性能のために同型性 (P-6) や宣言の真実性 (P-3) を崩す案は採らない。L6-15 のキャッシュは、宣言の変更が cell open 時に見えること (Q4 の visibility 規律) を守る形でのみ入れる。
@@ -214,10 +240,10 @@
 | **R-6** | request budget (3 class から) | フェーズ9 |
 | **R-7** | 成功応答の `request_id` | フェーズ9 |
 | **R-8** | 契約 JSON から派生する機械可読の操作カタログ + 再生成一致テスト | フェーズ9 |
-| **R-9** | CI のテスト総数下限 (+ L7-23 収集 0 件ガード、L7-22 台帳 ID 復帰) | フェーズ8 |
-| **R-10** | 契約 JSON の現行/履歴分離 (WP-7 方式) | フェーズ8 |
-| **R-11** | 運用項目: smoke test、L7-18 `ops verify-declarations` (両 peer)、backup/restore 実証 (r2db)、ops CLI 引数の secret 経路検査、L7-19 の撤去 | フェーズ8 |
-| **R-12** | 性能基準値ハーネスと集計行形式 | フェーズ8 |
+| **R-9** | CI のテスト総数下限 (+ L7-23 収集 0 件ガード、L7-22 台帳 ID 復帰) | **フェーズ8 完了 (2026-09-07)**。`conformance-tests/COLLECTION_FLOOR` = 2340、検査は `tools/check_collection_floor.py` (CI の 3.11 / 3.12 の両 job)。L7-23 のガードは設置済み。**L7-22 は起票時点で既に充足していたことが判明し、記述訂正で閉じた** (フェーズ8 設計 §10 L8-1) |
+| **R-10** | 契約 JSON の現行/履歴分離 (WP-7 方式) | **フェーズ8 完了 (2026-09-07)**。 **【改版 2026-09-07 (R-14)。上の内容欄は起票時の原文であり、消さずに残す】** 実施した形は **provenance companion (`spec/CONTRACT_HISTORY.md`、29 anchor。契約 JSON は 0 バイト不変)** である。**検査文「現行 JSON から経緯マーカーが消えたこと」は、逐語インベントリ (フェーズ8 設計 付録 A、2026-09-06) が「値全体が経緯叙述の値は 0 件、29 値すべてにマーカーと現行規範文が同居、18 件は PIN された依頼者確定文言」と実測したため不成立であり、採らなかった。** 代わりに **register テスト (集合一致 / 引用の byte 一致 / 導入版の照合 17 件 / ruling の実在 / 重複なし・非空)** で網羅性を固定した。**(B) 接頭辞剥離はフェーズ9 (契約 1.7.0) へ送った** (フェーズ8 設計 §10 L8-4 / L8-8) |
+| **R-11** | 運用項目: smoke test、L7-18 `ops verify-declarations` (両 peer)、backup/restore 実証 (r2db)、ops CLI 引数の secret 経路検査、L7-19 の撤去 | **フェーズ8 完了 (2026-09-07)**。`tools/deploy_smoke.py`、両 peer の `ops verify-declarations` (**L7-18 は閉じた**)、`docs/ops/BACKUP_RESTORE_R2DB.md` と実証記録、argv secret の常設検査 (**修正前 6 件 → 修正後 0 件**) が入った。**L7-19 だけは撤去条件未達のまま据え置きである** — 上流の Starlette に当該参照を直した版が無い (フェーズ8 設計 §10 L8-2) |
+| **R-12** | 性能基準値ハーネスと集計行形式 | **フェーズ8 完了 (2026-09-07)**。 **【改版 2026-09-07 (R-14)】** op 名は **query / mutate / batch (+ `cross_entity` は `cross_entity_mutation` が `unavailable` でない plug のみ)** である (根拠: r2db は `cross_entity_mutation: unavailable`、拒否経路の費用は対象外。監督裁定 2026-09-06)。`tools/perf_baseline.py` と **PERF 14 行**の基準値がフェーズ8 設計 §11.2 にある。**閾値は無い** (P-8)。**§7 の 3 が言う「2 フェーズ安定」の起点は本基準値である** |
 | **R-13** | 保留項目 (§3.2) の実需記録の置き場。公開後の実利用で現行契約では表現できない要求が出たとき、本表に日付・要求・不足する契約要素を 1 行で記す。これが CCR-01 の「表現力不足の実証」になる | フェーズ11 以降 |
 | **R-14** | 本書の改版規約: 判定 (§3, §6) を覆すときは、覆した根拠と日付を該当行に残し版数を上げる。行を消さない | 本書 |
 
