@@ -268,8 +268,23 @@ def _host_suffix_match(host: str, suffixes) -> bool:
     return False
 
 
+def _last_label_cannot_be_a_tld(host: str) -> bool:
+    """A host whose LAST label contains a hyphen (and is not an IDN `xn--`
+    label) cannot be a public internet name: no TLD contains a hyphen. Such
+    tokens are fragments -- typically a synthetic URL split across two
+    string literals, where the `.example.invalid` suffix sits on the next
+    line (WP-9 preflight, 2026-09-06: history mode saw exactly that shape).
+    Deny-suffix hosts (`*.run.app`, `*.cloudfunctions.net`,
+    `*.gserviceaccount.com`) always end in a hyphen-free label, so this
+    never waves a deny-suffix host through."""
+    last = host.lower().rstrip(".").rsplit(".", 1)[-1]
+    return "-" in last and not last.startswith("xn--")
+
+
 def r2_url_flag(host: str, placeholder_removed: bool = False) -> bool:
     h = host.lower().rstrip(".")
+    if _last_label_cannot_be_a_tld(h):
+        return False
     # Rework item 2: the deny suffixes (run.app / cloudfunctions.net) are
     # checked before ANY GENERIC allow determination -- including the
     # ALLOW_HOST_EXACT / "." shortcut / r1_domain_allowed's malformed-
@@ -340,6 +355,8 @@ def _is_code_attribute_chain(h: str) -> bool:
 
 def r2_fqdn_flag(host: str, placeholder_removed: bool = False) -> bool:
     h = host.lower().rstrip(".")
+    if _last_label_cannot_be_a_tld(h):
+        return False
     # Rework item 2: deny suffixes checked before any generic allow
     # determination (see r2_url_flag above for the same reordering and its
     # three narrow, specifically-scoped exceptions).
@@ -401,6 +418,14 @@ def r3_number_in_hex_or_uuid_context(line: str, start: int, end: int) -> bool:
 # ones included).
 # ---------------------------------------------------------------------------
 R4_CREDENTIAL_RE = re.compile(r"\b[a-z]{2,5}_[0-9a-f]{16}\b")
+
+
+def _r4_obviously_synthetic(val: str) -> bool:
+    """The hex half is the ascending digit run `0123456789abcdef` or a single
+    repeated character -- shapes no issued credential_id takes, used only as
+    documentation examples (WP-9 preflight, 2026-09-06)."""
+    hexpart = val.split("_", 1)[1]
+    return hexpart == "0123456789abcdef" or len(set(hexpart)) == 1
 
 
 def r4_synthetic_annotation_nearby(line: str, prev_line: str) -> bool:
@@ -526,6 +551,11 @@ class Scanner:
 
         # R1 email
         for m in R1_EMAIL_RE.finditer(residual_line):
+            if not re.search(r'[A-Za-z0-9]', m.group(0).split('@', 1)[0]):
+                # A local part made only of symbols ('+', '-', '.') is not an
+                # e-mail address; it is a diff marker or punctuation glued to an
+                # '@'-decorator (WP-9 preflight, 2026-09-06).
+                continue
             val = m.group(0)
             self.counts["R1_email:total"] += 1
             domain = val.split("@", 1)[1]
@@ -579,7 +609,7 @@ class Scanner:
         for m in R4_CREDENTIAL_RE.finditer(residual_line):
             val = m.group(0)
             self.counts["R4_credential_id:total"] += 1
-            if r4_synthetic_annotation_nearby(line, self._r4_prev_line):
+            if r4_synthetic_annotation_nearby(line, self._r4_prev_line) or _r4_obviously_synthetic(val):
                 self.counts["R4_credential_id:synthetic"] += 1
             else:
                 self._flag(path, lineno, "R4_credential_id", val)
@@ -708,6 +738,13 @@ def scan_history(scanner: Scanner) -> tuple[int, int]:
         if line.startswith("+++ b/") or line.startswith("--- a/"):
             current_file = line[6:]
             continue
+        # Patch content lines carry a one-character diff marker ('+', '-' or
+        # ' ') that is NOT part of the file content. Strip exactly one marker
+        # before scanning: left in place, a leading '+' becomes the local
+        # part of an e-mail match (a plus sign directly before an at-sign and a dotted decorator name reads as R1), which flooded
+        # the history mode with false positives (WP-9 preflight, 2026-09-06).
+        if line[:1] in "+- " and not (line.startswith("+++") or line.startswith("---")):
+            line = line[1:]
         scanner.scan_line(f"history:{current_file}", lineno, line)
     return n_commits, n_lines
 
