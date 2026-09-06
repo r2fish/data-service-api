@@ -814,7 +814,7 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mut
 ## 9. 完了ゲート
 
 1. **root suite の単独実行** `./.venv/bin/python -m pytest -q -n 5 --dist loadgroup` (監督が単独で実行。`ps` で他の pytest が 0 件であることを確認してから。ローカル PG の `max_connections = 300` が前提):
-   - **`xfailed` = 0** (U-1 (A) の場合) **または 2** (U-1 (B) の場合)
+   - **`xfailed` = 0** (U-1 裁定 (A)。**実測で in-process の `operation_depth` 1 組が残る場合のみ 1**、§5 U-1 裁定のとおり理由を C-05 行と §10 に開示する) **【v1.2 訂正: 旧「または 2 (U-1 (B))」は裁定前の枝であり無効】**
    - **`skipped` = 0**
    - **`failed` = 0**
 2. **CI の 3.11 job の集計行が 1 の集計行と一致すること。** `tally-consistency` job が緑 (**3.11 / 3.12 の 4 数の一致。collect 件数は突合対象に足さない** — §6.4)。**collection floor step が 3.11 / 3.12 の両 job で緑であること。**
@@ -853,7 +853,7 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mut
 | 完了ゲート (root suite 単独実行) | (未記入) | `./.venv/bin/python -m pytest -q -n 5 --dist loadgroup`、監督単独実行、日付・branch head を添える |
 | CI 3.11 job の集計行 | (未記入) | run URL または run id、`tally-consistency` の結果 |
 | `--collect-only -q` の件数 (ゲート時) | (未記入) | `COLLECTION_FLOOR` の更新後の値 |
-| C-05 V3 の `xfailed` 件数と内訳 | (未記入) | U-1 の裁定結果に対応する件数 (0 または 2) と、残った (plug, class) の組 |
+| C-05 V3 の `xfailed` 件数と内訳 | (未記入) | U-1 裁定 (A) に対応する件数 (0、実測で in-process 1 組が残る場合は 1) と、残った (plug, class) の組 |
 | R-10 の記録 | (未記入) | **U-2 (A)**: 契約 JSON・両 peer packaged 複製 2 本の sha256 (付録 A §A.0 の値と一致すること = 0 バイト不変)、常設スキャナが列挙した JSON パス件数 (= companion の anchor 件数)。**U-2 (B)**: main `472e2ac` の契約 JSON とマニフェスト逆適用後の deep-equal 比較 (差分 0 と走査キー数) |
 | argv secret 静的規則の出力 | (未記入) | **修正前と修正後の両方を逐語で記録する** (常設規律 5、§3 D-5)。修正前 = 6 件 (6 行そのもの)、**修正後 = 0 件**。走査コマンドと `files scanned: N hits: M` 行を残す |
 | backup / restore 実証 | (未記入) | 復元前後の catalog と 1 query の結果が一致したこと、`ops verify-declarations` と smoke test の終了コード。**実行したコマンドを逐語で残す** (§9 の 6) |
