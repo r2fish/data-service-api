@@ -210,12 +210,21 @@ _DEFAULT_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 def _migrations_dir() -> Path:
-    # `R2DB_MIGRATIONS_DIR` is not part of the documented environment
-    # contract -- added purely so this repository's own tests can point
+    # `R2DB_MIGRATIONS_DIR` IS now a documented, operational environment
+    # variable (POSTGRES_PROVISIONING_RUNBOOK.md §17 -- also listed in the
+    # §10 environment-variable table; supervisor ruling 2026-09-06 M-2(a) --
+    # reversing this comment's previous "not part of the documented
+    # environment contract" / "a real deployment never sets this" stance;
+    # M-2(a) rework the same day narrowed this reference from "§16/§17" to
+    # "§17" alone, since §16 itself never gained R2DB_MIGRATIONS_DIR text):
+    # pip 非 editable インストールでは既定解決が効かないため、
+    # 配備では migrations ディレクトリを本変数で指定する (part1 が設定する)。
+    # `deploy/scripts/part1_provision_host_and_db.sh` sets it explicitly
+    # around its own `ops upgrade-applications` call for exactly this
+    # reason. This repository's own tests also use it, unchanged, to point
     # `upgrade-applications` at a throwaway directory holding a synthetic
-    # per-application upgrade script, the same escape-hatch reasoning
-    # `_schema()`'s own `R2DB_PLATFORM_SCHEMA` comment gives. A real
-    # deployment never sets this.
+    # per-application upgrade script -- the same escape-hatch reasoning
+    # `_schema()`'s own `R2DB_PLATFORM_SCHEMA` comment gives.
     override = os.environ.get("R2DB_MIGRATIONS_DIR")
     return Path(override) if override else _DEFAULT_MIGRATIONS_DIR
 

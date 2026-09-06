@@ -613,24 +613,58 @@ r2dbsvc-control.service` (the second unit, isomorphic to `deploy/systemd/
 r2dbsvc-api.service` except unit name/port/`EnvironmentFile`/`ExecStart`),
 `deploy/nginx/r2dbsvc-api-8443.conf.example`'s own `location /control/v1/`
 block, and `deploy/scripts/` (`part1_provision_host_and_db.sh` through
-`0007`+the first application, `part1b_control_credential_reset.sh` for
-step 4 below, `part2_enable_units_and_nginx.sh` for installing/enabling
-both units and the nginx listener together and verifying both fail closed
-with no credential). `deploy/scripts/lint_deploy_assets.sh` is the
-syntax-level check the `deploy-assets` CI job runs against all of the
+`0008`+the first application+`ops declare-surfaces`/`upgrade-applications`,
+`part1b_control_credential_reset.sh` for step 4 below,
+`part2_enable_units_and_nginx.sh` for installing/enabling both units and the
+nginx listener together, checking both `EnvironmentFile`s carry none of the
+four Q4-removed variables and that `api.env`'s `R2DB_CONTROL_PLANE_STATUS`
+agrees with whether part1 declared a control surface (F-6), verifying both
+fail closed with no credential, showing the platform declarations
+(diagnostic only) and verifying the per-application platform-upgrade
+ledger). `deploy/scripts/lint_deploy_assets.sh`
+is the syntax-level check the `deploy-assets` CI job runs against all of the
 above (unit files, the nginx example, and the scripts themselves) -- it
 does not perform a deployment.
 
-**Gap to close by hand until the scripts catch up (recorded 2026-09-05, Q4
-phase WP-5).** `deploy/scripts/part1_provision_host_and_db.sh` was written
-before the Q4 phase and applies `0001`/`0002`/`0005`/`0006`/`0007` plus the
-first application's `0003` -- **it does not apply `0008`, and it does not run
-`ops declare-surfaces`**. A host provisioned by that script alone therefore
-has both processes refusing to start (F-8, then F-3). After running it, apply
-`0008` and declare the surfaces by hand per `POSTGRES_PROVISIONING_RUNBOOK.md`
-§16, and check the ledger with `ops upgrade-status` (§17), before installing
-the units. Updating the script itself is deploy-asset work outside the Q4
-phase's document WP.
+**Gap closed (Phase 7 WP-3 addendum, ledger LQ4-24, 2026-09-06; rework the
+same day per external review).**
+`deploy/scripts/part1_provision_host_and_db.sh` previously applied only
+`0001`/`0002`/`0005`/`0006`/`0007` plus the first application's `0003` -- it
+never applied `0008` and never ran `ops declare-surfaces`, so a host it alone
+provisioned left both processes refusing to start (F-8, then F-3). The script
+now also verifies, just before `0008` runs, that `R2DBSVC_API_ROLE`/
+`R2DBSVC_CONTROLPLANE_ROLE` equal the literal role names `0005`/`0006`
+actually create and that both are present in `pg_roles` (L-3), applies `0008`
+(with those same two required variables, fail-fast on the same discipline as
+`R2DBSVC_API_PASSWORD`), declares `surfaces` via `ops declare-surfaces`
+(required `R2DBSVC_DATA_BASE_URL`; `R2DBSVC_CONTROL_BASE_URL` is OPTIONAL,
+mirroring that subcommand's own CLI shape -- H-1 -- with `--no-control` used
+when it is unset), records which of the two this run declared in a small
+state file under `R2DBSVC_INSTALL_ROOT` for part2 to read back, and brings
+every registered application's per-application platform-upgrade ledger
+current via `ops upgrade-applications` -- all before printing "part 1
+complete". `part2_enable_units_and_nginx.sh` now also refuses to install/
+start either unit while its own `EnvironmentFile` still defines any of the
+four Q4-removed variables (F-1/F-2's own hazard, checked regardless of
+value, an empty string included) or while `api.env`'s
+`R2DB_CONTROL_PLANE_STATUS` disagrees with part1's control-surface marker
+(F-6, checked BEFORE either `systemctl enable --now` -- see step 3 below for
+the resulting operator ordering). Both of those checks, and the placeholder/
+existence checks feeding them, read the root-owned `0600` `EnvironmentFile`s
+through `sudo` throughout, branching on the underlying `grep`/`test` exit
+code so that a check that cannot actually run (rc >= 2: a permission or I/O
+error) stops the script rather than being read as "not found" (H-2). Its
+closing step then shows `ops show-declarations` purely for a human to read
+(never gating anything on its exit code -- M-1) and verifies `ops
+upgrade-status` (failing the script, not merely warning, if anything is
+still pending) alongside the existing 401 checks (guarded against a
+connection-refused target reporting a raw curl failure instead of the
+intended "answered 000" diagnostic -- L-2). A host provisioned and brought
+up entirely through `part1_provision_host_and_db.sh` +
+`part2_enable_units_and_nginx.sh` now needs no more by-hand steps for `0008`/
+`declare-surfaces`/the ledger than any other migration this runbook already
+assumes scripted -- see those two scripts' own header comments for the exact
+variable contract.
 
 1. Create a dedicated `EnvironmentFile` (e.g. `/etc/r2dbsvc/control.env`),
    root-owned, mode `0600`, containing the table above (copy
@@ -639,7 +673,41 @@ phase's document WP.
    provisions the database objects this file's DSNs point at; placing the
    file itself is still a manual, per-target step (this repository never
    holds a real value for it).
-2. Install the second systemd unit, `deploy/systemd/
+2. **When provisioning through `part1_provision_host_and_db.sh` +
+   `part2_enable_units_and_nginx.sh`, set `R2DB_CONTROL_PLANE_STATUS=enabled`
+   in the application-plane `api.env` NOW, BEFORE running
+   `part2_enable_units_and_nginx.sh` in step 3 below** (supervisor ruling
+   2026-09-06 H-1; this step's own number was moved ahead of the "install/
+   run part2" step below in the H-1(c) rework the same day, so the numbered
+   sequence itself now matches this instruction -- previously this note sat
+   at a later step number than "install the second unit"/"run part2",
+   which an operator working through the steps in order could read
+   backwards). This script pair always stands **both** systemd units up
+   together in one run, unlike a control plane added by hand to an
+   already-running data plane later: part2's own F-6 preflight checks this
+   variable against whether `part1_provision_host_and_db.sh` declared a
+   control surface, and refuses BEFORE either `systemctl enable --now` if
+   they disagree. Within one successful part2 run (step 3 below), it
+   enables both systemd units FIRST and only THEN verifies each answers
+   `401` with no credential -- a run that fails that verification exits
+   non-zero without reverting the units it already enabled, so it is a
+   part2 run actually reaching "part 2 complete" that closes the window
+   between "`api.env` claims a control surface" and "part2 has verified it
+   reachable", not merely starting the run.
+   **Adding a control-plane process by hand to an application plane that is
+   already running, without these scripts**, keeps the general rule this
+   step used to state: **only after** the control-plane process is
+   genuinely running and reachable, set `R2DB_CONTROL_PLANE_STATUS=enabled`
+   in `api.env` and restart `r2dbsvc-api.service`. This is a deployer
+   *declaration* (`r2db_api.main` cannot detect the control plane's actual
+   reachability on its own -- R-9); setting it before the control-plane
+   process is actually reachable creates a declaration/behavior mismatch
+   (`/v1/capabilities` claiming `control_plane: enabled` with nothing
+   listening). The authoritative check for "is a separated control plane
+   actually reachable" is always the control plane's own
+   `GET /control/v1/capabilities`, never the application plane's
+   declaration.
+3. Install the second systemd unit, `deploy/systemd/
    r2dbsvc-control.service`, pointing `ExecStart=` at `uvicorn r2db_api.
    control_main:app` on its own internal port, following the same
    account/port-collision checks as §2 steps 1 and 3 above -- and add the
@@ -648,19 +716,15 @@ phase's document WP.
    block. `part2_enable_units_and_nginx.sh` performs both halves of this
    step together (install/enable both units, install the nginx listener,
    verify both surfaces answer `401` with no credential) once the
-   `EnvironmentFile`s from step 1 are in place; it refuses to install any
-   file that still contains an unresolved `REPLACE_ME_*` placeholder.
-3. **Only after** the control-plane process is genuinely running and
-   reachable, set `R2DB_CONTROL_PLANE_STATUS=enabled` in the
-   **application-plane** process' own `api.env` and restart
-   `r2dbsvc-api.service`. This is a deployer *declaration*
-   (`r2db_api.main` cannot detect the control plane's actual reachability on
-   its own -- R-9); setting it before the control-plane process is actually
-   reachable creates a declaration/behavior mismatch (`/v1/capabilities`
-   claiming `control_plane: enabled` with nothing listening). The
-   authoritative check for "is a separated control plane actually
-   reachable" is always the control plane's own `GET /control/v1/capabilities`,
-   never the application plane's declaration.
+   `EnvironmentFile`s from step 1 are in place AND `api.env` already carries
+   the `R2DB_CONTROL_PLANE_STATUS` value step 2 above requires; it refuses
+   to install any file that still contains an unresolved `REPLACE_ME_*`
+   placeholder, and refuses outright, before enabling either unit, on a
+   host that declared no control surface at all (supervisor ruling
+   2026-09-06 A10) -- this script pair assumes a deployment standing up
+   BOTH surfaces together; a genuinely control-less ("data-only") host
+   follows this section's steps by hand instead (§2 above for the
+   application plane alone), never running `part2_enable_units_and_nginx.sh`.
 4. **Bootstrap the first control credential** (exactly once per platform
    database, ever -- see `POSTGRES_PROVISIONING_RUNBOOK.md` §12 for the full
    ritual and its lockout/recovery paths):
