@@ -8,8 +8,12 @@
 -- (created by 0001) AS the `r2dbsvc_control` role -- the same role/connection
 -- 0002/0005/0006/0007 already run as. Run once, after 0007:
 --
---   psql "$R2DBSVC_CONTROL_DSN" -f 0008_platform_declarations_and_writer_timeouts.sql \
+--   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0008_platform_declarations_and_writer_timeouts.sql \
 --        -v api_role=r2dbsvc_api -v controlplane_role=r2dbsvc_controlplane
+--
+-- `-v ON_ERROR_STOP=1` (WP-4 rework round 2, supervisor ruling 2026-09-06,
+-- wp4-rework-2.md #2) must be passed on every `-f` invocation -- without
+-- it, psql exits 0 even when a statement in this file errors out.
 --
 -- `-v api_role=...`/`-v controlplane_role=...` (rework round, D-2(h) point
 -- 1: "migration は psql 変数で role 名を受ける既存様式に従う", the SAME

@@ -973,6 +973,177 @@ def cmd_show_declarations(_args: argparse.Namespace) -> int:
 
 
 # ===========================================================================
+# Phase 8 WP-4 (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md
+# D-5 decision 1/2, work order docs/work-orders/
+# WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md §2 WP-4): `ops verify-
+# declarations` -- a machine-checkable "is this process' declared platform
+# state one it could actually start against" gate, run OUT OF BAND against
+# the provision DSN, before or after a deployment. Reuses the SAME
+# `platform_declarations` check functions the composition roots call at
+# startup (never a second, independent copy of the checks); the only new
+# code here is the exit-code table and the one-line-per-check driver.
+# `_VERIFY_DECLARATIONS_EXIT_CODES`/`_VERIFY_DECLARATIONS_READ_ORDER`/
+# `_verify_declarations_ok`/`_verify_declarations_fail`/`_verify_
+# declarations_checks`/`cmd_verify_declarations` are ALL pinned isomorphic
+# to r2db-api's own same-named realizations (`_ISOMORPHIC_TARGETS`, WP-4
+# rework round 2, supervisor ruling 2026-09-06, wp4-rework-2.md #1).
+# `cmd_verify_declarations` reads its own required env var's NAME through
+# `platform_declarations.PROVISION_DSN_ENV` (already a peer-specific-VALUE
+# constant defined once in `platform_declarations.py`, the same technique
+# `PEER_MODULE`/`MIGRATION_NUMBER`/`CONTROL_PLANE_STATUS_ENV` already use
+# elsewhere in this file) rather than embedding the literal env var name
+# (`MITATEDB_PROVISION_DSN` here, `R2DB_CONTROL_DSN` on r2db-api) directly
+# in its own body -- the function's own AST, once its per-peer docstring
+# is stripped, therefore carries no peer-specific literal at all and
+# normalizes byte-identical to the sibling peer's realization.
+# ===========================================================================
+
+#: Design D-5 "実装の形 (a)": the fixed F-number -> exit code table. Both
+#: peers' own `platform_declarations.py` raise the SAME F-number for the
+#: SAME condition, so this table is verbatim on both peers.
+_VERIFY_DECLARATIONS_EXIT_CODES = {
+    "F-3": 3,
+    "F-3c": 4,
+    "F-4": 5,
+    "F-4b": 6,
+    "F-5": 7,
+    "F-8": 8,
+    "F-6": 9,
+    "F-7": 10,
+    "F-10": 10,
+    "F-11": 10,
+    "F-13": 11,
+    "F-9": 12,
+}
+
+#: `read_platform_declarations`'s own fixed internal order (that function's
+#: own docstring: table existence before row existence before value
+#: validation) -- drives the OK lines printed for every condition that
+#: check already passed before it either succeeded outright or raised on
+#: the one that failed.
+_VERIFY_DECLARATIONS_READ_ORDER = (
+    ("F-8", "declaration table present"),
+    ("F-3", "surfaces row present"),
+    ("F-4", "audit_coalescing_window_ms row present"),
+    ("F-5", "surfaces value valid"),
+    ("F-4b", "audit_coalescing_window_ms / audit_writer_roles value valid"),
+)
+
+
+def _verify_declarations_ok(code: str, description: str) -> None:
+    print(f"OK   {code}  {description}")
+
+
+def _verify_declarations_fail(exc: "platform_declarations.PlatformDeclarationError") -> int:
+    print(f"FAIL {exc.code}  {exc}")
+    return _VERIFY_DECLARATIONS_EXIT_CODES[exc.code]
+
+
+#: WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #2): this was
+#: previously inlined into `cmd_verify_declarations` itself, with the
+#: trailing "out of scope" line printed AFTER the `try/finally` that this
+#: logic lived inside -- every `return` here is a `return` out of that
+#: outer `try`, so the finally ran (closing the connection) but the code
+#: textually AFTER the finally block never did on any FAIL path. Splitting
+#: this into its own function that only ever RETURNS a code (never prints
+#: the trailing disclosure line itself) lets `cmd_verify_declarations`
+#: print that line exactly once, unconditionally, for every code this
+#: returns -- 0 through 12 alike.
+def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Namespace, schema: str) -> int:
+    try:
+        declarations = platform_declarations.read_platform_declarations(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER)
+    except platform_declarations.PlatformDeclarationError as exc:
+        for code, description in _VERIFY_DECLARATIONS_READ_ORDER:
+            if code == exc.code:
+                break
+            _verify_declarations_ok(code, description)
+        return _verify_declarations_fail(exc)
+    for code, description in _VERIFY_DECLARATIONS_READ_ORDER:
+        _verify_declarations_ok(code, description)
+
+    if args.control:
+        try:
+            platform_declarations.require_control_surface_declared(
+                declarations.surfaces, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+        except platform_declarations.PlatformDeclarationError as exc:
+            return _verify_declarations_fail(exc)
+        _verify_declarations_ok("F-3c", "surfaces.control present")
+
+    control_plane_status = os.environ.get(platform_declarations.CONTROL_PLANE_STATUS_ENV)
+    if control_plane_status is not None:
+        try:
+            platform_declarations.check_control_surface_consistency(
+                declarations.surfaces, control_plane_status, ops_module=platform_declarations.PEER_MODULE)
+        except platform_declarations.PlatformDeclarationError as exc:
+            return _verify_declarations_fail(exc)
+        _verify_declarations_ok("F-6", f"surfaces.control agrees with {platform_declarations.CONTROL_PLANE_STATUS_ENV}")
+
+    try:
+        platform_declarations.check_writer_role_timeouts(
+            conn, declared_roles=declarations.audit_writer_roles, schema=schema,
+            ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER)
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok("F-7/F-10/F-11/F-13/F-9", "connected role's writer timeout settings valid")
+    return 0
+
+
+def cmd_verify_declarations(args: argparse.Namespace) -> int:
+    """R-11 WP-4 (design D-5 decision 1/2): one line per check, OK/FAIL
+    prefixed, in `read_platform_declarations`'s own fixed order followed
+    by F-3c (only when `--control` is given), F-6 (only when this peer's
+    own `*_CONTROL_PLANE_STATUS` env var is defined), then the writer-role
+    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally. The first FAIL
+    stops the run and returns that F-number's own fixed exit code
+    (`_VERIFY_DECLARATIONS_EXIT_CODES`, via `_verify_declarations_checks`).
+
+    Exit codes follow design D-5 実装の形 (a) literally: 1 is a USAGE
+    error (this command's own required env var, `MITATEDB_PROVISION_DSN`,
+    is unset -- a mistake in how the command was invoked, never a check
+    result) and 2 is a real inability to connect once that DSN is known
+    (host down, auth rejected, etc.) -- "検査以前の失敗" distinct from
+    every F-numbered condition. This command therefore does NOT reuse the
+    shared `_provision_dsn()`/`_die()` pair other subcommands call (that
+    pair is SystemExit(2) for a missing env var, the opposite assignment
+    from this table) -- WP-4 rework (supervisor ruling 2026-09-06,
+    wp4-rework-1.md #7): those other subcommands' own `_die`=2 convention
+    predates this table and is out of this WP's scope to renumber; only
+    this command's own usage-error path is realigned to the table it is
+    the one that has to answer to. (`argparse`'s OWN native argument
+    errors -- e.g. an unrecognized flag -- still exit 2, Python's built-in
+    `ArgumentParser.error()` behavior for the whole CLI; redirecting THAT
+    would mean overriding `error()` on the shared parser, touching every
+    subcommand, not just this one -- reported as the table's one
+    unreachable cell rather than silently left inconsistent.)
+
+    F-1/F-2 (this process' own env, not readable from a provision DSN
+    connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
+    are out of this command's reach -- named, with the reason, on the last
+    output line, printed for every code `_verify_declarations_checks`
+    returns (0 through 12 alike), never only on the 0 path."""
+    schema = _schema()
+    dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
+    if not dsn:
+        print(f"error: {platform_declarations.PROVISION_DSN_ENV} is required", file=sys.stderr)
+        return 1
+    try:
+        conn = psycopg.connect(dsn, autocommit=True)
+    except psycopg.Error as exc:
+        print(f"error: cannot connect to platform database: {exc}", file=sys.stderr)
+        return 2
+    try:
+        rc = _verify_declarations_checks(conn, args, schema)
+    finally:
+        conn.close()
+    print(
+        "--   F-1/F-2/F-12  out of scope for this command: F-1/F-2 depend on this process' own environment, "
+        "not the provision DSN; F-12 is checked only at cell-open time"
+    )
+    return rc
+
+
+# ===========================================================================
 # Q4 phase D-4/D-5 (design docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md,
 # work order docs/work-orders/WORK_ORDER_Q4_DB_SIDE_SINGLE_TRUTH_V1.md §4
 # WP-4 変更対象 E): `upgrade-applications` (bulk-apply, provision DSN
@@ -1557,6 +1728,17 @@ def _build_parser() -> argparse.ArgumentParser:
              "hand-edited one -- does not itself enforce startup validation). Requires MITATEDB_PROVISION_DSN",
     )
     p.set_defaults(func=cmd_show_declarations)
+
+    p = sub.add_parser(
+        "verify-declarations",
+        help=(
+            "Phase 8 R-11: machine-checkable check of whether this process' declared platform state (as seen "
+            "from the provision DSN) allows it to start -- one line per check, exit code identifies the first "
+            "failing F-number (see docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-5)"
+        ),
+    )
+    p.add_argument("--control", action="store_true", help="also check F-3c (surfaces.control must be declared for a control-plane process)")
+    p.set_defaults(func=cmd_verify_declarations)
 
     # ---- Q4 phase per-application platform-upgrade command family
     # (design D-4/D-5) -- provision DSN only, same as the declaration

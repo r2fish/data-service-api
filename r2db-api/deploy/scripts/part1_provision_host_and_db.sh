@@ -266,28 +266,57 @@ sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install "${
 # ---------------------------------------------------------------------------
 
 log "0001_bootstrap_control_plane.sql (cluster admin)"
-psql "${R2DBSVC_BOOTSTRAP_ADMIN_DSN}" \
-    -v control_password="${R2DBSVC_CONTROL_PASSWORD}" \
-    -f "${R2DBSVC_MIGRATIONS_DIR}/0001_bootstrap_control_plane.sql"
+# Phase 8 WP-4 (design D-5 実装の形 (c)): psql `-v` puts the value on this
+# process' own argv, visible in `ps` output for the life of the psql
+# child. `\getenv` reads the SAME value from this shell's own environment
+# instead, inside a script piped over stdin -- never on argv at all.
+# WP-4 rework (supervisor ruling 2026-09-06, wp4-rework-1.md #1): without
+# `\set ON_ERROR_STOP on`, psql itself exits 0 even when `\i` names a
+# missing file or `\getenv` reads an unset/unexported env var (leaving
+# `:'control_password'` unresolved as a literal in the piped-in migration
+# -- an ERROR psql reports but does not fail on) -- `set -euo pipefail`
+# above cannot catch a NONZERO exit that never happens. Measured on this
+# machine's psql 16.14: both failure modes go from exit 0 to exit 3 once
+# this is the first line piped in.
+printf '%s\n' \
+    "\\set ON_ERROR_STOP on" \
+    "\\getenv control_password R2DBSVC_CONTROL_PASSWORD" \
+    "\\i ${R2DBSVC_MIGRATIONS_DIR}/0001_bootstrap_control_plane.sql" \
+  | psql "${R2DBSVC_BOOTSTRAP_ADMIN_DSN}"
 
 log "0002_provisioning_functions.sql (r2dbsvc_control)"
+# WP-4 rework round 2 (supervisor ruling 2026-09-06, wp4-rework-2.md #2):
+# this `-f` invocation carries no secret (no `\getenv`/`-v <...password...>
+# =` at all, so it was never in scope for the argv-secret prelude
+# conversion above) but was ALSO missing `\set ON_ERROR_STOP on`'s own
+# effect -- `-v ON_ERROR_STOP=1` is the `-f`-compatible equivalent (psql
+# applies a `-v` var of this exact name before running the file), closing
+# the same "silent exit 0 on a SQL error" gap 0001/0005/0006/0007/0003
+# already closed via the piped prelude above.
 psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0002_provisioning_functions.sql"
 
 log "0005_credential_store.sql (r2dbsvc_control, api_password)"
-psql "${R2DBSVC_CONTROL_DSN}" \
-    -v api_password="${R2DBSVC_API_PASSWORD}" \
-    -f "${R2DBSVC_MIGRATIONS_DIR}/0005_credential_store.sql"
+printf '%s\n' \
+    "\\set ON_ERROR_STOP on" \
+    "\\getenv api_password R2DBSVC_API_PASSWORD" \
+    "\\i ${R2DBSVC_MIGRATIONS_DIR}/0005_credential_store.sql" \
+  | psql "${R2DBSVC_CONTROL_DSN}"
 
 log "0006_control_plane_http.sql (r2dbsvc_control, controlplane_password)"
-psql "${R2DBSVC_CONTROL_DSN}" \
-    -v controlplane_password="${R2DBSVC_CONTROLPLANE_PASSWORD}" \
-    -f "${R2DBSVC_MIGRATIONS_DIR}/0006_control_plane_http.sql"
+printf '%s\n' \
+    "\\set ON_ERROR_STOP on" \
+    "\\getenv controlplane_password R2DBSVC_CONTROLPLANE_PASSWORD" \
+    "\\i ${R2DBSVC_MIGRATIONS_DIR}/0006_control_plane_http.sql" \
+  | psql "${R2DBSVC_CONTROL_DSN}"
 
 log "0007_application_audit.sql (r2dbsvc_control, auditreader_password)"
-psql "${R2DBSVC_CONTROL_DSN}" \
-    -v auditreader_password="${R2DBSVC_AUDITREADER_PASSWORD}" \
-    -f "${R2DBSVC_MIGRATIONS_DIR}/0007_application_audit.sql"
+printf '%s\n' \
+    "\\set ON_ERROR_STOP on" \
+    "\\getenv auditreader_password R2DBSVC_AUDITREADER_PASSWORD" \
+    "\\i ${R2DBSVC_MIGRATIONS_DIR}/0007_application_audit.sql" \
+  | psql "${R2DBSVC_CONTROL_DSN}"
 
 # ---------------------------------------------------------------------------
 # Role-name / pg_roles consistency check (supervisor ruling 2026-09-06
@@ -323,17 +352,27 @@ if [ -n "$missing_roles" ]; then
 fi
 
 log "0008_platform_declarations_and_writer_timeouts.sql (r2dbsvc_control, api_role=${R2DBSVC_API_ROLE} controlplane_role=${R2DBSVC_CONTROLPLANE_ROLE})"
+# WP-4 rework round 2 (supervisor ruling 2026-09-06, wp4-rework-2.md #2):
+# same gap and same fix as 0002 above -- `role`-named `-v` values are not
+# secrets (the argv-secret rule's own SECRET_WORD list does not match
+# `api_role`/`controlplane_role`, so they correctly stay on argv), but
+# this `-f` invocation still exited 0 on a SQL error before `-v
+# ON_ERROR_STOP=1` was added.
 psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
     -v api_role="${R2DBSVC_API_ROLE}" \
     -v controlplane_role="${R2DBSVC_CONTROLPLANE_ROLE}" \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0008_platform_declarations_and_writer_timeouts.sql"
 
 log "0003_provision_application.sql (r2dbsvc_control, application ${R2DB_APP_SLUG})"
-psql "${R2DBSVC_CONTROL_DSN}" \
-    -v app_slug="${R2DB_APP_SLUG}" \
-    -v runtime_password="${R2DB_APP_RUNTIME_PASSWORD}" \
-    -v developer_password="${R2DB_APP_DEVELOPER_PASSWORD}" \
-    -f "${R2DBSVC_MIGRATIONS_DIR}/0003_provision_application.sql"
+# `app_slug` is not a secret -- it stays a plain `-v` argument; only the
+# two passwords move to `\getenv`.
+printf '%s\n' \
+    "\\set ON_ERROR_STOP on" \
+    "\\getenv runtime_password R2DB_APP_RUNTIME_PASSWORD" \
+    "\\getenv developer_password R2DB_APP_DEVELOPER_PASSWORD" \
+    "\\i ${R2DBSVC_MIGRATIONS_DIR}/0003_provision_application.sql" \
+  | psql "${R2DBSVC_CONTROL_DSN}" -v app_slug="${R2DB_APP_SLUG}"
 
 # ---------------------------------------------------------------------------
 # Step 4 -- Q4 platform declarations this deployment must make before either

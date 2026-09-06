@@ -120,7 +120,20 @@ REMOVED_SURFACE_ENV: tuple[str, ...] = ("MITATEDB_DATA_BASE_URL", "MITATEDB_CONT
 class PlatformDeclarationError(RuntimeError):
     """Every F-1..F-11/F-13 fail-fast condition this module raises. A
     composition-root startup failure only -- never mapped to a contract
-    error code, never returned over HTTP (design §3.8's own SI-10 note)."""
+    error code, never returned over HTTP (design §3.8's own SI-10 note).
+
+    Phase 8 WP-4 (design PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-5
+    decision 2): `code` is the structured F-number attribute `ops
+    verify-declarations` maps to its own fixed exit code table -- added so
+    that command never has to prefix-match this exception's own message
+    text. The message text itself is UNCHANGED by this addition (every
+    `_fN_message`/`_fNx_message` builder above is untouched; only the
+    `raise PlatformDeclarationError(...)` call sites below now also pass
+    `code=`)."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -185,7 +198,7 @@ def reject_removed_timeout_env(env: Mapping[str, str], *, names: tuple[str, ...]
     `os.environ` (design D-1(d))."""
     for name in names:
         if name in env:
-            raise PlatformDeclarationError(_f1_message(name))
+            raise PlatformDeclarationError(_f1_message(name), code="F-1")
 
 
 def reject_removed_surface_env(env: Mapping[str, str], *, names: tuple[str, ...], schema: str) -> None:
@@ -196,7 +209,7 @@ def reject_removed_surface_env(env: Mapping[str, str], *, names: tuple[str, ...]
     may override it."""
     for name in names:
         if name in env:
-            raise PlatformDeclarationError(_f2_message(name, schema=schema))
+            raise PlatformDeclarationError(_f2_message(name, schema=schema), code="F-2")
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +291,7 @@ def validate_coalescing_window_value(value: object, *, schema: str, ops_module: 
     Python `int` subclass -- rejected explicitly, since PostgreSQL's own
     jsonb `true`/`false` must never silently read back as `1`/`0`."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise PlatformDeclarationError(_f4b_window_message(schema, value, ops_module=ops_module))
+        raise PlatformDeclarationError(_f4b_window_message(schema, value, ops_module=ops_module), code="F-4b")
     return value
 
 
@@ -305,7 +318,7 @@ def validate_audit_writer_roles_value(value: object, *, schema: str, ops_module:
         and all(_PG_IDENTIFIER_PATTERN.fullmatch(item) is not None and len(item) <= _PG_IDENTIFIER_MAX_LENGTH for item in value)
     )
     if not is_valid:
-        raise PlatformDeclarationError(_f4b_writer_roles_message(schema, value, migration=MIGRATION_NUMBER))
+        raise PlatformDeclarationError(_f4b_writer_roles_message(schema, value, migration=MIGRATION_NUMBER), code="F-4b")
     return tuple(value)
 
 
@@ -321,13 +334,13 @@ def _validate_base_url(field: str, raw: Any, *, suffix: str, schema: str, ops_mo
     stay in place for `config.py`/`cell.py`'s unrelated, pre-existing
     env-var-shaped re-validation, untouched by this change."""
     if not isinstance(raw, str) or not raw:
-        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module), code="F-5")
     parsed = urlsplit(raw)
     if not parsed.scheme or not parsed.netloc:
-        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module), code="F-5")
     without_trailing_slash = raw[:-1] if raw.endswith("/") else raw
     if not without_trailing_slash.endswith(suffix):
-        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module), code="F-5")
     # `/control/v1` itself ends with the substring `/v1` -- `surfaces.data.
     # base_url`'s own `suffix="/v1"` check alone would otherwise ACCEPT a
     # value that is actually a control-surface URL. `surfaces.control.
@@ -335,9 +348,9 @@ def _validate_base_url(field: str, raw: Any, *, suffix: str, schema: str, ops_mo
     # value never satisfies its own `suffix="/control/v1"` check in the
     # first place).
     if suffix == "/v1" and without_trailing_slash.endswith("/control/v1"):
-        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module), code="F-5")
     if raw.endswith("/"):
-        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message(field, suffix, raw, schema=schema, ops_module=ops_module), code="F-5")
     return raw
 
 
@@ -346,14 +359,14 @@ def validate_surfaces_value(value: object, *, schema: str, ops_module: str) -> S
     `surfaces.data.base_url` unconditionally required, `surfaces.control.
     base_url` optional."""
     if not isinstance(value, dict) or not isinstance(value.get("data"), dict) or "base_url" not in value["data"]:
-        raise PlatformDeclarationError(_f5_message("surfaces.data.base_url", "/v1", value, schema=schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f5_message("surfaces.data.base_url", "/v1", value, schema=schema, ops_module=ops_module), code="F-5")
     data_url = _validate_base_url("surfaces.data.base_url", value["data"]["base_url"], suffix="/v1", schema=schema, ops_module=ops_module)
 
     control_url: Optional[str] = None
     if "control" in value:
         control = value["control"]
         if not isinstance(control, dict) or "base_url" not in control:
-            raise PlatformDeclarationError(_f5_message("surfaces.control.base_url", "/control/v1", control, schema=schema, ops_module=ops_module))
+            raise PlatformDeclarationError(_f5_message("surfaces.control.base_url", "/control/v1", control, schema=schema, ops_module=ops_module), code="F-5")
         control_url = _validate_base_url("surfaces.control.base_url", control["base_url"], suffix="/control/v1", schema=schema, ops_module=ops_module)
 
     return Surfaces(data_base_url=data_url, control_base_url=control_url)
@@ -380,12 +393,12 @@ def read_platform_declarations(conn: "psycopg.Connection", *, schema: str, ops_m
             rows = dict(cur.fetchall())
     except psycopg.errors.UndefinedTable as exc:
         conn.rollback()
-        raise PlatformDeclarationError(_f8_message(schema, migration=migration)) from exc
+        raise PlatformDeclarationError(_f8_message(schema, migration=migration), code="F-8") from exc
 
     if "surfaces" not in rows:
-        raise PlatformDeclarationError(_f3_message(schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f3_message(schema, ops_module=ops_module), code="F-3")
     if "audit_coalescing_window_ms" not in rows:
-        raise PlatformDeclarationError(_f4_message(schema, ops_module=ops_module, migration=migration))
+        raise PlatformDeclarationError(_f4_message(schema, ops_module=ops_module, migration=migration), code="F-4")
 
     surfaces = validate_surfaces_value(rows["surfaces"], schema=schema, ops_module=ops_module)
     window_ms = validate_coalescing_window_value(rows["audit_coalescing_window_ms"], schema=schema, ops_module=ops_module)
@@ -436,9 +449,9 @@ def check_control_surface_consistency(surfaces: Surfaces, control_plane_status: 
     composition の F-6 出力は撤去し、F-3c を出す")."""
     has_control = surfaces.control_base_url is not None
     if has_control and control_plane_status == "unavailable":
-        raise PlatformDeclarationError(_f6_forward_message(ops_module=ops_module))
+        raise PlatformDeclarationError(_f6_forward_message(ops_module=ops_module), code="F-6")
     if not has_control and control_plane_status != "unavailable":
-        raise PlatformDeclarationError(_f6_reverse_message(control_plane_status, ops_module=ops_module))
+        raise PlatformDeclarationError(_f6_reverse_message(control_plane_status, ops_module=ops_module), code="F-6")
 
 
 def require_control_surface_declared(surfaces: Surfaces, *, schema: str, ops_module: str) -> None:
@@ -448,7 +461,7 @@ def require_control_surface_declared(surfaces: Surfaces, *, schema: str, ops_mod
     regardless of any env var (there is no `*_CONTROL_PLANE_STATUS`-style
     knob on this side to consult, unlike F-6's data-plane check)."""
     if surfaces.control_base_url is None:
-        raise PlatformDeclarationError(_f3c_message(schema, ops_module=ops_module))
+        raise PlatformDeclarationError(_f3c_message(schema, ops_module=ops_module), code="F-3c")
 
 
 # ---------------------------------------------------------------------------
@@ -571,12 +584,12 @@ def read_declared_role_timeouts(conn: "psycopg.Connection", role: str, *, ops_mo
 
     missing = [key for key in _TIMEOUT_KEYS if key not in values]
     if missing:
-        raise PlatformDeclarationError(_f7_message(role, ops_module=ops_module, migration=migration))
+        raise PlatformDeclarationError(_f7_message(role, ops_module=ops_module, migration=migration), code="F-7")
     for key in _TIMEOUT_KEYS:
         if values[key] <= 0:
-            raise PlatformDeclarationError(_f10_message(role, key, values[key], ops_module=ops_module))
+            raise PlatformDeclarationError(_f10_message(role, key, values[key], ops_module=ops_module), code="F-10")
     if per_database_timeout_names:
-        raise PlatformDeclarationError(_f11_message(role, per_database_timeout_names[0]))
+        raise PlatformDeclarationError(_f11_message(role, per_database_timeout_names[0]), code="F-11")
     return RoleTimeoutCatalog(role=role, statement_ms=values[_STATEMENT_TIMEOUT_KEY], idle_ms=values[_IDLE_TIMEOUT_KEY])
 
 
@@ -621,15 +634,13 @@ def check_writer_role_timeouts(
     integers, never as rendered strings (F-9)."""
     role_name = _current_user(conn)
     if role_name not in declared_roles:
-        raise PlatformDeclarationError(_f13_message(role_name, declared_roles, schema=schema, ops_module=ops_module, migration=migration))
+        raise PlatformDeclarationError(_f13_message(role_name, declared_roles, schema=schema, ops_module=ops_module, migration=migration), code="F-13")
     declared = read_declared_role_timeouts(conn, role_name, ops_module=ops_module, migration=migration)
     effective_statement_ms, effective_idle_ms = read_effective_timeouts_ms(conn)
     if effective_statement_ms != declared.statement_ms:
-        raise PlatformDeclarationError(
-            _f9_message(role_name, _STATEMENT_TIMEOUT_KEY, declared.statement_ms, effective_statement_ms, ops_module=ops_module))
+        raise PlatformDeclarationError(_f9_message(role_name, _STATEMENT_TIMEOUT_KEY, declared.statement_ms, effective_statement_ms, ops_module=ops_module), code="F-9")
     if effective_idle_ms != declared.idle_ms:
-        raise PlatformDeclarationError(
-            _f9_message(role_name, _IDLE_TIMEOUT_KEY, declared.idle_ms, effective_idle_ms, ops_module=ops_module))
+        raise PlatformDeclarationError(_f9_message(role_name, _IDLE_TIMEOUT_KEY, declared.idle_ms, effective_idle_ms, ops_module=ops_module), code="F-9")
     return declared
 
 
