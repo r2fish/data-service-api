@@ -262,9 +262,38 @@ GRANT  SELECT ON public._mdb_platform_upgrades TO SESSION_USER;
 INSERT INTO public._mdb_platform_upgrades (upgrade_number, script_name) VALUES
     (6, '0006_declared_field_types_upgrade.sql'),
     (8, '0008_platform_upgrades_upgrade.sql'),
-    (9, '0009_field_constraints_upgrade.sql')
+    (9, '0009_field_constraints_upgrade.sql'),
+    (10, '0010_idempotency_records_upgrade.sql')
 ON CONFLICT (upgrade_number) DO NOTHING;
 -- Q4-WP4-LEDGER-END
+
+-- Phase 9 WP-3c (design docs/design/
+-- PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5, 追補 2
+-- S-a/S-b/S-f; 監督裁定集約 rulings-r5-r6.md I-1): the idempotency-record
+-- side table -- one row per `idempotency_key` this Application has
+-- committed a request under, still within its own `idempotency_
+-- retention_ms` window. Created here (a NEW application) and by
+-- `migrations/0010_idempotency_records_upgrade.sql` (an EXISTING one) --
+-- both reach the identical end state (design §8.1's own two-provisioning-
+-- path convention, matching `_mdb_platform_upgrades`/`_mdb_field_types`
+-- before it). UNLIKE `_mdb_schema_revision`/`_mdb_field_types` (developer-
+-- connection only) and LIKE `_mdb_platform_upgrades`, the runtime role
+-- needs a real, explicit grant here -- but FULL DML (`SELECT`/`INSERT`/
+-- `UPDATE`/`DELETE`), not the ledger's own read-only `SELECT`:
+-- `ApplicationCell.transact`'s own idempotency lookup/reap/write all run
+-- over the RUNTIME connection, the same one its own data DML already
+-- runs on (I-1's own "record は data tx と同一 tx で書く", applied to the
+-- mutate path). A schema-op idempotency write (`create_entity`/
+-- `add_field`/`alter_field`) instead runs over the DEVELOPER connection,
+-- alongside that op's own DDL -- the developer role already owns this
+-- table (it created it), so no separate grant is needed for that path.
+CREATE TABLE public._mdb_idempotency (
+    key            text        PRIMARY KEY,
+    digest         text        NOT NULL,
+    response_json  text        NOT NULL,
+    created_at_ms  bigint      NOT NULL
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON public._mdb_idempotency TO :"runtime_role";
 
 -- From here on, any table the developer role creates in `public` (i.e.
 -- every entity table `PostgresBackend.create_collection`/`add_field`

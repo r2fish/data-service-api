@@ -382,9 +382,12 @@ def _deny_provisional_field(field_name: str) -> None:
 
 # Phase 9 WP-3b: `dry_run`/`plan` removed -- `post_mutate`/`post_cross_
 # entity_mutate` below now pass both through to `session.transact()` for
-# real instead of gating them here. `budget` stays gated (WP-3d).
-_PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ("budget",)
-_PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ("budget",)
+# real instead of gating them here. Phase 9 WP-3c/WP-3d: `idempotency_
+# key`/`budget` removed too -- both now pass through for real, same
+# commit as `idempotency`/`request_budget` flipping to `enabled`
+# (`cell.py::ApplicationRuntime.capabilities`).
+_PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ()
+_PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ()
 # Phase 9 WP-3a (design docs/design/
 # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (4)):
 # `field_constraints`/`enum`/`nullable` removed from this gate -- same
@@ -393,11 +396,9 @@ _PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ("budget",)
 # each governs. Phase 9 WP-3b: `dry_run`/`plan` removed too -- same
 # commit as `dry_run` flipping to `enabled` and `post_schema` below
 # passing both through to `create_entity`/`add_field`/`alter_field` for
-# real. `budget`/`idempotency_key` are UNCHANGED -- their own
-# capabilities stay `unavailable` until WP-3d/WP-3e.
-_PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS = (
-    "budget", "idempotency_key",
-)
+# real. Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` removed too --
+# same reasoning as the mutation/query gates immediately above.
+_PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS = ()
 
 
 def _deny_first_provisional_field(body: Mapping[str, Any], field_names: tuple[str, ...]) -> None:
@@ -721,8 +722,12 @@ async def post_query(request: Request) -> Response:
         if "size" in page:
             page_size = page["size"]
 
+    # Phase 9 WP-3d (design D-6, B-4): `budget` now reaches `session.read`
+    # for real -- `ApplicationRuntime.read` (`cell.py`) is what turns it
+    # into `effective_limits` (`config.narrow_limits_by_budget`,
+    # `endpoint_kind="query"`) and validates it.
     rows = session.read(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size,
-                        request_id=_request_id(request))
+                        request_id=_request_id(request), budget=body.get("budget"))
     return JSONResponse({"items": rows, "next_page": None}, status_code=200)
 
 
@@ -823,8 +828,6 @@ async def post_mutate(request: Request) -> Response:
     # body entity field is rejected as an unknown field.") -- `entity`
     # is simply not in this schema's own property set.
     _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
-    if "idempotency_key" in body:
-        _deny_provisional_field("idempotency_key")
     _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS)
     # `transaction_raw` (rework, G-1): the digest must commit to the
     # request AS PRESENTED -- an omitted `transaction` and one explicitly
@@ -887,6 +890,15 @@ async def post_mutate(request: Request) -> Response:
         # never falls back to reconstructing them from `items`' own
         # internal execution vocabulary.
         entity=entity, digest_operations=digest_items,
+        # Phase 9 WP-3c/WP-3d (design D-5/D-6): `idempotency_key`/`budget`
+        # now reach `session.transact` for real -- both are the SINGLE
+        # request-level `MutationRequest` values (never per-operation on
+        # this endpoint's own wire shape), passed straight through as
+        # this method's own keywords (never folded onto `items`, unlike
+        # the in-process port's own convention -- see `cell.py::
+        # ApplicationCell.transact`'s own docstring for why both entry
+        # points converge correctly either way).
+        idempotency_key=body.get("idempotency_key"), budget=body.get("budget"),
     )
     affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
@@ -937,9 +949,10 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     comes from (per-operation `entity`, via `_scoped_mutation_item`,
     rather than one shared URL path segment).
 
-    `idempotency_key` is refused exactly like `post_mutate` does (P35-D3)
-    -- `ScopedMutationRequest` declares the same optional field, this
-    peer implements it nowhere. There is no `transaction` field on
+    Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` now reach `session.
+    transact` for real, exactly like `post_mutate` above (I-9: this
+    peer's own `transact()` dispatcher is shared by both endpoints, so
+    both honor them identically). There is no `transaction` field on
     `ScopedMutationRequest` at all (unlike `MutationRequest`) -- a
     cross-entity batch has no `best_effort` mode to refuse here.
 
@@ -952,8 +965,6 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     session = _authenticate(request)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["ScopedMutationRequest"], label="ScopedMutationRequest")
-    if "idempotency_key" in body:
-        _deny_provisional_field("idempotency_key")
     _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS)
 
     operations = body.get("operations")
@@ -974,6 +985,7 @@ async def post_cross_entity_mutate(request: Request) -> Response:
         items, request_id=_request_id(request),
         dry_run=body.get("dry_run", False), plan=body.get("plan"),
         digest_operations=digest_items,
+        idempotency_key=body.get("idempotency_key"), budget=body.get("budget"),
     )
     affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
@@ -1031,20 +1043,27 @@ async def post_schema(request: Request) -> Response:
     if not isinstance(session, ApplicationDeveloper):
         raise AuthorizationError("developer authority required")
 
-    # `digest_extra` (WP-3b closure, H-3 (b)): `destructive`/`confirmation`/
-    # `revision`/`index`/`unique` are real `SchemaOperationRequest`
-    # properties (`_check_object_shape` above already lets them through)
-    # that `create_entity`/`add_field`/`alter_field` below never read --
-    # they carry no meaning for any of the three real operations this
-    # dispatcher executes today -- but the contract still requires the
-    # plan token to commit to "every other field" the request presented
-    # (structured_operations.dry_run.plan). Forwarded to `cell.py`
-    # verbatim, unread and unvalidated here beyond the shape check above;
-    # whichever of the 5 the request did not carry stays entirely absent
-    # (G-1's own "省略された optional は key ごと無し" -- never backfilled
-    # to `None`/a default).
-    digest_extra = {key: body[key] for key in ("destructive", "confirmation", "revision", "index", "unique")
-                    if key in body}
+    # `digest_extra` (WP-3b closure, H-3 (b); Phase 9 WP-3d rework):
+    # `destructive`/`confirmation`/`revision`/`index`/`unique`/`budget`
+    # are real `SchemaOperationRequest` properties (`_check_object_shape`
+    # above already lets them through) that `create_entity`/`add_field`/
+    # `alter_field` below never read INTO the digest as a NAMED key of
+    # their own (`budget` IS read structurally, by `ApplicationDeveloper`
+    # above, to build `effective_limits` -- but the digest itself must
+    # still commit to the RAW value the request presented, per contract
+    # `structured_operations.idempotency.record`: "every other field,
+    # including budget ... is part of what a resend must match") -- the
+    # contract requires the plan/idempotency digest to commit to "every
+    # other field" the request presented (`structured_operations.dry_run.
+    # plan`) regardless. Forwarded to `cell.py` verbatim, unread and
+    # unvalidated here beyond the shape check above; whichever of the 6
+    # the request did not carry stays entirely absent (G-1's own "省略さ
+    # れた optional は key ごと無し" -- never backfilled to `None`/a
+    # default).
+    digest_extra = {
+        key: body[key] for key in ("destructive", "confirmation", "revision", "index", "unique", "budget")
+        if key in body
+    }
 
     if schema_operation == "create_entity":
         # M-3 (independent review): `SchemaOperationRequest.field_type` is
@@ -1174,7 +1193,8 @@ async def post_schema(request: Request) -> Response:
             entity, fields, field_types=(field_types_map if field_types_raw is not None else None),
             field_constraints=field_constraints,
             dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request), digest_extra=digest_extra)
+            request_id=_request_id(request), digest_extra=digest_extra,
+            idempotency_key=body.get("idempotency_key"), budget=body.get("budget"))
         response: dict[str, Any] = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]
@@ -1232,7 +1252,8 @@ async def post_schema(request: Request) -> Response:
             # plan token (reproduced: `audit_probe_wp3b.py` P-B).
             contract_type=field_type_raw, enum=body.get("enum"), nullable=body.get("nullable"),
             dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request), digest_extra=digest_extra)
+            request_id=_request_id(request), digest_extra=digest_extra,
+            idempotency_key=body.get("idempotency_key"), budget=body.get("budget"))
         response = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]
@@ -1264,7 +1285,8 @@ async def post_schema(request: Request) -> Response:
         result = session.alter_field(
             entity, field, enum=body.get("enum", UNCHANGED), nullable=body.get("nullable"),
             field_type=body.get("field_type"), dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request), digest_extra=digest_extra)
+            request_id=_request_id(request), digest_extra=digest_extra,
+            idempotency_key=body.get("idempotency_key"), budget=body.get("budget"))
         response = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]

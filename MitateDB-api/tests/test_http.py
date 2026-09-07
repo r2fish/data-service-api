@@ -26,7 +26,7 @@ from mitatedb_api.auth import Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
-from mitatedb_api.errors import CapabilityError, ValidationError
+from mitatedb_api.errors import CapabilityError, ResourceLimitError, ValidationError
 from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, _problem_for_exception, create_app
 
 # A RELATIVE import, not a bare `from test_postgres import ...`: this
@@ -1171,135 +1171,158 @@ def test_cross_entity_mutation_non_string_entity_is_validation_failed_not_servic
     assert response.json()["code"] == "VALIDATION_FAILED"
 
 
-def test_cross_entity_mutation_idempotency_key_is_capability_unsupported(app_a_stack):
-    response = _post(
+def test_cross_entity_mutation_idempotency_key_replays_via_http(app_a_stack):
+    """Phase 9 WP-3c (design D-5): `idempotency_key` on `ScopedMutation
+    Request` is real as of this commit -- a resend under the same key
+    replays the original result, over HTTP, on the cross-entity endpoint
+    exactly like the per-entity one (`test_c23_idempotency_semantics.py`
+    is the cross-peer evidence; this pins the HTTP wiring locally)."""
+    entity = "http_cem_idem_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    body = {
+        "operations": [{"operation": "insert", "entity": entity, "values": {"label": "cem-idem"}}],
+        "idempotency_key": "http-cem-idem-1",
+    }
+    first = _post(app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer, json_body=body)
+    assert first.status_code == 200, first.text
+    second = _post(app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer, json_body=body)
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+
+
+def test_cross_entity_mutation_budget_narrows_batch_items_over_http(app_a_stack):
+    """K-4 (WP-3cd audit §11 推奨7, N-6; 監督裁定集約 rulings-r5-r6.md
+    B-1): `http.py::post_cross_entity_mutate` reads `budget=body.get
+    ("budget")` and forwards it to `session.transact` -- the audit
+    measured that DROPPING that keyword left every existing test green
+    (`{scratchpad}` mutation probe). `ScopedMutationRequest.budget` names
+    the SAME `batch_items`/`execution_ms` classes `MutationRequest.
+    budget` does (B-1's single row for both `mutate`/`cross_entity`); this
+    pins the cross-entity endpoint's own real wiring the same way `test_
+    contract_1_7_0_budget_and_idempotency_are_real_over_http` above pins
+    the per-entity one."""
+    entity = "http_cem_budget_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    two_ops = _post(
         app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
-        json_body={"operations": [{"operation": "insert", "entity": "shared_items", "values": {"item_key": 1}}],
-                   "idempotency_key": "abc123"},
+        json_body={
+            "operations": [
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-a"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-b"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert two_ops.status_code == 200, two_ops.text
+    assert two_ops.json()["affected"] == 2
+    three_ops = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={
+            "operations": [
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-c"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-d"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-e"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
+    )
+    assert three_ops.status_code == 413, three_ops.text
+    assert three_ops.json()["code"] == "LIMIT_EXCEEDED"
+    assert three_ops.json()["details"]["limit_class"] == "batch_items"
 
 
-def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app_a_stack):
-    """Phase 9 WP-1 (contract 1.7.0, design D-1 (3); work order docs/
-    work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9),
-    completion condition 24): the packaged contract copy is already 1.7.0
-    (schema-accepts `dry_run`/`plan`/`budget`/`enum`/`nullable`/
-    `field_constraints`/`SchemaOperationRequest.idempotency_key`), but this
-    peer still declares `dry_run`/`request_budget` `unavailable` -- every
-    remaining gated field must be refused with `CAPABILITY_UNSUPPORTED`
-    (with `details.violated_declaration: capability` / `details.field`)
-    before anything executes, with no side effect.
-
-    Phase 9 WP-3a (design D-1 (4)): `field_constraints`/`enum`/`nullable`
-    REMOVED from this gate, same commit as `constraint_declarations`
-    flipping to `enabled` -- see `test_alter_field_real_http_round_trip`
-    and `MitateDB-api/tests/test_constraints_declaration.py` for their own
-    coverage of the real enforcement that replaces this gate for those
-    three fields.
-
-    Phase 9 WP-3b (design D-1 (4)): `dry_run`/`plan` REMOVED from this
-    gate too, same commit as `dry_run` flipping to `enabled` -- see
-    `MitateDB-api/tests/test_dry_run_and_plan.py` for the real dry_run/
-    plan behavior that replaces this gate for those two fields. `budget`
-    (WP-3d) and `idempotency_key` (WP-3c/WP-3e) remain gated here."""
-    entity = "http_gate_target"
+def test_contract_1_7_0_budget_and_idempotency_are_real_over_http(app_a_stack):
+    """Phase 9 WP-3c/WP-3d (design D-5/D-6): `budget`/`idempotency_key`
+    were the LAST two fields `test_contract_1_7_0_provisional_gate_
+    rejects_new_fields_before_execution` (this test's own predecessor,
+    WP-1/WP-3a/WP-3b) still refused with `CAPABILITY_UNSUPPORTED` -- both
+    now execute for real, on every entry point that gate used to cover
+    (query/mutate/cross-entity-mutate/schema), replacing that gate's own
+    negative coverage with real positive coverage, the same pattern
+    `test_constraints_declaration.py`/`test_dry_run_and_plan.py` already
+    established for the fields WP-3a/WP-3b flipped."""
+    entity = "http_budget_idem_target"
     _create_entity(app_a_stack, entity, fields=["label"])
 
-    # --- query: budget ---
+    # --- query: budget.result_items is honored, not refused. ---
     query_response = _post(
         app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer,
-        json_body={"select": ["label"], "budget": {"result_items": 1}},
+        json_body={"select": ["label"], "budget": {"result_items": 5}},
     )
-    assert query_response.status_code == 400
-    assert query_response.json()["code"] == "CAPABILITY_UNSUPPORTED"
-    assert query_response.json()["details"]["violated_declaration"] == "capability"
-    assert query_response.json()["details"]["field"] == "budget"
+    assert query_response.status_code == 200, query_response.text
 
-    # --- per-entity mutate: budget (no side effect) ---
-    for field_name, value in (("budget", {"batch_items": 1}),):
-        response = _post(
-            app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
-            json_body={"operations": [{"operation": "insert", "values": {"label": f"gate-{field_name}"}}], field_name: value},
-        )
-        assert response.status_code == 400, field_name
-        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", field_name
-        assert response.json()["details"]["violated_declaration"] == "capability", field_name
-        assert response.json()["details"]["field"] == field_name, field_name
-
-    # --- cross-entity mutate: budget (no side effect) ---
-    for field_name, value in (("budget", {"batch_items": 1}),):
-        response = _post(
-            app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
-            json_body={"operations": [{"operation": "insert", "entity": entity, "values": {"label": f"gate-cem-{field_name}"}}], field_name: value},
-        )
-        assert response.status_code == 400, field_name
-        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", field_name
-        assert response.json()["details"]["violated_declaration"] == "capability", field_name
-        assert response.json()["details"]["field"] == field_name, field_name
-
-    # No side effect from any gated mutate attempt above.
-    after_gate = _post(
-        app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer,
-        json_body={"select": ["label"]},
+    # --- per-entity mutate: budget narrows batch_items for real. ---
+    two_ops = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={
+            "operations": [
+                {"operation": "insert", "values": {"label": "budget-a"}},
+                {"operation": "insert", "values": {"label": "budget-b"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
     )
-    assert after_gate.status_code == 200
-    assert after_gate.json()["items"] == []
+    assert two_ops.status_code == 200, two_ops.text
+    assert two_ops.json()["affected"] == 2
+    three_ops = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={
+            "operations": [
+                {"operation": "insert", "values": {"label": "budget-c"}},
+                {"operation": "insert", "values": {"label": "budget-d"}},
+                {"operation": "insert", "values": {"label": "budget-e"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
+    )
+    assert three_ops.status_code == 413, three_ops.text
+    assert three_ops.json()["code"] == "LIMIT_EXCEEDED"
+    assert three_ops.json()["details"]["limit_class"] == "batch_items"
 
-    # --- schema: budget / idempotency_key (Phase 9 WP-3a: field_
-    # constraints / enum / nullable removed from this list; Phase 9
-    # WP-3b: dry_run / plan removed too -- see this function's own
-    # docstring). ---
-    schema_gate_cases = [
-        {"operation": "add_field", "entity": entity, "field": "gated_budget_field", "field_type": "string", "budget": {"execution_ms": 1}},
-        {"operation": "add_field", "entity": entity, "field": "gated_idempotency_field", "field_type": "string", "idempotency_key": "abc"},
-    ]
-    provisional_fields = {"budget", "idempotency_key"}
-    catalog_before = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
-    for case in schema_gate_cases:
-        response = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=case)
-        expected_field = next(k for k in case if k in provisional_fields)
-        assert response.status_code == 400, case
-        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", case
-        assert response.json()["details"]["violated_declaration"] == "capability", case
-        assert response.json()["details"]["field"] == expected_field, case
-    # No side effect: field additions above never landed.
+    # --- per-entity mutate: idempotency_key replays the original result. ---
+    idem_body = {"operations": [{"operation": "insert", "values": {"label": "idem-http"}}],
+                 "idempotency_key": "http-idem-key-1"}
+    idem_first = _post(app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer, json_body=idem_body)
+    assert idem_first.status_code == 200, idem_first.text
+    idem_second = _post(app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer, json_body=idem_body)
+    assert idem_second.status_code == 200, idem_second.text
+    assert idem_second.json() == idem_first.json()
+    idem_conflict = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "idem-http-other"}}],
+                   "idempotency_key": "http-idem-key-1"},
+    )
+    assert idem_conflict.status_code == 409
+    assert idem_conflict.json()["code"] == "CONFLICT"
+    assert idem_conflict.json()["details"]["violated_declaration"] == "idempotency_key"
+
+    # --- schema: budget.execution_ms and idempotency_key both apply for
+    # real. ---
+    schema_budget = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "add_field", "entity": entity, "field": "budgeted_field",
+                   "field_type": "string", "budget": {"execution_ms": 5000}},
+    )
+    assert schema_budget.status_code == 200, schema_budget.text
+    schema_idem_body = {"operation": "add_field", "entity": entity, "field": "idem_schema_field",
+                        "field_type": "string", "idempotency_key": "http-schema-idem-1"}
+    schema_idem_first = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=schema_idem_body)
+    assert schema_idem_first.status_code == 200, schema_idem_first.text
+    schema_idem_second = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=schema_idem_body)
+    assert schema_idem_second.status_code == 200, schema_idem_second.text
+    assert schema_idem_second.json() == schema_idem_first.json()
     catalog_after = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
-    assert catalog_after == catalog_before
     target_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == entity)
-    for gated_field in ("gated_budget_field", "gated_idempotency_field"):
-        assert gated_field not in target_fields_after
+    assert "budgeted_field" in target_fields_after
+    assert "idem_schema_field" in target_fields_after
 
 
-def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_stack):
-    """WP-1a rework item 6: the SAME contract 1.7.0 provisional gate as
-    `test_contract_1_7_0_provisional_gate_rejects_new_fields_before_
-    execution` above, exercised through the in-process surface
-    (`ApplicationRuntime`/`ApplicationDeveloper`, constructed directly
-    against `app_a_stack.cell` and `app_a_stack.read_store`, bypassing
-    `http.py` entirely) -- confirming the gate lives in `cell.py` itself,
-    not only at the HTTP boundary. Each case raises `CapabilityError` with
-    `details == {"violated_declaration": "capability", "field": <name>}`.
-    Includes an empty-string (`idempotency_key=""`) case specifically:
-    `ApplicationDeveloper.create_entity`'s gate used a bare truthy check
-    before this rework (WP-1a code review item 5), which silently let it
-    past uncaught since `""` is falsy -- `add_field`'s existing `is not
-    None` check already covered it and is exercised here too, for parity.
-
-    Phase 9 WP-3a (design D-1 (4)): the `field_constraints={}`
-    (`create_entity`) and `nullable=False` (`add_field`) cases this test
-    used to carry are REMOVED -- both fields are real, enforced
-    declarations as of this commit, no longer gated; see `MitateDB-api/
-    tests/test_constraints_declaration.py` for their own in-process
-    coverage.
-
-    Phase 9 WP-3b (design D-1 (4)): the `dry_run=True` `runtime.transact`
-    case this test used to carry is REMOVED -- `dry_run` is a real,
-    executed capability as of this commit, no longer gated; see
-    `MitateDB-api/tests/test_dry_run_and_plan.py` for its own in-process
-    coverage."""
-    entity = "in_process_gate_target"
+def test_contract_1_7_0_budget_and_idempotency_are_real_in_process(app_a_stack):
+    """WP-1a rework item 6's own predecessor exercised this SAME
+    provisional gate through the in-process surface -- see this test's
+    own HTTP-surface sibling immediately above for the full "gate ->
+    real behavior" narrative (Phase 9 WP-3c/WP-3d)."""
+    entity = "in_process_budget_idem_target"
     _create_entity(app_a_stack, entity, fields=["label"])
 
     runtime_principal = app_a_stack.read_store.authenticate(app_a_stack.runtime_bearer)
@@ -1307,52 +1330,65 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_sta
     runtime = ApplicationRuntime(app_a_stack.cell, runtime_principal, app_a_stack.read_store.assert_active)
     developer = ApplicationDeveloper(app_a_stack.cell, developer_principal, app_a_stack.read_store.assert_active)
 
-    with pytest.raises(CapabilityError) as excinfo:
-        runtime.read(entity, budget={"result_items": 1})
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
+    rows = runtime.read(entity, budget={"result_items": 5})
+    assert rows == []
 
-    with pytest.raises(CapabilityError) as excinfo:
-        runtime.transact([{"operation": "insert", "entity": entity, "values": {"label": "gate"}}], budget={"batch_items": 1})
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
+    result = runtime.transact(
+        [{"type": "insert", "collection": entity, "values": {"label": "ip-a"}},
+         {"type": "insert", "collection": entity, "values": {"label": "ip-b"}}],
+        budget={"batch_items": 2},
+    )
+    assert len(result) == 2
+    with pytest.raises(ResourceLimitError) as excinfo:
+        runtime.transact(
+            [{"type": "insert", "collection": entity, "values": {"label": "ip-c"}},
+             {"type": "insert", "collection": entity, "values": {"label": "ip-d"}},
+             {"type": "insert", "collection": entity, "values": {"label": "ip-e"}}],
+            budget={"batch_items": 2},
+        )
+    assert excinfo.value.details["limit_class"] == "batch_items"
 
-    with pytest.raises(CapabilityError) as excinfo:
-        developer.create_entity("in_process_gated_entity_2", fields={"label": "text"}, idempotency_key="")
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
+    key = "in-process-idem-1"
+    first = runtime.transact(
+        [{"type": "insert", "collection": entity, "values": {"label": "ip-idem"}}], idempotency_key=key)
+    second = runtime.transact(
+        [{"type": "insert", "collection": entity, "values": {"label": "ip-idem"}}], idempotency_key=key)
+    assert first == second
 
-    with pytest.raises(CapabilityError) as excinfo:
-        developer.add_field(entity, "in_process_gated_field_2", "text", idempotency_key="")
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
+    created = developer.create_entity("in_process_budget_idem_entity_2", fields={"label": "text"}, idempotency_key="schema-key-1")
+    replayed = developer.create_entity("in_process_budget_idem_entity_2", fields={"label": "text"}, idempotency_key="schema-key-1")
+    assert created == replayed
 
-    # No side effect from any gated in-process attempt above.
     catalog_after = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     entity_names_after = {e["entity"] for e in catalog_after["entities"]}
-    assert "in_process_gated_entity_2" not in entity_names_after
-    target_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == entity)
-    assert "in_process_gated_field_2" not in target_fields_after
+    assert "in_process_budget_idem_entity_2" in entity_names_after
 
 
 def test_contract_1_7_0_new_capabilities_are_declared_unavailable(app_a_stack):
     """Completion condition 25 (peer-local half): the 3 new capabilities
-    were declared `unavailable` in the SAME commit as the provisional gate
-    above (P-3) -- the common-suite half of this (defined ⊆ declared, all
-    14 names present) is `conformance-tests/test_c11_document_
-    conformance.py` (裁定 T-4).
+    named by this test's own original P-3 commit -- the common-suite half
+    of this (defined ⊆ declared, all 14 names present) is `conformance-
+    tests/test_c11_document_conformance.py` (裁定 T-4).
 
     Phase 9 WP-3a (design D-1 (4)): `constraint_declarations` flips to
     `enabled` in this SAME commit as the gate removal/real enforcement
-    above -- `dry_run`/`request_budget` stay `unavailable` until WP-3b/
-    WP-3d.
+    above.
 
-    Phase 9 WP-3b (design D-1 (4)): `dry_run` flips to `enabled` too, in
-    THIS commit -- `request_budget` alone stays `unavailable` until
-    WP-3d."""
+    Phase 9 WP-3b (design D-1 (4)): `dry_run` flips to `enabled` too.
+
+    Phase 9 WP-3d (design D-6, B-4): `request_budget` flips to `enabled`
+    too, in this SAME commit as `narrow_limits_by_budget`'s own real
+    enforcement (`config.py`) and the corresponding `http.py` gate
+    removal -- this test's own name now describes history (every field
+    the original gate covered has since flipped), kept for the same
+    declaration-vs-behavior pinning it always did."""
     response = _get(app_a_stack, "/v1/capabilities", bearer=app_a_stack.developer_bearer)
     assert response.status_code == 200
     capabilities = response.json()["capabilities"]
     assert capabilities["constraint_declarations"]["status"] == "enabled"
     assert capabilities["dry_run"]["status"] == "enabled"
-    assert "request_budget" in capabilities
-    assert capabilities["request_budget"]["status"] == "unavailable"
+    assert capabilities["request_budget"]["status"] == "enabled"
+    assert capabilities["idempotency"]["status"] == "enabled"
 
 
 def test_cross_entity_mutation_upsert_is_capability_unsupported(app_a_stack):

@@ -384,3 +384,82 @@ class StorageBackend:
         """Release any held connections/resources. A no-op is
         acceptable for a backend with nothing to release."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
+    # rulings-r5-r6.md I-1): idempotency record storage. `PostgresBackend`
+    # keeps these in an application-scoped side table (`_mdb_idempotency`,
+    # per-application upgrade 0010); `SQLiteBackend` keeps them in a
+    # private, process-local dict (this backend IS the process -- R-a).
+    # `ApplicationCell` is the sole caller: it looks these up (`idempotency_
+    # get`/`idempotency_reap_expired`/`idempotency_count`) BEFORE it ever
+    # calls `begin()`/a schema-mutating method, and writes exactly one
+    # (`record_idempotency`) as the LAST thing before its own commit point
+    # -- mirroring `audit_hook.pre_commit()`'s own "last thing before
+    # commit" placement, so a failed attempt (anything that keeps this
+    # backend's own transaction from committing) leaves no record.
+    # ------------------------------------------------------------------
+
+    def idempotency_get(self, key):
+        """Returns `{"digest": str, "response_json": str}` for `key`, or
+        `None` if this Application has no (unexpired) record for it.
+        Callers reap expired records first (`idempotency_reap_expired`),
+        so a non-`None` result here is always still within its own
+        retention window."""
+        raise NotImplementedError
+
+    def idempotency_reap_expired(self, now_ms, retention_ms):
+        """Deletes every record whose own `created_at_ms` is older than
+        `retention_ms` relative to `now_ms` -- lazy reclamation only, no
+        background thread/timer anywhere (design D-5: "an implementation
+        may delete elapsed records lazily")."""
+        raise NotImplementedError
+
+    def idempotency_count(self):
+        """Number of records THIS Application currently retains (after
+        the caller's own `idempotency_reap_expired` call) -- compared
+        against `FoundationConfig.idempotency_entries` at the lookup
+        stage, before execution."""
+        raise NotImplementedError
+
+    def record_idempotency(self, key, digest, response_json, now_ms):
+        """Writes (or replaces) one record, over the SAME connection/
+        transaction this backend is currently mid-commit on -- called by
+        `ApplicationCell.transact` immediately before `self.commit()`.
+        A backend method that manages its OWN internal transaction
+        (`create_collection`/`add_field`/`alter_field_constraints`) takes
+        an `idempotency_record` tuple instead (see each method's own
+        docstring) and writes it itself, at the identical "last thing
+        before commit" point, over whichever connection that DDL already
+        runs on."""
+        raise NotImplementedError
+
+    def idempotency_discard_pending(self, key):
+        """Phase 9 WP-3cd closure (監督裁定集約 rulings-r5-r6.md K-5, N-8):
+        undoes a `record_idempotency` write that turned out NOT to share
+        the data's own fate after all -- `ApplicationCell.transact`'s own
+        `except Exception:` handler calls this (unconditionally, whenever
+        `idempotency_key is not None`) immediately after `self.rollback()`,
+        mirroring the identical `self._idempotency.pop(idempotency_record
+        [0], None)` cleanup the 3 schema-mutating DDL methods' own
+        `except Exception:` blocks already perform. `key` not currently
+        pending is a no-op (never raises) -- exactly like those 3 DDL
+        methods' own `dict.pop(key, None)`, since the common, ordinary
+        case (an EARLIER failure, before `record_idempotency` was ever
+        reached) must not raise here either.
+
+        Necessary specifically because `transact`'s own `record_
+        idempotency`/`self.commit()` are two SEPARATE calls (unlike the
+        DDL methods' own single atomic backend call) -- on `PostgresBackend`
+        both already run on the SAME connection/transaction `self.rollback
+        ()` undoes together (a real no-op override is correct there); on
+        `SQLiteBackend`/the in-memory backend, `record_idempotency` writes
+        to a private, NON-transactional process-local dict (R-a) that a
+        SUBSEQUENT `self.commit()` failure's own `self.rollback()` cannot
+        retroactively undo -- without this method, that specific ordering
+        (`record_idempotency` succeeds, `self.commit()` then raises) would
+        leak a durable-looking idempotency record for data that was never
+        actually committed, so a resend under the SAME key would be
+        wrongly answered from that phantom record instead of executing
+        fresh."""
+        raise NotImplementedError
