@@ -43,10 +43,11 @@ from .errors import (AuthenticationError, AuthenticationRequiredError,
                      CapabilityError, ConflictError,
                      DestructiveConfirmationRequired, FoundationError,
                      NotFoundError, ResourceLimitError,
-                     StorageConfigurationError, ValidationError)
+                     StorageConfigurationError, ValidationError, violation,
+                     observed_type_of)
 from .http import (PROBLEM_CONTENT_TYPE, RequestByteBoundMiddleware,
                    _CredentialMissing, _extract_bearer,
-                   _read_json_object, _request_id)
+                   _read_json_object, _request_id, _schema_property_type_name)
 # Phase 6 WP-0 (design D-4(b)): `_SCHEMAS` is imported from `.http` rather
 # than this module loading its own second, independent copy of the
 # contract -- `.http` already owns the packaged-copy / `importlib.
@@ -143,15 +144,46 @@ def _generic_service_unavailable(request_id: str) -> JSONResponse:
 
 
 def _check_object_shape(value: Any, schema: Mapping[str, Any], *, label: str) -> Mapping[str, Any]:
+    """追補 4 O-1 (版フリップ監査 §14 疑義 1/§16, `{scratchpad}/rulings-r3-
+    r7-flip.md`): mirrors `http.py`'s own data-plane `_check_object_shape`
+    (V-6/L-4 rework) -- every denial here now carries `violated_
+    declaration: request_schema` too. Every call site in this module
+    passes `value` as the control-plane request BODY itself (never a
+    nested object), so there is no narrower `own_path` than the request
+    root: `field` is omitted for the "must be an object" leg (the whole
+    body is what failed, D-3 (4): a violation not attributable to one
+    position), and is the sole offending TOP-LEVEL key for the unknown-
+    field/missing-field legs (`None` when more than one key is at fault,
+    matching `_prepare_values`'s own "single unknown field names it,
+    multiple omit it" convention, V-6)."""
     if not isinstance(value, dict):
-        raise ValidationError(f"{label} must be an object")
+        raise ValidationError(
+            f"{label} must be an object",
+            details=violation("request_schema", declared_type="object", observed_type=observed_type_of(value)),
+        )
     allowed = set(schema.get("properties", {}))
     extra = set(value) - allowed
     if extra:
-        raise ValidationError(f"{label} contains unsupported fields: {sorted(extra)}")
+        sole = next(iter(extra)) if len(extra) == 1 else None
+        raise ValidationError(
+            f"{label} contains unsupported fields: {sorted(extra)}",
+            details=violation("request_schema", field=sole),
+        )
     missing = set(schema.get("required", [])) - set(value)
     if missing:
-        raise ValidationError(f"{label} is missing required fields: {sorted(missing)}")
+        sole = next(iter(missing)) if len(missing) == 1 else None
+        if sole is not None:
+            raise ValidationError(
+                f"{label} is missing required fields: {sorted(missing)}",
+                details=violation(
+                    "request_schema", field=sole,
+                    declared_type=_schema_property_type_name(schema, sole), observed_type="absent",
+                ),
+            )
+        raise ValidationError(
+            f"{label} is missing required fields: {sorted(missing)}",
+            details=violation("request_schema"),
+        )
     return value
 
 

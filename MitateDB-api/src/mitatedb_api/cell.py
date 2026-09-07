@@ -46,7 +46,7 @@ from .field_types import (
     json_type_name,
     validate_enum_declaration,
 )
-from .identifiers import validate_identifier
+from .identifiers import validate_identifier, is_identifier_syntax
 from .surfaces import build_surfaces
 
 # The common contract's own mutation vocabulary
@@ -1317,11 +1317,23 @@ class ApplicationCell:
                     # No `declared_type` (the named field is never
                     # created by this request, so it has none).
                     bad_field = sorted(unknown)[0]
+                    # 追補 4 O-3 (版フリップ監査 §4/§16): `bad_field` is a
+                    # RAW, unvalidated dict key -- it may be syntax-valid
+                    # (a real name the request simply never `fields`-
+                    # declared, safe to echo, N-1's own "有効だが存在しな
+                    # い field" precedent) or syntax-INVALID (may itself
+                    # carry a SQL fragment/control characters, the exact
+                    # r2db-api `field_constraints` leak the audit found --
+                    # capped at the container position `"field_
+                    # constraints"` instead, never echoing the raw key).
+                    field_path = (
+                        f"field_constraints/{bad_field}" if is_identifier_syntax(bad_field) else "field_constraints"
+                    )
                     raise ValidationError(
                         f"field_constraints names {bad_field!r}, which is not in fields",
                         details={
                             "violated_declaration": "constraint_declaration",
-                            "field": f"field_constraints/{bad_field}",
+                            "field": field_path,
                         },
                     )
             resolved_constraints = _resolve_field_constraints(
@@ -3026,12 +3038,16 @@ class ApplicationCell:
             )
         result = []
         for i, field in enumerate(requested):
-            # WP-3e rework T2 (追補 L-3): `select/<i>` -- the request's
-            # own list-index position, not a generic `"field"` literal
-            # (the value at this position may not even be a string, so
-            # there is no safe raw value to echo the way an already-
-            # syntax-valid identifier can be below).
-            field = self._identifier(field, f"select/{i}")
+            # WP-3e rework T2 (追補 L-3), corrected 追補 4 O-3 (版フリップ
+            # 監査 §4/§16, `{scratchpad}/rulings-r3-r7-flip.md`): the
+            # container position (`"select"`, the whole list's own
+            # request position), not a per-item indexed slot -- r2db-api's
+            # own form for this exact site (N-1's "両 peer 同形" -- an
+            # indexed slot was this peer's own pre-audit choice, now
+            # aligned). The value at this position may not even be a
+            # string, so there is no safe raw value to echo the way an
+            # already-syntax-valid identifier can be below.
+            field = self._identifier(field, "select")
             if field not in available:
                 # Phase 9 WP-3e (design D-3 (2)/(4)): mirrors `_prepare_
                 # values`'s identical "this entity has no field by this
@@ -3115,10 +3131,11 @@ class ApplicationCell:
                     "order_by must be an object or a non-empty list of objects",
                     details=violation("request_schema", field=f"order_by/{i}"),
                 )
-            # WP-3e rework T2 (追補 L-3): `order_by/<i>/field`, not the
-            # generic `"order field"` literal -- this predicate's own
-            # request-relative position.
-            field = self._identifier(item.get("field"), f"order_by/{i}/field")
+            # WP-3e rework T2 (追補 L-3), corrected 追補 4 O-3: the
+            # container position `order_by/<i>` (this predicate's own
+            # request-relative slot), not a trailing `/field` -- r2db-
+            # api's own form for this site (N-1's "両 peer 同形").
+            field = self._identifier(item.get("field"), f"order_by/{i}")
             if field not in available:
                 raise ValidationError(
                     "unknown order field",
@@ -3310,9 +3327,16 @@ class ApplicationCell:
             # there, matching its own unchanged external behavior) --
             # passed through so a type-mismatched value (e.g. a string for
             # a declared-`integer` column) is rejected deterministically
-            # here, before any statement reaches PostgreSQL.
+            # here, before any statement reaches PostgreSQL. 追補 4 O-2:
+            # `field`/`declared_type` are this value's own request-
+            # internal path (`_prepare_values`'s own path prefix, the
+            # SAME position `check_declared_value`'s own `except` clause
+            # above attaches) and contract-vocabulary declared type, so a
+            # backend-layer value-domain denial (NUL/lone surrogate/
+            # out-of-range) carries the same D-3 (4) 4-key form.
             params.append(self._backend.encode_value(
-                self._normalize_value_for_storage(value, declared_type), domain=available[field]))
+                self._normalize_value_for_storage(value, declared_type), domain=available[field],
+                field=f"{path_prefix}/{field}", declared_type=declared_type))
         return collection, fields, params
 
     @staticmethod
@@ -3389,7 +3413,15 @@ class ApplicationCell:
                     "filters must contain Filter values",
                     details=violation("request_schema", field=where_path),
                 )
-            field = self._identifier(item.field, f"{where_path}/field")
+            # 追補 4 O-3: the container position `where/<i>` itself
+            # (`where_path`), not a trailing `/field` -- r2db-api's own
+            # form for this identifier-syntax site (N-1's "両 peer 同形").
+            # The OTHER `f"{where_path}/field"` uses below (unsupported-
+            # operator/unrecognized-field) are a DIFFERENT violation
+            # category (capability/request_schema, about an already
+            # syntax-valid field name) -- O-3 scopes only the identifier-
+            # syntax container, not those.
+            field = self._identifier(item.field, where_path)
             if item.operator in _UNSUPPORTED_CONTRACT_OPERATORS:
                 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains`/
                 # `matches`/`is_null` are real members of the common
@@ -3450,8 +3482,14 @@ class ApplicationCell:
                 declared_type = declared_types.get(field)
                 for v in item.value:
                     self._check_predicate_value(v, declared_type, f"{where_path}/value")
+                # 追補 4 O-2: `field`/`declared_type` mirror `_check_
+                # predicate_value`'s own path immediately above (`where/
+                # <i>/value`) -- the value being checked, not the field
+                # position, exactly M-4's "述語値系は要求内パス" rule.
                 encoded = [
-                    self._backend.encode_value(self._normalize_value_for_storage(v, declared_type), domain=domain)
+                    self._backend.encode_value(
+                        self._normalize_value_for_storage(v, declared_type), domain=domain,
+                        field=f"{where_path}/value", declared_type=declared_type)
                     for v in item.value
                 ]
                 bound.append(Filter(field, "in", encoded))
@@ -3459,7 +3497,8 @@ class ApplicationCell:
                 declared_type = declared_types.get(field)
                 self._check_predicate_value(item.value, declared_type, f"{where_path}/value")
                 encoded = self._backend.encode_value(
-                    self._normalize_value_for_storage(item.value, declared_type), domain=available[field])
+                    self._normalize_value_for_storage(item.value, declared_type), domain=available[field],
+                    field=f"{where_path}/value", declared_type=declared_type)
                 bound.append(Filter(field, item.operator, encoded))
         return bound
 

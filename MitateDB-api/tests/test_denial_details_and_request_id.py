@@ -239,6 +239,72 @@ def test_identifier_violation_is_validation_failed_with_identifier_syntax(servic
     assert details.get("field")
 
 
+def test_identifier_syntax_violation_container_positions_match_r2db_form(service):
+    """追補 4 O-3 (版フリップ監査 §4/§16, `{scratchpad}/rulings-r3-r7-flip.
+    md`): the CONTAINER position an identifier-syntax violation reports
+    is aligned to r2db-api's own chosen form (N-1's "両 peer 同形") --
+    `select`/`where/<i>`/`order_by/<i>`/`operations/<i>/values`/`fields`/
+    `entity`/`field_constraints`, never this peer's own pre-audit
+    `select/<i>`/`where/<i>/field` indexed-then-`/field`-suffixed
+    forms."""
+    _, _, dev, runtime = service
+    dev.create_collection("o3_probe", {"title": "text"})
+
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("o3_probe", fields=["Not-Valid!"])
+    assert ctx.value.details["field"] == "select"
+
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("o3_probe", filters=[Filter("Not-Valid!", "eq", "x")])
+    assert ctx.value.details["field"] == "where/0"
+
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("o3_probe", order_by=[{"field": "Not-Valid!"}])
+    assert ctx.value.details["field"] == "order_by/0"
+
+    with pytest.raises(ValidationError) as ctx:
+        runtime.insert("o3_probe", {"Not-Valid!": "x"})
+    assert ctx.value.details["field"] == "operations/0/values"
+
+    with pytest.raises(ValidationError) as ctx:
+        dev.create_collection("o3_probe_2", {"Not-Valid!": "text"})
+    assert ctx.value.details["field"] == "fields"
+
+    with pytest.raises(ValidationError) as ctx:
+        dev.create_collection("Not-Valid!", {"title": "text"})
+    assert ctx.value.details["field"] == "entity"
+
+
+def test_field_constraints_unknown_key_syntax_invalid_is_capped_at_the_container(service):
+    """追補 4 O-3: `field_constraints` naming a key that is not only
+    unrecognized but itself SYNTAX-INVALID (may carry a SQL fragment/
+    control characters) must not echo that raw key into `details.field`
+    -- capped at the `field_constraints` container position instead (the
+    exact r2db-api leak the audit found and this peer now avoids
+    proactively). A syntax-VALID-but-unrecognized key keeps the existing,
+    safe `field_constraints/<name>` echo (N-1's own "有効だが存在しない
+    field" precedent) -- checked in the same test for contrast."""
+    _, _, dev, _runtime = service
+    with pytest.raises(ValidationError) as ctx:
+        dev.create_entity(
+            "o3_fc_probe", fields={"a": "text"},
+            field_constraints={"public.notes; DROP TABLE x--": {"nullable": False}},
+        )
+    details = ctx.value.details
+    assert details["violated_declaration"] == "constraint_declaration"
+    assert details["field"] == "field_constraints"
+    assert "DROP TABLE" not in repr(details)
+
+    with pytest.raises(ValidationError) as ctx:
+        dev.create_entity(
+            "o3_fc_probe_2", fields={"a": "text"},
+            field_constraints={"no_such_field_xyz": {"nullable": False}},
+        )
+    details = ctx.value.details
+    assert details["violated_declaration"] == "constraint_declaration"
+    assert details["field"] == "field_constraints/no_such_field_xyz"
+
+
 # ---------------------------------------------------------------------------
 # R-3: SI-10 -- details never carry a row value.
 # ---------------------------------------------------------------------------
@@ -595,6 +661,63 @@ def test_sqlite_backend_identifier_violation_label_is_entity_not_collection():
     with pytest.raises(ValidationError) as ctx:
         backend.field_domains("not a valid identifier!")
     assert ctx.value.details["field"] == "entity"
+
+
+# ---------------------------------------------------------------------------
+# 追補 4 O-2 (版フリップ監査 §5/§15, `{scratchpad}/rulings-r3-r7-flip.md`):
+# a backend-layer value-domain denial reached by a NORMAL client request
+# (never a direct `_validate_value_domain`/`encode_value` call bypassing
+# `cell.py`) must carry the same D-3 (4) 4-key `details` form every other
+# choke-point denial does -- the audit found these six sites (this
+# module's own SQLite-backed leg here; `tests/test_postgres.py`'s own leg
+# covers the two PostgreSQL-only conditions, embedded NUL and the
+# int32/int64 RANGE bound, that have no SQLite equivalent) returning an
+# EMPTY `details` for exactly this kind of ordinary insert. This is the
+# probe-based evidentiary basis `_BACKEND_LAYER_ALLOWLIST`'s own module
+# docstring in `test_l1_details_vocabulary_ast_scan.py` now points back
+# to for the two conditions SQLite's own `encode_value` still checks
+# (lone UTF-16 surrogate, out-of-64-bit-integer-range) -- "同じ入力で
+# in-memory 側が denial を出すか" is moot for these two (there genuinely
+# is no in-memory equivalent check), but the CLIENT-REACHABLE denial
+# itself must still be 4-key shaped, which is what this test pins.
+# ---------------------------------------------------------------------------
+
+
+def test_backend_value_domain_denials_reachable_from_a_normal_client_request_carry_the_4_key_form(service):
+    """SQLite leg (in-process plug): a lone UTF-16 surrogate code point in
+    a `text`-declared field, and an out-of-64-bit-range integer in an
+    `integer`-declared field, reached via `runtime.insert` exactly as an
+    ordinary client would -- never a direct backend call. Both must now
+    carry `violated_declaration: field_type` plus `declared_type`/
+    `observed_type`/`field` (D-3 (4)'s field_type type-pair rule), not an
+    empty `details` (追補 4 O-2's own finding)."""
+    _, _, dev, runtime = service
+    dev.create_collection("domain_probe", {"label": "text", "amount": "integer"})
+
+    with pytest.raises(ValidationError) as ctx:
+        runtime.insert("domain_probe", {"label": "\ud800"})
+    details = ctx.value.details
+    assert details["violated_declaration"] == "field_type"
+    assert details["declared_type"] == "string"
+    assert details["observed_type"] == "string"
+    assert details["field"] == "operations/0/values/label"
+
+    for big in (2 ** 80, -(2 ** 80)):
+        with pytest.raises(ValidationError) as ctx:
+            runtime.insert("domain_probe", {"amount": big})
+        details = ctx.value.details
+        assert details["violated_declaration"] == "field_type"
+        assert details["declared_type"] == "integer"
+        assert details["observed_type"] == "integer"
+        assert details["field"] == "operations/0/values/amount"
+
+    # The identical value-domain gate also runs at the `_bind_filters`
+    # predicate-value choke point (`where/<i>/value`, not a values path).
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("domain_probe", filters=[Filter("amount", "eq", 2 ** 80)])
+    details = ctx.value.details
+    assert details["violated_declaration"] == "field_type"
+    assert details["field"] == "where/0/value"
 
 
 # ---------------------------------------------------------------------------

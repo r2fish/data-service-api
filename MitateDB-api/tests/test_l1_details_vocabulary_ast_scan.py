@@ -23,18 +23,34 @@ Postgres/SQLite realization of that same check, and must carry the same
 allowlist this test itself verifies against real, current code, never a
 blanket file-name skip nobody checks.
 
-`config.py`/`control_plane.py` (also named in the WP-3e T1 work order as
-files to inspect for a data-plane choke point) are DELIBERATELY not
-members of `SCANNED_MODULES` below -- see each module's own boundary
-comment for why every `ValidationError`/`CapabilityError` site AST-
-visited while drafting this scan turned out to belong to a surface
-`errors.details_vocabulary` never covers (deployment-time `FoundationConfig`
-construction, or the control-plane credential/application-management
-API), except `config.py`'s own ONE genuine choke-point site
-(`_budget_denied`, D-6's `request_budget` gate), which
-`test_config_budget_denial_helper_carries_the_4_key_form` below verifies
-directly rather than folding into the whole-file scan.
-"""
+`config.py` (also named in the WP-3e T1 work order as a file to inspect
+for a data-plane choke point) is DELIBERATELY not a member of
+`SCANNED_MODULES` below -- see that module's own boundary comment (in
+`test_config_budget_denial_helper_carries_the_4_key_form` below) for why
+every OTHER `ValidationError`/`CapabilityError` site in it turned out to
+belong to a surface `errors.details_vocabulary` never covers (deployment-
+time `FoundationConfig` construction), except its own ONE genuine choke-
+point site (`_budget_denied`, D-6's `request_budget` gate), verified
+directly there rather than folded into the whole-file scan below.
+
+追補 4 O-1 (版フリップ監査 §14 疑義 1/§16, `{scratchpad}/rulings-r3-r7-
+flip.md`, 2026-09-08): `control_plane.py`/`control_http.py`/`audit_
+query.py` WERE excluded from `SCANNED_MODULES` by an earlier draft of
+this scan on the theory that `errors.details_vocabulary` applies only to
+the query/mutate/schema DATA-plane request surface -- the audit found
+this reading too narrow: contract `versioning.version_binding`'s 1.7.0
+unconditional obligation (a) says "**every** denial it answers with
+VALIDATION_FAILED ... or CAPABILITY_UNSUPPORTED", with no plane-scoped
+carve-out, and these three modules' own `VALIDATION_FAILED`/
+`CAPABILITY_UNSUPPORTED` denials (credential/application-management
+request-shape checks, the audit-evidence-query capability gate) reach a
+real client (an operator/control-credential holder) as problem+json
+exactly like a data-plane denial does. They are now full `SCANNED_
+MODULES` members -- `ops.py`/`control_auth.py`/`control_credential_
+store_postgres.py` stay OUT of scope (not named by O-1's own "12 + 4 +
+3" count, and their own `ValidationError`/`CapabilityError` sites are
+either deployment-time or duplicate a control_plane.py-level check
+already covered here)."""
 from __future__ import annotations
 
 import ast
@@ -42,85 +58,123 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 
-#: Contract 1.7.0 `errors.details_vocabulary` applies to the DATA-plane
-#: query/mutate/schema request surface (D-1/D-3) -- these 6 files are the
-#: full choke-point / request-shape layer for that surface plus its two
-#: backend realizations. `config.py`/`control_plane.py`/`audit_query.py`/
-#: `ops.py`/`control_auth.py`/`control_http.py`/`control_credential_
-#: store_postgres.py` also raise `ValidationError`/`CapabilityError` (see
-#: `{scratchpad}/wp3e-sites.md`'s own 147-site enumeration), but for the
-#: CONTROL-plane credential/application-management surface or deployment-
-#: time configuration -- out of this scan's scope by the same boundary
-#: r2db-api's own analogous scan draws around `control_plane.py`/
-#: `auth.py`/`credential_store.py`/`ops.py`, not an omission (every site
-#: in those files was read while drafting this scan; none of them is a
-#: request-shape check for a query/mutate/schema request).
-SCANNED_MODULES = ("cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py")
+#: Contract 1.7.0 `errors.details_vocabulary` applies to EVERY
+#: `VALIDATION_FAILED`/`IDENTIFIER_INVALID`/`CAPABILITY_UNSUPPORTED`
+#: denial this peer answers with, data-plane (D-1/D-3) AND control-plane
+#: (追補 4 O-1) alike -- these 9 files are the full choke-point/request-
+#: shape layer for both surfaces, plus the two data-plane backend
+#: realizations. `config.py`/`ops.py`/`control_auth.py`/`control_
+#: credential_store_postgres.py` also raise `ValidationError`/
+#: `CapabilityError` (see `{scratchpad}/wp3e-sites.md`'s own 147-site
+#: enumeration), but for deployment-time configuration or a surface O-1
+#: does not name -- out of this scan's scope (every site in those files
+#: was read while drafting this scan/O-1's own fix; `config.py`'s own
+#: ONE exception is verified separately, see above).
+SCANNED_MODULES = (
+    "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
+    "control_plane.py", "control_http.py", "audit_query.py",
+)
 
 _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 
-#: M-1 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2): the backend-
-#: layer allowlist is confined to denials that TRANSLATE a rejection the
-#: storage engine (or the physical value-domain encoding step) itself
-#: raised -- NOT to a re-implementation of a shape/capability check the
-#: in-memory `ApplicationCell` (or a module it calls into, `field_types.
-#: py`/`identifiers.py`) already performs. Two categories in each
-#: backend module ARE exactly that kind of re-implementation and were
-#: moved OFF this allowlist onto the 4-key form instead (this WP's own
-#: fix): the shared `check_reserved` identifier choke point (`identifiers.
-#: py`'s own module docstring names this as the backend-specific SECOND
-#: HALF of `cell.ApplicationCell._identifier`, always applied together
-#: with `identifiers.validate_identifier` -- not a redundant backstop for
-#: a check the cell layer already performs itself, since this backend IS
-#: the one place that reserved-name knowledge lives), and the `invalid
-#: order direction` `KeyError` backstop in each backend's own ORDER BY
-#: composition (the exact literal denial `cell.ApplicationCell._bind_
-#: order_by` already carries -- `test_backend_layer_allowlist_entries_
-#: have_no_in_memory_sibling_denial` below is what caught this pair, and
-#: is what would catch a future one). What remains allowlisted is
-#: genuinely storage/physical-encoding-only: driver-exception translation
-#: (`"storage backend rejected the request"`, every `except psycopg.
-#: Error`/`except sqlite3.DatabaseError` final backstop), PostgreSQL text-
-#: encoding domain checks with no in-memory equivalent at all (embedded
-#: NUL / lone UTF-16 surrogate -- `cell.ApplicationCell._normalize_value`
-#: only checks PYTHON type, never byte-level text encodability), and the
-#: physical value-domain re-check in `_check_domain`/`backend_sqlite.
-#: encode_value` (a defensively worded, differently-phrased echo of
-#: `field_types.check_declared_value`'s own type check -- DIFFERENT
-#: literal wording, confirmed by `test_backend_layer_allowlist_entries_
-#: have_no_in_memory_sibling_denial` finding no shared message -- plus a
-#: genuine storage-only 32/64-bit integer RANGE bound the in-memory side
-#: never checks at all).
+#: M-1 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2) / 追補 4 O-2
+#: (版フリップ監査 §5/§15, 2026-09-08): the backend-layer allowlist is
+#: confined to denials that TRANSLATE a rejection the storage engine
+#: itself raised, with NO controlled input a probe can construct to
+#: reach it deliberately (a generic `except psycopg.Error`/`except
+#: sqlite3.DatabaseError` final backstop, reached only by a genuinely
+#: unanticipated driver-level rejection) -- NOT to a re-implementation of
+#: a shape/capability/value-domain check the in-memory `ApplicationCell`
+#: (or a module it calls into, `field_types.py`/`identifiers.py`) already
+#: performs, or that a NORMAL client request can reach on purpose. THREE
+#: categories in each backend module were moved OFF this allowlist onto
+#: the 4-key form instead: the shared `check_reserved` identifier choke
+#: point and the `invalid order direction` `KeyError` backstop (this WP's
+#: own earlier fix -- `identifiers.py`'s own module docstring names
+#: `check_reserved` as the backend-specific SECOND HALF of `cell.
+#: ApplicationCell._identifier`, always applied together with
+#: `identifiers.validate_identifier`; `invalid order direction` is the
+#: exact literal denial `cell.ApplicationCell._bind_order_by` already
+#: carries -- `test_backend_layer_allowlist_entries_have_no_in_memory_
+#: sibling_denial` below is what caught this pair), and the PostgreSQL
+#: text-encoding / physical value-domain checks (追補 4 O-2, this WP's own
+#: closure fix: embedded NUL, lone UTF-16 surrogate, the physical
+#: isinstance re-check in `_check_domain`/`backend_sqlite.encode_value`,
+#: and the 32/64-bit integer RANGE bound). The 版フリップ監査 (§5) found
+#: these last six/two sites reachable from an ORDINARY client request
+#: (an insert/filter naming an out-of-range integer or a lone-surrogate/
+#: NUL string) while still returning an EMPTY `details` -- contract
+#: `versioning.version_binding`'s 1.7.0 unconditional obligation (a)
+#: ("every denial ... carries the details keys ... requires for that
+#: code") does not carve out an exception for "no in-memory sibling
+#: exists to duplicate the wording of"; `errors.details_vocabulary.
+#: layer_rule`'s own defence-in-depth exemption is for a denial a client
+#: request cannot normally trigger at all, not for one it can. What
+#: remains allowlisted is ONLY the generic driver-exception translation
+#: backstop (`"storage backend rejected the request"`) -- no controlled
+#: input reaches it on purpose, so `test_backend_layer_allowlist_entries_
+#: have_no_in_memory_sibling_denial` below judges it by ABSENCE of a
+#: reproducible client-reachable input (the probe-based sibling test,
+#: `test_backend_value_domain_denials_reachable_from_a_normal_client_
+#: request_carry_the_4_key_form` in `tests/test_denial_details_and_
+#: request_id.py`/`tests/test_postgres.py`, is what now carries the
+#: allowlist's OWN evidentiary weight for the entries this WP moved off
+#: -- see those tests' own docstrings), never by comparing message text
+#: alone (追補 4 O-2's own stated correction: "「同文言か」ではなく「同じ
+#: 入力で in-memory 側が denial を出すか」で判定する" -- a differently-
+#: worded denial for an input the in-memory layer WOULD also refuse is
+#: still not a storage translation; this test's own scan below (both
+#: message-text AND, for the remaining generic-translation entries, "no
+#: real input this allowlist entry's own site can be driven by that the
+#: in-memory layer would treat differently") is the surviving check for
+#: what remains).
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
-    ("backend_postgres.py", 257),   # _validate_value_domain: embedded NUL, PostgreSQL text storage only, no in-memory equivalent
-    ("backend_postgres.py", 282),   # _validate_value_domain: lone UTF-16 surrogate, encoding-only, no in-memory equivalent
-    ("backend_postgres.py", 317),   # _check_domain: text-domain physical isinstance re-check, differently worded from field_types.check_declared_value
-    ("backend_postgres.py", 321),   # _check_domain: int-domain physical isinstance re-check, differently worded
-    ("backend_postgres.py", 324),   # _check_domain: int32/int64 RANGE bound -- genuine storage-only domain, no in-memory equivalent at all
-    ("backend_postgres.py", 328),   # _check_domain: float-domain physical isinstance re-check, differently worded
-    ("backend_postgres.py", 539),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 596),   # generic driver-exception translation
-    ("backend_postgres.py", 645),   # generic driver-exception translation
-    ("backend_postgres.py", 672),   # generic driver-exception translation
-    ("backend_postgres.py", 729),   # generic driver-exception translation
-    ("backend_postgres.py", 781),   # generic driver-exception translation
-    ("backend_postgres.py", 806),   # generic driver-exception translation
-    ("backend_postgres.py", 968),   # generic driver-exception translation
-    ("backend_postgres.py", 985),   # generic driver-exception translation
-    ("backend_postgres.py", 1116),  # generic driver-exception translation
-    ("backend_postgres.py", 1257),  # generic driver-exception translation
-    ("backend_postgres.py", 1343),  # generic driver-exception translation
-    ("backend_postgres.py", 1395),  # generic driver-exception translation
-    ("backend_postgres.py", 1428),  # generic driver-exception translation
-    ("backend_postgres.py", 1454),  # generic driver-exception translation
-    ("backend_postgres.py", 1521),  # generic driver-exception translation
-    ("backend_postgres.py", 1549),  # generic driver-exception translation
-    ("backend_postgres.py", 1590),  # generic driver-exception translation
-    ("backend_postgres.py", 1685),  # generic driver-exception translation
-    ("backend_postgres.py", 1701),  # generic driver-exception translation
-    ("backend_postgres.py", 1713),  # generic driver-exception translation
-    ("backend_sqlite.py", 660),     # encode_value: out of range for 64-bit integer storage -- genuine storage-only domain, no in-memory equivalent
-    ("backend_sqlite.py", 682),     # encode_value: lone UTF-16 surrogate, encoding-only, no in-memory equivalent
+    ("backend_postgres.py", 578),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 635),   # generic driver-exception translation
+    ("backend_postgres.py", 684),   # generic driver-exception translation
+    ("backend_postgres.py", 711),   # generic driver-exception translation
+    ("backend_postgres.py", 768),   # generic driver-exception translation
+    ("backend_postgres.py", 820),   # generic driver-exception translation
+    ("backend_postgres.py", 845),   # generic driver-exception translation
+    ("backend_postgres.py", 1007),  # generic driver-exception translation
+    ("backend_postgres.py", 1024),  # generic driver-exception translation
+    ("backend_postgres.py", 1155),  # generic driver-exception translation
+    ("backend_postgres.py", 1296),  # generic driver-exception translation
+    ("backend_postgres.py", 1382),  # generic driver-exception translation
+    ("backend_postgres.py", 1434),  # generic driver-exception translation
+    ("backend_postgres.py", 1467),  # generic driver-exception translation
+    ("backend_postgres.py", 1493),  # generic driver-exception translation
+    ("backend_postgres.py", 1560),  # generic driver-exception translation
+    ("backend_postgres.py", 1588),  # generic driver-exception translation
+    ("backend_postgres.py", 1629),  # generic driver-exception translation
+    ("backend_postgres.py", 1724),  # generic driver-exception translation
+    ("backend_postgres.py", 1740),  # generic driver-exception translation
+    ("backend_postgres.py", 1752),  # generic driver-exception translation
+})
+
+#: 追補 4 O-1: `control_plane.py`'s own ONE remaining bare site --
+#: `rotate_credential`'s "a revoked credential cannot be rotated" -- is
+#: NOT a declaration violation the closed 11-word `violated_declaration`
+#: vocabulary (`errors.details_vocabulary.violated_declaration_
+#: vocabulary`) has a word for: the REQUEST shape is fine (a syntactically
+#: valid credential id), and the value itself is not wrong either -- what
+#: is wrong is a STATE precondition on an already-existing resource (the
+#: named credential is revoked), the same kind of fact `ConflictError`
+#: ("application already exists", this same module, 4 other sites) exists
+#: to carry, not `ValidationError`. Reclassifying this ONE site's
+#: exception type is a bigger semantic change than this WP's own "add
+#: 4-key details" scope (existing peer-local tests, `test_control_plane_
+#: service.py::test_rotate_credential_refuses_a_revoked_credential`/
+#: `test_enable_credential_never_resurrects_a_revoked_credential`, pin
+#: `ValidationError` specifically) -- reported here as a disclosed,
+#: narrowly-confined allowlist entry (not silently exempted: `test_
+#: control_plane_allowlist_entry_matches_a_real_bare_site` below verifies
+#: it against real, current code) rather than forcing an ill-fitting
+#: vocabulary word onto a site the closed vocabulary was never meant to
+#: cover. A supervisor-level decision (reclassify to `ConflictError`, or
+#: extend the vocabulary) is left open, not silently resolved here.
+_CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
+    ("control_plane.py", 1667),  # rotate_credential: "a revoked credential cannot be rotated" -- a state conflict, no 11-word vocabulary fit
 })
 
 
@@ -292,14 +346,21 @@ def _type_pair_call_sites(path: Path) -> list[tuple[int, str, str, frozenset[str
     return sites
 
 
+#: The two allowlists combined -- every legitimately-bare site across
+#: `SCANNED_MODULES`, for whichever of two DISTINCT reasons (backend-
+#: layer defence-in-depth with a real storage-only condition, or a
+#: control-plane state-conflict the closed vocabulary has no word for).
+_ALL_ALLOWLISTS = _BACKEND_LAYER_ALLOWLIST | _CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST
+
+
 def test_every_choke_point_denial_carries_details_ast_full_count():
     """L-1's own "0 件" assert, AST full-count: every in-scope site
-    (i.e. every site NOT on the verified backend-layer allowlist, across
+    (i.e. every site NOT on one of the two verified allowlists, across
     all of `SCANNED_MODULES`) must carry non-empty `details`."""
     violations: list[str] = []
     for module in SCANNED_MODULES:
         for lineno, cls, has_details in _fail_call_sites(SRC / module):
-            if (module, lineno) in _BACKEND_LAYER_ALLOWLIST:
+            if (module, lineno) in _ALL_ALLOWLISTS:
                 continue
             if not has_details:
                 violations.append(f"{module}:{lineno} {cls}")
@@ -325,6 +386,15 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         "identifiers.py": 1,
         "backend_postgres.py": 29,
         "backend_sqlite.py": 4,
+        # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
+        # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
+        # WP's fix); the total CALL-SITE count (bare + already-had-
+        # details) is 12 / 4 / 4 (`control_http.py`'s own "missing
+        # required fields, no sole attributable key" leg is a genuine
+        # 4th call site, mirroring `http.py`'s own analogous split).
+        "control_plane.py": 12,
+        "control_http.py": 4,
+        "audit_query.py": 4,
     }, counts
     assert sum(counts.values()) >= 76, counts
 
@@ -337,26 +407,49 @@ def test_allowlist_entries_match_real_bare_call_sites():
     forcing the allowlist to be updated rather than silently exempting a
     line that no longer needs it. This is also what catches a brand new
     bare site added anywhere in `SCANNED_MODULES`, including a new one
-    in `backend_postgres.py`/`backend_sqlite.py` that was never added to
-    the allowlist."""
+    in `backend_postgres.py`/`backend_sqlite.py`/`control_plane.py` that
+    was never added to either allowlist."""
     real_bare_sites = {
         (module, lineno)
         for module in SCANNED_MODULES
         for lineno, cls, has_details in _fail_call_sites(SRC / module)
         if not has_details
     }
-    missing_from_reality = sorted(_BACKEND_LAYER_ALLOWLIST - real_bare_sites)
-    missing_from_allowlist = sorted(real_bare_sites - _BACKEND_LAYER_ALLOWLIST)
+    missing_from_reality = sorted(_ALL_ALLOWLISTS - real_bare_sites)
+    missing_from_allowlist = sorted(real_bare_sites - _ALL_ALLOWLISTS)
     assert missing_from_reality == [], f"allowlist entries with no matching real bare call site: {missing_from_reality}"
     assert missing_from_allowlist == [], f"real bare call site(s) not on the allowlist: {missing_from_allowlist}"
 
 
 def test_backend_layer_allowlist_is_confined_to_backend_modules():
     """`errors.details_vocabulary.layer_rule`'s exemption is for backend-
-    layer defence-in-depth ONLY -- the allowlist must never grow into one
-    of the 4 choke-point / request-shape files themselves (that would
+    layer defence-in-depth ONLY -- this allowlist must never grow into one
+    of the choke-point / request-shape files themselves (that would
     silently reintroduce the exact L-1 gap this rework closed)."""
     assert all(module in ("backend_postgres.py", "backend_sqlite.py") for module, _ in _BACKEND_LAYER_ALLOWLIST)
+
+
+def test_control_plane_allowlist_is_confined_to_control_plane_py_and_one_entry():
+    """The no-vocabulary-fit allowlist (追補 4 O-1) is deliberately tiny
+    and named-module-confined -- unlike the backend allowlist, growth here
+    should be rare and each addition individually justified in prose (a
+    site genuinely outside the closed 11-word vocabulary), never used as
+    a general escape hatch for "did not get around to it yet"."""
+    assert _CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST == frozenset({("control_plane.py", 1667)})
+
+
+def test_control_plane_allowlist_entry_matches_a_real_bare_site():
+    """Mirrors `test_allowlist_entries_match_real_bare_call_sites` above,
+    scoped to the one-entry control-plane allowlist -- if `rotate_
+    credential`'s own site moves, is fixed, or is removed, this goes red
+    rather than silently exempting a line that no longer needs it."""
+    real_bare_sites = {
+        (module, lineno)
+        for module in ("control_plane.py",)
+        for lineno, cls, has_details in _fail_call_sites(SRC / module)
+        if not has_details
+    }
+    assert real_bare_sites == _CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST, real_bare_sites
 
 
 def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
@@ -444,25 +537,19 @@ def test_config_budget_denial_helper_carries_the_4_key_form():
     assert "violated_declaration" in keys and "field" in keys
 
 
-def test_control_plane_module_has_no_data_plane_choke_point_site():
-    """The WP-3e T1 work order names `control_plane.py`'s "data 面" as a
-    file to inspect for a query/mutate/schema request choke point.
-    Reading every `ValidationError`/`CapabilityError` site in that module
-    (credential issuance/rotation/revocation, application enable/disable,
-    audit-query gating, `application_id`/`destructive`/`confirmation`
-    shape checks on control-plane requests) found none: every one of
-    them is part of the control-plane credential/application-management
-    surface `errors.details_vocabulary` (D-1/D-3, scoped to query/
-    mutate/schema requests) never covers -- confirmed here, not merely
-    asserted in prose, so a future data-plane site accidentally added to
-    this module would need to either carry `details` in `cell.py`/
-    `http.py` style or this test itself would need deliberate revision,
-    never a silent gap."""
-    path = SRC / "control_plane.py"
-    sites = _fail_call_sites(path)
-    assert sites, "control_plane.py should still contain ValidationError/CapabilityError sites (sanity: scan is not vacuous)"
-    # None of these are asserted to carry `details` -- this module is
-    # entirely out of `errors.details_vocabulary`'s scope, confirmed by
-    # inspection (see module docstring above) rather than by this loop,
-    # which only pins the count so a file-shape change is visible here.
-    assert len(sites) == 12, len(sites)
+# 追補 4 O-1 (版フリップ監査 §14 疑義 1/§16, 2026-09-08): the test that
+# used to stand here, `test_control_plane_module_has_no_data_plane_
+# choke_point_site`, asserted the OPPOSITE of what this file now enforces
+# -- that every `control_plane.py` `ValidationError`/`CapabilityError`
+# site was legitimately exempt from `errors.details_vocabulary` because
+# the module sat entirely outside its scope (a "data 面のみ" reading of
+# D-1/D-3 the audit found too narrow; see the module docstring above and
+# `versioning.version_binding`'s own unconditional (a) obligation, which
+# names no plane-scoped carve-out). `control_plane.py` is now a full
+# `SCANNED_MODULES` member instead -- `test_every_choke_point_denial_
+# carries_details_ast_full_count`/`test_ast_full_count_matches_a_non_
+# trivial_floor`/`test_allowlist_entries_match_real_bare_call_sites`
+# above already cover it (its 12-site count, its one remaining allowlisted
+# site, and the 4-key requirement on the other 11), making a THIRD,
+# narrower test asserting the module's old exempt status both redundant
+# and actively wrong to keep.

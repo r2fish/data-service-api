@@ -1097,32 +1097,14 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     # Contract 1.7.0 (work order §2 WP-3e F-3, `{scratchpad}/
     # rulings-r3-r7-flip.md` F-3): the "enabled" declaration checked
     # against the actual deployed state -- the served capabilities
-    # document, this process' own `FoundationConfig`, AND (the one part
-    # that can genuinely fail against a real deployment) every registered
-    # application's own per-application upgrade ledger. Run
-    # unconditionally like the writer-role check just above.
+    # document AND (the one part that can genuinely fail against a real
+    # deployment) every registered application's own per-application
+    # upgrade ledger. Run unconditionally like the writer-role check just
+    # above.
     try:
         applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
-        # `data_base_url` is no longer read from bare `environ` by
-        # `FoundationConfig.from_env` (design D-2(f), `config.py`'s own
-        # historical note above `from_env`'s "surfaces.data is required"
-        # raise) -- the caller (normally `main.build_app`) reads it from
-        # THIS SAME `declarations.surfaces` first. `declarations` is
-        # already this function's own live value (`read_platform_
-        # declarations` above), so `config` is built from it here too --
-        # never a second, independently-drifting env read. `config` is
-        # used ONLY to build the probe cell `_contract_170_capabilities_
-        # document` calls its real `capabilities()` method through --
-        # WP-3e rework T3 (ruling `{scratchpad}/rulings-r3-r7-flip.md`
-        # L-2/M-7): `check_contract_170_declarations` itself no longer
-        # takes `config` at all, and reads the `limits` block from the
-        # SERVED capabilities document it returns, never from `config`
-        # directly (that direct-`getattr` form was the dead-check flaw
-        # this rework removes -- see `platform_declarations.py`'s own
-        # comment above `check_contract_170_declarations`).
-        config = FoundationConfig.from_env(data_base_url=declarations.surfaces.data_base_url)
         platform_declarations.check_contract_170_declarations(
-            _contract_170_capabilities_document(config),
+            _served_capabilities_document(),
             applied_by_application,
             platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
@@ -1136,25 +1118,48 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     return 0
 
 
-def _contract_170_capabilities_document(config: "FoundationConfig") -> dict:
-    """The REAL `ApplicationRuntime.capabilities()` document for a
-    throwaway, entirely in-memory application/credential -- never a
-    second, hand-written copy of what `cell.py` is expected to declare
-    (mirrors r2db-api's own `_contract_170_capabilities_document`,
-    isomorphism pinned): this exercises the SAME production code path a
-    real client's `GET /v1/capabilities` reaches, so a future regression
-    that stops declaring one of the contract 1.7.0 capabilities `enabled`
-    is caught here too, not only by `mitatedb_api.cell`'s own unit tests.
-    No network/PostgreSQL connection is involved -- `ApplicationCell`'s
-    own default backend (`backend_sqlite.SQLiteBackend`) is a
-    deterministic, in-memory, pure-Python object. `config` is the
-    CALLER's own already-resolved `FoundationConfig` (never rebuilt
-    here) -- the same instance `check_contract_170_declarations`'s own
-    limit-value check inspects, so the capabilities this probe reports
-    and the limits that check reads are provably the same deployment."""
+def _served_capabilities_document() -> dict:
+    """O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): extracted out of `_verify_declarations_checks` under this SAME
+    name on both peers (r2db-api's own `_served_capabilities_document`,
+    `r2db_api/ops.py`), so that function's own body -- one of the
+    isomorphism-pinned symbols -- calls this helper with no arguments and
+    carries no peer-specific complexity of its own. This peer's own
+    equivalent, unlike r2db-api's, first has to build a `FoundationConfig`
+    before it can construct its own probe cell -- that peer-specific
+    difference now lives entirely INSIDE this helper's own body, never
+    inside `_verify_declarations_checks`'s. Previously named `_contract_
+    170_capabilities_document` and taking the caller's already-resolved
+    `FoundationConfig` (built from `declarations.surfaces.data_base_url`)
+    as an argument (the form `_verify_declarations_checks` used before
+    this rework) -- `FoundationConfig.from_env` REQUIRES a truthy
+    `data_base_url` (`config.py`'s own "surfaces.data is required" raise,
+    unconditional, unlike the bare dataclass constructor's own `None`-
+    tolerant `__post_init__`), so this helper cannot simply omit it the
+    way a first draft assumed; a fixed, synthetic placeholder URL is
+    supplied here instead (`tools/public_value_scan.py`-safe: a `.invalid`
+    domain, never a real deployment value) -- functionally inert either
+    way, since `ApplicationCell`'s own default backend, `backend_sqlite.
+    SQLiteBackend`, is a deterministic, in-memory, pure-Python object
+    with no real database connection this URL could ever be dialed
+    through. `FoundationConfig.from_env()` still reads every OTHER
+    (limit) env var exactly as before -- only this one peer-specific
+    argument is now internal to this helper rather than threaded in from
+    `_verify_declarations_checks`; the isomorphism table row addition
+    itself is pair-closing work, not done here (O-7's own instruction:
+    "同型性表への行追加は監督の pair-closing で行う").
+
+    The REAL `ApplicationRuntime.capabilities()` document for a throwaway,
+    entirely in-memory application/credential -- never a second, hand-
+    written copy of what `cell.py` is expected to declare: this exercises
+    the SAME production code path a real client's `GET /v1/capabilities`
+    reaches, so a future regression that stops declaring one of the
+    contract 1.7.0 capabilities `enabled` is caught here too, not only by
+    `mitatedb_api.cell`'s own unit tests."""
     from .cell import ApplicationCell, ApplicationRuntime, Principal
     from .auth import Role
 
+    config = FoundationConfig.from_env(data_base_url="https://verify-declarations-probe.example.invalid/v1")
     cell = ApplicationCell("verify_declarations_probe", config)
     principal = Principal(
         application_id="verify_declarations_probe", credential_id="verify_declarations_probe", role=Role.RUNTIME,

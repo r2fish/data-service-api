@@ -57,6 +57,21 @@ def validate_identifier(value, label="identifier"):
     return value
 
 
+def is_identifier_syntax(value) -> bool:
+    """追補 4 O-3 (版フリップ監査 §4/§16, `{scratchpad}/rulings-r3-r7-
+    flip.md`): a non-raising syntax-only probe for a caller that needs to
+    DECIDE, before composing a `details.field` path, whether an untrusted
+    candidate string is safe to echo verbatim (a syntax-VALID identifier
+    names a position, never a value -- V-3's own precedent) or must be
+    capped at its containing position instead (a syntax-violating
+    candidate may itself carry a SQL fragment or control characters --
+    the exact SI-10 concern N-1 states for `field` at an identifier-
+    syntax denial). Used by `cell.py`'s own `field_constraints` unknown-
+    key path (追補 3 N-1's own `constraint_declaration` sibling of the
+    same concern, r2db-api's own `field_constraints` fix precedent)."""
+    return isinstance(value, str) and bool(_IDENTIFIER.fullmatch(value))
+
+
 def quote_identifier(value, label="identifier"):
     """SQLite-style ANSI double-quote composition. This is used only by
     the SQLite backend: PostgreSQL statements are never assembled by

@@ -36,7 +36,7 @@ from psycopg import sql
 
 from .application_audit import APPLICATION_AUDIT_FIELDS, DEFAULT_DENIAL_COALESCE_WINDOW_S
 from .control_audit import CONTROL_AUDIT_FIELDS
-from .errors import ValidationError
+from .errors import ValidationError, violation, observed_type_of
 from .identifiers import validate_identifier
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -427,7 +427,17 @@ def validate_audit_event_classes(value: Any, *, max_classes: int) -> "list[str] 
     if value is None:
         return None
     if not isinstance(value, list) or len(value) > max_classes or not all(isinstance(item, str) for item in value):
-        raise ValidationError(f"event_classes must be an array of at most {max_classes} strings")
+        # 追補 4 O-1 (版フリップ監査 §14 疑義 1/§16): control-plane
+        # `AuditQueryRequest` shape checks now carry the same 4-key
+        # `errors.details_vocabulary` form the data-plane request-shape
+        # layer does. `declared_type`/`observed_type` omitted here (an
+        # array-of-strings-with-a-length-bound shape has no single JSON
+        # type word this contract's own vocabulary names for "too long or
+        # wrong element type" -- V-2's own "形の違反なら不要").
+        raise ValidationError(
+            f"event_classes must be an array of at most {max_classes} strings",
+            details=violation("request_schema", field="event_classes"),
+        )
     return value
 
 
@@ -435,18 +445,27 @@ def validate_audit_after(value: Any) -> "tuple[datetime, str, str] | None":
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValidationError("after must be a string")
+        raise ValidationError(
+            "after must be a string",
+            details=violation("request_schema", field="after", declared_type="string", observed_type=observed_type_of(value)),
+        )
     try:
         return decode_cursor(value)
     except ValueError as exc:
-        raise ValidationError("after is not a valid opaque cursor") from exc
+        raise ValidationError(
+            "after is not a valid opaque cursor",
+            details=violation("request_schema", field="after"),
+        ) from exc
 
 
 def validate_audit_limit(value: Any, *, default: int, maximum: int) -> int:
     if value is None:
         return default
     if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > maximum:
-        raise ValidationError(f"limit must be an integer between 1 and {maximum}")
+        raise ValidationError(
+            f"limit must be an integer between 1 and {maximum}",
+            details=violation("request_schema", field="limit"),
+        )
     return value
 
 

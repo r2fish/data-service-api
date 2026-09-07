@@ -17,7 +17,7 @@ import sqlite3
 import time
 
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
-from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError, violation
+from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError, violation, observed_type_of
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
 
@@ -629,13 +629,22 @@ class SQLiteBackend:
                 raise
         return self._schema_revision, descriptor
 
-    def encode_value(self, value, domain=None):
+    def encode_value(self, value, domain=None, *, field=None, declared_type=None):
         # `domain` is accepted only to match the shared `StorageBackend`
         # call shape (`cell.py` always passes it) and is otherwise IGNORED
         # -- see `field_domains`'s own comment above for why (this
         # backend's own value acceptance is unchanged by B-1's own domain
         # concept: SQLite's dynamic column affinity has no equivalent
         # mismatch to detect).
+        #
+        # `field`/`declared_type` (追補 4 O-2): same threading as
+        # `backend_postgres.PostgresBackend.encode_value` -- `cell.py`'s
+        # own 3 call sites always pass both (the caller's own request-
+        # internal path and the contract-vocabulary declared type), so
+        # the two value-domain denials below (both genuinely storage-
+        # only, no in-memory equivalent) carry the same D-3 (4) 4-key
+        # form a normal client request reaches them with, rather than an
+        # empty `details`.
         #
         # SQLite's own driver: an explicit `int(bool)` conversion (rather
         # than relying on `bool` being an `int` subclass the driver might
@@ -657,7 +666,10 @@ class SQLiteBackend:
         # not to a value that ALREADY crashed out of this backend's own
         # error hierarchy entirely.
         if isinstance(value, int) and not (_SQLITE_INT64_MIN <= value <= _SQLITE_INT64_MAX):
-            raise ValidationError("value is out of range for 64-bit integer storage")
+            raise ValidationError(
+                "value is out of range for 64-bit integer storage",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         # Independent review B-2(ii) (WP-2 follow-up, same precedent as
         # the out-of-range-integer check immediately above -- both are a
         # value that would otherwise crash out of this backend's own
@@ -680,7 +692,8 @@ class SQLiteBackend:
         # value`, before this method is ever called).
         if isinstance(value, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
             raise ValidationError(
-                "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8"
+                "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
             )
         return value
 

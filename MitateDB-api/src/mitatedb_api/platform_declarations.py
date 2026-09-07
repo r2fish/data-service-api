@@ -685,9 +685,9 @@ def check_writer_role_timeouts(
 #       upgrade-applications` makes the "enabled" declaration false for
 #       that application's own traffic).
 def check_contract_170_declarations(
-    capabilities_document: "Mapping[str, Any]",
-    applied_upgrade_numbers_by_application: "Mapping[str, Optional[frozenset[int]]]",
-    required_upgrade_numbers: "frozenset[int]",
+    capabilities_document: Mapping[str, Any],
+    applied_upgrade_numbers_by_application: Mapping[str, Optional[frozenset[int]]],
+    required_upgrade_numbers: frozenset[int],
 ) -> None:
     """F-14. `capabilities_document` is the value the caller's own live
     `ApplicationRuntime.capabilities()` call returned (or an equivalent
@@ -698,7 +698,18 @@ def check_contract_170_declarations(
     application's database (`None` when that application has no ledger
     table at all -- read as "every number is pending", the same
     convention `platform_upgrades.pending_upgrade_numbers` already
-    uses)."""
+    uses).
+
+    O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): the signature above is bare (not string-quoted) annotations,
+    matching r2db-api's own same-named function's real, current form --
+    both modules carry `from __future__ import annotations`, so quoting
+    was never semantically necessary; a prior draft quoted these three
+    for reasons unrelated to runtime behavior, which only produced a
+    normalize-diff against the sibling (r2db 形を基準にし, O-7's own
+    instruction). The docstring text differs (peer-specific -- `_normalize`
+    strips docstrings before comparing, so this paragraph itself is not
+    part of what must match)."""
     capabilities = capabilities_document.get("capabilities", capabilities_document)
     for name in _CONTRACT_170_ENABLED_CAPABILITIES:
         entry = capabilities.get(name) if isinstance(capabilities, Mapping) else None
