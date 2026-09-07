@@ -560,8 +560,195 @@ def require_destructive_confirmation(
 FIELD_TYPES = {"string", "integer", "number", "boolean", "object", "array", "json"}
 MAX_INDEX_FIELDS = 16
 
+# Contract 1.7.0 (D-2, WP-2a): `SCHEMA_OPERATIONS` below is a dead constant
+# (no reference anywhere in this repository, work order §2 WP-2a's own
+# "実装の指示", 監査照合項目 2) -- the real dispatch/rejection points are
+# `bind_schema_operation`'s own `if`/`elif` chain below and `service.py`'s
+# `schema_ops`/`unsupported` literals. Left in place unmodified (never
+# referenced, so leaving it stale changes nothing observable) rather than
+# "fixed" to look complete -- updating it would not satisfy any completion
+# condition, only look like it did.
 SCHEMA_OPERATIONS = {"create_entity", "add_field", "drop_entity", "create_index", "drop_index"}
-_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type"}
+_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable"}
+
+
+@dataclass(frozen=True)
+class FieldConstraints:
+    """Contract 1.7.0 (D-2, R-2): one field's `enum`/`nullable` declaration,
+    the choke point's (`_check_type` below) own value-validation vocabulary
+    -- mirrors `field_type`'s own shape (a small, frozen value carried
+    alongside a field name), never the raw request JSON.
+
+    `enum`: the closed set of accepted non-null values, already validated
+    (non-empty, distinct, each a member of the field's own declared type,
+    `validate_enum_declaration` below) -- `None` means no `enum` is
+    declared (any value of the field's own type is accepted, contract
+    default).
+    `nullable`: whether the field accepts a JSON `null` -- defaults to
+    `True` (D-2 (2): "既存挙動を宣言化する", the pre-1.7.0 default every
+    field, declared or not, already had).
+    """
+
+    enum: tuple[Any, ...] | None = None
+    nullable: bool = True
+
+    @property
+    def is_declared(self) -> bool:
+        """`True` iff this instance carries something other than the
+        version-wide default (no `enum`, `nullable: true`) -- used to
+        decide whether the side-table/in-memory registry needs a row for
+        this field at all (WP-2a: a field nobody ever declared a
+        constraint on never touches the registry, contract `field_
+        constraints` description's own "省略 = 制約なし")."""
+        return self.enum is not None or not self.nullable
+
+
+@dataclass(frozen=True)
+class ConstraintPatch:
+    """`alter_field`'s own request-side `enum`/`nullable` PATCH (D-2 (5);
+    monitor ruling A, rulings-wp3a-review.md, applied to r2db by ruling
+    B-2, rulings-wp2a-review.md) -- deliberately distinct from
+    `FieldConstraints` above (the COMPOSED, effective state a field ends
+    up with). `alter_field` redeclares one field WHOLESALE per the
+    contract text, but "wholesale" means "the request's own explicit
+    keys replace what they name", never "every key not sent is cleared" --
+    the previous (pre-rework) implementation's bug was collapsing this
+    into a single `FieldConstraints` at BIND time, before the field's
+    EXISTING declared constraints are even known (only `apply_schema`,
+    both backends, knows them) -- silently dropping an omitted `nullable`
+    back to `true` and an omitted `enum` to "none" instead of leaving
+    them alone.
+
+    Three-valued per key, ruling A verbatim: "alter_field で enum 省略 =
+    変更なし、enum: null = 解除、nullable 省略 = 変更なし."
+
+    `enum_omitted=True` (the request carried no `enum` key at all): leave
+    the field's existing `enum` exactly as it is. `enum_omitted=False,
+    enum_clear=True` (`enum: null`): clear it (no `enum` after this
+    operation). `enum_omitted=False, enum_clear=False`: the request gave
+    an explicit list, in `enum_raw` -- already SHAPE-checked at bind time
+    (a non-empty list, no `None` member, no duplicate) but NOT YET
+    validated against the field's declared type (`validate_enum_
+    declaration`, deferred to `apply_schema`, addendum R-b/R-c, D-2 (3):
+    only there is the field's EXISTING declared type known).
+
+    `nullable_omitted=True` (the request carried no `nullable` key at
+    all): leave the field's existing `nullable` exactly as it is.
+    `nullable_omitted=False`: `nullable` is the request's own explicit
+    boolean.
+    """
+
+    enum_omitted: bool = True
+    enum_clear: bool = False
+    enum_raw: tuple[Any, ...] | None = None
+    nullable_omitted: bool = True
+    nullable: bool = True
+
+
+#: Contract 1.7.0 (D-2 (2), monitor ruling B-1 rulings-wp2a-review.md):
+#: an `enum` is declarable ONLY on a field of one of these 4 scalar
+#: types -- `None` (untyped/JSONB-equivalent), `"json"`, `"object"` and
+#: `"array"` are ALL rejected outright, never accepted-with-inference.
+#: Mirrors MitateDB's own `field_types._ENUM_ELIGIBLE_TYPES` verbatim
+#: (m-3: same name, r2db keeps its own leading-underscore module-private
+#: convention since this constant, unlike the two functions below, was
+#: never named in the isomorphism pairing).
+_ENUM_ELIGIBLE_TYPES = ("string", "integer", "number", "boolean")
+
+
+def enum_member_matches_type(value: Any, declared_type: str | None) -> bool:
+    """Whether `value` is a legal `enum` member for a field of
+    `declared_type` (D-2 (2): "要素は field の宣言型 ... の値のみ"). Never
+    accepts `None` here -- callers reject a null member up front (`enum`
+    constrains non-null values only). `declared_type` outside
+    `_ENUM_ELIGIBLE_TYPES` never reaches this function at all --
+    `validate_enum_declaration` below rejects the declaration itself
+    first. m-3 (monitor ruling): renamed from `_enum_member_matches_type`
+    to match MitateDB's own `field_types.enum_member_matches_type`
+    (same name, same 2-argument signature) -- the isomorphism test's own
+    same-named-helper pairing (work order §2 WP-2a "同型性テストの対象")."""
+    if declared_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if declared_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if declared_type == "boolean":
+        return isinstance(value, bool)
+    if declared_type == "string":
+        return isinstance(value, str)
+    return False
+
+
+class _ConstraintDeclarationError(Exception):
+    """Internal-only signal `validate_enum_declaration` below raises when
+    an `enum` declaration is itself invalid -- never surfaced outside this
+    module. Every one of that function's 3 call sites (`create_entity`'s
+    `field_constraints` loop, `add_field`, and `alter_field`'s composition
+    in `apply_schema`, both backends) catches this and calls `fail()`
+    itself, attaching the `details` (`field` as a request-internal PATH,
+    D-3 (2); `violated_declaration: "constraint_declaration"`, monitor
+    ruling m-1; `declared_type`) that only the CALL SITE -- never this
+    shared validator -- knows how to compose (m-3's own locked, minimal
+    2-argument signature carries no field/path at all, mirroring
+    MitateDB's `field_types.validate_enum_declaration`, which similarly
+    raises with no `details` of its own attached inside the function)."""
+
+
+def validate_enum_declaration(enum_values: Any, declared_type: str | None) -> tuple[Any, ...]:
+    """Contract 1.7.0 (D-2 (2), contract text `field_constraints`
+    description; monitor ruling B-1, rulings-wp2a-review.md): the single
+    validator for an `enum` declaration, called from every one of the
+    three places one can appear (`create_entity`'s `field_constraints`,
+    `add_field`'s top-level `enum`, both here at bind time since the
+    field's own declared type is already known then; and `alter_field`'s
+    top-level `enum`, deferred to `apply_schema` -- see that method's own
+    comment -- since only there is the field's EXISTING declared type
+    known).
+
+    `declared_type` outside `_ENUM_ELIGIBLE_TYPES` above (`None`/
+    untyped, `"object"`, `"array"` -- `"json"` is never a value this
+    module's own internal vocabulary uses, see `FIELD_TYPES`'s own
+    comment) is rejected OUTRIGHT (ruling B-1: no first-member type
+    INFERENCE for an untyped field, unlike the pre-rework implementation
+    -- MitateDB rejects the identical `declared_type` set the identical
+    way, `field_types._ENUM_ELIGIBLE_TYPES`/`validate_enum_declaration`,
+    so a `field_constraints`/`enum`/`field_types: json` combination the
+    catalog can report is now refused by BOTH peers, never accepted by
+    one and refused by the other).
+
+    Raises `_ConstraintDeclarationError` (never `fail()` directly -- see
+    that class' own docstring) for: `declared_type` outside the 4 eligible
+    words, not a non-empty list, a `None` member, a member whose JSON
+    type does not match `declared_type`, or a duplicate member. Returns
+    the validated members as a tuple, in the order declared (round-trip
+    fidelity for `EntityDescriptor.field_constraints`).
+    """
+    if declared_type not in _ENUM_ELIGIBLE_TYPES:
+        raise _ConstraintDeclarationError("enum can only be declared on a field of type string, integer, number or boolean.")
+    if not isinstance(enum_values, list) or not enum_values:
+        raise _ConstraintDeclarationError("enum must be a non-empty list.")
+    validated: list[Any] = []
+    for member in enum_values:
+        if member is None or not enum_member_matches_type(member, declared_type):
+            raise _ConstraintDeclarationError("enum member does not match the field's declared type.")
+        if member in validated:
+            raise _ConstraintDeclarationError("enum must not contain duplicate members.")
+        validated.append(member)
+    return tuple(validated)
+
+
+def _fail_constraint_declaration(request_path: str, declared_type: str | None, exc: "_ConstraintDeclarationError") -> None:
+    """Shared `fail()` wrapper every `validate_enum_declaration` call site
+    below uses (monitor ruling m-1, rulings-wp2a-review.md): `field` is
+    the request-internal PATH the offending declaration sits at (D-3 (2)),
+    `violated_declaration` is the new 11th vocabulary word this ruling
+    adds, and `declared_type` is the field's own declared type (`"json"`
+    for an untyped field -- `_declared_type_label` below) -- never
+    `observed_type` (a declaration defect is not a value defect)."""
+    fail(
+        "VALIDATION_FAILED",
+        str(exc),
+        details={"field": request_path, "violated_declaration": "constraint_declaration", "declared_type": _declared_type_label(declared_type)},
+    )
 
 
 @dataclass(frozen=True)
@@ -584,6 +771,32 @@ class BoundSchemaOperation:
     # `None`) for every other operation, so a caller never needs an
     # `is None` check before `.get(...)`-ing it.
     field_types: dict[str, str | None] = field(default_factory=dict)
+    # Contract 1.7.0 (D-2, WP-2a): `create_entity`'s own optional, per-field
+    # constraint declarations (`SchemaOperationRequest.field_constraints`)
+    # -- a `{field_name: FieldConstraints}` map, populated ONLY for the
+    # fields the request itself named a spec for (D-2 (1): "省略 = 制約
+    # なし" -- a name absent from this map carries the version-wide
+    # default, never an explicit `FieldConstraints()` entry). Only ever
+    # populated for `create_entity`; empty for every other operation.
+    field_constraints: dict[str, "FieldConstraints"] = field(default_factory=dict)
+    # Contract 1.7.0 (D-2, WP-2a): `add_field`'s own single-field
+    # constraint declaration (the request's own top-level `enum`/
+    # `nullable`) -- `None` when the request carried neither key (no
+    # declaration at all, not even the default made explicit). Only ever
+    # populated for `add_field`; `None` for every other operation
+    # (`alter_field`'s own single-field declaration is `constraint_patch`
+    # below, never this -- ruling B-2/A: `add_field` creates a brand new
+    # field, so there is no EXISTING declared state to compose against,
+    # unlike `alter_field`).
+    constraints: "FieldConstraints | None" = None
+    # Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): `alter_field`'s
+    # own single-field enum/nullable PATCH -- see `ConstraintPatch`'s own
+    # docstring for the three-valued (omitted/clear/value) semantics this
+    # carries instead of a collapsed `FieldConstraints`. Only ever
+    # populated for `alter_field`; `None` for every other operation.
+    # `apply_schema` (both backends) composes this against the field's
+    # EXISTING declared constraints -- the first place they are known.
+    constraint_patch: "ConstraintPatch | None" = None
 
 
 def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOperation:
@@ -614,12 +827,35 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # `add_field`; every other operation rejects it exactly as before
         # this contract version did (this key simply didn't exist in
         # `_SCHEMA_KEYS` then), so this is not new external behaviour.
+        #
+        # Contract 1.7.0 (D-2 (5), work order §2 WP-2a "実装の指示"):
+        # `alter_field` redeclares a field's `enum`/`nullable`, never its
+        # type -- carrying `field_type` fails the SAME code but in the
+        # WP-2a/D-3 four-key form (`violated_declaration: unsupported_
+        # field`), the one existing branch this WP's own "実装の指示"
+        # instructs be "載せ替える" rather than left generic.
+        if name == "alter_field":
+            fail(
+                "VALIDATION_FAILED",
+                "alter_field does not redeclare a field's type.",
+                details={"field": "field_type", "violated_declaration": "unsupported_field"},
+            )
         fail("VALIDATION_FAILED", "field_type is only supported by add_field.")
     if name != "create_entity" and "field_types" in operation:
         # Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map)
         # is accepted only by `create_entity` -- symmetric with `field_
         # type`'s (the scalar) `add_field`-only rule immediately above.
         fail("VALIDATION_FAILED", "field_types is only supported by create_entity.")
+    if name != "create_entity" and "field_constraints" in operation:
+        # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the
+        # per-field map) is accepted only by `create_entity` -- symmetric
+        # with `field_types` immediately above.
+        fail("VALIDATION_FAILED", "field_constraints is only supported by create_entity.")
+    if name not in ("add_field", "alter_field") and ("enum" in operation or "nullable" in operation):
+        # Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable`
+        # pair is accepted only by `add_field`/`alter_field` -- symmetric
+        # with `field_type`'s own `add_field`-only rule above.
+        fail("VALIDATION_FAILED", "enum/nullable are only supported by add_field/alter_field.")
     if name != "create_index":
         # WP-2 review M-3: `index`/`unique` are meaningful only to
         # `create_index` (`drop_index` additionally accepts `index` as the
@@ -644,6 +880,9 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     field_name: str | None = None
     field_type: str | None = None
     field_types: dict[str, str | None] = {}
+    field_constraints: dict[str, FieldConstraints] = {}
+    constraints: FieldConstraints | None = None
+    constraint_patch: ConstraintPatch | None = None
     index_name: str | None = None
     index_fields: tuple[str, ...] = ()
     unique = False
@@ -704,6 +943,88 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # (NUL-check inclusion, JSONB-default DDL).
                 declared_types[declared_field] = None if declared_type == "json" else declared_type
             field_types = declared_types
+        # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` is an
+        # OPTIONAL, never-required key -- a `create_entity` carrying no
+        # `field_constraints` at all stays valid unchanged (every field it
+        # creates gets no `enum`, `nullable: true`, D-2 (2)'s own default).
+        # Placed AFTER `field_types` above so each field's own declared
+        # type (`field_types.get(name)`, `None`/json if that field was
+        # never given one) is already resolved for `validate_enum_
+        # declaration` below.
+        if "field_constraints" in operation:
+            if "fields" not in operation:
+                # Mirrors `field_types`'s identical "sent without fields"
+                # check above. Monitor ruling N-2 (rulings-r2-closure.md,
+                # WP-2a closure): `field` names the request-internal key
+                # this whole clause hangs off, mirrors the adjacent
+                # per-entry branches below which already load this key.
+                fail(
+                    "VALIDATION_FAILED",
+                    "field_constraints requires fields.",
+                    details={"field": "field_constraints", "violated_declaration": "request_schema"},
+                )
+            raw_field_constraints = operation["field_constraints"]
+            if not isinstance(raw_field_constraints, dict):
+                # Monitor ruling N-2 (rulings-r2-closure.md): same key,
+                # same reason as the "requires fields" branch above.
+                fail(
+                    "VALIDATION_FAILED",
+                    "field_constraints must be an object.",
+                    details={"field": "field_constraints", "violated_declaration": "request_schema"},
+                )
+            parsed_constraints: dict[str, FieldConstraints] = {}
+            for declared_field, spec in raw_field_constraints.items():
+                if declared_field not in fields:
+                    # Monitor ruling m-1 (rulings-wp2a-review.md, contract
+                    # corrigendum, verbatim list of `constraint_declaration`
+                    # cases): "...or a declaration naming a field the
+                    # request does not create" -- `field` is the request-
+                    # internal PATH to the offending key (D-3 (2)), never
+                    # the field name it names (which does not exist).
+                    fail(
+                        "VALIDATION_FAILED",
+                        "field_constraints names a field that is not present in fields.",
+                        details={"field": f"field_constraints/{declared_field}", "violated_declaration": "constraint_declaration"},
+                    )
+                if not isinstance(spec, dict):
+                    fail(
+                        "VALIDATION_FAILED",
+                        "field_constraints entry shape is not supported.",
+                        details={"field": f"field_constraints/{declared_field}", "violated_declaration": "request_schema"},
+                    )
+                unknown_keys = set(spec) - {"enum", "nullable"}
+                if unknown_keys:
+                    # Monitor ruling E (rulings-wp3a-review.md, applied to
+                    # r2db by M-3/rulings-wp2a-review.md): an unknown key
+                    # INSIDE one field's own constraint spec (as opposed to
+                    # the field name itself, handled above) is a request-
+                    # shape defect -- `field` names the unknown key's own
+                    # path, mirrors MitateDB `cell.py`'s identical form.
+                    bad_key = sorted(unknown_keys)[0]
+                    fail(
+                        "VALIDATION_FAILED",
+                        "field_constraints entry has an unsupported key.",
+                        details={"field": f"field_constraints/{declared_field}/{bad_key}", "violated_declaration": "request_schema"},
+                    )
+                raw_nullable = spec.get("nullable", True)
+                if not isinstance(raw_nullable, bool):
+                    fail(
+                        "VALIDATION_FAILED",
+                        "nullable must be boolean.",
+                        details={
+                            "field": f"field_constraints/{declared_field}/nullable",
+                            "violated_declaration": "constraint_declaration",
+                            "declared_type": _declared_type_label(field_types.get(declared_field)),
+                        },
+                    )
+                enum_tuple = None
+                if "enum" in spec:
+                    try:
+                        enum_tuple = validate_enum_declaration(spec["enum"], field_types.get(declared_field))
+                    except _ConstraintDeclarationError as exc:
+                        _fail_constraint_declaration(f"field_constraints/{declared_field}/enum", field_types.get(declared_field), exc)
+                parsed_constraints[declared_field] = FieldConstraints(enum=enum_tuple, nullable=raw_nullable)
+            field_constraints = parsed_constraints
     elif name == "add_field":
         field_name = validate_identifier(operation.get("field", ""))
         _reject_reserved_field(field_name)
@@ -720,6 +1041,93 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # Decision (v1.3 G11): same json->None translation as
                 # create_entity's `field_types` values above.
                 field_type = None
+        # Contract 1.7.0 (D-2 (1), WP-2a): `add_field`'s own single-field
+        # `enum`/`nullable`, validated against THIS SAME request's own
+        # `field_type` (already resolved above -- `add_field` declares a
+        # brand new field, so there is no "existing declared type" to
+        # defer to, unlike `alter_field` below).
+        if "enum" in operation or "nullable" in operation:
+            raw_nullable = operation.get("nullable", True)
+            if not isinstance(raw_nullable, bool):
+                fail(
+                    "VALIDATION_FAILED",
+                    "nullable must be boolean.",
+                    details={"field": "nullable", "violated_declaration": "constraint_declaration", "declared_type": _declared_type_label(field_type)},
+                )
+            enum_tuple = None
+            # Monitor ruling A (rulings-wp3a-review.md, applied to r2db by
+            # rulings-wp2a-review.md B-2): "add_field で enum: null = enum
+            # 無し" -- an explicit `null` is the SAME as omitting `enum`
+            # altogether, never a declaration-shape error. Anything else
+            # non-list still fails inside `validate_enum_declaration`.
+            if "enum" in operation and operation["enum"] is not None:
+                try:
+                    enum_tuple = validate_enum_declaration(operation["enum"], field_type)
+                except _ConstraintDeclarationError as exc:
+                    _fail_constraint_declaration("enum", field_type, exc)
+            constraints = FieldConstraints(enum=enum_tuple, nullable=raw_nullable)
+    elif name == "alter_field":
+        # Contract 1.7.0 (D-2 (5), WP-2a; monitor ruling A/B-2): `alter_
+        # field` redeclares one EXISTING field's `enum`/`nullable` as a
+        # PATCH, never a wholesale replace -- omitting `enum` LEAVES it as
+        # it is, `enum: null` CLEARS it, omitting `nullable` LEAVES it as
+        # it is. `field_type` is rejected above (before this branch is
+        # ever reached) in the D-3 four-key form.
+        #
+        # The field's own EXISTING declared type/constraints are not known
+        # here (no catalog access at bind time) -- only this request's own
+        # SHAPE is checked (a list, non-empty, no `None` member, no
+        # duplicate); the member-type-vs-declared-type check (`validate_
+        # enum_declaration`, called again with the real declared type),
+        # the `enum_members` bound, and the omitted/clear/value COMPOSITION
+        # against the field's existing constraints are all deferred to
+        # `apply_schema` (addendum R-b/R-c, D-2 (3)) -- see `ConstraintPatch`.
+        field_name = validate_identifier(operation.get("field", ""))
+        _reject_reserved_field(field_name)
+        if "nullable" not in operation and "enum" not in operation:
+            # Monitor ruling N-1 (rulings-r2-closure.md, contract
+            # corrigendum 3, verbatim): "An alter_field carrying neither
+            # enum nor nullable declares nothing and is refused with
+            # VALIDATION_FAILED; it does not advance the schema
+            # revision." `field` names the operation itself (D-3 (2)) --
+            # the missing declaration is not any one field's key, it is
+            # the whole `alter_field` object carrying nothing to apply.
+            # Rejected here (bind time, before any backend/revision
+            # access) so neither backend ever sees this operation.
+            fail(
+                "VALIDATION_FAILED",
+                "alter_field must declare enum or nullable.",
+                details={"field": "operation", "violated_declaration": "constraint_declaration"},
+            )
+        nullable_omitted = "nullable" not in operation
+        nullable_value = True
+        if not nullable_omitted:
+            nullable_value = operation["nullable"]
+            if not isinstance(nullable_value, bool):
+                fail("VALIDATION_FAILED", "nullable must be boolean.", details={"field": "nullable", "violated_declaration": "constraint_declaration"})
+        enum_omitted = "enum" not in operation
+        enum_clear = False
+        enum_shape_checked: tuple[Any, ...] | None = None
+        if not enum_omitted:
+            raw_enum = operation["enum"]
+            if raw_enum is None:
+                # Monitor ruling A: `enum: null` clears the field's enum.
+                enum_clear = True
+            else:
+                if not isinstance(raw_enum, list) or not raw_enum:
+                    fail("VALIDATION_FAILED", "enum must be a non-empty list.", details={"field": "enum", "violated_declaration": "constraint_declaration"})
+                shape_checked: list[Any] = []
+                for member in raw_enum:
+                    if member is None:
+                        fail("VALIDATION_FAILED", "enum must not contain null.", details={"field": "enum", "violated_declaration": "constraint_declaration"})
+                    if member in shape_checked:
+                        fail("VALIDATION_FAILED", "enum must not contain duplicate members.", details={"field": "enum", "violated_declaration": "constraint_declaration"})
+                    shape_checked.append(member)
+                enum_shape_checked = tuple(shape_checked)
+        constraint_patch = ConstraintPatch(
+            enum_omitted=enum_omitted, enum_clear=enum_clear, enum_raw=enum_shape_checked,
+            nullable_omitted=nullable_omitted, nullable=nullable_value,
+        )
     elif name == "create_index":
         # R-5: the physical index name is `{entity}__{index}` (double
         # underscore separated), so a client index name containing `__`
@@ -759,7 +1167,10 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         _reject_reserved_prefix(index_name)
     elif name != "drop_entity":
         fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.")
-    return BoundSchemaOperation(name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique, field_types=field_types)
+    return BoundSchemaOperation(
+        name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique,
+        field_types=field_types, field_constraints=field_constraints, constraints=constraints, constraint_patch=constraint_patch,
+    )
 
 
 # --- CCR-13 return shapes (design R2DB_CCR13_STORAGE_V1.md §3, revised per
@@ -855,15 +1266,23 @@ def _contains_nul(value: Any) -> bool:
     return False
 
 
-def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
+def _declared_type_label(field_type: str | None) -> str:
+    """The D-3 `declared_type` detail value for a field's own internal
+    declared type -- `None` (untyped/JSONB-equivalent) reports as `json`,
+    the same translation `catalog()`'s own `field_types` output already
+    uses (Phase 6 WP-2, decision (ii))."""
+    return field_type or "json"
+
+
+def _check_type(value: Any, field_type: str | None, field_name: str, *, constraints: "FieldConstraints | None" = None) -> None:
     """Validate `value` against a declared column type before it is bound.
 
     `field_type` of `None` means the field is untyped (JSONB-equivalent):
     any JSON value is accepted, exactly like before typed columns existed.
     `null` is always accepted regardless of declared type (NOT NULL is out
-    of scope for this contract version). A mismatch fails `VALIDATION_
-    FAILED` naming only the field -- never the value itself (`errors.
-    disclosure`).
+    of scope for this contract version, UNLESS `constraints` below says
+    otherwise). A mismatch fails `VALIDATION_FAILED` naming only the field
+    -- never the value itself (`errors.disclosure`).
 
     R-7 addendum (WP-3 review blocker-2): beyond the JSON-type check, a
     value's own *domain* is validated too -- an `integer` outside signed
@@ -871,12 +1290,42 @@ def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
     untyped value -- both of which `_check_type` alone (a bare `isinstance`
     check) would let through, but PostgreSQL's own storage cannot. Same
     error code/disclosure shape as the type check itself.
+
+    Contract 1.7.0 (D-2, WP-2a): `constraints`, a keyword-only, `None`-
+    default argument (addendum R-b: this file's choke point) -- the field's
+    declared `enum`/`nullable`, or `None` when this call site never checks
+    constraints at all (the 2 predicate-value call sites, addendum 2 S-k:
+    `enum`/`nullable` bind writes only, never a query predicate, D-2 (2)'s
+    own negative disclosure). `None` here behaves exactly like the pre-
+    1.7.0 default `FieldConstraints()` would (nullable, no enum) -- the 6
+    write call sites (insert/update/upsert x 2 backends) always pass the
+    field's real constraints (a lookup miss there also yields `None`,
+    naturally the same default). Checked in the WP-2a/D-3 four-key form:
+    `field` + `violated_declaration` always, `declared_type` (the field's
+    own type, `field_type` translated through `_declared_type_label`)
+    alongside it for `nullable` (`observed_type: "null"`), and `declared_
+    type` alone (never `observed_type`, D-3 (4): a `enum` mismatch is not
+    a type mismatch) for `enum`.
     """
     if value is None:
+        if constraints is not None and not constraints.nullable:
+            fail(
+                "VALIDATION_FAILED",
+                "Value must not be null for a field declared nullable: false.",
+                details={"field": field_name, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_type), "observed_type": "null"},
+            )
         return
     if field_type is None:
         if _contains_nul(value):
             fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+        # Monitor ruling B-1 (rulings-wp2a-review.md): an untyped/JSONB-
+        # equivalent field can NEVER declare an `enum` at all (`validate_
+        # enum_declaration`'s own `_ENUM_ELIGIBLE_TYPES` gate above already
+        # refuses the declaration itself) -- so `constraints.enum` is
+        # never non-`None` here, and this branch never needs its own enum
+        # check (removed: the pre-rework "untyped field can still declare
+        # enum" reasoning this comment used to carry was the very type-
+        # inference bug B-1 reports).
         return
     if field_type == "integer":
         ok = isinstance(value, int) and not isinstance(value, bool)
@@ -898,6 +1347,16 @@ def _check_type(value: Any, field_type: str | None, field_name: str) -> None:
         fail("VALIDATION_FAILED", "Value does not match the field's declared type.", details={"field": field_name})
     if field_type in ("string", "object", "array") and _contains_nul(value):
         fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+    # Contract 1.7.0 (D-2, WP-2a): checked LAST, only once `value` has
+    # already passed the basic type/domain/NUL checks above -- a value of
+    # the WRONG type is `violated_declaration: field_type` (the existing,
+    # unmodified branch above), never misreported as an `enum` violation.
+    if constraints is not None and constraints.enum is not None and value not in constraints.enum:
+        fail(
+            "VALIDATION_FAILED",
+            "Value is not a member of the field's declared enum.",
+            details={"field": field_name, "violated_declaration": "enum", "declared_type": _declared_type_label(field_type)},
+        )
 
 
 def _validate_wildcard_pattern(pattern: str, field_name: str) -> None:
@@ -1102,6 +1561,16 @@ class ApplicationCell:
     # entity -> client index name -> {"fields": (...), "unique": bool}
     # (R-5). Declared uniqueness keys are exactly the unique=True entries.
     indexes: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    # Contract 1.7.0 (D-2 (4), WP-2a): entity -> field_name -> FieldConstraints
+    # -- the in-memory backend's own declaration registry ("プロセス内参照
+    # cell の構造", no upgrade script needed, unlike Postgres's side table).
+    # A field name is present here ONLY when SOMETHING was declared for it
+    # (`FieldConstraints.is_declared`) -- absence means the version-wide
+    # default (`nullable: true`, no `enum`), exactly like `schema`'s own
+    # "省略 = json" convention. Never read/written directly by anything
+    # outside this class; `catalog()`/`_apply`/`_apply_upsert`/`apply_
+    # schema` below are its only callers.
+    field_constraints: dict[str, dict[str, "FieldConstraints"]] = field(default_factory=dict)
     schema_revision: int = 0
     # entity -> highest `id` ever assigned. Monotonic, never decremented by
     # delete, and deliberately NOT rolled back when a `transact()` batch
@@ -1220,11 +1689,26 @@ class ApplicationCell:
             # `self.schema[name]`'s internal `None` (untyped) reports as
             # `json`, decision (ii)'s own default, never left un-translated.
             declared_field_types = self.schema.get(name, {})
+            # Contract 1.7.0 (D-2 (1), WP-2a): total over `fields` --
+            # `nullable` always present, `enum` only for a field the
+            # registry (`self.field_constraints`) actually carries a row
+            # for. Read from the registry itself, never re-derived from
+            # any physical/stored value (D-2 (4): "catalog は...宣言
+            # registry から報告する").
+            declared_constraints = self.field_constraints.get(name, {})
+            field_constraints_out: dict[str, Any] = {}
+            for field_name in fields:
+                constraints = declared_constraints.get(field_name, FieldConstraints())
+                entry: dict[str, Any] = {"nullable": constraints.nullable}
+                if constraints.enum is not None:
+                    entry["enum"] = list(constraints.enum)
+                field_constraints_out[field_name] = entry
             result.append(
                 {
                     "entity": name,
                     "fields": fields,
                     "field_types": {field_name: declared_field_types.get(field_name) or "json" for field_name in fields},
+                    "field_constraints": field_constraints_out,
                     "mutation_class": "mutable",
                     "address_fields": ["id"],
                     "address_reuse": "never",
@@ -1255,7 +1739,7 @@ class ApplicationCell:
             # confirmation` that establishes it, not merely the presence
             # of a `delete` key in the request.
             destructive = False
-            for operation in operations:
+            for operation_index, operation in enumerate(operations):
                 if deadline is not None and clock is not None:
                     # WP-2 review M-2: per-operation deadline check, not
                     # only before/after the whole batch -- a unique-index
@@ -1264,7 +1748,14 @@ class ApplicationCell:
                     # indexed entity) could otherwise run well past the
                     # execution budget before the next checkpoint.
                     limits.check_deadline(deadline, clock)
-                count, address, op_destructive = self._apply(entity, operation)
+                # Monitor ruling M-3/D (rulings-wp2a-review.md, rulings-
+                # wp3a-review.md D): `operation_index` is this operation's
+                # own position in the request's `operations` list --
+                # `_apply` below uses it to compose `details.field` as a
+                # request-internal path (`operations/<i>/values/<field>`,
+                # D-3 (2)) for any VALIDATION_FAILED it raises validating
+                # this operation's own `values`.
+                count, address, op_destructive = self._apply(entity, operation, operation_index)
                 affected += count
                 destructive = destructive or op_destructive
                 if address is not None:
@@ -1288,20 +1779,48 @@ class ApplicationCell:
             self.entities[entity] = before
             raise
 
-    def _apply(self, entity: str, operation: dict[str, Any]) -> tuple[int, dict[str, Any] | None, bool]:
+    def _apply(self, entity: str, operation: dict[str, Any], operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = self.schema.get(entity, {})
         known_fields = set(field_types.keys())
         bound = bind_mutation(operation, known_fields)
+        # Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for
+        # this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in
+        # `postgres.py`) all pass THIS through to `_check_type`; the 2
+        # predicate call sites (`_validate_predicate_types`, below and in
+        # `query`) never do (D-2 (2): a query predicate is not bound by
+        # `enum`/`nullable`).
+        entity_constraints = self.field_constraints.get(entity, {})
+        # Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every
+        # `details.field` this method raises for a VALUE-position defect
+        # in `bound.values` names the request-internal PATH to that value
+        # (`operations/<operation_index>/values/<field>`), never the bare
+        # entity field name -- mirrors the contract text's own example
+        # verbatim ("operations/0/values/label").
+        values_path = f"operations/{operation_index}/values/"
 
         if bound.operation == "insert":
+            # Contract 1.7.0 (D-2 (3)(ii), addendum R-c): the "declared
+            # non-nullable field was never given a value at all" check --
+            # unlike a null VALUE (checked per-value by the choke point,
+            # `_check_type` below), an OMITTED field never reaches that
+            # choke point at all (it is simply absent from `bound.values`),
+            # so this structural check runs first, insert-only.
+            missing_non_nullable = sorted({name for name, c in entity_constraints.items() if not c.nullable} - set(bound.values))
+            if missing_non_nullable:
+                missing_field = missing_non_nullable[0]
+                fail(
+                    "VALIDATION_FAILED",
+                    "A field declared nullable: false requires a value on insert.",
+                    details={"field": values_path + missing_field, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_types.get(missing_field)), "observed_type": "absent"},
+                )
             for key, value in bound.values.items():
-                _check_type(value, field_types.get(key), key)
+                _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
             self._check_unique_conflict(entity, bound.values, exclude_id=None)
             row = self._insert_row(entity, bound.values)
             return 1, {"address": {"id": row["id"]}}, False
 
         if bound.operation == "upsert":
-            count, address = self._apply_upsert(entity, bound, field_types)
+            count, address = self._apply_upsert(entity, bound, field_types, entity_constraints, values_path)
             return count, address, False
 
         # update / delete: R-7, corrigendum M-9 -- validate every value's
@@ -1311,7 +1830,7 @@ class ApplicationCell:
         _validate_predicate_types(bound.where, field_types)
         if bound.operation == "update":
             for key, value in bound.values.items():
-                _check_type(value, field_types.get(key), key)
+                _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
 
         try:
             matches = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in bound.where)]
@@ -1362,7 +1881,7 @@ class ApplicationCell:
             row["_r2db_revision"] = str(uuid.uuid4())
         return len(matches), None, False
 
-    def _apply_upsert(self, entity: str, bound: BoundMutation, field_types: dict[str, str | None]) -> tuple[int, dict[str, Any] | None]:
+    def _apply_upsert(self, entity: str, bound: BoundMutation, field_types: dict[str, str | None], entity_constraints: "dict[str, FieldConstraints]", values_path: str) -> tuple[int, dict[str, Any] | None]:
         declared = {name: info for name, info in self.indexes.get(entity, {}).items() if info["unique"]}
         if not declared:
             # R-5 / §0.5 Q-1 (adjudicated 案B): an entity declaring no
@@ -1389,7 +1908,7 @@ class ApplicationCell:
         # R-7, corrigendum M-9: type-check before searching for an existing
         # row (symmetric with insert/update above).
         for key, value in bound.values.items():
-            _check_type(value, field_types.get(key), key)
+            _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
         existing = [row for row in self.entities[entity] if all(row.get(f) == bound.values[f] for f in key_fields)]
         update_values = {k: v for k, v in bound.values.items() if k not in key_fields}
         if bound.expected_revision is not None:
@@ -1410,6 +1929,23 @@ class ApplicationCell:
             row.update(update_values)
             row["_r2db_revision"] = str(uuid.uuid4())
             return 1, None
+        # Contract 1.7.0 (D-2 (3)(ii), (contract text): "An upsert that
+        # resolves to an insert is refused on the same rule [as insert];
+        # an upsert that resolves to an update is not"). This point is
+        # reached ONLY when `existing` (checked above) found no row AND
+        # there was no `expected_revision` -- i.e. this upsert is now
+        # KNOWN to resolve to an insert, so the insert-only absent-field
+        # rule applies, symmetric with the plain `insert` branch in
+        # `_apply` above (never applied to the update-resolving branches
+        # above this one, which never reach this line at all).
+        missing_non_nullable = sorted({name for name, c in entity_constraints.items() if not c.nullable} - set(bound.values))
+        if missing_non_nullable:
+            missing_field = missing_non_nullable[0]
+            fail(
+                "VALIDATION_FAILED",
+                "A field declared nullable: false requires a value on an upsert that resolves to an insert.",
+                details={"field": values_path + missing_field, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_types.get(missing_field)), "observed_type": "absent"},
+            )
         self._check_unique_conflict(entity, bound.values, exclude_id=None)
         row = self._insert_row(entity, bound.values)
         return 1, {"address": {"id": row["id"]}}
@@ -1473,6 +2009,14 @@ class ApplicationCell:
             projected_objects = current_objects - (len(self.schema.get(bound.entity, {})) + 1) - len(self.indexes.get(bound.entity, {}))
         elif bound.operation == "create_index":
             projected_objects = current_objects + 1
+        elif bound.operation == "alter_field":
+            # Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a): `alter_field`
+            # redeclares an EXISTING field's constraints -- it creates no
+            # new entity/field/index, so it never changes `schema_objects`
+            # (that bound is unrelated to `enum_members`, checked
+            # separately below once the field's real declared type is
+            # known).
+            projected_objects = current_objects
         else:  # drop_index
             projected_objects = current_objects - 1
         limits.check("schema_objects", projected_objects)
@@ -1482,10 +2026,22 @@ class ApplicationCell:
         before_schema = deepcopy(self.schema)
         before_indexes = deepcopy(self.indexes)
         before_next_id = dict(self._next_id)
+        before_field_constraints = deepcopy(self.field_constraints)
         before_revision = self.schema_revision
         if bound.operation == "create_entity":
             if bound.entity in self.entities:
                 fail("CONFLICT", "Entity already exists.", status=409)
+            # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `enum_members` is
+            # checked BEFORE any mutation below (limits.enum_members's own
+            # text: "before anything is created or altered") -- `fail()`
+            # raised from inside this method is not caught by anything
+            # short of unwinding the whole call (only the LATER deadline-
+            # check/audit-hook points below restore `before_*`), so this
+            # must run first, not merely "before `schema_revision`
+            # advances".
+            for constraints in bound.field_constraints.values():
+                if constraints.enum is not None:
+                    limits.check("enum_members", len(constraints.enum))
             self.entities[bound.entity] = []
             # Phase 6 WP-2 (design D-3(iv)): a name present in `bound.
             # field_types` gets its declared type; every other name in
@@ -1494,6 +2050,11 @@ class ApplicationCell:
             self.schema[bound.entity] = {name: bound.field_types.get(name) for name in bound.fields}
             self.schema[bound.entity]["id"] = "integer"
             self.indexes[bound.entity] = {}
+            # Only fields the request itself gave a `field_constraints`
+            # spec ever touch the registry (D-2 (1): "省略 = 制約なし").
+            for field_name, constraints in bound.field_constraints.items():
+                if constraints.is_declared:
+                    self.field_constraints.setdefault(bound.entity, {})[field_name] = constraints
         elif bound.operation == "drop_entity":
             if bound.entity not in self.entities:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1512,12 +2073,116 @@ class ApplicationCell:
             # ends that lifetime, so a later create_entity of the same name
             # is a new entity and its addresses start at 1 again.
             self._next_id.pop(bound.entity, None)
+            # Contract 1.7.0 (D-2 (4), WP-2a): the registry is scoped to
+            # the entity's own lifetime too, symmetric with `schema`/
+            # `indexes`/`_next_id` above -- a later `create_entity` of the
+            # same name is a new entity with no inherited constraints.
+            self.field_constraints.pop(bound.entity, None)
         elif bound.operation == "add_field":
             if bound.entity not in self.entities:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
             if bound.field in self.schema.setdefault(bound.entity, {}):
                 fail("CONFLICT", "Field already exists.", status=409)
+            # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `add_field`'s own
+            # single-field declaration, mirroring `create_entity`'s enum_
+            # members check above -- checked BEFORE the mutation just
+            # below (`bound.constraints` is `None` when the request never
+            # carried `enum`/`nullable` at all).
+            if bound.constraints is not None and bound.constraints.enum is not None:
+                limits.check("enum_members", len(bound.constraints.enum))
+            # Monitor ruling M-6 (rulings-wp2a-review.md, contract
+            # corrigendum): "An add_field declaring nullable: false on an
+            # entity that already holds rows is refused with CONFLICT on
+            # the same rule, because every existing row would hold null in
+            # the new field" -- the SAME rule `alter_field`'s own existing-
+            # row scan enforces (D-2 (6)), applied here since a brand new
+            # field with no default always starts every existing row at
+            # `null`. Checked BEFORE the field is created (fail-closed:
+            # nothing has been mutated yet at this point).
+            if bound.constraints is not None and not bound.constraints.nullable and self.entities[bound.entity]:
+                fail(
+                    "CONFLICT",
+                    "Existing rows would hold null in a field declared nullable: false.",
+                    status=409,
+                    details={"field": bound.field, "violated_declaration": "nullable"},
+                )
             self.schema[bound.entity][bound.field] = bound.field_type
+            if bound.constraints is not None and bound.constraints.is_declared:
+                self.field_constraints.setdefault(bound.entity, {})[bound.field] = bound.constraints
+        elif bound.operation == "alter_field":
+            # Contract 1.7.0 (D-2 (5)/(6), WP-2a): "redeclares the
+            # constraints of one existing field" -- both the entity and
+            # the field must already exist (`field_type` redeclaration is
+            # rejected earlier, at bind time, `bind_schema_operation`).
+            if bound.entity not in self.entities:
+                fail("NOT_FOUND", "Entity was not found.", status=404)
+            if bound.field not in self.schema.get(bound.entity, {}):
+                fail("NOT_FOUND", "Field was not found.", status=404)
+            declared_type = self.schema[bound.entity][bound.field]
+            patch = bound.constraint_patch
+            assert patch is not None  # bind_schema_operation always sets this for alter_field
+            # Monitor ruling A/B-2 (rulings-wp3a-review.md, rulings-wp2a-
+            # review.md): compose the request's PATCH against the field's
+            # EXISTING declared constraints -- only known here, never at
+            # bind time (addendum R-b/R-c, D-2 (3)). `enum` omitted/
+            # `nullable` omitted each LEAVE the existing value as it is;
+            # `enum: null` CLEARS it; an explicit list is fully validated
+            # against the field's real declared type now.
+            existing_constraints = self.field_constraints.get(bound.entity, {}).get(bound.field, FieldConstraints())
+            new_nullable = existing_constraints.nullable if patch.nullable_omitted else patch.nullable
+            if patch.enum_clear:
+                new_enum: tuple[Any, ...] | None = None
+            elif patch.enum_omitted:
+                new_enum = existing_constraints.enum
+            else:
+                try:
+                    new_enum = validate_enum_declaration(list(patch.enum_raw), declared_type)
+                except _ConstraintDeclarationError as exc:
+                    _fail_constraint_declaration("enum", declared_type, exc)
+                limits.check("enum_members", len(new_enum))
+            new_constraints = FieldConstraints(enum=new_enum, nullable=new_nullable)
+            # Contract 1.7.0 (D-2 (6)): every existing row is checked
+            # against the constraints this operation would establish,
+            # BEFORE anything commits -- one violating row refuses the
+            # WHOLE operation with CONFLICT, changing nothing (this
+            # method's own fail-closed/`before_*`-restore machinery, never
+            # reached here since nothing has been mutated yet at this
+            # point).
+            #
+            # Monitor ruling F (rulings-wp3a-review.md, applied to r2db by
+            # M-1/rulings-wp2a-review.md): `PostgresCell.apply_schema`'s
+            # own alter_field branch takes `LOCK TABLE ... IN SHARE MODE`
+            # before this same scan, closing a race where another
+            # transaction commits a violating row between the scan and the
+            # registry write. This in-memory backend needs no such lock:
+            # `ApplicationCell` serves one process, one operation at a
+            # time (there is no concurrent transaction that could commit a
+            # row between this scan and `entity_registry[...]` below), so
+            # the scan-then-write sequence is already atomic by
+            # construction.
+            violated_declaration: str | None = None
+            for row in self.entities[bound.entity]:
+                value = row.get(bound.field)
+                if value is None:
+                    if not new_constraints.nullable:
+                        violated_declaration = "nullable"
+                        break
+                    continue
+                if new_constraints.enum is not None and value not in new_constraints.enum:
+                    violated_declaration = "enum"
+                    break
+            if violated_declaration is not None:
+                fail(
+                    "CONFLICT",
+                    "Existing rows violate the constraints this alter_field would establish.",
+                    status=409,
+                    details={"field": bound.field, "violated_declaration": violated_declaration},
+                )
+            entity_registry = self.field_constraints.setdefault(bound.entity, {})
+            if new_constraints.is_declared:
+                entity_registry[bound.field] = new_constraints
+            else:
+                entity_registry.pop(bound.field, None)
         elif bound.operation == "create_index":
             if bound.entity not in self.entities:
                 fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1559,6 +2224,7 @@ class ApplicationCell:
                 self.schema = before_schema
                 self.indexes = before_indexes
                 self._next_id = before_next_id
+                self.field_constraints = before_field_constraints
                 self.schema_revision = before_revision
                 raise
         # Phase 4 (design D-2, item 2): every schema operation is
@@ -1578,6 +2244,7 @@ class ApplicationCell:
                 self.schema = before_schema
                 self.indexes = before_indexes
                 self._next_id = before_next_id
+                self.field_constraints = before_field_constraints
                 self.schema_revision = before_revision
                 raise
         self.schema_revision += 1

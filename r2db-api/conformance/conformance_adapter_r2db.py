@@ -161,6 +161,12 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     requests_per_minute=50,
     schema_objects=20,
     operation_depth=5,
+    # Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a, 監査照合項目 3): small
+    # like every other COUNT-valued class above (<= C-14's own
+    # `_MAX_EXERCISABLE_LIMIT`, 200) -- a peer-local `enum_members` test
+    # can exercise the bound with a handful of members instead of the
+    # production default's 64.
+    enum_members=5,
 )
 
 

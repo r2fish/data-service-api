@@ -289,6 +289,30 @@ INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name)
     VALUES (9, '0009_platform_upgrades_ledger_upgrade.sql')
     ON CONFLICT (upgrade_number) DO NOTHING;
 
+-- Phase 9 WP-2a (contract 1.7.0 R-2, design docs/design/PHASE9_
+-- CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-2, work order
+-- docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-2a): the
+-- per-application field-constraints declaration registry, paired with
+-- `migrations/0010_field_constraints_upgrade.sql` the same way this
+-- block above is paired with `0009` -- a brand-new application, provi-
+-- sioned by THIS script, gets the table and the ledger row directly; an
+-- application provisioned before this WP shipped reaches both through
+-- `0010` (via `ops upgrade-applications`). See `0010`'s own header for
+-- the table's full shape/access-pattern rationale (identical here).
+CREATE TABLE IF NOT EXISTS public._r2db_field_constraints (
+    entity_name text    NOT NULL,
+    field_name  text    NOT NULL,
+    nullable    boolean NOT NULL DEFAULT true,
+    enum_values jsonb,
+    PRIMARY KEY (entity_name, field_name)
+);
+REVOKE ALL    ON public._r2db_field_constraints FROM :"runtime_role";
+GRANT  SELECT ON public._r2db_field_constraints TO :"runtime_role";
+GRANT  SELECT ON public._r2db_field_constraints TO SESSION_USER;
+INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name)
+    VALUES (10, '0010_field_constraints_upgrade.sql')
+    ON CONFLICT (upgrade_number) DO NOTHING;
+
 -- §8.5 condition 3(b) -- see this file's header. A live view, not a
 -- point-in-time claim: querying it always reflects the database's current
 -- catalog state, so it catches RLS having been disabled or never enabled
@@ -313,7 +337,7 @@ CREATE OR REPLACE VIEW public._r2db_missing_rls AS
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
       AND c.relkind = 'r'
-      AND c.relname NOT IN ('_r2db_schema_revision', '_r2db_platform_upgrades')
+      AND c.relname NOT IN ('_r2db_schema_revision', '_r2db_platform_upgrades', '_r2db_field_constraints')
       AND (c.relrowsecurity = false OR c.relforcerowsecurity = false);
 GRANT SELECT ON public._r2db_missing_rls TO :"runtime_role";
 

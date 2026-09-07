@@ -607,13 +607,19 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     """Phase 9 WP-1 (contract 1.7.0, design D-1 (3); work order docs/
     work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9),
     completion condition 24): the packaged contract copy is already 1.7.0
-    (schema-accepts `dry_run`/`plan`/`budget`/`enum`/`nullable`/
-    `field_constraints`/`SchemaOperationRequest.idempotency_key`), but this
-    foundation still declares `constraint_declarations`/`dry_run`/
-    `request_budget` `unavailable` -- every one of the 7 new fields must be
-    refused with `CAPABILITY_UNSUPPORTED` before anything executes, with NO
-    side effect (no row created, no catalog change, no schema revision
-    advance), exactly like the existing `idempotency_key` gate above.
+    (schema-accepts `dry_run`/`plan`/`budget`/`SchemaOperationRequest.
+    idempotency_key`), and this foundation still declares `dry_run`/
+    `request_budget` `unavailable` -- every one of the remaining gated
+    fields must be refused with `CAPABILITY_UNSUPPORTED` before anything
+    executes, with NO side effect (no row created, no catalog change, no
+    schema revision advance), exactly like the existing `idempotency_key`
+    gate above.
+
+    WP-2a already removed `field_constraints`/`enum`/`nullable` from this
+    gate (`constraint_declarations` is `enabled`, enforced) -- their own
+    positive/negative coverage lives in `tests/test_constraints_
+    declaration.py` and `conformance-tests/test_c20_constraint_
+    declaration_agreement.py` now, not here.
     """
     # --- query: budget ---
     query_response = await client.post(
@@ -646,11 +652,9 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     assert catalog_after_mutate_gate.status_code == 200
     assert query_after_mutate_gate.json()["items"] == []
 
-    # --- schema: field_constraints / enum / nullable / dry_run / plan / budget / idempotency_key ---
+    # --- schema: dry_run / plan / budget / idempotency_key (field_
+    # constraints / enum / nullable are enforced now, WP-2a -- not gated) ---
     schema_gate_cases = [
-        {"operation": "create_entity", "entity": "gated_entity", "fields": ["label"], "field_constraints": {"label": {"nullable": False}}},
-        {"operation": "add_field", "entity": "notes", "field": "gated_enum_field", "enum": ["a", "b"]},
-        {"operation": "add_field", "entity": "notes", "field": "gated_nullable_field", "nullable": False},
         {"operation": "add_field", "entity": "notes", "field": "gated_dry_run_field", "dry_run": True},
         {"operation": "add_field", "entity": "notes", "field": "gated_plan_field", "plan": "deadbeef"},
         {"operation": "add_field", "entity": "notes", "field": "gated_budget_field", "budget": {"execution_ms": 1}},
@@ -659,19 +663,17 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     schema_revision_before = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
     for case in schema_gate_cases:
         response = await client.post("/v1/schema/operations", headers=_auth("dev-a.dev-secret-a"), json=case)
-        provisional_fields = {"field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key"}
+        provisional_fields = {"dry_run", "plan", "budget", "idempotency_key"}
         expected_field = next(k for k in case if k in provisional_fields)
         assert response.status_code == 400, case
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", case
         assert response.json()["details"]["violated_declaration"] == "capability", case
         assert response.json()["details"]["field"] == expected_field, case
-    # No side effect: entity/field additions above never landed.
+    # No side effect: field additions above never landed.
     schema_revision_after = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
     assert schema_revision_after == schema_revision_before
-    entity_names_after = {e["entity"] for e in schema_revision_after["entities"]}
-    assert "gated_entity" not in entity_names_after
     notes_fields_after = next(e["fields"] for e in schema_revision_after["entities"] if e["entity"] == "notes")
-    for gated_field in ("gated_enum_field", "gated_nullable_field", "gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
+    for gated_field in ("gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
         assert gated_field not in notes_fields_after
 
 
@@ -681,24 +683,25 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process():
     confirms the gate lives in `service.py` itself, raising
     `FoundationError(code="CAPABILITY_UNSUPPORTED", details={
     "violated_declaration": "capability", "field": <name>})`, with no
-    side effect. `field_constraints={}` (empty dict) specifically
-    exercises that `DataService.schema`'s own gate
-    (`_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`) checks key MEMBERSHIP
-    (`provisional_field in operation`), not the value's truthiness -- an
-    empty dict is falsy but its key must still gate (this is the same
-    class of bug the sibling `MitateDB-api` peer's `cell.py::
-    ApplicationDeveloper.create_entity` had before this rework, WP-1a
-    code review item 5; r2db's own gate never had it, this test pins that
-    it stays that way)."""
+    side effect. `budget={}` (empty dict) specifically exercises that
+    `DataService.schema`'s own gate (`_PROVISIONAL_UNSUPPORTED_SCHEMA_
+    FIELDS`) checks key MEMBERSHIP (`provisional_field in operation`),
+    not the value's truthiness -- an empty dict is falsy but its key must
+    still gate (this is the same class of bug the sibling `MitateDB-api`
+    peer's `cell.py::ApplicationDeveloper.create_entity` had before this
+    rework, WP-1a code review item 5; r2db's own gate never had it, this
+    test pins that it stays that way). WP-2a already removed `field_
+    constraints`/`enum`/`nullable` from this gate -- their own coverage
+    lives in `tests/test_constraints_declaration.py` now."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
 
     catalog_before = service.catalog(developer)
 
     with pytest.raises(FoundationError) as excinfo:
-        service.schema(developer, {"operation": "create_entity", "entity": "in_process_gated_entity", "fields": ["label"], "field_constraints": {}})
+        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field", "budget": {}})
     assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "field_constraints"}
+    assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
 
     with pytest.raises(FoundationError) as excinfo:
         service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field", "idempotency_key": ""})
@@ -706,30 +709,32 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process():
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
 
     with pytest.raises(FoundationError) as excinfo:
-        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field_2", "nullable": False})
+        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field_2", "plan": ""})
     assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "nullable"}
+    assert excinfo.value.details == {"violated_declaration": "capability", "field": "plan"}
 
     # No side effect: none of the gated schema attempts above landed.
     catalog_after = service.catalog(developer)
     assert catalog_after == catalog_before
-    entity_names_after = {e["entity"] for e in catalog_after["entities"]}
-    assert "in_process_gated_entity" not in entity_names_after
     notes_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == "notes")
     assert "in_process_gated_field" not in notes_fields_after
     assert "in_process_gated_field_2" not in notes_fields_after
 
 
 def test_contract_1_7_0_new_capabilities_are_declared_unavailable():
-    """Completion condition 25 (peer-local half): the 3 new capabilities are
-    declared `unavailable` in the SAME commit as the provisional gate above
-    (P-3) -- the common-suite half of this (defined ⊆ declared, all 14
-    names present) is `conformance-tests/test_c11_document_conformance.py`
-    (裁定 T-4)."""
+    """Completion condition 25 (peer-local half): the 3 new capabilities
+    were ALL declared `unavailable` in the SAME commit as the provisional
+    gate (P-3) -- the common-suite half of this (defined ⊆ declared, all
+    14 names present) is `conformance-tests/test_c11_document_
+    conformance.py` (裁定 T-4). WP-2a flipped `constraint_declarations`
+    to `enabled` in its own commit (its own gate/behavior/declaration
+    together, per D-1 (4)) -- `dry_run`/`request_budget` remain
+    `unavailable` until their own capability WPs land."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
     capabilities = service.capabilities(developer)["capabilities"]
-    for name in ("constraint_declarations", "dry_run", "request_budget"):
+    assert capabilities["constraint_declarations"]["status"] == "enabled"
+    for name in ("dry_run", "request_budget"):
         assert name in capabilities, name
         assert capabilities[name]["status"] == "unavailable", name
 
@@ -996,10 +1001,22 @@ async def test_catalog_matches_contract_shape_and_application_scope(client):
     # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md §2/R-1):
     # `row_addressability` is declared `enabled` (WP-5b), so the full
     # `EntityDescriptor` shape reaches the response with no narrowing.
+    # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` is a real key
+    # too now -- total, `nullable: true` and no `enum` here (nothing was
+    # ever declared).
     assert body == {
         "application_scope": "app-a",
         "entities": [
-            {"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}
+            {
+                "entity": "notes",
+                "fields": ["body", "id"],
+                "field_types": {"body": "json", "id": "integer"},
+                "field_constraints": {"body": {"nullable": True}, "id": {"nullable": True}},
+                "mutation_class": "mutable",
+                "address_fields": ["id"],
+                "address_reuse": "never",
+                "unique_keys": [],
+            }
         ],
     }
     assert response.headers["x-request-id"]

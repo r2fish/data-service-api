@@ -100,7 +100,7 @@ import queue
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Sequence
 
 import psycopg
@@ -115,12 +115,17 @@ from .limits import ResourceLimits
 from . import platform_upgrades
 from .structured import (
     BoundMutation,
+    ConstraintPatch,
+    FieldConstraints,
     MutationOutcome,
     Predicate,
     QueryOutcome,
     _check_type,
+    _ConstraintDeclarationError,
     _decode_cursor,
+    _declared_type_label,
     _encode_cursor,
+    _fail_constraint_declaration,
     _resolve_order_by,
     _shape_hash,
     _validate_predicate_types,
@@ -131,6 +136,7 @@ from .structured import (
     drop_entity_confirmation_phrase,
     drop_index_confirmation_phrase,
     require_destructive_confirmation,
+    validate_enum_declaration,
     validate_identifier,
     validate_page_size,
     validate_predicates,
@@ -151,7 +157,14 @@ _REVISION_TABLE = "_r2db_schema_revision"
 # owned by `migrations/0003_provision_application.sql`/`0009_...sql` and
 # read only by `platform_upgrades.read_applied_upgrade_numbers`, via the
 # runtime pool's own connection -- U-2's `SELECT`-only grant).
-_BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME})
+#: Contract 1.7.0 (D-2 (4), WP-2a): the per-application field-constraints
+#: declaration registry (side table) -- the declaration's own source of
+#: truth (physical column constraints are never added, §4 A-1), so this is
+#: a THIRD backend bookkeeping table joining `_REVISION_TABLE`/the platform-
+#: upgrade ledger, excluded from the application-visible catalog/RLS-
+#: coverage check the same way.
+_FIELD_CONSTRAINTS_TABLE = "_r2db_field_constraints"
+_BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE})
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -284,6 +297,16 @@ class _TableInfo:
 
     columns: dict[str, str | None]
     indexes: dict[str, dict[str, Any]]
+    # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared `enum`/
+    # `nullable` constraints, read from the side-table registry (`_load_
+    # field_constraints` below) -- field name -> `FieldConstraints`,
+    # present ONLY for a field something was actually declared on
+    # (`FieldConstraints.is_declared`), same "absence = default" convention
+    # `columns`/`indexes` above never needed (there is no "undeclared
+    # column"). Defaults to `{}` so every EXISTING call site that builds a
+    # `_TableInfo` without constraints in mind (there are none left after
+    # this WP, but a future one) keeps working.
+    constraints: dict[str, "FieldConstraints"] = field(default_factory=dict)
 
 
 def _run(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, params: Sequence[Any] = ()) -> None:
@@ -860,6 +883,18 @@ class PostgresCell:
                 for index_name, index_info in sorted(table_info.indexes.items())
                 if index_info["unique"]
             ]
+            # Contract 1.7.0 (D-2 (1), WP-2a): total over `table_info.
+            # columns` (like `field_types` below) -- `nullable` always
+            # present, `enum` only for a field the registry (`table_info.
+            # constraints`, read by `_load_catalog`'s own `_load_field_
+            # constraints`) actually carries a declaration for.
+            field_constraints_out: dict[str, Any] = {}
+            for field_name in table_info.columns:
+                constraints = table_info.constraints.get(field_name, FieldConstraints())
+                entry: dict[str, Any] = {"nullable": constraints.nullable}
+                if constraints.enum is not None:
+                    entry["enum"] = list(constraints.enum)
+                field_constraints_out[field_name] = entry
             result.append(
                 {
                     "entity": name,
@@ -869,6 +904,7 @@ class PostgresCell:
                     # `None` (untyped/JSONB) reports as `json`, decision
                     # (ii)'s own default.
                     "field_types": {field_name: (declared_type or "json") for field_name, declared_type in table_info.columns.items()},
+                    "field_constraints": field_constraints_out,
                     # R-1/R-2/§2: every entity this backend provisions is
                     # server-addressed, mutable, and never reuses an
                     # address within one entity's lifetime -- there is no
@@ -882,7 +918,7 @@ class PostgresCell:
             )
         return result
 
-    def _load_catalog(self, conn: "psycopg.Connection[Any]") -> dict[str, "_TableInfo"]:
+    def _load_catalog(self, conn: "psycopg.Connection[Any]", *, with_constraints: bool = True) -> dict[str, "_TableInfo"]:
         """The catalog-verification step D-4 requires before any client
         identifier may be composed with `sql.Identifier`: this is the live
         set of tables/columns/unique-indexes that actually exist in this
@@ -991,7 +1027,114 @@ class PostgresCell:
                 client_name = index_name[len(prefix):]
                 indexes[table_name][client_name] = {"physical": index_name, "fields": tuple(fields), "unique": bool(is_unique)}
 
-        return {name: _TableInfo(columns=columns, indexes=indexes.get(name, {})) for name, columns in tables.items()}
+        # Monitor ruling M-4 (rulings-wp2a-review.md): the side-table read
+        # (a nested SAVEPOINT + SELECT + RELEASE SAVEPOINT, `_load_field_
+        # constraints` below) is skipped entirely when `with_constraints`
+        # is `False` -- `query` (D-2 (2): "query の predicate 値は enum を
+        # 検査しない") never uses `table_info.constraints` at all, so
+        # paying for that read on every read-only request is pure waste.
+        constraints_by_entity = self._load_field_constraints(conn) if with_constraints else {}
+        return {
+            name: _TableInfo(columns=columns, indexes=indexes.get(name, {}), constraints=constraints_by_entity.get(name, {}))
+            for name, columns in tables.items()
+        }
+
+    def _load_field_constraints(self, conn: "psycopg.Connection[Any]") -> dict[str, dict[str, "FieldConstraints"]]:
+        """Contract 1.7.0 (D-2 (4), WP-2a): reads the side-table registry
+        (`public._r2db_field_constraints`, migration `0010_field_
+        constraints_upgrade.sql`) -- the declaration's own source of truth
+        (physical column constraints are never added, §4 A-1). `conn` is
+        already inside the caller's own `with conn.transaction():` block
+        (`catalog`/`transact`/`apply_schema` above), so this method opens a
+        NESTED transaction (a real PostgreSQL SAVEPOINT once already inside
+        one) around its own read: if the table does not exist yet (an
+        application that has never run `python -m r2db_api.ops upgrade-
+        applications` for upgrade 10, WP-2a completion condition 10), that
+        one savepoint rolls back to a clean, still-usable state and this
+        method returns `{}` -- every entity/field then reports the
+        version-wide default (`nullable: true`, no `enum`). An application
+        that never declares any `field_constraints`/`enum`/`nullable` at
+        all keeps working unmodified without ever needing that upgrade;
+        only an attempt to WRITE a declaration (`_write_field_constraints`
+        below) actually needs the table to exist -- that failure is left
+        to propagate to this class' own existing `except psycopg.Error`
+        handling (`transact`/`apply_schema`), which already maps it to a
+        safe `SERVICE_UNAVAILABLE` with no rows changed (the enclosing
+        `with conn.transaction():` rolls the whole operation back).
+        """
+        result: dict[str, dict[str, FieldConstraints]] = {}
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("SELECT entity_name, field_name, nullable, enum_values FROM public.{}").format(sql.Identifier(_FIELD_CONSTRAINTS_TABLE)))
+                    rows = cur.fetchall()
+        except psycopg.errors.UndefinedTable:
+            return result
+        for entity_name, field_name, nullable, enum_values in rows:
+            result.setdefault(entity_name, {})[field_name] = FieldConstraints(
+                enum=tuple(enum_values) if enum_values is not None else None,
+                nullable=bool(nullable),
+            )
+        return result
+
+    def _write_field_constraints(self, conn: "psycopg.Connection[Any]", entity: str, field_name: str, constraints: "FieldConstraints") -> None:
+        """Contract 1.7.0 (D-2 (4), WP-2a): persists (or clears) one
+        field's own row in the side-table registry -- the ONLY write path
+        into it, called from `apply_schema`'s `create_entity`/`add_field`/
+        `alter_field` branches, always inside that method's own outer `with
+        conn.transaction():` (never a separate commit). A field whose
+        constraints are no longer declared at all (`not constraints.is_
+        declared` -- `alter_field` clearing back to the version-wide
+        default) has its row DELETEd rather than left standing; `create_
+        entity`/`add_field` only ever call this for a field the request
+        gave an actual spec (never for the fully-default case, so a plain
+        `create_entity`/`add_field` that never mentions `field_constraints`
+        /`enum`/`nullable` never touches this table at all).
+        """
+        table = sql.Identifier(_FIELD_CONSTRAINTS_TABLE)
+        with conn.cursor() as cur:
+            if not constraints.is_declared:
+                _run(
+                    cur,
+                    sql.SQL("DELETE FROM public.{table} WHERE entity_name = {ph} AND field_name = {ph2}").format(table=table, ph=sql.Placeholder(), ph2=sql.Placeholder()),
+                    [entity, field_name],
+                )
+                return
+            enum_json = Jsonb(list(constraints.enum)) if constraints.enum is not None else None
+            _run(
+                cur,
+                sql.SQL(
+                    "INSERT INTO public.{table} (entity_name, field_name, nullable, enum_values) VALUES ({e}, {f}, {n}, {v}) "
+                    "ON CONFLICT (entity_name, field_name) DO UPDATE SET nullable = EXCLUDED.nullable, enum_values = EXCLUDED.enum_values"
+                ).format(table=table, e=sql.Placeholder(), f=sql.Placeholder(), n=sql.Placeholder(), v=sql.Placeholder()),
+                [entity, field_name, constraints.nullable, enum_json],
+            )
+
+    def _clear_field_constraints(self, conn: "psycopg.Connection[Any]", entity: str) -> None:
+        """Monitor ruling B-3 (rulings-wp2a-review.md): `drop_entity`'s own
+        registry cleanup, protected the same way `_load_field_constraints`
+        above protects its own read -- a real PostgreSQL SAVEPOINT (a
+        NESTED transaction, `conn` is already inside `apply_schema`'s own
+        outer `with conn.transaction():`) around the `DELETE`, swallowing
+        `UndefinedTable` if the side table itself was never created (an
+        application that has never run upgrade `10`). `drop_entity` must
+        succeed for such an application regardless -- dropping an entity
+        that never had a `field_constraints` row is unrelated to whether
+        the registry TABLE exists at all, unlike `alter_field`/`create_
+        entity`/`add_field` actually WRITING a declaration, which legitimately
+        needs the table and is left to fail closed (`SERVICE_UNAVAILABLE`,
+        `_write_field_constraints`'s own docstring) if it is missing.
+        """
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    _run(
+                        cur,
+                        sql.SQL("DELETE FROM public.{table} WHERE entity_name = {ph}").format(table=sql.Identifier(_FIELD_CONSTRAINTS_TABLE), ph=sql.Placeholder()),
+                        [entity],
+                    )
+        except psycopg.errors.UndefinedTable:
+            return
 
     # ---- query ---------------------------------------------------------
 
@@ -1018,7 +1161,10 @@ class PostgresCell:
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
-                    catalog = self._load_catalog(conn)
+                    # Monitor ruling M-4: `query` never reads `table_info.
+                    # constraints` (D-2 (2): predicates are not bound by
+                    # `enum`/`nullable`) -- skip the side-table read.
+                    catalog = self._load_catalog(conn, with_constraints=False)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
                     table_info = catalog[entity]
@@ -1150,12 +1296,17 @@ class PostgresCell:
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
                     table_info = catalog[entity]
-                    for operation in operations:
+                    for operation_index, operation in enumerate(operations):
                         if deadline is not None and clock is not None:
                             # WP-2 review M-2 parity: per-operation deadline
                             # check, not only before/after the whole batch.
                             limits.check_deadline(deadline, clock)
-                        count, address, op_destructive = self._apply(conn, entity, operation, table_info)
+                        # Monitor ruling M-3/D (rulings-wp2a-review.md):
+                        # this operation's own position in the request's
+                        # `operations` list -- `_apply` composes `details.
+                        # field` as a request-internal path from it
+                        # (`operations/<i>/values/<field>`, D-3 (2)).
+                        count, address, op_destructive = self._apply(conn, entity, operation, table_info, operation_index)
                         affected += count
                         destructive = destructive or op_destructive
                         if address is not None:
@@ -1269,21 +1420,43 @@ class PostgresCell:
             return Jsonb(value)
         return value
 
-    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None, bool]:
+    def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo", operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = table_info.columns
         known_fields = set(field_types)
         bound = bind_mutation(operation, known_fields)
+        # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
+        # constraints, already read by `_load_catalog` into `table_info`
+        # (addendum 2 S-k's 6 write call sites all pass this through to
+        # `_check_type`; the 2 predicate call sites never do).
+        entity_constraints = table_info.constraints
+        # Monitor ruling M-3/D (rulings-wp2a-review.md, D-3 (2)): every
+        # `details.field` this method raises for a VALUE-position defect
+        # in `bound.values` names the request-internal PATH to that value.
+        values_path = f"operations/{operation_index}/values/"
 
         if bound.operation == "insert":
+            # Contract 1.7.0 (D-2 (3)(ii), addendum R-c): the "declared
+            # non-nullable field was never given a value at all" check,
+            # insert-only -- mirrors `ApplicationCell._apply`'s identical
+            # check (see that method's own comment for why this cannot be
+            # folded into the choke point itself).
+            missing_non_nullable = sorted({name for name, c in entity_constraints.items() if not c.nullable} - set(bound.values))
+            if missing_non_nullable:
+                missing_field = missing_non_nullable[0]
+                fail(
+                    "VALIDATION_FAILED",
+                    "A field declared nullable: false requires a value on insert.",
+                    details={"field": values_path + missing_field, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_types.get(missing_field)), "observed_type": "absent"},
+                )
             # R-7, corrigendum M-9: value types are validated before
             # anything is sent to the database.
             for key, value in bound.values.items():
-                _check_type(value, field_types.get(key), key)
+                _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
             row_id = self._insert(conn, entity, bound.values, field_types)
             return 1, {"address": {"id": row_id}}, False
 
         if bound.operation == "upsert":
-            count, address = self._apply_upsert(conn, entity, bound, table_info)
+            count, address = self._apply_upsert(conn, entity, bound, table_info, values_path)
             return count, address, False
 
         # update / delete: R-7, corrigendum M-9 -- validate every value's
@@ -1293,7 +1466,7 @@ class PostgresCell:
         _validate_predicate_types(bound.where, field_types)
         if bound.operation == "update":
             for key, value in bound.values.items():
-                _check_type(value, field_types.get(key), key)
+                _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
 
         where_sql, where_params = self._where_clause(bound.where, field_types)
 
@@ -1438,7 +1611,7 @@ class PostgresCell:
             row = cur.fetchone()
             return row[0] if row else 0
 
-    def _apply_upsert(self, conn: "psycopg.Connection[Any]", entity: str, bound: "BoundMutation", table_info: "_TableInfo") -> tuple[int, dict[str, Any] | None]:
+    def _apply_upsert(self, conn: "psycopg.Connection[Any]", entity: str, bound: "BoundMutation", table_info: "_TableInfo", values_path: str) -> tuple[int, dict[str, Any] | None]:
         """R-5 / §0.5 Q-1 (adjudicated 案B). Mirrors `ApplicationCell.
         _apply_upsert`'s exact key-selection and error-precedence rules;
         the only difference is execution: two real SQL statements
@@ -1465,15 +1638,60 @@ class PostgresCell:
         for key_field in key_fields:
             if bound.values.get(key_field) is None:
                 fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details={"field": key_field})
+        # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
+        # constraints, same source `_apply` above reads.
+        entity_constraints = table_info.constraints
         # R-7, corrigendum M-9: type-check before any SQL runs, symmetric
         # with insert/update above.
         for key, value in bound.values.items():
-            _check_type(value, field_types.get(key), key)
+            _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
 
         table = sql.Identifier(entity)
         key_where_sql = sql.SQL(" AND ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(f), ph=sql.Placeholder()) for f in key_fields)
         key_where_params = [self._bind_value(bound.values[f], field_types.get(f)) for f in key_fields]
         update_values = {k: v for k, v in bound.values.items() if k not in key_fields}
+
+        # Contract 1.7.0 (D-2 (3)(ii), contract text: "An upsert that
+        # resolves to an insert is refused on the same rule [as insert];
+        # an upsert that resolves to an update is not"). Unlike `_apply`'s
+        # plain `insert` branch, this backend cannot know ahead of the two
+        # real SQL statements below whether THIS upsert will resolve to an
+        # insert or an update (corrigendum M-4: no separate existence
+        # check drives that choice) -- so the missing-field question is
+        # only even asked (one extra, targeted `SELECT ... LIMIT 1`,
+        # skipped entirely when every non-nullable field IS present, the
+        # common case) when it can actually change the outcome: a
+        # precondition (`expected_revision`) already guarantees this
+        # upsert can never resolve to an insert (R-5, `_apply_upsert`'s own
+        # docstring), so this check does not apply there at all.
+        if bound.expected_revision is None:
+            missing_non_nullable = sorted({name for name, c in entity_constraints.items() if not c.nullable} - set(bound.values))
+            if missing_non_nullable:
+                # Monitor ruling M-2 (rulings-wp2a-review.md): `FOR UPDATE`
+                # locks the row this existence check found, inside this
+                # same transaction, for the rest of it -- without this, a
+                # concurrent session could DELETE this exact row and
+                # commit between this `SELECT` (finds it, "resolves to
+                # update") and the `INSERT ... ON CONFLICT DO NOTHING`
+                # below, letting that INSERT actually insert (the key is
+                # free again) -- a row missing a `nullable: false` field,
+                # never caught, because this check already concluded
+                # "resolves to update, skip it". Locking the row means the
+                # concurrent DELETE blocks until this transaction commits
+                # or rolls back, so the row this SELECT saw is still there
+                # (or the whole transaction serializes behind it) when the
+                # INSERT/UPDATE below actually run -- the missing-field
+                # verdict this check reaches can no longer go stale.
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("SELECT 1 FROM {table} WHERE {where} LIMIT 1 FOR UPDATE").format(table=table, where=key_where_sql), key_where_params)
+                    resolves_to_update = cur.fetchone() is not None
+                if not resolves_to_update:
+                    missing_field = missing_non_nullable[0]
+                    fail(
+                        "VALIDATION_FAILED",
+                        "A field declared nullable: false requires a value on an upsert that resolves to an insert.",
+                        details={"field": values_path + missing_field, "violated_declaration": "nullable", "declared_type": _declared_type_label(field_types.get(missing_field)), "observed_type": "absent"},
+                    )
         revision_bump = sql.SQL("{col} = gen_random_uuid()").format(col=sql.Identifier(_REVISION_COLUMN))
         if update_values:
             assignments = sql.SQL(", ").join(sql.SQL("{col} = {ph}").format(col=sql.Identifier(k), ph=sql.Placeholder()) for k in update_values)
@@ -1636,6 +1854,13 @@ class PostgresCell:
                         projected = current_objects - (columns_len + 1) - indexes_len
                     elif bound.operation == "create_index":
                         projected = current_objects + 1
+                    elif bound.operation == "alter_field":
+                        # Contract 1.7.0 (D-2 (7), U-1 = (β), WP-2a):
+                        # redeclares an EXISTING field -- no new entity/
+                        # field/index, so `schema_objects` never moves
+                        # (`enum_members` is checked separately below, once
+                        # the field's real declared type is known).
+                        projected = current_objects
                     else:  # drop_index
                         projected = current_objects - 1
                     limits.check("schema_objects", projected)
@@ -1654,7 +1879,26 @@ class PostgresCell:
                         _reject_reserved_entity_name(bound.entity)
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
+                        # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `enum_
+                        # members` is checked BEFORE `_create_entity`
+                        # issues any DDL below (limits.enum_members's own
+                        # text: "before anything is created or altered")
+                        # -- a `fail()` here would in any case roll back
+                        # the whole `with conn.transaction():` block, but
+                        # checking first avoids issuing DDL only to
+                        # discard it, and matches the in-memory backend's
+                        # identical ordering (`ApplicationCell.apply_
+                        # schema`).
+                        for field_constraints_spec in bound.field_constraints.values():
+                            if field_constraints_spec.enum is not None:
+                                limits.check("enum_members", len(field_constraints_spec.enum))
                         self._create_entity(conn, bound.entity, bound.fields, bound.field_types)
+                        # Only fields the request itself gave a `field_
+                        # constraints` spec ever touch the registry (D-2
+                        # (1): "省略 = 制約なし").
+                        for field_name, field_constraints_spec in bound.field_constraints.items():
+                            if field_constraints_spec.is_declared:
+                                self._write_field_constraints(conn, bound.entity, field_name, field_constraints_spec)
                     elif bound.operation == "drop_entity":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1667,12 +1911,151 @@ class PostgresCell:
                             recovery=None,
                         )
                         self._drop_entity(conn, bound.entity)
+                        # Contract 1.7.0 (D-2 (4), WP-2a): the registry is
+                        # scoped to the entity's own lifetime, symmetric
+                        # with `ApplicationCell.apply_schema`'s identical
+                        # `field_constraints.pop` -- a later `create_
+                        # entity` of the same name must never inherit a
+                        # dropped entity's own constraints. Monitor ruling
+                        # B-3 (rulings-wp2a-review.md): this cleanup runs
+                        # ONLY when the side table itself exists -- an
+                        # application that has never run upgrade `10` has
+                        # no such table at all, and `drop_entity` (an
+                        # operation wholly unrelated to whether that table
+                        # exists) must still succeed for it, exactly like
+                        # every other schema/data operation that never
+                        # touches `field_constraints`.
+                        self._clear_field_constraints(conn, bound.entity)
                     elif bound.operation == "add_field":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)
                         if bound.field in catalog[bound.entity].columns:
                             fail("CONFLICT", "Field already exists.", status=409)
+                        # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `add_field`'s
+                        # own single-field declaration, mirroring `create_
+                        # entity`'s enum_members check above -- checked
+                        # BEFORE the mutation just below (`bound.
+                        # constraints` is `None` when the request never
+                        # carried `enum`/`nullable` at all).
+                        if bound.constraints is not None and bound.constraints.enum is not None:
+                            limits.check("enum_members", len(bound.constraints.enum))
+                        # Monitor ruling M-6 (rulings-wp2a-review.md,
+                        # contract corrigendum): "An add_field declaring
+                        # nullable: false on an entity that already holds
+                        # rows is refused with CONFLICT on the same rule" --
+                        # the SAME tx + lock `alter_field`'s own existing-
+                        # row scan uses below (M-1/F): `LOCK TABLE ... IN
+                        # SHARE MODE` before the existence check, so a
+                        # concurrent INSERT cannot slip a row in between
+                        # this check and the DDL/registry write below.
+                        if bound.constraints is not None and not bound.constraints.nullable:
+                            add_field_table_ident = sql.Identifier(bound.entity)
+                            with conn.cursor() as cur:
+                                _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=add_field_table_ident))
+                            with conn.cursor() as cur:
+                                _run(cur, sql.SQL("SELECT 1 FROM {table} LIMIT 1").format(table=add_field_table_ident))
+                                if cur.fetchone() is not None:
+                                    fail(
+                                        "CONFLICT",
+                                        "Existing rows would hold null in a field declared nullable: false.",
+                                        status=409,
+                                        details={"field": bound.field, "violated_declaration": "nullable"},
+                                    )
                         self._add_field(conn, bound.entity, bound.field, bound.field_type)
+                        if bound.constraints is not None and bound.constraints.is_declared:
+                            self._write_field_constraints(conn, bound.entity, bound.field, bound.constraints)
+                    elif bound.operation == "alter_field":
+                        # Contract 1.7.0 (D-2 (5)/(6), WP-2a): "redeclares
+                        # the constraints of one existing field" -- `field_
+                        # type` redeclaration is already rejected at bind
+                        # time (`bind_schema_operation`).
+                        if bound.entity not in catalog:
+                            fail("NOT_FOUND", "Entity was not found.", status=404)
+                        table_info = catalog[bound.entity]
+                        if bound.field not in table_info.columns:
+                            fail("NOT_FOUND", "Field was not found.", status=404)
+                        declared_type = table_info.columns[bound.field]
+                        patch = bound.constraint_patch
+                        assert patch is not None  # bind_schema_operation always sets this for alter_field
+                        # Monitor ruling A/B-2 (rulings-wp3a-review.md,
+                        # rulings-wp2a-review.md): compose the request's
+                        # PATCH against the field's EXISTING declared
+                        # constraints -- only known here (`table_info.
+                        # constraints`, never at bind time, addendum R-b/
+                        # R-c, D-2 (3)). `enum`/`nullable` omitted each
+                        # LEAVE the existing value as it is; `enum: null`
+                        # CLEARS it; an explicit list is fully validated
+                        # against the field's real declared type now.
+                        existing_constraints = table_info.constraints.get(bound.field, FieldConstraints())
+                        new_nullable = existing_constraints.nullable if patch.nullable_omitted else patch.nullable
+                        if patch.enum_clear:
+                            new_enum: tuple[Any, ...] | None = None
+                        elif patch.enum_omitted:
+                            new_enum = existing_constraints.enum
+                        else:
+                            try:
+                                new_enum = validate_enum_declaration(list(patch.enum_raw), declared_type)
+                            except _ConstraintDeclarationError as exc:
+                                _fail_constraint_declaration("enum", declared_type, exc)
+                            limits.check("enum_members", len(new_enum))
+                        new_constraints = FieldConstraints(enum=new_enum, nullable=new_nullable)
+                        # Contract 1.7.0 (D-2 (6)): every existing row is
+                        # checked against the constraints this operation
+                        # would establish, INSIDE this same `with conn.
+                        # transaction():` block, before anything commits --
+                        # one violating row refuses the WHOLE operation
+                        # with CONFLICT via `fail()`, which unwinds this
+                        # entire transaction (nothing has been written yet
+                        # at this point, so there is nothing to roll back
+                        # beyond PostgreSQL's own transactional DDL/DML).
+                        # Two separate, targeted queries (never a combined
+                        # OR) so the CONFLICT can name exactly which
+                        # declaration a violating row breaks, without ever
+                        # naming the row itself or how many there are
+                        # (SI-10, contract text).
+                        table_ident = sql.Identifier(bound.entity)
+                        field_ident = sql.Identifier(bound.field)
+                        # Monitor ruling F/M-1 (rulings-wp3a-review.md,
+                        # rulings-wp2a-review.md): lock the entity's own
+                        # table (SHARE MODE -- blocks concurrent writers,
+                        # never concurrent readers) BEFORE the scan below,
+                        # inside this SAME transaction. Without this, READ
+                        # COMMITTED lets another session INSERT/UPDATE a
+                        # row that violates the new constraints, commit it
+                        # AFTER this scan sees zero violations but BEFORE
+                        # this transaction's own `_write_field_constraints`
+                        # commits -- `alter_field` would then succeed while
+                        # a violating row already exists, making the
+                        # catalog's own declaration false (G-3) the instant
+                        # it is published. `SHARE MODE` (not a row lock)
+                        # because the scan below reads the WHOLE table, not
+                        # a single identified row (contrast the upsert
+                        # TOCTOU fix below, M-2, which locks one row).
+                        with conn.cursor() as cur:
+                            _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=table_ident))
+                        if not new_constraints.nullable:
+                            with conn.cursor() as cur:
+                                _run(cur, sql.SQL("SELECT 1 FROM {table} WHERE {f} IS NULL LIMIT 1").format(table=table_ident, f=field_ident))
+                                if cur.fetchone() is not None:
+                                    fail("CONFLICT", "Existing rows violate the constraints this alter_field would establish.", status=409, details={"field": bound.field, "violated_declaration": "nullable"})
+                        if new_constraints.enum is not None:
+                            # `_bind_value` (never a bare member) so this
+                            # binds correctly for `declared_type`'s real
+                            # typed column -- ruling B-1 means `declared_
+                            # type` is always one of the 4 scalar words
+                            # here (`validate_enum_declaration`'s own
+                            # `_ENUM_ELIGIBLE_TYPES` gate already refused
+                            # `enum` on any untyped/object/array field at
+                            # declaration time), so this is never an
+                            # unwrapped bind against a `jsonb` column.
+                            placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in new_constraints.enum)
+                            statement = sql.SQL("SELECT 1 FROM {table} WHERE {f} IS NOT NULL AND {f} NOT IN ({items}) LIMIT 1").format(table=table_ident, f=field_ident, items=placeholders)
+                            enum_params = [self._bind_value(member, declared_type) for member in new_constraints.enum]
+                            with conn.cursor() as cur:
+                                _run(cur, statement, enum_params)
+                                if cur.fetchone() is not None:
+                                    fail("CONFLICT", "Existing rows violate the constraints this alter_field would establish.", status=409, details={"field": bound.field, "violated_declaration": "enum"})
+                        self._write_field_constraints(conn, bound.entity, bound.field, new_constraints)
                     elif bound.operation == "create_index":
                         if bound.entity not in catalog:
                             fail("NOT_FOUND", "Entity was not found.", status=404)

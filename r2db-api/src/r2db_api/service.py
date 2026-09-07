@@ -882,7 +882,12 @@ class DataService:
             # (see `query`/`mutate`/`schema`/`catalog` below) -- this
             # declaration update is what makes that removal honest rather
             # than a new C-12 "declared unavailable, executes anyway" gap.
-            schema_ops = ["create_entity", "add_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
+            # Contract 1.7.0 (D-2 (5), WP-2a): `alter_field` joins the
+            # developer-only schema-operation set -- `R-2` constraint
+            # declarations are enforced now (see `constraint_declarations`
+            # below), so it is no longer accurate to list it under
+            # `unsupported`.
+            schema_ops = ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"] if canonical.role == "developer" else []
             document: dict[str, Any] = {
                 # Phase 4 WP-2(b) (P4-D4, contract `versioning.
                 # version_binding`), flipped to 1.5.0 in phase 5 WP-2,
@@ -911,7 +916,7 @@ class DataService:
                     # service-wide gap `atomic_mutation` needs to qualify.
                     "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
                     "application_catalog": {"status": "enabled"},
-                    "schema_operations": {"status": "partial", "operations": schema_ops, "unsupported": ["alter_field", "jobs"]},
+                    "schema_operations": {"status": "partial", "operations": schema_ops, "unsupported": ["jobs"]},
                     "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                     "best_effort_transactions": {"status": "unavailable"},
                     "idempotency": {"status": "unavailable"},
@@ -933,18 +938,21 @@ class DataService:
                     # comment on this field).
                     "control_plane": {"status": self._control_plane_status},
                     # Contract 1.7.0 (subordinate ruling 12, D-1 (3)): three
-                    # new capabilities, honestly declared `unavailable` in
-                    # the SAME commit as the provisional gate that rejects
-                    # every field each one governs (`schema`/`mutate_result`/
+                    # new capabilities, honestly declared `unavailable`
+                    # until each one's own capability WP flips it, in the
+                    # SAME commit as the provisional gate that rejects
+                    # every field it governs (`schema`/`mutate_result`/
                     # `_query_outcome` above, `http.py`'s `post_mutate`/
-                    # `post_query`) -- P-3 (宣言と挙動は同一コミット). WP-2a
-                    # (`constraint_declarations`), WP-2b (`dry_run`) and
-                    # WP-2d (`request_budget`) each flip their own entry to
-                    # `enabled`/`partial` in the same commit that removes
-                    # their name from `_PROVISIONAL_UNSUPPORTED_SCHEMA_
-                    # FIELDS` / the `mutate_result`/`_query_outcome` gates
-                    # above.
-                    "constraint_declarations": {"status": "unavailable"},
+                    # `post_query`) -- P-3 (宣言と挙動は同一コミット).
+                    #
+                    # WP-2a: `constraint_declarations` is `enabled` --
+                    # `field_constraints`/`enum`/`nullable`/`alter_field`
+                    # are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_
+                    # FIELDS` (removed in this same commit) and are now
+                    # enforced (`structured.py`/`postgres.py`). WP-2b
+                    # (`dry_run`) and WP-2d (`request_budget`) each flip
+                    # their own entry the same way, in their own commit.
+                    "constraint_declarations": {"status": "enabled"},
                     "dry_run": {"status": "unavailable"},
                     "request_budget": {"status": "unavailable"},
                 },
@@ -1113,11 +1121,13 @@ class DataService:
     # every one of these fields is schema-accepted (the packaged contract
     # copy is already 1.7.0) but not yet capability-enabled -- passing one
     # through unrejected would be a P-3 violation (declaring `unavailable`
-    # while quietly accepting the field). WP-2a (`field_constraints`/`enum`/
-    # `nullable`), WP-2b (`dry_run`/`plan`), WP-2c (`idempotency_key`) and
-    # WP-2d (`budget`) each remove their own name from this tuple in the
-    # same commit that flips the corresponding capability to `enabled`.
-    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key")
+    # while quietly accepting the field). WP-2a already removed `field_
+    # constraints`/`enum`/`nullable` from this tuple (`constraint_
+    # declarations` is `enabled`, `alter_field` is enforced). WP-2b
+    # (`dry_run`/`plan`), WP-2c (`idempotency_key`) and WP-2d (`budget`)
+    # each remove their own name from what remains, in the same commit
+    # that flips the corresponding capability to `enabled`.
+    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("dry_run", "plan", "budget", "idempotency_key")
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
         rid = request_id or str(uuid.uuid4())

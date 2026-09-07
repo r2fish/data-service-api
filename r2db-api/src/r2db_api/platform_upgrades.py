@@ -69,14 +69,17 @@ LEDGER_TABLE_NAME = "_r2db_platform_upgrades"
 
 #: The complete set of per-application upgrade numbers THIS SHIPPED VERSION
 #: of r2db-api knows about (design D-3(f)/§8: r2db's own per-app upgrade
-#: series has one member so far, `0009`). Kept in three-way sync with (a)
-#: the `NNNN_..._upgrade.sql` scripts actually present under `migrations/`
-#: and (b) `0003_provision_application.sql`'s own ledger seed list --
-#: `tests/test_platform_upgrade_ledger_scan.py::test_real_migrations_three_
-#: way_match` (WP-0, its `xfail` removed in this same WP-3 commit) closes
-#: the "forgot to bump this constant" gap mechanically (design §10, U-2's
-#: own "代償" clause).
-PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({9})
+#: series had one member, `0009`, joined by Phase 9 WP-2a's `0010` -- the
+#: R-2 field-constraints side table, reusing this exact mechanism per that
+#: work order's own cited precedent, docs/design/PHASE9_CONTRACT_170_
+#: DECLARATION_AND_VERIFICATION_V1.md §3 D-2 "根拠"). Kept in three-way
+#: sync with (a) the `NNNN_..._upgrade.sql` scripts actually present under
+#: `migrations/` and (b) `0003_provision_application.sql`'s own ledger
+#: seed list -- `tests/test_platform_upgrade_ledger_scan.py::test_real_
+#: migrations_three_way_match` (WP-0, its `xfail` removed in this same
+#: WP-3 commit) closes the "forgot to bump this constant" gap
+#: mechanically (design §10, U-2's own "代償" clause).
+PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({9, 10})
 
 #: The psql `-v` variable name every r2db per-application upgrade script
 #: (and `ops upgrade-applications`' own `psql` invocation) uses to pass the
