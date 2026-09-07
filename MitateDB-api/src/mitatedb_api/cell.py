@@ -666,7 +666,16 @@ def _measure_request_bytes(request, bound):
         if isinstance(item, (dict, list, tuple, set)):
             marker = id(item)
             if marker in ancestors:
-                raise ValidationError("cyclic request structures are not supported")
+                # WP-3e rework T1 (追補 L-1): `request_schema`, no `field`
+                # -- this walk has no request-relative path to attribute
+                # a cycle to (an id()-keyed ancestor stack, not a
+                # positional traversal), mirrors r2db-api's own bare
+                # `violation("request_schema")` sites for a shape defect
+                # that is not about any one field.
+                raise ValidationError(
+                    "cyclic request structures are not supported",
+                    details=violation("request_schema"),
+                )
             child_ancestors = ancestors | {marker}
         if isinstance(item, dict):
             total += 2
@@ -718,7 +727,12 @@ def _check_operation_depth(request, bound):
             continue
         marker = id(item)
         if marker in ancestors:
-            raise ValidationError("cyclic request structures are not supported")
+            # WP-3e rework T1 (追補 L-1): mirrors `_measure_request_
+            # bytes`'s own identical site immediately above.
+            raise ValidationError(
+                "cyclic request structures are not supported",
+                details=violation("request_schema"),
+            )
         child_ancestors = ancestors | {marker}
         next_depth = current + 1
         if next_depth > bound:
@@ -1220,7 +1234,15 @@ class ApplicationCell:
                 # single collection DEFINITION may name in one `create_
                 # collection` call -- a one-time shape bound on the request
                 # itself, not a repeated, finite-resource consumption class.
-                raise ValidationError("field limit exceeded")
+                # WP-3e rework T1 (追補 L-1): `request_schema`, mirroring
+                # r2db-api's own "Mutation contains too many fields"
+                # treatment for the SAME `maxProperties`-style shape
+                # bound -- `field` names the container the bound applies
+                # to, not any one entry inside it.
+                raise ValidationError(
+                    "field limit exceeded",
+                    details=violation("request_schema", field="fields"),
+                )
             if self._backend.schema_count() >= self.config.max_schema_objects:
                 raise ResourceLimitError("schema object limit exceeded", limit_class="schema_objects")
             validated_fields = {}
@@ -1228,7 +1250,18 @@ class ApplicationCell:
             for field, field_type in fields.items():
                 field = self._identifier(field, "field")
                 if field_type not in _FIELD_TYPE_VOCABULARY:
-                    raise ValidationError("unsupported field type")
+                    # WP-3e rework T1 (追補 L-1): `enum` -- the declared
+                    # type name itself must be a member of the closed
+                    # foundation-type vocabulary; mirrors r2db-api's own
+                    # `field_types/<name>` "Unsupported field type"
+                    # treatment (`violated_declaration: "enum"`,
+                    # `declared_type: "string"`, no `observed_type` --
+                    # the violation is about the vocabulary MEMBERSHIP of
+                    # the declared name, not about a value's type).
+                    raise ValidationError(
+                        "unsupported field type",
+                        details=violation("enum", field=f"fields/{field}", declared_type="string"),
+                    )
                 validated_fields[field] = field_type
                 declared_types[field] = (
                     field_types.get(field) if field_types is not None and field in field_types
@@ -1519,7 +1552,15 @@ class ApplicationCell:
             collection = self._identifier(collection, "collection")
             field = self._identifier(field, "field")
             if field_type not in _FIELD_TYPE_VOCABULARY:
-                raise ValidationError("unsupported field type")
+                # WP-3e rework T1 (追補 L-1): mirrors `create_collection`'s
+                # own identical per-field check above -- `add_field`'s
+                # single scalar `field_type` key is its own request
+                # position (matches r2db-api's own `add_field` site,
+                # `field="field_type"`).
+                raise ValidationError(
+                    "unsupported field type",
+                    details=violation("enum", field="field_type", declared_type="string"),
+                )
             declared_type = contract_type if contract_type is not None else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
             # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure H-3
             # (a); Phase 9 WP-3c rework, I-13): hoisted above `field_
@@ -1577,7 +1618,15 @@ class ApplicationCell:
             # `ResourceLimitError` call-site count unaffected by this WP).
             current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if len(current) >= self.config.max_fields:
-                raise ValidationError("field limit exceeded")
+                # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
+                # names the request key this bound is about -- `add_field`
+                # has no plural container to point at (unlike `create_
+                # collection`'s own `fields`), so this points at the one
+                # new field name the request itself carries.
+                raise ValidationError(
+                    "field limit exceeded",
+                    details=violation("request_schema", field="field"),
+                )
             if nullable is not None and not isinstance(nullable, bool):
                 # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
                 # identical `add_field` site, `structured.py`): a
@@ -2133,7 +2182,20 @@ class ApplicationCell:
             )
         collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
         if not fields:
-            raise ValidationError("values must be non-empty")
+            # WP-3e rework T1 (追補 L-1): unreachable in practice --
+            # `_prepare_values` above already guarantees a non-empty
+            # `fields` whenever it returns without raising (every key of
+            # its own non-empty `values` argument either raises or is
+            # appended) -- kept as a defensive `request_schema` guard
+            # rather than removed (matching this module's own pre-
+            # existing defensive style, `field_types.check_declared_
+            # value`'s "unknown declared field type" branch), now with
+            # the same `details` its unreachable-in-practice sibling
+            # sites carry.
+            raise ValidationError(
+                "values must be non-empty",
+                details=violation("request_schema", field=path_prefix),
+            )
         bound_filters = self._bind_filters(collection, filters, limits=limits)
         return collection, fields, values_params, bound_filters
 
@@ -2929,7 +2991,12 @@ class ApplicationCell:
             # Q1-D11 (design v1.5 §7): read-projection width is a shape
             # bound on the request's own `fields` list, mirroring contract
             # `QueryRequest.select.maxItems`.
-            raise ValidationError("field limit exceeded")
+            # WP-3e rework T1 (追補 L-1): `request_schema`, `field` names
+            # the request's own `select` container this bound applies to.
+            raise ValidationError(
+                "field limit exceeded",
+                details=violation("request_schema", field="select"),
+            )
         result = []
         for field in requested:
             field = self._identifier(field, "field")
@@ -2984,25 +3051,50 @@ class ApplicationCell:
     _MAX_ORDER_BY_TERMS = 10  # mirrors contract `definitions.QueryRequest.order_by.maxItems`
 
     def _bind_order_by(self, collection, order_by):
+        # WP-3e rework T1 (追補 L-1/M-2): every branch below is a
+        # choke-point request-shape violation about `order_by` -- 4-keyed
+        # with `errors.violation()` like every other `_bind_*` site in
+        # this class. Bare-list/bounds/shape violations are `request_
+        # schema` (mirrors r2db-api's own `_resolve_order_by`); an
+        # unrecognized field name mirrors `_select_fields`'s/`_prepare_
+        # values`'s own "unknown field" `request_schema` treatment;
+        # `direction` outside `{"asc", "desc"}` is `enum` (`declared_
+        # type="string"`, no `observed_type` -- the enum branch never
+        # carries one, D-3 (4)).
         if order_by is None:
             return None
         if isinstance(order_by, dict):
             order_by = [order_by]
         if not isinstance(order_by, list) or not order_by:
-            raise ValidationError("order_by must be an object or a non-empty list of objects")
+            raise ValidationError(
+                "order_by must be an object or a non-empty list of objects",
+                details=violation("request_schema", field="order_by"),
+            )
         if len(order_by) > self._MAX_ORDER_BY_TERMS:
-            raise ValidationError("order_by term limit exceeded")
+            raise ValidationError(
+                "order_by term limit exceeded",
+                details=violation("request_schema", field="order_by"),
+            )
         available = self._backend.field_domains(collection)
         bound = []
-        for item in order_by:
+        for i, item in enumerate(order_by):
             if not isinstance(item, dict):
-                raise ValidationError("order_by must be an object or a non-empty list of objects")
+                raise ValidationError(
+                    "order_by must be an object or a non-empty list of objects",
+                    details=violation("request_schema", field=f"order_by/{i}"),
+                )
             field = self._identifier(item.get("field"), "order field")
             if field not in available:
-                raise ValidationError("unknown order field")
+                raise ValidationError(
+                    "unknown order field",
+                    details=violation("request_schema", field=f"order_by/{i}/field"),
+                )
             direction = item.get("direction", "asc")
             if direction not in ("asc", "desc"):
-                raise ValidationError("invalid order direction")
+                raise ValidationError(
+                    "invalid order direction",
+                    details=violation("enum", field=f"order_by/{i}/direction", declared_type="string"),
+                )
             bound.append((field, direction))
         return bound
 
@@ -3099,7 +3191,14 @@ class ApplicationCell:
             # Q1-D11 (design v1.5 §7): write-payload width (insert/update/
             # transact-insert) mirrors contract `Mutation.values.
             # maxProperties: 100` directly.
-            raise ValidationError("field limit exceeded")
+            # WP-3e rework T1 (追補 L-1): `request_schema`, `field` =
+            # `path_prefix` -- same convention the "non-empty object"
+            # check immediately above already uses for this same
+            # container.
+            raise ValidationError(
+                "field limit exceeded",
+                details=violation("request_schema", field=path_prefix),
+            )
         fields = []
         params = []
         for field, value in values.items():
@@ -3196,9 +3295,20 @@ class ApplicationCell:
         # above uses.
         declared_types = self._backend.field_types(collection)
         bound = []
-        for item in filters:
+        for i, item in enumerate(filters):
             if not isinstance(item, Filter):
-                raise ValidationError("filters must contain Filter values")
+                # WP-3e rework T1 (追補 L-1): unreachable through the
+                # HTTP surface (`http.py`'s own `_parse_filter` always
+                # constructs a `Filter` before this method is ever
+                # called) -- a defensive internal-shape guard against a
+                # direct caller passing the wrong Python type, kept
+                # `request_schema` with the list index it can still
+                # attribute (`filters/<i>`), same treatment as this
+                # method's own unreachable-in-practice siblings above.
+                raise ValidationError(
+                    "filters must contain Filter values",
+                    details=violation("request_schema", field=f"filters/{i}"),
+                )
             field = self._identifier(item.field, "filter field")
             if item.operator in _UNSUPPORTED_CONTRACT_OPERATORS:
                 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains`/
@@ -3277,7 +3387,17 @@ class ApplicationCell:
             return json.dumps(value, separators=(",", ":"), sort_keys=True)
         if isinstance(value, (bool, str, int, float)) or value is None:
             return value
-        raise ValidationError("unsupported value")
+        # WP-3e rework T1 (追補 L-1): unreachable in practice -- a JSON
+        # request body decodes only into dict/list/bool/str/int/float/
+        # None, exactly the accepted set above -- kept `request_schema`
+        # (no `field`: this static method has no request-relative path
+        # of its own, `_prepare_values`'s own catch clause is what
+        # attaches one for its own `field_type` choke point, D-2 (3))
+        # rather than removed, matching this class's own defensive style.
+        raise ValidationError(
+            "unsupported value",
+            details=violation("request_schema"),
+        )
 
     @classmethod
     def _normalize_value_for_storage(cls, value, declared_type):

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .errors import ValidationError
+from .errors import ValidationError, violation
 
 #: Contract 1.6.0 `field_type` enum (`schemas.SchemaOperationRequest.
 #: properties.field_type.enum` / `definitions.EntityDescriptor.properties.
@@ -209,13 +209,19 @@ def check_declared_value(value: Any, declared_type: "str | None", *, constraints
         # Unreachable in practice: `declared_type` reaching this point is
         # always a member of `CONTRACT_TYPES` (the registry never holds
         # anything else, `_FIELD_TYPE_VOCABULARY`/`CONTRACT_TYPES` are
-        # validated at schema-operation time) -- kept as a plain,
-        # details-free `ValidationError` (no `violated_declaration` word
-        # in the 11-word vocabulary names an unrecognized REGISTRY entry,
-        # as opposed to a value the request itself sent), never a
-        # `pragma: no cover` removal, matching this module's own
-        # pre-existing defensive style.
-        raise ValidationError(f"unknown declared field type {declared_type!r}")
+        # validated at schema-operation time) -- never a `pragma: no
+        # cover` removal, matching this module's own pre-existing
+        # defensive style. WP-3e rework T1 (追補 L-1): "免除は layer_rule
+        # の backend 層のみ" leaves this choke-point site no exemption
+        # either, even though it is unreachable -- best-effort
+        # `request_schema` (no closer 11-word member names an
+        # unrecognized REGISTRY entry, as opposed to a value the request
+        # itself sent; no `field`, this function's own fixed 3-argument
+        # signature has no request-relative path of its own, D-2 (3)).
+        raise ValidationError(
+            f"unknown declared field type {declared_type!r}",
+            details=violation("request_schema"),
+        )
     if not ok:
         # Phase 9 WP-3e (design D-3 (2)/(4), V-1/V-2): the primary
         # `field_type` choke point -- `violated_declaration: "field_type"`

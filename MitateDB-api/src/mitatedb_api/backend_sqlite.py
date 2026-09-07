@@ -17,7 +17,7 @@ import sqlite3
 import time
 
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
-from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError
+from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError, violation
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
 
@@ -135,8 +135,15 @@ class SQLiteBackend:
         return self._db
 
     def check_reserved(self, value, label):
+        # WP-3e rework T1 (追補2 M-1): mirrors `backend_postgres.
+        # PostgresBackend.check_reserved`'s own identical rationale -- the
+        # reserved-name half of the identifier choke point, not defence-
+        # in-depth, so it carries `identifier_syntax` too.
         if value in _RESERVED:
-            raise ValidationError("reserved " + label)
+            raise ValidationError(
+                "reserved " + label,
+                details=violation("identifier_syntax", field=label),
+            )
 
     def schema_count(self):
         row = self._db.execute(
@@ -779,7 +786,14 @@ class SQLiteBackend:
                     quote_identifier(field) + " " + _DIRECTION_TOKENS[direction] for field, direction in order_by
                 )
             except KeyError as exc:
-                raise ValidationError("invalid order direction") from exc
+                # WP-3e rework T1 (追補2 M-1): mirrors `backend_postgres.
+                # PostgresBackend.read`'s own identical site -- same
+                # literal denial `cell.ApplicationCell._bind_order_by`
+                # already carries, same 4-key treatment.
+                raise ValidationError(
+                    "invalid order direction",
+                    details=violation("enum", field="order_by/direction", declared_type="string"),
+                ) from exc
             statement += " ORDER BY " + order_terms
         statement += " LIMIT ?"
         params = list(params) + [limit]

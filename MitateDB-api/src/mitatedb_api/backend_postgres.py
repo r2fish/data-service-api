@@ -90,7 +90,7 @@ from psycopg import sql
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
-                     StorageConfigurationError, ValidationError)
+                     StorageConfigurationError, ValidationError, violation)
 from .identifiers import validate_identifier
 from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
@@ -506,8 +506,21 @@ class PostgresBackend:
         self._developer.close()
 
     def check_reserved(self, value, label):
+        # WP-3e rework T1 (追補2 M-1): the reserved-name half of the
+        # identifier choke point `cell.ApplicationCell._identifier`
+        # always applies together with `identifiers.validate_identifier`
+        # (that module's own docstring names this exact pairing) -- not
+        # a defence-in-depth backstop for a check the cell layer already
+        # performs itself (this backend is the ONLY place PostgreSQL's
+        # own `pg_`-prefixed reservations are known), so it carries the
+        # same `identifier_syntax` vocabulary `validate_identifier`
+        # itself uses, `field` = `label` (the same per-call-site request
+        # position `_identifier` already passes to both stages).
         if value in _RESERVED_EXACT or value.startswith(_RESERVED_PREFIX):
-            raise ValidationError("reserved " + label)
+            raise ValidationError(
+                "reserved " + label,
+                details=violation("identifier_syntax", field=label),
+            )
 
     # ------------------------------------------------------------------
     # catalog (developer connection -- schema owner)
@@ -1470,7 +1483,22 @@ class PostgresBackend:
                     for field, direction in order_by
                 )
             except KeyError as exc:
-                raise ValidationError("invalid order direction") from exc
+                # WP-3e rework T1 (追補2 M-1): same literal denial
+                # `cell.ApplicationCell._bind_order_by` already carries
+                # (`errors.details_vocabulary.enum`) -- this comment's own
+                # "defense-in-depth" framing above describes an
+                # UNREACHABLE-today re-implementation of that exact cell-
+                # layer check, not a storage-layer translation with no
+                # in-memory sibling, so it gets the same 4-key `details`
+                # (no per-item index survives the generator above, so
+                # `field` stays the non-indexed `order_by/direction`
+                # position, same convention `identifiers.validate_
+                # identifier`'s own module comment documents for a
+                # position that cannot be pinned to one list index here).
+                raise ValidationError(
+                    "invalid order direction",
+                    details=violation("enum", field="order_by/direction", declared_type="string"),
+                ) from exc
             statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
         params = list(where_params) + [limit]
