@@ -608,18 +608,21 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9),
     completion condition 24): the packaged contract copy is already 1.7.0
     (schema-accepts `dry_run`/`plan`/`budget`/`SchemaOperationRequest.
-    idempotency_key`), and this foundation still declares `dry_run`/
-    `request_budget` `unavailable` -- every one of the remaining gated
-    fields must be refused with `CAPABILITY_UNSUPPORTED` before anything
-    executes, with NO side effect (no row created, no catalog change, no
-    schema revision advance), exactly like the existing `idempotency_key`
-    gate above.
+    idempotency_key`), and this foundation still declares `request_
+    budget` `unavailable` -- every one of the remaining gated fields must
+    be refused with `CAPABILITY_UNSUPPORTED` before anything executes,
+    with NO side effect (no row created, no catalog change, no schema
+    revision advance), exactly like the existing `idempotency_key` gate
+    above.
 
     WP-2a already removed `field_constraints`/`enum`/`nullable` from this
     gate (`constraint_declarations` is `enabled`, enforced) -- their own
     positive/negative coverage lives in `tests/test_constraints_
     declaration.py` and `conformance-tests/test_c20_constraint_
-    declaration_agreement.py` now, not here.
+    declaration_agreement.py` now, not here. WP-2b removes `dry_run`/
+    `plan` the same way (`dry_run` is `enabled`, enforced) -- their own
+    coverage lives in `tests/test_dry_run_and_plan.py` and `conformance-
+    tests/test_c22_dry_run_and_plan.py` now.
     """
     # --- query: budget ---
     query_response = await client.post(
@@ -632,19 +635,26 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     assert query_response.json()["details"]["violated_declaration"] == "capability"
     assert query_response.json()["details"]["field"] == "budget"
 
-    # --- mutate: dry_run / plan / budget (no side effect: nothing inserted) ---
-    for field_name, value in (("dry_run", True), ("plan", "deadbeef"), ("budget", {"batch_items": 1})):
-        response = await client.post(
-            "/v1/data/notes/mutations",
-            headers=_auth("cred-a.secret-a"),
-            json={"operations": [{"operation": "insert", "values": {"body": f"gate-{field_name}"}}], field_name: value},
-        )
-        assert response.status_code == 400, field_name
-        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", field_name
-        assert response.json()["details"]["violated_declaration"] == "capability", field_name
-        assert response.json()["details"]["field"] == field_name, field_name
+    # --- mutate: budget alone, with no accompanying plan (no side effect:
+    # nothing inserted). `dry_run`/`plan` are no longer gated (WP-2b) --
+    # `budget` itself stays gated UNCONDITIONALLY, `plan` or no `plan`
+    # (review round F-1, `{scratchpad}/rulings-r4.md`: `request_budget`
+    # validity is a request-validation-stage question, the same stage as
+    # this capability gate, and strictly BEFORE `plan`'s own precondition
+    # stage -- `destructive_confirmation.evaluation_order` never lets a
+    # later stage's success excuse an earlier one). `test_dry_run_and_
+    # plan.py` covers the budget+plan combination directly.
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "gate-budget"}}], "budget": {"batch_items": 1}},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+    assert response.json()["details"]["violated_declaration"] == "capability"
+    assert response.json()["details"]["field"] == "budget"
 
-    # No side effect: none of the gated mutate attempts above created a row.
+    # No side effect: the gated mutate attempt above created no row.
     catalog_after_mutate_gate = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
     query_after_mutate_gate = await client.post(
         "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "gate-%"}]}
@@ -652,18 +662,17 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     assert catalog_after_mutate_gate.status_code == 200
     assert query_after_mutate_gate.json()["items"] == []
 
-    # --- schema: dry_run / plan / budget / idempotency_key (field_
-    # constraints / enum / nullable are enforced now, WP-2a -- not gated) ---
+    # --- schema: budget / idempotency_key (field_constraints / enum /
+    # nullable are enforced now, WP-2a; dry_run / plan are enforced now,
+    # WP-2b -- none of the 6 are gated here any more) ---
     schema_gate_cases = [
-        {"operation": "add_field", "entity": "notes", "field": "gated_dry_run_field", "dry_run": True},
-        {"operation": "add_field", "entity": "notes", "field": "gated_plan_field", "plan": "deadbeef"},
         {"operation": "add_field", "entity": "notes", "field": "gated_budget_field", "budget": {"execution_ms": 1}},
         {"operation": "add_field", "entity": "notes", "field": "gated_idempotency_field", "idempotency_key": "abc"},
     ]
     schema_revision_before = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
     for case in schema_gate_cases:
         response = await client.post("/v1/schema/operations", headers=_auth("dev-a.dev-secret-a"), json=case)
-        provisional_fields = {"dry_run", "plan", "budget", "idempotency_key"}
+        provisional_fields = {"budget", "idempotency_key"}
         expected_field = next(k for k in case if k in provisional_fields)
         assert response.status_code == 400, case
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", case
@@ -673,7 +682,7 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
     schema_revision_after = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
     assert schema_revision_after == schema_revision_before
     notes_fields_after = next(e["fields"] for e in schema_revision_after["entities"] if e["entity"] == "notes")
-    for gated_field in ("gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
+    for gated_field in ("gated_budget_field", "gated_idempotency_field"):
         assert gated_field not in notes_fields_after
 
 
@@ -692,7 +701,11 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process():
     rework, WP-1a code review item 5; r2db's own gate never had it, this
     test pins that it stays that way). WP-2a already removed `field_
     constraints`/`enum`/`nullable` from this gate -- their own coverage
-    lives in `tests/test_constraints_declaration.py` now."""
+    lives in `tests/test_constraints_declaration.py` now. WP-2b removes
+    `plan`/`dry_run` the same way -- a bare `plan` (no accompanying real
+    request to check it against) now reaches `PRECONDITION_FAILED`
+    instead, since `plan` no longer gates on capability at all; its own
+    coverage lives in `tests/test_dry_run_and_plan.py`."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
 
@@ -708,17 +721,10 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process():
     assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
 
-    with pytest.raises(FoundationError) as excinfo:
-        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field_2", "plan": ""})
-    assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "plan"}
-
     # No side effect: none of the gated schema attempts above landed.
     catalog_after = service.catalog(developer)
     assert catalog_after == catalog_before
-    notes_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == "notes")
-    assert "in_process_gated_field" not in notes_fields_after
-    assert "in_process_gated_field_2" not in notes_fields_after
+    assert "in_process_gated_field" not in next(e["fields"] for e in catalog_after["entities"] if e["entity"] == "notes")
 
 
 def test_contract_1_7_0_new_capabilities_are_declared_unavailable():
@@ -728,15 +734,207 @@ def test_contract_1_7_0_new_capabilities_are_declared_unavailable():
     14 names present) is `conformance-tests/test_c11_document_
     conformance.py` (裁定 T-4). WP-2a flipped `constraint_declarations`
     to `enabled` in its own commit (its own gate/behavior/declaration
-    together, per D-1 (4)) -- `dry_run`/`request_budget` remain
-    `unavailable` until their own capability WPs land."""
+    together, per D-1 (4)); WP-2b flips `dry_run` the same way --
+    `request_budget` remains `unavailable` until its own capability WP
+    lands."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
     capabilities = service.capabilities(developer)["capabilities"]
     assert capabilities["constraint_declarations"]["status"] == "enabled"
-    for name in ("dry_run", "request_budget"):
-        assert name in capabilities, name
-        assert capabilities[name]["status"] == "unavailable", name
+    assert capabilities["dry_run"]["status"] == "enabled"
+    assert "request_budget" in capabilities
+    assert capabilities["request_budget"]["status"] == "unavailable"
+
+
+# --------------------------------------------------------------------------
+# Contract 1.7.0 (D-4, WP-2b): dry_run/plan at the HTTP boundary.
+#
+# Review round F-4 (`{scratchpad}/rulings-r4.md`): this WP built the
+# response-shaping code (`http.py:post_mutate`/`post_schema`) but the
+# original submission's own `test_http.py` diff only ever REMOVED the
+# gate-test assertions above -- no peer-local test observed the dry_run/
+# plan response SHAPE over the actual ASGI boundary (in-process coverage
+# in `tests/test_dry_run_and_plan.py` never exercises `http.py` at all).
+# A mutation to hardcode `result.committed` to `True` in `post_mutate`
+# left the FULL suite (1054 tests) green before these three existed.
+# --------------------------------------------------------------------------
+
+
+async def test_http_mutate_dry_run_response_shape(client):
+    """(a) mutation dry_run: `committed: false`, a `plan`, no row added,
+    and `assigned_addresses` absent (review F-6 -- the KEY itself, not an
+    empty list)."""
+    before = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
+    before_notes = next(e for e in before.json()["entities"] if e["entity"] == "notes")
+
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-dry"}}], "dry_run": True},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["committed"] is False
+    assert body["affected"] == 1
+    assert isinstance(body["plan"], str) and body["plan"]
+    assert "assigned_addresses" not in body
+
+    query = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("cred-a.secret-a"),
+        json={"select": ["id"], "where": [{"field": "body", "operator": "eq", "value": "http-dry"}]},
+    )
+    assert query.json()["items"] == []
+    after = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
+    after_notes = next(e for e in after.json()["entities"] if e["entity"] == "notes")
+    assert after_notes == before_notes
+
+
+async def test_http_schema_dry_run_response_shape(client):
+    """(b) schema dry_run: `committed: false`, `descriptor` reports the
+    entity as it WOULD read afterwards (the new field present), and
+    `revision` is the CURRENT (pre-apply) value, not a bumped one
+    (addendum 2 S-j) -- a real apply afterwards actually advances it."""
+    # `revision` is not surfaced by `/v1/catalog` -- read the current
+    # value off a real, harmless schema apply first (a `create_index`
+    # baseline), the same way `test_schema_endpoint_requires_developer_
+    # authority` reads a response's `revision`.
+    baseline = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-a.dev-secret-a"),
+        json={"operation": "create_index", "entity": "notes", "index": "http_dry_baseline_idx", "fields": ["body"]},
+    )
+    assert baseline.status_code == 200
+    revision_before = int(baseline.json()["revision"])
+
+    response = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-a.dev-secret-a"),
+        json={"operation": "add_field", "entity": "notes", "field": "http_dry_field", "dry_run": True},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["committed"] is False
+    assert int(body["revision"]) == revision_before
+    assert "http_dry_field" in body["descriptor"]["fields"]
+    assert isinstance(body["plan"], str) and body["plan"]
+
+    catalog = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
+    notes = next(e for e in catalog.json()["entities"] if e["entity"] == "notes")
+    assert "http_dry_field" not in notes["fields"]
+
+    # A real apply (no `dry_run`/`plan`) afterwards genuinely advances the
+    # revision past what the dry run reported -- the pre-1.7.0 response
+    # shape (`committed: true`, no `descriptor`/`plan`) is unchanged.
+    real = await client.post(
+        "/v1/schema/operations",
+        headers=_auth("dev-a.dev-secret-a"),
+        json={"operation": "add_field", "entity": "notes", "field": "http_real_field"},
+    )
+    assert real.status_code == 200
+    real_body = real.json()
+    assert real_body["committed"] is True
+    assert int(real_body["revision"]) > revision_before
+    assert "descriptor" not in real_body
+    assert "plan" not in real_body
+
+
+async def test_http_mutate_stale_plan_is_precondition_failed_412(client):
+    """(c) a `plan` presented on a real (non-dry-run) request that no
+    longer matches the request/schema state is refused `PRECONDITION_
+    FAILED`, HTTP 412, `details.violated_declaration: plan` -- and
+    nothing executes."""
+    dry = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-plan-probe"}}], "dry_run": True},
+    )
+    assert dry.status_code == 200
+    stale_plan = dry.json()["plan"]
+
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        # A body differing from the one the plan was computed against --
+        # the digest no longer agrees (D-4 (7)).
+        json={"operations": [{"operation": "insert", "values": {"body": "http-plan-probe-different"}}], "plan": stale_plan},
+    )
+    assert response.status_code == 412
+    body = response.json()
+    assert body["code"] == "PRECONDITION_FAILED"
+    assert body["details"]["violated_declaration"] == "plan"
+
+    query = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("cred-a.secret-a"),
+        json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "http-plan-probe%"}]},
+    )
+    assert query.json()["items"] == []
+
+
+async def test_http_mutate_plan_digest_treats_an_omitted_transaction_key_differently_from_an_explicit_one(client):
+    """N-2 (`{scratchpad}/audit-wp2b.md`) / G-1 (`{scratchpad}/rulings-r4.md`
+    addendum): the plan digest never fills in a `transaction` *default* --
+    a body that omits the key digests differently from one that spells out
+    `"atomic"` explicitly, even though both behave identically otherwise
+    (`service.py`'s own comment: "a request that carried `transaction:
+    "atomic"` explicitly digests differently from one that omitted the key
+    entirely"). Before this test, no peer-local test observed this at the
+    HTTP boundary -- the un-committed `service.py`/`http.py` fix (reverting
+    `plan_request` to always carry the RESOLVED `transaction` value, audit
+    mutation M-1) left `r2db-api/tests` (1061 passed) fully green; only
+    `conformance-tests`' own leg 10 caught it."""
+    # A body omitting `transaction` entirely -- its own dry-run plan,
+    # presented on the SAME (still omitting) body, is honored.
+    dry = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-omit"}}], "dry_run": True},
+    )
+    assert dry.status_code == 200
+    plan = dry.json()["plan"]
+
+    real = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-omit"}}], "plan": plan},
+    )
+    assert real.status_code == 200
+    assert real.json()["committed"] is True
+
+    # A second dry run, for a DIFFERENT body (so the query check below is
+    # unambiguous), again omitting `transaction`.
+    dry2 = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-explicit"}}], "dry_run": True},
+    )
+    assert dry2.status_code == 200
+    plan2 = dry2.json()["plan"]
+
+    # The IDENTICAL operations, now with `"transaction": "atomic"` spelled
+    # out explicitly -- behaviourally identical, but a DIFFERENT digest
+    # input (G-1) -- refused for staleness, never accepted-and-ignored.
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={
+            "operations": [{"operation": "insert", "values": {"body": "http-tx-explicit"}}],
+            "transaction": "atomic",
+            "plan": plan2,
+        },
+    )
+    assert response.status_code == 412
+    body = response.json()
+    assert body["code"] == "PRECONDITION_FAILED"
+    assert body["details"]["violated_declaration"] == "plan"
+
+    query = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("cred-a.secret-a"),
+        json={"select": ["id"], "where": [{"field": "body", "operator": "eq", "value": "http-tx-explicit"}]},
+    )
+    assert query.json()["items"] == []
 
 
 async def test_mutate_update_and_delete_where_matches_executes(client):

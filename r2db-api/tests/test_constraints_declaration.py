@@ -211,7 +211,7 @@ def test_memory_alter_field_succeeds_and_advances_revision() -> None:
     cell = _memory_cell_with_enum_and_nullable()
     cell.transact("widgets", [{"operation": "insert", "values": {"label": "x", "status": "draft"}}], LIMITS)
     before_revision = cell.schema_revision
-    revision = cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"]}, developer=True, limits=LIMITS)
+    revision = cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"]}, developer=True, limits=LIMITS).revision
     assert revision == before_revision + 1
     assert cell.schema_revision == revision
     entry = next(e for e in cell.catalog() if e["entity"] == "widgets")
@@ -467,7 +467,7 @@ def test_pg_alter_field_succeeds_and_advances_revision(app_a: types.SimpleNamesp
         with cell._developer.connection() as conn:
             with conn.transaction():
                 before_revision = cell._read_schema_revision(conn)
-        revision = cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"]}, developer=True, limits=LIMITS)
+        revision = cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"]}, developer=True, limits=LIMITS).revision
         assert revision == before_revision + 1
         entry = next(e for e in cell.catalog() if e["entity"] == "widgets")
         assert entry["field_constraints"]["status"]["enum"] == ["draft", "live", "archived"]
@@ -674,7 +674,7 @@ def test_pg_ops_upgrade_applications_retrofits_the_side_table_and_unblocks_alter
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "retrofitted", "fields": ["a"]}, developer=True, limits=LIMITS)
-        revision = cell.apply_schema({"operation": "alter_field", "entity": "retrofitted", "field": "a", "nullable": False}, developer=True, limits=LIMITS)
+        revision = cell.apply_schema({"operation": "alter_field", "entity": "retrofitted", "field": "a", "nullable": False}, developer=True, limits=LIMITS).revision
         assert revision is not None
         entry = next(e for e in cell.catalog() if e["entity"] == "retrofitted")
         assert entry["field_constraints"]["a"] == {"nullable": False}
@@ -1143,7 +1143,7 @@ def test_pg_drop_entity_succeeds_when_the_upgrade_has_not_been_applied(app_a: ty
             {"operation": "drop_entity", "entity": "plain", "destructive": True, "confirmation": drop_entity_confirmation_phrase("plain", revision)},
             developer=True,
             limits=LIMITS,
-        )
+        ).revision
         assert revision_after == revision + 1
         assert not any(e["entity"] == "plain" for e in cell.catalog())
     finally:

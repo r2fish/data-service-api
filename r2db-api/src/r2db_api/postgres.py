@@ -120,6 +120,8 @@ from .structured import (
     MutationOutcome,
     Predicate,
     QueryOutcome,
+    SchemaOutcome,
+    compute_plan_token,
     _check_type,
     _ConstraintDeclarationError,
     _decode_cursor,
@@ -871,52 +873,57 @@ class PostgresCell:
 
     # ---- catalog -----------------------------------------------------
 
+    def _describe_table(self, name: str, table_info: "_TableInfo") -> dict[str, Any]:
+        """One entity's `EntityDescriptor` (contract shape) -- factored
+        out of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run`
+        response can build the identical descriptor for the ONE entity a
+        schema operation targets (D-4 (3)), re-reading `table_info` from
+        the SAME open transaction/connection a tentative (not yet
+        committed, and about to be rolled back) DDL/registry write just
+        ran in -- mirrors `ApplicationCell._describe_entity`'s identical
+        role for the in-memory backend, without sharing code with it."""
+        unique_keys = [
+            {"name": index_name, "fields": list(index_info["fields"])}
+            for index_name, index_info in sorted(table_info.indexes.items())
+            if index_info["unique"]
+        ]
+        # Contract 1.7.0 (D-2 (1), WP-2a): total over `table_info.
+        # columns` (like `field_types` below) -- `nullable` always
+        # present, `enum` only for a field the registry (`table_info.
+        # constraints`, read by `_load_catalog`'s own `_load_field_
+        # constraints`) actually carries a declaration for.
+        field_constraints_out: dict[str, Any] = {}
+        for field_name in table_info.columns:
+            constraints = table_info.constraints.get(field_name, FieldConstraints())
+            entry: dict[str, Any] = {"nullable": constraints.nullable}
+            if constraints.enum is not None:
+                entry["enum"] = list(constraints.enum)
+            field_constraints_out[field_name] = entry
+        return {
+            "entity": name,
+            "fields": sorted(table_info.columns),
+            # Phase 6 WP-2 (design D-3(iii)): `table_info.columns`
+            # is already `{field_name: declared_type_or_None}` --
+            # `None` (untyped/JSONB) reports as `json`, decision
+            # (ii)'s own default.
+            "field_types": {field_name: (declared_type or "json") for field_name, declared_type in table_info.columns.items()},
+            "field_constraints": field_constraints_out,
+            # R-1/R-2/§2: every entity this backend provisions is
+            # server-addressed, mutable, and never reuses an
+            # address within one entity's lifetime -- there is no
+            # per-entity toggle for any of this (R-1: "クライアント
+            # は区分を選べない").
+            "mutation_class": "mutable",
+            "address_fields": [_ID_COLUMN],
+            "address_reuse": "never",
+            "unique_keys": unique_keys,
+        }
+
     def catalog(self) -> list[dict[str, Any]]:
         with self._runtime.connection() as conn:
             with conn.transaction():
                 info = self._load_catalog(conn)
-        result: list[dict[str, Any]] = []
-        for name in sorted(info):
-            table_info = info[name]
-            unique_keys = [
-                {"name": index_name, "fields": list(index_info["fields"])}
-                for index_name, index_info in sorted(table_info.indexes.items())
-                if index_info["unique"]
-            ]
-            # Contract 1.7.0 (D-2 (1), WP-2a): total over `table_info.
-            # columns` (like `field_types` below) -- `nullable` always
-            # present, `enum` only for a field the registry (`table_info.
-            # constraints`, read by `_load_catalog`'s own `_load_field_
-            # constraints`) actually carries a declaration for.
-            field_constraints_out: dict[str, Any] = {}
-            for field_name in table_info.columns:
-                constraints = table_info.constraints.get(field_name, FieldConstraints())
-                entry: dict[str, Any] = {"nullable": constraints.nullable}
-                if constraints.enum is not None:
-                    entry["enum"] = list(constraints.enum)
-                field_constraints_out[field_name] = entry
-            result.append(
-                {
-                    "entity": name,
-                    "fields": sorted(table_info.columns),
-                    # Phase 6 WP-2 (design D-3(iii)): `table_info.columns`
-                    # is already `{field_name: declared_type_or_None}` --
-                    # `None` (untyped/JSONB) reports as `json`, decision
-                    # (ii)'s own default.
-                    "field_types": {field_name: (declared_type or "json") for field_name, declared_type in table_info.columns.items()},
-                    "field_constraints": field_constraints_out,
-                    # R-1/R-2/§2: every entity this backend provisions is
-                    # server-addressed, mutable, and never reuses an
-                    # address within one entity's lifetime -- there is no
-                    # per-entity toggle for any of this (R-1: "クライアント
-                    # は区分を選べない").
-                    "mutation_class": "mutable",
-                    "address_fields": [_ID_COLUMN],
-                    "address_reuse": "never",
-                    "unique_keys": unique_keys,
-                }
-            )
-        return result
+        return [self._describe_table(name, info[name]) for name in sorted(info)]
 
     def _load_catalog(self, conn: "psycopg.Connection[Any]", *, with_constraints: bool = True) -> dict[str, "_TableInfo"]:
         """The catalog-verification step D-4 requires before any client
@@ -1265,7 +1272,31 @@ class PostgresCell:
 
     # ---- mutations -------------------------------------------------------
 
-    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> MutationOutcome:
+    def transact(
+        self,
+        entity: str,
+        operations: list[dict[str, Any]],
+        limits: ResourceLimits,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+    ) -> MutationOutcome:
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        the single tx-exit point sits right before the pre-commit hook,
+        inside the SAME `with conn.transaction():` block every operation
+        already writes its (uncommitted) row changes in. A `dry_run`
+        forces a real ROLLBACK via `psycopg.Rollback` (caught and
+        swallowed by `conn.transaction()`'s own `__exit__`, never
+        surfacing as an error -- `ApplicationCell.transact`'s in-memory
+        `before`-restore, realized with a real transaction instead of a
+        `deepcopy`) rather than committing; `committed` below carries the
+        decided result out of that block, since a raise cannot itself
+        return a value.
+        """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
@@ -1279,6 +1310,7 @@ class PostgresCell:
         # DESTRUCTIVE_CONFIRMATION_V1 choke -- see `ApplicationCell.
         # transact`'s identical comment (D-10 parity).
         destructive = False
+        committed = True
         # Set the instant `audit_hook.pre_commit()` returns successfully --
         # everything that can still fail after that point is this method's
         # OWN data commit (the implicit `conn.commit()` `conn.transaction()`
@@ -1296,6 +1328,24 @@ class PostgresCell:
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
                     table_info = catalog[entity]
+                    # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a, WP-2b):
+                    # read ONCE, before any row change this transaction is
+                    # about to (tentatively) make -- mutations never
+                    # advance this counter, but reading it here (rather
+                    # than after the loop) keeps this identical in spirit
+                    # to `apply_schema`'s own "before this operation's own
+                    # tentative write" read. Review round F-5: gated on
+                    # `dry_run or plan is not None` too -- an ordinary
+                    # apply (neither) skips both the digest computation
+                    # AND this method's own extra `_read_schema_revision`
+                    # round trip, which `delete` would otherwise pay
+                    # twice over (once here, once for its own confirmation
+                    # phrase).
+                    expected_plan = (
+                        compute_plan_token(plan_request, self._read_schema_revision(conn))
+                        if plan_request is not None and (dry_run or plan is not None)
+                        else None
+                    )
                     for operation_index, operation in enumerate(operations):
                         if deadline is not None and clock is not None:
                             # WP-2 review M-2 parity: per-operation deadline
@@ -1314,6 +1364,21 @@ class PostgresCell:
                         limits.check("result_items", affected)
                     if deadline is not None and clock is not None:
                         limits.check_deadline(deadline, clock)
+                    # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single
+                    # tx-exit point -- plan validity, then commit vs
+                    # rollback (dry_run) vs real commit. Reached only once
+                    # every operation above has tentatively succeeded (a
+                    # confirmation/precondition/value/limit refusal inside
+                    # `_apply` already raised and rolled this transaction
+                    # back via the normal exception path below).
+                    if plan is not None and plan != expected_plan:
+                        fail(
+                            "PRECONDITION_FAILED", "The plan no longer matches this request or the Application's schema.",
+                            status=412, details={"violated_declaration": "plan"},
+                        )
+                    if dry_run:
+                        committed = False
+                        raise psycopg.Rollback()
                     # Phase 4 (design D-2): the pre-commit hook is the LAST
                     # statement inside this `with conn.transaction():`
                     # block -- a raise here propagates straight through the
@@ -1353,8 +1418,13 @@ class PostgresCell:
         # address of every operation that resolved to an insert (a plain
         # `insert`, or an `upsert` whose declared key found no existing
         # row) -- an `upsert` that resolved to an update contributes
-        # nothing here, exactly like `ApplicationCell.transact`.
-        return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive)
+        # nothing here, exactly like `ApplicationCell.transact`. `plan`
+        # (D-4 (3)) is surfaced only for a `dry_run` -- `None` for a real
+        # commit (`committed=True`), matching `ApplicationCell.transact`.
+        return MutationOutcome(
+            affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
+            committed=committed, plan=(expected_plan if not committed else None),
+        )
 
     def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
         """R-5, corrigendum M-5: map a real PostgreSQL `UniqueViolation`
@@ -1821,7 +1891,35 @@ class PostgresCell:
 
     # ---- schema ----------------------------------------------------------
 
-    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> int:
+    def apply_schema(
+        self,
+        operation: dict[str, Any],
+        *,
+        developer: bool,
+        limits: ResourceLimits,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+    ) -> "SchemaOutcome":
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        identical single tx-exit-point discipline to `transact` above --
+        the exit point sits right before `_bump_revision`/the pre-commit
+        hook, inside the SAME `with conn.transaction():` block every
+        operation branch already writes its (uncommitted) DDL/registry
+        changes in. A `dry_run` forces a real ROLLBACK via `psycopg.
+        Rollback` (caught and swallowed by `conn.transaction()`'s own
+        `__exit__`, never surfacing as an error) rather than committing --
+        `outcome_*` locals below carry the decided result out of that
+        block, since a raise cannot itself return a value. Always returns
+        `SchemaOutcome` (review round F-8, `{scratchpad}/rulings-r4.md`;
+        mirrors `ApplicationCell.apply_schema`'s identical unification) --
+        this method's own direct callers (`tests/test_constraints_
+        declaration.py`'s many `cell.apply_schema(...)` call sites among
+        them) read `.revision` off the result.
+        """
         bound = bind_schema_operation(operation, developer=developer)
         # Phase 4 (design D-2/D-10): see `transact`'s identical `hook_fired`
         # comment -- `True` only once the durable pre-commit row has
@@ -1829,12 +1927,42 @@ class PostgresCell:
         # `except psycopg.Error` clause below tell a post-hook data-commit
         # failure apart from every other failure.
         hook_fired = False
+        # Contract 1.7.0 (D-4, WP-2b): the tx-exit-point's own decided
+        # outcome, set inside `with conn.transaction():` below (a `dry_
+        # run`'s own `return` cannot come from inside that block -- normal
+        # exit COMMITS -- so `psycopg.Rollback` is raised instead, and
+        # these locals carry the already-decided result past it).
+        outcome_committed = True
+        outcome_revision: int | None = None
+        outcome_descriptor: dict[str, Any] | None = None
+        outcome_plan: str | None = None
         with self._developer.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
                     catalog = self._load_catalog(conn)
+                    # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j,
+                    # WP-2b): read ONCE, before any DDL/registry write this
+                    # transaction is about to (tentatively) make -- "the
+                    # revision as it stood when the request was decided"
+                    # (D-4 (7)), the SAME value a dry run's own `revision`
+                    # reports (S-j) and a real apply's `plan` verification
+                    # is checked against. Review round F-5: read only when
+                    # actually needed -- `dry_run` always needs it for
+                    # `outcome_revision` below (S-j), and a caller-
+                    # presented `plan` needs it to verify; an ordinary
+                    # apply (neither) needs neither, and skips this extra
+                    # round trip entirely (`plan_request` is otherwise
+                    # built unconditionally by `service.py`, so gating on
+                    # `plan_request is not None` alone would not have
+                    # helped).
+                    revision_before = self._read_schema_revision(conn) if dry_run or plan is not None else None
+                    expected_plan = (
+                        compute_plan_token(plan_request, revision_before)
+                        if plan_request is not None and revision_before is not None
+                        else None
+                    )
                     # Object accounting mirrors `ApplicationCell.apply_
                     # schema` exactly (R-5: an index is a real resource and
                     # counts toward `schema_objects` too, SI-08): one object
@@ -2085,7 +2213,41 @@ class PostgresCell:
                             recovery="create_index with the same definition restores it -- an index carries no data of its own, so this fully restores a non-unique index; recreating a UNIQUE index re-validates existing rows against that uniqueness and can instead fail with CONFLICT if data written after the drop now violates it.",
                         )
                         self._drop_index(conn, table_info.indexes[bound.index]["physical"])
-                    revision = self._bump_revision(conn)
+                    # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single
+                    # tx-exit point -- plan validity, then commit vs
+                    # rollback (dry_run) vs real commit -- right before
+                    # `_bump_revision`/the pre-commit hook. Reached only
+                    # once the operation branch above has already
+                    # tentatively written its DDL/registry changes (a
+                    # `require_destructive_confirmation` failure inside
+                    # the `drop_entity`/`drop_index` branches above
+                    # already raised, before this point is ever reached
+                    # for it -- D-4 (2)'s own ordering, and why an
+                    # unconfirmed `drop_entity` carrying a stale `plan` is
+                    # refused DESTRUCTIVE_CONFIRMATION_REQUIRED, never
+                    # PRECONDITION_FAILED).
+                    if plan is not None and plan != expected_plan:
+                        fail(
+                            "PRECONDITION_FAILED", "The plan no longer matches this request or the Application's schema.",
+                            status=412, details={"violated_declaration": "plan"},
+                        )
+                    if dry_run:
+                        # D-4 (3): `descriptor` is the target entity's own
+                        # descriptor as it would read afterwards -- built
+                        # from a FRESH `_load_catalog` re-read inside this
+                        # SAME (still open, uncommitted) transaction, which
+                        # sees this operation's own tentative writes;
+                        # `None` for a dry-run `drop_entity` (the entity no
+                        # longer appears in that re-read). `revision`
+                        # (S-j) is `revision_before`, never a bumped value
+                        # -- `_bump_revision` below is never reached here.
+                        catalog_after = self._load_catalog(conn)
+                        outcome_descriptor = self._describe_table(bound.entity, catalog_after[bound.entity]) if bound.entity in catalog_after else None
+                        outcome_committed = False
+                        outcome_revision = revision_before
+                        outcome_plan = expected_plan
+                        raise psycopg.Rollback()
+                    outcome_revision = self._bump_revision(conn)
                     # Phase 4 (design D-2, item 2): unconditional -- every
                     # schema operation is fail-closed class. Last statement
                     # inside this `with conn.transaction():` block, same
@@ -2109,7 +2271,14 @@ class PostgresCell:
                 if hook_fired and audit_hook is not None:
                     audit_hook.commit_failed()
                 fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
-        return revision
+        # Review round F-8: always `SchemaOutcome`, dry_run/plan or
+        # neither (mirrors `ApplicationCell.apply_schema`'s identical
+        # unification) -- every pre-1.7.0 direct caller of this method
+        # (`tests/test_constraints_declaration.py`'s many `cell.
+        # apply_schema(...)` call sites among them) now reads `.revision`
+        # off the result instead of comparing the result itself to an
+        # `int`.
+        return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan)
 
     def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...], field_types: dict[str, str | None] | None = None) -> None:
         # R-1/R-4: every entity table gets a server-assigned `id` address
