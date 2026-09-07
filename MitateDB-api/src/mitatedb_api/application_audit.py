@@ -157,6 +157,25 @@ DECLARED_AUDIT_TARGET_KINDS = frozenset({
     "credential",
 })
 
+# Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約 rulings-r5-r6.md
+# J-4): this peer's own `outcome` column vocabulary -- mirrors r2db-api's
+# `audit_query.DECLARED_AUDIT_OUTCOMES` one-for-one (`allow`/`deny`/
+# `error`, this module's own pre-existing literals at every `.append(...)`
+# call site, plus `replayed`, new as of this closure: an idempotency
+# REPLAY's own durable row, `audit_dispatch.AuditRouter.push_buffer_event`/
+# `.write_replayed_fail_closed_event`). `test_application_audit.py`'s own
+# `test_declared_audit_outcomes_cover_every_emitted_outcome` fixes every
+# `outcome=`/`outcome="..."` literal this peer's durable emit sites
+# construct against this set, the same AST-scan shape `test_declared_
+# event_classes_cover_every_emittable_class` already uses for `event_
+# class`.
+DECLARED_AUDIT_OUTCOMES = frozenset({
+    "allow",
+    "deny",
+    "error",
+    "replayed",
+})
+
 # Contract `audit.fields`, verbatim order (matches `control_audit.
 # CONTROL_AUDIT_FIELDS`) plus the 14th, durable-schema-only `count` column
 # (D-3's coalesced-denial summary row / D-4's buffer-overflow alert row;
@@ -395,6 +414,7 @@ __all__ = [
     "DECLARED_AUDIT_EVENT_CLASSES",
     "DECLARED_AUDIT_OPERATIONS",
     "DECLARED_AUDIT_TARGET_KINDS",
+    "DECLARED_AUDIT_OUTCOMES",
     "APPLICATION_AUDIT_FIELDS",
     "coalesced_count",
     "ApplicationAuditEvent",

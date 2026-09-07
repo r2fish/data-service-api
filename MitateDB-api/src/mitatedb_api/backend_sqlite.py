@@ -875,5 +875,22 @@ class SQLiteBackend:
         # `idempotency_record` parameter), immediately before its own
         # `self._backend.commit()` -- a failed batch never reaches this
         # line at all (the execution loop above it raises first), so this
-        # write and the batch's own commit share the identical fate.
+        # write and the batch's own commit share the identical fate,
+        # UNLESS `self._backend.commit()` itself is what fails -- see
+        # `idempotency_discard_pending` below (K-5, N-8), the cleanup
+        # `ApplicationCell.transact`'s own `except Exception:` calls for
+        # exactly that case.
         self._idempotency[key] = {"digest": digest, "response_json": response_json, "created_at_ms": now_ms}
+
+    def idempotency_discard_pending(self, key):
+        # Phase 9 WP-3cd closure (K-5, N-8): this dict write above is NOT
+        # part of `self._db`'s own real transaction -- `self.rollback()`
+        # (`self._db.rollback()`) cannot undo it, so `ApplicationCell.
+        # transact`'s `except Exception:` handler calls this directly,
+        # unconditionally, right after its own `self.rollback()` -- a
+        # `key` this dict never held (the ordinary case: SOME earlier
+        # step failed, before `record_idempotency` was ever reached) is a
+        # silent no-op, exactly like `create_collection`/`add_field`/
+        # `alter_field_constraints`'s own identical `self._idempotency.
+        # pop(idempotency_record[0], None)` cleanup.
+        self._idempotency.pop(key, None)

@@ -433,3 +433,33 @@ class StorageBackend:
         before commit" point, over whichever connection that DDL already
         runs on."""
         raise NotImplementedError
+
+    def idempotency_discard_pending(self, key):
+        """Phase 9 WP-3cd closure (監督裁定集約 rulings-r5-r6.md K-5, N-8):
+        undoes a `record_idempotency` write that turned out NOT to share
+        the data's own fate after all -- `ApplicationCell.transact`'s own
+        `except Exception:` handler calls this (unconditionally, whenever
+        `idempotency_key is not None`) immediately after `self.rollback()`,
+        mirroring the identical `self._idempotency.pop(idempotency_record
+        [0], None)` cleanup the 3 schema-mutating DDL methods' own
+        `except Exception:` blocks already perform. `key` not currently
+        pending is a no-op (never raises) -- exactly like those 3 DDL
+        methods' own `dict.pop(key, None)`, since the common, ordinary
+        case (an EARLIER failure, before `record_idempotency` was ever
+        reached) must not raise here either.
+
+        Necessary specifically because `transact`'s own `record_
+        idempotency`/`self.commit()` are two SEPARATE calls (unlike the
+        DDL methods' own single atomic backend call) -- on `PostgresBackend`
+        both already run on the SAME connection/transaction `self.rollback
+        ()` undoes together (a real no-op override is correct there); on
+        `SQLiteBackend`/the in-memory backend, `record_idempotency` writes
+        to a private, NON-transactional process-local dict (R-a) that a
+        SUBSEQUENT `self.commit()` failure's own `self.rollback()` cannot
+        retroactively undo -- without this method, that specific ordering
+        (`record_idempotency` succeeds, `self.commit()` then raises) would
+        leak a durable-looking idempotency record for data that was never
+        actually committed, so a resend under the SAME key would be
+        wrongly answered from that phantom record instead of executing
+        fresh."""
+        raise NotImplementedError

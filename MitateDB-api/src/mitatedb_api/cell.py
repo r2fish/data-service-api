@@ -831,7 +831,7 @@ class ApplicationCell:
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
 
     @contextmanager
-    def _limit_gate(self, principal, request=None, *, request_id=None, effective_limits=None):
+    def _limit_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
         """Phase 8 WP-1a rework 1 (裁定 5, 監督裁定 2026-09-06; design D-1
         "順序"/"実装の形"): the single choke every application-plane
         operation below (`insert`/`read`/`update`/`delete`/`transact`,
@@ -861,30 +861,100 @@ class ApplicationCell:
         Yields the computed wall-clock `deadline` (`time.monotonic()`
         seconds) for the caller to hand to `self._backend`.
 
-        `effective_limits` (Phase 9 WP-3d, design D-6, 監督裁定集約
-        rulings-r5-r6.md B-2/B-3): the ONE bound this gate itself ever
-        reads a request `budget` through -- `None` (every pre-WP-3d
-        caller) keeps reading `self.config` directly, unchanged; a caller
-        that has already computed `effective_limits = narrow_limits_by_
-        budget(self.config, budget, endpoint_kind)` (`config.py`) passes
-        it here instead, so `max_execution_ms` -- the ONLY field of it
-        this gate itself consults -- narrows to the smaller of the
-        deployed and budgeted value. Every OTHER field this gate reads
-        (`max_requests_per_minute`/`max_concurrency`/`max_request_bytes`/
-        `max_operation_depth`) is never budgetable (D-6's own three-class
-        table), so `effective_limits` always carries the SAME deployed
-        value as `self.config` for those -- reading it uniformly here,
-        rather than cherry-picking only `max_execution_ms`, is harmless
-        and keeps this gate from needing to know which fields budget can
-        touch."""
-        limits = effective_limits if effective_limits is not None else self.config
-        self.__limit_holder.acquire_rate(principal.credential_id, limits.max_requests_per_minute)
-        with self.__limit_holder.concurrency_slot(limits.max_concurrency):
+        `budget`/`endpoint_kind` (Phase 9 WP-3cd closure, design D-6,
+        監督裁定集約 rulings-r5-r6.md K-1/B-2/B-3 -- supersedes the WP-3d
+        `effective_limits` parameter this replaces): `budget` validity
+        (applicable class / integer >= 1 / not above the deployed bound --
+        `config.narrow_limits_by_budget`, which is what actually raises
+        `errors.ValidationError` for an invalid one) is now checked HERE,
+        AFTER `requests_per_minute`/`concurrency`/`request_bytes`/
+        `operation_depth` above have all already passed, and BEFORE the
+        `deadline` below is computed from the result -- the exact r2db
+        order (`_slot` -> `check_request` -> `check_depth` -> `narrow_
+        limits_by_budget` -> `deadline = ... effective_limits.execution_ms
+        ...`, `service.py::_query_outcome`/`_mutate_outcome`) this WP's
+        own audit (audit-wp3cd.md §3) found MitateDB did NOT match: every
+        pre-closure caller computed `effective_limits` at the FACADE layer
+        (`ApplicationRuntime.read`/`.transact`, `ApplicationDeveloper.*`),
+        before this gate was ever entered, so an invalid `budget` on a
+        request that ALSO exceeded (say) the rate limit surfaced
+        `VALIDATION_FAILED` instead of r2db's `LIMIT_EXCEEDED` for the
+        identical combination -- an observable peer asymmetry (裁定 I-3
+        groups all seven bounds -- rate/concurrency/request_bytes/
+        operation_depth/shape/capability/budget -- without ordering
+        WITHIN the group, but K-1 now fixes MitateDB's own position to
+        match r2db's, closing the asymmetry rather than leaving it to a
+        future conformance gap). `None`/falsy `budget` (every pre-WP-3d
+        caller, and every WP-3d+ caller that simply never presented one)
+        makes `narrow_limits_by_budget` return `self.config` unchanged --
+        identity-shaped, so `max_requests_per_minute`/`max_concurrency`/
+        `max_request_bytes`/`max_operation_depth` above are ALWAYS read
+        from `self.config` directly (those four are never budgetable --
+        D-6 (2)'s own three-class table -- so there is no reason for this
+        gate to defer reading them until after a budget it cannot affect
+        is resolved); only `max_execution_ms`, read below to build
+        `deadline`, is ever narrower than `self.config`'s own value.
+        Callers that need the resolved `FoundationConfig` themselves (for
+        a check point past this gate's own `with` block, e.g. `read`'s
+        `max_result_rows` or `transact`'s `max_batch_items`) call `config.
+        narrow_limits_by_budget(self.config, budget, endpoint_kind)`
+        again, once past this gate's `__enter__` -- a second call to the
+        SAME pure function, already proven not to raise by this gate's
+        own successful entry, never a second, independently-drifting
+        computation."""
+        self.__limit_holder.acquire_rate(principal.credential_id, self.config.max_requests_per_minute)
+        with self.__limit_holder.concurrency_slot(self.config.max_concurrency):
             if request is not None:
-                _measure_request_bytes(request, limits.max_request_bytes)
-                _check_operation_depth(request, limits.max_operation_depth)
-            deadline = time.monotonic() + limits.max_execution_ms / 1000
+                _measure_request_bytes(request, self.config.max_request_bytes)
+                _check_operation_depth(request, self.config.max_operation_depth)
+            effective_limits = narrow_limits_by_budget(self.config, budget, endpoint_kind)
+            deadline = time.monotonic() + effective_limits.max_execution_ms / 1000
             yield deadline
+
+    def _gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
+        """Phase 9 WP-3cd C-05 fix (rulings-r5-r6.md B-2/B-3), rebased onto
+        the WP-3cd closure's K-1 rework of `_limit_gate` above (`budget`/
+        `endpoint_kind` replace the WP-3d `effective_limits` parameter
+        this method used to forward). The ONLY caller of `_limit_gate` for
+        the 5 call sites this WP touched (`create_collection`/`add_field`/
+        `alter_field`/`read`/`transact`). Forwards to `self._limit_gate`
+        -- looked up EACH call, through `self`, so any monkeypatch
+        replacing the *instance* attribute (as opposed to the class
+        method) is still honored -- but OMITS the `budget`/`endpoint_kind`
+        keywords entirely whenever `budget` itself is falsy (`None` or
+        `{}`), rather than always passing them explicitly.
+
+        Measured root cause (C-05, probe transcript `{scratchpad}/
+        c05_probe.log`/`{scratchpad}/c05_probe2.log`, reproducing
+        `test_c05_v2_declaration_and_position_agree[MitateDB-api-http]`'s
+        own full `_V2_DRIVERS` sweep): `conformance/conformance_adapter_
+        mitatedb_http.py::_hold_in_flight_via_http_requests_over_stalled_
+        gate` monkeypatches `ApplicationCell._limit_gate` (an INSTANCE
+        attribute, `cell_obj._limit_gate = _stalled_limit_gate`) for the
+        duration of `hold_in_flight`, with a frozen wrapper
+        (`_stalled_limit_gate(principal, request=None, *, request_id=
+        None)`) that has no `**kwargs` catch-all and no room for either
+        `effective_limits` (WP-3d's own shape) or `budget`/`endpoint_kind`
+        (this closure's K-1 rework). Every one of the 5 facade call sites
+        (`ApplicationRuntime.transact`/`.read`, `ApplicationDeveloper.
+        create_entity`/`add_field`/`alter_field`) forwards its own raw
+        `budget` argument here UNCHANGED now (K-1: `narrow_limits_by_
+        budget` itself moved inside `_limit_gate`, no longer called at the
+        facade layer at all) -- `None` for the overwhelming majority of
+        requests that never present one, and the falsy-`budget` skip below
+        is exactly what keeps THOSE requests reaching the frozen adapter's
+        3-argument monkeypatch unchanged (no C-05 driver combines a real
+        `budget` with concurrency-holding, so a request that DOES present
+        one never needs to reach `_stalled_limit_gate` at all -- the
+        `budget`/`endpoint_kind` keywords are safe to omit here on exactly
+        the same condition `narrow_limits_by_budget`'s own `if not budget:
+        return deployed` short-circuit uses, so this skip changes nothing
+        `_limit_gate` itself would not already have resolved to `self.
+        config` unchanged)."""
+        if budget:
+            return self._limit_gate(
+                principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
+        return self._limit_gate(principal, request, request_id=request_id)
 
     def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
         """Phase 4 (design D-2): builds the `audit_hook.ApplicationAuditHook`
@@ -924,6 +994,47 @@ class ApplicationCell:
         both peers record the identical event stream."""
         self.__audit_router.push_buffer_event(
             event_class="data_operation", request_id=request_id, application_id=self.application_id,
+            actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
+            role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
+            target_kind="collection", target_id=target_id,
+        )
+
+    def _push_replayed_data_operation_event(self, principal, *, operation, target_id=None, request_id=None):
+        """Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約
+        rulings-r5-r6.md J-4/SI-14): `transact`'s own idempotency-REPLAY
+        counterpart of `_push_data_operation_event` immediately above --
+        SAME `event_class="data_operation"` (buffer-class), mirroring
+        r2db-api's own uniform `outcome.replayed` -> `event_class=
+        "data_operation"` choice (a mutate replay is never MORE durable
+        than a fresh non-destructive success would have been, even when
+        the replayed batch was itself destructive -- SI-14's own concern
+        is that a resend leaves SOME evidence, not that it must match the
+        original commit's own fail-closed class). `request_id` is THIS
+        replay request's own id (never the original's -- correlation with
+        the original is the RESPONSE's own `request_id`, contract
+        `idempotency.correlation`). `outcome="replayed"` -- never `key`,
+        which never reaches this call at all (I-11)."""
+        self.__audit_router.push_buffer_event(
+            event_class="data_operation", request_id=request_id, application_id=self.application_id,
+            actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
+            role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
+            target_kind="collection", target_id=target_id, outcome="replayed",
+        )
+
+    def _write_replayed_schema_event(self, principal, *, operation, target_id=None, request_id=None):
+        """Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約
+        rulings-r5-r6.md J-4/SI-14): `create_collection`/`add_field`/
+        `alter_field`'s own idempotency-REPLAY counterpart of `_make_
+        audit_hook`'s own `event_class="schema_change"` pre-commit hook
+        -- schema operations are UNCONDITIONALLY fail-closed class (D-2
+        item 2), so their replay line is too (`AuditRouter.write_
+        replayed_fail_closed_event`, raises `errors.AuditSinkUnavailable`
+        if the durable sink cannot record it, rather than silently
+        answering the replay with zero evidence). `request_id` is THIS
+        replay request's own id, never the original's; never `key`
+        (I-11)."""
+        self.__audit_router.write_replayed_fail_closed_event(
+            event_class="schema_change", request_id=request_id, application_id=self.application_id,
             actor_type="application_credential", actor_id=getattr(principal, "credential_id", None),
             role=getattr(getattr(principal, "role", None), "value", None), operation=operation,
             target_kind="collection", target_id=target_id,
@@ -986,7 +1097,7 @@ class ApplicationCell:
     def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
                           field_types=None, field_constraints=None, dry_run=False, plan=None,
                           digest_extra=None, operation="create_entity", idempotency_key=None,
-                          effective_limits=None):
+                          budget=None):
         """Phase 6 WP-3 (design D-3): `field_types`, when given, is a
         `{field_name: contract_type}` map (the 7-word contract vocabulary,
         `field_types.CONTRACT_TYPES`) -- the declared type this call
@@ -1023,7 +1134,7 @@ class ApplicationCell:
         # constraints` -- decoupled on purpose, not the SAME dict reused
         # for two different jobs.
         request = {"name": name, "fields": fields}
-        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
+        with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
             name = self._identifier(name, "collection")
             if not isinstance(fields, dict) or not fields:
                 raise ValidationError("fields must be a non-empty object")
@@ -1131,6 +1242,10 @@ class ApplicationCell:
                 replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
                     idempotency_key, digest_request)
                 if replay is not None:
+                    # J-4 (SI-14): a replayed schema response earns its
+                    # own durable row before it is ever returned.
+                    self._write_replayed_schema_event(
+                        principal, operation="create_collection", target_id=name, request_id=request_id)
                     return replay
             # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
             # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
@@ -1200,7 +1315,7 @@ class ApplicationCell:
 
     def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None,
                       field_constraints=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
-                      effective_limits=None):
+                      budget=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -1249,11 +1364,11 @@ class ApplicationCell:
         return self.create_collection(
             principal, name, fields, request_id=request_id, field_types=field_types,
             field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra,
-            idempotency_key=idempotency_key, effective_limits=effective_limits)
+            idempotency_key=idempotency_key, budget=budget)
 
     def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None,
                   enum=None, nullable=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
-                  effective_limits=None):
+                  budget=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -1305,7 +1420,7 @@ class ApplicationCell:
         # too; this one does not, matching this method's pre-WP-3b
         # `_limit_gate` sizing exactly).
         request = {"collection": collection, "field": field, "field_type": field_type}
-        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
+        with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
             collection = self._identifier(collection, "collection")
             field = self._identifier(field, "field")
             if field_type not in _FIELD_TYPE_VOCABULARY:
@@ -1348,6 +1463,10 @@ class ApplicationCell:
                 replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
                     idempotency_key, digest_request)
                 if replay is not None:
+                    # J-4 (SI-14): a replayed schema response earns its own
+                    # durable row before it is ever returned.
+                    self._write_replayed_schema_event(
+                        principal, operation="add_field", target_id=collection, request_id=request_id)
                     return replay
             # Q1-D11-consistent shape bound (same reasoning as `create_
             # collection`'s own field-count check above): the total column
@@ -1429,7 +1548,7 @@ class ApplicationCell:
 
     def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
                     request_id=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
-                    effective_limits=None):
+                    budget=None):
         """Phase 9 WP-3a (design docs/design/
         PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)/
         (6)): redeclares `field`'s own `enum`/`nullable` constraints.
@@ -1481,7 +1600,7 @@ class ApplicationCell:
         request = {"collection": collection, "field": field, "nullable": nullable, "field_type": field_type}
         if enum is not UNCHANGED:
             request["enum"] = enum
-        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
+        with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
             if field_type is not None:
                 raise ValidationError(
                     "alter_field does not redeclare a field's own type",
@@ -1541,6 +1660,10 @@ class ApplicationCell:
                 replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
                     idempotency_key, digest_request)
                 if replay is not None:
+                    # J-4 (SI-14): a replayed schema response earns its own
+                    # durable row before it is ever returned.
+                    self._write_replayed_schema_event(
+                        principal, operation="alter_field", target_id=collection, request_id=request_id)
                     return replay
             available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if field not in available:
@@ -1780,20 +1903,26 @@ class ApplicationCell:
         return result
 
     def read(self, principal, collection, fields=None, filters=None,
-             order_by=None, limit=None, *, request_id=None, effective_limits=None):
+             order_by=None, limit=None, *, request_id=None, budget=None):
         self._require_data(principal, request_id=request_id)
-        # Phase 9 WP-3d (design D-6, B-2/B-6): `effective_limits` is the
-        # ONE narrowing point `result_items` reads through -- the check
-        # below is unchanged in SHAPE (still driven by the REQUESTED
-        # `limit` value, never the row count actually returned, L9-11)
-        # other than reading `limits.max_result_rows` instead of `self.
-        # config.max_result_rows` directly.
-        limits = effective_limits if effective_limits is not None else self.config
         request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by, "limit": limit}
-        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
+        with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="query") as deadline:
+            # Phase 9 WP-3cd closure (K-1): `narrow_limits_by_budget` is
+            # no longer called at the facade layer, before this gate --
+            # `self._gate` above already validated `budget` (raising
+            # VALIDATION_FAILED there, AFTER rate/concurrency/request_
+            # bytes/operation_depth, if it is invalid) and used it to size
+            # its own `deadline`. This second call is the SAME pure
+            # function, on the SAME inputs, already proven not to raise by
+            # the gate's own successful entry -- it resolves `limits`, the
+            # ONE narrowing point `result_items` reads through below (the
+            # check itself is unchanged in SHAPE, still driven by the
+            # REQUESTED `limit` value, never the row count actually
+            # returned, L9-11).
+            limits = narrow_limits_by_budget(self.config, budget, "query")
             collection = self._identifier(collection, "collection")
             selected = self._select_fields(collection, fields)
-            bound_filters = self._bind_filters(collection, filters)
+            bound_filters = self._bind_filters(collection, filters, limits=limits)
             order = self._bind_order_by(collection, order_by)
             if limit is None:
                 limit = limits.max_result_rows
@@ -1810,7 +1939,7 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
         return rows
 
-    def _validate_update(self, collection, values, filters, *, path_prefix="values"):
+    def _validate_update(self, collection, values, filters, *, path_prefix="values", limits=None):
         """m-1 (independent review, P3-D2 follow-up): the single choke
         BOTH `ApplicationCell.update` below AND `transact()`'s own
         batch-embedded update branch (`_plan_operation`, since P35 WP-2's
@@ -1837,7 +1966,7 @@ class ApplicationCell:
         collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
         if not fields:
             raise ValidationError("values must be non-empty")
-        bound_filters = self._bind_filters(collection, filters)
+        bound_filters = self._bind_filters(collection, filters, limits=limits)
         return collection, fields, values_params, bound_filters
 
     def update(self, principal, collection, values, filters, *, request_id=None):
@@ -1851,7 +1980,7 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="update", target_id=collection, request_id=request_id)
         return result
 
-    def _validate_delete_confirmation(self, collection, filters, destructive, confirm):
+    def _validate_delete_confirmation(self, collection, filters, destructive, confirm, limits=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
         `ApplicationCell.delete` below AND `transact()`'s own
         batch-embedded delete branch (`_plan_operation`, since P35 WP-2's
@@ -1908,7 +2037,7 @@ class ApplicationCell:
         collection = self._identifier(collection, "collection")
         if not isinstance(filters, list) or not filters:
             raise ValidationError("delete requires non-empty filters")
-        bound_filters = self._bind_filters(collection, filters)
+        bound_filters = self._bind_filters(collection, filters, limits=limits)
         schema_revision = self._backend.schema_revision()
         phrase = _delete_confirmation_phrase(collection, filters, schema_revision)
         if destructive is not True or confirm != phrase:
@@ -1958,7 +2087,7 @@ class ApplicationCell:
                       principal.credential_id, detail="delete_rows")
         return result
 
-    def _plan_operation(self, operation, index):
+    def _plan_operation(self, operation, index, limits=None):
         """P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
         CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free
         plan step for a single `transact()` operation-dict -- identical
@@ -2041,7 +2170,7 @@ class ApplicationCell:
                 )
             collection, fields, values_params, bound_filters = self._validate_update(
                 operation.get("collection"), operation.get("values"), operation.get("filters"),
-                path_prefix=f"operations/{index}/values")
+                path_prefix=f"operations/{index}/values", limits=limits)
             return ("update", (collection, fields, values_params, bound_filters))
         if op_type == "delete":
             if set(operation) - _TRANSACT_DELETE_KEYS:
@@ -2051,7 +2180,7 @@ class ApplicationCell:
             collection, bound_filters = self._validate_delete_confirmation(
                 operation.get("collection"), operation.get("filters"),
                 destructive=operation.get("destructive", False),
-                confirm=operation.get("confirm"))
+                confirm=operation.get("confirm"), limits=limits)
             return ("delete", (collection, bound_filters))
         if op_type in _CONTRACT_MUTATION_VOCABULARY:
             # Only "upsert" ever reaches here -- P3-D2 (WP-1.5) converged
@@ -2099,7 +2228,7 @@ class ApplicationCell:
         return names
 
     def transact(self, principal, operations, *, request_id=None, dry_run=False, plan=None, budget=None,
-                transaction=None, entity=None, digest_operations=None, idempotency_key=None, effective_limits=None):
+                transaction=None, entity=None, digest_operations=None, idempotency_key=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
         same batch -- converging this entry point's real behavior onto
@@ -2169,15 +2298,23 @@ class ApplicationCell:
                 if isinstance(op, dict) and op.get("idempotency_key") is not None:
                     idempotency_key = op["idempotency_key"]
                     break
-        # Phase 9 WP-3d (design D-6, B-2): the ONE point that reads
-        # `effective_limits` instead of `self.config` for the two COUNT-
-        # valued checks below (`batch_items`/`batch_entities`) -- callers
-        # that never presented a `budget` pass `effective_limits=None`,
-        # which resolves to `self.config` unchanged (identity-shaped
-        # narrowing, matching `_limit_gate`'s own identical fallback).
-        limits = effective_limits if effective_limits is not None else self.config
         request = {"operations": operations}
-        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
+        with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="mutate") as deadline:
+            # Phase 9 WP-3cd closure (K-1, design D-6, B-2): `narrow_
+            # limits_by_budget` is no longer called at the facade layer,
+            # before this gate -- `self._gate` above already validated
+            # `budget` (raising VALIDATION_FAILED there, AFTER rate/
+            # concurrency/request_bytes/operation_depth, if it is
+            # invalid) and used it to size its own `deadline`. This
+            # second call is the SAME pure function, on the SAME inputs,
+            # already proven not to raise by the gate's own successful
+            # entry -- it resolves `limits`, the ONE point the COUNT-
+            # valued checks below (`batch_items`/`batch_entities`) and
+            # `_plan_operation`'s own `_bind_filters` `in`-filter check
+            # (K-3) read instead of `self.config` directly. A caller that
+            # never presented a `budget` gets `self.config` back
+            # unchanged (identity-shaped narrowing).
+            limits = narrow_limits_by_budget(self.config, budget, "mutate")
             if not isinstance(operations, list) or not operations:
                 raise ValidationError("operations must be a non-empty list")
             if len(operations) > limits.max_batch_items:
@@ -2228,7 +2365,14 @@ class ApplicationCell:
                     # existence/confirmation/precondition/execution are
                     # ever reached -- the exact `results` object this
                     # method itself returned when the original request
-                    # committed.
+                    # committed. J-4 (SI-14): a replayed mutation response
+                    # earns its own durable row before it is ever
+                    # returned -- otherwise a confirmed destructive
+                    # delete's own resend would return `committed: true`
+                    # while leaving zero evidence this Application was
+                    # touched at time T (WP-2cd/WP-3cd audit N-5).
+                    self._push_replayed_data_operation_event(
+                        principal, operation="transact", target_id=None, request_id=request_id)
                     return replay
 
             # Pass 1: validate every operation, across every entity, before
@@ -2249,7 +2393,7 @@ class ApplicationCell:
             execution_plan = []
             for index, operation in enumerate(operations):
                 try:
-                    execution_plan.append(self._plan_operation(operation, index))
+                    execution_plan.append(self._plan_operation(operation, index, limits=limits))
                 except DestructiveConfirmationRequired:
                     collection = operation.get("collection") if isinstance(operation, dict) else None
                     self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
@@ -2423,6 +2567,21 @@ class ApplicationCell:
                     # as before -- this method itself never reclassifies an
                     # exception type, only guarantees rollback runs first.
                     self._backend.rollback()
+                    # Phase 9 WP-3cd closure (K-5, N-8): undoes a `record_
+                    # idempotency` write that turned out NOT to share the
+                    # data's own fate -- e.g. `record_idempotency` itself
+                    # succeeded but `self._backend.commit()` immediately
+                    # after it then raised (reaching THIS handler with the
+                    # `SQLiteBackend`/in-memory backend's own private,
+                    # non-transactional dict already holding a record for
+                    # data `self.rollback()` above just discarded). A no-op
+                    # when there is nothing pending to discard (the far
+                    # more common case: some EARLIER step failed, before
+                    # `record_idempotency` was ever reached) -- mirrors the
+                    # 3 schema-mutating DDL methods' own identical `except
+                    # Exception:` cleanup one-for-one.
+                    if idempotency_key is not None:
+                        self._backend.idempotency_discard_pending(idempotency_key)
                     # Phase 4 (design D-2, error-row rule): `hook_fired` is
                     # only `True` once the durable pre-commit row has already
                     # committed on its own (separate) connection -- so an
@@ -2687,7 +2846,17 @@ class ApplicationCell:
                 self._normalize_value_for_storage(value, declared_type), domain=available[field]))
         return collection, fields, params
 
-    def _bind_filters(self, collection, filters):
+    def _bind_filters(self, collection, filters, limits=None):
+        """`limits` (Phase 9 WP-3cd closure, 監督裁定集約 rulings-r5-r6.md
+        K-3/B-2): the `in`-filter `batch_items` check below is the ONE
+        check point in this method that budget can ever narrow (`max_filter_
+        terms` immediately below stays a pure request-shape bound, never
+        budgetable -- D-6 (2)'s own three-class table). `None` (every
+        caller with no `budget` in scope -- `update()`/`delete()`, which
+        accept no `budget` argument at all) resolves to `self.config`
+        unchanged, identity-shaped, matching every other budget-narrowing
+        fallback in this file."""
+        limits = limits if limits is not None else self.config
         if filters is None:
             return []
         if not isinstance(filters, list) or len(filters) > self.config.max_filter_terms:
@@ -2726,9 +2895,18 @@ class ApplicationCell:
             if item.operator == "in":
                 if not isinstance(item.value, list) or not item.value:
                     raise ValidationError("in filter requires values")
-                if len(item.value) > self.config.max_batch_items:
+                if len(item.value) > limits.max_batch_items:
                     # Reuses `config.max_batch_items` itself (not a
-                    # separate `max_filter_terms`-style bound).
+                    # separate `max_filter_terms`-style bound). K-3: reads
+                    # the budget-narrowed `limits` (falls back to `self.
+                    # config` above when no caller-supplied budget is in
+                    # scope), not `self.config` directly -- this was the
+                    # one check point B-2 missed (a batch-embedded update/
+                    # delete's own `in` filter, inside `transact`'s
+                    # `_plan_operation`, must be bound by the SAME
+                    # budget-narrowed `batch_items` value the batch's own
+                    # `len(operations) > limits.max_batch_items` check
+                    # uses).
                     raise ResourceLimitError("filter value limit exceeded", limit_class="batch_items")
                 # B-1: every element compares against the SAME column, so
                 # they all share that column's own domain.
@@ -2920,13 +3098,17 @@ class ApplicationRuntime:
         self.__authorize(request_id=request_id)
         # Phase 9 WP-3d (design D-6, B-4): `request_budget` is `enabled`
         # as of this SAME commit (`__build_capabilities_document` below)
-        # -- the present-denial gate is removed; `narrow_limits_by_budget`
-        # itself is what refuses an invalid `budget` now (`endpoint_kind=
-        # "query"`), at this request's own validation stage, before
-        # `ApplicationCell.read`'s own target-existence check.
-        effective_limits = narrow_limits_by_budget(self.__cell.config, budget, "query")
+        # -- the present-denial gate is removed. Phase 9 WP-3cd closure
+        # (K-1): `budget` now reaches `ApplicationCell.read` RAW/
+        # unvalidated -- `narrow_limits_by_budget` moved from here into
+        # `ApplicationCell._limit_gate` itself (`endpoint_kind="query"`),
+        # so an invalid `budget` is refused AFTER rate/concurrency/
+        # request_bytes/operation_depth, matching r2db's own gate order
+        # (audit-wp3cd.md §3 N-3: this facade-layer call used to refuse
+        # an invalid `budget` BEFORE any of those four bounds, an
+        # observable peer asymmetry this closure fixes).
         return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit,
-                                request_id=request_id, effective_limits=effective_limits)
+                                request_id=request_id, budget=budget)
 
     def catalog(self, *, request_id=None):
         self.__authorize(request_id=request_id)
@@ -2949,28 +3131,30 @@ class ApplicationRuntime:
         # (`__build_capabilities_document` below). Phase 9 WP-3c/WP-3d:
         # `idempotency_key`/`budget` are UNGATED as of this SAME commit
         # too -- both `idempotency`/`request_budget` flip to `enabled`
-        # below. `narrow_limits_by_budget` (`endpoint_kind="mutate"`,
-        # shared by the single-entity and cross-entity callers alike,
-        # both of which route through this one method) is what refuses
-        # an invalid `budget` now, at this request's own validation
-        # stage. `transaction` (rework, M-4/G-1) is NOT gated -- unlike
-        # `budget` it names no capability of its own (this peer's own
-        # `http.py::post_mutate` already accepts and validates
-        # `MutationRequest.transaction` today, refusing anything but
-        # `"atomic"` before this method is ever reached); it is forwarded
-        # so `ApplicationCell.transact`'s own digest can commit to it
-        # (`MutationRequest`'s contract-required 4th non-`plan`/`dry_run`
-        # field, alongside `operations`/`idempotency_key`/`budget`).
-        # `entity`/`digest_operations` (WP-3b closure, H-1/H-2): passed
-        # straight through, unexamined -- see `ApplicationCell.transact`'s
-        # own identical-purpose comment for the full reasoning. Neither
-        # names a capability this peer gates; both are pure digest-
-        # construction inputs.
-        effective_limits = narrow_limits_by_budget(self.__cell.config, budget, "mutate")
+        # below. Phase 9 WP-3cd closure (K-1): `budget` now reaches
+        # `ApplicationCell.transact` RAW/unvalidated -- `narrow_limits_by_
+        # budget` (`endpoint_kind="mutate"`, shared by the single-entity
+        # and cross-entity callers alike, both of which route through
+        # this one method) moved from here into `ApplicationCell.
+        # _limit_gate` itself, so an invalid `budget` is refused AFTER
+        # rate/concurrency/request_bytes/operation_depth, matching r2db's
+        # own gate order (see `ApplicationRuntime.read`'s identical
+        # comment immediately above). `transaction` (rework, M-4/G-1) is
+        # NOT gated -- unlike `budget` it names no capability of its own
+        # (this peer's own `http.py::post_mutate` already accepts and
+        # validates `MutationRequest.transaction` today, refusing
+        # anything but `"atomic"` before this method is ever reached); it
+        # is forwarded so `ApplicationCell.transact`'s own digest can
+        # commit to it (`MutationRequest`'s contract-required 4th non-
+        # `plan`/`dry_run` field, alongside `operations`/`idempotency_
+        # key`/`budget`). `entity`/`digest_operations` (WP-3b closure,
+        # H-1/H-2): passed straight through, unexamined -- see
+        # `ApplicationCell.transact`'s own identical-purpose comment for
+        # the full reasoning. Neither names a capability this peer gates;
+        # both are pure digest-construction inputs.
         return self.__cell.transact(self.__principal, operations, request_id=request_id, dry_run=dry_run, plan=plan,
                                     budget=budget, transaction=transaction, entity=entity,
-                                    digest_operations=digest_operations, idempotency_key=idempotency_key,
-                                    effective_limits=effective_limits)
+                                    digest_operations=digest_operations, idempotency_key=idempotency_key)
 
     def capabilities(self, *, request_id=None):
         """Minimal capability/discovery document, per this session's own
@@ -3333,16 +3517,19 @@ class ApplicationDeveloper(ApplicationRuntime):
         # ApplicationCell.create_entity`'s own real dry_run/plan
         # behavior. Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are
         # UNGATED as of THIS commit too -- both `idempotency`/`request_
-        # budget` flip to `enabled` below. `narrow_limits_by_budget`
-        # (`endpoint_kind="schema"`) is what refuses an invalid `budget`
-        # now, at this request's own validation stage.
-        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
+        # budget` flip to `enabled` below. Phase 9 WP-3cd closure (K-1):
+        # `budget` now reaches `ApplicationCell.create_entity` RAW/
+        # unvalidated -- `narrow_limits_by_budget` (`endpoint_kind=
+        # "schema"`) moved from here into `ApplicationCell._limit_gate`
+        # itself, so an invalid `budget` is refused AFTER rate/
+        # concurrency/request_bytes/operation_depth (see `ApplicationRuntime.
+        # read`'s identical comment for the full reasoning).
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-
         # construction pass-through, unexamined here.
         return self._ApplicationRuntime__cell.create_entity(
             self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types,
             field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra,
-            idempotency_key=idempotency_key, effective_limits=effective_limits)
+            idempotency_key=idempotency_key, budget=budget)
 
     def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None,
                   enum=None, nullable=None, dry_run=False, plan=None, budget=None, idempotency_key=None,
@@ -3353,15 +3540,16 @@ class ApplicationDeveloper(ApplicationRuntime):
         # Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- same
         # reasoning as `create_entity`'s own identical comment. Phase 9
         # WP-3c/WP-3d: `idempotency_key`/`budget` ungated too, same
-        # reasoning.
-        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
+        # reasoning. Phase 9 WP-3cd closure (K-1): `budget` now reaches
+        # `ApplicationCell.add_field` RAW/unvalidated -- see `create_
+        # entity`'s own identical comment immediately above.
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
         # pass-through, unexamined here.
         return self._ApplicationRuntime__cell.add_field(
             self._ApplicationRuntime__principal, collection, field, field_type,
             request_id=request_id, contract_type=contract_type, enum=enum, nullable=nullable,
             dry_run=dry_run, plan=plan, digest_extra=digest_extra,
-            idempotency_key=idempotency_key, effective_limits=effective_limits)
+            idempotency_key=idempotency_key, budget=budget)
 
     def alter_field(self, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
                     request_id=None, dry_run=False, plan=None, budget=None, idempotency_key=None,
@@ -3402,11 +3590,13 @@ class ApplicationDeveloper(ApplicationRuntime):
         is" now simply omits the keyword (the default IS `UNCHANGED`);
         `enum=None` explicitly still means "clear", unchanged."""
         self._ApplicationRuntime__authorize(request_id=request_id)
-        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
+        # Phase 9 WP-3cd closure (K-1): `budget` now reaches
+        # `ApplicationCell.alter_field` RAW/unvalidated -- see `create_
+        # entity`'s own identical comment above.
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
         # pass-through, unexamined here.
         return self._ApplicationRuntime__cell.alter_field(
             self._ApplicationRuntime__principal, collection, field,
             enum=enum, nullable=nullable, field_type=field_type, request_id=request_id,
             dry_run=dry_run, plan=plan, digest_extra=digest_extra,
-            idempotency_key=idempotency_key, effective_limits=effective_limits)
+            idempotency_key=idempotency_key, budget=budget)

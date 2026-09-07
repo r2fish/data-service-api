@@ -350,9 +350,17 @@ def test_plan_digest_covers_budget_not_only_operations(sessions) -> None:
 
     # The SAME plan, the SAME operations, but a request object that ALSO
     # carries `budget` this time -- if the digest were `operations`-only,
-    # this would silently commit; it must instead refuse.
+    # this would silently commit; it must instead refuse. `execution_ms:
+    # 4_000` (WP-3cd closure, K-1): must stay WITHIN `FoundationConfig()`'s
+    # own deployed `max_execution_ms` (5_000) -- unlike the pre-closure
+    # call shape, `budget` validity is now checked by `ApplicationCell.
+    # transact` itself (via `_gate`/`_limit_gate`, K-1), not only by the
+    # `ApplicationRuntime` facade this direct `cell.transact` call
+    # bypasses, so an out-of-range value (the prior `1_000_000`) now
+    # raises `VALIDATION_FAILED` before ever reaching the plan-digest
+    # comparison this test means to exercise.
     with pytest.raises(PreconditionFailedError) as ei:
-        cell.transact(principal, [dict(item)], plan=plan, budget={"execution_ms": 1_000_000})
+        cell.transact(principal, [dict(item)], plan=plan, budget={"execution_ms": 4_000})
     assert ei.value.details == {"violated_declaration": "plan"}
     assert cell.read(principal, entity, fields=["label"], filters=None, order_by=None, limit=None) == []
 

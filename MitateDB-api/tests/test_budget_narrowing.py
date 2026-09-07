@@ -158,6 +158,39 @@ class BudgetWiringTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.dev.add_field("notes", "rank2", "integer", budget={"execution_ms": 10_000_000})
 
+    def test_batch_embedded_in_filter_respects_budget_narrowed_batch_items(self):
+        """K-3 (監督裁定集約 rulings-r5-r6.md, WP-3cd audit §11 必須 4,
+        MitateDB `cell.py`'s `_bind_filters` -- the `in`-filter `batch_
+        items` check): this was the ONE check point B-2 missed -- it used
+        to read `self.config.max_batch_items` directly, ignoring a
+        request's own budget-narrowed value, so a SINGLE-operation batch
+        (well under a `budget={"batch_items": 2}` COUNT bound of 2) whose
+        lone delete's own `in` filter names 3 values could still slip
+        through at the deployed default (100). Deliberately no `confirm`/
+        `destructive` setup: `_validate_delete_confirmation` runs `_bind_
+        filters` (this check) BEFORE evaluating the confirmation phrase
+        at all, so this refusal is reached regardless."""
+        for i in range(3):
+            self.runtime.transact([{"type": "insert", "collection": "notes", "values": {"title": f"del-{i}"}}])
+        with self.assertRaises(ResourceLimitError) as ctx:
+            self.runtime.transact(
+                [{"type": "delete", "collection": "notes",
+                  "filters": [Filter("title", "in", ["del-0", "del-1", "del-2"])]}],
+                budget={"batch_items": 2},
+            )
+        self.assertEqual(ctx.exception.details["limit_class"], "batch_items")
+        # Positive control: the SAME 3-value `in` filter, with no budget
+        # at all, reaches the deployed default (100) and is accepted at
+        # THIS check -- proving the refusal above is really about the
+        # budget-narrowed bound, not about a 3-value `in` filter being
+        # refused unconditionally (the delete goes on to fail its own
+        # confirmation choke instead, a DIFFERENT, later refusal).
+        from mitatedb_api.errors import DestructiveConfirmationRequired
+        with self.assertRaises(DestructiveConfirmationRequired):
+            self.runtime.transact(
+                [{"type": "delete", "collection": "notes",
+                  "filters": [Filter("title", "in", ["del-0", "del-1", "del-2"])]}])
+
 
 if __name__ == "__main__":
     unittest.main()

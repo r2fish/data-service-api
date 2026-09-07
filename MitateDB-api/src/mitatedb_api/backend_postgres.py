@@ -1694,3 +1694,16 @@ class PostgresBackend:
         never calling this method), so this write and the batch's own
         commit share the identical fate."""
         self._write_idempotency_row(self._runtime, key, digest, response_json, now_ms)
+
+    def idempotency_discard_pending(self, key):
+        """Phase 9 WP-3cd closure (K-5, N-8): a real no-op HERE -- unlike
+        `SQLiteBackend`'s own private, non-transactional dict, this
+        backend's `record_idempotency` above writes to the SAME real
+        PostgreSQL connection/transaction `self.commit()`/`self.rollback
+        ()` already govern, so a `self.commit()` failure's own `self.
+        rollback()` already undoes the row this method would otherwise
+        need to discard -- there is nothing left pending to clean up by
+        the time `ApplicationCell.transact`'s `except Exception:` handler
+        reaches this call. Declared (not simply inherited/omitted) so a
+        future reader sees this backend was considered, not skipped."""
+        return None

@@ -1190,6 +1190,47 @@ def test_cross_entity_mutation_idempotency_key_replays_via_http(app_a_stack):
     assert second.json() == first.json()
 
 
+def test_cross_entity_mutation_budget_narrows_batch_items_over_http(app_a_stack):
+    """K-4 (WP-3cd audit §11 推奨7, N-6; 監督裁定集約 rulings-r5-r6.md
+    B-1): `http.py::post_cross_entity_mutate` reads `budget=body.get
+    ("budget")` and forwards it to `session.transact` -- the audit
+    measured that DROPPING that keyword left every existing test green
+    (`{scratchpad}` mutation probe). `ScopedMutationRequest.budget` names
+    the SAME `batch_items`/`execution_ms` classes `MutationRequest.
+    budget` does (B-1's single row for both `mutate`/`cross_entity`); this
+    pins the cross-entity endpoint's own real wiring the same way `test_
+    contract_1_7_0_budget_and_idempotency_are_real_over_http` above pins
+    the per-entity one."""
+    entity = "http_cem_budget_target"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    two_ops = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={
+            "operations": [
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-a"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-b"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
+    )
+    assert two_ops.status_code == 200, two_ops.text
+    assert two_ops.json()["affected"] == 2
+    three_ops = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={
+            "operations": [
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-c"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-d"}},
+                {"operation": "insert", "entity": entity, "values": {"label": "cem-budget-e"}},
+            ],
+            "budget": {"batch_items": 2},
+        },
+    )
+    assert three_ops.status_code == 413, three_ops.text
+    assert three_ops.json()["code"] == "LIMIT_EXCEEDED"
+    assert three_ops.json()["details"]["limit_class"] == "batch_items"
+
+
 def test_contract_1_7_0_budget_and_idempotency_are_real_over_http(app_a_stack):
     """Phase 9 WP-3c/WP-3d (design D-5/D-6): `budget`/`idempotency_key`
     were the LAST two fields `test_contract_1_7_0_provisional_gate_
