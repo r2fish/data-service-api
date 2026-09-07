@@ -1,6 +1,7 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.4 (2026-09-07)**。v1.3 からの変更: §9 の 11 に訂正注 — `tools/check_doc_refs.py` の CI 上の位置を「3.11 / 3.12 両 job の pytest 前段」から**常時実行の独立 job `doc-refs`** に改めた (Class A の push で conformance が回らなくても検査は要る。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-2 訂正 v1.5 / D-4)。§8 の R-15 行に D-4 (CI は変更クラスで conformance の要否を決める) を追記した。**R-14 に従い、旧文は残し訂正注を添える形である。**
+- 版数: **v1.5 (2026-09-08)**。v1.4 からの変更: **フェーズ9 が完了した**ので §1 に「1.0b 更新 (2026-09-08、フェーズ9 完了)」を足し (§9 の 6)、§5 のフェーズ9 節に完了と完了条件の充足を書き、§8 の R-2〜R-8 の行き先を「フェーズ9 完了」に改めた。**R-14 に従い、§5 のフェーズ9 R-4 行と §8 の R-8 行に、フェーズ9 設計 §10.1 の改版文案を逐語で足した。** **行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。**§8 の R-16 行には、フェーズ9 が P-2 の周回のどこを条件化したかを 1 文で足した** (R-16 の着手条件である「フェーズ9 設計文書との重複確認」の材料)。
+- 旧 **v1.4 (2026-09-07)**。v1.3 からの変更: §9 の 11 に訂正注 — `tools/check_doc_refs.py` の CI 上の位置を「3.11 / 3.12 両 job の pytest 前段」から**常時実行の独立 job `doc-refs`** に改めた (Class A の push で conformance が回らなくても検査は要る。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-2 訂正 v1.5 / D-4)。§8 の R-15 行に D-4 (CI は変更クラスで conformance の要否を決める) を追記した。**R-14 に従い、旧文は残し訂正注を添える形である。**
 - 旧 **v1.3 (2026-09-07)**。v1.2 からの変更: §9 に 7〜11 を追加、§8 に R-15 / R-16 を追加。根拠: 設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-3、依頼者裁定 2026-09-07 (U-4 (A))。
 - 旧 **v1.2 (2026-09-07)**。v1.1 からの変更: **フェーズ8 が完了した**ので §1「現状」を更新し (§9 の 6)、§5 のフェーズ8 節に完了と完了条件の充足を書き、§8 の R-9〜R-12 の行き先を「フェーズ8 完了」に改めた。**R-14 に従い、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行を、根拠と日付を添えて改版した** (フェーズ8 設計 §10 L8-8)。**行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。
 - 旧 **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
@@ -29,6 +30,20 @@
 ---
 
 ## 1. 現状
+
+### 1.0b 更新 (2026-09-08、フェーズ9 完了。§9 の 6)
+
+**§1.0 (2026-09-07 時点) と §1.1 は下に残す。以下が現在形である。**
+
+- **フェーズ9 は完了した (2026-09-08)。** main の最新 merge は **`b3cfc0c`** (版フリップの pair-closing)。**その直前 2 つが `e16422d` (r2db の版フリップ) と `a1cee5b` (MitateDB の版フリップ) であり、3 つの merge の間に他のコミットは 1 つも挟まっていない。** 完了ゲート (root suite 単独実行) は ****`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (failed 0 / xfailed 0 / skipped 0)。
+- **契約は 1.6.0 から 1.7.0 になった。** 契約 JSON と両 peer の packaged 複製 2 本の sha256 は 3 本とも **`1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4`** である (フェーズ8 の `968d3c72…45e6` から動いた)。**両 peer が 1.7.0 を宣言する** — `r2db-api/src/r2db_api/service.py:942` / `control_plane.py:731`、`MitateDB-api/src/mitatedb_api/cell.py:3852` / `control_plane.py:1424`。
+- **能力は 11 種 → 14 種**(`constraint_declarations` / `dry_run` / `request_budget` を新設し、既存の `idempotency` を両 peer で `enabled` にした)、**limit class は 16 種 → 17 種**(`enum_members`)、**error code は 17 種のまま**、**共通条件は C-00〜C-19 の 20 件 → C-00〜C-25 の 26 件**であり、**新 6 条件 (C-20〜C-25) はすべて four adapters で実行可能**である。
+- **エージェントの 1 周 (P-2) が宣言だけで閉じた。** **R-2** 制約宣言 (`field_constraints` の enum / nullable、新設 `alter_field`、同じ版で catalog が報告)、**R-3** 検証エラーの固定 details 語彙 (`violated_declaration` は 11 語の閉じた語彙、`field` は要求内パス)、**R-4** `dry_run` と無状態 plan (token = `"<sha256hex>.<application schema revision>"`)、**R-5** idempotency の両 peer 実装、**R-6** request budget (配備値を下回る方向にのみ効く)、**R-7** 成功応答の `request_id`、**R-8** 派生の操作カタログ (`tools/contract_catalog.py` + `spec/OPERATION_CATALOG.json`、19 行、再生成一致テスト) と `versioning.obligations`。
+- **R-10 (B) も同梱で閉じた。** `spec/CONTRACT_HISTORY_MANIFEST.json` は 29 エントリ (剥離 26 / `unstripped` 3) で、剥離量は 1,812 バイト (#18 の語改訂 +2 を差し引いて正味 -1,810)。**逆適用の deep-equal は 26 値中 24 値が byte 一致し、残り 2 値の差は意図した規範文改訂 (U-8 #28) だけである。** **契約 JSON 全体は 1.7.0 の新設分により 77,119 → 126,516 バイトに増えた** — 剥離で短くなったわけではない。
+- **閉じた台帳項目**: **L9-2b** (MitateDB が `PRECONDITION_FAILED` を発行するようになった)、**L9-5** (剥離量の実測を記録)、**L9-7 (= L7-8)** (`idempotency` の肯定枝が 4 plug で load-bearing になった)、**L9-8 (= L8-4)** (R-10 (B) の 5 段手順)、**L9-9 (= L8-9)** (`versioning.obligations` + register 2 本。ただし実施形は「散文を残して機械可読な索引を並置する」であり、起票時の想定とは違う)。
+- **開いている台帳項目**: フェーズ9 側は **L9-1** (`schema_objects` の数え方の不一致)、**L9-2a** (MitateDB は `IDENTIFIER_INVALID` を発行しない)、**L9-3** (r2db に limits の env override が無い)、**L9-4** (`operation_catalog_url` を両 peer が宣言しない)、**L9-10** (無条件義務が累計 4 件になった)、**L9-11** (`result_items` の意味が peer で揃わず C-24 で駆動しない)、**L9-12** (`example_profile` が全 class を網羅しない)、**L9-13** (idempotency の replay と `evaluation_order` の関係)、**L9-14** (記録する応答の内部表現が peer で異なる)、**L9-15** (C-25 (3) の監査行照合が共通 suite で駆動されない)。**フェーズ7 / 8 側は §1.0 のまま** — **L7-2** (実 socket HTTP plug、フェーズ10)、**L7-19 / L8-2** (上流待ち)、**L6-5a** (フェーズ10)、**L8-5 / L8-6 / L8-10 / L8-11 / L8-12 / L8-13**。
+- **フェーズ7 の残は依然として WP-9 (公開ゲート) だけであり、着手条件は依頼者の実行合図のみである。** **フェーズ9 は `tools/rewrite_hash_refs.py` を触っていない** (触るファイルの重なり 0)。
+- **次の一手**: **WP-9 (依頼者の合図待ち)** と **フェーズ10 (L7-2 / L6-5a)**。**性能基準値は本フェーズで 2 フェーズ目の差分が付いた** (フェーズ9 設計 §11.2) ので、**フェーズ10 の完了ゲートの後に §7 の 3 が言う「退行のゲート化」を審議できる。**
 
 ### 1.0 更新 (2026-09-07、フェーズ8 完了。§9 の 6)
 
@@ -168,14 +183,23 @@
 - **完了条件**: C-05 V3 の xfail が 0 (または実測で残る class とその理由が台帳に載る)、CI に総数下限 job、`spec/` に companion、R-12 の基準値が設計 §13 に記録される。
 - **再検討事項**: `operation_depth` の枝 (L7-1)。性能ハーネスの plug 選択 (HTTP plug を含めるか。L7-2 前なので in-process TestClient 経路になる点を記録する)。
 
-### フェーズ9 — 契約 1.7.0「宣言と検証」
+### フェーズ9 — 契約 1.7.0「宣言と検証」【完了 (2026-09-08)】
+
+**【状態注記 2026-09-08】本節は完了した。** 正本は `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` (**v1.8**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md` (訂正註は §6、19 件) である。**main の最新 merge は `b3cfc0c`、完了ゲートは **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) である。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
+
+- **完了条件 1「契約 1.7.0」= 充足。** 3 複製の sha256 は `1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4` で一致する (フェーズ8 の値から動いた)。**従属判断 12 を `spec/CCR_DISPOSITION.md` に新設した。**
+- **完了条件 2「両 peer の `contract_version` 1.7.0」= 充足。** 4 箇所すべてを実測した (§1.0b)。**版フリップは peer ごとに 1 コミットで、完了ゲート内で連続して main にマージし、間に他のコミットを挟んでいない** (設計 §5 U-7 = (A))。
+- **完了条件 3「新条件 (C-20 以降) が four adapters で executable」= 充足。** **C-20〜C-25 の 6 行がいずれも `executable (four adapters)` である。** **版ゲートの `xfail(strict=True)` は 8 → 4 → 0 と遷移し、`conformance-tests/` を 1 行も編集せずに 0 になった。**
+- **完了条件 4「R-12 の性能差分が記録される」= 充足。** フェーズ9 設計 **§11.2** にフェーズ8 §11.2 と同形式で記録した (PERFRUN 行 + 14 行の PERF 表 + 同一 plug の版間差分)。**閾値は置いていない** (P-8)。**これで基準値は 2 フェーズ安定した。**
+- **「再検討事項」の 3 件も決着した。** **enum の上限** = 設計 §5 U-1 = (β)、独立の limit class `enum_members` を新設 (`schema_objects` には含めない)。**dry_run の監査イベント** = 設計 §5 U-2、dry_run は監査行を書かない (実行前拒否は従来どおり監査される)。**idempotency の保持** = 設計 §5 U-3 = (A)、application DB の side table に data tx と同一 tx で書く (DB 側単一真実 (Q4) には載せない)。
+
 
 - **目的**: G-1 と G-3。エージェントの 1 周 (P-2) を閉じる。
 - **着手条件**: フェーズ8 完了 (実効 bound の無い peer に新しい要求形を足さない)。契約フェーズなので**設計レビュー 2 回**。
 - **範囲** (一括出荷。分けると P-4 に反する):
   - **R-2** 制約宣言: `create_entity` / `add_field` / `alter_field` に enum と nullable。サーバが値検証の choke point で強制し、`EntityDescriptor` が同じ版で報告する。既存行が反する `alter_field` は実行前検証で全件拒否。`pattern` は正規表現の計算量が SI-08 の面になるので**初版に含めない**。両 peer の宣言永続化は per-application upgrade (フェーズ6 / Q4 の機構) で行う。
   - **R-3** 検証エラー語彙: VALIDATION_FAILED / IDENTIFIER_INVALID / CAPABILITY_UNSUPPORTED に固定 key (`field` / `declared_type` / `observed_type` / `violated_declaration`)。事実のみ。行値・推奨値・修正動作は載せない (SI-10)。両 peer でどの層が `violated_declaration` を決めるかを揃える (L6-9 の二重検証を整理する)。
-  - **R-4** dry_run と無状態 plan: `MutationRequest` / `ScopedMutationRequest` / `SchemaOperationRequest` に `dry_run`。応答は実呼びと同じ判定 + affected 件数 + (schema なら) 変更後の `EntityDescriptor`。副作用の規則 (監査イベント・idempotency 記録・server-assigned address の消費) を契約に明記。plan トークン = request digest + 対象 entity の schema revision の決定的値で、apply 時に不一致なら PRECONDITION_FAILED。認可判定 (policy simulation) も dry_run の判定に含める。conformance 条件: 「dry_run の判定 = 実呼びの判定、外部可視の状態変化 0」。
+  - **R-4** dry_run と無状態 plan: `MutationRequest` / `ScopedMutationRequest` / `SchemaOperationRequest` に `dry_run`。応答は実呼びと同じ判定 + affected 件数 + (schema なら) 変更後の `EntityDescriptor`。副作用の規則 (監査イベント・idempotency 記録・server-assigned address の消費) を契約に明記。plan トークン = request digest + 対象 entity の schema revision の決定的値で、apply 時に不一致なら PRECONDITION_FAILED。認可判定 (policy simulation) も dry_run の判定に含める。conformance 条件: 「dry_run の判定 = 実呼びの判定、外部可視の状態変化 0」。 **【改版 2026-09-07 (R-14)。上の文は起票時の原文であり、消さずに残す】** **plan の schema 状態成分は「対象 entity の schema revision」ではなく「対象 Application の schema revision」である。** **根拠: 両 peer とも entity 単位の revision を持たず、`SchemaOperationResult.revision` は per-application の単調カウンタである** (r2db `r2db-api/src/r2db_api/postgres.py:1900-1935`、MitateDB `MitateDB-api/src/mitatedb_api/backend_postgres.py:646-661`。フェーズ9 設計 F-16)。**帰結として、対象 entity に無関係な entity への schema 操作も plan を失効させる** — **これは fail-closed 側の誤差であり (失効しすぎることはあっても、変わった schema を見落とすことはない)、安全側である。** **契約 `structured_operations.dry_run.plan` がこの広さを 1 文で開示する。** **監督裁定 2026-09-07 (依頼者裁定「判断しなければならないものが出たらあなたの推奨で進めてください。後で報告してください。」の委任に基づく)、フェーズ9 設計 §5 U-4 = (A) と §3 D-4 (7)。**
   - **R-5** idempotency の実装と契約追記: 両 peer で `idempotency` を `enabled` へ。契約に追記するのは (i) key と body digest の結合、(ii) 同一 key 異 body は CONFLICT、(iii) 保持期間内の再送は元の結果を返す、(iv) cross-entity と schema 操作にも適用、(v) 監査イベントとの相関 (key は secret ではないが、**client が secret 的な値を key に入れることを契約で禁じる文**を置き、`forbidden_fields` との境界を明記)。L7-8 の肯定側がここで初めて load-bearing になる。
   - **R-6** request budget: 要求単位の `budget` (初版は `result_items` / `execution_ms` / `batch_items` の 3 class)。配備上限を超える値は VALIDATION_FAILED、超過は LIMIT_EXCEEDED + `limit_class`。`rows_scanned` は limit class に無く backend 間で意味が揃わないので**含めない**。
   - **R-7** 成功応答の `request_id` (QueryResult / MutationResult / SchemaOperationResult に optional 追加)。
@@ -235,13 +259,13 @@
 | ID | 内容 | 行き先 |
 |---|---|---|
 | **R-1** | 依頼者の目標 (§0) を 4 要求 G-1〜G-4 に分解した。以後のフェーズ設計は §2「守るべき条件」でどの G に応えるかを明記する | 全フェーズ |
-| **R-2** | 制約宣言 (enum・nullable) と同版 catalog 報告 | フェーズ9 |
-| **R-3** | 検証エラーの固定 details 語彙 | フェーズ9 |
-| **R-4** | `dry_run` と無状態 plan トークン、認可 dry_run | フェーズ9 |
-| **R-5** | idempotency の両 peer 実装と契約追記 | フェーズ9 |
-| **R-6** | request budget (3 class から) | フェーズ9 |
-| **R-7** | 成功応答の `request_id` | フェーズ9 |
-| **R-8** | 契約 JSON から派生する機械可読の操作カタログ + 再生成一致テスト | フェーズ9 |
+| **R-2** | 制約宣言 (enum・nullable) と同版 catalog 報告 | **フェーズ9 完了 (2026-09-08)**。`SchemaOperationRequest.field_constraints` (enum / nullable) と新設 `alter_field` をサーバが値検証の choke point で強制し、`EntityDescriptor.field_constraints` が同じ版で総計として報告する。既存行が反する `alter_field` / `add_field(nullable: false)` は同一 tx + `LOCK TABLE ... IN SHARE MODE` の走査で `CONFLICT`。共通条件は **C-20** |
+| **R-3** | 検証エラーの固定 details 語彙 | **フェーズ9 完了 (2026-09-08)**。`VALIDATION_FAILED` / `IDENTIFIER_INVALID` / `CAPABILITY_UNSUPPORTED` が 4 key (`field` / `declared_type` / `observed_type` / `violated_declaration`) を持ち、`violated_declaration` は 11 語の閉じた語彙、`field` は要求内パス (batch index 込み) である。両 peer とも AST 全数走査で「choke point / request-shape 層に details 無しの発行箇所が 0 件」を固定する。共通条件は **C-21** (1.7.0 の無条件義務) |
+| **R-4** | `dry_run` と無状態 plan トークン、認可 dry_run | **フェーズ9 完了 (2026-09-08)**。`dry_run` は実呼びと同じ判定 (認可・破壊確認・precondition・bound) を返して外部可視の状態変化を 0 にし、plan は `"<sha256hex>.<application schema revision>"` の無状態トークンである。共通条件は **C-22**。**schema 成分が per-application である点は本表 R-4 行と §5 の R-4 行の改版註のとおり** |
+| **R-5** | idempotency の両 peer 実装と契約追記 | **フェーズ9 完了 (2026-09-08)**。両 peer が `idempotency: enabled`。記録は application DB の side table に data tx と同一 tx で書き、照会は認証・認可・bound の後・target-existence の前。同 key 異 body は `CONFLICT`、replay は元の結果 (`request_id` を含む) を返し監査行 1 行 (`outcome: replayed`) を残す。共通条件は **C-23**、**L7-8 の肯定側が 4 plug で load-bearing になった** |
+| **R-6** | request budget (3 class から) | **フェーズ9 完了 (2026-09-08)**。要求単位の `budget` が配備値を**下回る方向にのみ**効く (`narrow_limits_by_budget` を両 peer 同名で持つ)。適用外 class / 非整数 / 配備値超過は `VALIDATION_FAILED` + `violated_declaration: budget`、超過は `LIMIT_EXCEEDED` + `limit_class`。共通条件は **C-24** (駆動は `batch_items`。`result_items` / `execution_ms` が駆動しない理由は C-24 行に開示、台帳 L9-11) |
+| **R-7** | 成功応答の `request_id` | **フェーズ9 完了 (2026-09-08)**。`QueryResult` / `MutationResult` / `SchemaOperationResult` のすべての成功応答が `request_id` を持ち、要求ごとに相異なり、replay は元実行の値を返す。共通条件は **C-25** (1.7.0 の無条件義務。監査行照合の脚が共通 suite で駆動されない件は台帳 L9-15) |
+| **R-8** | 契約 JSON から派生する機械可読の操作カタログ + 再生成一致テスト **【改版 2026-09-07 (R-14)。上の文は起票時の原文であり、消さずに残す】** **フェーズ9 が出す初版の操作カタログは、`endpoints` / `control_endpoints` ごとの role・destructive・atomicity 境界・能力依存・request / response schema を持つが、§5 R-8 が列挙していた「返し得る code」(`endpoints.*.error_codes`) は含めない。** **根拠: この宣言は片方向 (「観測した code ⊆ 宣言」) しか検査できず、「宣言にあるが観測されない code」が advisory として残る。P-3 (advisory な宣言を catalog に載せない) を優先した。** **エージェントは `errors.codes` の全域 17 code と各節の記述から判断する (現行どおり)。** **監督裁定 2026-09-07 (依頼者裁定「判断しなければならないものが出たらあなたの推奨で進めてください。後で報告してください。」の委任に基づく)、フェーズ9 設計 §5 U-5 = (B)。** | **フェーズ9 完了 (2026-09-08)**。`tools/contract_catalog.py` が契約 JSON から `spec/OPERATION_CATALOG.json` (endpoints 7 + control_endpoints 12 = 19 行) を生成し、テストが再生成して byte 一致を assert する。`versioning.obligations` (版 1.2.0〜1.7.0 の 6 entry) と `endpoint_fields_note` を新設し、register が散文との一致を固定する (**L8-9 が閉じた**)。`CapabilityDocument.operation_catalog_url` は optional 1 項目として契約に載せたが、両 peer は宣言しない (台帳 L9-4) |
 | **R-9** | CI のテスト総数下限 (+ L7-23 収集 0 件ガード、L7-22 台帳 ID 復帰) | **フェーズ8 完了 (2026-09-07)**。`conformance-tests/COLLECTION_FLOOR` = 2340、検査は `tools/check_collection_floor.py` (CI の 3.11 / 3.12 の両 job)。L7-23 のガードは設置済み。**L7-22 は起票時点で既に充足していたことが判明し、記述訂正で閉じた** (フェーズ8 設計 §10 L8-1) |
 | **R-10** | 契約 JSON の現行/履歴分離 (WP-7 方式) | **フェーズ8 完了 (2026-09-07)**。 **【改版 2026-09-07 (R-14)。上の内容欄は起票時の原文であり、消さずに残す】** 実施した形は **provenance companion (`spec/CONTRACT_HISTORY.md`、29 anchor。契約 JSON は 0 バイト不変)** である。**検査文「現行 JSON から経緯マーカーが消えたこと」は、逐語インベントリ (フェーズ8 設計 付録 A、2026-09-06) が「値全体が経緯叙述の値は 0 件、29 値すべてにマーカーと現行規範文が同居、18 件は PIN された依頼者確定文言」と実測したため不成立であり、採らなかった。** 代わりに **register テスト (集合一致 / 引用の byte 一致 / 導入版の照合 17 件 / ruling の実在 / 重複なし・非空)** で網羅性を固定した。**(B) 接頭辞剥離はフェーズ9 (契約 1.7.0) へ送った** (フェーズ8 設計 §10 L8-4 / L8-8) |
 | **R-11** | 運用項目: smoke test、L7-18 `ops verify-declarations` (両 peer)、backup/restore 実証 (r2db)、ops CLI 引数の secret 経路検査、L7-19 の撤去 | **フェーズ8 完了 (2026-09-07)**。`tools/deploy_smoke.py`、両 peer の `ops verify-declarations` (**L7-18 は閉じた**)、`docs/ops/BACKUP_RESTORE_R2DB.md` と実証記録、argv secret の常設検査 (**修正前 6 件 → 修正後 0 件**) が入った。**L7-19 だけは撤去条件未達のまま据え置きである** — 上流の Starlette に当該参照を直した版が無い (フェーズ8 設計 §10 L8-2) |
@@ -249,7 +273,7 @@
 | **R-13** | 保留項目 (§3.2) の実需記録の置き場。公開後の実利用で現行契約では表現できない要求が出たとき、本表に日付・要求・不足する契約要素を 1 行で記す。これが CCR-01 の「表現力不足の実証」になる | フェーズ11 以降 |
 | **R-14** | 本書の改版規約: 判定 (§3, §6) を覆すときは、覆した根拠と日付を該当行に残し版数を上げる。行を消さない | 本書 |
 | **R-15** | 開発プロセス衛生 v1: 現行運用条件の単一正本 (`docs/work-orders/OPERATING_CONDITIONS.md`)、文書 ID 参照検査 (`tools/check_doc_refs.py`)、作業指示書の Change Set Manifest 化。設計は `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` (D-1 / D-2 / D-3) **【追記 2026-09-07 (v1.4)】D-4「CI は変更クラスで conformance の要否を決める」(`tools/change_class.py`、CI の `change-class` job) を本項の範囲に含める** | 本書 §9 の 7〜11 |
-| **R-16** | **起票候補**: P-2 の周回 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) を両 peer で通す scenario 級 conformance。**フェーズ9 設計文書との重複確認を着手条件とする** — フェーズ9 が同じ周回の一部を既に条件化している可能性があり、着手前に突合する。本作業では設計しない | フェーズ10 以降 |
+| **R-16** | **起票候補**: P-2 の周回 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) を両 peer で通す scenario 級 conformance。**フェーズ9 設計文書との重複確認を着手条件とする** — フェーズ9 が同じ周回の一部を既に条件化している可能性があり、着手前に突合する。本作業では設計しない **【追記 2026-09-08 (v1.5)。着手条件である「フェーズ9 設計文書との重複確認」の材料】** **フェーズ9 は P-2 の周回のうち「判定を受ける」と「安全に再送する」の 2 段を共通条件として条件化した** — **C-20 (宣言と挙動の一致) / C-21 (拒否が構造化診断を持つ) / C-22 (dry_run の判定が実呼びと一致し副作用 0) / C-23 (再送の意味) / C-24 (要求単位 budget) / C-25 (`request_id` による相関) の 6 条件である。** **R-16 が足すべきものは、この 6 条件が個別に見ている性質ではなく、「catalog を読む → 要求を作る → 判定を受ける → 安全に再送する」を 1 本の scenario として通したときに初めて見える不整合 (段と段の間の受け渡し) である。** | フェーズ10 以降 |
 
 ---
 

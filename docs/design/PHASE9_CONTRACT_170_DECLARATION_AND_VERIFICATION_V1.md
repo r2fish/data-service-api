@@ -1,6 +1,6 @@
 # フェーズ9 実施設計: 契約 1.7.0「宣言と検証」
 
-- 版数: **v1.7 (2026-09-07)**。**改版履歴**:
+- 版数: **v1.8 (2026-09-08)**。**改版履歴**:
   - **v1.0 (2026-09-07)** — 起草初稿。設計レビュー 1 回目の対象となる版である。
   - **v1.1 (2026-09-07)** — 設計レビュー 1 回目 (Blocker 4 / Major 9 / Minor 10) を全件反映、§5 U-1〜U-8 を依頼者裁定の委任に基づき監督が確定。**設計レビュー 2 回目の対象となる版**である。
   - **v1.2 (2026-09-07)** — 設計レビュー 2 回目 (Blocker 4 / Major 9 / Minor 13) を全件反映 (監督裁定 S-a〜S-n)。U-3 / U-4 の確定文を訂正後の本文に差し替え。
@@ -9,6 +9,7 @@
   - **v1.5 (2026-09-07)**: WP-3a レビュー A — alter_field の enum 解除の表現 (enum: null) を契約に補正。
   - **v1.6 (2026-09-07)**: WP-2a レビュー M-6 / m-1 — add_field nullable:false と既存行の CONFLICT、violated_declaration 語彙に constraint_declaration を追加
   - **v1.7 (2026-09-07)**: WP-2a 監査 (i) — 宣言の無い alter_field は VALIDATION_FAILED (revision 不変)
+  - **v1.8 (2026-09-08)**: **WP-4 (完了ゲートと記録)。** **§11 実施記録 (11.1 集計行 / 11.2 性能差分 / 11.3 WP ごとの記録) を記入し、§10 の台帳 L9-1〜L9-13 に実施結果の状態注記を足し、L9-14 / L9-15 を新設した** (訂正註 17 の「台帳 L9 に記録する」と裁定 O-6 の帰結)。**§1〜§9 の本文は 1 文字も変えていない** — 追記のみである。**ゲートの実測値 (root suite / 収集件数 / 性能 / CI) は監督が単独実行で埋める。**
 - 位置づけ: **監督が確定した枠 (2026-09-07) の実施設計**であり、**2 回の設計レビューを経て確定した設計 (v1.3) であって、作業指示書の正本である。** 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` (v1.2) の §5「フェーズ9」節・§4 (P-1〜P-9)・§7・§8 (R-2〜R-8 / R-10)・§9 が**正本**であり、本書 §1.1 / §2.1 はそれを**逐語で転記**する (再導出しない)。§3 の D-1〜D-9 と §4 の A-1〜A-10 は**監督確定**である。**§5 の U-1〜U-8 は、依頼者裁定 (2026-09-07) が判断を監督に委任したことに基づき、設計レビュー 1 回目の反映時に監督が確定した (v1.1)。U-3 / U-4 の確定文は v1.2 で監督の訂正後の本文に差し替えた (枝の確定は不変)。** **作業指示書の起草中に生じた疑義 4 件は監督裁定 T-1〜T-4 として v1.3 に反映した** (§3 D-4 の実装の形 / §5 U-8 #29 / §6.2 / §6.3 / §6.4 / §6.6 / §8 / §8.1 / §9)。 **§3 D-10 は v1.1 で撤回した** (レビュー 1 B1。前提事実の誤り)。WP 分割は §8 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md`) は別途起こす。構成・粒度・文体はフェーズ8 設計文書 (`docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` v1.3) を踏襲する。
 - テーマ: **「エージェントの 1 周 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) が、宣言だけで閉じており、その宣言がすべて検査されている」状態にすること。**
 - 前提となる main: **`523753c`** (= フェーズ8 完了の `ef7bd57` に WP-9 リハーサルのコミット群を重ねたもの)。作業 branch **`phase9-contract-170`**、worktree はフェーズ8 と同じ運用 (`.claude/worktrees/` 配下、WP ごとに分ける。§8)。
@@ -1499,20 +1500,22 @@
 
 **本節は起票時 (設計 v1.0) の内容である。実施結果は §11 と各項の状態注記に書く。**
 
-- **L9-1 `schema_objects` の数え方が両 peer で一致していない (F-5)**。r2db は **entity 1 + field 数 + index 数** (`r2db-api/src/r2db_api/postgres.py:1620-1627`、`structured.py:1467` / `:1478`、既定 1000 は `limits.py:12-20`)、MitateDB は **`information_schema` のテーブル数のみ** (`MitateDB-api/src/mitatedb_api/backend_postgres.py:494-507`、既定 128 は `config.py:35`) であり、MitateDB は field 数を**別軸 `max_fields`** で `ValidationError` として扱う (`cell.py:617` / `:708`)。**契約 `limits.classes` の `schema_objects` の意味が peer で一致していない** — **P-6 の既存の差である。** **§5 U-1 = (β) の確定により、本項は本フェーズでは解消せず、開いたまま残して別途扱う。** **本項に実測値を記録する。** **開いたまま (記録)。**
-- **L9-2a MitateDB は `IDENTIFIER_INVALID` を発行しない (F-7)**。`MitateDB-api/src/mitatedb_api/identifiers.py:30` が `ValidationError` へ畳み込み、その判断を `http.py:88-96` が明記している。**D-3 の適用範囲は「発行されるときの形」なので、発行しない実装は縛られない** — **本フェーズでこの非対称を変えない。** **帰結として C-21 の `IDENTIFIER_INVALID` 枝は MitateDB 2 plug で観測されない。** **この事実を C-21 行に開示し、本項に記録する。** **将来 identifier 検証を分離するときに再評価する。** **開いたまま (記録)。** (**v1.2 で L9-2 を 2 項に分割した。レビュー 2 M4、監督裁定 S-h。**)
-- **L9-2b MitateDB の `PRECONDITION_FAILED` は本フェーズで閉じる (v1.2 で新設。レビュー 2 M4、監督裁定 S-h)**。**現行の MitateDB は `PRECONDITION_FAILED` をリポジトリ全体でコード文字列として持たない** — 出現するのは `MitateDB-api/src/mitatedb_api/http.py:89` のコメント、`audit_dispatch.py:48` のコメント、および同梱契約 JSON だけである。**D-4 の plan 失効判定がこの code を初めて必要にするので、WP-3b が例外クラスを新設する** (§8、D-4 実装の形 5)。**`revision_preconditions` (行単位の precondition) が `unavailable` である事実は変わらない**が、**「`PRECONDITION_FAILED` を発行しない実装」ではなくなる。** **v1.1 の L9-2 は「本フェーズでこの非対称を変えない」と書いており、D-4 (7) / C-22 (8)(9) と両立しなかった。** **閉止は WP-3b の完了時である。** **開いたまま (閉止予定)。**
-- **L9-3 r2db は limits の配備時 env override を持たない (F-18)**。`r2db-api/src/r2db_api/limits.py:12-20` の既定値を `main.py` が参照せず、上書き経路が無い (control-plane 側だけは `R2DB_CONTROL_LIMIT_*` で上書きできる)。MitateDB は `MitateDB-api/src/mitatedb_api/config.py:20-220` が `MITATEDB_MAX_*` で上書きできる。**budget (D-6) は「配備値より小さくする」機構なので本フェーズの機能には影響しないが、同型性 (P-6) の差として記録する。** **配備者が bound を配備ごとに動かせないことは、`limits.profile` (「Limits are deployment-profile values」) の趣旨からは弱い。** **開いたまま (記録)。**
-- **L9-4 `CapabilityDocument.operation_catalog_url` を両 peer は本フェーズで宣言しない (D-8)**。optional であり義務でもないので、宣言しない実装も conformant である。**帰結として、この項目が load-bearing になる条件は本フェーズには無い** — 契約に置くだけである。**宣言する実装が現れた時点で「宣言した URL が実在するか」が問題になり、それは L7-2 / L6-5 の `surfaces` とまったく同じ問題である。** **開いたまま (記録)。**
-- **L9-5 R-10 (B) の `unstripped` 件数 (D-9)**。**マニフェストに `unstripped: true` で残る値の件数と、その各々の理由を本項に記録する。** **`versioning.version_binding` (10,269 字、契約全体の 13.32%) は `unstripped` になる見込みが高い** — 版の言及が規範文そのものに織り込まれており、接頭辞として剥がせる形をしていない (F-21、`spec/CONTRACT_HISTORY.md` 前文 limitation 3)。**あわせて、剥離によって契約 JSON が実際に何バイト短くなったかを記録する** — フェーズ8 の (A) が「1 文字も減らない」だった限界に対する、本フェーズの実測の答えである。**確定後の `unstripped` は 3 件である** — `versioning.version_binding` (10,269 字の累積叙述であり、後続文が同一値内の先行文を参照するため、機械的な分離ではなく再著述になる)、`versioning.compatibility`、`destructive_confirmation.phrase_construction.rules[3]` (後 2 者はマーカーが括弧・接頭辞の形を取らず、規範文中の裸の語として現れる)。**残り 26 件の内訳は、監督裁定 S-d を織り込んだ確定後の分類で `strip-prefix` 14 / `strip-insert` 11 / 両方 1 である** (草案時点は 13 / 12 / 1。**#18 `schemas.AuditResult.properties.events.items.description` が `strip-insert` から「接頭辞全体の除去 + `this ruling closes` → `this contract closes` の語改訂」へ移った**。**この 1 件は、挿入句を剥がしただけでは規範文の中に裸の `ruling` が残り、D-9 の新規 assert (剥離後スキャナ 0 ヒット) が赤になるからである** — レビュー 2 B4 の実測、監督裁定 S-d。**この値は PIN 定数を持たないので確定文言の破棄には当たらない。**)。**削減量の設計時点の見積り (v1.2 で追記。レビュー 2 m10)**: **レビュー 2 の実測 (26 値 + 追加剥離 2 件) が 1,787 バイト / 契約 JSON 全体 77,119 バイト = 2.3% であり、S-d の扱い (#18 で剥がす範囲が 26 字から 50 字へ広がって +24 バイト、語改訂で -2 バイト) を織り込むと約 1,809 バイト / 2.3% である。** **完了時に、実際にマニフェストへ入った件数と契約 JSON のバイト減少量の実測へ改める。** **開いたまま (WP-1 の実測待ち)。**
-- **L9-6 (撤回) §5 U-4 が (B) の場合、D-10 (MitateDB SQLite の revision 永続化) は共通 suite から観測されない**。**本項は v1.1 で撤回した (前提事実の誤り、レビュー 1 B1)。** 起票時の内容は「plan トークンが descriptor digest 由来なら revision の永続性を共通条件が検査する経路が無く、担保が peer-local テストだけになる」というものであり、**D-10 (MitateDB SQLite backend の revision 永続化) が行われることを前提にしていた。** **D-10 は撤回された** — MitateDB の SQLite backend は `sqlite3.connect(":memory:")` のみ (`MitateDB-api/src/mitatedb_api/backend_sqlite.py:87`) のプロセス内 backend であり、永続化すべき対象が存在しないからである (§3 D-10、F-16)。**あわせて §5 U-4 = (A) が確定したので、(B) を前提とする本項の想定そのものが成立しない。** **撤回の記録として残す (削除しない)。**
-- **L9-7 L7-8 (C-07 (ii) の肯定側が未到達) は本フェーズで閉じる予定である**。`conformance-tests/test_c07_atomicity_and_retry.py:106-158` の `retry_same_result` 枝は、両 peer が `idempotency: enabled` を宣言した時点で **4 plug で load-bearing になる** (D-5 (7))。**テストは 1 文字も変えない** — 宣言が変わることで枝が入れ替わる。**閉止は WP-2c / WP-3c の完了時である。** **C-07 行の開示文の書き換えは WP-1 で行う** (§6.4) が、**実際に肯定枝が通るのは実装 WP の後である。** **開いたまま (閉止予定)。**
-- **L9-8 L8-4 (R-10 (B) をフェーズ9 へ送る) は本フェーズで閉じる予定である**。フェーズ8 設計 §10 L8-4 が「フェーズ9 の着手材料として開いたまま保持する」と書いた項目であり、**D-9 の 5 段手順の完了をもって閉じる。** **閉止条件は (i) 依頼者の再確定 (§5 U-6)、(ii) マニフェストの設置、(iii) deep-equal 検証の差分 0、(iv) 3 複製の同一バイト更新、(v) PIN 書き換えの 5 つすべてである。** **1 つでも欠ければ閉じない。** **開いたまま (閉止予定)。**
-- **L9-9 L8-9 (`versioning.version_binding` の機械可読化) は本フェーズで閉じる予定である**。フェーズ8 設計 §10 L8-9 が「フェーズ9 へ保持」と書いた項目であり、**D-8 の `versioning.obligations` 配列 + register 2 本 (版集合一致 / 無条件件数一致) の設置をもって閉じる。** **散文は残す** (A-6) ので、L8-9 が想定した「配列に組み替える」形そのものではない — **「散文を残し、機械可読な索引を並置し、両者を register で縛る」形である。** **この差を閉止時に明記する** (R-14 の流儀: 起票時の想定と実施形が違うときは、根拠と日付を添えて書く)。**開いたまま (閉止予定)。**
-- **L9-10 契約 1.7.0 は無条件義務を 2 件持つので、1.6.0 のみを宣言する第三者実装との差が広がる**。1.6.0 の無条件義務は 2 件 (`surfaces` と bearer secret)、1.7.0 で 2 件 (details 語彙と `request_id`) が加わり、累計 4 件になる。**retroactive-denial 規定によりこれらは 1.6.0 実装に遡及しない**が、**「1.7.0 を宣言するには 2 件を無条件で満たす必要がある」という参入障壁が上がる。** **これは意図した設計 (宣言の価値を上げる) であり欠陥ではないが、版を上げる費用として記録する。** **開いたまま (記録)。**
-- **L9-11 `result_items` の意味と駆動点が両 peer で一致していない (v1.1 で起票。レビュー 1 M3、監督裁定 R-g)**。r2db は mutation の `affected` 件数に**逐次** `limits.check("result_items", affected)` を掛ける (`r2db-api/src/r2db_api/structured.py:1272`、`r2db-api/src/r2db_api/postgres.py:1163`) が、**MitateDB は mutation の `affected` に対する検査を持たず**、read 経路の**要求 `limit` の事前検査**としてのみ持つ (`MitateDB-api/src/mitatedb_api/cell.py:834-837`)。**つまり `result_items` が数えているものが「返した行数」「要求した上限」「影響した行数」の間で peer 一致していない** — **L9-1 の `schema_objects` と同型の P-6 の既存差である。** **本フェーズでは変えない** — D-6 の適用表から mutation の `result_items` を外すことで、**新しい強制点を MitateDB に実装させないことを選んだ** (P-5)。**C-24 が `result_items` を駆動するか否かは WP-1 の実測で決め、駆動しないなら C-24 行に開示する。** **開いたまま (記録)。**
-- **L9-12 `limits.example_profile` は `limits.classes` の全 class を網羅しない (v1.1 で起票。レビュー 1 m10)**。`limits.classes` は 16 語だが `example_profile` は 15 値であり、**`audit_requests_per_minute` を持たない** (2026-09-07 実測)。**本フェーズは `enum_members` を `classes` (17 語へ) と `example_profile` (16 値へ) の両方に足す**が、**既存の欠落は埋めない** — 埋めるかどうかは `example_profile` が「例示」なのか「網羅」なのかという契約上の位置づけの判断であり、本フェーズの範囲ではない。**「`example_profile` は全 class を網羅しない例示である」ことを本項に記録し、将来 `example_profile` に依存する条件を書くときの前提とする。** **開いたまま (記録)。**
-- **L9-13 idempotency の replay と `destructive_confirmation.evaluation_order` の関係を 1.7.0 が初めて定めた (v1.2 で起票。レビュー 2 B2、監督裁定 S-b)**。**契約 `destructive_confirmation.evaluation_order` は「confirmation は shape / 認証・認可 / target-existence の後、precondition と execution の前」と定めているが、記録済み `idempotency_key` の照会がその列のどこに入るかは 1.6.0 まで定義されていなかった。** **1.7.0 は「認証・認可・bound の後、target-existence の前」と定める** (D-5 (8))。**これを定めないと、破壊操作 (`drop_entity` / `delete`) の再送だけが両 peer で割れる** — 照会が confirmation より後なら、target が既に無いので `NOT_FOUND`、あるいは state fingerprint が変わっているので `DESTRUCTIVE_CONFIRMATION_REQUIRED` になる。**`evaluation_order` の文言そのものは変えず、`structured_operations.idempotency.record` の側に置いた。** **将来 `evaluation_order` を機械可読化するときに、この挿入位置も同じ表に載せるかを再評価する。** **開いたまま (記録)。**
+- **L9-1 `schema_objects` の数え方が両 peer で一致していない (F-5)**。r2db は **entity 1 + field 数 + index 数** (`r2db-api/src/r2db_api/postgres.py:1620-1627`、`structured.py:1467` / `:1478`、既定 1000 は `limits.py:12-20`)、MitateDB は **`information_schema` のテーブル数のみ** (`MitateDB-api/src/mitatedb_api/backend_postgres.py:494-507`、既定 128 は `config.py:35`) であり、MitateDB は field 数を**別軸 `max_fields`** で `ValidationError` として扱う (`cell.py:617` / `:708`)。**契約 `limits.classes` の `schema_objects` の意味が peer で一致していない** — **P-6 の既存の差である。** **§5 U-1 = (β) の確定により、本項は本フェーズでは解消せず、開いたまま残して別途扱う。** **本項に実測値を記録する。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **実測値**: `r2db-api/src/r2db_api/limits.py:19` が `schema_objects: int = 1_000`、`MitateDB-api/src/mitatedb_api/config.py:35` が `max_schema_objects: int = 128` (MitateDB は field 数を別軸 `max_fields: int = 64` で持つ)。**本フェーズはこのどちらも 1 バイトも変えていない。** **§5 U-1 = (β) の確定どおり `enum_members` を独立の limit class として新設した (17 語目) ので、`schema_objects` の意味の不一致は解消していない。**
+- **L9-2a MitateDB は `IDENTIFIER_INVALID` を発行しない (F-7)**。`MitateDB-api/src/mitatedb_api/identifiers.py:30` が `ValidationError` へ畳み込み、その判断を `http.py:88-96` が明記している。**D-3 の適用範囲は「発行されるときの形」なので、発行しない実装は縛られない** — **本フェーズでこの非対称を変えない。** **帰結として C-21 の `IDENTIFIER_INVALID` 枝は MitateDB 2 plug で観測されない。** **この事実を C-21 行に開示し、本項に記録する。** **将来 identifier 検証を分離するときに再評価する。** **開いたまま (記録)。** (**v1.2 で L9-2 を 2 項に分割した。レビュー 2 M4、監督裁定 S-h。**) **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **MitateDB は `IDENTIFIER_INVALID` を最後まで発行しない。** **版フリップ監査の 5 位置 probe (不正識別子 `public.notes; DROP TABLE x--`) の実測では、r2db が `IDENTIFIER_INVALID` + `identifier_syntax` を返すのに対し MitateDB は `VALIDATION_FAILED` + `identifier_syntax` を返す** (両 peer とも不正 token をエコーしない)。**帰結として C-21 の `IDENTIFIER_INVALID` 枝は MitateDB 2 plug で観測されず、その非一様性は `CONDITIONS.md` の C-21 行に "Disclosed non-uniformity" として在る。** **作業指示書 WP-3e の完了条件 3 は、この事実に合わせて 3' (識別子違反は `VALIDATION_FAILED` + `violated_declaration: identifier_syntax` で 4 key を持つ) に読み替えて発注した。**
+- **L9-2b MitateDB の `PRECONDITION_FAILED` は本フェーズで閉じる (v1.2 で新設。レビュー 2 M4、監督裁定 S-h)**。**現行の MitateDB は `PRECONDITION_FAILED` をリポジトリ全体でコード文字列として持たない** — 出現するのは `MitateDB-api/src/mitatedb_api/http.py:89` のコメント、`audit_dispatch.py:48` のコメント、および同梱契約 JSON だけである。**D-4 の plan 失効判定がこの code を初めて必要にするので、WP-3b が例外クラスを新設する** (§8、D-4 実装の形 5)。**`revision_preconditions` (行単位の precondition) が `unavailable` である事実は変わらない**が、**「`PRECONDITION_FAILED` を発行しない実装」ではなくなる。** **v1.1 の L9-2 は「本フェーズでこの非対称を変えない」と書いており、D-4 (7) / C-22 (8)(9) と両立しなかった。** **閉止は WP-3b の完了時である。** **開いたまま (閉止予定)。** **【実施結果 2026-09-08 (WP-4)】閉じた。** **`PRECONDITION_FAILED` の例外クラスと HTTP マッピング (412) は WP-3b (`a0fde9c` → merge `2b5bbd6`) が新設した。** **監査の自前変異 M5 (`_STATUS_BY_CODE["PRECONDITION_FAILED"]` を 412 → 409) が `test_precondition_failed_http_mapping` 1 件を赤にし、load-bearing であることを実測した。** **MitateDB は「`PRECONDITION_FAILED` を発行しない実装」ではなくなった** (`revision_preconditions` が `unavailable` である事実は変わらない)。
+- **L9-3 r2db は limits の配備時 env override を持たない (F-18)**。`r2db-api/src/r2db_api/limits.py:12-20` の既定値を `main.py` が参照せず、上書き経路が無い (control-plane 側だけは `R2DB_CONTROL_LIMIT_*` で上書きできる)。MitateDB は `MitateDB-api/src/mitatedb_api/config.py:20-220` が `MITATEDB_MAX_*` で上書きできる。**budget (D-6) は「配備値より小さくする」機構なので本フェーズの機能には影響しないが、同型性 (P-6) の差として記録する。** **配備者が bound を配備ごとに動かせないことは、`limits.profile` (「Limits are deployment-profile values」) の趣旨からは弱い。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **本フェーズは r2db に limits の配備時 env override を足していない。** **r2db の新 limit class 3 種 (`enum_members` / `idempotency_entries` / `idempotency_retention_ms`) も `limits.py` の既定値だけを持ち、`R2DB_*` の上書き経路は無い** (control-plane 側の `R2DB_CONTROL_LIMIT_*` は従来どおり)。**MitateDB 側は `MITATEDB_MAX_ENUM_MEMBERS` 等の既存慣行どおり env で上書きできる** (`MitateDB-api/src/mitatedb_api/config.py`)。**同型性 (P-6) の差は本フェーズで 3 class ぶん広がった。**
+- **L9-4 `CapabilityDocument.operation_catalog_url` を両 peer は本フェーズで宣言しない (D-8)**。optional であり義務でもないので、宣言しない実装も conformant である。**帰結として、この項目が load-bearing になる条件は本フェーズには無い** — 契約に置くだけである。**宣言する実装が現れた時点で「宣言した URL が実在するか」が問題になり、それは L7-2 / L6-5 の `surfaces` とまったく同じ問題である。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **`CapabilityDocument.operation_catalog_url` は契約に載ったが、両 peer とも宣言していない** (版フリップ監査が 4 plug の served capability document を実測)。**したがって本フェーズでこの項目が load-bearing になる条件は無い。** **宣言する実装が現れた時点で「宣言した URL が実在するか」が問題になり、それは L7-2 / L6-5 の `surfaces` とまったく同じ問題である** — 起票時の記述のままである。
+- **L9-5 R-10 (B) の `unstripped` 件数 (D-9)**。**マニフェストに `unstripped: true` で残る値の件数と、その各々の理由を本項に記録する。** **`versioning.version_binding` (10,269 字、契約全体の 13.32%) は `unstripped` になる見込みが高い** — 版の言及が規範文そのものに織り込まれており、接頭辞として剥がせる形をしていない (F-21、`spec/CONTRACT_HISTORY.md` 前文 limitation 3)。**あわせて、剥離によって契約 JSON が実際に何バイト短くなったかを記録する** — フェーズ8 の (A) が「1 文字も減らない」だった限界に対する、本フェーズの実測の答えである。**確定後の `unstripped` は 3 件である** — `versioning.version_binding` (10,269 字の累積叙述であり、後続文が同一値内の先行文を参照するため、機械的な分離ではなく再著述になる)、`versioning.compatibility`、`destructive_confirmation.phrase_construction.rules[3]` (後 2 者はマーカーが括弧・接頭辞の形を取らず、規範文中の裸の語として現れる)。**残り 26 件の内訳は、監督裁定 S-d を織り込んだ確定後の分類で `strip-prefix` 14 / `strip-insert` 11 / 両方 1 である** (草案時点は 13 / 12 / 1。**#18 `schemas.AuditResult.properties.events.items.description` が `strip-insert` から「接頭辞全体の除去 + `this ruling closes` → `this contract closes` の語改訂」へ移った**。**この 1 件は、挿入句を剥がしただけでは規範文の中に裸の `ruling` が残り、D-9 の新規 assert (剥離後スキャナ 0 ヒット) が赤になるからである** — レビュー 2 B4 の実測、監督裁定 S-d。**この値は PIN 定数を持たないので確定文言の破棄には当たらない。**)。**削減量の設計時点の見積り (v1.2 で追記。レビュー 2 m10)**: **レビュー 2 の実測 (26 値 + 追加剥離 2 件) が 1,787 バイト / 契約 JSON 全体 77,119 バイト = 2.3% であり、S-d の扱い (#18 で剥がす範囲が 26 字から 50 字へ広がって +24 バイト、語改訂で -2 バイト) を織り込むと約 1,809 バイト / 2.3% である。** **完了時に、実際にマニフェストへ入った件数と契約 JSON のバイト減少量の実測へ改める。** **開いたまま (WP-1 の実測待ち)。** **【実施結果 2026-09-08 (WP-4)】閉じた (実測を記録して閉じる)。** **`spec/CONTRACT_HISTORY_MANIFEST.json` は 29 エントリで、内訳は剥離 26 / `unstripped` 3 である。** **剥離 26 の分類は `strip-prefix` 14 (うち 1 件は `rewrite` を伴う #18)、`strip-insert` 11、両方 1 であり、設計時の確定分類と一致する。** **`unstripped` 3 件は `versioning.version_binding` / `versioning.compatibility` / `destructive_confirmation.phrase_construction.rules[3]` で、§5 U-6 の確定文と一致する。** **契約 JSON から除去された量は 1,812 バイト、#18 の語改訂が +2 バイトなので正味 -1,810 バイトであり、設計時の見積り (約 1,809 バイト / 2.3%) と一致する。** **ただし契約 JSON 全体は 1.7.0 の新設分により 77,119 → 126,516 バイトに増えている** — **「剥離で契約が短くなった」とは言えない。効きは「経緯の在処が 1 か所に集まり、機械が網羅性を固定できるようになった」ことに留まる。** 詳細は §11.1。
+- **L9-6 (撤回) §5 U-4 が (B) の場合、D-10 (MitateDB SQLite の revision 永続化) は共通 suite から観測されない**。**本項は v1.1 で撤回した (前提事実の誤り、レビュー 1 B1)。** 起票時の内容は「plan トークンが descriptor digest 由来なら revision の永続性を共通条件が検査する経路が無く、担保が peer-local テストだけになる」というものであり、**D-10 (MitateDB SQLite backend の revision 永続化) が行われることを前提にしていた。** **D-10 は撤回された** — MitateDB の SQLite backend は `sqlite3.connect(":memory:")` のみ (`MitateDB-api/src/mitatedb_api/backend_sqlite.py:87`) のプロセス内 backend であり、永続化すべき対象が存在しないからである (§3 D-10、F-16)。**あわせて §5 U-4 = (A) が確定したので、(B) を前提とする本項の想定そのものが成立しない。** **撤回の記録として残す (削除しない)。** **【実施結果 2026-09-08 (WP-4)】撤回のまま (v1.1 で撤回済み)。** **本フェーズで復活する事由は生じなかった。**
+- **L9-7 L7-8 (C-07 (ii) の肯定側が未到達) は本フェーズで閉じる予定である**。`conformance-tests/test_c07_atomicity_and_retry.py:106-158` の `retry_same_result` 枝は、両 peer が `idempotency: enabled` を宣言した時点で **4 plug で load-bearing になる** (D-5 (7))。**テストは 1 文字も変えない** — 宣言が変わることで枝が入れ替わる。**閉止は WP-2c / WP-3c の完了時である。** **C-07 行の開示文の書き換えは WP-1 で行う** (§6.4) が、**実際に肯定枝が通るのは実装 WP の後である。** **開いたまま (閉止予定)。** **【実施結果 2026-09-08 (WP-4)】閉じた。** **両 peer が `idempotency: enabled` を宣言したのは WP-2cd (`bbd47db` → merge `79754f6`) と WP-3cd (`a51d667` → merge `f30fb85`) である。** **`conformance-tests/test_c07_atomicity_and_retry.py` は 1 文字も変えていない** — 入力 (宣言) が変わったことで `retry_same_result` 枝が 4 plug で load-bearing になった。**`CONDITIONS.md` の C-07 行の書き換えは 訂正 11 (`efbe6ae` → merge `2a6bf78`) で行い、WP-1 時点の文言は `CONDITIONS_HISTORY.md` へ逐語で移した** (訂正註 4 の時点差どおり)。
+- **L9-8 L8-4 (R-10 (B) をフェーズ9 へ送る) は本フェーズで閉じる予定である**。フェーズ8 設計 §10 L8-4 が「フェーズ9 の着手材料として開いたまま保持する」と書いた項目であり、**D-9 の 5 段手順の完了をもって閉じる。** **閉止条件は (i) 依頼者の再確定 (§5 U-6)、(ii) マニフェストの設置、(iii) deep-equal 検証の差分 0、(iv) 3 複製の同一バイト更新、(v) PIN 書き換えの 5 つすべてである。** **1 つでも欠ければ閉じない。** **開いたまま (閉止予定)。** **【実施結果 2026-09-08 (WP-4)】閉じた。** **5 段手順はすべて実施した**: (i) 依頼者の再確定は §5 U-6 に逐語で記録、(ii) `spec/CONTRACT_HISTORY_MANIFEST.json` を設置 (29 エントリ)、(iii) 逆適用の deep-equal 検証を実施 (26 値中 24 値が byte 一致、残り 2 値の差は U-8 #28 の規範文改訂そのものだけ — §11.1)、(iv) 契約 JSON と両 peer の packaged 複製 2 本を同一コミットで同一バイトに更新 (`8f1142e` 以降、最終 sha256 `16517954…fcc4` の 3 本一致)、(v) PIN 定数の書き換え (動いたのは S-e の 7 件のみ、残り 8 定数は 1 バイトも動いていない)。**(iii) が「差分 0」でない点は §11.1 に開示した** — 意図した規範文改訂の 2 値であり、変換そのものは 26/26 で可逆である。
+- **L9-9 L8-9 (`versioning.version_binding` の機械可読化) は本フェーズで閉じる予定である**。フェーズ8 設計 §10 L8-9 が「フェーズ9 へ保持」と書いた項目であり、**D-8 の `versioning.obligations` 配列 + register 2 本 (版集合一致 / 無条件件数一致) の設置をもって閉じる。** **散文は残す** (A-6) ので、L8-9 が想定した「配列に組み替える」形そのものではない — **「散文を残し、機械可読な索引を並置し、両者を register で縛る」形である。** **この差を閉止時に明記する** (R-14 の流儀: 起票時の想定と実施形が違うときは、根拠と日付を添えて書く)。**開いたまま (閉止予定)。** **【実施結果 2026-09-08 (WP-4)】閉じた。** **`versioning.obligations` (版 1.2.0〜1.7.0 の 6 entry) を新設し、register 2 本 (版集合の一致 / 無条件件数の一致) を置いた。** **散文 `versioning.version_binding` は残した** (A-6) ので、**L8-9 が想定した「10,269 字の単一文字列を版ごとの義務の配列に組み替える」形そのものではない** — **実施形は「散文を残し、機械可読な索引を並置し、両者を register で縛る」である。** **この差は R-14 の流儀に従って本項に明記する。** **併せて `tools/contract_catalog.py` と `spec/OPERATION_CATALOG.json` (endpoints 7 + control_endpoints 12 = 19 行) を置き、再生成一致テストが byte 一致を固定する。**
+- **L9-10 契約 1.7.0 は無条件義務を 2 件持つので、1.6.0 のみを宣言する第三者実装との差が広がる**。1.6.0 の無条件義務は 2 件 (`surfaces` と bearer secret)、1.7.0 で 2 件 (details 語彙と `request_id`) が加わり、累計 4 件になる。**retroactive-denial 規定によりこれらは 1.6.0 実装に遡及しない**が、**「1.7.0 を宣言するには 2 件を無条件で満たす必要がある」という参入障壁が上がる。** **これは意図した設計 (宣言の価値を上げる) であり欠陥ではないが、版を上げる費用として記録する。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **1.7.0 の無条件義務は宣言どおり 2 件である** — `versioning.version_binding` の 1.7.0 段落が "Two of those obligations are unconditional" と述べ、`versioning.obligations` の 1.7.0 entry も unconditional 2 / conditional 5 である (WP-1 監査 完了条件 10 / 12)。**累計 4 件になった参入障壁は意図した設計であり、版を上げる費用として記録する。**
+- **L9-11 `result_items` の意味と駆動点が両 peer で一致していない (v1.1 で起票。レビュー 1 M3、監督裁定 R-g)**。r2db は mutation の `affected` 件数に**逐次** `limits.check("result_items", affected)` を掛ける (`r2db-api/src/r2db_api/structured.py:1272`、`r2db-api/src/r2db_api/postgres.py:1163`) が、**MitateDB は mutation の `affected` に対する検査を持たず**、read 経路の**要求 `limit` の事前検査**としてのみ持つ (`MitateDB-api/src/mitatedb_api/cell.py:834-837`)。**つまり `result_items` が数えているものが「返した行数」「要求した上限」「影響した行数」の間で peer 一致していない** — **L9-1 の `schema_objects` と同型の P-6 の既存差である。** **本フェーズでは変えない** — D-6 の適用表から mutation の `result_items` を外すことで、**新しい強制点を MitateDB に実装させないことを選んだ** (P-5)。**C-24 が `result_items` を駆動するか否かは WP-1 の実測で決め、駆動しないなら C-24 行に開示する。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **C-24 は `result_items` を駆動しない。** **`CONDITIONS.md` の C-24 行に "Disclosed scope limit" として開示済みである** — `result_items` は query で受理されることまでしか確かめず、自身の N/N+1 境界では駆動しない (MitateDB の `result_items` 拒否が要求 `limit` を鍵にするため、両 peer が同じ形で満たすレシピが組めない)。**`execution_ms` も駆動しない** (`reference_wall_clock` の下に決定的な N/N+1 が無い。フェーズ8 D-1 と同じ理由)。**C-24 の非 vacuity は `batch_items` が単独で担う。** **D-6 の適用表から mutation の `result_items` を外した判断はそのまま有効である。**
+- **L9-12 `limits.example_profile` は `limits.classes` の全 class を網羅しない (v1.1 で起票。レビュー 1 m10)**。`limits.classes` は 16 語だが `example_profile` は 15 値であり、**`audit_requests_per_minute` を持たない** (2026-09-07 実測)。**本フェーズは `enum_members` を `classes` (17 語へ) と `example_profile` (16 値へ) の両方に足す**が、**既存の欠落は埋めない** — 埋めるかどうかは `example_profile` が「例示」なのか「網羅」なのかという契約上の位置づけの判断であり、本フェーズの範囲ではない。**「`example_profile` は全 class を網羅しない例示である」ことを本項に記録し、将来 `example_profile` に依存する条件を書くときの前提とする。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **`limits.classes` は 17 語、`limits.example_profile` は 16 値であり、差の 1 件は起票時と同じ `audit_requests_per_minute` である** (main `b3cfc0c` で実測)。**本フェーズは `enum_members` を `classes` と `example_profile` の両方に足した (64) が、既存の欠落は埋めていない。** **`example_profile` が「例示」なのか「網羅」なのかという契約上の位置づけの判断は本フェーズの範囲外のままである。**
+- **L9-13 idempotency の replay と `destructive_confirmation.evaluation_order` の関係を 1.7.0 が初めて定めた (v1.2 で起票。レビュー 2 B2、監督裁定 S-b)**。**契約 `destructive_confirmation.evaluation_order` は「confirmation は shape / 認証・認可 / target-existence の後、precondition と execution の前」と定めているが、記録済み `idempotency_key` の照会がその列のどこに入るかは 1.6.0 まで定義されていなかった。** **1.7.0 は「認証・認可・bound の後、target-existence の前」と定める** (D-5 (8))。**これを定めないと、破壊操作 (`drop_entity` / `delete`) の再送だけが両 peer で割れる** — 照会が confirmation より後なら、target が既に無いので `NOT_FOUND`、あるいは state fingerprint が変わっているので `DESTRUCTIVE_CONFIRMATION_REQUIRED` になる。**`evaluation_order` の文言そのものは変えず、`structured_operations.idempotency.record` の側に置いた。** **将来 `evaluation_order` を機械可読化するときに、この挿入位置も同じ表に載せるかを再評価する。** **開いたまま (記録)。** **【実施結果 2026-09-08 (WP-4)】開いたまま (記録)。** **契約 `structured_operations.idempotency.record` に S-b の 1 文が入り、記録済み key の照会が「認証・認可・bound の後、target-existence / 破壊確認 / precondition の前」であることが定まった** (WP-1 監査 完了条件 8 で逐語を確認)。**両 peer とも実装し、C-23 の (vii) が「確認つきで実行した破壊 `delete` の再送が、`NOT_FOUND` でも `DESTRUCTIVE_CONFIRMATION_REQUIRED` でもなく元の結果を返す」ことを 4 plug で駆動する。** **`destructive_confirmation.evaluation_order` の文言そのものは変えていない。** **将来 `evaluation_order` を機械可読化するときにこの挿入位置も同じ表に載せるかの再評価は、開いたままである。**
+- **L9-14 idempotency 記録の内部表現が peer で異なる (2026-09-08、WP-4 で起票。作業指示書 訂正註 17 が「台帳 L9 に peer 固有の実現差として記録」と定めたもの)**。**裁定 K-2 は「記録し replay で返す応答 object は契約レベルの `MutationResult` / `SchemaOperationResult` (HTTP body と同じ形) であり、両 peer 同形」と定めた。** **r2db は `{affected, assigned_addresses}` を契約形で記録するが、MitateDB は peer 内部の per-operation 結果リストを記録し、HTTP 境界で契約形へ変換する実現を採った。** **監督はこの実現を追認した — 契約上の replay の意味 (「元の結果をそのまま返す」) は同じであり、C-23 (i) が 4 plug で「同一の `affected` / `assigned_addresses` / `request_id` を返し、行は 1 つしか増えない」ことを駆動するからである。** **ただし「記録される object そのものの形」は共通条件では観測できない** — **記録の中身に依存する将来の条件 (例: 記録を跨いだ監査相関、記録の移送や backup からの復元) を書くときは、この差が先に効く。** **開いたまま (記録)。**
+- **L9-15 C-25 (3) の監査行照合は共通 suite で駆動されない (2026-09-08、WP-4 で起票。裁定 O-6 と 作業指示書 訂正註 18 の帰結)**。**版フリップ監査が 4 plug の `adapter.capability_document()` を実測した結果、隔離 profile の 4 plug すべてが `audit_query: {"status": "unavailable"}` を宣言しており、`conformance-tests/test_c25_result_request_id.py` の `if audit_status != "unavailable":` 分岐に 1 plug も入らない。** **したがって「応答の `request_id` = その要求の監査行の `request_id`」という 1.7.0 の性質は、共通条件としては 1 度も観測されていない。** **担うのは両 peer のローカル pin (裁定 L-7: mutate / query / schema の各端点で service・cell 層の値 = 応答の値 = 監査行の値) である。** **`CONDITIONS.md` の C-25 行は 訂正 12 (`ac40934` → merge `45effb4`) でこの事実を開示するよう改めた** (それ以前の行は「4 plug とも `audit_query` は `unavailable` 以外を宣言するので (3) は 4 plug で観測される」と書いており、実態と食い違っていた)。**閉じる条件は「隔離 profile のいずれかの plug が `audit_query` を宣言すること」であり、それは C-09 の駆動設計そのものに触る。** **開いたまま (記録)。**
 
 ### 10.1 計画文書への改版文案 (§5 U-5 = (B) と U-4 = (A) の帰結。v1.1 で追加、v1.2 で R-4 行を追加)
 
@@ -1528,19 +1531,335 @@
 
 ## 11. 実施記録
 
-**本節は完了ゲート (WP-4) で記入する。設計 v1.0 の時点では空欄である。**
+**本節は 2026-09-08 (WP-4) に記入した。** **起票時 (設計 v1.0) の記入指示は §9 / §11 の斜体プレースホルダにあったものであり、以下はその全項目に対する回答である。** **答えられない項目は「未実測」と理由を書いた。**
 
 ### 11.1 集計行
 
-***(未記入。完了ゲートで記入する。記入する項目: 取得条件 (worktree / branch head / main merge / `ps` 確認 / PG 設定 / `pg_database` 前後差分)、root suite の集計行と EXIT、CI の 3.11 / 3.12 の集計行と run id、`--collect-only -q` の件数と `COLLECTION_FLOOR` 更新、xfail の残数と内訳、契約 3 複製の新 sha256、R-10 (B) の deep-equal 検証結果 (差分 0 と走査キー数)、剥離による契約 JSON のバイト減少量、`unstripped` 件数、両 peer の `contract_version` の 4 箇所、**1.7.0 が新設 / 改訂した契約値に対する provenance スキャナのヒット数 (0 であること、§9 の 12)**、**`test_contract.py:343-360` が 1.7.0 段落追加後も 1.4.0 を拾い続けること**、**`test_contract_history_register.py` の `assert checked == 17` が逆適用後の値に対して無改訂で通ること** (§9 の 13)。)***
+**取得条件 (全項共通)**: 作業 branch `phase9-contract-170`、**main の最新 merge は `b3cfc0c`** (版フリップの pair-closing)。**その直前 2 つが `e16422d` (WP-2e = r2db フリップ `c13831e`) と `a1cee5b` (WP-3e = MitateDB フリップ `d9201b5`) であり、3 つの merge の間に他のコミットは 1 つも挟まっていない** (§5 U-7 = (A)、§4 コミット規律 7)。**完了ゲートは監督が単独で実行し、`ps` で他の pytest が 0 件であることを確認してから取る** (ローカル PostgreSQL の `max_connections = 300` が前提)。**`pg_database` の前後差分は `**`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)` に記録する。**
+
+| 項目 | 値 | 取得条件 |
+|---|---|---|
+| **完了ゲート (root suite 単独実行)** | ****`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (集計行 / EXIT / `failed` / `xfailed` / `skipped` / `pg_database` 前後) | `./.venv/bin/python -m pytest -q -n 5 --dist loadgroup`、監督単独実行 |
+| **CI 3.11 / 3.12 の集計行と run id** | **run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向)** (`b3cfc0c` 以降の run id と 3.11 / 3.12 の集計行、`tally-consistency` と collection floor step の結果) | **フリップ前の直近の緑は main `933ca53` / `37a5cfa` の `2681 passed / 0 failed / 8 xfailed`、その前は main `720eaee` の `2593 passed` である** (参考値。ゲートの正本は run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向))。**CI 課金停止 (GitHub 「recent account payments have failed」) は依頼者が 2026-09-07 に解消し、再実行で緑になった** |
+| **`--collect-only -q` の件数と `COLLECTION_FLOOR` 更新** | **`2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `9060d3a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた)** | 着手時点の値は **2340** (フェーズ8 完了時)。**更新は監督のゲート作業である** (§6.7) |
+| **xfail の残数と内訳** | ****`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (期待は **0**)。**遷移は実測で `8 → 4 → 0` を通った** — WP-1 完了時 8 本 (C-21 / C-25 × 4 plug、WP-1 監査が `-rxX` で内訳を実測)、先にフリップした r2db 側が入った時点で 4 本 (未フリップ peer の 2 plug × 2 条件、版フリップ監査 §1 で両 worktree とも実測)、両 peer フリップ後 0 本 | §6.6 の 3 段遷移 (監督裁定 T-3) は**ファイルを 1 行も編集せずに**起きた |
+| **契約 3 複製の sha256** | **`1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4` (3 本一致)** — `spec/data-service-api.v1.json` / `r2db-api/src/r2db_api/contract/data-service-api.v1.json` / `MitateDB-api/src/mitatedb_api/contract/data-service-api.v1.json` | **フェーズ8 の `968d3c72415d4536c0393ce451497324c182cbc2ae9d9213e0ec6ed4444f45e6` から動いた** (§9 の 5)。**契約 1.7.0 公開 (`8f1142e`) 以降、補正 3 回で `973a870a…f935d0` → `96854a6b…` → `afd6bb4f…0052` → `16517954…fcc4` と動き、版フリップの 2 コミットは契約 JSON に 1 バイトも触っていない** (F-5、両 worktree で実測) |
+| **R-10 (B) のマニフェスト逆適用 deep-equal 検証** | **マニフェスト 29 エントリ = 剥離 26 / `unstripped` 3。逆適用の結果、26 値中 24 値がフェーズ8 時点の値と byte 一致し、残り 2 値 (`definitions.EntityDescriptor.properties.field_types.description` / `schemas.SchemaOperationRequest.properties.field_types.description`) の差は U-8 #28 の規範文改訂そのものだけである** (WP-1 監査が opcode 単位で確認、WP-4 起草時に独立に再実行して同一結果: 29 / 24 / 2、差は旧 2,208・2,206 字 → 新 2,133 字) | **「差分 0」ではない** — 意図した規範文改訂の 2 値が残る。**R-10 (B) の変換そのものは 26/26 で可逆である。** WP-1 監査の走査キー / 要素数は **1,443** |
+| **剥離による契約 JSON のバイト減少量** | **マニフェストの `stripped_prefix` / `stripped_insert` の総和 = 1,812 文字 = 1,812 バイト (全 ASCII)。#18 の `rewrite` (`this ruling closes` → `this contract closes`) が +2 バイトなので、R-10 (B) に帰属する正味は -1,810 バイトである。** 設計 §10 L9-5 の見積り (約 1,809 バイト / 2.3%) と一致する | **契約 JSON 全体は 77,119 バイト (フェーズ8) → 126,516 バイト**であり、**1.7.0 の新設分が剥離分を大きく上回る** — 「短くなった」わけではない (L9-5 の状態注記) |
+| **`unstripped` 件数** | **3** — `versioning.version_binding` / `versioning.compatibility` / `destructive_confirmation.phrase_construction.rules[3]`。設計 §5 U-6 の確定文と一致する | マニフェストの `reason` に理由を記載 |
+| **両 peer の `contract_version` (4 箇所)** | **`r2db-api/src/r2db_api/service.py:942`**、**`r2db-api/src/r2db_api/control_plane.py:731`**、**`MitateDB-api/src/mitatedb_api/cell.py:3852`**、**`MitateDB-api/src/mitatedb_api/control_plane.py:1424`** がいずれも `"contract_version": "1.7.0"` (main `b3cfc0c` で実測) | C-19 の data 面 / control 面一致 assert は **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) に含まれる。**片面だけを 1.6.0 に戻す変異は両 peer とも C-19 が 3 failed で捕まえる** (版フリップ監査 R-M1 / M-M1) |
+| **provenance スキャナのヒット数 (§9 の 12)** | **1.7.0 が新設 / 改訂した文字列値は 242 json_path であり、`test_contract_history_register.py` の `_PATTERNS` を当てたヒットは 1 件 = `versioning.version_binding` のみ、残り 241 は 0 ヒットである。契約全体を走らせたヒットも 3 件だけで、`unstripped` の 3 値と完全に一致する** (WP-4 起草時に main `b3cfc0c` の契約で再実測。WP-1 監査の 241 / 1 と同型) | **§9 の 12 が求めた「0 ヒット」は文字どおりには達成していない** — **完了条件 22 が 1.7.0 段落に `subordinate ruling 12` を名指すことを要求しており、その段落は `versioning.version_binding` (= `unstripped` の 1 値) の中にある。** **例外はこの 1 値だけであり、既存の `unstripped` 扱いに吸収されている** (WP-1 監査 §3 の 1) |
+| **`test_contract.py:343-360` の件数正規表現の非破壊 (§9 の 13)** | **`(\w+) of those obligations are unconditional` の全一致は順に `['Three', 'Two', 'Two']` であり、各々の直前の `declaring X.Y.Z` は 1.4.0 / 1.6.0 / 1.7.0 である。最初の一致は 1.7.0 段落追加後も 1.4.0 のままである** (WP-4 起草時に再実測) | 既存 assert は無改訂 |
+| **`assert checked == 17` の非改訂通過 (§9 の 13)** | **`conformance-tests/test_contract_history_register.py:425` に無改訂で残り、マニフェスト逆適用後の値に対して評価されて緑である** (WP-1 監査 §3 の 3。行番号は main `b3cfc0c` で再確認) | — |
+| **`PIN_1_5_0_SENTENCE_1` 分割後の `version_binding` 側照合 (§9 の 13)** | **`PIN_1_5_0_SENTENCE_1` は AST 比較で byte 完全一致 (未変更) であり、新設した `PIN_1_5_0_SENTENCE_1_STRIPPED` が剥離後の 2 値の照合に使われる。`version_binding` 側の照合は無改訂で通る** (WP-1 監査 §3 の 4) | — |
+| **`idempotency` に条件付く 2 limit class の宣言 (§9 の 15)** | **両 peer の served capability document が `idempotency_entries` = 10000、`idempotency_retention_ms` = 86400000 を宣言する** (版フリップ監査 F-2、4 plug で実測)。**`limit_enforcement` は `idempotency_entries` = `enforced`、`idempotency_retention_ms` = `reference_wall_clock` で両 peer 同一** (裁定 J-3) | C-05 `_CAPABILITY_CONDITIONED` |
+| **`capability_status.defined` の 14 語 (§9 の 16)** | **`defined` は 14 語であり、追加 3 語は `constraint_declarations` / `dry_run` / `request_budget` である。逆方向 assert (`missing = defined - set(capabilities)`) は `conformance-tests/test_c11_document_conformance.py` に版ゲート無しで入っている** (WP-1 監査 完了条件 25 / 3) | 裁定 T-4 |
+| **契約の規模 (参考)** | **能力 14 種 (11 → 14)、limit class 17 種 (16 → 17、`enum_members`)、error code 17 種 (不変)、共通条件 C-00〜C-25 の 26 件 (20 → 26)** (main `b3cfc0c` で実測) | §9 の 7 |
+
+#### §9 完了ゲート 16 項目に対する結果
+
+- **§9 の 1 → **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (root suite 単独実行、`failed` / `xfailed` / `skipped` がいずれも 0 であること)。**根拠は監督の単独実行である。**
+- **§9 の 2 → run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向)** (3.11 job の集計行がローカルと一致、`tally-consistency` 緑、collection floor step が 3.11 / 3.12 の両 job で緑)。
+- **§9 の 3 → 充足 (形式)。値は `PERFRUN host=Darwin/arm64 python=3.11.15 commit=b3cfc0c date=2026-09-08`、EXIT 0、`pg_database` 22 → 22。同一 plug の版間差は `backend_calls` が r2db-api-http の mutate 14.00 → 15.00 / batch 18.00 → 19.00 の +1.00 のみ (書き込み経路の `_load_field_constraints` の SELECT 1 文。SAVEPOINT / RELEASE は `conn.transaction()` 経由で `Cursor.execute` に載らない)、他 12 行は ±0.00。p50 の最大増は r2db in-process batch 0.746 → 0.883 ms、p95 の最大増は MitateDB-http mutate 6.101 → 8.099 ms、HTTP 4 plug の p50 は r2db 側 3 op と MitateDB query / mutate で減少 (§11.2 の表)** (§11.2 に PERFRUN 行 + PERF 表 + フェーズ8 §11.2 との版間差分)。
+- **§9 の 4 → `2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `9060d3a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた)** (`COLLECTION_FLOOR` をゲート時の実測値へ更新。着手時 2340)。
+- **§9 の 5 → 充足。** 契約 3 複製の sha256 は `16517954…fcc4` で 3 本一致 (上表)。**R-10 (B) の逆適用 deep-equal は 26 値中 24 値が byte 一致、2 値が U-8 #28 の規範文改訂ぶんだけ差がある** — **「差分 0」ではないので、その 2 値と理由を上表に明記した** (根拠: WP-1 監査 §3 の 5、WP-4 起草時の再実測)。
+- **§9 の 6 → 充足。** `contract_version` 4 箇所を main `b3cfc0c` で実測 (上表の file:line)。**C-19 の data 面 / control 面一致 assert の緑は **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) に含まれる** (版フリップ監査は両 worktree で C-19 を個別に緑と実測済み)。
+- **§9 の 7 → 充足。** `conformance-tests/CONDITIONS.md` の C-20〜C-25 の 6 行がいずれも `executable (four adapters)` を含み、6 本の条件ファイルがそれぞれ `pytestmark = pytest.mark.condition("C-2x")` を持つ (WP-1 監査 完了条件 26)。**各条件の非 vacuity assert (`observed_branch` と宣言由来の `expected_branch` の突合) は 4 条件すべてで実装済みであり、C-21 / C-25 は `>= 1.7.0` 枝でのみ突合する** (訂正註 7)。`test_conditions_register.py` の照合の緑は **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) に含まれる。
+- **§9 の 8 → 充足。** **全 9 サブ WP の「完了条件番号 → 変異」対応表は 1 対 1 であり、対応の無い行は 0 である** (§11.3 の各表。完了条件 130 件 / 変異 130 件)。**変異を持たない完了条件については、照合対象の逐語記録を §11.3 に残した。** **ただし「対応する変異が実際には赤にならなかった (空振り)」行が実測で 6 件あり、いずれも差し戻しで閉じた** — §11.3 に個別に記載した。
+- **§9 の 9 → 充足。** 設計レビューは 2 回 (v1.0 → v1.1、v1.1 → v1.2)。**v1.3 以降はレビューではない** (T-1〜T-4 の反映、および WP 実施中の監督裁定の反映)。
+- **§9 の 10 → 充足。** §5 U-1〜U-8 の確定は §5 に逐語で記録されており、確定文言は監督の scratchpad の確定文ファイル経由で複製した (常設規律 4)。
+- **§9 の 11 → **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (`pg_database` の前後差分 0、他の pytest 0 件)。
+- **§9 の 12 → 充足 (例外 1 件を開示)。** 新設 / 改訂 242 値のうちヒットは `versioning.version_binding` の 1 件のみ (上表)。
+- **§9 の 13 → 充足 (3 項目とも)。** 件数正規表現 `['Three','Two','Two']` → 1.4.0 / 1.6.0 / 1.7.0、`assert checked == 17` 無改訂、`PIN_1_5_0_SENTENCE_1` 分割後の `version_binding` 側照合が無改訂 (上表)。
+- **§9 の 14 → 充足。** **両 peer のフリップ後、4 plug すべてが `constraint_declarations` / `dry_run` / `idempotency` / `request_budget` を `enabled` と宣言することを版フリップ監査が 4 plug の served capability document で実測しており** (F-2)、**C-20 / C-22 / C-23 / C-24 の `observed_branch` が肯定枝 (`enforced` / `dry_run_enabled` / `retry_same_result` / `budget_enforced`) であることは各条件の per-plug 突合 assert が担保する。** **xfail の残数 0 の実測は **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) である。**
+- **§9 の 15 → 充足。** `idempotency_entries` / `idempotency_retention_ms` の `limits` 値と `limit_enforcement` エントリを両 peer が宣言する (上表)。
+- **§9 の 16 → 充足。** `defined` 14 語と C-11 の逆方向 assert (上表)。
 
 ### 11.2 性能差分 (P-8)
 
-***(未記入。完了ゲートで記入する。形式はフェーズ8 設計 §11.2 と同一 — PERFRUN 行 (逐語) + 実行コマンド (逐語) + PERF 表 (plug × op)。あわせて、フェーズ8 §11.2 の基準値に対する**同一 plug の版間差分** (p50 / p95 / `backend_calls`) を並記する。plug 間の比較はしない (L8-11)。閾値は置かない (P-8)。)***
+**実行環境行 (逐語)**:
+
+```
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=b3cfc0c date=2026-09-08
+```
+
+**実行コマンド (逐語)**: `./.venv/bin/python tools/perf_baseline.py --warmup 20 --n 200` / **EXIT=0**。**監督が完了ゲート (root suite 終了後) に単独で実行する。他の pytest は 0 件、`pg_database` の前後差分 0 を確認する。**
+
+**行順はハーネスの出力順 (`conformance-tests/registry.json` の順 = r2db in-process → MitateDB in-process → r2db-http → MitateDB-http) である。** **「前」列はフェーズ8 §11.2 の基準値 (逐語転記、`--warmup 20 --n 200`、`commit=2ab4edc-dirty`、2026-09-07) であり、「後」列と差分列は完了ゲートの実測で埋める。** **plug 間の比較はしない** (L8-11)。**閾値は無い** (P-8)。**本フェーズは「2 フェーズ安定」の 2 フェーズ目である** (計画文書 §7 の 3)。
+
+| # | peer | plug | transport | op | n | p50_ms (前) | p50_ms (後) | Δp50 | p95_ms (前) | p95_ms (後) | Δp95 | backend_calls (前) | backend_calls (後) | Δcalls |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | r2db-api | `r2db-api` | in-process | query | 200 | 0.042 | 0.044 | +0.002 | 0.045 | 0.047 | +0.002 | 1.00 | 1.00 | +0.00 |
+| 2 | r2db-api | `r2db-api` | in-process | mutate | 200 | 0.147 | 0.146 | -0.001 | 0.221 | 0.212 | -0.009 | 1.00 | 1.00 | +0.00 |
+| 3 | r2db-api | `r2db-api` | in-process | batch | 200 | 0.746 | 0.883 | +0.137 | 1.109 | 1.393 | +0.284 | 1.00 | 1.00 | +0.00 |
+| 4 | MitateDB-api | `MitateDB-api` | in-process | query | 200 | 0.037 | 0.040 | +0.003 | 0.040 | 0.045 | +0.005 | 11.00 | 11.00 | +0.00 |
+| 5 | MitateDB-api | `MitateDB-api` | in-process | mutate | 200 | 0.022 | 0.023 | +0.001 | 0.024 | 0.025 | +0.001 | 7.00 | 7.00 | +0.00 |
+| 6 | MitateDB-api | `MitateDB-api` | in-process | batch | 200 | 0.073 | 0.083 | +0.010 | 0.080 | 0.088 | +0.008 | 37.00 | 37.00 | +0.00 |
+| 7 | MitateDB-api | `MitateDB-api` | in-process | cross_entity | 200 | 0.039 | 0.045 | +0.006 | 0.043 | 0.053 | +0.010 | 16.00 | 16.00 | +0.00 |
+| 8 | r2db-api | `r2db-api-http` | asgi-inprocess | query | 200 | 4.840 | 3.807 | -1.033 | 5.347 | 5.426 | +0.079 | 14.00 | 14.00 | +0.00 |
+| 9 | r2db-api | `r2db-api-http` | asgi-inprocess | mutate | 200 | 4.771 | 4.226 | -0.545 | 5.186 | 5.116 | -0.070 | 14.00 | 15.00 | +1.00 |
+| 10 | r2db-api | `r2db-api-http` | asgi-inprocess | batch | 200 | 4.250 | 3.815 | -0.435 | 5.262 | 4.903 | -0.359 | 18.00 | 19.00 | +1.00 |
+| 11 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | query | 200 | 4.750 | 4.431 | -0.319 | 6.469 | 6.029 | -0.440 | 13.00 | 13.00 | +0.00 |
+| 12 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | mutate | 200 | 4.499 | 3.891 | -0.608 | 6.101 | 8.099 | +1.998 | 9.00 | 9.00 | +0.00 |
+| 13 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | batch | 200 | 4.263 | 5.005 | +0.742 | 6.095 | 6.661 | +0.566 | 29.00 | 29.00 | +0.00 |
+| 14 | MitateDB-api | `MitateDB-api-http` | asgi-inprocess | cross_entity | 200 | 4.594 | 4.610 | +0.016 | 6.212 | 6.676 | +0.464 | 14.01 | 14.01 | +0.00 |
+
+**注記 (フェーズ8 §11.2 の注記はすべて有効であり、複製しない。本フェーズが足すものだけを書く)**:
+
+- **本フェーズは 4 capability を `unavailable` から `enabled` に変えたので、`backend_calls` が動く方向は事前に分かっている。** **WP ごとの実測 (往復数) は §11.3 にある**: r2db は制約宣言の side table 読みで書き込み経路が **+3 往復** (query は ±0)、idempotency の keyed 書き込みが **+5 文** / replay が **4 文**、MitateDB は制約宣言の registry 読みを 1 クエリに畳んで insert を **4 → 2 往復**、idempotency の keyed 書き込みが **+4 文** / replay が **2〜3 文**である。**これらは同一 plug の版間差分としてのみ意味を持つ。**
+- **`dry_run` / `plan` を伴わない要求では digest 計算と schema revision の追加読みを行わない** (裁定 F-5 / 訂正註 13 (vi))。**この遅延化の効き幅は WP-2b 監査が実測した** — HTTP + 実 PostgreSQL の plug の conformance 126 テストで、`_read_schema_revision` が **62 回 / 2,494 回**、`compute_plan_token` が **13 回 / 2,445 回** (遅延化あり / なし)。
+- **上表の「前」列はフェーズ8 §11.2 の 14 行を転記したものであり、フェーズ8 の注記 (op の意味、`cross_entity` が MitateDB 2 plug のみであること、`backend_calls` の粒度が plug 間で揃わないこと、HTTP plug が ASGI in-process であること、`--warmup` が出力に残らないこと、計測窓に `BatchOperation` 生成が残ること) はそのまま当てはまる。**
 
 ### 11.3 WP ごとの記録
 
-***(未記入。各 WP の完了時に記入する。少なくとも次を含める: WP-1 の C-05 行のセル長実測と `MAX_CELL_LENGTH` に対する余裕、port v1.13 の 5 フィールドについて「adapter が捨てる変異が赤になる」ことの実測 (L8-15)、WP-2a / WP-3a の既存行走査における MitateDB developer 接続の SELECT 権限の実測 (F-6 の未確認点)、WP-2e の `field` 値を要求内パスへ改めた箇所の AST 全数走査の結果 (grep を根拠にしない。第 15 次 §5 の教訓)、**WP-1 の `SchemaOperationRequest.properties.enum` が `_check_object_shape` / `schema_check.py` の 2 検証器と衝突しないことの実測** (§3 D-2 開示事項、レビュー 1 m6)、**C-24 が `result_items` を駆動するか否かの WP-1 の実測結果** (§3 D-6 開示事項、レビュー 1 M3)、**WP-3a の「既存行走査と DDL の間に他 session の書き込みが入る隙間が無い」ことを示す peer-local テストの結果** (§3 D-2 実装の形 4、レビュー 2 M3)、**WP-1 の `BatchOperation.idempotency_key` 混在拒否 (§6.1 (v)) の実測**、各サブ WP の「完了条件番号 → 変異」対応表。)***
+**コミット表記は「実装コミット → main への merge」である。** **実装担当は commit しない** (§4 コミット規律 1) ので、すべて監督のコミットである。
+
+#### 共通の記録 (全 WP)
+
+- **「完了条件番号 → 変異」対応表は、作業指示書 §2 の各 WP 節が正本であり、対応は全 WP で恒等 (完了条件 n ↔ 変異 n) である。** **総数は 完了条件 130 件 / 変異 130 件で、対応の無い行は 0 である。** 内訳: **WP-1 30、WP-2a 12、WP-3a 13 (12 + 13 番目)、WP-2b 10、WP-3b 11 (10 + 11 番目)、WP-2c 9 + WP-2d 7 = WP-2cd 16、WP-3c 9 + WP-3d 7 = WP-3cd 16、WP-2e 11、WP-3e 11 (条件 3 は MitateDB 向けの 3' に読み替え)。**
+- **実測で「対応する変異が赤にならなかった」行 (空振り) は 6 件あり、すべて差し戻しで閉じた** — WP-2cd / WP-3cd の I-13 / J-1 (plan digest への `idempotency_key` 配線)、WP-3cd の I-1 (記録が data tx と同一 tx であること) と I-6 (期限切れ回収の順序)、WP-2e の完了条件 9 (HTTP が `request_id` を再生成しないこと)、WP-2b の裁定 F-5 (遅延 digest の回帰ピン)。**各 WP の項に個別に記載する。**
+- **変異の実測は `PYTHONPYCACHEPREFIX` を scratchpad 配下に設定して行う** (裁定 H-5)。**この規律は WP-3b 監査の事故から生まれた** — `cp` 復元後、`git status` clean・sha256 一致にもかかわらず 1 件が赤になり、原因は復元元と復元先の mtime が同一秒で `__pycache__` の古い bytecode が走ったことだった。**この規律を使わなかった時点より前の変異結果は、「緑だった」側が特に信用できない。**
+- **公開スキャンは各 WP で `./.venv/bin/python tools/public_value_scan.py` を実行し、いずれも `total_flagged=0` / exit 0 である** (走査ファイル数は WP の進行とともに 297 → 303 → 312 → 317 と増えた)。
+
+#### WP-0 (設計 v1.3 + 作業指示書 v1.0)
+
+- **コミット**: `40334be` → merge `e922943`。
+- **内容**: 設計 v1.3 (設計レビュー 2 回を反映、依頼者裁定の委任に基づき §5 U-1〜U-8 を監督が確定、監督裁定 T-1〜T-4)、作業指示書 v1.0 (WP-1 契約 / WP-2a〜e r2db / WP-3a〜e MitateDB / WP-4 ゲート、完了条件 130 件と変異 130 件の 1 対 1)。
+- **設計レビューの判定件数**: **1 回目 Blocker 4 / Major 9 / Minor 10** (全件反映して v1.1)、**2 回目 Blocker 4 / Major 9 / Minor 13** (全件反映して v1.2、監督裁定 S-a〜S-n)。**作業指示書起草者の疑義 4 件 → 監督裁定 T-1〜T-4 (v1.3)。**
+
+#### WP-1 (契約 1.7.0、従属判断 12) と訂正 1〜12
+
+- **コミット**: 本体 `8f1142e` → merge `e6dd131`。**訂正は 12 本 (実コミットは 16 本)**: 訂正 1 `f6b66bb` → `40952a9`、訂正 2 `13bfec8` → `5da3154`、訂正 3 `9779aef` → `b7bee21`、訂正 4 `2bc0ce1` → `82e1d25`、訂正 5 `60c2dff` → `7a1fe00`、訂正 6 `0228de4` → `958bef7`、訂正 7 `9b247dd` → `13eeb2d`、訂正 8a `ed9e9f6` → `88ed074`、訂正 8b `0f2d5ae` → `6bd5f76`、訂正 9 `dec0cb9` → `e767834`、訂正 9b `f18d909` → `0891aad`、訂正 9c `e6ba09e` → `933ca53`、訂正 10 `e71fe00` → `ac5eac2`、訂正 11 `efbe6ae` → `2a6bf78`、訂正 12 `ac40934` → `45effb4`。
+- **集計行 (受け入れ監査が自分で再実行、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+955 passed, 1 warning in 238.21s (0:03:58)
+
+$ ./.venv/bin/python -m pytest -q MitateDB-api/tests
+789 passed in 59.72s
+
+$ ./.venv/bin/python -m pytest -q conformance-tests
+637 passed, 8 xfailed in 147.43s (0:02:27)
+```
+
+- **xfailed 8 本の内訳 (`-rxX` で実測)**: `test_c21_denial_details_vocabulary` × 4 plug + `test_c25_result_request_id` × 4 plug。**C-20 / C-22 / C-23 / C-24 は 4 plug すべて緑 (合計 20 passed)。**
+- **判定件数**: **完了条件 30 項目 = 30 充足 / 0 未充足 / 0 証拠不足** (うち 4 項目に註)。**監査照合項目 11 件 = 11 充足** (うち 1 件に例外開示、1 件は部分的にしか自前実測していない)。**監査の自前変異 6 件 (A / B / C / D / E(+E2/E3) / F)** — 赤 3 件 (B / E-系の一部 / F)、緑 3 件 (A / C / D) で、緑 3 件がそれぞれ指摘の根拠になった。
+- **差し戻しと裁定**: 訂正註 6 (監督確定文 5 値に文字列 PIN を置く。変異 C が根拠)、訂正註 7 (C-21 / C-25 の `xfail(strict=True)` は pre-1.7.0 枝で `observed_branch` 突合を本体に含めない。変異 E3 + E2 が「strict XPASS が構造上起こり得ない」ことを実証した)、訂正註 8 (変異 3 の期待の記述訂正 — 赤くなるのは `test_c12` ではなく `test_c11` である)。
+- **§11.3 が名指しで求めた実測**:
+  - **C-05 行のセル長と `MAX_CELL_LENGTH` に対する余裕**: **WP-1 時点の最大セル長は 2,960 字 (C-05)。main `b3cfc0c` でも最大は 2,960 字 (C-05 と C-22 が同値) であり、`MAX_CELL_LENGTH = 3000` に対する余裕は 40 字である** (次点は C-09 2,948 / C-19 2,942 / C-20 2,935)。**C-05 行は WP-1 で byte 完全一致 (1 文字も変えていない)。**
+  - **port v1.13 の 5 フィールドについて「adapter が捨てる変異が赤になる」実測 (L8-15)**: **`budget` の 1 件だけを WP-1 監査が独立に実測した** (変異 F → `test_c24_request_budget[r2db-api]` が `Failed: DID NOT RAISE ConformanceDenial` で赤)。**残り 4 件 (`dry_run` / `plan` / `idempotency_key` / `field_constraints` 系) は WP-1 監査では独立に測っていない (未実測)。** **ただし後続 WP の監査が同型の実測を行った** — `dry_run` は WP-3b 監査 M13 (`post_cross_entity_mutate` が `dry_run` を転送しない → 1 failed)、`plan` は WP-3b 監査 M12 (HTTP 応答に `plan` を載せない → 4 failed、うち 1 件は `C-22[MitateDB-api-http]`)、`budget` は WP-3cd 監査 M7 (`post_cross_entity_mutate` から `budget=` を落とす → **全緑 = 空振り**、cross_entity の budget が共通側で未観測であることの実証)。**`idempotency_key` と `field_constraints` を adapter が捨てる変異は、どの監査も独立には実測していない (未実測)。**
+  - **`SchemaOperationRequest.properties.enum` が `_check_object_shape` / `schema_check.py` の 2 検証器と衝突しないこと**: **衝突しない。** `enum`/`nullable` を載せた `add_field` 要求を `conformance-tests/schema_check.py` に掛けて violations = `[]`。`schema_check` の `enum` キーワード処理は `schema["enum"]` を見るのに対し当該値は `schema["properties"]["enum"]` の位置にあり、両 peer の `_check_object_shape` は `set(schema.get("properties", {}))` を allowed key に使うだけで `enum` を JSON Schema キーワードとして解釈しない (WP-1 監査 §3 の 6)。
+  - **C-24 が `result_items` を駆動するか否か**: **駆動しない。** **`CONDITIONS.md` の C-24 行に "Disclosed scope limit" として開示済みである** — `result_items` は query で受理されることまでしか確かめておらず、自身の N/N+1 境界では駆動しない (MitateDB の `result_items` 拒否が要求 `limit` を鍵にするため、両 peer が同じ形で満たすレシピが組めない)。**`execution_ms` も駆動しない。** **本行の非 vacuity は `batch_items` が単独で担う** (WP-1 監査 §3 の 7、台帳 L9-11)。
+  - **`BatchOperation.idempotency_key` 混在拒否 (§6.1 (v))**: **`conformance-tests/adapter.py:901-960` の `fold_batch_idempotency_key` が、1 要求の operations にまたがる `idempotency_key` の混在 (異なる値どうし、および値と不在の混在) を `AssertionError` で拒否する。** **駆動テストは `conformance-tests/test_c23_idempotency_semantics.py:434` の `test_c23_fold_batch_idempotency_key_rejects_a_genuine_mixture` であり、4 plug で走る。**
+- **監査が残した疑義 (処置済み)**: 疑義 1 (監督確定文に逐語固定が無い → 訂正註 6 で PIN を追加)、疑義 2 (`xfail(strict=True)` が構造上 XPASS しえない → 訂正註 7 で本体の形を確定)、疑義 3 (`CCR_DISPOSITION.md` 従属判断 12 が設計を v1.3 と参照している — 記述のみ)、疑義 4 (変異 3 の期待の誤り → 訂正註 8)。
+
+#### WP-2a (r2db、R-2 制約宣言と `alter_field`)
+
+- **コミット**: `5d17976` (初回) + `4b59799` (レビュー / 監査の閉止) → merge `33d91eb`。
+- **集計行 (監査が自分で再実行、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+1020 passed, 1 warning in 81.82s (0:01:21)
+
+$ ./.venv/bin/python -m pytest -q conformance-tests
+638 passed, 8 xfailed in 147.70s (0:02:27)
+```
+
+- **判定件数**: **完了条件 12 項目 = 12 充足 / 0 未充足**。**レビュー (差し戻し 11 項目: Blocker 3 / Major 5 / Minor 3) は 10 充足 + 1 件 (項目 7 後半、`SAVEPOINT`/`RELEASE` の 2 往復の削減) が条件付き指示のため未実施。** **監査の自前変異 6 件 (A〜F) はすべて赤化を実測した** (A: 8 peer-local failed / C-20 は 4 passed のまま、B: 2 failed + C-20 が r2db 2 plug で赤、C / D / F: 各 1〜2 failed、E: 2 failed)。
+- **差し戻しと裁定**: 監督裁定 `rulings-wp2a-review.md` B-1 / B-2 / B-3 / M-1〜M-6 / m-1〜m-4 (契約補正 2 件 = M-6 と m-1 を含む)、`rulings-r2-closure.md` N-1〜N-4 (宣言の無い `alter_field` を VALIDATION_FAILED にする契約補正、`field_constraints` の 2 拒否の形、C-21 に要求内パスの leg を足す)。**作業指示書 訂正註 9 / 10 / 11 が対応する。**
+- **AST 全数 (監査照合項目 1)**: **`_check_type` の本番呼び出しは 8 箇所ちょうどで、`constraints` を渡すのは 6 箇所 (in-memory と Postgres の insert / update / upsert)、渡さないのは 2 箇所 (`_validate_predicate_types` の `in` 要素と値) である。** 設計 §3 D-2 (3) / 追補 2 S-k の表と完全一致する。**`SCHEMA_OPERATIONS` は死んだ定数のままであり、`alter_field` を足していない** (作業指示書どおり)。
+- **往復数の実測 (P-8)**: **`query` は ±0** (裁定 M-4 のとおり query 経路は制約を読まない)。**書き込み・schema 経路は +3 往復** (`SAVEPOINT` / `SELECT` / `RELEASE`)、`alter_field` のみ +4 (registry `INSERT` 1)、`catalog` は +3。**upsert の `FOR UPDATE` は条件付き発行であり、全 field を与えた upsert では 0 回である。**
+- **監査が指摘した残り**: 裁定 D (`details.field` = 要求内パス) は **peer-local テストだけが pin しており C-20 は pin していない** (変異 A: peer-local 8 failed / C-20 は 4 passed)。**この穴は裁定 N-4 が C-21 に leg を足すことで閉じた** (訂正 3 = `9779aef`)。
+
+#### WP-3a (MitateDB、R-2)
+
+- **コミット**: `1dd1878` (初回) + `3df3116` (レビュー / 監査の閉止) → merge `b06c68a`。
+- **集計行 (監査が自分で再実行、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q MitateDB-api/tests
+839 passed in 67.15s (0:01:07)
+
+$ ./.venv/bin/python -m pytest -q conformance-tests/test_c20_constraint_declaration_agreement.py -rxXf
+4 passed in 1.26s
+
+$ ./.venv/bin/python -m pytest -q conformance-tests
+638 passed, 8 xfailed in 154.22s (0:02:34)
+```
+
+- **判定件数**: **完了条件 13 項目 = 13 充足 / 0 未充足** (3 項目に註)。**レビュー指摘は 差し戻し 3 件 (A / B / C) + 確認・裁定 5 件 (D〜H)。** **監査の自前変異 5 件 (M1〜M5) は 5 件とも赤化した。** **監査が残した所見 7 件 (G1〜G7)** のうち G1 (陳腐化コメント) と G3 (`details` を持たない新設拒否 4 件) は WP-3e までに閉じ、G5 (`add_field` の `field_type` 既定 `json`) は **訂正註 11 で監督が追認**した。
+- **§11.3 が名指しで求めた実測 — MitateDB developer 接続の SELECT 権限 (F-6 の未確認点)**: **明示 GRANT は不要である (所有者権限)。** `MitateDB-api/tests/test_constraints_declaration.py` の Postgres 側テストが実 PostgreSQL に対して既存行走査を行い、`InsufficientPrivilege` が出ないことを実測している。
+- **§11.3 が名指しで求めた実測 — 「既存行走査と DDL の間に他 session の書き込みが入る隙間が無い」peer-local テスト**: **`backend_postgres.py` の `alter_field_constraints` が単一 `with self._developer.cursor()` 内で走査と更新を行い、`commit()` は 1 回だけである。** **走査の前に `LOCK TABLE ... IN SHARE MODE` を取る** (裁定 F)。**`test_alter_field_constraints_lock_table_blocks_concurrent_write` が 2 接続でこれを実測しており、lock mode を `IN ROW EXCLUSIVE MODE` に変える監査変異 M3 で `DID NOT RAISE LockNotAvailable` として赤になる** (同一 tx を確かめるテストは緑のままなので、**lock mode 単独が load-bearing である**)。**r2db 側も同型で、`LOCK TABLE ... IN SHARE MODE` を外す監査変異 F で 1 failed。**
+- **AST 全数**: **`check_declared_value` の呼び出しは 3 箇所** (`_prepare_values` の書き込み側 1 が `constraints=` を渡し、`_bind_filters` の 2 は渡さない)。**r2db の 6 / 2 に対して 1 / 2 であり、これは P-6 の platform 差である** (MitateDB に `upsert` が無く、in-memory と Postgres で choke point の数が違う)。
+- **往復数の実測 (P-8)**: **裁定 C により registry 読みを 1 クエリに畳み、plain insert の developer 接続往復が 4 → 2 になった** (`test_insert_makes_one_merged_registry_round_trip_not_three` が `len(cursor_calls) == 2` を assert)。
+- **開示 (P-6)**: **MitateDB は `upsert` を提供しない** (`unsupported: ["upsert"]`) ので、完了条件 1 / 2 / 5 の「3 経路」は insert / update / `transact` の insert 分岐と読み替えた (訂正註 11)。
+
+#### R-2 pair-closing (監督)
+
+- **コミット**: `3e9b361` → merge `124ffa7`。**`validate_enum_declaration` / `enum_member_matches_type` を両 peer の `_ISOMORPHIC_TARGETS` に登録し、MitateDB 側の本文を正規化 diff の下で r2db に揃えた** (86 → 88 行)。**作業指示書 訂正註 11。**
+
+#### WP-2b (r2db、R-4 dry_run と無状態 plan)
+
+- **コミット**: `58f9a98` → `f1c5eca` → `b00ec3e` → `491bbff` → merge `6e2f1bf`。
+- **集計行 (レビュー 2 回目 + 受け入れ監査の統合パスが自分で再実行、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+1061 passed, 1 warning in 85.57s (0:01:25)
+
+$ ./.venv/bin/python -m pytest -q conformance-tests/test_c22_dry_run_and_plan.py -rxXf
+4 passed in 2.55s
+
+$ ./.venv/bin/python -m pytest -q conformance-tests
+638 passed, 8 xfailed in 152.08s (0:02:32)
+```
+
+- **判定件数**: **完了条件 10 項目 = 10 充足 (1 項目に註)。前回差し戻し 5 項目 = 4 充足 + 1 部分 (ピン未充足)。裁定 F-1〜F-8 と R-4 追補 5 件 (digest の対象 / S-a の正規化 3 規則の固定 / token 書式 / helper 名 / テストの穴) の合計 13 項目 = 10 充足 + 3 が「実装充足 / ピン未充足」。** **監査の自前変異 8 件 = 6 赤 / 2 緑** (緑 2 件が指摘 N-1 / N-2 の根拠)。**差し戻し 6 項目** (すべて「実装は正しいがそれを守るテストが無い」)。
+- **空振りの実測**: **裁定 F-5 / 訂正註 13 (vi) の遅延 digest には回帰ピンが 1 本も無かった** — 変異 M-5 で guard 4 箇所を全部戻しても `r2db-api/tests` 1061 passed / C-22 4 passed。**差し戻し 1 で回帰ピンを足して閉じた。** **効き幅は大きい** (§11.2 の注記: `_read_schema_revision` 62 → 2,494、`compute_plan_token` 13 → 2,445)。
+- **二重防御の実測 (訂正註 12)**: **監査 hook の層 A だけを外す → 緑、層 B だけを外す → 緑、両方外す → 赤** (`test_service_dry_run_schema_writes_no_audit_event`)。**訂正註 12 が求めた形どおりである。**
+- **C-22 肯定枝の非 vacuity (`sys.settrace` による HIT/MISS 実測)**: **(1) 認可 / 破壊確認 / precondition、(2)(4) `committed:false` / `affected` / `assigned_addresses`、(3) 行数半分、(5) schema descriptor / revision、(6) plan 決定性、(7) plan 有効、(8) schema 変更後の失効、(9) body 変更後の失効、(10) `transaction` による digest scope、(11) `drop_entity` 形の順序、`observed_branch` 突合 — すべて HIT。** **MISS は 4 つで、いずれも declare-first の開示済み narrowing である**: (1) の limit sub-leg と (10) の `budget` 半分 (`request_budget` が `unavailable` のため。裁定 F-1)、(3) の監査半分 (`audit_query` が `unavailable`)、(11) の `delete` 形 (`drop_entity` 形で観測済み)。
+- **裁定**: 監督の R-4 裁定ファイル F-1〜F-8 + 追補 5 件 (上記) + 追補 2 H-1〜H-5。**作業指示書 訂正註 12 / 13。**
+
+#### WP-3b (MitateDB、R-4)
+
+- **コミット**: `a0fde9c` → `8b37008` → `f1af9a9` → merge `2b5bbd6`。
+- **集計行 (統合パスが自分で再実行、逐語)**:
+
+```
+=== A: ./.venv/bin/python -m pytest -q MitateDB-api/tests ===
+877 passed in 64.83s (0:01:04)
+=== B: ./.venv/bin/python -m pytest -q conformance-tests/test_c22_dry_run_and_plan.py -rxXf ===
+4 passed in 1.47s
+=== C: ./.venv/bin/python -m pytest -q conformance-tests ===
+638 passed, 8 xfailed in 148.95s (0:02:28)
+```
+
+- **判定件数**: **判定表 22 行 = 15 充足 / 5 部分未充足 / 1 未充足 / 1 証拠不足。完了条件 11 項目はすべて充足。** **監査の自前変異 13 件 = 9 赤 (うち 8 件は新規テストだけを赤にした) / 4 緑** (緑のうち 3 件は二重防御の設計どおり)。**差し戻し 4 項目。**
+- **未充足 1 件 (R-4 追補の helper 裁定)**: **`normalize_request_for_plan` の本文に `default=_dataclass_default` が残り、しかも load-bearing だった** (変異 M1 で 2 本赤)。**裁定文は「`default=` 引数などの peer 固有の逃げ道を本文に持たせない」と定めており、差し戻し 2 で閉じた。**
+- **部分未充足 3 件 (digest の材料)**: **(i) `field_type` を省略した要求と `field_type: "json"` の要求が同一 token になっていた** (probe 実測: `collision -> True`)、**(ii) `destructive` / `confirmation` / `revision` / `index` / `unique` が digest に入っていなかった** (probe 実測: `post_schema reads ... -> False` × 5)、**(iii) mutation の digest 材料が契約 shape ではなく port 内部 item であり、`values` 省略と `values: {}` が衝突していた** (probe 実測: `P-C token equal -> True`)。**いずれも差し戻し 1 / 3 で閉じ、裁定 H-1〜H-3 が形を固定した** (H-1 で対象 entity を digest に入れることを確定)。
+- **対応の無い行 (テストの穴 (d))**: **Postgres backend の `create_collection` / `alter_field_constraints` の dry_run 分岐には変異を当てていない (未実測)。** 証拠は `877 passed` の中の 2 本の存在と DDL / registry の前後比較 assert である。
+- **範囲外の変更 1 件 (要追認)**: **`MitateDB-api/tests/test_audit_query.py` の監査語彙スキャナを `_NON_AUDIT_OPERATION_LITERALS` で弱める変更が入り、両 peer の監査スキャナが非対称になった。** **裁定 H-4 が「この緩和は採らない」と確定し、撤去された。**
+- **測定上の事故 (全 WP に効く教訓)**: **変異 M5 の復元後、`git status` clean・sha256 一致にもかかわらず 1 件が赤になった。原因は `__pycache__` の pyc が変異版から作られ、source の mtime と pyc 記録 mtime が同一秒だったことである。以後 `PYTHONPYCACHEPREFIX` を scratchpad 配下に隔離して測り直した** (裁定 H-5)。
+
+#### R-4 pair-closing (監督)
+
+- **コミット**: `659f57e` → merge `720eaee`。**`normalize_request_for_plan` / `compute_plan_token` を両 peer の `_ISOMORPHIC_TARGETS` に登録 (88 → 90 行)。**
+
+#### WP-2cd (r2db、R-5 idempotency + R-6 request budget)
+
+- **コミット**: `bbd47db` → `d9b406f` → merge `79754f6`。**WP-2c と WP-2d の統合は依頼者承認の短縮 (訂正註 14) による。**
+- **集計行 (統合パスが自分で再実行、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+1108 passed, 1 warning in 88.14s (0:01:28)
+
+$ ./.venv/bin/python -m pytest -q conformance-tests/test_c05_limit_declaration_agreement.py
+61 passed in 63.38s (0:01:03)
+
+$ ./.venv/bin/python -m pytest -q r2db-api/tests/test_idempotency_records.py r2db-api/tests/test_budget_narrowing.py
+37 passed, 1 warning in 0.56s
+```
+
+- **判定件数**: **完了条件 16 項目 (WP-2c 9 + WP-2d 7) = 16 充足 / 0 未充足。裁定 19 項目 (I-1〜I-13 / B-1〜B-6) = 18 充足 + 1 未充足 (I-13)。** **監査の自前変異 5 件 = 4 赤 / 1 緑** (緑 = 変異 C、指摘 N-1 の根拠)。**所見 7 件 (N-1〜N-7)、差し戻し 2 群。**
+- **空振りの実測 (I-13)**: **plan digest から `idempotency_key` を落とす変異 C が全緑だった** (peer-local 79 passed / `r2db-api/tests` 1108 passed / C-23 全緑)。**裁定 J-1 が実経路のテストで固定することを確定し、閉じた。**
+- **往復数の実測 (P-8)**: **keyed の書き込み (新規記録あり) = `_run` 11 回、keyed の replay = 4 回、unkeyed の同種 transact = 5〜7 回 (単一 insert の最頻値 6)。** **idempotency 有効化による書き込み経路の増分は 1 要求あたり +5 文であり、うち 1 文は常に 0 行の冗長な DELETE だった** — **裁定 J-6 で除去し、keyed の書き込みは 12 → 11 往復になった** (コミット `d9b406f`)。
+- **AST 全数 (B-2)**: **budget 対象 3 class に触る検査点を全列挙し、「budget が効かない検査点」は無いことを確認した。**
+- **peer 非対称 2 件 → 裁定で解消**: **N-2 (非整数 budget の details に型対が無い) → 裁定 J-2 で r2db を MitateDB に揃えた。N-3 (`limit_enforcement.idempotency_retention_ms` が peer で割れていた) → 裁定 J-3 で両 peer とも `reference_wall_clock` に確定。**
+- **裁定**: `rulings-r5-r6.md` I-1〜I-13 / B-1〜B-6 + 追補 I-13 + 追補 2 J-1〜J-7。**作業指示書 訂正註 15 / 16。**
+
+#### WP-3cd (MitateDB、R-5 + R-6)
+
+- **コミット**: `a51d667` → `a030783` → `a619bf9` → merge `f30fb85`。
+- **集計行 (統合パスが自分で再実行、逐語)**:
+
+```
+=== MitateDB-api/tests ===
+917 passed in 64.89s (0:01:04)
+```
+
+- **判定件数**: **裁定 26 項目 (I-1〜I-13 / B-1〜B-6 / J-1〜J-7) = 充足 18 / 部分 3 / 未充足 4 / 証拠不足 1 / 軽微欠陥 1 / 該当なし 1。** **監査の自前変異は有効 8 件 (M1〜M8。M6 の初版は構文エラーで無効、M6b で再実行) = 5 赤 / 3 緑。** **所見 9 件 (N-1〜N-9)、差し戻し 必須 4 + 推奨 4。**
+- **空振りの実測 3 件**: **(i) M1 (記録を commit の後へ移す) が全緑** — 「data tx と同一 tx」を固定するテストが 1 本も無かった (I-1)。**(ii) M2 (期限切れ回収を `pass` にする) が全緑** — 回収順序が未固定 (I-6)。**(iii) M6b (plan digest への `idempotency_key` 配線を削る) が全緑** — r2db の N-1 と同じ欠落 (J-1)。**(iv) M7 (`post_cross_entity_mutate` から `budget=` を落とす) が全緑** — cross_entity の budget は共通側で一切観測されていない (N-6)。**いずれも裁定 K-4 / J-1 の差し戻しで閉じた。**
+- **証拠の欠落 (報告物)**: **実装担当の変異表が 0 バイトだった** — **監査の 8 件はすべて監査側の自前変異である。** **これは常設規律 2 (変異先行) の運用上の失敗であり、差し戻し 8 で報告物を補わせた。**
+- **往復数の実測 (P-8)**: **keyed の新規書き込み = 通常実行 +4 文、keyed の replay = 2〜3 文で完結する。保持接続・保持 lock・背景スレッド・定期ジョブの新設は差分中に無い。**
+- **裁定**: 追補 3 K-1〜K-5 (budget 妥当性の位置を r2db に揃える、記録する応答の形、`self.config` 直読みの解消、空振り 3 件、in-memory の後始末)。**訂正註 16 / 17。** **K-2 について、MitateDB は peer 内部形を記録し HTTP 境界で契約形に変換する実現を監督が追認した (契約上の replay の意味は同じ) — 台帳 L9-14 に記録する。**
+
+#### R-5 / R-6 pair-closing (監督)
+
+- **コミット**: `86c1933` → merge `37a5cfa`。**`normalize_request_for_idempotency` / `idempotency_digest` / `narrow_limits_by_budget` を両 peer の `_ISOMORPHIC_TARGETS` に登録 (90 → 93 行)。`narrow_limits_by_budget` の本文差は `_budget_denied` / `_BUDGET_CLASS_TO_FIELD` の wrapper に押し出して揃えた。** **`fold_operation_idempotency_keys` は r2db 片側にしか無いので登録しない** (両監査の指摘)。
+
+#### WP-2e (r2db、R-3 details 語彙 + R-7 `request_id` + 版フリップ)
+
+- **コミット**: `c415816` → `bfefa28` → `dfd836d` → `7b22861` → `c13831e` → merge `e16422d`。**受け入れ監査は 3 パス (初回 → 閉止 → 版フリップ監査) を要した。**
+- **初回パスの集計行 (逐語)**:
+
+```
+=== CMD1: ./.venv/bin/python -m pytest -q r2db-api/tests ===
+FAILED r2db-api/tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer
+1 failed, 1135 passed, 1 warning in 95.96s (0:01:35)
+```
+
+- **閉止パスの集計行 (逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+FAILED r2db-api/tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer
+FAILED r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_the_audit_site_count
+2 failed, 1156 passed, 1 warning in 103.03s (0:01:43)
+```
+
+- **判定件数**: **初回パス 23 行 = 充足 8 / 部分未充足 7 / 未充足 5 / 証拠不足 1 / 対象外 1 + 「充足だが証拠不足」1。差し戻し 9 項目 (裁定待ち D-1〜D-3 + 裁定不要 I-1〜I-6)。** **閉止パス 8 裁定 (L-1〜L-8) = 充足 2 / 充足 (残件 1) 2 / 充足 (r2db 側) 1 / 部分充足 1 / 未充足 2。差し戻し 8 項目 (R-1〜R-8)。** **監査の自前変異は初回 5 件 (A〜E、A が空振り) + 閉止 6 件 (A1 / A2 / A2b / A3 / A4 / A5、A5 が空振り)。**
+- **§11.3 が名指しで求めた実測 — `field` を要求内パスへ改めた箇所の AST 全数走査**: **grep ではなく `ast` で走査した。** **初回パスの実測: `fail(...)` 総数 165、`violation()` 使用 19、`details` キーワード保有 66 — 実装報告と 3 数とも一致。層別では「choke point / request-shape 層で `violated_declaration` を持たない発行箇所が 76 件」あり、client から到達可能な probe 20 件のうち 19 件が `details={}` だった。** **閉止パスの再実測: probe 20 件すべてが 4 key 形 (`MISSING violated_declaration=0`)。** **版フリップ監査の独立走査 (r2db): `structured.py 93 / service.py 10 / limits.py 5 / http.py 8 / postgres.py 10 = 126 箇所`、`details` 無しは `postgres.py:1621` の 1 件 (`psycopg.errors.DataError` の翻訳) のみで、静的に不明な `violated_declaration` は 0 件。** **MitateDB 側の同走査: `cell.py 49 / http.py 27 / field_types.py 4 / identifiers.py 1 / backend_postgres.py 29 / backend_sqlite.py 4`、静的に不明な `violated_declaration` は全モジュール 0 件。**
+- **空振りの実測 2 件**: **(i) 完了条件 9 (HTTP が `request_id` を再生成しない) は初回パスの変異 A (`post_query` の応答 `request_id` を `uuid.uuid4().hex` に再生成) が全緑で空振りだった** — 裁定 L-7 で 3 端点それぞれに pin を置き、閉止パスの変異 A3 が 1 件だけを赤にすることで閉じた。**(ii) SI-10 走査 (L-5) は `field` に内部名 `public._r2db_rows_` を前置する変異 A5 を検出しなかった** — 裁定 M-5 で走査対象に IDENTIFIER_INVALID / CAPABILITY_UNSUPPORTED と内部名検出を加えて閉じた (最終形は 17 probe)。
+- **裁定違反 1 件 (閉止パス L-6)**: **`request_id` を持たない idempotency 記録に対して、裁定が求めた「無いものとして扱う」ではなくフォールバック実装 (4 箇所) が納品され、「still a replay」を固定するテストまで置かれていた。** **裁定 M-6 で撤去し、再実行を固定するテストに置き換えた。**
+- **裁定**: `rulings-r3-r7-flip.md` V-1〜V-9 / Q-1〜Q-5 / F-1〜F-7 + 追補 L-1〜L-8 + 追補 2 M-1〜M-8 + 追補 3 N-1 + 追補 4 O-1〜O-8。**作業指示書 訂正註 17 / 18。**
+- **納品の規律違反 1 件 (記録)**: **閉止パスで `test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_the_audit_site_count` が赤のまま納品された** (main のマージで `limits.py` の 4 件が `_budget_denied` に畳まれ、per-module 件数 pin が 5 ≠ 9 になった)。**裁定 M-8 が「納品前に main をマージした状態で全 suite を再実行する」ことを規律として固定した。**
+
+#### WP-3e (MitateDB、R-3 + R-7 + 版フリップ)
+
+- **コミット**: `d494bca` → `24d04f6` → `f2aa5b5` → `c4936d3` → `cdb6116` → `0c08ea3` → `d314ef5` → `d9201b5` → merge `a1cee5b`。**再作業が Sonnet の 1 回分に収まらなかったので T1 / T2 / T3 に分割した** (訂正註 18)。
+- **版フリップ監査の集計行 (両 peer 分、逐語)**:
+
+```
+$ ./.venv/bin/python -m pytest -q r2db-api/tests
+1 failed, 1167 passed, 1 warning in 90.06s (0:01:30)
+FAILED r2db-api/tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer
+```
+
+```
+$ ./.venv/bin/python -m pytest -q MitateDB-api/tests
+2 failed, 983 passed in 67.45s (0:01:07)
+FAILED MitateDB-api/tests/test_audit_query.py::test_peer_local_helpers_are_isomorphic_to_the_sibling_peer
+FAILED MitateDB-api/tests/test_conformance_public_surface_coverage.py::test_public_operation_callables_covers_every_application_runtime_and_developer_method
+```
+
+```
+$ ./.venv/bin/python -m pytest -q conformance-tests/test_c21_... test_c25_... test_c19_... test_c11_... test_c09_... test_c03_... test_c12_... test_c23_... -rxXf
+160 passed, 4 xfailed in 79.64s (0:01:19)
+```
+
+- **判定件数 (版フリップ監査、両 peer)**: **裁定 22 項目 = 充足 15 / 未充足 3 / 一部未充足 1 / 要開示 1 / 証拠不足 1 / 対象外 1。** **監査の自前変異は各 peer 2 件 (R-M1 / R-M2、M-M1 / M-M2) で 4 件とも赤化した。** **未充足・証拠不足の一覧は peer 別に 5 件ずつ。**
+- **未充足の内訳と処置**: **(i) MitateDB の backend 層の値ドメイン検査 6 経路 (surrogate / NUL / ±2**80) が通常の client 要求から到達可能で `details` が空だった** (契約 1.7.0 の無条件義務 (a) に反する。r2db は同じ入力に 4 key を返す) → **裁定 O-2 で choke point 層の検証として 4 key 化した。** **(ii) `_ISOMORPHIC_TARGETS` が r2db 95 行 / MitateDB 93 行で不一致、`errors.violation` / `errors.observed_type_of` がどちらの表にも無かった** → **裁定 O-7 で登録し、`_verify_declarations_checks` の実コード 2 行差を `_served_capabilities_document()` の切り出しで解消した。** **(iii) `details.field` の粒度が peer で違った** (r2db `select` / `where/0` に対し MitateDB `select/0` / `where/0/field`) → **裁定 O-3 で r2db 形に揃えた。** **(iv) r2db の `field_constraints` の key が構文違反のとき `details.field` に不正識別子 (SQL 断片) をそのままエコーしていた** (裁定 N-1 違反) → **裁定 O-3 で容器位置 `field_constraints` に留めた。** **(v) control 面の VALIDATION_FAILED に `violated_declaration` が無かった** → **裁定 O-1 で control 面も 4 key 化し、AST 0 件テストの走査対象に加えた** (r2db 14 sites / MitateDB 20 sites)。
+- **証拠不足の内訳と処置**: **(i) `request_id` を持たない記録の扱いが MitateDB では in-memory backend でしかテストされていなかった** → **裁定 O-4 で Postgres 脚を追加。** **(ii) C-25 (3) の監査行照合は 4 plug すべてが `audit_query: unavailable` を宣言するため 1 plug でも走っていない** → **裁定 O-6 で `CONDITIONS.md` の C-25 行に「共通 suite では駆動せず、peer ローカルの L-7 ピン (応答 = 監査行) が担う」と開示した (訂正 12 = `ac40934`、訂正註 18)。台帳 L9-15 に記録する。**
+- **`request_id` の生成点 (D-7 (3) との差、開示)**: **両 peer とも ASGI middleware が `uuid.uuid4().hex` を採番して下層に渡す形であり、設計 D-7 (3) の「生成点を service / cell 層へ下げる」の字義は実現していない。** **再生成は無く「応答 = 監査行」は成立している。** **裁定 O-5 がこの形を追認した (Q-1 の「service / cell 層で生成」は「service / cell 層が持つ 1 値を使う」と読む)。**
+- **`ops verify-declarations` F-14 の実測**: **両 peer とも `check_contract_170_declarations(capabilities_document, applied_upgrade_numbers_by_application, required_upgrade_numbers)` の形で、`limits` は served capability document から読む** (裁定 M-7)。**実 PostgreSQL で rc = 13 (未適用 application あり、`pending=[10]`) と rc = 0 (全 application 適用済み) を実測し、台帳検査を無効化する監査変異 M-M2 で 3 件が赤になることも実測した (実 PG 脚を含む)。**
+- **`request_id` の相異の実測 (L-7)**: **r2db は mutate / query / schema / dry_run の 4 値がすべて別値、MitateDB は cross_entity を加えた 5 値がすべて別値。replay は両 peer とも元実行の値を返す (2 plug ずつで実測)。**
+
+#### 版フリップの pair-closing (監督)
+
+- **コミット**: `a350a8b` (+ adapter 側の `a91ed01`) → merge `b3cfc0c`。**merge の直前 2 つが `e16422d` (r2db フリップ) と `a1cee5b` (MitateDB フリップ) であり、間に他のコミットは無い** (U-7)。
+- **集計行 (監督が session worktree で再実行、逐語)**: **`r2db-api/tests` 1169 passed、`MitateDB-api/tests` 992 passed、`conformance-tests` 646 passed (failed 0 / xfailed 0) in 175.98s、`tools/public_value_scan` `total_flagged=0`。**
+- **同型性表**: **両 peer とも 97 行で一致する** (`assert len(_ISOMORPHIC_TARGETS) == 97`、行数 pin の関数名も 97 版)。**遷移は 86 → 88 (R-2) → 90 (R-4) → 93 (R-5/R-6) → 95 (WP-2e が r2db 側に 2 行) → 97 (pair-closing)。**
+- **コミットメッセージと実体の食い違い 1 件 (開示)**: **`a350a8b` のメッセージは `_served_capabilities_document` を同型表に登録したと書いているが、実際には登録していない。** **裁定 O-7 の原文の対象外であり、両 peer の本文が本質的に非同型だからである。** **実際に登録したのは `errors.violation` / `errors.observed_type_of` / `platform_declarations.check_contract_170_declarations` / `platform_declarations.ops_module_hint` の 4 シンボルであり (r2db は後 2 者を WP-2e で登録済みだったので +2、MitateDB は +4)、あわせて `ops.py` の `_VERIFY_DECLARATIONS_EXIT_CODES` / `_verify_declarations_checks` のコメント文言差を統一した。** **コミットメッセージは書き換えない** (履歴を改変しない)。**本項がその訂正である。**
+- **あわせて閉じたもの**: **裁定 O-8 (revoke 済み credential の rotate は VALIDATION_FAILED ではなく CONFLICT) を両 peer の control 面で同形に実装し、C-13 / C-14 / C-15 が緑のままであることを確認した。** **`CONDITIONS.md` の C-21 / C-25 行を「両 peer が 1.7.0 を宣言し、`>= 1.7.0` 枝が 4 plug で実駆動、xfailed 0」に更新し、フリップ前の記述は `CONDITIONS_HISTORY.md` へ逐語で移した。**
+
+#### WP-4 (完了ゲートと記録)
+
+- **本節・§11.1 / §11.2・§10 の状態注記・計画文書 v1.5・第 16 次引き継ぎ・作業指示書 訂正註 19 が成果物である。**
+- **ゲートの実測値は **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) / `2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `9060d3a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた) / `PERFRUN host=Darwin/arm64 python=3.11.15 commit=b3cfc0c date=2026-09-08`、EXIT 0、`pg_database` 22 → 22。同一 plug の版間差は `backend_calls` が r2db-api-http の mutate 14.00 → 15.00 / batch 18.00 → 19.00 の +1.00 のみ (書き込み経路の `_load_field_constraints` の SELECT 1 文。SAVEPOINT / RELEASE は `conn.transaction()` 経由で `Cursor.execute` に載らない)、他 12 行は ±0.00。p50 の最大増は r2db in-process batch 0.746 → 0.883 ms、p95 の最大増は MitateDB-http mutate 6.101 → 8.099 ms、HTTP 4 plug の p50 は r2db 側 3 op と MitateDB query / mutate で減少 (§11.2 の表) / run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向) であり、監督が単独実行で埋める。**
+- **`tools/check_doc_refs.py` は起草時に 0 dangling で緑である** (SI 16 / C 26 / CCR 15 / G 4 / P 9 / R 16 / L 123 の定義に対して参照が解決する)。
 
 ---
 
