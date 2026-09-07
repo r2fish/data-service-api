@@ -338,9 +338,21 @@ async def post_mutate(request: Request) -> Response:
             "Idempotency keys are not supported by this foundation.",
             details={"violated_declaration": "capability", "field": "idempotency_key"},
         )
-    transaction = body.get("transaction", "atomic")
-    if transaction not in {"atomic", "best_effort"}:
-        fail("VALIDATION_FAILED", "Transaction mode is not supported.")
+    # G-1 (`{scratchpad}/rulings-r4.md` addendum): a `plan`'s digest
+    # commits to the request object exactly as received -- a body that
+    # omits `transaction` must digest differently from one that spells
+    # out `transaction: "atomic"` explicitly, even though both behave
+    # identically. So `transaction` is passed to `mutate_result` ONLY
+    # when the body actually carried the key (mirroring how the
+    # in-process port already omits its own `transaction` kwarg when
+    # the caller didn't supply one) -- never resolved to `"atomic"`
+    # here first.
+    mutate_kwargs: dict[str, Any] = {}
+    if "transaction" in body:
+        transaction = body["transaction"]
+        if transaction not in {"atomic", "best_effort"}:
+            fail("VALIDATION_FAILED", "Transaction mode is not supported.")
+        mutate_kwargs["transaction"] = transaction
     # Contract 1.7.0 (D-4, WP-2b): `dry_run`/`plan` are real as of this
     # commit (`capabilities().dry_run` is `enabled`) -- passed through to
     # `mutate_result`, which now gives them full effect. `budget` (R-6)
@@ -352,11 +364,11 @@ async def post_mutate(request: Request) -> Response:
         context,
         entity,
         body.get("operations"),
-        transaction=transaction,
         request_id=_request_id(request),
         dry_run=body.get("dry_run", False),
         plan=body.get("plan"),
         budget=body.get("budget"),
+        **mutate_kwargs,
     )
     # CCR-13 WP-5: `assigned_addresses` now reaches the response, in
     # operation order (insert, and insert-resolved upsert, only) -- the

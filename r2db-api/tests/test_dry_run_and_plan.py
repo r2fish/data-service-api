@@ -161,16 +161,33 @@ def test_memory_dry_run_affected_matches_real_and_reports_committed_false() -> N
     assert dry.affected == real.affected == 2
 
 
-def test_memory_dry_run_leaves_rows_and_next_id_sequence_position_reported_unchanged() -> None:
+def test_memory_dry_run_leaves_rows_unchanged_but_may_consume_the_id_sequence() -> None:
     """Completion condition 3 (rows unchanged; row content is the
     observable half of "外部可視の状態変化 0" this level can see -- audit/
-    capability declaration are `DataService`-level, Section 5 below)."""
+    capability declaration are `DataService`-level, Section 5 below).
+
+    WP-2b 監査 N-6(a) (`{scratchpad}/audit-wp2b.md`): the pre-fix name of
+    this test additionally claimed the `_next_id` sequence position was
+    "reported unchanged", but no assertion here ever touched `_next_id` at
+    all -- and a DATA mutation dry run is explicitly permitted to consume
+    it (F-15), unlike a SCHEMA dry run, which `test_memory_schema_dry_run_
+    does_not_consume_the_id_sequence` above pins as snapshotted/restored.
+    This version asserts the real behaviour instead of the misleading
+    name: rows are unchanged, but the dry run's own `assigned_addresses`
+    (this cell-level return value, never the `DataService` response,
+    which omits the key entirely -- `test_service_mutate_result_dry_run_
+    response_omits_assigned_addresses` below) DOES carry the id it
+    consumed, and a REAL insert straight after gets the NEXT id, not a
+    reused one."""
     cell = _memory_cell_with_widgets()
     cell.transact("widgets", [{"operation": "insert", "values": {"label": "a"}}], LIMITS)
     before = [dict(row) for row in cell.entities["widgets"]]
-    cell.transact("widgets", [{"operation": "insert", "values": {"label": "dry"}}], LIMITS, dry_run=True)
+    dry = cell.transact("widgets", [{"operation": "insert", "values": {"label": "dry"}}], LIMITS, dry_run=True)
     after = [dict(row) for row in cell.entities["widgets"]]
     assert after == before
+    assert dry.assigned_addresses[0]["address"]["id"] == 2
+    real = cell.transact("widgets", [{"operation": "insert", "values": {"label": "b"}}], LIMITS)
+    assert real.assigned_addresses[0]["address"]["id"] == 3
 
 
 def test_memory_dry_run_plan_is_deterministic_across_two_calls() -> None:
@@ -237,6 +254,65 @@ def test_memory_plan_staleness_after_a_schema_change() -> None:
     assert cell.entities["widgets"] == []
 
 
+def test_memory_plan_staleness_after_a_schema_change_to_a_different_entity() -> None:
+    """WP-2b 監査 N-6(b) (`{scratchpad}/audit-wp2b.md`): the mutation-side
+    sibling of the test above, but the intervening schema change lands on
+    a DIFFERENT entity (`other`) than the one the mutation/plan target
+    (`widgets`) -- proof that "the token names the Application's schema
+    state, not one entity's" (contract `structured_operations.dry_run.
+    plan`) is not merely a same-entity coincidence: `schema_revision` is a
+    single per-Application counter (D-4 (7)), so ANY entity's schema
+    change invalidates every outstanding plan. Before this test, no
+    peer-local test asserted cross-entity invalidation positively -- the
+    inline comment on `test_memory_stale_plan_on_unconfirmed_destructive_
+    delete_is_confirmation_required_first` below claimed to, but that test
+    is refused for the missing confirmation before plan comparison is ever
+    reached (see its own corrected comment)."""
+    cell = _memory_cell_with_widgets()
+    operations = [{"operation": "insert", "values": {"label": "a"}}]
+    request = {"operations": operations, "transaction": "atomic"}
+    plan = cell.transact("widgets", operations, LIMITS, dry_run=True, plan_request=request).plan
+    cell.apply_schema({"operation": "create_entity", "entity": "other", "fields": ["x"]}, developer=True, limits=LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.transact("widgets", operations, LIMITS, plan=plan, plan_request=request)
+    assert exc.value.code == "PRECONDITION_FAILED"
+    assert exc.value.details == {"violated_declaration": "plan"}
+    assert cell.entities["widgets"] == []
+
+
+def test_memory_transact_does_not_compute_plan_token_without_dry_run_or_plan(monkeypatch) -> None:
+    """N-1 (`{scratchpad}/audit-wp2b.md`) / review round F-5's own
+    docstring claim on `transact` above ("A plain apply pays no `json.
+    dumps`/`sha256` cost it never uses"): `compute_plan_token` (and the
+    `normalize_request_for_plan`/sha256 work behind it) is only ever
+    called when `dry_run` or a caller-presented `plan` actually consumes
+    the digest -- never for an ordinary apply carrying neither. Before
+    this test, no peer-local test pinned this at all: reverting
+    `structured.py`'s `if plan_request is not None and (dry_run or plan
+    is not None)` guard back to unconditional (`if plan_request is not
+    None`) left `r2db-api/tests` (1061 passed) and `conformance-tests/
+    test_c22_dry_run_and_plan.py` (4 passed) both fully green (audit
+    mutation M-5) -- this test is the first thing that goes red."""
+    import r2db_api.structured as structured_module
+
+    calls = {"n": 0}
+    real_compute = structured_module.compute_plan_token
+
+    def counting(*args: Any, **kwargs: Any) -> str:
+        calls["n"] += 1
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(structured_module, "compute_plan_token", counting)
+
+    cell = _memory_cell_with_widgets()
+    request = {"operations": [{"operation": "insert", "values": {"label": "a"}}], "transaction": "atomic"}
+    cell.transact("widgets", request["operations"], LIMITS, plan_request=request)
+    assert calls["n"] == 0, "an ordinary apply (no dry_run, no plan) must not compute a plan token at all"
+
+    cell.transact("widgets", request["operations"], LIMITS, plan_request=request, dry_run=True)
+    assert calls["n"] == 1
+
+
 def test_memory_stale_plan_on_unconfirmed_destructive_delete_is_confirmation_required_first() -> None:
     """Completion condition 9 (ordering, D-4 (2)): confirmation precedes
     precondition -- a stale plan on an UNCONFIRMED destructive delete is
@@ -249,7 +325,13 @@ def test_memory_stale_plan_on_unconfirmed_destructive_delete_is_confirmation_req
     request = {"operations": [delete_op], "transaction": "atomic"}
     stale_plan = cell.transact("widgets", [delete_op], LIMITS, dry_run=True, plan_request=request).plan
     # A second, unrelated schema change on the SAME Application (not this
-    # entity) invalidates the plan (D-4 (7): per-application revision).
+    # entity) invalidates the plan (D-4 (7): per-application revision) --
+    # but this test does NOT observe that invalidation itself: the
+    # UNCONFIRMED delete below is refused for the missing confirmation
+    # before plan comparison is ever reached (D-4 (2)'s ordering, this
+    # test's own point). The positive cross-entity-invalidation assertion
+    # lives in `test_memory_plan_staleness_after_a_schema_change_to_a_
+    # different_entity` above.
     cell.apply_schema({"operation": "create_entity", "entity": "other", "fields": ["x"]}, developer=True, limits=LIMITS)
     unconfirmed_delete = {"operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "a"}], "destructive": True}
     with pytest.raises(FoundationError) as exc:
@@ -322,6 +404,67 @@ def test_memory_schema_plan_valid_and_stale_paths() -> None:
     assert exc.value.code == "PRECONDITION_FAILED"
     assert exc.value.details == {"violated_declaration": "plan"}
     assert "b" not in cell.schema["widgets"]
+
+
+def test_memory_schema_drop_entity_confirmation_precedes_stale_plan_precondition() -> None:
+    """N-5 (`{scratchpad}/audit-wp2b.md`): schema-side sibling of
+    `test_memory_stale_plan_on_unconfirmed_destructive_delete_is_
+    confirmation_required_first` (Section 2) -- D-4 (2)'s "confirmation
+    precedes precondition" ordering, pinned for `apply_schema`'s own
+    `drop_entity` branch this time. `structured.py`'s `expected_plan`/
+    `plan` comparison for `apply_schema` sits AFTER every operation
+    branch, including the `require_destructive_confirmation` call inside
+    `drop_entity` -- so an UNCONFIRMED `drop_entity` carrying a stale plan
+    is refused DESTRUCTIVE_CONFIRMATION_REQUIRED, never PRECONDITION_
+    FAILED. Before this test, no peer-local test pinned this for the
+    schema side (audit mutation M-3: moving the plan comparison earlier,
+    to immediately after `expected_plan` is computed, left this WP's
+    whole peer-local suite -- 33 tests at audit time -- fully green; only
+    `conformance-tests`' own `PostgresCell`-backed leg caught it)."""
+    cell = _memory_cell_with_widgets()
+    confirmed_phrase = drop_entity_confirmation_phrase("widgets", cell.schema_revision)
+    confirmed_drop = {"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": confirmed_phrase}
+    request = {k: v for k, v in confirmed_drop.items() if k not in ("plan", "dry_run")}
+    stale_plan = cell.apply_schema(confirmed_drop, developer=True, limits=LIMITS, dry_run=True, plan_request=request).plan
+    # A second, unrelated schema change advances the revision (staling the
+    # plan above) and, since the revision also feeds the confirmation
+    # phrase, would make any OLD confirmation phrase wrong too -- this
+    # test instead omits confirmation entirely, so the refusal reason is
+    # unambiguous.
+    cell.apply_schema({"operation": "create_entity", "entity": "other", "fields": ["x"]}, developer=True, limits=LIMITS)
+    unconfirmed_drop = {"operation": "drop_entity", "entity": "widgets", "destructive": True}
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema(unconfirmed_drop, developer=True, limits=LIMITS, plan=stale_plan, plan_request=dict(unconfirmed_drop))
+    assert exc.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED"
+    assert "widgets" in cell.entities
+
+
+def test_memory_apply_schema_does_not_compute_plan_token_without_dry_run_or_plan(monkeypatch) -> None:
+    """N-1 (`{scratchpad}/audit-wp2b.md`), schema-side sibling of `test_
+    memory_transact_does_not_compute_plan_token_without_dry_run_or_plan`
+    (Section 2) -- same guard, `structured.py`'s `apply_schema` this
+    time."""
+    import r2db_api.structured as structured_module
+
+    calls = {"n": 0}
+    real_compute = structured_module.compute_plan_token
+
+    def counting(*args: Any, **kwargs: Any) -> str:
+        calls["n"] += 1
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(structured_module, "compute_plan_token", counting)
+
+    cell = _memory_cell_with_widgets()
+    op = {"operation": "add_field", "entity": "widgets", "field": "plain"}
+    request = {k: v for k, v in op.items() if k not in ("plan", "dry_run")}
+    cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=request)
+    assert calls["n"] == 0, "an ordinary apply (no dry_run, no plan) must not compute a plan token at all"
+
+    op2 = {"operation": "add_field", "entity": "widgets", "field": "dry_only"}
+    request2 = {k: v for k, v in op2.items() if k not in ("plan", "dry_run")}
+    cell.apply_schema(op2, developer=True, limits=LIMITS, plan_request=request2, dry_run=True)
+    assert calls["n"] == 1
 
 
 # ===========================================================================

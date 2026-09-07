@@ -872,6 +872,71 @@ async def test_http_mutate_stale_plan_is_precondition_failed_412(client):
     assert query.json()["items"] == []
 
 
+async def test_http_mutate_plan_digest_treats_an_omitted_transaction_key_differently_from_an_explicit_one(client):
+    """N-2 (`{scratchpad}/audit-wp2b.md`) / G-1 (`{scratchpad}/rulings-r4.md`
+    addendum): the plan digest never fills in a `transaction` *default* --
+    a body that omits the key digests differently from one that spells out
+    `"atomic"` explicitly, even though both behave identically otherwise
+    (`service.py`'s own comment: "a request that carried `transaction:
+    "atomic"` explicitly digests differently from one that omitted the key
+    entirely"). Before this test, no peer-local test observed this at the
+    HTTP boundary -- the un-committed `service.py`/`http.py` fix (reverting
+    `plan_request` to always carry the RESOLVED `transaction` value, audit
+    mutation M-1) left `r2db-api/tests` (1061 passed) fully green; only
+    `conformance-tests`' own leg 10 caught it."""
+    # A body omitting `transaction` entirely -- its own dry-run plan,
+    # presented on the SAME (still omitting) body, is honored.
+    dry = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-omit"}}], "dry_run": True},
+    )
+    assert dry.status_code == 200
+    plan = dry.json()["plan"]
+
+    real = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-omit"}}], "plan": plan},
+    )
+    assert real.status_code == 200
+    assert real.json()["committed"] is True
+
+    # A second dry run, for a DIFFERENT body (so the query check below is
+    # unambiguous), again omitting `transaction`.
+    dry2 = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={"operations": [{"operation": "insert", "values": {"body": "http-tx-explicit"}}], "dry_run": True},
+    )
+    assert dry2.status_code == 200
+    plan2 = dry2.json()["plan"]
+
+    # The IDENTICAL operations, now with `"transaction": "atomic"` spelled
+    # out explicitly -- behaviourally identical, but a DIFFERENT digest
+    # input (G-1) -- refused for staleness, never accepted-and-ignored.
+    response = await client.post(
+        "/v1/data/notes/mutations",
+        headers=_auth("cred-a.secret-a"),
+        json={
+            "operations": [{"operation": "insert", "values": {"body": "http-tx-explicit"}}],
+            "transaction": "atomic",
+            "plan": plan2,
+        },
+    )
+    assert response.status_code == 412
+    body = response.json()
+    assert body["code"] == "PRECONDITION_FAILED"
+    assert body["details"]["violated_declaration"] == "plan"
+
+    query = await client.post(
+        "/v1/data/notes/query",
+        headers=_auth("cred-a.secret-a"),
+        json={"select": ["id"], "where": [{"field": "body", "operator": "eq", "value": "http-tx-explicit"}]},
+    )
+    assert query.json()["items"] == []
+
+
 async def test_mutate_update_and_delete_where_matches_executes(client):
     """CCR-13 WP-5b: `update`/`delete`'s own `operation.where` accepts
     `matches` too, not only `query()`'s predicates -- executes end-to-end

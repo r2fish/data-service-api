@@ -158,10 +158,14 @@ class StorageBackend(Protocol):
         verifies it. Every caller returns `SchemaOutcome` uniformly --
         review round F-8 (`{scratchpad}/rulings-r4.md`): a bare `int`
         return, conditioned on whether the SAME request happened to carry
-        a `plan`, is not this protocol's shape; `DataService.schema`'s own
-        pre-1.7.0-compatible bare-`int` surface is that method's choice
-        about ITS OWN return value, built from `.revision`, not a shape
-        this backend boundary itself carries.
+        a `plan`, is not this protocol's shape. `DataService.schema`
+        (`service.py`) is a pure passthrough of this return value and,
+        since F-8, also always returns `SchemaOutcome` -- WP-2b 監査 N-7
+        (`{scratchpad}/audit-wp2b.md`): there is no remaining pre-1.7.0
+        bare-`int` surface anywhere on that call, at this boundary or
+        `DataService`'s own; every pre-1.7.0 direct caller now reads
+        `.revision` off the `SchemaOutcome` instead of comparing the
+        result itself to an `int`.
         """
         ...
 

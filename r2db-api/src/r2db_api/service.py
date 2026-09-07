@@ -1084,7 +1084,7 @@ class DataService:
         """
         return self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id).affected
 
-    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None) -> "MutationResult":
+    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None) -> "MutationResult":
         """The HTTP-facing shape (`{affected, assigned_addresses}`,
         `spec/data-service-api.v1.json`'s `MutationResult`) -- used by
         `http.post_mutate` instead of `mutate` above, mirroring the
@@ -1133,11 +1133,24 @@ class DataService:
             plan=outcome.plan if dry_run else None,
         )
 
-    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None):
+    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None):
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
-                if transaction != "atomic":
+                # G-1 (`{scratchpad}/rulings-r4.md` addendum): `transaction`
+                # is never a contract-level *default* -- `None` here means
+                # the caller's own request object never carried the key at
+                # all (both `http.post_mutate` and the in-process port omit
+                # the kwarg rather than resolving it to `"atomic"` before
+                # this call). `resolved_transaction` is used for every
+                # behavioural decision (the capability gate below); the
+                # RAW `transaction` value (still `None` when omitted) is
+                # what `plan_request` below reflects, so a request that
+                # carried `transaction: "atomic"` explicitly digests
+                # differently from one that omitted the key entirely, even
+                # though both behave identically otherwise.
+                resolved_transaction = transaction if transaction is not None else "atomic"
+                if resolved_transaction != "atomic":
                     fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.")
                 if not isinstance(operations, list):
                     fail("VALIDATION_FAILED", "Mutations must be a list.")
@@ -1152,7 +1165,12 @@ class DataService:
                 # segment, not a body field) and never `dry_run`/`plan`
                 # themselves (S-a's own exclusion pair, applied again
                 # defensively inside `normalize_request_for_plan`).
-                plan_request: dict[str, Any] = {"operations": operations, "transaction": transaction}
+                # G-1: `transaction` is included only when the caller's own
+                # request object actually carried the key (see above) --
+                # never the resolved/defaulted value.
+                plan_request: dict[str, Any] = {"operations": operations}
+                if transaction is not None:
+                    plan_request["transaction"] = transaction
                 if budget is not None:
                     plan_request["budget"] = budget
                 # Phase 4 (design D-2/D-10), extended by D-4 (4)/U-2 = (A)
