@@ -491,7 +491,7 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
             # VALIDATION_FAILED reached first) -- this deployment's own
             # declared `execution_ms` bound, never a hardcoded literal,
             # which a narrow isolation profile can sit below.
-            declared_execution_ms = adapter.capability_document().get("limits", {}).get("execution_ms")
+            declared_execution_ms = iso.capability_document().get("limits", {}).get("execution_ms")
             assert isinstance(declared_execution_ms, int), (
                 f"{adapter.name}: capability_document()['limits']['execution_ms'] is not an int -- "
                 f"{adapter.capability_document().get('limits')!r}"
