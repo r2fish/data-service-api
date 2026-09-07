@@ -106,6 +106,9 @@ jobs:
       - name: Check COLLECTION_FLOOR (R-9, evidence-loss detection -- design PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-3)
         run: python3 tools/check_collection_floor.py
 
+      - name: Check document ID references (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-2)
+        run: python3 tools/check_doc_refs.py
+
       - name: Run the common conformance gate
         run: |
           set -o pipefail
