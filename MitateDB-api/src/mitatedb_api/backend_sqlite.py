@@ -17,7 +17,7 @@ import sqlite3
 import time
 
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
-from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError
+from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError, violation, observed_type_of
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
 
@@ -135,8 +135,15 @@ class SQLiteBackend:
         return self._db
 
     def check_reserved(self, value, label):
+        # WP-3e rework T1 (追補2 M-1): mirrors `backend_postgres.
+        # PostgresBackend.check_reserved`'s own identical rationale -- the
+        # reserved-name half of the identifier choke point, not defence-
+        # in-depth, so it carries `identifier_syntax` too.
         if value in _RESERVED:
-            raise ValidationError("reserved " + label)
+            raise ValidationError(
+                "reserved " + label,
+                details=violation("identifier_syntax", field=label),
+            )
 
     def schema_count(self):
         row = self._db.execute(
@@ -157,7 +164,7 @@ class SQLiteBackend:
         # matching this backend's own pre-existing, unchanged external
         # behavior (WP-1 P3 round 2 instruction #1: "SQLite側の外部挙動は
         # 不変に保つこと").
-        name = validate_identifier(collection, "collection")
+        name = validate_identifier(collection, "entity")
         try:
             rows = self._db.execute("PRAGMA table_info(" + quote_identifier(name) + ")").fetchall()
         except sqlite3.DatabaseError:
@@ -263,7 +270,7 @@ class SQLiteBackend:
                 # uncached call would have (I-8) -- never a second,
                 # independently-drifting construction.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     predicted_revision = self._schema_revision + 1
                     response_json = json.dumps({
                         "committed": True, "revision": str(predicted_revision),
@@ -271,6 +278,7 @@ class SQLiteBackend:
                             "entity": name, "fields": sorted(fields), "field_types": dict(resolved),
                             "field_constraints": {f: dict(v) for f, v in resolved_constraints.items()},
                         },
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
@@ -367,7 +375,7 @@ class SQLiteBackend:
                 # _declared_constraints` BEFORE this call's own registry
                 # write (which lands after this `try` block, on success).
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     predicted_revision = self._schema_revision + 1
                     existing_types_before = dict(self._declared_types.get(collection, {}))
                     existing_constraints_before = {
@@ -384,6 +392,7 @@ class SQLiteBackend:
                             "field_types": {**existing_types_before, field: contract_type},
                             "field_constraints": {**existing_constraints_before, field: dict(declared)},
                         },
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
@@ -597,9 +606,10 @@ class SQLiteBackend:
                 # is ALREADY the post-bump value at this point (bumped two
                 # lines above, before this `try`) -- no "+1" needed.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(self._schema_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
@@ -619,13 +629,22 @@ class SQLiteBackend:
                 raise
         return self._schema_revision, descriptor
 
-    def encode_value(self, value, domain=None):
+    def encode_value(self, value, domain=None, *, field=None, declared_type=None):
         # `domain` is accepted only to match the shared `StorageBackend`
         # call shape (`cell.py` always passes it) and is otherwise IGNORED
         # -- see `field_domains`'s own comment above for why (this
         # backend's own value acceptance is unchanged by B-1's own domain
         # concept: SQLite's dynamic column affinity has no equivalent
         # mismatch to detect).
+        #
+        # `field`/`declared_type` (追補 4 O-2): same threading as
+        # `backend_postgres.PostgresBackend.encode_value` -- `cell.py`'s
+        # own 3 call sites always pass both (the caller's own request-
+        # internal path and the contract-vocabulary declared type), so
+        # the two value-domain denials below (both genuinely storage-
+        # only, no in-memory equivalent) carry the same D-3 (4) 4-key
+        # form a normal client request reaches them with, rather than an
+        # empty `details`.
         #
         # SQLite's own driver: an explicit `int(bool)` conversion (rather
         # than relying on `bool` being an `int` subclass the driver might
@@ -647,7 +666,10 @@ class SQLiteBackend:
         # not to a value that ALREADY crashed out of this backend's own
         # error hierarchy entirely.
         if isinstance(value, int) and not (_SQLITE_INT64_MIN <= value <= _SQLITE_INT64_MAX):
-            raise ValidationError("value is out of range for 64-bit integer storage")
+            raise ValidationError(
+                "value is out of range for 64-bit integer storage",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         # Independent review B-2(ii) (WP-2 follow-up, same precedent as
         # the out-of-range-integer check immediately above -- both are a
         # value that would otherwise crash out of this backend's own
@@ -670,7 +692,8 @@ class SQLiteBackend:
         # value`, before this method is ever called).
         if isinstance(value, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
             raise ValidationError(
-                "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8"
+                "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
             )
         return value
 
@@ -776,7 +799,14 @@ class SQLiteBackend:
                     quote_identifier(field) + " " + _DIRECTION_TOKENS[direction] for field, direction in order_by
                 )
             except KeyError as exc:
-                raise ValidationError("invalid order direction") from exc
+                # WP-3e rework T1 (追補2 M-1): mirrors `backend_postgres.
+                # PostgresBackend.read`'s own identical site -- same
+                # literal denial `cell.ApplicationCell._bind_order_by`
+                # already carries, same 4-key treatment.
+                raise ValidationError(
+                    "invalid order direction",
+                    details=violation("enum", field="order_by/direction", declared_type="string"),
+                ) from exc
             statement += " ORDER BY " + order_terms
         statement += " LIMIT ?"
         params = list(params) + [limit]

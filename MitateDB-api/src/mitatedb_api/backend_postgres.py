@@ -90,7 +90,8 @@ from psycopg import sql
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
-                     StorageConfigurationError, ValidationError)
+                     StorageConfigurationError, ValidationError, violation,
+                     observed_type_of)
 from .identifiers import validate_identifier
 from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
@@ -202,7 +203,7 @@ _INT_DOMAIN_RANGES = {
 }
 
 
-def _validate_value_domain(value, domain=None):
+def _validate_value_domain(value, domain=None, *, field=None, declared_type=None):
     """B-1 value-domain gate (independent review, both rounds). A pure,
     connection-independent function (m-8, round 2: "layer (i) 単体テスト
     は接続不要であるべき") -- `PostgresBackend.encode_value` is a thin
@@ -221,6 +222,26 @@ def _validate_value_domain(value, domain=None):
     function's own pre-B-1 behavior for that case (shape-checked-but-not-
     domain-checked), never silently WIDENING what a real column call site
     accepts.
+
+    `field`/`declared_type` (追補 4 O-2, `{scratchpad}/rulings-r3-r7-flip.
+    md`): this gate reaches every value a NORMAL client request writes or
+    filters on (`cell.py::_prepare_values`/`_bind_filters`, the ONLY
+    callers of `PostgresBackend.encode_value`, always pass both) -- it is
+    the choke-point layer's own PostgreSQL realization of the same D-3 (4)
+    4-key `errors.details_vocabulary` rule `field_types.check_declared_
+    value` applies in-memory, not backend-layer defence-in-depth (there is
+    no in-memory equivalent value-domain check to duplicate wording
+    against here in the first place -- the NUL/lone-surrogate/int-range
+    conditions below are genuinely PostgreSQL-storage-only, but a client
+    request reaches them directly all the same, so the DENIAL it receives
+    must still carry the 4-key form). `field` is the caller's own
+    request-internal path (never composed here -- this function has no
+    path context of its own, exactly `field_types.check_declared_value`'s
+    own precedent); `declared_type` is the contract vocabulary word
+    (`CONTRACT_TYPES`) the caller already resolved. Both default to
+    `None` so this function's own direct callers in `tests/test_postgres.
+    py` (mechanism-level unit tests, no request context at all) keep
+    working unchanged.
     """
     # M-5 (independent review round 2, regression from B-1's own first
     # round): SQL `NULL` is a valid value for ANY column regardless of its
@@ -255,7 +276,8 @@ def _validate_value_domain(value, domain=None):
     # carry a literal NUL through to a bind parameter.
     if isinstance(value, str) and "\x00" in value:
         raise ValidationError(
-            "value contains an embedded NUL character, which PostgreSQL text storage cannot represent"
+            "value contains an embedded NUL character, which PostgreSQL text storage cannot represent",
+            details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
         )
     # Independent review B-2(ii) (WP-2 follow-up, same precedent as the
     # NUL check immediately above): a Python `str` may contain a LONE
@@ -280,7 +302,8 @@ def _validate_value_domain(value, domain=None):
     # to a bind parameter, exactly as for NUL).
     if isinstance(value, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
         raise ValidationError(
-            "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8"
+            "value contains a lone UTF-16 surrogate code point, which cannot be encoded as UTF-8",
+            details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
         )
     # See this module's own `_TYPES` comment: `boolean` fields are
     # physically `INTEGER` columns on this backend (as on SQLite's),
@@ -293,11 +316,11 @@ def _validate_value_domain(value, domain=None):
     if isinstance(value, bool):
         value = int(value)
     if domain is not None:
-        value = _check_domain(value, domain)
+        value = _check_domain(value, domain, field=field, declared_type=declared_type)
     return value
 
 
-def _check_domain(value, domain):
+def _check_domain(value, domain, *, field=None, declared_type=None):
     """B-1 (i): the actual value-domain gate, a pure function (m-8).
     Runs BEFORE any statement reaches PostgreSQL, so a type-mismatched
     value never gets the chance to raise `InvalidTextRepresentation`/
@@ -306,7 +329,11 @@ def _check_domain(value, domain):
     range" -- deliberately worded differently from the layer (ii)
     backstop's own generic "storage backend rejected the request" (every
     DML/DDL method's final `except psycopg.Error` branch), so a test can
-    tell WHICH layer actually caught a given case (m-8 (ii))."""
+    tell WHICH layer actually caught a given case (m-8 (ii)).
+
+    `field`/`declared_type`: same 追補 4 O-2 threading as `_validate_value_
+    domain` above (this is that function's own callee, `field`/`declared_
+    type` pass straight through unchanged)."""
     if domain in ("string", "object", "array", "json"):
         # See `_TEXT_DOMAIN_BY_DECLARED_TYPE`'s own comment: the real
         # object-vs-array-vs-json shape check already ran at the cell
@@ -314,18 +341,30 @@ def _check_domain(value, domain):
         # declared types is physically a plain `str` (JSON text for the
         # three non-`string` members).
         if not isinstance(value, str):
-            raise ValidationError("value does not match the declared field type")
+            raise ValidationError(
+                "value does not match the declared field type",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         return value
     if domain in _INT_DOMAIN_RANGES:
         if not isinstance(value, int):
-            raise ValidationError("value does not match the declared field type")
+            raise ValidationError(
+                "value does not match the declared field type",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         low, high = _INT_DOMAIN_RANGES[domain]
         if not (low <= value <= high):
-            raise ValidationError("value is out of range for the declared field type")
+            raise ValidationError(
+                "value is out of range for the declared field type",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         return value
     if domain == "float":
         if not isinstance(value, (int, float)):
-            raise ValidationError("value does not match the declared field type")
+            raise ValidationError(
+                "value does not match the declared field type",
+                details=violation("field_type", field=field, declared_type=declared_type, observed_type=observed_type_of(value)),
+            )
         return float(value)
     return value
 
@@ -506,8 +545,21 @@ class PostgresBackend:
         self._developer.close()
 
     def check_reserved(self, value, label):
+        # WP-3e rework T1 (追補2 M-1): the reserved-name half of the
+        # identifier choke point `cell.ApplicationCell._identifier`
+        # always applies together with `identifiers.validate_identifier`
+        # (that module's own docstring names this exact pairing) -- not
+        # a defence-in-depth backstop for a check the cell layer already
+        # performs itself (this backend is the ONLY place PostgreSQL's
+        # own `pg_`-prefixed reservations are known), so it carries the
+        # same `identifier_syntax` vocabulary `validate_identifier`
+        # itself uses, `field` = `label` (the same per-call-site request
+        # position `_identifier` already passes to both stages).
         if value in _RESERVED_EXACT or value.startswith(_RESERVED_PREFIX):
-            raise ValidationError("reserved " + label)
+            raise ValidationError(
+                "reserved " + label,
+                details=violation("identifier_syntax", field=label),
+            )
 
     # ------------------------------------------------------------------
     # catalog (developer connection -- schema owner)
@@ -550,7 +602,7 @@ class PostgresBackend:
         `create_collection`'s own registry-write below) degrades to
         `"string"`, never a crash.
         """
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -610,7 +662,7 @@ class PostgresBackend:
         point (`cell.py::_prepare_values`/`_bind_filters`) both read.
         Existence-checked the same way `field_domains` is (an entity with
         no columns at all cannot exist on this backend)."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -696,7 +748,7 @@ class PostgresBackend:
         source of truth `GET /v1/catalog` and the cell-layer choke point
         (`cell.py::_prepare_values`, never `_bind_filters`) both read.
         Existence-checked the same way `field_types` is."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -748,7 +800,7 @@ class PostgresBackend:
         the sole caller -- every other reader of `field_types`/`field_
         constraints` keeps calling one of those two on their own,
         unchanged. Existence-checked the same way both are."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -816,7 +868,7 @@ class PostgresBackend:
         and PostgreSQL grants a table's owner every privilege on it,
         `SELECT` included, with no separate `GRANT` required (F-6,
         `migrations/0003_provision_application.sql`)."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         validate_identifier(field, "field")
         timeout_ms = self._timeout_ms(deadline)
         hook_fired = False
@@ -929,9 +981,10 @@ class PostgresBackend:
                 # already read back for real, inside this SAME
                 # transaction, above.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
@@ -1075,13 +1128,14 @@ class PostgresBackend:
                 # locals), so a later replay is byte-identical to what an
                 # uncached call would have returned.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision),
                         "descriptor": {
                             "entity": name, "fields": sorted(fields), "field_types": dict(field_types),
                             "field_constraints": {f: dict(c) for f, c in resolved_constraints.items()},
                         },
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
@@ -1117,7 +1171,7 @@ class PostgresBackend:
     @_guard_pending_platform_upgrades
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
                   audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
             sql.Identifier(collection), sql.Identifier(field), _TYPE_SQL[field_type]
@@ -1216,9 +1270,10 @@ class PostgresBackend:
                 # Phase 9 WP-3c (design D-5, I-1/I-8): see `create_
                 # collection`'s own identical comment above.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
@@ -1256,8 +1311,8 @@ class PostgresBackend:
     # py` calls these two directly, with no `platform`/`app_a` fixture and
     # no live PostgreSQL server involved at all).
     # ------------------------------------------------------------------
-    def encode_value(self, value, domain=None):
-        return _validate_value_domain(value, domain)
+    def encode_value(self, value, domain=None, *, field=None, declared_type=None):
+        return _validate_value_domain(value, domain, field=field, declared_type=declared_type)
 
     # ------------------------------------------------------------------
     # DML (runtime connection only -- R-1)
@@ -1467,7 +1522,22 @@ class PostgresBackend:
                     for field, direction in order_by
                 )
             except KeyError as exc:
-                raise ValidationError("invalid order direction") from exc
+                # WP-3e rework T1 (追補2 M-1): same literal denial
+                # `cell.ApplicationCell._bind_order_by` already carries
+                # (`errors.details_vocabulary.enum`) -- this comment's own
+                # "defense-in-depth" framing above describes an
+                # UNREACHABLE-today re-implementation of that exact cell-
+                # layer check, not a storage-layer translation with no
+                # in-memory sibling, so it gets the same 4-key `details`
+                # (no per-item index survives the generator above, so
+                # `field` stays the non-indexed `order_by/direction`
+                # position, same convention `identifiers.validate_
+                # identifier`'s own module comment documents for a
+                # position that cannot be pinned to one list index here).
+                raise ValidationError(
+                    "invalid order direction",
+                    details=violation("enum", field="order_by/direction", declared_type="string"),
+                ) from exc
             statement = statement + sql.SQL(" ORDER BY ") + terms
         statement = statement + sql.SQL(" LIMIT %s")
         params = list(where_params) + [limit]

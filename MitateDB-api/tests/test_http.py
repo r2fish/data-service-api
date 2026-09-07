@@ -22,6 +22,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from mitatedb_api.application_audit import ApplicationAuditSink
+from mitatedb_api.audit_dispatch import AuditRouter
 from mitatedb_api.auth import Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
@@ -90,6 +92,62 @@ def app_a_stack(platform, app_a):
         write_store=write_store,
         read_store=read_store,
         cell=cell,
+    )
+    try:
+        yield stack
+    finally:
+        backend.close()
+        read_store.close()
+        write_store.close()
+
+
+@pytest.fixture
+def app_a_stack_with_audit(platform, app_a):
+    """WP-3e rework T3 (L-7, ruling `{scratchpad}/rulings-r3-r7-flip.md`):
+    the SAME real, throwaway-provisioned stack `app_a_stack` builds, except
+    the `ApplicationCell` is wired to an explicit, INSPECTABLE
+    `audit_dispatch.AuditRouter(application_audit.ApplicationAuditSink())`
+    (never the private default `app_a_stack` leaves every pre-Phase-4
+    caller with, `cell.py::ApplicationCell.__init__`'s own docstring) --
+    `stack.router.durable_sink.events()` is this file's own read path for
+    the durable application-plane audit row a real HTTP call produces,
+    mirroring `test_application_audit.py`'s own `make_router`/`router.
+    durable_sink.events()` pattern rather than a second, independently
+    maintained PostgreSQL-backed audit reader. `stack.router.flush()`
+    drains the buffer-class events `cell.py::ApplicationCell._push_data_
+    operation_event` (query/insert/update) queues before they reach
+    `durable_sink` -- called by every test below immediately after its own
+    HTTP call, before reading `events()`."""
+    read_store = PostgresCredentialStore(
+        platform.api_dsn, pepper="synthetic-test-pepper-mitatedb-http-audit-0000", schema=platform.registry_schema,
+    )
+    write_store = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper="synthetic-test-pepper-mitatedb-http-audit-0000", schema=platform.registry_schema,
+    )
+    backend = PostgresBackend(app_a.runtime_dsn, app_a.developer_dsn)
+    router = AuditRouter(ApplicationAuditSink())
+    cell = ApplicationCell(app_a.app_id, backend=backend, audit_router=router)
+
+    def _cell_factory(application_id: str) -> ApplicationCell:
+        assert application_id == app_a.app_id
+        return cell
+
+    service = HttpService(read_store, _cell_factory)
+    app = create_app(service, request_bytes_limit=1024)
+
+    runtime_id, runtime_bearer = write_store.issue(app_a.app_id, Role.RUNTIME)
+    developer_id, developer_bearer = write_store.issue(app_a.app_id, Role.DEVELOPER)
+
+    import types
+    stack = types.SimpleNamespace(
+        app=app,
+        app_id=app_a.app_id,
+        runtime_bearer=runtime_bearer,
+        developer_bearer=developer_bearer,
+        write_store=write_store,
+        read_store=read_store,
+        cell=cell,
+        router=router,
     )
     try:
         yield stack
@@ -300,7 +358,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 4 WP-3(b): contract_version flip lands in the same commit as
     # the audit_query bundle it accompanies (design §5, P4-D4). Phase 5
     # WP-3: re-flipped to 1.5.0 (design D-1, subordinate ruling 10 item 1).
-    assert document["contract_version"] == "1.6.0"
+    assert document["contract_version"] == "1.7.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -1093,7 +1151,12 @@ def test_cross_entity_mutation_commits_across_two_real_entities(app_a_stack):
         ]},
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"committed": True, "affected": 2}
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): the response also
+    # carries `request_id` now -- checked for presence, then popped
+    # before the exact-shape assert below.
+    body = response.json()
+    assert body.pop("request_id")
+    assert body == {"committed": True, "affected": 2}
     # No `assigned_addresses` key at all (design M-6) -- not merely empty.
     assert "assigned_addresses" not in response.json()
 
@@ -1533,7 +1596,119 @@ def test_cross_entity_mutation_delete_declare_and_echo_per_entity_wrong_entity_p
         ]},
     )
     assert committed.status_code == 200, committed.text
-    assert committed.json() == {"committed": True, "affected": 2}
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): see the identical
+    # comment above this test's own sibling assertion.
+    committed_body = committed.json()
+    assert committed_body.pop("request_id")
+    assert committed_body == {"committed": True, "affected": 2}
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework T3 (L-7, ruling `{scratchpad}/rulings-r3-r7-flip.md`): the
+# non-regeneration pin -- for `post_query`/`post_mutate`(+cross-entity)/
+# `post_schema`, the ONE `uuid.uuid4().hex` the ASGI middleware mints per
+# request (`http.py`'s own module-level docstring above `REQUEST_ID_
+# HEADER`) is: (a) the value threaded into `cell.py`'s own session call
+# (`request_id=_request_id(request)`), (b) the value the HTTP JSON
+# response carries under its own `"request_id"` key, and (c) the value the
+# durable application-audit row this request produced carries under its
+# own `request_id` column -- ALL THREE the SAME string, never three
+# independently-resolved ones that merely happen to agree today. Each test
+# below asserts all three at once; mutating any ONE of the response-body
+# `request_id=` call sites in `http.py` (`post_query`/`post_mutate`/
+# `post_cross_entity_mutate`/`post_schema`) to mint a fresh
+# `uuid.uuid4().hex` instead of reusing the already-threaded value turns
+# the corresponding test below red (measured directly, WP-3e rework T3
+# mutation table).
+# ---------------------------------------------------------------------------
+
+
+def _latest_audit_event_for(router: AuditRouter, request_id: str):
+    """The durable row(s) whose own `request_id` column equals `request_
+    id` -- `router.flush()` must already have been called by the time this
+    runs (buffer-class events, `cell.py::ApplicationCell._push_data_
+    operation_event`, are not visible on `durable_sink` before that).
+    Asserts exactly one such row rather than silently taking `[0]`, so a
+    request that (by an unrelated bug) left NO durable row, or more than
+    one, fails loudly here instead of masquerading as a pass."""
+    matches = [event for event in router.durable_sink.events() if event.request_id == request_id]
+    assert len(matches) == 1, (request_id, router.durable_sink.events())
+    return matches[0]
+
+
+def test_request_id_is_pinned_through_query_response_and_audit_row(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    entity = "l7_query_pin_entity"
+    _create_entity(stack, entity, fields=["label"])
+    response = _post(stack, f"/v1/data/{entity}/query", bearer=stack.runtime_bearer, json_body={"select": ["label"]})
+    assert response.status_code == 200, response.text
+    header_request_id = response.headers["x-request-id"]
+    body_request_id = response.json()["request_id"]
+    assert header_request_id == body_request_id
+    stack.router.flush()
+    event = _latest_audit_event_for(stack.router, body_request_id)
+    assert event.operation == "query"
+
+
+def test_request_id_is_pinned_through_mutate_response_and_audit_row(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    entity = "l7_mutate_pin_entity"
+    _create_entity(stack, entity, fields=["label"])
+    response = _post(
+        stack, f"/v1/data/{entity}/mutations", bearer=stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "l7-mutate-pin"}}]},
+    )
+    assert response.status_code == 200, response.text
+    header_request_id = response.headers["x-request-id"]
+    body_request_id = response.json()["request_id"]
+    assert header_request_id == body_request_id
+    stack.router.flush()
+    # A non-destructive `transact` batch is ONE buffer-class row for the
+    # WHOLE batch (`cell.py::ApplicationCell.transact`'s own D-4/P4-D5
+    # comment: "exactly ONE `data_operation` event...operation='transact'"
+    # -- single-entity `/mutations` reaches the SAME `transact` path
+    # cross-entity `/v1/data/mutations` does, never a separate per-
+    # operation "insert" event).
+    event = _latest_audit_event_for(stack.router, body_request_id)
+    assert event.operation == "transact"
+
+
+def test_request_id_is_pinned_through_cross_entity_mutate_response_and_audit_row(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    entity_x = "l7_cross_entity_x"
+    entity_y = "l7_cross_entity_y"
+    _create_entity(stack, entity_x, fields=["label"])
+    _create_entity(stack, entity_y, fields=["label"])
+    response = _post(
+        stack, "/v1/data/mutations", bearer=stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "insert", "entity": entity_x, "values": {"label": "l7-x"}},
+            {"operation": "insert", "entity": entity_y, "values": {"label": "l7-y"}},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    header_request_id = response.headers["x-request-id"]
+    body_request_id = response.json()["request_id"]
+    assert header_request_id == body_request_id
+    stack.router.flush()
+    # Both operations share the ONE request-level `request_id` -- at least
+    # one durable row for it is enough to prove the pin (unlike `_latest_
+    # audit_event_for`'s single-entity siblings, this call legitimately
+    # produces more than one row for the same `request_id`, one per
+    # entity).
+    matches = [event for event in stack.router.durable_sink.events() if event.request_id == body_request_id]
+    assert len(matches) >= 1, (body_request_id, stack.router.durable_sink.events())
+
+
+def test_request_id_is_pinned_through_schema_response_and_audit_row(app_a_stack_with_audit):
+    stack = app_a_stack_with_audit
+    response = _create_entity(stack, "l7_schema_pin_entity", fields=["label"])
+    header_request_id = response.headers["x-request-id"]
+    body_request_id = response.json()["request_id"]
+    assert header_request_id == body_request_id
+    stack.router.flush()
+    event = _latest_audit_event_for(stack.router, body_request_id)
+    assert event.event_class == "schema_change"
 
 
 # ---------------------------------------------------------------------------

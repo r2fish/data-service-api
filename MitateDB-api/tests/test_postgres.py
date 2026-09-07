@@ -28,6 +28,7 @@ skip (design R-8's own "skip 禁止" condition, mirroring r2db-api's
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import subprocess
@@ -334,6 +335,37 @@ def sessions_for(cell: ApplicationCell, app_id: str):
     return developer, runtime
 
 
+# ---------------------------------------------------------------------------
+# WP-3e rework T3 (N-1, ruling `{scratchpad}/rulings-r3-r7-flip.md`):
+# `backend_postgres.py`/`backend_sqlite.py`'s OWN internal `validate_
+# identifier(collection, ...)` calls -- the backends' own cell-mirroring
+# checks (WP-3e T2, git log "identifier / predicate fields are request
+# paths") -- now pass `"entity"`, the SAME contract-vocabulary word `cell.
+# py::ApplicationCell._identifier`'s own call sites already pass for this
+# exact position (`identifiers.py::validate_identifier`'s own docstring:
+# "`field` is `label` itself...cell.py's own call sites...stop passing a
+# generic, position-blind literal like the pre-rework bare `"collection"`
+# "), never the stale bare `"collection"` literal these two backend files
+# alone still carried. `ApplicationCell._identifier` already validates
+# every collection name (as `"entity"`) BEFORE either backend method below
+# is ever reached through the normal cell-mediated path, so this test
+# reaches the backend's OWN check directly (a raw `PostgresBackend.field_
+# types(...)` call, bypassing `ApplicationCell` entirely) -- proving the
+# label even though ordinary traffic can never actually trigger it (N-1:
+# "到達性が無くても契約語に揃える").
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_backend_identifier_violation_label_is_entity_not_collection(app_a) -> None:
+    backend = PostgresBackend(runtime_dsn=app_a.runtime_dsn, developer_dsn=app_a.developer_dsn)
+    try:
+        with pytest.raises(ValidationError) as ctx:
+            backend.field_types("not a valid identifier!")
+        assert ctx.value.details["field"] == "entity"
+    finally:
+        backend.close()
+
+
 # --- same-semantics tests (both backends, R-3's own regression claim) -----
 
 
@@ -380,6 +412,9 @@ def test_transact_only_executes_insert_and_rolls_back_the_whole_batch_on_failure
         from mitatedb_api.errors import CapabilityError
         updated = runtime.transact([{"type": "update", "collection": "notes", "values": {"title": "x"},
                                      "filters": [Filter("title", "eq", "first")]}])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST (here,
+        # only) item's own result dict now also carries `request_id`.
+        assert updated[-1].pop("request_id")
         assert updated == [{"updated": 0}]  # "first" was rolled back above; nothing to match
         # `upsert` alone remains a real capability gap -- no execution path
         # for it exists anywhere on this peer, batched or not.
@@ -419,6 +454,13 @@ def test_transact_executes_mixed_insert_update_delete_atomically(app_a) -> None:
         assert len(results) == 3
         assert "rowid" in results[0]
         assert results[1] == {"updated": 1}
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST item's own
+        # result dict now also carries `request_id` (folded in, in place,
+        # by `cell.py::ApplicationCell.transact`, never a new trailing
+        # list entry -- see that method's own comment for why) -- checked
+        # for presence, then popped before the exact-shape assert below,
+        # which stays a precise pin of the REST of the shape.
+        assert results[2].pop("request_id")
         assert results[2] == {"deleted": 1}
         rows = {row["rank"]: row["title"] for row in runtime.read("widgets")}
         assert rows == {1: "renamed", 3: "brand-new"}
@@ -570,6 +612,10 @@ def test_transact_batch_delete_accepts_an_empty_values_key(app_a) -> None:
             {"type": "delete", "collection": "widgets", "values": {},
              "filters": [Filter("title", "eq", "keep-me")], "destructive": True, "confirm": phrase},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): see the identical
+        # comment above this test's own sibling assertion for why the
+        # LAST item's own dict now also carries `request_id`.
+        assert result[-1].pop("request_id")
         assert result == [{"deleted": 1}]
         assert runtime.read("widgets") == []
     finally:
@@ -769,6 +815,10 @@ def test_transact_cross_entity_delete_wrong_entity_phrase_is_refused(app_a) -> N
             {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
              "destructive": True, "confirm": phrase_b},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): see the identical
+        # comment above this test's own sibling assertion for why the
+        # LAST item's own dict now also carries `request_id`.
+        assert result[-1].pop("request_id")
         assert result == [{"deleted": 1}, {"deleted": 1}]
         assert runtime.read("phrase_a") == []
         assert runtime.read("phrase_b") == []
@@ -1161,6 +1211,70 @@ def test_type_mismatched_values_are_rejected_deterministically_and_never_poison_
         assert rows[0]["label"] == "ok"
         assert rows[0]["flag"] == 1
         assert len(runtime.read("typed")) == 2
+    finally:
+        close_cell(cell)
+
+
+# --- 追補 4 O-2 (版フリップ監査 §5/§15, `{scratchpad}/rulings-r3-r7-flip. --
+# --- md`): embedded NUL / lone surrogate / int32/int64 RANGE denials -------
+# --- reached from a NORMAL client request must carry the 4-key form -------
+
+
+def test_postgres_only_value_domain_denials_reachable_from_a_normal_client_request_carry_the_4_key_form(app_a) -> None:
+    """The two PostgreSQL-only value-domain conditions with NO SQLite
+    equivalent (`tests/test_denial_details_and_request_id.py`'s own
+    sibling test covers the two conditions both backends share: lone
+    surrogate, out-of-range integer) -- embedded NUL, and the
+    int32-range (`boolean` field type's own physical `INTEGER` column)
+    bound -- reached via `runtime.insert`/`runtime.read` exactly as an
+    ordinary client would, never a direct `_validate_value_domain`/
+    `encode_value` call. Before this WP's own closure fix these returned
+    `VALIDATION_FAILED` with an EMPTY `details` (版フリップ監査 §5's own
+    finding, the http+postgres plug's 3 probed cases); now they must
+    carry `violated_declaration: field_type` plus the full type-pair
+    (`declared_type`/`observed_type`) and a request-internal `field`."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("domain_probe_pg", {"label": "text", "flag": "boolean", "n": "integer"})
+
+        with pytest.raises(ValidationError) as ctx:
+            runtime.insert("domain_probe_pg", {"label": "a\x00b"})
+        details = ctx.value.details
+        assert details["violated_declaration"] == "field_type"
+        assert details["declared_type"] == "string"
+        assert details["observed_type"] == "string"
+        assert details["field"] == "operations/0/values/label"
+
+        with pytest.raises(ValidationError) as ctx:
+            runtime.insert("domain_probe_pg", {"label": "\ud800"})
+        details = ctx.value.details
+        assert details["violated_declaration"] == "field_type"
+        assert details["declared_type"] == "string"
+        assert details["field"] == "operations/0/values/label"
+
+        for big in (2 ** 80, -(2 ** 80)):
+            with pytest.raises(ValidationError) as ctx:
+                runtime.insert("domain_probe_pg", {"n": big})
+            details = ctx.value.details
+            assert details["violated_declaration"] == "field_type"
+            assert details["declared_type"] == "integer"
+            assert details["observed_type"] == "integer"
+            assert details["field"] == "operations/0/values/n"
+
+        # `_bind_filters`'s own predicate-value choke point (`where/<i>/
+        # value`), not a values path -- same gate, different caller.
+        with pytest.raises(ValidationError) as ctx:
+            runtime.read("domain_probe_pg", filters=[Filter("n", "eq", 2 ** 80)])
+        details = ctx.value.details
+        assert details["violated_declaration"] == "field_type"
+        assert details["field"] == "where/0/value"
+
+        # Connection recovery: every rejection above must leave the cell
+        # usable for ordinary operations afterward, matching this file's
+        # own established B-1 (ii) precedent.
+        runtime.insert("domain_probe_pg", {"label": "ok", "flag": True, "n": 1})
+        assert len(runtime.read("domain_probe_pg")) == 1
     finally:
         close_cell(cell)
 
@@ -2856,3 +2970,98 @@ def test_missing_field_types_registry_is_storage_configuration_error_not_validat
             close_cell(cell)
     finally:
         deprovision_app(platform, "no_registry_probe")
+
+
+# ---------------------------------------------------------------------------
+# 追補 4 O-4 (M-6 の Postgres 脚, 版フリップ監査 §7/§16, `{scratchpad}/
+# rulings-r3-r7-flip.md`): the SAME "a stored idempotency record with no
+# `request_id` is treated as absent" guarantee `tests/test_denial_details_
+# and_request_id.py::test_idempotency_record_without_request_id_on_
+# mutation_is_treated_as_absent`/`..._on_schema_op_...` pin on the
+# in-memory `SQLiteBackend`, now also pinned directly against a real
+# PostgreSQL `PostgresBackend` -- the audit found the mechanism (`cell.py`'s
+# own `has_request_id` gate, backend-independent) implemented but
+# unproven on this backend. Manipulates the real `public._mdb_idempotency`
+# row directly (mirrors this file's own `test_missing_field_types_
+# registry_...` precedent immediately above for reaching into the real
+# database) rather than through any backend-private Python attribute
+# (`PostgresBackend` has no in-process dict like `SQLiteBackend._
+# idempotency` to poke).
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_idempotency_record_without_request_id_on_mutation_is_treated_as_absent(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("o4idem_probe", {"title": "text"})
+        key = "o4-pg-idem-mutation-key"
+        first = runtime.transact(
+            [{"type": "insert", "collection": "o4idem_probe", "values": {"title": "a"}, "idempotency_key": key}])
+        assert first[-1]["request_id"]
+
+        with cell._backend._runtime.cursor() as cur:
+            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+            (response_json,) = cur.fetchone()
+            stored = json.loads(response_json)
+            del stored[-1]["request_id"]
+            cur.execute(
+                "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
+                [json.dumps(stored), key],
+            )
+        cell._backend._runtime.commit()
+
+        rows_before = runtime.read("o4idem_probe")
+        second = runtime.transact(
+            [{"type": "insert", "collection": "o4idem_probe", "values": {"title": "a"}, "idempotency_key": key}])
+        rows_after = runtime.read("o4idem_probe")
+
+        # A genuine re-execution happened (a second row was inserted),
+        # never a replay of the stripped record.
+        assert len(rows_after) == len(rows_before) + 1
+        assert second[-1]["request_id"]
+        assert second[-1]["request_id"] != first[-1]["request_id"]
+
+        # `ON CONFLICT (key) DO UPDATE` (`_write_idempotency_row`) means
+        # the record itself was overwritten by the fresh execution's own
+        # write, and now carries `request_id` again.
+        with cell._backend._runtime.cursor() as cur:
+            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+            (updated_json,) = cur.fetchone()
+        cell._backend._runtime.commit()
+        updated = json.loads(updated_json)
+        assert updated[-1]["request_id"] == second[-1]["request_id"]
+    finally:
+        close_cell(cell)
+
+
+def test_postgres_idempotency_record_without_request_id_on_schema_op_is_treated_as_absent(app_a) -> None:
+    """Mirrors the mutation-level test above for the SCHEMA side -- a
+    resend re-executes `add_field` as a genuinely new attempt, observed
+    here as a `ConflictError` from the second, real attempt to add a
+    field name that already exists (the tell-tale sign this was NOT
+    answered from the stripped record, which would have returned
+    successfully with no error at all)."""
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("o4idem_probe_2", {"title": "text"})
+        key = "o4-pg-idem-schema-key"
+        first = developer.add_field("o4idem_probe_2", "o4_field", "text", idempotency_key=key)
+        assert first["request_id"]
+
+        with cell._backend._developer.cursor() as cur:
+            cur.execute("SELECT response_json FROM public._mdb_idempotency WHERE key = %s", [key])
+            (response_json,) = cur.fetchone()
+            stored = json.loads(response_json)
+            del stored["request_id"]
+            cur.execute(
+                "UPDATE public._mdb_idempotency SET response_json = %s WHERE key = %s",
+                [json.dumps(stored), key],
+            )
+        cell._backend._developer.commit()
+
+        with pytest.raises(ConflictError):
+            developer.add_field("o4idem_probe_2", "o4_field", "text", idempotency_key=key)
+    finally:
+        close_cell(cell)

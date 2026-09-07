@@ -42,7 +42,8 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      DestructiveConfirmationRequired, FoundationError,
                      NotFoundError, PlatformUpgradePending,
                      PreconditionFailedError, ResourceLimitError,
-                     StorageConfigurationError, ValidationError)
+                     StorageConfigurationError, ValidationError,
+                     observed_type_of, violation)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
@@ -339,16 +340,132 @@ class RequestByteBoundMiddleware:
 # --------------------------------------------------------------------------
 
 
-def _check_object_shape(value: Any, schema: Mapping[str, Any], *, label: str) -> Mapping[str, Any]:
+def _schema_property_type_name(schema: Mapping[str, Any], key: str) -> "str | None":
+    """The `declared_type` word (design D-3 (2): field-type vocabulary,
+    or the JSON type this contract's own request schema names) for a
+    `schema`'s `properties[key].type` -- a bare string (`"string"`) or a
+    `[type, "null"]` pair (this contract's own optional-property
+    convention). Falls back to `None` (key omitted from the resulting
+    `details`) when the property schema names no single JSON type --
+    mirrors r2db-api's own `http._schema_property_type_name`."""
+    prop = schema.get("properties", {}).get(key)
+    if not isinstance(prop, dict):
+        return None
+    raw = prop.get("type")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        non_null = [t for t in raw if t != "null"]
+        if len(non_null) == 1 and isinstance(non_null[0], str):
+            return non_null[0]
+    return None
+
+
+def _schema_property_type_mismatch(value: Any, prop: Any) -> bool:
+    """WP-3e rework T2 (追補 L-4): does `value`'s own JSON type fail to
+    match `prop["type"]` (a bare string, or this contract's `[type,
+    "null"]` union convention -- `_schema_property_type_name`'s own
+    sibling reader)? A property schema naming no single JSON type at all
+    (a `$ref` object like `QueryRequest.page`, or an `enum`-only scalar
+    like `SchemaOperationRequest.operation`) never mismatches here --
+    this leg is deliberately confined to a JSON TYPE violation, never an
+    enum-membership or nested-shape one (those stay exactly where they
+    already lived, downstream of this shape layer)."""
+    if not isinstance(prop, dict):
+        return False
+    raw = prop.get("type")
+    if isinstance(raw, str):
+        allowed = {raw}
+    elif isinstance(raw, list):
+        allowed = {t for t in raw if isinstance(t, str)}
+    else:
+        return False
+    if not allowed:
+        return False
+    return observed_type_of(value) not in allowed
+
+
+def _check_object_shape(
+    value: Any, schema: Mapping[str, Any], *, label: str, own_path: "str | None" = None,
+) -> Mapping[str, Any]:
+    """Reject unknown top-level fields and missing required fields per
+    `schema`.
+
+    Phase 9 WP-3e (design D-3, V-3/V-6): every denial here is `violated_
+    declaration: request_schema` (`errors.details_vocabulary`) -- mirrors
+    r2db-api's own `http._check_object_shape` (task brief: "同型に揃え
+    る"). `own_path` is this VALUE's own request-internal path (`None`
+    for the request body itself; `"page"` for the nested `QueryRequest.
+    page` object; `f"operations/{i}"` for one batch item) and a child
+    key's own path is `own_path + "/" + key` (or the bare `key` at the
+    top level). `field` is carried only when the violation is
+    attributable to exactly ONE position (D-3 (4)): a lone unknown
+    field, a lone missing required field, or `value` itself failing the
+    object check. `declared_type`/`observed_type` are carried only for a
+    VALUE-type violation (`value` itself is not an object, or a required
+    field is entirely absent) -- never for an unknown-field denial (D-3
+    (4): the contract's request schema names no type for a field it
+    does not know)."""
     if not isinstance(value, dict):
-        raise ValidationError(f"{label} must be an object")
+        raise ValidationError(
+            f"{label} must be an object",
+            details=violation(
+                "request_schema", field=own_path, declared_type="object", observed_type=observed_type_of(value),
+            ),
+        )
     allowed = set(schema.get("properties", {}))
     extra = set(value) - allowed
     if extra:
-        raise ValidationError(f"{label} contains unsupported fields: {sorted(extra)}")
+        sole = next(iter(extra)) if len(extra) == 1 else None
+        field = (f"{own_path}/{sole}" if own_path else sole) if sole is not None else None
+        raise ValidationError(
+            f"{label} contains unsupported fields: {sorted(extra)}",
+            details=violation("request_schema", field=field),
+        )
     missing = set(schema.get("required", [])) - set(value)
     if missing:
-        raise ValidationError(f"{label} is missing required fields: {sorted(missing)}")
+        sole = next(iter(missing)) if len(missing) == 1 else None
+        if sole is not None:
+            field = f"{own_path}/{sole}" if own_path else sole
+            raise ValidationError(
+                f"{label} is missing required fields: {sorted(missing)}",
+                details=violation(
+                    "request_schema", field=field,
+                    declared_type=_schema_property_type_name(schema, sole), observed_type="absent",
+                ),
+            )
+        raise ValidationError(
+            f"{label} is missing required fields: {sorted(missing)}",
+            details=violation("request_schema"),
+        )
+    # WP-3e rework T2 (追補 L-4): the leg this function used to lack --
+    # a key that IS declared by `schema` and IS present in `value`, whose
+    # own VALUE's JSON type does not match what `schema` declares for it
+    # (design D-3 (2)/(4)'s own "値の型の違反のときだけ型対" rule, V-6
+    # applied to this shape layer, not only to `cell.py`'s downstream
+    # choke points). Checked in a stable (sorted) key order so a request
+    # violating more than one property's type still reports the SAME one
+    # deterministically. `missing`-before-`value` (checked above, D-2 (3)
+    # "検査順序は欠落検査 -> 値検査") already guarantees every key this
+    # loop inspects is genuinely present, never `absent`. Before this
+    # leg existed, a request like `{"select": "abc"}` sailed through this
+    # function unchecked (a known JSON type property carrying the WRONG
+    # JSON type is not "unknown" and not "missing") and reached a later
+    # choke point with no `details` at all, or -- worse, `values: "x"`,
+    # `dict("x")` -- an unhandled exception before any `ValidationError`
+    # was ever raised.
+    for key in sorted(value):
+        prop = schema.get("properties", {}).get(key)
+        if _schema_property_type_mismatch(value[key], prop):
+            field = f"{own_path}/{key}" if own_path else key
+            raise ValidationError(
+                f"{label}.{key} has the wrong type",
+                details=violation(
+                    "request_schema", field=field,
+                    declared_type=_schema_property_type_name(schema, key),
+                    observed_type=observed_type_of(value[key]),
+                ),
+            )
     return value
 
 
@@ -368,16 +485,24 @@ def _deny_provisional_field(field_name: str) -> None:
     `idempotency_key` remain `unavailable` (WP-3d/WP-3c), so accepting
     either of THOSE and silently ignoring it would still be a P-3
     violation (declaration says `unavailable`, behavior accepts the
-    field). `details` is set directly
-    on the raised instance (rather than a new `CapabilityError.__init__`
-    parameter) so this gate does not preempt WP-3e's own planned `details`
-    attribute rollout for `CapabilityError`/`ValidationError` (D-3 (5));
+    field).
+
+    Phase 9 WP-3e (design D-3 (5), V-7): `details` is now passed through
+    `CapabilityError.__init__` itself -- the attribute-assignment escape
+    hatch this function's own pre-WP-3e docstring described (`err.details
+    = {...}` after construction) is gone. Every 1.7.0 capability this
+    gate ever covered is `enabled` as of this WP (`_PROVISIONAL_
+    UNSUPPORTED_*_FIELDS` below are all empty tuples), so this function
+    currently has no reachable call site -- left in place, undeleted, as
+    the standing mechanism the next provisional capability would reuse
+    (mirrors `cell.py`'s identical in-process counterpart).
     `_problem_for_exception` already surfaces any `getattr(exc, "details",
     None)` regardless of how it was set.
     """
-    err = CapabilityError(f"{field_name} is not supported by this peer")
-    err.details = {"violated_declaration": "capability", "field": field_name}
-    raise err
+    raise CapabilityError(
+        f"{field_name} is not supported by this peer",
+        details={"violated_declaration": "capability", "field": field_name},
+    )
 
 
 # Phase 9 WP-3b: `dry_run`/`plan` removed -- `post_mutate`/`post_cross_
@@ -415,9 +540,11 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
     try:
         payload = await request.json()
     except json.JSONDecodeError as exc:
-        raise ValidationError("request body must be valid JSON") from exc
+        raise ValidationError(
+            "request body must be valid JSON", details=violation("request_schema"),
+        ) from exc
     if not isinstance(payload, dict):
-        raise ValidationError("request body must be a JSON object")
+        raise ValidationError("request body must be a JSON object", details=violation("request_schema"))
     return payload
 
 
@@ -633,16 +760,19 @@ _CONTRACT_FIELD_TYPE_TO_MITATEDB = {
 _SCHEMA_OPERATIONS = {"create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"}
 
 
-def _predicate_to_filter(item: Any) -> Filter:
-    _check_object_shape(item, _DEFINITIONS["Predicate"], label="where item")
+def _predicate_to_filter(item: Any, *, own_path: "str | None" = None) -> Filter:
+    _check_object_shape(item, _DEFINITIONS["Predicate"], label="where item", own_path=own_path)
     return Filter(item["field"], item["operator"], item.get("value"))
 
 
 def _order_items(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
-        raise ValidationError("order_by must be an array")
-    for item in raw:
-        _check_object_shape(item, _DEFINITIONS["Order"], label="order_by item")
+        raise ValidationError(
+            "order_by must be an array",
+            details=violation("request_schema", field="order_by", declared_type="array", observed_type=observed_type_of(raw)),
+        )
+    for index, item in enumerate(raw):
+        _check_object_shape(item, _DEFINITIONS["Order"], label="order_by item", own_path=f"order_by/{index}")
     return raw
 
 
@@ -693,7 +823,10 @@ async def post_query(request: Request) -> Response:
 
     select = body["select"]
     where_raw = body.get("where")
-    filters = [_predicate_to_filter(item) for item in where_raw] if where_raw is not None else None
+    filters = (
+        [_predicate_to_filter(item, own_path=f"where/{i}") for i, item in enumerate(where_raw)]
+        if where_raw is not None else None
+    )
 
     order_by_raw = body.get("order_by")
     order_by = _order_items(order_by_raw) if order_by_raw is not None else None
@@ -701,7 +834,7 @@ async def post_query(request: Request) -> Response:
     page = body.get("page")
     page_size = None
     if page is not None:
-        _check_object_shape(page, _DEFINITIONS["Page"], label="page")
+        _check_object_shape(page, _DEFINITIONS["Page"], label="page", own_path="page")
         if "cursor" in page:
             # WP-3 design decision (reported to the requester): `page.
             # cursor` has no implementation on this peer -- there is no
@@ -718,7 +851,10 @@ async def post_query(request: Request) -> Response:
             # actually presented, after shape/auth, before execution).
             # Left to a future capability-envelope decision whether to
             # implement cursor pagination at all (design v1.2 §7 ledger).
-            raise CapabilityError("page.cursor is not supported by this peer")
+            raise CapabilityError(
+                "page.cursor is not supported by this peer",
+                details=violation("capability", field="page/cursor"),
+            )
         if "size" in page:
             page_size = page["size"]
 
@@ -726,13 +862,22 @@ async def post_query(request: Request) -> Response:
     # for real -- `ApplicationRuntime.read` (`cell.py`) is what turns it
     # into `effective_limits` (`config.narrow_limits_by_budget`,
     # `endpoint_kind="query"`) and validates it.
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `request_id` on the
+    # response is `_request_id(request)` -- the SAME per-request value
+    # already passed into `session.read` above (this layer's own uuid,
+    # minted once at the ASGI middleware, never regenerated here) --
+    # `ApplicationCell.read` has no return-shape room to echo a value
+    # back through (a bare row list, unlike `transact`'s/the schema
+    # methods' own dict/list-with-envelope returns), so this endpoint
+    # reads its own already-held local value instead of `rows`.
     rows = session.read(entity, fields=list(select), filters=filters, order_by=order_by, limit=page_size,
                         request_id=_request_id(request), budget=body.get("budget"))
-    return JSONResponse({"items": rows, "next_page": None}, status_code=200)
+    return JSONResponse({"items": rows, "next_page": None, "request_id": _request_id(request)}, status_code=200)
 
 
-def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    _check_object_shape(raw, _DEFINITIONS["Mutation"], label="mutation operation")
+def _mutation_item(entity: str, raw: Mapping[str, Any], *, index: int) -> dict[str, Any]:
+    own_path = f"operations/{index}"
+    _check_object_shape(raw, _DEFINITIONS["Mutation"], label="mutation operation", own_path=own_path)
     # Phase 9 WP-3b rework (M-6): `values` is unconditionally present here
     # (`raw.get("values") or {}`, never conditional on `"values" in raw`)
     # -- this is this peer's own INTERNAL execution-item vocabulary
@@ -746,7 +891,9 @@ def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     # execution item itself always carries.
     item: dict[str, Any] = {"type": raw["operation"], "collection": entity, "values": dict(raw.get("values") or {})}
     if "where" in raw:
-        item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
+        item["filters"] = [
+            _predicate_to_filter(w, own_path=f"{own_path}/where/{i}") for i, w in enumerate(raw["where"])
+        ]
     if "expected_revision" in raw:
         item["expected_revision"] = raw["expected_revision"]
     if "unique_key" in raw:
@@ -784,7 +931,7 @@ def _mutation_digest_item(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _mutation_outcome(items: list[dict[str, Any]], results: list[Any], *,
-                      dry_run: bool = False) -> tuple[int, bool, str | None]:
+                      dry_run: bool = False) -> tuple[int, bool, str | None, str | None]:
     """Phase 9 WP-3b: shared by `post_mutate`/`post_cross_entity_mutate`
     -- `affected` exactly as both computed it before this WP (`zip`
     truncates to `len(items)`, so this is unaffected by `cell.py::
@@ -792,6 +939,15 @@ def _mutation_outcome(items: list[dict[str, Any]], results: list[Any], *,
     present -- one entry PAST the last real per-item result). `committed`/
     `plan` are read off that trailing envelope (a dict `transact()` itself
     never returns for a real, non-dry-run request, design D-4 (4)).
+
+    Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `request_id` is this
+    tuple's new 4th element, read off the SAME `envelope` -- for a dry
+    run that is the trailing envelope `cell.py::ApplicationCell.transact`
+    always appends; for a real commit, `results[-1]` IS one real
+    operation's own per-item dict, but `cell.py`'s own commit path now
+    folds `request_id` into it, in place (never a new trailing entry
+    there, unlike the dry-run envelope -- see that method's own comment
+    for why: `len(results)` is load-bearing for the pre-v1.13 port).
 
     Rework (Minor m-4, review): `committed`'s own default is `not
     dry_run` -- matching the in-process port's own identical `envelope.
@@ -813,7 +969,7 @@ def _mutation_outcome(items: list[dict[str, Any]], results: list[Any], *,
         elif isinstance(result, dict):
             affected += result.get("updated", result.get("deleted", 0))
     envelope = results[-1] if results and isinstance(results[-1], dict) else {}
-    return affected, envelope.get("committed", not dry_run), envelope.get("plan")
+    return affected, envelope.get("committed", not dry_run), envelope.get("plan"), envelope.get("request_id")
 
 
 @_endpoint
@@ -850,14 +1006,29 @@ async def post_mutate(request: Request) -> Response:
         # declaration, unchanged) -- `transact()` has no partial-result
         # execution mode at all; presenting `best_effort` is a real,
         # optional-target-shape refusal, not a malformed request.
-        raise CapabilityError("best_effort transactions are not supported by this peer")
+        raise CapabilityError(
+            "best_effort transactions are not supported by this peer",
+            details=violation("capability", field="transaction"),
+        )
     if transaction != "atomic":
-        raise ValidationError("transaction mode is not supported")
+        # An out-of-vocabulary `transaction` value entirely (neither
+        # `atomic` nor `best_effort`, the contract's own 2-member enum) --
+        # `request_schema`, not `capability` (mirrors the analogous
+        # distinction `cell.py::_plan_operation`'s own final fallback
+        # draws between an unimplemented-but-real vocabulary member and a
+        # value outside the vocabulary altogether).
+        raise ValidationError(
+            "transaction mode is not supported",
+            details=violation("request_schema", field="transaction"),
+        )
 
     operations = body.get("operations")
     if not isinstance(operations, list) or not operations:
-        raise ValidationError("operations must be a non-empty array")
-    items = [_mutation_item(entity, op) for op in operations]
+        raise ValidationError(
+            "operations must be a non-empty array",
+            details=violation("request_schema", field="operations"),
+        )
+    items = [_mutation_item(entity, op, index=i) for i, op in enumerate(operations)]
     # `digest_items` (WP-3b closure, H-2): the SAME `operations` list,
     # built into the CONTRACT-shaped digest object instead of the
     # execution item `_mutation_item` builds -- see `_mutation_digest_
@@ -900,14 +1071,20 @@ async def post_mutate(request: Request) -> Response:
         # points converge correctly either way).
         idempotency_key=body.get("idempotency_key"), budget=body.get("budget"),
     )
-    affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
+    affected, committed, plan_token, mutation_request_id = _mutation_outcome(
+        items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
     if plan_token is not None:
         response["plan"] = plan_token
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `mutation_request_id`
+    # -- the SAME value `cell.py::ApplicationCell.transact` resolved and
+    # used for this request's own audit event -- never `_request_id
+    # (request)` again here (this layer does not regenerate).
+    response["request_id"] = mutation_request_id
     return JSONResponse(response, status_code=200)
 
 
-def _scoped_mutation_item(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _scoped_mutation_item(raw: Mapping[str, Any], *, index: int) -> dict[str, Any]:
     """P35 WP-2 (R-3, design docs/design/PHASE35_CROSS_ENTITY_AND_
     CONTRACT_130_V1.md §2): the cross-entity counterpart of
     `_mutation_item` above -- reads `entity` from EACH operation itself
@@ -920,12 +1097,15 @@ def _scoped_mutation_item(raw: Mapping[str, Any]) -> dict[str, Any]:
     `_mutation_item` lets it, so `transact()`'s own single choke refuses
     it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal
     at this layer."""
-    _check_object_shape(raw, _DEFINITIONS["ScopedMutation"], label="cross-entity mutation operation")
+    own_path = f"operations/{index}"
+    _check_object_shape(raw, _DEFINITIONS["ScopedMutation"], label="cross-entity mutation operation", own_path=own_path)
     # Phase 9 WP-3b rework (M-6/G-1): same reasoning as `_mutation_item`'s
     # own identical comment -- `values` always present.
     item: dict[str, Any] = {"type": raw["operation"], "collection": raw["entity"], "values": dict(raw.get("values") or {})}
     if "where" in raw:
-        item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
+        item["filters"] = [
+            _predicate_to_filter(w, own_path=f"{own_path}/where/{i}") for i, w in enumerate(raw["where"])
+        ]
     if "expected_revision" in raw:
         item["expected_revision"] = raw["expected_revision"]
     if "unique_key" in raw:
@@ -969,8 +1149,11 @@ async def post_cross_entity_mutate(request: Request) -> Response:
 
     operations = body.get("operations")
     if not isinstance(operations, list) or not operations:
-        raise ValidationError("operations must be a non-empty array")
-    items = [_scoped_mutation_item(op) for op in operations]
+        raise ValidationError(
+            "operations must be a non-empty array",
+            details=violation("request_schema", field="operations"),
+        )
+    items = [_scoped_mutation_item(op, index=i) for i, op in enumerate(operations)]
     # `digest_items` (WP-3b closure, H-1/H-2): built straight from `raw`
     # per operation -- `ScopedMutation` already names `entity` as one of
     # its own contract properties, so each digest item carries its own
@@ -987,10 +1170,16 @@ async def post_cross_entity_mutate(request: Request) -> Response:
         digest_operations=digest_items,
         idempotency_key=body.get("idempotency_key"), budget=body.get("budget"),
     )
-    affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
+    affected, committed, plan_token, mutation_request_id = _mutation_outcome(
+        items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
     if plan_token is not None:
         response["plan"] = plan_token
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `mutation_request_id`
+    # -- the SAME value `cell.py::ApplicationCell.transact` resolved and
+    # used for this request's own audit event -- never `_request_id
+    # (request)` again here (this layer does not regenerate).
+    response["request_id"] = mutation_request_id
     return JSONResponse(response, status_code=200)
 
 
@@ -1026,7 +1215,15 @@ async def post_schema(request: Request) -> Response:
     # name.
     schema_operation = body.get("operation")
     if schema_operation not in _SCHEMA_OPERATIONS:
-        raise ValidationError("unsupported schema operation")
+        # A value outside the contract's own 6-member `operation` enum
+        # entirely -- `_check_object_shape` above does not validate enum
+        # membership (only top-level key presence), so a genuinely
+        # unrecognized string still reaches here; `request_schema`, not
+        # `capability` (mirrors `post_mutate`'s own analogous "out-of-
+        # vocabulary transaction value" distinction above).
+        raise ValidationError(
+            "unsupported schema operation", details=violation("request_schema", field="operation"),
+        )
     entity = body["entity"]
 
     # Contract `endpoints.schema.auth`: "developer" -- the WHOLE endpoint
@@ -1086,7 +1283,10 @@ async def post_schema(request: Request) -> Response:
         # shaped key before execution" discipline `cell.py`'s own
         # `_TRANSACT_INSERT_KEYS` already applies to `transact()`.
         if "field_type" in body:
-            raise CapabilityError("create_entity cannot honor a request-level field_type for its fields array")
+            raise CapabilityError(
+                "create_entity cannot honor a request-level field_type for its fields array",
+                details=violation("capability", field="field_type"),
+            )
         fields_raw = body.get("fields")
         field_types_raw = body.get("field_types")
         # Phase 6 WP-3 (design D-3, decision (iv)): `field_types` is an
@@ -1097,7 +1297,9 @@ async def post_schema(request: Request) -> Response:
         # own description: "none of the three is silently ignored").
         if field_types_raw is not None and fields_raw is None:
             # (c) field_types sent without fields.
-            raise ValidationError("field_types requires fields to be present")
+            raise ValidationError(
+                "field_types requires fields to be present", details=violation("request_schema", field="field_types"),
+            )
         # P3-D1 (design §0 exception, WP-1): the contract's `fields` on
         # `create_entity` is a bare array of NAMES (no per-field
         # `field_type` slot on `fields` itself) -- `SchemaOperationRequest.
@@ -1106,7 +1308,9 @@ async def post_schema(request: Request) -> Response:
         # (plural, this WP) is the per-field carrier instead.
         if fields_raw is not None:
             if not isinstance(fields_raw, list) or not fields_raw:
-                raise ValidationError("fields must be a non-empty array")
+                raise ValidationError(
+                    "fields must be a non-empty array", details=violation("request_schema", field="fields"),
+                )
             # Defensive, pre-execution shape check: a non-string (or
             # unhashable) element here would otherwise raise a raw
             # `TypeError` building the dict below, escaping as an
@@ -1116,20 +1320,45 @@ async def post_schema(request: Request) -> Response:
             # entity is created either way (this check exists for correct
             # classification, not for structural-integrity safety, which
             # already held without it).
-            for item in fields_raw:
+            for field_index, item in enumerate(fields_raw):
                 if not isinstance(item, str):
-                    raise ValidationError("each field name must be a string")
+                    raise ValidationError(
+                        "each field name must be a string",
+                        details=violation(
+                            "request_schema", field=f"fields/{field_index}",
+                            declared_type="string", observed_type=observed_type_of(item),
+                        ),
+                    )
             field_types_map: dict[str, str] = {}
             if field_types_raw is not None:
                 if not isinstance(field_types_raw, dict):
-                    raise ValidationError("field_types must be an object")
+                    raise ValidationError(
+                        "field_types must be an object", details=violation("request_schema", field="field_types"),
+                    )
                 for name, declared_type in field_types_raw.items():
                     if name not in fields_raw:
-                        # (a) field_types names a field not in fields.
-                        raise ValidationError(f"field_types names {name!r}, which is not in fields")
+                        # (a) field_types names a field not in fields --
+                        # a declaration naming a field the request does
+                        # not create, `constraint_declaration`'s own 4th
+                        # named case (mirrors `cell.py`'s identical
+                        # `field_constraints` treatment).
+                        raise ValidationError(
+                            f"field_types names {name!r}, which is not in fields",
+                            details=violation("constraint_declaration", field=f"field_types/{name}"),
+                        )
                     if declared_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
-                        # (b) field_types value outside the vocabulary.
-                        raise ValidationError(f"field_types[{name!r}] is not a supported field_type")
+                        # (b) field_types value outside the 7-word
+                        # vocabulary -- not a violation about the VALUE's
+                        # own JSON type (a syntactically valid string can
+                        # still name no real field-type word), so
+                        # `declared_type`/`observed_type` are omitted, the
+                        # same "unrecognized member of a fixed word list"
+                        # treatment `field_constraints`'s own unknown-key
+                        # denials above already use.
+                        raise ValidationError(
+                            f"field_types[{name!r}] is not a supported field_type",
+                            details=violation("request_schema", field=f"field_types/{name}"),
+                        )
                     field_types_map[name] = declared_type
             # Decision (ii): a field named in `fields` but not in
             # `field_types` (or every field, when `field_types` is absent
@@ -1200,12 +1429,29 @@ async def post_schema(request: Request) -> Response:
             response["descriptor"] = result["descriptor"]
         if result.get("plan") is not None:
             response["plan"] = result["plan"]
+        # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `result["request_id"]`
+        # -- the SAME value `cell.py`'s own schema-operation methods
+        # resolved and used for this request's own audit event -- never
+        # `_request_id(request)` again here (this layer does not
+        # regenerate).
+        response["request_id"] = result["request_id"]
         return JSONResponse(response, status_code=200)
 
     if schema_operation == "add_field":
         field = body.get("field")
         if not isinstance(field, str):
-            raise ValidationError("add_field requires field")
+            # `field` is globally optional on `SchemaOperationRequest`
+            # (only `operation`/`entity` are `required`) but conditionally
+            # required for THIS operation -- `observed_type` is `absent`
+            # when the request omitted the key entirely, the value's own
+            # JSON type otherwise (design D-3 (2)'s "欠落" convention).
+            raise ValidationError(
+                "add_field requires field",
+                details=violation(
+                    "request_schema", field="field", declared_type="string",
+                    observed_type="absent" if "field" not in body else observed_type_of(field),
+                ),
+            )
         field_type_raw = body.get("field_type")
         # WP-3a rework 3 (real, measured bug): `SchemaOperationRequest.
         # field_type` is NOT globally `required` (only `operation`/`entity`
@@ -1229,7 +1475,14 @@ async def post_schema(request: Request) -> Response:
         # translation). A field_type that IS present and outside the
         # 7-word vocabulary is still refused, unchanged.
         if field_type_raw is not None and field_type_raw not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
-            raise ValidationError("field_type is not a supported field_type")
+            # Mirrors `create_entity`'s own `field_types[name]`-outside-
+            # vocabulary treatment above: not a value-type violation
+            # (`field_type_raw` may well be a syntactically valid string),
+            # so `declared_type`/`observed_type` are omitted.
+            raise ValidationError(
+                "field_type is not a supported field_type",
+                details=violation("request_schema", field="field_type"),
+            )
         field_type = field_type_raw if field_type_raw is not None else "json"
         # Phase 9 WP-3a (design D-2 (1)): `enum`/`nullable` passed through
         # verbatim -- `cell.py::ApplicationCell.add_field` does the real
@@ -1259,6 +1512,12 @@ async def post_schema(request: Request) -> Response:
             response["descriptor"] = result["descriptor"]
         if result.get("plan") is not None:
             response["plan"] = result["plan"]
+        # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `result["request_id"]`
+        # -- the SAME value `cell.py`'s own schema-operation methods
+        # resolved and used for this request's own audit event -- never
+        # `_request_id(request)` again here (this layer does not
+        # regenerate).
+        response["request_id"] = result["request_id"]
         return JSONResponse(response, status_code=200)
 
     if schema_operation == "alter_field":
@@ -1269,7 +1528,13 @@ async def post_schema(request: Request) -> Response:
         # below, unchanged by this WP.
         field = body.get("field")
         if not isinstance(field, str):
-            raise ValidationError("alter_field requires field")
+            raise ValidationError(
+                "alter_field requires field",
+                details=violation(
+                    "request_schema", field="field", declared_type="string",
+                    observed_type="absent" if "field" not in body else observed_type_of(field),
+                ),
+            )
         # Code review §2 A / 監督裁定 A (2026-09-07): `body.get("enum",
         # UNCHANGED)` -- NOT a plain `body.get("enum")` -- is the one
         # place on the wire this distinction can still be made: `dict.
@@ -1292,6 +1557,12 @@ async def post_schema(request: Request) -> Response:
             response["descriptor"] = result["descriptor"]
         if result.get("plan") is not None:
             response["plan"] = result["plan"]
+        # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): `result["request_id"]`
+        # -- the SAME value `cell.py`'s own schema-operation methods
+        # resolved and used for this request's own audit event -- never
+        # `_request_id(request)` again here (this layer does not
+        # regenerate).
+        response["request_id"] = result["request_id"]
         return JSONResponse(response, status_code=200)
 
     # C-17 present-denial form (design R-8 item 1): `create_index`/
@@ -1299,7 +1570,10 @@ async def post_schema(request: Request) -> Response:
     # this real dispatcher receives and refuses -- never a structural
     # absence on this composition, since the entry point genuinely exists
     # and executes for `create_entity`/`add_field`/`alter_field` above.
-    raise CapabilityError(f"schema operation {schema_operation!r} is not supported by this peer")
+    raise CapabilityError(
+        f"schema operation {schema_operation!r} is not supported by this peer",
+        details=violation("capability", field="operation"),
+    )
 
 
 @_endpoint
@@ -1311,7 +1585,10 @@ async def post_audit_query(request: Request) -> Response:
     # authority for this endpoint and this process holds no control-
     # credential store at all (R-4's own process-role separation).
     _authenticate(request)
-    raise CapabilityError("audit evidence query requires control/audit authority this peer does not expose here")
+    raise CapabilityError(
+        "audit evidence query requires control/audit authority this peer does not expose here",
+        details=violation("capability"),
+    )
 
 
 # --------------------------------------------------------------------------
