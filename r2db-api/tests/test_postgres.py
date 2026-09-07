@@ -2299,7 +2299,9 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: t
         # Contract 1.7.0 (D-3, WP-2e): see `test_foundation.py`'s identical
         # comment -- a typed field's NUL-byte refusal is `field_type`
         # (`declared_type`/`observed_type` both the field's own type); the
-        # untyped field ("u") has no declared type and keeps the bare form.
+        # untyped field ("u") has `violated_declaration: request_schema`
+        # instead (WP-2e rework, audit-wp2e.md D-1 = (A)/ruling L-1: every
+        # choke-point site now carries `violated_declaration`).
         declared_types = {"s": "string", "o": "object", "a": "array"}
         for field_name, bad_value in bad_values.items():
             with pytest.raises(FoundationError) as exc:
@@ -2312,7 +2314,7 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: t
                     "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
                 }
             else:
-                assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+                assert exc.value.details == {"field": f"operations/0/values/{field_name}", "violated_declaration": "request_schema"}
         assert cell.query("docs", select=["u"], where=[], page_size=10, limits=LIMITS).items == []
     finally:
         cell.close()
@@ -2373,6 +2375,15 @@ def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_fai
     `VALIDATION_FAILED` mapping this test is for: it must never surface as
     `SERVICE_UNAVAILABLE` (a false "retry" signal to an AI agent client),
     and must never leak the value itself into the error.
+
+    WP-2e rework (audit-wp2e.md I-6, ruling L-1 / D-1 = (A)): this is also
+    the completion-condition-6 pin (moved here from `test_denial_details_
+    and_request_id.py`) that `errors.details_vocabulary.layer_rule`'s
+    backend-layer exemption never carries `violated_declaration` -- unlike
+    every choke-point / request-shape site (D-1 = (A) applies the 4-key
+    rule to all 76 of those), `PostgresCell._fail_client_value`'s generic
+    catch cannot attribute a whole-statement `DataError` to one declared
+    field, so it stays a bare `VALIDATION_FAILED` with no `details` at all.
     """
     cell = make_cell(app_a)
     try:
@@ -2383,6 +2394,7 @@ def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_fai
             cell.transact("readings", [{"operation": "insert", "values": {"n": huge}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         assert exc.value.status == 400
+        assert "violated_declaration" not in exc.value.details, exc.value.details
         rendered = repr(exc.value)
         assert str(huge)[:20] not in rendered
         # No side effect.

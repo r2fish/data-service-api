@@ -442,3 +442,100 @@ def test_verify_declarations_output_format_has_one_line_per_check_and_trailing_o
     assert any(line.startswith("FAIL ") for line in out_fail[:-1]), out_fail
     for line in out_fail[:-1]:
         assert line.startswith("OK   ") or line.startswith("FAIL "), line
+
+
+# ===========================================================================
+# F-14 (contract 1.7.0, WP-2e rework `{scratchpad}/audit-wp2e.md` D-2,
+# ruling `{scratchpad}/rulings-r3-r7-flip.md` L-2 = (A)): the ONE part of
+# the rebuilt `check_contract_170_declarations` a real deployment can
+# actually fail through this exact command -- the pre-rework
+# `check_contract_170_resource_limits` could not (audit finding: it built
+# its own default `ResourceLimits()` and checked THAT, so `PlatformDeclarationError(code="F-14")`
+# could never actually be raised via `ops verify-declarations`).
+# ===========================================================================
+
+
+def _provision_app_for_verify(platform: types.SimpleNamespace, slug: str) -> types.SimpleNamespace:
+    """Runs the REAL `0003_provision_application.sql` (rewritten with this
+    platform's own throwaway prefix, mirroring `test_ops_upgrade.py::
+    provision_app`) against `platform.control_dsn` -- not otherwise touched
+    by this file's own `platform` fixture, which only migrates through
+    `0008` and provisions no application by default."""
+    import tempfile
+
+    script_text = (MIGRATIONS_DIR / "0003_provision_application.sql").read_text().replace("r2dbsvc", platform.prefix)
+    script = Path(tempfile.mkdtemp(prefix="r2db_ops_verify_app_")) / "0003_provision_application.sql"
+    script.write_text(script_text)
+    runtime_password = secrets.token_urlsafe(24)
+    developer_password = secrets.token_urlsafe(24)
+    _run_psql(
+        platform.control_dsn, script,
+        {"app_slug": slug, "runtime_password": runtime_password, "developer_password": developer_password},
+    )
+    database = f"{platform.prefix}_app_{slug}"
+    return types.SimpleNamespace(
+        slug=slug, database=database,
+        developer_dsn=_dsn_with(platform.admin_dsn, user=f"{database}_developer", password=developer_password, dbname=database),
+    )
+
+
+def _declare_control_role_as_the_writer(platform: types.SimpleNamespace) -> None:
+    """Reading every application's own ledger (F-14's new per-application
+    check) needs a role with cross-database access -- `platform.
+    control_role` (proven able to do this: `ops upgrade-applications`/
+    `upgrade-status` already read every application's ledger connected as
+    this same role, `test_ops_upgrade.py`'s own `ops_env` fixture). Unlike
+    `api_role`/`controlplane_role`, migration `0008` does not seed
+    `control_role` as a declared audit writer -- done here instead so this
+    test can connect `verify-declarations` AS `control_role` and reach
+    F-14 (the check under test) rather than failing earlier at F-13."""
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '5000ms'").format(sql.Identifier(platform.control_role)))
+            cur.execute(sql.SQL("ALTER ROLE {} SET idle_in_transaction_session_timeout = '5000ms'").format(sql.Identifier(platform.control_role)))
+        conn.commit()
+    _set_row(platform, "audit_writer_roles", [platform.control_role])
+
+
+def test_verify_declarations_f14_fails_when_an_application_has_not_applied_every_upgrade(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Provisions one REAL application (0003 seeds its ledger with
+    `{9, 10, 11}` directly), then deletes upgrade number `10` from that
+    application's own ledger table -- the SAME real-Postgres "construct a
+    hole" technique `test_ops_upgrade.py::test_upgrade_applications_
+    pending_detects_a_hole_not_just_the_max` uses -- to simulate an
+    application whose database has not yet run Phase 9 WP-2a's own
+    per-application upgrade. `ops verify-declarations` must then exit
+    non-zero (F-14's own exit code, 13) and name the lagging application,
+    never a silent `OK F-14`."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    app = _provision_app_for_verify(platform, "verifyf14")
+    with psycopg.connect(app.developer_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 10")
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 13
+    assert "FAIL F-14" in out, out
+    assert "verifyf14" in out, out
+    assert "pending=[10]" in out, out
+
+
+def test_verify_declarations_f14_passes_when_every_application_has_applied_every_upgrade(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-空振り positive control for the test immediately above: the
+    SAME real application, ledger left intact (`{9, 10, 11}`, exactly what
+    0003 seeds), passes F-14 -- proving the FAIL above is really about the
+    missing upgrade number, not some other difference between this test's
+    setup and the happy-path fixture."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf14ok")
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK   F-14" in out, out

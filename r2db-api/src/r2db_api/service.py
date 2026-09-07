@@ -14,7 +14,7 @@ from .audit import ApplicationAuditSink, AuditEvent, AuditSink
 from .audit_hook import ApplicationAuditHook
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
-from .errors import FoundationError, fail, violation
+from .errors import FoundationError, fail, observed_type_of, violation
 from .limits import ResourceLimits, narrow_limits_by_budget
 from .structured import ApplicationCell, fold_operation_idempotency_keys, parse_predicate
 from .topology import AuthorityTopology
@@ -1094,13 +1094,13 @@ class DataService:
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
-                    fail("VALIDATION_FAILED", "Projection and page size have invalid types.")
+                    fail("VALIDATION_FAILED", "Projection and page size have invalid types.", details=violation("request_schema"))
                 if where is not None and not isinstance(where, list):
-                    fail("VALIDATION_FAILED", "Filter must be a list.")
+                    fail("VALIDATION_FAILED", "Filter must be a list.", details=violation("request_schema", field="where", declared_type="array", observed_type=observed_type_of(where)))
                 if order_by is not None and not isinstance(order_by, list):
-                    fail("VALIDATION_FAILED", "order_by must be a list.")
+                    fail("VALIDATION_FAILED", "order_by must be a list.", details=violation("request_schema", field="order_by", declared_type="array", observed_type=observed_type_of(order_by)))
                 if cursor is not None and not isinstance(cursor, str):
-                    fail("VALIDATION_FAILED", "Cursor must be a string.")
+                    fail("VALIDATION_FAILED", "Cursor must be a string.", details=violation("request_schema", field="cursor", declared_type="string", observed_type=observed_type_of(cursor)))
                 request = {"entity": entity, "select": select, "where": where or [], "page_size": page_size, "order_by": order_by or [], "cursor": cursor}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
@@ -1192,7 +1192,7 @@ class DataService:
                 if resolved_transaction != "atomic":
                     fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.", details=violation("capability", field="transaction"))
                 if not isinstance(operations, list):
-                    fail("VALIDATION_FAILED", "Mutations must be a list.")
+                    fail("VALIDATION_FAILED", "Mutations must be a list.", details=violation("request_schema", field="operations"))
                 # Ruling I-12/port v1.11 compatibility: an HTTP-originated
                 # call always supplies `idempotency_key` directly (the
                 # contract-level `MutationRequest.idempotency_key`); the
@@ -1330,7 +1330,7 @@ class DataService:
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
-                    fail("VALIDATION_FAILED", "Schema operation must be an object.")
+                    fail("VALIDATION_FAILED", "Schema operation must be an object.", details=violation("request_schema"))
                 # Authority is checked before touching request content at
                 # all, so a non-developer credential gets FORBIDDEN/403 for
                 # any schema operation, before any shape/capability
@@ -1639,7 +1639,7 @@ class ControlAuthority:
     def set_application_enabled(self, application_id: str, enabled: bool) -> None:
         try:
             if not isinstance(enabled, bool):
-                fail("VALIDATION_FAILED", "Application enabled state must be boolean.")
+                fail("VALIDATION_FAILED", "Application enabled state must be boolean.", details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)))
             self._service._set_application_disabled(application_id, not enabled)
             self._control_event(operation="enable_application" if enabled else "disable_application", outcome="allow", target=application_id, event_class="application_lifecycle")
         except FoundationError as exc:
@@ -1726,7 +1726,7 @@ class ControlAuthority:
     def set_authorization_state_available(self, available: bool) -> None:
         try:
             if not isinstance(available, bool):
-                fail("VALIDATION_FAILED", "Authorization state availability must be boolean.")
+                fail("VALIDATION_FAILED", "Authorization state availability must be boolean.", details=violation("request_schema", field="available", declared_type="boolean", observed_type=observed_type_of(available)))
             self._service._credentials.available = available
             self._control_event(operation="set_authorization_state_available", outcome="allow", target="authorization", event_class="control_state")
         except FoundationError as exc:

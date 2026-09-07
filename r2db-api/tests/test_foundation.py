@@ -634,7 +634,10 @@ def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded
         service.mutate(runtime, "notes", [{"operation": "insert", "values": too_many_values}])
     assert exc.value.code == "VALIDATION_FAILED"
     assert exc.value.code != "LIMIT_EXCEEDED"
-    assert exc.value.details == {"field": "values"}
+    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1): this choke-point
+    # site now also carries `violated_declaration` (contract shape bound,
+    # not a declared field/type/capability mismatch -- `request_schema`).
+    assert exc.value.details == {"field": "values", "violated_declaration": "request_schema"}
 
 
 def test_every_advertised_resource_limit_has_a_deterministic_boundary():
@@ -1492,7 +1495,10 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
     # check itself, `_check_type`'s own docstring) -- `declared_type`/
     # `observed_type` both name the field's own type. The untyped field
     # ("u", `field_type=None`) has no declared type to violate, so its
-    # denial stays the bare `field` form (no `violated_declaration`).
+    # `violated_declaration` is `request_schema` instead (WP-2e rework,
+    # audit-wp2e.md D-1 = (A)/ruling L-1: every choke-point site, typed or
+    # not, now carries `violated_declaration` -- there is no bare-`field`
+    # exception left).
     declared_types = {"s": "string", "o": "object", "a": "array"}
     for field_name, bad_value in bad_values.items():
         with pytest.raises(FoundationError) as exc:
@@ -1505,7 +1511,7 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
                 "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
             }
         else:
-            assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+            assert exc.value.details == {"field": f"operations/0/values/{field_name}", "violated_declaration": "request_schema"}
         assert "\x00" not in repr(exc.value)
     # Untyped field: NUL nested inside a dict/list value too.
     with pytest.raises(FoundationError) as exc:
@@ -1640,7 +1646,12 @@ def test_eq_and_ne_reject_a_null_predicate_value():
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "eq", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
-    assert exc.value.details == {"field": "tag"}
+    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1): a null value on an
+    # operator that only accepts a value (eq/ne) is a `nullable` violation
+    # -- `observed_type` is the JSON type actually supplied (`null`);
+    # `declared_type` is omitted (the violation is about the operator/value
+    # combination, not the field's own declared nullability).
+    assert exc.value.details == {"field": "tag", "violated_declaration": "nullable", "observed_type": "null"}
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "ne", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"

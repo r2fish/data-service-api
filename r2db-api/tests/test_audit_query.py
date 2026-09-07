@@ -2353,7 +2353,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_92_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2471,6 +2471,20 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
     ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+    # Contract 1.7.0 (WP-2e rework, `{scratchpad}/audit-wp2e.md` I-5,
+    # ruling `{scratchpad}/rulings-r3-r7-flip.md` L-2/L-8): F-14's own
+    # check function and its peer-isomorphic message-hint helper -- ruling
+    # I-5's original two rows, updated for L-2's rename (`check_
+    # contract_170_resource_limits` -> `check_contract_170_declarations`,
+    # the pre-rework name never having been added here at all, the exact
+    # I-5 finding). MitateDB-api's own WP-3e has not landed these yet
+    # (`{scratchpad}/rulings-r3-r7-flip.md` L-8: "pair-closing の対象に
+    # する") -- these two rows are therefore part of the SAME known-red
+    # `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`
+    # mismatch this whole rework's own verification step already expects
+    # and reports as pre-existing, not a new regression.
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_contract_170_declarations"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "ops_module_hint"),
     ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
     # WP-1/WP-2 audit-gaps round (supervisor ruling 2026-09-05, wp12-audit-
     # gaps.md G4): the derivation formula's own margin constant was a
@@ -2645,7 +2659,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_92_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2699,7 +2713,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_92_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2765,6 +2779,8 @@ def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f10_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f11_message"),
         ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f13_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "check_contract_170_declarations"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "ops_module_hint"),
         ("src/r2db_api/ops.py", "src/mitatedb_api/ops.py", "_upsert_declaration"),
         (
             "src/r2db_api/platform_declarations.py",
@@ -2832,7 +2848,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
         ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_plan"),
         ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "compute_plan_token"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 90
+    assert len(_ISOMORPHIC_TARGETS) == 92
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:

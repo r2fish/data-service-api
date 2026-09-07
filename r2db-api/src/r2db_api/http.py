@@ -140,6 +140,41 @@ def _check_object_shape(value: Any, schema: dict[str, Any], *, label: str, own_p
                 details=violation("request_schema", field=field, declared_type=_schema_property_type_name(schema, sole), observed_type="absent"),
             )
         fail("VALIDATION_FAILED", f"{label} is missing required fields.", details=violation("request_schema"))
+    # WP-2e rework (audit-wp2e.md I-4, ruling L-4/V-6 (iii)): leg (iii) --
+    # a property that IS present (so neither the unknown-field nor the
+    # missing-field leg above ever sees it) but whose VALUE's JSON type
+    # does not match `schema`'s own declared type for it. Before this leg
+    # existed, a request like `{"where": "not-a-list"}` fell all the way
+    # through to `service.py`'s own bare `fail("VALIDATION_FAILED", ...,
+    # details={})` (the exact I-4 finding) -- this leg now catches it here
+    # instead, with the full 4-key form. `_schema_property_type_name`
+    # already strips this contract's own `[type, "null"]` optional-
+    # property convention down to the single non-null word for `declared_
+    # type`'s own value; the type-membership check below instead compares
+    # against the FULL raw type list (`null` included when the property
+    # allows it) so an explicit `null` on an optional property is never
+    # mistaken for a type violation.
+    for key, raw_value in value.items():
+        if key not in allowed:
+            continue  # unknown key -- already rejected by the leg above
+        prop = schema.get("properties", {}).get(key)
+        raw_type = prop.get("type") if isinstance(prop, dict) else None
+        if isinstance(raw_type, str):
+            allowed_types = {raw_type}
+        elif isinstance(raw_type, list):
+            allowed_types = {t for t in raw_type if isinstance(t, str)}
+        else:
+            allowed_types = None
+        if not allowed_types:
+            continue  # property names no single JSON type -- never guessed (WP-2e)
+        observed_type = observed_type_of(raw_value)
+        if observed_type in allowed_types:
+            continue
+        field = f"{own_path}/{key}" if own_path else key
+        fail(
+            "VALIDATION_FAILED", f"{label} has a field of the wrong type.",
+            details=violation("request_schema", field=field, declared_type=_schema_property_type_name(schema, key), observed_type=observed_type),
+        )
     return value
 
 
@@ -322,10 +357,10 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
     try:
         payload = await request.json()
     except json.JSONDecodeError:
-        fail("VALIDATION_FAILED", "Request body must be valid JSON.")
+        fail("VALIDATION_FAILED", "Request body must be valid JSON.", details=violation("request_schema"))
         raise  # unreachable; fail() always raises
     if not isinstance(payload, dict):
-        fail("VALIDATION_FAILED", "Request body must be a JSON object.")
+        fail("VALIDATION_FAILED", "Request body must be a JSON object.", details=violation("request_schema"))
     return payload
 
 

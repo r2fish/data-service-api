@@ -787,7 +787,7 @@ class PostgresCell:
     """
 
     def __init__(self, application_id: str, schema: str, *, runtime_dsn: str, developer_dsn: str, runtime_role: str, developer_role: str, pool_size: int | None = None, pool_manager: SharedPoolManager | None = None) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         self.application_id = application_id
         self.schema = schema
         # Role *names* (not credentials) are needed at table-creation time to
@@ -796,8 +796,8 @@ class PostgresCell:
         # distinct DB roles. They are control-plane-assigned constants, the
         # same trust level as `schema` above -- never taken from a client
         # request.
-        validate_identifier(runtime_role)
-        validate_identifier(developer_role)
+        validate_identifier(runtime_role, field="runtime_role")
+        validate_identifier(developer_role, field="developer_role")
         self._runtime_role = runtime_role
         self._developer_role = developer_role
         # Q4 WP-3 (design D-3(f)): kept as a plain attribute, separate from
@@ -1248,8 +1248,8 @@ class PostgresCell:
     ) -> QueryOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
-        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
+        validate_identifier(entity, field="entity")
+        _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         validate_page_size(page_size, limits)
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
@@ -1389,8 +1389,8 @@ class PostgresCell:
         """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
-        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
+        validate_identifier(entity, field="entity")
+        _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         if not operations:
             fail("VALIDATION_FAILED", "At least one mutation is required.")
         limits.check("batch_items", len(operations))
@@ -1438,7 +1438,7 @@ class PostgresCell:
                             return MutationOutcome(
                                 affected=stored_payload["affected"], assigned_addresses=stored_payload["assigned_addresses"],
                                 destructive=False, committed=True, plan=None, replayed=True,
-                                request_id=stored_payload.get("request_id"),
+                                request_id=stored_payload.get("request_id") or request_id,
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -1625,7 +1625,7 @@ class PostgresCell:
     def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo", operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = table_info.columns
         known_fields = set(field_types)
-        bound = bind_mutation(operation, known_fields)
+        bound = bind_mutation(operation, known_fields, operation_index=operation_index)
         # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
         # constraints, already read by `_load_catalog` into `table_info`
         # (addendum 2 S-k's 6 write call sites all pass this through to
@@ -2108,7 +2108,7 @@ class PostgresCell:
                             # against it, are both long gone.
                             return SchemaOutcome(
                                 committed=True, revision=stored_payload["revision"], descriptor=None, plan=None, replayed=True,
-                                request_id=stored_payload.get("request_id"),
+                                request_id=stored_payload.get("request_id") or request_id,
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -2175,7 +2175,7 @@ class PostgresCell:
                         # it directly too, mirroring MitateDB's per-backend
                         # `check_reserved` redundancy rather than relying
                         # solely on the shared caller never being bypassed.
-                        _reject_reserved_entity_name(bound.entity)
+                        _reject_reserved_entity_name(bound.entity, field="entity")
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
                         # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `enum_
