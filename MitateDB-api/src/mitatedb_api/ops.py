@@ -164,6 +164,7 @@ from .control_credential_store_postgres import DEFAULT_SCHEMA, PostgresControlCr
 from .control_plane import (_APPLICATION_ID_PATTERN, PostgresApplicationRegistry,
                             bootstrap_control_credential, issue_audit_credential_ceremony,
                             reset_control_credentials)
+from .config import FoundationConfig
 from .credential_store_postgres import assert_pepper_separation
 from .errors import (AuthenticationError, AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError, DestructiveConfirmationRequired,
@@ -1014,6 +1015,12 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-11": 10,
     "F-13": 11,
     "F-9": 12,
+    # Contract 1.7.0 (work order §2 WP-3e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3): `check_contract_170_declarations`'s
+    # own new condition -- the next unused exit code (F-12 is reserved,
+    # out of scope for this command, `_verify_declarations_checks`'s own
+    # docstring / the trailing disclosure line below).
+    "F-14": 13,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1048,8 +1055,8 @@ def _verify_declarations_fail(exc: "platform_declarations.PlatformDeclarationErr
 #: this into its own function that only ever RETURNS a code (never prints
 #: the trailing disclosure line itself) lets `cmd_verify_declarations`
 #: print that line exactly once, unconditionally, for every code this
-#: returns -- 0 through 12 alike.
-def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Namespace, schema: str) -> int:
+#: returns -- 0 through 13 alike.
+def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Namespace, schema: str, dsn: str) -> int:
     try:
         declarations = platform_declarations.read_platform_declarations(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER)
@@ -1086,7 +1093,113 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-7/F-10/F-11/F-13/F-9", "connected role's writer timeout settings valid")
+
+    # Contract 1.7.0 (work order §2 WP-3e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3): the "enabled" declaration checked
+    # against the actual deployed state -- the served capabilities
+    # document AND (the one part that can genuinely fail against a real
+    # deployment) every registered application's own per-application
+    # upgrade ledger. Run unconditionally like the writer-role check just
+    # above.
+    try:
+        applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
+        platform_declarations.check_contract_170_declarations(
+            _served_capabilities_document(),
+            applied_by_application,
+            platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok(
+        "F-14",
+        "contract 1.7.0 capabilities enabled, enum_members/idempotency_entries/idempotency_retention_ms limits valid, "
+        f"and every registered application has applied upgrades {sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)}",
+    )
     return 0
+
+
+def _served_capabilities_document() -> dict:
+    """O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): extracted out of `_verify_declarations_checks` under this SAME
+    name on both peers (r2db-api's own `_served_capabilities_document`,
+    `r2db_api/ops.py`), so that function's own body -- one of the
+    isomorphism-pinned symbols -- calls this helper with no arguments and
+    carries no peer-specific complexity of its own. This peer's own
+    equivalent, unlike r2db-api's, first has to build a `FoundationConfig`
+    before it can construct its own probe cell -- that peer-specific
+    difference now lives entirely INSIDE this helper's own body, never
+    inside `_verify_declarations_checks`'s. Previously named `_contract_
+    170_capabilities_document` and taking the caller's already-resolved
+    `FoundationConfig` (built from `declarations.surfaces.data_base_url`)
+    as an argument (the form `_verify_declarations_checks` used before
+    this rework) -- `FoundationConfig.from_env` REQUIRES a truthy
+    `data_base_url` (`config.py`'s own "surfaces.data is required" raise,
+    unconditional, unlike the bare dataclass constructor's own `None`-
+    tolerant `__post_init__`), so this helper cannot simply omit it the
+    way a first draft assumed; a fixed, synthetic placeholder URL is
+    supplied here instead (`tools/public_value_scan.py`-safe: a `.invalid`
+    domain, never a real deployment value) -- functionally inert either
+    way, since `ApplicationCell`'s own default backend, `backend_sqlite.
+    SQLiteBackend`, is a deterministic, in-memory, pure-Python object
+    with no real database connection this URL could ever be dialed
+    through. `FoundationConfig.from_env()` still reads every OTHER
+    (limit) env var exactly as before -- only this one peer-specific
+    argument is now internal to this helper rather than threaded in from
+    `_verify_declarations_checks`; the isomorphism table row addition
+    itself is pair-closing work, not done here (O-7's own instruction:
+    "同型性表への行追加は監督の pair-closing で行う").
+
+    The REAL `ApplicationRuntime.capabilities()` document for a throwaway,
+    entirely in-memory application/credential -- never a second, hand-
+    written copy of what `cell.py` is expected to declare: this exercises
+    the SAME production code path a real client's `GET /v1/capabilities`
+    reaches, so a future regression that stops declaring one of the
+    contract 1.7.0 capabilities `enabled` is caught here too, not only by
+    `mitatedb_api.cell`'s own unit tests."""
+    from .cell import ApplicationCell, ApplicationRuntime, Principal
+    from .auth import Role
+
+    config = FoundationConfig.from_env(data_base_url="https://verify-declarations-probe.example.invalid/v1")
+    cell = ApplicationCell("verify_declarations_probe", config)
+    principal = Principal(
+        application_id="verify_declarations_probe", credential_id="verify_declarations_probe", role=Role.RUNTIME,
+    )
+    runtime = ApplicationRuntime(cell, principal)
+    return dict(runtime.capabilities())
+
+
+def _applied_upgrade_numbers_by_application(
+    conn: "psycopg.Connection", provision_dsn: str,
+) -> dict:
+    """`platform_upgrades.read_applied_upgrade_numbers` for EVERY
+    registered, provisioned application (`database_name IS NOT NULL` --
+    same target set `_registry_applications_for_upgrade(conn, schema=...,
+    application_id=None)` already selects for `ops upgrade-applications`).
+    An application with no `database_name` at all (registered but never
+    provisioned) is reported with an empty-ledger sentinel (`None`,
+    "every number pending") rather than skipped -- an unprovisioned
+    application cannot have applied anything, so it is not silently
+    exempt from F-14's own declaration. Mirrors r2db-api's own
+    `_applied_upgrade_numbers_by_application`, isomorphism pinned."""
+    result: dict = {}
+    for application_id, database_name, _developer_role in _registry_applications_for_upgrade(
+        conn, schema=_schema(), application_id=None,
+    ):
+        if database_name is None:
+            result[application_id] = None
+            continue
+        app_dsn = _app_dsn(provision_dsn, database_name)
+        try:
+            app_conn = psycopg.connect(app_dsn)
+        except psycopg.Error:
+            result[application_id] = None
+            continue
+        try:
+            result[application_id] = platform_upgrades.read_applied_upgrade_numbers(
+                app_conn, ledger_table_name=platform_upgrades.LEDGER_TABLE_NAME)
+        finally:
+            app_conn.close()
+    return result
 
 
 def cmd_verify_declarations(args: argparse.Namespace) -> int:
@@ -1121,7 +1234,7 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
     are out of this command's reach -- named, with the reason, on the last
     output line, printed for every code `_verify_declarations_checks`
-    returns (0 through 12 alike), never only on the 0 path."""
+    returns (0 through 13 alike), never only on the 0 path."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
@@ -1133,7 +1246,7 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
         print(f"error: cannot connect to platform database: {exc}", file=sys.stderr)
         return 2
     try:
-        rc = _verify_declarations_checks(conn, args, schema)
+        rc = _verify_declarations_checks(conn, args, schema, dsn)
     finally:
         conn.close()
     print(

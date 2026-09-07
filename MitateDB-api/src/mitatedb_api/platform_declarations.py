@@ -644,6 +644,144 @@ def check_writer_role_timeouts(
     return declared
 
 
+# Contract 1.7.0 (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work
+# order §2 WP-3e F-3, `{scratchpad}/rulings-r3-r7-flip.md` F-3; WP-3e
+# rework T3, `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7): pinned
+# isomorphic to r2db-api's own `check_contract_170_declarations` (same
+# name, same signature SHAPE, same 3-part check, `_ISOMORPHIC_TARGETS` --
+# task brief: "F-14 (check_contract_170_resource_limits / ops_module_hint)
+# と exit code の表"). Never a second, redundant construction of a fresh
+# `FoundationConfig()`/capabilities document for itself (the SAME flaw
+# r2db-api's own pre-rework version had, audit finding D-2/L-2 -- a broken
+# default would raise at construction, before this function is ever
+# reached, and a healthy default always passes, making the check dead):
+# `capabilities_document` is the CALLER's own already-live value, for
+# BOTH halves of the check below -- no separate `config`/`ResourceLimits`
+# argument at all (T3 rework: the PRE-rework version of this function took
+# a `config: FoundationConfig` argument and read `getattr(config, attr_
+# name)` directly -- the exact "on-the-spot construction" flaw this rework
+# removes, since the caller built that `config` fresh, at check time, via
+# `FoundationConfig.from_env(...)`; a broken value there raises at
+# `FoundationConfig.__post_init__`, before this function is ever reached).
+#   (a) the served capabilities document actually declares `constraint_
+#       declarations`/`dry_run`/`idempotency`/`request_budget` `enabled`.
+#   (b) the SAME served document's own `limits` block (never a separately
+#       constructed `FoundationConfig`/`ResourceLimits`) carries a
+#       positive `enum_members`/`idempotency_entries`/`idempotency_
+#       retention_ms` -- this peer's own `__build_capabilities_document`
+#       (`cell.py`) already normalizes every limit key to the contract's
+#       own vocabulary name there (`"enum_members": config.max_enum_
+#       members`, this peer's own `max_*` naming convention resolved at
+#       DOCUMENT-BUILD time, not read here), so this function needs no
+#       peer-specific attribute-name mapping of its own -- `_CONTRACT_170_
+#       LIMIT_CLASSES` below is the bare vocabulary tuple, byte-identical
+#       to r2db-api's own same-named constant.
+#   (c) EVERY registered application's own per-application upgrade ledger
+#       (migrations `0009`/`0010`, `platform_upgrades.PLATFORM_UPGRADE_
+#       NUMBERS`) already carries every number this shipped version
+#       requires -- the one part of F-14 a real deployment can actually
+#       fail (an application whose database has not yet run `ops
+#       upgrade-applications` makes the "enabled" declaration false for
+#       that application's own traffic).
+def check_contract_170_declarations(
+    capabilities_document: Mapping[str, Any],
+    applied_upgrade_numbers_by_application: Mapping[str, Optional[frozenset[int]]],
+    required_upgrade_numbers: frozenset[int],
+) -> None:
+    """F-14. `capabilities_document` is the value the caller's own live
+    `ApplicationRuntime.capabilities()` call returned (or an equivalent
+    already-served document) -- this function never constructs one
+    itself, for EITHER half of the check. `applied_upgrade_numbers_by_
+    application` maps every registered application's slug to `platform_
+    upgrades.read_applied_upgrade_numbers`'s own return value for that
+    application's database (`None` when that application has no ledger
+    table at all -- read as "every number is pending", the same
+    convention `platform_upgrades.pending_upgrade_numbers` already
+    uses).
+
+    O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): the signature above is bare (not string-quoted) annotations,
+    matching r2db-api's own same-named function's real, current form --
+    both modules carry `from __future__ import annotations`, so quoting
+    was never semantically necessary; a prior draft quoted these three
+    for reasons unrelated to runtime behavior, which only produced a
+    normalize-diff against the sibling (r2db 形を基準にし, O-7's own
+    instruction). The docstring text differs (peer-specific -- `_normalize`
+    strips docstrings before comparing, so this paragraph itself is not
+    part of what must match)."""
+    capabilities = capabilities_document.get("capabilities", capabilities_document)
+    for name in _CONTRACT_170_ENABLED_CAPABILITIES:
+        entry = capabilities.get(name) if isinstance(capabilities, Mapping) else None
+        status = entry.get("status") if isinstance(entry, Mapping) else None
+        if status != "enabled":
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.capabilities().{name}.status must be 'enabled'; got {status!r}.",
+                code="F-14",
+            )
+    limits = capabilities_document.get("limits")
+    for name in _CONTRACT_170_LIMIT_CLASSES:
+        value = limits.get(name) if isinstance(limits, Mapping) else None
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.capabilities().limits.{name} must be a positive integer; got {value!r}.",
+                code="F-14",
+            )
+    missing = {
+        application_id: tuple(sorted(required_upgrade_numbers - (applied or frozenset())))
+        for application_id, applied in applied_upgrade_numbers_by_application.items()
+        if required_upgrade_numbers - (applied or frozenset())
+    }
+    if missing:
+        detail = "; ".join(f"{app}: pending={list(nums)}" for app, nums in sorted(missing.items()))
+        raise PlatformDeclarationError(
+            f"{ops_module_hint()}: the following application(s) have not applied every contract 1.7.0 "
+            f"per-application upgrade {sorted(required_upgrade_numbers)} -- {detail}. Run "
+            f"'python -m {ops_module_hint()}.ops upgrade-applications' before declaring this capability enabled.",
+            code="F-14",
+        )
+
+
+#: The `capabilities()` document keys `check_contract_170_declarations`
+#: requires `status: "enabled"` for (contract 1.7.0, D-1/D-6). Byte-
+#: identical to r2db-api's own same-named constant -- no peer-specific
+#: value here.
+_CONTRACT_170_ENABLED_CAPABILITIES: tuple = ("constraint_declarations", "dry_run", "idempotency", "request_budget")
+
+#: The `capabilities()` document's own `limits` block keys `check_
+#: contract_170_declarations` requires a positive integer for (contract
+#: 1.7.0, D-2 (7)/D-5). Byte-identical to r2db-api's own same-named
+#: `_CONTRACT_170_LIMIT_CLASSES` -- no peer-specific value here either:
+#: this peer's `FoundationConfig` attribute names (`max_enum_members`
+#: etc., `config.py`) differ from these contract-vocabulary names, but
+#: that rename already happens once, at DOCUMENT-BUILD time, inside
+#: `cell.py`'s own `__build_capabilities_document` (`"enum_members":
+#: config.max_enum_members`) -- never here. WP-3e rework T3 (ruling
+#: `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7) removed this module's
+#: former `_CONTRACT_170_LIMIT_ATTRIBUTES` (a `contract name -> Foundation
+#: Config attribute name` mapping `check_contract_170_declarations` used
+#: to read a freshly-built `FoundationConfig` through, `getattr(config,
+#: attr_name)`) for exactly that reason: once the check reads the SERVED
+#: document instead, a peer-specific attribute-name mapping constant has
+#: no remaining job to do inside this pinned function. A future limit
+#: class whose contract name and this peer's own `FoundationConfig` field
+#: name genuinely diverge (unlike the three above) would need a mapping
+#: constant again -- if so, keep it OUTSIDE this function's own body (a
+#: module-level constant `cell.py`'s document-builder reads from), never
+#: inlined into `check_contract_170_declarations` itself, so this
+#: function's own body stays textually isomorphic to r2db-api's.
+_CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "idempotency_retention_ms")
+
+
+def ops_module_hint() -> str:
+    """`PEER_MODULE`, named through a function (not referenced directly by
+    `check_contract_170_declarations`'s own f-strings) so this check's
+    error-message wording stays isomorphic across peers the same way the
+    `_fN_message` builders above do (peer-IDENTICAL name, peer-SPECIFIC
+    value read from this module's own `PEER_MODULE` constant)."""
+    return PEER_MODULE
+
+
 __all__ = [
     "CONTROL_PLANE_STATUS_ENV",
     "DEFAULT_SCHEMA",

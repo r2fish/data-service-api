@@ -512,7 +512,14 @@ def test_insert_missing_required_field_details_field_is_request_relative_path(se
     entity = _make_entity(dev)
     with pytest.raises(ValidationError) as excinfo:
         runtime.insert(entity, {"status": "a", "label": "no-req"})
-    assert excinfo.value.details.get("field") == "values/req", excinfo.value.details
+    # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): this
+    # peer's own direct, single-operation `insert()` entry point now
+    # occupies request-internal position `operations/0/...`, matching the
+    # real wire shape (`http.py::post_mutate` always wraps in an
+    # `operations` list) and r2db-api's own `structured.py::_apply`
+    # (`values_path = f"operations/{operation_index}/values/"` for every
+    # mutation, batched or solo) -- was bare `"values/req"`.
+    assert excinfo.value.details.get("field") == "operations/0/values/req", excinfo.value.details
 
 
 def test_prepare_values_enum_violation_details_field_is_request_relative_path(sessions) -> None:
@@ -520,7 +527,7 @@ def test_prepare_values_enum_violation_details_field_is_request_relative_path(se
     entity = _make_entity(dev)
     with pytest.raises(ValidationError) as excinfo:
         runtime.insert(entity, {"status": "not-a-member", "req": "ok", "label": "x"})
-    assert excinfo.value.details.get("field") == "values/status", excinfo.value.details
+    assert excinfo.value.details.get("field") == "operations/0/values/status", excinfo.value.details
 
 
 def test_update_values_violation_details_field_is_request_relative_path(sessions) -> None:
@@ -529,7 +536,7 @@ def test_update_values_violation_details_field_is_request_relative_path(sessions
     runtime.insert(entity, {"status": "a", "req": "ok", "label": "row-1"})
     with pytest.raises(ValidationError) as excinfo:
         runtime.update(entity, {"status": "not-a-member"}, filters=[Filter("label", "eq", "row-1")])
-    assert excinfo.value.details.get("field") == "values/status", excinfo.value.details
+    assert excinfo.value.details.get("field") == "operations/0/values/status", excinfo.value.details
 
 
 def test_transact_insert_violation_details_field_includes_operation_index(sessions) -> None:

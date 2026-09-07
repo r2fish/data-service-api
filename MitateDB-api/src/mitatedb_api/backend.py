@@ -300,7 +300,7 @@ class StorageBackend:
         registry row)."""
         raise NotImplementedError
 
-    def encode_value(self, value, domain=None):
+    def encode_value(self, value, domain=None, *, field=None, declared_type=None):
         """Backend-specific bind-safe encoding AND backend-specific
         value-domain validation (R-2/B-1 choke point) of an already
         shape-checked value (``cell.ApplicationCell._normalize_value``'s
@@ -315,7 +315,17 @@ class StorageBackend:
         domain (e.g. a string value for a declared-``integer`` column, or
         an out-of-range integer) -- deterministically, before any
         statement is ever sent, rather than surfacing the database
-        driver's own runtime error."""
+        driver's own runtime error.
+
+        ``field``/``declared_type`` (追補 4 O-2, ``{scratchpad}/rulings-r3-
+        r7-flip.md``): ``cell.py``'s own 3 call sites always pass both --
+        ``field`` the caller's own request-internal path, ``declared_type``
+        the contract vocabulary word already resolved there -- so a value-
+        domain denial reaching a normal client request carries the same
+        D-3 (4) 4-key ``errors.details_vocabulary`` form every other
+        choke-point denial does, never an empty ``details``. Both default
+        to ``None`` for a direct, no-request-context call (a unit test
+        exercising this mechanism in isolation)."""
         raise NotImplementedError
 
     def insert(self, collection, fields, params):

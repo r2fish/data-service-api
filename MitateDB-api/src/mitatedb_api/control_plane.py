@@ -64,7 +64,8 @@ from .errors import (AuthenticationError, AuthenticationRequiredError,
                      CapabilityError, ConflictError,
                      DestructiveConfirmationRequired, FoundationError,
                      NotFoundError, ResourceLimitError,
-                     StorageConfigurationError, ValidationError)
+                     StorageConfigurationError, ValidationError, violation,
+                     observed_type_of)
 from .identifiers import validate_identifier
 
 DEFAULT_SCHEMA = "mitatedb_registry"
@@ -1337,7 +1338,8 @@ class ControlPlaneService:
                          reason_code="CAPABILITY_UNSUPPORTED")
         raise CapabilityError(
             "issuing a role=control credential in-band is not supported; control credentials are "
-            "created only by the operator bootstrap/reset ceremony"
+            "created only by the operator bootstrap/reset ceremony",
+            details=violation("capability", field="role"),
         )
 
     def _deny_issuance_frozen(self, principal: ControlPrincipal, application_id: str, *, request_id: str) -> None:
@@ -1358,7 +1360,20 @@ class ControlPlaneService:
 
     def _validate_application_id(self, application_id: Any) -> None:
         if not isinstance(application_id, str) or not _APPLICATION_ID_PATTERN.fullmatch(application_id):
-            raise ValidationError("application_id must match ^[a-z][a-z0-9_]{0,32}$")
+            # 追補 4 O-1: not an identifier the shared `identifiers.py`
+            # syntax allowlist governs (a control-plane `application_id`
+            # has its own, narrower pattern) -- `request_schema`, not
+            # `identifier_syntax`. No raw candidate value is echoed
+            # (SI-10): only the declared JSON type pair, mirroring
+            # `field_types.check_declared_value`'s own convention for a
+            # value that fails a declared shape.
+            raise ValidationError(
+                "application_id must match ^[a-z][a-z0-9_]{0,32}$",
+                details=violation(
+                    "request_schema", field="application_id", declared_type="string",
+                    observed_type=observed_type_of(application_id),
+                ),
+            )
 
     def _locate_credential(self, credential_id: Any) -> tuple[Optional[str], Optional[tuple]]:
         if not isinstance(credential_id, str):
@@ -1400,7 +1415,13 @@ class ControlPlaneService:
             # flipped to 1.6.0 -- same commit as `surfaces` (already
             # present, WP-3 D-2) and the composed-bearer issue/rotate
             # responses (`control_http.py::_with_composed_secret`).
-            "contract_version": "1.6.0",
+            #
+            # Phase 9 WP-3e (design D-1 (5)/(7), F-1): flipped to 1.7.0 --
+            # the SAME commit as the data-plane document's own identical
+            # flip (`cell.py::ApplicationRuntime.capabilities`) -- C-19's
+            # own data/control `contract_version` agreement assert is
+            # what this pairing keeps green.
+            "contract_version": "1.7.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -1519,7 +1540,10 @@ class ControlPlaneService:
             self._check_rate()
         principal = self._authenticate(secret, request_id=request_id)
         if not isinstance(enabled, bool):
-            raise ValidationError("enabled must be a boolean")
+            raise ValidationError(
+                "enabled must be a boolean",
+                details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)),
+            )
         operation = "enable_application" if enabled else "disable_application"
         self._authorize_role(principal, operation=operation, request_id=request_id,
                              target_id=application_id if isinstance(application_id, str) else None)
@@ -1545,7 +1569,14 @@ class ControlPlaneService:
         self._authorize_role(principal, operation="issue_credential", request_id=request_id)
         self._gate_must_rotate(principal, operation="issue_credential", request_id=request_id)
         if role not in _ISSUABLE_ROLES:
-            raise ValidationError("role must be one of runtime, developer, control")
+            # 追補 4 O-1: an accepted-value-set violation, not a JSON-
+            # type mismatch (`role` may well already be a string) --
+            # `declared_type`/`observed_type` omitted (V-2: "形の違反な
+            # ら不要").
+            raise ValidationError(
+                "role must be one of runtime, developer, control",
+                details=violation("request_schema", field="role"),
+            )
         self._validate_application_id(application_id)
         # Capability denial BEFORE target resolution/freeze/limit (C-14
         # vector 3; Phase 3.5 §1-E/M-8 extends the same precedence to the
@@ -1673,9 +1704,15 @@ class ControlPlaneService:
         # fields regardless of whether this particular revoke ever meets
         # the gate condition below).
         if destructive is not None and not isinstance(destructive, bool):
-            raise ValidationError("destructive must be a boolean")
+            raise ValidationError(
+                "destructive must be a boolean",
+                details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(destructive)),
+            )
         if confirmation is not None and not isinstance(confirmation, str):
-            raise ValidationError("confirmation must be a string")
+            raise ValidationError(
+                "confirmation must be a string",
+                details=violation("request_schema", field="confirmation", declared_type="string", observed_type=observed_type_of(confirmation)),
+            )
         kind, state = self._locate_credential(target_credential_id)
         if kind is None:
             raise NotFoundError("credential was not found")
@@ -1749,7 +1786,10 @@ class ControlPlaneService:
             self._check_rate()
         principal = self._authenticate(secret, request_id=request_id)
         if not isinstance(enabled, bool):
-            raise ValidationError("enabled must be a boolean")
+            raise ValidationError(
+                "enabled must be a boolean",
+                details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)),
+            )
         operation = "enable_credential" if enabled else "disable_credential"
         self._authorize_role(principal, operation=operation, request_id=request_id,
                              target_id=target_credential_id if isinstance(target_credential_id, str) else None)
@@ -1813,7 +1853,10 @@ class ControlPlaneService:
         if self._audit_reader is None:
             self._deny_audit_capability_unsupported(principal, request_id=request_id)
         if not isinstance(request, dict):
-            raise ValidationError("AuditQueryRequest must be an object")
+            raise ValidationError(
+                "AuditQueryRequest must be an object",
+                details=violation("request_schema", declared_type="object", observed_type=observed_type_of(request)),
+            )
         event_classes = validate_audit_event_classes(request.get("event_classes"), max_classes=_MAX_AUDIT_QUERY_EVENT_CLASSES)
         after = validate_audit_after(request.get("after"))
         limit = validate_audit_limit(request.get("limit"), default=self._audit_default_limit, maximum=self._audit_max_limit)
@@ -1850,7 +1893,10 @@ class ControlPlaneService:
             request_id=request_id, actor_id=principal.credential_id, actor_type="control_credential",
             role=principal.role, reason_code="CAPABILITY_UNSUPPORTED",
         )
-        raise CapabilityError("audit evidence query is not available on this deployment")
+        raise CapabilityError(
+            "audit evidence query is not available on this deployment",
+            details=violation("capability"),
+        )
 
 
 # ===========================================================================
@@ -1893,9 +1939,15 @@ def reset_control_credentials(control_credentials, audit_append, *, work, destru
     denial's own `required_confirmation` goes stale the moment that set
     changes again."""
     if not isinstance(destructive, bool):
-        raise ValidationError("destructive must be a boolean")
+        raise ValidationError(
+            "destructive must be a boolean",
+            details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(destructive)),
+        )
     if confirmation is not None and not isinstance(confirmation, str):
-        raise ValidationError("confirmation must be a string")
+        raise ValidationError(
+            "confirmation must be a string",
+            details=violation("request_schema", field="confirmation", declared_type="string", observed_type=observed_type_of(confirmation)),
+        )
     rows = control_credentials.locked_for_update(work)
     active_ids = [row[0] for row in rows if row[1] and not row[2]]
     phrase = _reset_confirmation_phrase(active_ids)
