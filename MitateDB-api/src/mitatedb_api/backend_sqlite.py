@@ -178,7 +178,8 @@ class SQLiteBackend:
             self._db.rollback()
         self._db.execute("BEGIN")
 
-    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None, deadline=None):
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
+                          deadline=None, dry_run=False):
         _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
@@ -191,55 +192,73 @@ class SQLiteBackend:
         except sqlite3.DatabaseError:
             self._db.rollback()
             raise ConflictError("collection already exists")
-        # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
-        # D-2/D-10): `audit_hook.pre_commit()` runs as the LAST thing
-        # before this backend's own commit -- mirrored, "pseudo-tx"
-        # parity counterpart to `backend_postgres.PostgresBackend`'s real
-        # commit-inside-try structure (D-10's own parity-test target),
-        # made real by `_begin_pseudo_tx` above (see that method's own
-        # comment for why a bare `commit()`/`rollback()` alone is not
-        # enough for DDL on this backend). This connection's `commit()`
-        # realistically never fails once the statement above already
-        # succeeded -- so there is no `commit_failed()` counterpart call
-        # anywhere in this file, mirroring r2db-api's own in-memory
-        # `ApplicationCell.transact`'s identical, documented absence of
-        # one. A raise from `pre_commit()` itself (an `AuditSinkUnavailable`,
-        # never a `sqlite3.Error`) is caught by the bare `except Exception`
-        # below, which rolls back the still-uncommitted DDL before
-        # propagating.
-        try:
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-            self._db.commit()
-        except Exception:
-            self._db.rollback()
-            raise
-        self._schema_revision += 1
-        # Phase 6 WP-3 (design D-3): registry write lands only on this
-        # success path -- an exception above already `raise`d, so a
-        # rolled-back DDL never leaves a stray registry entry behind.
-        # Robust to a direct caller (bypassing `cell.py`) supplying no
-        # `field_types` at all, or only a partial one -- the SAME
-        # backfill-rule fallback `cell.ApplicationCell.create_collection`
-        # itself applies for every uncovered name.
+        # Phase 6 WP-3 (design D-3): robust to a direct caller (bypassing
+        # `cell.py`) supplying no `field_types` at all, or only a partial
+        # one -- the SAME backfill-rule fallback `cell.ApplicationCell.
+        # create_collection` itself applies for every uncovered name.
+        # Phase 9 WP-3b: computed regardless of `dry_run` -- a dry run
+        # needs this SAME resolved shape for its own `descriptor`,
+        # without ever writing it to `self._declared_types`.
         resolved = dict(field_types or {})
         for field, physical_type in fields.items():
             resolved.setdefault(field, FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
-        self._declared_types[name] = resolved
-        # Phase 9 WP-3a (design D-2 (1)/(4)): registry write lands only on
-        # this same success path -- total over `fields`, `field_constraints`
-        # partial input backfilled to `{"nullable": True}` for any name it
-        # omits (contract `SchemaOperationRequest.field_constraints.
-        # description`: "any name in fields it omits is created with no
-        # enum and nullable: true").
+        # Phase 9 WP-3a (design D-2 (1)/(4)): total over `fields`,
+        # `field_constraints` partial input backfilled to `{"nullable":
+        # True}` for any name it omits (contract `SchemaOperationRequest.
+        # field_constraints.description`: "any name in fields it omits is
+        # created with no enum and nullable: true").
         resolved_constraints = {}
         for field in fields:
             declared = dict((field_constraints or {}).get(field) or {})
             declared.setdefault("nullable", True)
             resolved_constraints[field] = declared
-        self._declared_constraints[name] = resolved_constraints
+        # Phase 9 WP-3b (design D-4 (4)): commit vs. rollback is decided
+        # HERE, at the tx's own exit -- the DDL above already ran for
+        # real either way (the SAME `ConflictError` a real call would
+        # raise is what a dry run must raise too). No audit hook, no
+        # registry write, no revision bump for a dry run.
+        if dry_run:
+            self._db.rollback()
+        else:
+            # Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
+            # D-2/D-10): `audit_hook.pre_commit()` runs as the LAST thing
+            # before this backend's own commit -- mirrored, "pseudo-tx"
+            # parity counterpart to `backend_postgres.PostgresBackend`'s
+            # real commit-inside-try structure (D-10's own parity-test
+            # target), made real by `_begin_pseudo_tx` above (see that
+            # method's own comment for why a bare `commit()`/`rollback()`
+            # alone is not enough for DDL on this backend). This
+            # connection's `commit()` realistically never fails once the
+            # statement above already succeeded -- so there is no `commit_
+            # failed()` counterpart call anywhere in this file, mirroring
+            # r2db-api's own in-memory `ApplicationCell.transact`'s
+            # identical, documented absence of one. A raise from `pre_
+            # commit()` itself (an `AuditSinkUnavailable`, never a
+            # `sqlite3.Error`) is caught by the bare `except Exception`
+            # below, which rolls back the still-uncommitted DDL before
+            # propagating.
+            try:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+            self._schema_revision += 1
+            # Phase 6 WP-3 (design D-3): registry write lands only on this
+            # success path -- an exception above already `raise`d, so a
+            # rolled-back DDL never leaves a stray registry entry behind.
+            self._declared_types[name] = resolved
+            self._declared_constraints[name] = resolved_constraints
+        return self._schema_revision, {
+            "entity": name,
+            "fields": sorted(fields),
+            "field_types": dict(resolved),
+            "field_constraints": {field: dict(value) for field, value in resolved_constraints.items()},
+        }
 
-    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None, deadline=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
+                  audit_hook=None, deadline=None, dry_run=False):
         _check_deadline(deadline)
         resolved_nullable = True if nullable is None else nullable
         if resolved_nullable is False:
@@ -285,27 +304,35 @@ class SQLiteBackend:
         except sqlite3.DatabaseError:
             self._db.rollback()
             raise NotFoundError("collection not found")
-        # Phase 4: same pre-commit-hook structure as `create_collection`
-        # above -- see that method's own comment.
-        try:
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-            self._db.commit()
-        except Exception:
-            self._db.rollback()
-            raise
-        self._schema_revision += 1
         if contract_type is None:
             contract_type = FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
-        self._declared_types.setdefault(collection, {})[field] = contract_type
-        # Phase 9 WP-3a (design D-2 (1)/(4)): same success-path-only
-        # registry write as `create_collection` above, for this one new
-        # field -- `nullable=None` (no explicit declaration) resolves to
-        # the contract default `True`.
         declared = {"nullable": resolved_nullable}
         if enum is not None:
             declared["enum"] = list(enum)
-        self._declared_constraints.setdefault(collection, {})[field] = declared
+        # Phase 9 WP-3b (design D-4 (4)): commit vs. rollback decided
+        # HERE, at the tx's own exit -- the DDL above already ran for
+        # real either way, so a dry run reaches the SAME `ConflictError`/
+        # `NotFoundError` a real call would. No audit hook, no registry
+        # write, no revision bump for a dry run.
+        if dry_run:
+            self._db.rollback()
+        else:
+            # Phase 4: same pre-commit-hook structure as `create_
+            # collection` above -- see that method's own comment.
+            try:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+            self._schema_revision += 1
+            self._declared_types.setdefault(collection, {})[field] = contract_type
+            # Phase 9 WP-3a (design D-2 (1)/(4)): same success-path-only
+            # registry write as `create_collection` above, for this one
+            # new field -- `nullable=None` (no explicit declaration)
+            # resolves to the contract default `True`.
+            self._declared_constraints.setdefault(collection, {})[field] = declared
         # WP-3a rework 3 (real, measured bug -- SchemaOperationResult.
         # revision is `required` unconditionally, `contract/data-service-
         # api.v1.json`'s own `schemas.SchemaOperationResult.required`;
@@ -313,8 +340,20 @@ class SQLiteBackend:
         # revision, but this method used to return nothing at all, so the
         # in-process caller's own successful `add_field` result could
         # never report one -- see `cell.ApplicationCell.add_field`'s own
-        # comment at its call site for the full chain this closes).
-        return self._schema_revision
+        # comment at its call site for the full chain this closes). Phase
+        # 9 WP-3b: `descriptor` added -- the entity's OTHER, pre-existing
+        # fields read verbatim off the registry (unaffected by this
+        # call), `field` itself from this call's own arguments (a dry run
+        # never wrote it, but this is what it WOULD read afterwards).
+        existing_types = dict(self._declared_types.get(collection, {}))
+        existing_constraints = {f: dict(v) for f, v in self._declared_constraints.get(collection, {}).items()}
+        descriptor = {
+            "entity": collection,
+            "fields": sorted(list(existing_types) + [field]) if field not in existing_types else sorted(existing_types),
+            "field_types": {**existing_types, field: contract_type},
+            "field_constraints": {**existing_constraints, field: dict(declared)},
+        }
+        return self._schema_revision, descriptor
 
     def field_types(self, collection):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
@@ -368,7 +407,8 @@ class SQLiteBackend:
             for name, constraints in self._declared_constraints.items()
         }
 
-    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
+                                deadline=None, dry_run=False):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g):
         see `backend.StorageBackend.alter_field_constraints`'s own
         contract. This backend has no separate DDL step for a constraint
@@ -453,22 +493,43 @@ class SQLiteBackend:
                 "existing rows violate the constraints this alter_field would establish",
                 details={"field": violation, "violated_declaration": violation},
             )
-        self._declared_constraints.setdefault(collection, {})[field] = new_constraints
-        self._schema_revision += 1
-        try:
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-            self._db.commit()
-        except Exception:
+        # Phase 9 WP-3b (design D-4 (4)): the existing-row scan above
+        # (and its possible `ConflictError`) already ran for real, dry
+        # run or not -- SAME refusal either way. What differs from here
+        # is whether the registry/revision mutation below actually
+        # happens: for a dry run it is skipped entirely (never applied,
+        # so there is nothing to undo), and the pseudo-tx is rolled back
+        # instead of committed. `descriptor`'s OTHER, pre-existing fields
+        # are read off the registry BEFORE any mutation, so they are
+        # correct for both branches.
+        existing_types = dict(self._declared_types.get(collection, {}))
+        existing_constraints = {f: dict(v) for f, v in self._declared_constraints.get(collection, {}).items()}
+        if dry_run:
             self._db.rollback()
-            # Undo the in-memory registry/revision mutation above -- this
-            # backend's own registries are plain Python dicts/ints, not
-            # transactional storage, so a rollback of the SQL side alone
-            # would otherwise leave them out of step with the database.
-            self._declared_constraints[collection][field] = current
-            self._schema_revision -= 1
-            raise
-        return self._schema_revision
+        else:
+            self._declared_constraints.setdefault(collection, {})[field] = new_constraints
+            self._schema_revision += 1
+            try:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                # Undo the in-memory registry/revision mutation above --
+                # this backend's own registries are plain Python
+                # dicts/ints, not transactional storage, so a rollback of
+                # the SQL side alone would otherwise leave them out of
+                # step with the database.
+                self._declared_constraints[collection][field] = current
+                self._schema_revision -= 1
+                raise
+        descriptor = {
+            "entity": collection,
+            "fields": sorted(existing_types),
+            "field_types": existing_types,
+            "field_constraints": {**existing_constraints, field: dict(new_constraints)},
+        }
+        return self._schema_revision, descriptor
 
     def encode_value(self, value, domain=None):
         # `domain` is accepted only to match the shared `StorageBackend`

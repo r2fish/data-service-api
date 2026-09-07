@@ -778,7 +778,8 @@ class PostgresBackend:
         return result
 
     @_guard_pending_platform_upgrades
-    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
+                                deadline=None, dry_run=False):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, F-6, 監督裁定
         S-g): see `backend.StorageBackend.alter_field_constraints`'s own
         contract. Unlike `create_collection`/`add_field` above (whose own
@@ -862,18 +863,31 @@ class PostgresBackend:
                         "existing rows violate the constraints this alter_field would establish",
                         details={"field": violation, "violated_declaration": violation},
                     )
+                # Phase 9 WP-3b (design D-4 (4)): the registry UPDATE and
+                # revision bump are skipped for a dry run -- the scan
+                # above (and its possible `ConflictError`) already ran
+                # for real either way, SAME refusal for dry_run and real.
                 new_enum_json = json.dumps(new_enum) if new_enum is not None else None
-                _execute(cur, sql.SQL(
-                    "UPDATE {} SET enum_json = %s, nullable = %s WHERE entity = %s AND field = %s"
-                ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [new_enum_json, new_nullable, collection, field])
-                self._bump_schema_revision(cur)
+                if not dry_run:
+                    _execute(cur, sql.SQL(
+                        "UPDATE {} SET enum_json = %s, nullable = %s WHERE entity = %s AND field = %s"
+                    ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [new_enum_json, new_nullable, collection, field])
+                    self._bump_schema_revision(cur)
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 new_revision = cur.fetchone()[0]
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-                hook_fired = True
-            self._developer.commit()
+                # Phase 9 WP-3b: `descriptor`'s OTHER, pre-existing fields
+                # -- same-cursor read, so a real (non-dry-run) call's own
+                # UPDATE above is already visible here (read-your-own-
+                # writes); a dry run's is not, since nothing was written.
+                existing_types, existing_constraints = self._field_types_and_constraints_locked(cur, collection)
+            if dry_run:
+                self._developer.rollback()
+            else:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
+                self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
@@ -894,7 +908,16 @@ class PostgresBackend:
         except Exception:
             self._developer.rollback()
             raise
-        return new_revision
+        new_field_constraints = {"nullable": new_nullable}
+        if new_enum is not None:
+            new_field_constraints["enum"] = list(new_enum)
+        descriptor = {
+            "entity": collection,
+            "fields": sorted(existing_types),
+            "field_types": existing_types,
+            "field_constraints": {**existing_constraints, field: new_field_constraints},
+        }
+        return new_revision, descriptor
 
     @_guard_pending_platform_upgrades
     def schema_revision(self):
@@ -918,7 +941,8 @@ class PostgresBackend:
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
     @_guard_pending_platform_upgrades
-    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None, deadline=None):
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
+                          deadline=None, dry_run=False):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -971,20 +995,33 @@ class PostgresBackend:
                 if timeout_ms is not None:
                     self._set_timeouts(cur, timeout_ms)
                 _execute(cur, statement)
-                self._bump_schema_revision(cur)
-                # Phase 6 WP-3 (design D-3): the declared-type registry
-                # write lands in the SAME transaction as the DDL above --
-                # atomic by construction (a failure/rollback below undoes
-                # both together, never one without the other).
-                for field in fields:
-                    constraints = resolved_constraints[field]
-                    enum_json = json.dumps(constraints["enum"]) if "enum" in constraints else None
-                    _execute(cur, field_types_statement,
-                             [name, field, field_types[field], enum_json, constraints["nullable"]])
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-                hook_fired = True
-            self._developer.commit()
+                # Phase 9 WP-3b (design D-4 (4)): the revision bump and
+                # the declared-type registry write are both skipped for a
+                # dry run -- the DDL above already ran for real either
+                # way, so a dry run reaches the SAME `DuplicateTable` ->
+                # `ConflictError` a real call would.
+                if not dry_run:
+                    self._bump_schema_revision(cur)
+                    # Phase 6 WP-3 (design D-3): the declared-type
+                    # registry write lands in the SAME transaction as the
+                    # DDL above -- atomic by construction (a failure/
+                    # rollback below undoes both together, never one
+                    # without the other).
+                    for field in fields:
+                        constraints = resolved_constraints[field]
+                        enum_json = json.dumps(constraints["enum"]) if "enum" in constraints else None
+                        _execute(cur, field_types_statement,
+                                 [name, field, field_types[field], enum_json, constraints["nullable"]])
+                _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
+                          .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
+                new_revision = cur.fetchone()[0]
+            if dry_run:
+                self._developer.rollback()
+            else:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
+                self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
@@ -1007,9 +1044,16 @@ class PostgresBackend:
             # before letting the failure propagate.
             self._developer.rollback()
             raise
+        return new_revision, {
+            "entity": name,
+            "fields": sorted(fields),
+            "field_types": dict(field_types),
+            "field_constraints": {f: dict(c) for f, c in resolved_constraints.items()},
+        }
 
     @_guard_pending_platform_upgrades
-    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None, deadline=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
+                  audit_hook=None, deadline=None, dry_run=False):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
@@ -1060,11 +1104,24 @@ class PostgresBackend:
                             "would leave every existing row holding null in the new field",
                             details={"violated_declaration": "nullable", "field": "nullable"},
                         )
+                # Phase 9 WP-3b: the entity's OTHER, pre-existing fields,
+                # read BEFORE this call's own DDL/registry write -- used
+                # for `descriptor` below, dry_run or not (a dry run never
+                # writes the new field to the registry at all, so it must
+                # come from this call's own arguments instead, exactly
+                # like `backend_sqlite.SQLiteBackend.add_field`).
+                existing_types, existing_constraints = self._field_types_and_constraints_locked(cur, collection)
                 _execute(cur, statement)
-                self._bump_schema_revision(cur)
-                # Phase 6 WP-3 (design D-3): same-transaction registry
-                # write as `create_collection` above.
-                _execute(cur, field_types_statement, [collection, field, contract_type, enum_json, resolved_nullable])
+                # Phase 9 WP-3b (design D-4 (4)): the revision bump and
+                # registry write are both skipped for a dry run -- the
+                # DDL above already ran for real either way, so a dry run
+                # reaches the SAME `DuplicateColumn`/`UndefinedTable` ->
+                # `ConflictError`/`NotFoundError` a real call would.
+                if not dry_run:
+                    self._bump_schema_revision(cur)
+                    # Phase 6 WP-3 (design D-3): same-transaction registry
+                    # write as `create_collection` above.
+                    _execute(cur, field_types_statement, [collection, field, contract_type, enum_json, resolved_nullable])
                 # WP-3a rework 3 (real, measured bug -- SchemaOperationResult.
                 # revision is `required` unconditionally, `contract/data-
                 # service-api.v1.json`'s own `schemas.SchemaOperationResult.
@@ -1075,10 +1132,13 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 new_revision = cur.fetchone()[0]
-            if audit_hook is not None:
-                audit_hook.pre_commit()
-                hook_fired = True
-            self._developer.commit()
+            if dry_run:
+                self._developer.rollback()
+            else:
+                if audit_hook is not None:
+                    audit_hook.pre_commit()
+                    hook_fired = True
+                self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
             raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
@@ -1099,7 +1159,16 @@ class PostgresBackend:
         except Exception:
             self._developer.rollback()
             raise
-        return new_revision
+        new_field_constraints = {"nullable": resolved_nullable}
+        if enum is not None:
+            new_field_constraints["enum"] = list(enum)
+        descriptor = {
+            "entity": collection,
+            "fields": sorted(set(existing_types) | {field}),
+            "field_types": {**existing_types, field: contract_type},
+            "field_constraints": {**existing_constraints, field: new_field_constraints},
+        }
+        return new_revision, descriptor
 
     # ------------------------------------------------------------------
     # values (R-2/B-1 value-domain gate) -- see the module-level

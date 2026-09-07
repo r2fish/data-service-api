@@ -118,11 +118,29 @@ class StorageBackend:
         exists)."""
         raise NotImplementedError
 
-    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None):
-        """``fields``: ``{field_name: declared_type}`` using this
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
+                          deadline=None, dry_run=False):
+        """WP-3b rework (F-2): ``deadline`` -- both ``backend_sqlite.
+        SQLiteBackend`` and ``backend_postgres.PostgresBackend`` have
+        always accepted this keyword (``ApplicationCell._limit_gate``'s
+        own wall-clock deadline, ``execution_ms``); this Protocol
+        declaration previously omitted it, undocumenting a parameter
+        every real backend already required.
+
+        ``fields``: ``{field_name: declared_type}`` using this
         foundation's own vocabulary (``cell._FIELD_TYPE_VOCABULARY``).
         Raises ``errors.ConflictError`` if ``name`` already exists. Bumps
-        the schema revision atomically with the DDL.
+        the schema revision atomically with the DDL. Returns ``(revision,
+        descriptor)`` -- ``revision`` an ``int``, ``descriptor`` a
+        ``definitions.EntityDescriptor``-shaped dict.
+
+        Phase 9 WP-3b (design D-4): ``dry_run`` executes the DDL and
+        every refusal check for real (the SAME ``ConflictError`` a real
+        call raises), then rolls back instead of committing -- no
+        ``field_types``/``field_constraints`` registry write, no
+        revision bump, no ``audit_hook.pre_commit()`` call at all. The
+        returned ``revision`` is then the CURRENT (unbumped) value and
+        ``descriptor`` is the entity as it WOULD read afterwards.
 
         Phase 6 WP-3 (design D-3): ``field_types``, when given, is
         ``{field_name: contract_type}`` (the 7-word contract vocabulary,
@@ -150,10 +168,13 @@ class StorageBackend:
         item 2). See ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
-    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
+                  audit_hook=None, deadline=None, dry_run=False):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
-        Bumps the schema revision atomically with the DDL.
+        Bumps the schema revision atomically with the DDL. Returns
+        ``(revision, descriptor)`` -- see ``create_collection``'s own
+        identical return shape.
 
         Phase 6 WP-3 (design D-3): ``contract_type`` (one of
         ``field_types.CONTRACT_TYPES``) is written to the declared-type
@@ -167,7 +188,7 @@ class StorageBackend:
         declaration) resolves to the contract default ``True``.
 
         Phase 4: same ``audit_hook`` contract as ``create_collection``
-        above."""
+        above. Phase 9 WP-3b: same ``dry_run`` contract too."""
         raise NotImplementedError
 
     def field_constraints(self, collection):
@@ -206,7 +227,8 @@ class StorageBackend:
         one or the other alone)."""
         raise NotImplementedError
 
-    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
+                                deadline=None, dry_run=False):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g;
         code review §2 A, 監督裁定 A 2026-09-07 for the tri-state ``enum``
         below): redeclares ``field``'s own ``enum``/``nullable``
@@ -233,8 +255,13 @@ class StorageBackend:
         count, SI-10) and change NOTHING -- neither the registry nor the
         schema revision -- if even one row would violate them; (2)
         otherwise, write the new constraints to the registry and bump
-        the schema revision; (3) commit. Returns the new schema revision
-        (an ``int``) on success. A PostgreSQL implementation additionally
+        the schema revision; (3) commit. Returns ``(revision, descriptor)``
+        on success -- see ``create_collection``'s own identical return
+        shape. Phase 9 WP-3b: ``dry_run`` performs the SAME scan (and its
+        possible ``ConflictError``), then rolls back instead of writing
+        the registry/bumping the revision/committing -- see
+        ``create_collection``'s own identical ``dry_run`` contract.
+        A PostgreSQL implementation additionally
         locks ``collection`` (``LOCK TABLE ... IN SHARE MODE``) BEFORE
         step (1)'s own scan, inside the SAME transaction -- closing the
         READ COMMITTED phantom-write window between that scan and this

@@ -92,6 +92,7 @@ from mitatedb_api.errors import (  # noqa: E402
     DestructiveConfirmationRequired,
     FoundationError,
     NotFoundError,
+    PreconditionFailedError,
     ResourceLimitError,
     ValidationError,
 )
@@ -118,6 +119,11 @@ _CLASSIFY_ORDER = (
     # follows (shape/identifier validation, then confirmation, then
     # execution).
     (DestructiveConfirmationRequired, "DESTRUCTIVE_CONFIRMATION_REQUIRED"),
+    # Phase 9 WP-3b (design D-4/D-3 (6), 追補 2 S-h): a stale `plan` --
+    # no shared inheritance with any neighbor here either, matching
+    # `http.py::_CLASSIFY_ORDER`'s own identical addition (F-10, this
+    # peer's two error-classification tables kept in agreement).
+    (PreconditionFailedError, "PRECONDITION_FAILED"),
     (ConflictError, "CONFLICT"),
     (NotFoundError, "NOT_FOUND"),
 )
@@ -1442,38 +1448,31 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             declared = {name: (field_types or {}).get(name, "json") for name in (fields or [])}
             full_fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[t] for name, t in declared.items()}
 
+            # Phase 9 WP-3b (design D-4(2), C-22 (1)'s own new authorization
+            # sub-leg): checked BEFORE `self._call(op)` below, not inside
+            # `op()` -- matching `alter_field`/`drop_entity`'s own existing
+            # pattern immediately below. WP-1b rework (review point I) used
+            # to assume every caller of this method presents a real
+            # `developer` session and raised a plain `AssertionError`
+            # otherwise ("port-usage error, not a peer denial") -- C-22's
+            # own new authorization sub-leg is the first real, INTENTIONAL
+            # caller to present a non-developer (`runtime`) session here,
+            # specifically to observe that this peer's session-type family
+            # has no real per-role entry point for a runtime credential to
+            # reach a developer-only schema operation at all (a genuine
+            # structural absence, `SurfaceAbsent`, not a port-usage error --
+            # `test_c22_dry_run_and_plan.py`'s own `_assert_dry_run_
+            # matches_real_refusal` explicitly anticipates and accepts this
+            # from BOTH the dry_run and the real probe alike).
+            if not hasattr(session, "create_entity"):
+                raise SurfaceAbsent(
+                    self.name, "schema_operation_with_result(create_entity)",
+                    f"no session.create_entity method exists on this session (entity={entity!r})",
+                    surface=self.public_operation_callables(),
+                    forbidden_parameters=["create_entity"],
+                )
+
             def op() -> Any:
-                # Phase 9 WP-1 (measured directly against `cell.py`'s real
-                # provisional-gate commit): the new `field_constraints`/
-                # `dry_run`/`plan`/`budget`/`idempotency_key` keywords are
-                # gated on `ApplicationDeveloper.create_entity`, NOT on
-                # `create_collection` (the older, foundation-level method
-                # `create_entity_with_declared_types` above still calls) --
-                # `create_entity` accepts the identical `{name: foundation_
-                # type}` `fields` shape `create_collection` does (it is a
-                # thin wrapper defaulting a missing `fields` to `{"id":
-                # "integer"}`, `cell.py::ApplicationCell.create_entity`),
-                # so passing a real, non-empty `full_fields` dict here
-                # behaves identically while also reaching the real gate.
-                if not hasattr(session, "create_entity"):
-                    # WP-1b rework (review point I): every currently-
-                    # registered caller of this method presents a real
-                    # `developer` session (schema_operation_with_result is
-                    # never exercised against a non-developer session by
-                    # this suite); a session lacking `create_entity` here
-                    # is therefore a PORT-usage error by the caller, not a
-                    # denial this adapter may fabricate on the peer's
-                    # behalf the way `AuthorizationError("developer
-                    # authority required")` would (that would assert a
-                    # real FORBIDDEN outcome no dispatch to the peer ever
-                    # produced). Raised as a plain `AssertionError`, exactly
-                    # like `fold_batch_idempotency_key`'s own caller-error
-                    # convention elsewhere in this port.
-                    raise AssertionError(
-                        "schema_operation_with_result(create_entity): session has no create_entity method -- "
-                        "every registered caller of this method presents a developer session; this is a "
-                        "port-usage error, not a peer denial"
-                    )
                 kwargs: dict[str, Any] = {"field_types": declared}
                 if field_constraints:
                     kwargs["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
@@ -1488,16 +1487,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 return session.create_entity(entity, full_fields, **kwargs)
             result = self._call(op)
         elif operation == "add_field":
+            # Phase 9 WP-3b: same reasoning as `create_entity` above -- a
+            # `SurfaceAbsent`, not a port-usage `AssertionError`, checked
+            # BEFORE `self._call(op)`.
+            if not hasattr(session, "add_field"):
+                raise SurfaceAbsent(
+                    self.name, "schema_operation_with_result(add_field)",
+                    f"no session.add_field method exists on this session (entity={entity!r}, field={field!r})",
+                    surface=self.public_operation_callables(),
+                    forbidden_parameters=["add_field"],
+                )
+
             def op() -> Any:
-                if not hasattr(session, "add_field"):
-                    # WP-1b rework (review point I): same reasoning as the
-                    # `create_entity` branch above -- port-usage error, not
-                    # a fabricated peer denial.
-                    raise AssertionError(
-                        "schema_operation_with_result(add_field): session has no add_field method -- "
-                        "every registered caller of this method presents a developer session; this is a "
-                        "port-usage error, not a peer denial"
-                    )
                 kwargs: dict[str, Any] = {}
                 if field_type is not None:
                     kwargs["contract_type"] = field_type
