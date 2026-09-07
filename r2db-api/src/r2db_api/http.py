@@ -338,29 +338,59 @@ async def post_mutate(request: Request) -> Response:
             "Idempotency keys are not supported by this foundation.",
             details={"violated_declaration": "capability", "field": "idempotency_key"},
         )
-    transaction = body.get("transaction", "atomic")
-    if transaction not in {"atomic", "best_effort"}:
-        fail("VALIDATION_FAILED", "Transaction mode is not supported.")
-    # Contract 1.7.0 provisional gate (D-1 (3)): `dry_run`/`plan`/`budget`
-    # are schema-accepted but not yet capability-enabled -- passed through
-    # so `mutate_result`'s own gate (service.py) rejects them with
-    # CAPABILITY_UNSUPPORTED, rather than `_check_object_shape` silently
-    # letting them through unread.
+    # G-1 (`{scratchpad}/rulings-r4.md` addendum): a `plan`'s digest
+    # commits to the request object exactly as received -- a body that
+    # omits `transaction` must digest differently from one that spells
+    # out `transaction: "atomic"` explicitly, even though both behave
+    # identically. So `transaction` is passed to `mutate_result` ONLY
+    # when the body actually carried the key (mirroring how the
+    # in-process port already omits its own `transaction` kwarg when
+    # the caller didn't supply one) -- never resolved to `"atomic"`
+    # here first.
+    mutate_kwargs: dict[str, Any] = {}
+    if "transaction" in body:
+        transaction = body["transaction"]
+        if transaction not in {"atomic", "best_effort"}:
+            fail("VALIDATION_FAILED", "Transaction mode is not supported.")
+        mutate_kwargs["transaction"] = transaction
+    # Contract 1.7.0 (D-4, WP-2b): `dry_run`/`plan` are real as of this
+    # commit (`capabilities().dry_run` is `enabled`) -- passed through to
+    # `mutate_result`, which now gives them full effect. `budget` (R-6)
+    # remains a provisional gate (D-1 (3)) until WP-2d -- passed through
+    # so `mutate_result`'s own gate (service.py) rejects a bare `budget`
+    # with CAPABILITY_UNSUPPORTED, rather than `_check_object_shape`
+    # silently letting it through unread.
     result = service.mutate_result(
         context,
         entity,
         body.get("operations"),
-        transaction=transaction,
         request_id=_request_id(request),
         dry_run=body.get("dry_run", False),
         plan=body.get("plan"),
         budget=body.get("budget"),
+        **mutate_kwargs,
     )
     # CCR-13 WP-5: `assigned_addresses` now reaches the response, in
     # operation order (insert, and insert-resolved upsert, only) -- the
     # per-entity endpoint's own elements never carry an `entity` key
-    # (contract: only the cross-entity endpoint's elements do).
-    return JSONResponse({"committed": True, "affected": result.affected, "assigned_addresses": result.assigned_addresses}, status_code=200)
+    # (contract: only the cross-entity endpoint's elements do). Contract
+    # 1.7.0 (D-4, WP-2b): `committed` now reports the real decision
+    # (`result.committed` -- unconditionally `True` for every request that
+    # reaches this point without `dry_run`, exactly the value this
+    # response hardcoded before this version, so a real apply's response
+    # is unchanged); `plan` is included only when the result actually
+    # carries one (a dry-run response, D-4 (3)). Review round F-6
+    # (`{scratchpad}/rulings-r4.md`): `assigned_addresses` is omitted
+    # (the key itself, not merely emptied) on a `dry_run` response --
+    # `result.assigned_addresses` is `None` exactly then -- matching the
+    # contract's "does not carry" wording and `descriptor`/`plan`'s own
+    # present-only-when-settled treatment.
+    response: dict[str, Any] = {"committed": result.committed, "affected": result.affected}
+    if result.assigned_addresses is not None:
+        response["assigned_addresses"] = result.assigned_addresses
+    if result.plan is not None:
+        response["plan"] = result.plan
+    return JSONResponse(response, status_code=200)
 
 
 @_endpoint
@@ -377,8 +407,20 @@ async def post_schema(request: Request) -> Response:
     context = _authenticate(request, service)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["SchemaOperationRequest"], label="SchemaOperationRequest")
-    revision = service.schema(context, body, request_id=_request_id(request))
-    return JSONResponse({"committed": True, "revision": str(revision)}, status_code=200)
+    outcome = service.schema(context, body, request_id=_request_id(request))
+    # Contract 1.7.0 (D-4, WP-2b): `service.schema` always returns
+    # `SchemaOutcome` (review round F-8, `{scratchpad}/rulings-r4.md`
+    # unified this away from a bare-`int`-or-`SchemaOutcome` dual shape).
+    # `descriptor`/`plan` are included only when actually present (a
+    # dry-run response, D-4 (3); a real response's shape stays unchanged
+    # besides `committed`, which is unconditionally `True` for a real
+    # apply that reaches this point).
+    response: dict[str, Any] = {"committed": outcome.committed, "revision": str(outcome.revision)}
+    if outcome.descriptor is not None:
+        response["descriptor"] = outcome.descriptor
+    if outcome.plan is not None:
+        response["plan"] = outcome.plan
+    return JSONResponse(response, status_code=200)
 
 
 @_endpoint

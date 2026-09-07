@@ -1,6 +1,7 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.3 (2026-09-07)**。v1.2 からの変更: §9 に 7〜11 を追加、§8 に R-15 / R-16 を追加。根拠: 設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-3、依頼者裁定 2026-09-07 (U-4 (A))。
+- 版数: **v1.4 (2026-09-07)**。v1.3 からの変更: §9 の 11 に訂正注 — `tools/check_doc_refs.py` の CI 上の位置を「3.11 / 3.12 両 job の pytest 前段」から**常時実行の独立 job `doc-refs`** に改めた (Class A の push で conformance が回らなくても検査は要る。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-2 訂正 v1.5 / D-4)。§8 の R-15 行に D-4 (CI は変更クラスで conformance の要否を決める) を追記した。**R-14 に従い、旧文は残し訂正注を添える形である。**
+- 旧 **v1.3 (2026-09-07)**。v1.2 からの変更: §9 に 7〜11 を追加、§8 に R-15 / R-16 を追加。根拠: 設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-3、依頼者裁定 2026-09-07 (U-4 (A))。
 - 旧 **v1.2 (2026-09-07)**。v1.1 からの変更: **フェーズ8 が完了した**ので §1「現状」を更新し (§9 の 6)、§5 のフェーズ8 節に完了と完了条件の充足を書き、§8 の R-9〜R-12 の行き先を「フェーズ8 完了」に改めた。**R-14 に従い、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行を、根拠と日付を添えて改版した** (フェーズ8 設計 §10 L8-8)。**行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。
 - 旧 **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
 - 旧 **v1.0 (2026-09-06)**。外部提案 2 本の評価と依頼者の目標宣言を受けて起草。
@@ -247,7 +248,7 @@
 | **R-12** | 性能基準値ハーネスと集計行形式 | **フェーズ8 完了 (2026-09-07)**。 **【改版 2026-09-07 (R-14)】** op 名は **query / mutate / batch (+ `cross_entity` は `cross_entity_mutation` が `unavailable` でない plug のみ)** である (根拠: r2db は `cross_entity_mutation: unavailable`、拒否経路の費用は対象外。監督裁定 2026-09-06)。`tools/perf_baseline.py` と **PERF 14 行**の基準値がフェーズ8 設計 §11.2 にある。**閾値は無い** (P-8)。**§7 の 3 が言う「2 フェーズ安定」の起点は本基準値である** |
 | **R-13** | 保留項目 (§3.2) の実需記録の置き場。公開後の実利用で現行契約では表現できない要求が出たとき、本表に日付・要求・不足する契約要素を 1 行で記す。これが CCR-01 の「表現力不足の実証」になる | フェーズ11 以降 |
 | **R-14** | 本書の改版規約: 判定 (§3, §6) を覆すときは、覆した根拠と日付を該当行に残し版数を上げる。行を消さない | 本書 |
-| **R-15** | 開発プロセス衛生 v1: 現行運用条件の単一正本 (`docs/work-orders/OPERATING_CONDITIONS.md`)、文書 ID 参照検査 (`tools/check_doc_refs.py`)、作業指示書の Change Set Manifest 化。設計は `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` (D-1 / D-2 / D-3) | 本書 §9 の 7〜11 |
+| **R-15** | 開発プロセス衛生 v1: 現行運用条件の単一正本 (`docs/work-orders/OPERATING_CONDITIONS.md`)、文書 ID 参照検査 (`tools/check_doc_refs.py`)、作業指示書の Change Set Manifest 化。設計は `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` (D-1 / D-2 / D-3) **【追記 2026-09-07 (v1.4)】D-4「CI は変更クラスで conformance の要否を決める」(`tools/change_class.py`、CI の `change-class` job) を本項の範囲に含める** | 本書 §9 の 7〜11 |
 | **R-16** | **起票候補**: P-2 の周回 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) を両 peer で通す scenario 級 conformance。**フェーズ9 設計文書との重複確認を着手条件とする** — フェーズ9 が同じ周回の一部を既に条件化している可能性があり、着手前に突合する。本作業では設計しない | フェーズ10 以降 |
 
 ---
@@ -298,3 +299,4 @@
     | 完了ゲート | フェーズ完了時 | §9 の 5 (root suite + CI 3.11 の集計行 + 性能差分) |
 
 11. **完了ゲートに `tools/check_doc_refs.py` を加える** (CI の 3.11 / 3.12 両 job、pytest の前段)。**ID 族と正本ファイルの対応表は script 内の定数であり、更新は明示コミットのみで行う** (`COLLECTION_FLOOR` と同じ規約)。
+    **【訂正注 2026-09-07 (v1.4)】CI 上の位置は「3.11 / 3.12 両 job の pytest 前段」ではなく、常時実行の独立 job `doc-refs` である (Class A の push では conformance job が回らないため。§9 の 8 の CI 実装は設計 D-4)。上の本文は原文として残す。**

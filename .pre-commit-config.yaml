@@ -12,3 +12,15 @@ repos:
         language: system
         pass_filenames: true
         types: [text]
+
+      - id: check-doc-refs
+        name: check document ID references (every ID reference resolves to a definition in its canonical file)
+        description: >-
+          Machine enforcement of docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md
+          D-2. Standard-library-only script (tools/check_doc_refs.py);
+          whole-repo scan, so it does not take per-file arguments from
+          pre-commit (unlike public-value-scan above).
+        entry: python3 tools/check_doc_refs.py
+        language: system
+        pass_filenames: false
+        always_run: true
