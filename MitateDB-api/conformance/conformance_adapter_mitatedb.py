@@ -1381,7 +1381,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         def op() -> None:
             if not hasattr(session, "add_field"):
                 raise AuthorizationError("developer authority required")
-            session.add_field(entity, field, CONTRACT_TYPE_TO_FOUNDATION_TYPE[field_type], contract_type=field_type)
+            session.add_field(entity, field, CONTRACT_TYPE_TO_FOUNDATION_TYPE.get(field_type, field_type), contract_type=field_type)
         self._call(op)
 
     def schema_operation_with_result(
@@ -1516,7 +1516,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     kwargs["budget"] = dict(budget)
                 if idempotency_key is not None:
                     kwargs["idempotency_key"] = idempotency_key
-                foundation_type = CONTRACT_TYPE_TO_FOUNDATION_TYPE[field_type] if field_type is not None else "json"
+                foundation_type = CONTRACT_TYPE_TO_FOUNDATION_TYPE.get(field_type, field_type) if field_type is not None else "json"
                 return session.add_field(entity, field, foundation_type, **kwargs)
             result = self._call(op)
         elif operation == "alter_field":
