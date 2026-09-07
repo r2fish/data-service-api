@@ -18,6 +18,7 @@ Real PostgreSQL throughout the `PostgresCell` half (§5.3 C-5, matching
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import pytest
@@ -89,6 +90,46 @@ def test_compute_plan_token_is_deterministic_and_sensitive_to_both_inputs() -> N
     assert compute_plan_token(dict(request), 3) == token
     assert compute_plan_token({**request, "transaction": "best_effort"}, 3) != token
     assert compute_plan_token(request, 4) != token
+
+
+def test_compute_plan_token_format_is_sha256hex_dot_revision() -> None:
+    """Review round F-7/G-3 (`{scratchpad}/rulings-r4.md`): the token
+    format is FIXED as `"<sha256hex>.<schema_revision>"`, one literal
+    `.` separating a 64-hex-digit sha256 of `normalize_request_for_plan`
+    from the decimal schema revision -- pinned byte-for-byte here rather
+    than only exercised indirectly through determinism/sensitivity."""
+    request = {"operations": [{"operation": "insert", "values": {"label": "x"}}], "transaction": "atomic"}
+    token = compute_plan_token(request, 7)
+    expected_digest = hashlib.sha256(normalize_request_for_plan(request)).hexdigest()
+    assert token == f"{expected_digest}.7"
+    digest_part, _, revision_part = token.partition(".")
+    assert len(digest_part) == 64
+    assert all(c in "0123456789abcdef" for c in digest_part)
+    assert revision_part == "7"
+
+
+def test_schema_plan_digest_covers_constraint_and_destructive_fields() -> None:
+    """G-1 (`{scratchpad}/rulings-r4.md` addendum): the plan digest is the
+    contract-level request object AS RECEIVED -- `field_constraints`/
+    `enum`/`nullable` (constraint-declaration keys, WP-2a) and
+    `destructive`/`confirmation` (the destructive-confirmation pair a
+    `drop_entity`/`delete_field` schema operation carries) each change
+    the digest on their own, proving none of them is silently dropped
+    before `normalize_request_for_plan` sees the object -- not merely
+    `operation`/`entity`/`field` as `test_compute_plan_token_...` above
+    already covers for the mutation side."""
+    base = {
+        "operation": "add_field", "entity": "widgets", "field": "status", "field_type": "string",
+        "field_constraints": {"enum": ["a", "b"], "nullable": False},
+    }
+    token = compute_plan_token(base, 1)
+    assert compute_plan_token({**base, "field_constraints": {"enum": ["a", "c"], "nullable": False}}, 1) != token
+    assert compute_plan_token({**base, "field_constraints": {"enum": ["a", "b"], "nullable": True}}, 1) != token
+
+    destructive_base = {"operation": "drop_entity", "entity": "widgets", "destructive": True, "confirmation": "drop widgets"}
+    destructive_token = compute_plan_token(destructive_base, 1)
+    assert compute_plan_token({**destructive_base, "destructive": False}, 1) != destructive_token
+    assert compute_plan_token({**destructive_base, "confirmation": "drop something-else"}, 1) != destructive_token
 
 
 # ===========================================================================
@@ -322,6 +363,45 @@ def test_pg_dry_run_schema_really_rolls_back_and_reports_pre_apply_revision(app_
         assert "extra" in dry.descriptor["fields"]
         entry = next(e for e in cell.catalog() if e["entity"] == "widgets")
         assert "extra" not in entry["fields"]
+    finally:
+        cell.close()
+
+
+def test_pg_dry_run_alter_field_really_rolls_back(app_a) -> None:
+    """G-5 (`{scratchpad}/rulings-r4.md` addendum): `alter_field`'s own
+    `PostgresCell` dry_run -- distinct code path from `add_field`
+    (`_check_type`, revision-bump, constraint-table write, WP-2a) that
+    `test_pg_dry_run_schema_really_rolls_back_and_reports_pre_apply_
+    revision` above never exercises. A dry-run `alter_field` must leave
+    the field's declared constraints exactly as they were, real
+    ROLLBACK -- not an in-memory `deepcopy`."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "widgets", "fields": ["status"], "field_types": {"status": "string"}, "field_constraints": {"status": {"enum": ["draft", "live"], "nullable": True}}},
+            developer=True, limits=LIMITS,
+        )
+        with cell._developer.connection() as conn:
+            with conn.transaction():
+                revision_before = cell._read_schema_revision(conn)
+        dry = cell.apply_schema(
+            {"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"], "nullable": False},
+            developer=True, limits=LIMITS, dry_run=True,
+        )
+        assert dry.committed is False
+        assert dry.revision == revision_before
+        entry = next(e for e in cell.catalog() if e["entity"] == "widgets")
+        assert entry["field_constraints"]["status"] == {"enum": ["draft", "live"], "nullable": True}
+        # A real apply afterwards still goes through -- the dry run above
+        # left the table's own constraint side-table untouched, not
+        # merely the response.
+        real = cell.apply_schema(
+            {"operation": "alter_field", "entity": "widgets", "field": "status", "enum": ["draft", "live", "archived"], "nullable": False},
+            developer=True, limits=LIMITS,
+        )
+        assert real.revision == revision_before + 1
+        entry_after = next(e for e in cell.catalog() if e["entity"] == "widgets")
+        assert entry_after["field_constraints"]["status"] == {"enum": ["draft", "live", "archived"], "nullable": False}
     finally:
         cell.close()
 
