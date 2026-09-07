@@ -122,6 +122,31 @@ class NotFoundError(FoundationError):
     pass
 
 
+class PreconditionFailedError(FoundationError):
+    """Phase 9 WP-3b (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-4/D-3 (6),
+    追補 2 S-h): raised when a caller-presented `plan` token
+    (`structured_operations.dry_run.plan`) no longer matches this same
+    request re-digested against the current schema state -- the first
+    time this peer raises the common contract's `PRECONDITION_FAILED`
+    code at all (`http.py`'s own pre-WP-3b comment: "this peer simply
+    never emits ... PRECONDITION_FAILED"; `revision_preconditions`,
+    the row-level precondition, stays `unavailable` and unrelated --
+    L9-2b, design table L9-2 split).
+
+    `details` carries `{"violated_declaration": "plan"}` (`errors.
+    details_vocabulary.violated_declaration_vocabulary`'s own `plan`
+    member) -- always present, since a plan mismatch is the ONLY
+    reason this class is ever raised; not one of D-3 (4)'s three
+    4-key-mandatory codes (`VALIDATION_FAILED`/`IDENTIFIER_INVALID`/
+    `CAPABILITY_UNSUPPORTED`), so `field`/`declared_type`/`observed_
+    type` are never required here and never supplied."""
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = dict(details) if details is not None else {"violated_declaration": "plan"}
+
+
 class AuthorizationStateUnavailable(FoundationError):
     """Raised when authorization state cannot be safely established."""
 

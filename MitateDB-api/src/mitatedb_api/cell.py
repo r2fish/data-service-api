@@ -35,7 +35,7 @@ from .backend_sqlite import SQLiteBackend
 from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
-                     ResourceLimitError, ValidationError)
+                     PreconditionFailedError, ResourceLimitError, ValidationError)
 from .field_types import (
     FOUNDATION_TYPE_TO_CONTRACT_TYPE,
     check_declared_value,
@@ -336,6 +336,90 @@ def _canonical_where_json(filters):
     """
     payload = [{"field": f.field, "operator": f.operator, "value": f.value} for f in filters]
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _dataclass_default(value):
+    """`json.dumps(..., default=...)` hook for `normalized_request_
+    digest` below: a dataclass INSTANCE (`is_dataclass` is also true of
+    a dataclass CLASS itself, hence the `not isinstance(value, type)`
+    guard) becomes its own `dataclasses.asdict()` mapping; anything else
+    re-raises the same `TypeError` `json.dumps` would have raised
+    without a `default` hook at all (`TypeError.__init__`'s own
+    message), never silently stringified."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def normalized_request_digest(request_object):
+    """Phase 9 WP-3b (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-4 (7),
+    追補 2 S-a): sha256 hex digest of `request_object`'s own canonical
+    JSON form -- keys in lexicographic order, no insignificant
+    whitespace, non-ASCII left unescaped, encoded UTF-8, exactly the 3
+    normalization rules `structured_operations.dry_run.plan` states.
+
+    Peer-symmetry note (同型性テストの対象, work order §2 WP-3b):
+    isomorphic to whatever helper `r2db-api`'s own WP-2b implementation
+    places for the identical rule; no code is shared between peers (R-2's
+    own closing paragraph) -- only the normalization RULE is shared, each
+    peer implements it independently.
+
+    This function carries no per-consumer exclusion knowledge of its
+    own: `plan`/`dry_run` (a plan token's own digest) or additionally
+    `idempotency_key` (an idempotency record's own digest, WP-3c) are
+    excluded by the CALLER, which builds `request_object` without
+    them -- "the same rule, a different exclusion set" (design 追補 2
+    S-a's own words) is realized as "the same function, a different
+    caller-built object", not a parameter this function branches on.
+
+    `default=_dataclass_default` below (never a permissive `default=
+    str`, matching `_canonical_where_json`'s own documented reasoning):
+    the ONE non-JSON-native value this peer's own `transact()` request
+    objects carry is a `Filter` (`@dataclass(frozen=True)`, this
+    module), nested inside `operations` items' own `filters` lists --
+    `asdict` turns it into the SAME `{"field", "operator", "value"}`
+    shape `_canonical_where_json` already builds by hand for the
+    identical dataclass, so a `Filter` and the equivalent plain dict a
+    schema-operation request object would carry digest identically."""
+    encoded = json.dumps(dict(request_object), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                         default=_dataclass_default)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def compute_plan_token(request_object, schema_revision):
+    """Phase 9 WP-3b (design D-4 (7)/U-4 = (A)): the opaque-but-
+    deterministic `plan` token (contract `structured_operations.dry_run.
+    plan`) -- `request_object`'s own digest (`normalized_request_digest`,
+    already built by the caller without `plan`/`dry_run`) combined with
+    `schema_revision`, the Application's own current schema revision (the
+    SAME value `SchemaOperationResult.revision` reports; per-application,
+    not per-entity -- U-4 = (A)'s own confirmation). `:` never appears in
+    either half (a hex digest, or this peer's own stringified integer
+    counter), so the two halves never collide; nothing about this format
+    is contractually meaningful -- a client treats the whole string as
+    opaque, exactly as the contract requires."""
+    return f"{normalized_request_digest(request_object)}:{schema_revision}"
+
+
+def check_plan_precondition(presented_plan, expected_token):
+    """Phase 9 WP-3b (design D-4 (7), destructive_confirmation.
+    evaluation_order's own precondition stage): a no-op when `presented_
+    plan` is `None` ("A plan is never required", contract `structured_
+    operations.dry_run.plan`). Otherwise raises `errors.
+    PreconditionFailedError` (`violated_declaration: plan`) unless it
+    equals `expected_token` -- a fresh `compute_plan_token` recomputation
+    against the request as it stands NOW and the Application's CURRENT
+    schema revision. Callers place this call at the precondition stage
+    (after confirmation validity, before execution) themselves -- this
+    function has no gate-ordering knowledge of its own."""
+    if presented_plan is None:
+        return
+    if presented_plan != expected_token:
+        raise PreconditionFailedError(
+            "The plan token does not match this request and the current schema state.",
+            details={"violated_declaration": "plan"},
+        )
 
 
 def _delete_confirmation_phrase(collection, filters, schema_revision):
@@ -695,7 +779,7 @@ class ApplicationCell:
         return value
 
     def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
-                          field_types=None, field_constraints=None):
+                          field_types=None, field_constraints=None, dry_run=False, plan=None):
         """Phase 6 WP-3 (design D-3): `field_types`, when given, is a
         `{field_name: contract_type}` map (the 7-word contract vocabulary,
         `field_types.CONTRACT_TYPES`) -- the declared type this call
@@ -715,8 +799,22 @@ class ApplicationCell:
         `SchemaOperationRequest.field_constraints.description`: "any name
         in fields it omits is created with no enum and nullable: true").
         A name in `field_constraints` that is not in `fields` fails
-        `VALIDATION_FAILED` -- none of it is silently ignored."""
+        `VALIDATION_FAILED` -- none of it is silently ignored.
+
+        Phase 9 WP-3b (design D-4): `dry_run`/`plan` -- see `add_field`'s
+        own identical paragraph immediately below for the full contract;
+        this method follows it exactly, with `create_collection` itself
+        as the schema operation each `dry_run`/`plan` behavior applies
+        to."""
         self._require_developer(principal, request_id=request_id)
+        # Phase 9 WP-3b: unchanged from before this WP -- `_limit_gate`'s
+        # own `request_bytes`/`operation_depth` measurement stays exactly
+        # what it already was (out of this WP's scope, and several
+        # existing tests pin its exact byte count against a tight
+        # deployed bound). The plan digest below uses a SEPARATE object
+        # (`digest_request`) that also carries `field_types`/`field_
+        # constraints` -- decoupled on purpose, not the SAME dict reused
+        # for two different jobs.
         request = {"name": name, "fields": fields}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
             name = self._identifier(name, "collection")
@@ -788,22 +886,65 @@ class ApplicationCell:
                     )
             resolved_constraints = _resolve_field_constraints(
                 validated_fields, declared_types, field_constraints, max_enum_members=self.config.max_enum_members)
+            # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
+            # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
+            # refusal above (this operation has no confirmation/target-
+            # existence stage of its own to order against: `create_
+            # collection` never refers to an entity that must already
+            # exist), before anything is created below. Only computed at
+            # all when there is a `plan` to check or a fresh one to
+            # return (`dry_run`) -- an ordinary real call (`dry_run=
+            # False, plan=None`, every pre-WP-3b caller) makes NO extra
+            # backend round trip for this, unchanged behavior (measured:
+            # `_schema_revision_uncounted` itself calls `self._backend.
+            # schema_revision()`, a real commit on this backend's own
+            # developer connection -- an unconditional call here would
+            # have silently added one to every schema operation, real or
+            # not). `current_revision` is read once, under `self._lock`
+            # (`_schema_revision_uncounted`, the SAME ungated accessor
+            # `_post_schema_revision` uses) -- the value both a submitted
+            # `plan` is checked against and a fresh one (dry_run) is
+            # computed against, so the two can never disagree with each
+            # other.
+            expected_token = None
+            if dry_run or plan is not None:
+                with self._lock:
+                    current_revision = self._schema_revision_uncounted()
+                # `digest_request` -- unlike `request` above (`_limit_
+                # gate`'s own sizing object, unchanged from before this
+                # WP) -- also carries `field_types`/`field_constraints`:
+                # the digest commits to every field of the request that
+                # reaches this call, `_limit_gate`'s own byte estimate
+                # does not need to.
+                digest_request = {"name": name, "fields": validated_fields,
+                                  "field_types": declared_types, "field_constraints": resolved_constraints}
+                expected_token = compute_plan_token(digest_request, current_revision)
+                check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): every schema operation is
             # unconditionally fail-closed class -- the hook's own `pre_commit()`
             # is called by `self._backend.create_collection` itself, as the
-            # last thing it does before its own commit point.
-            hook = self._make_audit_hook(
+            # last thing it does before its own commit point. Phase 9 WP-3b
+            # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
+            # run -- no audit hook, no audit event, not even an attempt.
+            hook = None if dry_run else self._make_audit_hook(
                 principal, event_class="schema_change", operation="create_collection",
                 target_kind="collection", target_id=name, request_id=request_id,
             )
             with self._lock:
-                self._backend.create_collection(
+                revision, descriptor = self._backend.create_collection(
                     name, validated_fields, field_types=declared_types,
-                    field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline)
-        self.__record("schema_change", self.application_id,
-                      principal.credential_id, detail="create_collection")
+                    field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
+                    dry_run=dry_run)
+        if not dry_run:
+            self.__record("schema_change", self.application_id,
+                          principal.credential_id, detail="create_collection")
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        if dry_run:
+            result["plan"] = expected_token
+        return result
 
-    def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None, field_constraints=None):
+    def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None,
+                      field_constraints=None, dry_run=False, plan=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -846,10 +987,10 @@ class ApplicationCell:
             fields = {"id": "integer"}
         return self.create_collection(
             principal, name, fields, request_id=request_id, field_types=field_types,
-            field_constraints=field_constraints)
+            field_constraints=field_constraints, dry_run=dry_run, plan=plan)
 
     def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None,
-                  enum=None, nullable=None):
+                  enum=None, nullable=None, dry_run=False, plan=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -871,8 +1012,30 @@ class ApplicationCell:
         validated (`field_types.validate_enum_declaration`, `enum_members`)
         and written to the constraint registry BEFORE anything is
         created, same as `create_collection`'s own `field_constraints`.
-        """
+
+        Phase 9 WP-3b (design D-4): `dry_run` (bool) asks this call to
+        reach the SAME decision a real call would -- every gate above
+        still runs, in the SAME order -- and then leave nothing behind:
+        no column, no registry write, no revision bump, no audit event
+        (§5 U-2 = (A)). Its response carries `committed: False`, the
+        `descriptor` the entity would have afterwards, and `revision` as
+        it stands NOW (the value the returned `plan` was taken against),
+        never the value this call would establish. `plan`, when
+        presented (`str | None`), is checked against a fresh digest of
+        this exact request and the Application's current schema
+        revision (`compute_plan_token`/`check_plan_precondition`,
+        module-level above) -- a mismatch refuses the WHOLE call with
+        `errors.PreconditionFailedError` before anything is touched,
+        real or dry. A dry run always returns a fresh `plan` of its own
+        (`SchemaOperationResult.plan`, optional); a real call returns
+        one only when the request presented one to be checked."""
         self._require_developer(principal, request_id=request_id)
+        # Phase 9 WP-3b: unchanged from before this WP -- see `create_
+        # collection`'s own identical comment for why `_limit_gate`'s
+        # sizing object and the plan digest's own object are kept
+        # separate (`digest_request` below carries `enum`/`nullable`
+        # too; this one does not, matching this method's pre-WP-3b
+        # `_limit_gate` sizing exactly).
         request = {"collection": collection, "field": field, "field_type": field_type}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
             collection = self._identifier(collection, "collection")
@@ -898,19 +1061,45 @@ class ApplicationCell:
                 validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
                 if len(validated_enum) > self.config.max_enum_members:
                     raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+            # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+            # checked after target-existence (`field_domains` above) and
+            # every other refusal, before anything is created below --
+            # see `create_collection`'s own identical comment for why
+            # this whole block is skipped (no extra backend round trip)
+            # when there is neither a `plan` to check nor a fresh one to
+            # return.
+            expected_token = None
+            if dry_run or plan is not None:
+                with self._lock:
+                    current_revision = self._schema_revision_uncounted()
+                # `digest_request` -- see `create_collection`'s own
+                # identical comment: `_limit_gate`'s sizing object
+                # (`request`) stays unchanged from before this WP; the
+                # digest's own object additionally carries `enum`/
+                # `nullable`.
+                digest_request = dict(request)
+                if enum is not None:
+                    digest_request["enum"] = list(enum)
+                if nullable is not None:
+                    digest_request["nullable"] = nullable
+                expected_token = compute_plan_token(digest_request, current_revision)
+                check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): same unconditional fail-closed
-            # pre-commit hook as `create_collection` above.
-            hook = self._make_audit_hook(
+            # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
+            # not built at all for a dry run.
+            hook = None if dry_run else self._make_audit_hook(
                 principal, event_class="schema_change", operation="add_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
             with self._lock:
                 # ConflictError if `field` already exists
-                revision = self._backend.add_field(
+                revision, descriptor = self._backend.add_field(
                     collection, field, field_type, contract_type=declared_type,
-                    enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline)
-        self.__record("schema_change", self.application_id,
-                      principal.credential_id, detail="add_field")
+                    enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
+                    dry_run=dry_run)
+        if not dry_run:
+            self.__record("schema_change", self.application_id,
+                          principal.credential_id, detail="add_field")
         # WP-3a rework 3 (real, measured bug -- contract `schemas.
         # SchemaOperationResult.required` includes `revision`
         # unconditionally, not only for `alter_field`): both backends'
@@ -920,10 +1109,15 @@ class ApplicationCell:
         # `add_field` result could never report one (the HTTP surface's
         # `post_schema` happened to mask this, since it computes its own
         # response `revision` via a SEPARATE `_post_schema_revision()`
-        # readback rather than this method's own return value).
-        return {"revision": str(revision)}
+        # readback rather than this method's own return value). Phase 9
+        # WP-3b: `descriptor`/`committed`/`plan` (dry_run only) added.
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        if dry_run:
+            result["plan"] = expected_token
+        return result
 
-    def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None, request_id=None):
+    def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
+                    request_id=None, dry_run=False, plan=None):
         """Phase 9 WP-3a (design docs/design/
         PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)/
         (6)): redeclares `field`'s own `enum`/`nullable` constraints.
@@ -1040,18 +1234,41 @@ class ApplicationCell:
                 validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
                 if len(validated_enum) > self.config.max_enum_members:
                     raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
-            hook = self._make_audit_hook(
+            # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+            # checked after target-existence/`enum` validation, before
+            # anything is altered below -- see `create_collection`'s own
+            # identical comment for why this whole block is skipped (no
+            # extra backend round trip) when there is neither a `plan` to
+            # check nor a fresh one to return.
+            expected_token = None
+            if dry_run or plan is not None:
+                with self._lock:
+                    current_revision = self._schema_revision_uncounted()
+                expected_token = compute_plan_token(request, current_revision)
+                check_plan_precondition(plan, expected_token)
+            # Phase 4 (design D-2 item 2): same unconditional fail-closed
+            # pre-commit hook as `create_collection`/`add_field` above.
+            # Phase 9 WP-3b: not built at all for a dry run.
+            hook = None if dry_run else self._make_audit_hook(
                 principal, event_class="schema_change", operation="alter_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
             with self._lock:
                 # ConflictError (existing rows violate the new constraints)
-                # or NotFoundError propagate from here unchanged.
-                revision = self._backend.alter_field_constraints(
-                    collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline)
-        self.__record("schema_change", self.application_id,
-                      principal.credential_id, detail="alter_field")
-        return {"revision": str(revision)}
+                # or NotFoundError propagate from here unchanged -- the
+                # SAME refusal a dry run reaches too (the existing-row
+                # scan below always runs for real, dry_run or not; only
+                # the registry write/revision bump/commit are skipped).
+                revision, descriptor = self._backend.alter_field_constraints(
+                    collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
+                    dry_run=dry_run)
+        if not dry_run:
+            self.__record("schema_change", self.application_id,
+                          principal.credential_id, detail="alter_field")
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        if dry_run:
+            result["plan"] = expected_token
+        return result
 
     def schema_revision(self, principal, *, request_id=None):
         """m-2 (independent WP-3 review): the SAME monotonically-increasing
@@ -1499,7 +1716,7 @@ class ApplicationCell:
                     names.add(name)
         return names
 
-    def transact(self, principal, operations, *, request_id=None):
+    def transact(self, principal, operations, *, request_id=None, dry_run=False, plan=None, budget=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
         same batch -- converging this entry point's real behavior onto
@@ -1564,10 +1781,17 @@ class ApplicationCell:
             # confirmation`, the same choke `delete()` uses) -- routed
             # (coalesced) here, at the one call site with `principal` in
             # scope, mirroring `delete()`'s own identical wrapping.
-            plan = []
+            # Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
+            # `_plan_operation` builds is renamed `execution_plan` here
+            # (it was `plan` before this WP) -- this method's own new
+            # `plan` PARAMETER (the caller-presented token) needs the
+            # name `add_field`/`alter_field`/`create_collection` above
+            # already use for the identical concept; keeping both names
+            # `plan` in one scope would shadow one with the other.
+            execution_plan = []
             for index, operation in enumerate(operations):
                 try:
-                    plan.append(self._plan_operation(operation, index))
+                    execution_plan.append(self._plan_operation(operation, index))
                 except DestructiveConfirmationRequired:
                     collection = operation.get("collection") if isinstance(operation, dict) else None
                     self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
@@ -1580,9 +1804,45 @@ class ApplicationCell:
             # row per operation, so the batch gets exactly one pre-commit row,
             # never one per individual delete inside it); a batch with none is
             # buffer-class (P4-D5's new emit site).
-            destructive = any(kind == "delete" for kind, _ in plan)
+            destructive = any(kind == "delete" for kind, _ in execution_plan)
+            # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
+            # evaluation_order): the plan precondition is checked HERE --
+            # after pass 1 above, which is where every destructive
+            # operation's own confirmation is validated
+            # (`_plan_operation`/`_route_delete_confirmation_denial`), and
+            # before pass 2 below, which is EXECUTION. A batch that is
+            # both unconfirmed and carries a stale `plan` therefore always
+            # refuses for the missing confirmation first (D-4 (2)'s own
+            # ordering example) -- pass 1 above already raised before
+            # control ever reaches this line. This whole block is skipped
+            # (no extra backend round trip) when there is neither a
+            # `plan` to check nor a fresh one to return -- `create_
+            # collection`'s own identical comment explains why.
+            expected_token = None
+            if dry_run or plan is not None:
+                with self._lock:
+                    current_revision = self._schema_revision_uncounted()
+                # `digest_request` -- see `create_collection`'s own
+                # identical comment: `_limit_gate`'s sizing object
+                # (`request`) stays unchanged; the digest's own object
+                # additionally carries `budget` when the caller supplied
+                # one. `ApplicationRuntime.transact` itself still gates
+                # `budget` unconditionally before ever reaching here
+                # (`request_budget: unavailable`, WP-3d) -- this
+                # parameter exists so the digest MECHANISM already
+                # commits to `budget` correctly (design D-4 (7): "every
+                # other field ... is part of what the token commits to"),
+                # provable now directly against this method, without
+                # waiting on WP-3d's own gate removal.
+                digest_request = dict(request)
+                if budget:
+                    digest_request["budget"] = budget
+                expected_token = compute_plan_token(digest_request, current_revision)
+                check_plan_precondition(plan, expected_token)
             hook = None
-            if destructive:
+            # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
+            # all for a dry run -- no audit hook, no audit event.
+            if destructive and not dry_run:
                 hook = self._make_audit_hook(
                     principal, event_class="destructive_data_operation", operation="transact",
                     target_kind="collection", target_id=None, request_id=request_id,
@@ -1590,8 +1850,8 @@ class ApplicationCell:
 
             # Pass 2: execute the fully-bound plan inside the begin/commit/
             # rollback envelope -- unchanged from before this WP other than
-            # reading its arguments from `plan` instead of re-validating them
-            # from the raw operation dicts inline.
+            # reading its arguments from `execution_plan` instead of
+            # re-validating them from the raw operation dicts inline.
             with self._lock:
                 self._backend.begin(deadline=deadline)
                 # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
@@ -1606,7 +1866,7 @@ class ApplicationCell:
                 hook_fired = False
                 try:
                     results = []
-                    for kind, payload in plan:
+                    for kind, payload in execution_plan:
                         if kind == "insert":
                             collection, fields, params = payload
                             results.append(self._backend.insert_in_transaction(collection, fields, params))
@@ -1626,10 +1886,19 @@ class ApplicationCell:
                     # `destructive_data_operation` record (below, post-commit)
                     # is unaffected either way (D-10: that sink's own
                     # behaviour is completely unchanged by this WP).
-                    if destructive and hook is not None:
-                        hook.pre_commit()
-                        hook_fired = True
-                    self._backend.commit()
+                    # Phase 9 WP-3b (design D-4 (4)): the commit-vs-
+                    # rollback decision is made at this ONE point, the
+                    # tx's own exit -- never earlier, so that everything
+                    # above (validation, confirmation, the plan
+                    # precondition, and the writes themselves) runs
+                    # identically for a dry run and a real request alike.
+                    if dry_run:
+                        self._backend.rollback()
+                    else:
+                        if destructive and hook is not None:
+                            hook.pre_commit()
+                            hook_fired = True
+                        self._backend.commit()
                 except Exception as exc:
                     # Independent review B-2 (WP-2 follow-up -- the
                     # atomicity hole, largest safety fix of that review):
@@ -1711,6 +1980,22 @@ class ApplicationCell:
                 # never needs to claim a write a later operation rolled back
                 # -- if we are here at all, `self._backend.commit()` already
                 # succeeded for the whole batch).
+                # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): NEITHER
+                # audit path below runs for a dry run -- rolled back
+                # above, nothing to record. `results` itself is still the
+                # real per-item outcome each write produced before the
+                # rollback undid it (`affected` "is the count if it had
+                # executed", D-4 (3)) -- a trailing envelope dict is
+                # appended (only for a dry run) carrying `committed`/
+                # `plan`/`request_id`, the same convention `attempt_
+                # mutation_with_result`'s own port docstring documents
+                # (`results[-1]`, `conformance-tests/adapter.py`); `zip`
+                # against `items` (this method's own callers, `http.py`/
+                # the port) truncates to `len(items)`, so this extra
+                # entry never perturbs `affected`'s own per-item sum.
+                if dry_run:
+                    results = results + [{"committed": False, "plan": expected_token, "request_id": request_id}]
+                    return results
                 if destructive:
                     self.__record("destructive_data_operation", self.application_id,
                                   principal.credential_id, detail="delete_rows")
@@ -2183,13 +2468,13 @@ class ApplicationRuntime:
 
     def transact(self, operations, *, request_id=None, dry_run=False, plan=None, budget=None):
         self.__authorize(request_id=request_id)
-        if dry_run:
-            _deny_provisional_field("dry_run")
-        if plan is not None:
-            _deny_provisional_field("plan")
+        # Phase 9 WP-3b (design D-1 (4), P-3): `dry_run`/`plan` gate
+        # removed -- `dry_run` flips to `enabled` in this SAME commit
+        # (`__build_capabilities_document` below). `budget` stays gated
+        # (WP-3d): `request_budget` is unchanged, still `unavailable`.
         if budget is not None:
             _deny_provisional_field("budget")
-        return self.__cell.transact(self.__principal, operations, request_id=request_id)
+        return self.__cell.transact(self.__principal, operations, request_id=request_id, dry_run=dry_run, plan=plan)
 
     def capabilities(self, *, request_id=None):
         """Minimal capability/discovery document, per this session's own
@@ -2328,7 +2613,14 @@ class ApplicationRuntime:
                 # `alter_field` all land in this SAME commit as this flip
                 # (D-1 (4): "宣言と挙動は同一コミットである").
                 "constraint_declarations": {"status": "enabled"},
-                "dry_run": {"status": "unavailable"},
+                # Phase 9 WP-3b: flipped to `enabled` -- `ApplicationRuntime.
+                # transact`/`ApplicationDeveloper.create_entity`/`.add_
+                # field`/`.alter_field` above all execute `dry_run`/`plan`
+                # for real now (`cell.py::ApplicationCell.transact`/
+                # `.create_collection`/`.add_field`/`.alter_field`), and
+                # the corresponding `http.py` gate rows are removed, in
+                # this SAME commit (D-1 (4)).
+                "dry_run": {"status": "enabled"},
                 "request_budget": {"status": "unavailable"},
             },
             **_surfaces_document_fragment(config),
@@ -2497,34 +2789,38 @@ class ApplicationDeveloper(ApplicationRuntime):
         self._ApplicationRuntime__authorize(request_id=request_id)
         # Phase 9 WP-3a (design D-1 (4), P-3): `field_constraints` no
         # longer gates -- `constraint_declarations` is `enabled` as of
-        # this commit, same commit as the real enforcement below. `dry_
-        # run`/`plan`/`budget`/`idempotency_key` are UNCHANGED -- their
-        # own capabilities (`dry_run`/`request_budget`) stay `unavailable`
-        # until WP-3b/WP-3d.
+        # that commit, same commit as the real enforcement below. Phase 9
+        # WP-3b: `dry_run`/`plan` no longer gate either -- `dry_run` is
+        # `enabled` as of THIS commit, same commit as `cell.py::
+        # ApplicationCell.create_entity`'s own real dry_run/plan
+        # behavior. `budget`/`idempotency_key` are UNCHANGED -- their own
+        # capabilities (`request_budget`/`idempotency`) stay `unavailable`
+        # until WP-3d/WP-3c.
         for provisional_field, provisional_value in (
-            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
-            ("idempotency_key", idempotency_key),
+            ("budget", budget), ("idempotency_key", idempotency_key),
         ):
             if provisional_value is not None:
                 _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.create_entity(
             self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types,
-            field_constraints=field_constraints)
+            field_constraints=field_constraints, dry_run=dry_run, plan=plan)
 
     def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None,
                   enum=None, nullable=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
         # Phase 9 WP-3a: `enum`/`nullable` no longer gate -- see
         # `create_entity`'s own identical comment immediately above.
+        # Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- same
+        # reasoning as `create_entity`'s own identical comment.
         for provisional_field, provisional_value in (
-            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
-            ("idempotency_key", idempotency_key),
+            ("budget", budget), ("idempotency_key", idempotency_key),
         ):
             if provisional_value is not None:
                 _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.add_field(
             self._ApplicationRuntime__principal, collection, field, field_type,
-            request_id=request_id, contract_type=contract_type, enum=enum, nullable=nullable)
+            request_id=request_id, contract_type=contract_type, enum=enum, nullable=nullable,
+            dry_run=dry_run, plan=plan)
 
     def alter_field(self, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
                     request_id=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
@@ -2535,10 +2831,11 @@ class ApplicationDeveloper(ApplicationRuntime):
         leading positional arguments immediately above -- the port's own
         `schema_operation_with_result` calls this as `session.alter_field
         (entity, field, **kwargs)`, `entity` being that method's own name
-        for the same value. `dry_run`/`plan`/`budget`/`idempotency_key`
-        stay gated exactly like `create_entity`/`add_field` above --
-        `alter_field` becoming real this commit does not itself unlock any
-        OTHER still-`unavailable` capability.
+        for the same value. `budget`/`idempotency_key` stay gated exactly
+        like `create_entity`/`add_field` above -- `alter_field` becoming
+        real this commit does not itself unlock any OTHER still-
+        `unavailable` capability. `dry_run`/`plan` no longer gate (Phase
+        9 WP-3b, same commit as `dry_run` flipping to `enabled`).
 
         WP-3a rework 2 (2026-09-07 -- real, measured bug, not a ruling
         item on its own but the exact "in-process entry point" gap the
@@ -2565,11 +2862,11 @@ class ApplicationDeveloper(ApplicationRuntime):
         `enum=None` explicitly still means "clear", unchanged."""
         self._ApplicationRuntime__authorize(request_id=request_id)
         for provisional_field, provisional_value in (
-            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
-            ("idempotency_key", idempotency_key),
+            ("budget", budget), ("idempotency_key", idempotency_key),
         ):
             if provisional_value is not None:
                 _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.alter_field(
             self._ApplicationRuntime__principal, collection, field,
-            enum=enum, nullable=nullable, field_type=field_type, request_id=request_id)
+            enum=enum, nullable=nullable, field_type=field_type, request_id=request_id,
+            dry_run=dry_run, plan=plan)

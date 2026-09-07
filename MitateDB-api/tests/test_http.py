@@ -1060,7 +1060,13 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     flipping to `enabled` -- see `test_alter_field_real_http_round_trip`
     and `MitateDB-api/tests/test_constraints_declaration.py` for their own
     coverage of the real enforcement that replaces this gate for those
-    three fields."""
+    three fields.
+
+    Phase 9 WP-3b (design D-1 (4)): `dry_run`/`plan` REMOVED from this
+    gate too, same commit as `dry_run` flipping to `enabled` -- see
+    `MitateDB-api/tests/test_dry_run_and_plan.py` for the real dry_run/
+    plan behavior that replaces this gate for those two fields. `budget`
+    (WP-3d) and `idempotency_key` (WP-3c/WP-3e) remain gated here."""
     entity = "http_gate_target"
     _create_entity(app_a_stack, entity, fields=["label"])
 
@@ -1074,8 +1080,8 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     assert query_response.json()["details"]["violated_declaration"] == "capability"
     assert query_response.json()["details"]["field"] == "budget"
 
-    # --- per-entity mutate: dry_run / plan / budget (no side effect) ---
-    for field_name, value in (("dry_run", True), ("plan", "deadbeef"), ("budget", {"batch_items": 1})):
+    # --- per-entity mutate: budget (no side effect) ---
+    for field_name, value in (("budget", {"batch_items": 1}),):
         response = _post(
             app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
             json_body={"operations": [{"operation": "insert", "values": {"label": f"gate-{field_name}"}}], field_name: value},
@@ -1085,8 +1091,8 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
         assert response.json()["details"]["violated_declaration"] == "capability", field_name
         assert response.json()["details"]["field"] == field_name, field_name
 
-    # --- cross-entity mutate: dry_run / plan / budget (no side effect) ---
-    for field_name, value in (("dry_run", True), ("plan", "deadbeef"), ("budget", {"batch_items": 1})):
+    # --- cross-entity mutate: budget (no side effect) ---
+    for field_name, value in (("budget", {"batch_items": 1}),):
         response = _post(
             app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
             json_body={"operations": [{"operation": "insert", "entity": entity, "values": {"label": f"gate-cem-{field_name}"}}], field_name: value},
@@ -1104,16 +1110,15 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     assert after_gate.status_code == 200
     assert after_gate.json()["items"] == []
 
-    # --- schema: dry_run / plan / budget / idempotency_key (Phase 9
-    # WP-3a: field_constraints / enum / nullable removed from this list --
-    # see this function's own docstring). ---
+    # --- schema: budget / idempotency_key (Phase 9 WP-3a: field_
+    # constraints / enum / nullable removed from this list; Phase 9
+    # WP-3b: dry_run / plan removed too -- see this function's own
+    # docstring). ---
     schema_gate_cases = [
-        {"operation": "add_field", "entity": entity, "field": "gated_dry_run_field", "field_type": "string", "dry_run": True},
-        {"operation": "add_field", "entity": entity, "field": "gated_plan_field", "field_type": "string", "plan": "deadbeef"},
         {"operation": "add_field", "entity": entity, "field": "gated_budget_field", "field_type": "string", "budget": {"execution_ms": 1}},
         {"operation": "add_field", "entity": entity, "field": "gated_idempotency_field", "field_type": "string", "idempotency_key": "abc"},
     ]
-    provisional_fields = {"dry_run", "plan", "budget", "idempotency_key"}
+    provisional_fields = {"budget", "idempotency_key"}
     catalog_before = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     for case in schema_gate_cases:
         response = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=case)
@@ -1126,7 +1131,7 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     catalog_after = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     assert catalog_after == catalog_before
     target_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == entity)
-    for gated_field in ("gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
+    for gated_field in ("gated_budget_field", "gated_idempotency_field"):
         assert gated_field not in target_fields_after
 
 
@@ -1150,6 +1155,12 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_sta
     used to carry are REMOVED -- both fields are real, enforced
     declarations as of this commit, no longer gated; see `MitateDB-api/
     tests/test_constraints_declaration.py` for their own in-process
+    coverage.
+
+    Phase 9 WP-3b (design D-1 (4)): the `dry_run=True` `runtime.transact`
+    case this test used to carry is REMOVED -- `dry_run` is a real,
+    executed capability as of this commit, no longer gated; see
+    `MitateDB-api/tests/test_dry_run_and_plan.py` for its own in-process
     coverage."""
     entity = "in_process_gate_target"
     _create_entity(app_a_stack, entity, fields=["label"])
@@ -1164,8 +1175,8 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_sta
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
 
     with pytest.raises(CapabilityError) as excinfo:
-        runtime.transact([{"operation": "insert", "entity": entity, "values": {"label": "gate"}}], dry_run=True)
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "dry_run"}
+        runtime.transact([{"operation": "insert", "entity": entity, "values": {"label": "gate"}}], budget={"batch_items": 1})
+    assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
 
     with pytest.raises(CapabilityError) as excinfo:
         developer.create_entity("in_process_gated_entity_2", fields={"label": "text"}, idempotency_key="")
@@ -1193,14 +1204,18 @@ def test_contract_1_7_0_new_capabilities_are_declared_unavailable(app_a_stack):
     Phase 9 WP-3a (design D-1 (4)): `constraint_declarations` flips to
     `enabled` in this SAME commit as the gate removal/real enforcement
     above -- `dry_run`/`request_budget` stay `unavailable` until WP-3b/
+    WP-3d.
+
+    Phase 9 WP-3b (design D-1 (4)): `dry_run` flips to `enabled` too, in
+    THIS commit -- `request_budget` alone stays `unavailable` until
     WP-3d."""
     response = _get(app_a_stack, "/v1/capabilities", bearer=app_a_stack.developer_bearer)
     assert response.status_code == 200
     capabilities = response.json()["capabilities"]
     assert capabilities["constraint_declarations"]["status"] == "enabled"
-    for name in ("dry_run", "request_budget"):
-        assert name in capabilities, name
-        assert capabilities[name]["status"] == "unavailable", name
+    assert capabilities["dry_run"]["status"] == "enabled"
+    assert "request_budget" in capabilities
+    assert capabilities["request_budget"]["status"] == "unavailable"
 
 
 def test_cross_entity_mutation_upsert_is_capability_unsupported(app_a_stack):

@@ -40,7 +40,8 @@ from .errors import (AuditSinkUnavailable, AuthenticationError,
                      AuthorizationError, AuthorizationStateUnavailable,
                      CapabilityError, ConflictError,
                      DestructiveConfirmationRequired, FoundationError,
-                     NotFoundError, PlatformUpgradePending, ResourceLimitError,
+                     NotFoundError, PlatformUpgradePending,
+                     PreconditionFailedError, ResourceLimitError,
                      StorageConfigurationError, ValidationError)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -87,14 +88,22 @@ _DEFINITIONS = _CONTRACT["definitions"]
 # this cross-check per the task brief). No divergence was needed: every
 # code below agrees with r2db-api's own mapping. This peer simply never
 # emits several contract codes at all (AUTH_REVOKED, APPLICATION_DISABLED,
-# SCOPE_MISMATCH, PRECONDITION_FAILED, ATOMICITY_FAILED, IDENTIFIER_INVALID
-# -- `auth.py`/`credential_store_postgres.py` fold "revoked"/"disabled"
-# into a single `AuthenticationError` -> AUTH_INVALID, and `identifiers.py`
-# raises the same `ValidationError` -> VALIDATION_FAILED for a malformed
-# identifier as for any other malformed shape); that is a pre-existing
-# fact about this peer's own error vocabulary, not something WP-3 narrows,
-# and is reported to the requester as a known divergence (not a status
-# mismatch -- there is nothing to compare a peer never emits).
+# SCOPE_MISMATCH, ATOMICITY_FAILED, IDENTIFIER_INVALID -- `auth.py`/
+# `credential_store_postgres.py` fold "revoked"/"disabled" into a single
+# `AuthenticationError` -> AUTH_INVALID, and `identifiers.py` raises the
+# same `ValidationError` -> VALIDATION_FAILED for a malformed identifier
+# as for any other malformed shape); that is a pre-existing fact about
+# this peer's own error vocabulary, not something WP-3 narrows, and is
+# reported to the requester as a known divergence (not a status mismatch
+# -- there is nothing to compare a peer never emits).
+#
+# Phase 9 WP-3b (design D-4/D-3 (6), 追補 2 S-h): PRECONDITION_FAILED is
+# no longer in that "never emits" set -- `errors.PreconditionFailedError`
+# (a stale `plan` token) is this peer's first real source of it, mapped
+# to 412 -- the SAME status `r2db-api/src/r2db_api/structured.py`/
+# `postgres.py` already use for their own (row-level) `PRECONDITION_
+# FAILED` `fail(..., status=412)` call sites (cross-peer status
+# agreement, R-5 m-12).
 _STATUS_BY_CODE: dict[str, int] = {
     "AUTH_REQUIRED": 401,
     "AUTH_INVALID": 401,
@@ -104,6 +113,7 @@ _STATUS_BY_CODE: dict[str, int] = {
     "CAPABILITY_UNSUPPORTED": 400,
     "NOT_FOUND": 404,
     "CONFLICT": 409,
+    "PRECONDITION_FAILED": 412,
     "LIMIT_EXCEEDED": 413,
     "DESTRUCTIVE_CONFIRMATION_REQUIRED": 409,
     "SERVICE_UNAVAILABLE": 503,
@@ -133,6 +143,17 @@ _CLASSIFY_ORDER: tuple[tuple[type[FoundationError], str], ...] = (
     (ValidationError, "VALIDATION_FAILED"),
     (ResourceLimitError, "LIMIT_EXCEEDED"),
     (DestructiveConfirmationRequired, "DESTRUCTIVE_CONFIRMATION_REQUIRED"),
+    # Phase 9 WP-3b (design D-4/D-3 (6), 追補 2 S-h): a stale `plan` --
+    # a real, present precondition denial, checked at the
+    # `destructive_confirmation.evaluation_order` precondition stage
+    # (after confirmation validity, D-4 (2)) -- classifies before
+    # `ConflictError`/`NotFoundError` here, matching this table's own
+    # existing convention of listing the more specific denial first
+    # (`DestructiveConfirmationRequired` already precedes `ConflictError`
+    # immediately above); no ordering ambiguity arises in practice, since
+    # no call site ever raises more than one of these for a single
+    # request.
+    (PreconditionFailedError, "PRECONDITION_FAILED"),
     (ConflictError, "CONFLICT"),
     (NotFoundError, "NOT_FOUND"),
 )
@@ -183,6 +204,7 @@ def _problem_for_exception(exc: FoundationError, request_id: str) -> JSONRespons
         "VALIDATION_FAILED": "The request failed validation.",
         "LIMIT_EXCEEDED": "The request exceeds a configured resource limit.",
         "DESTRUCTIVE_CONFIRMATION_REQUIRED": "This destructive operation requires the current confirmation phrase.",
+        "PRECONDITION_FAILED": "The declared precondition no longer holds.",
         "CONFLICT": "The request conflicts with existing state.",
         "NOT_FOUND": "The requested resource was not found.",
     }.get(code, "The request could not be completed.")
@@ -338,11 +360,14 @@ def _deny_provisional_field(field_name: str) -> None:
     `enum`/`nullable`/`field_constraints`/`SchemaOperationRequest.
     idempotency_key` (the packaged contract copy is already 1.7.0). This
     peer's own `constraint_declarations` capability flipped to `enabled`
-    in this same WP-3a commit (`enum`/`nullable`/`field_constraints`
-    removed from `_PROVISIONAL_UNSUPPORTED_*_FIELDS` below, same commit)
-    -- `dry_run`/`request_budget` remain `unavailable` (WP-3b/WP-3d), so
-    accepting either of THOSE and silently ignoring it would still be a
-    P-3 violation (declaration says `unavailable`, behavior accepts the
+    in the WP-3a commit (`enum`/`nullable`/`field_constraints` removed
+    from `_PROVISIONAL_UNSUPPORTED_*_FIELDS` below, same commit), and
+    `dry_run` flips to `enabled` in THIS commit (WP-3b: `dry_run`/`plan`
+    removed from `_PROVISIONAL_UNSUPPORTED_*_FIELDS` below, same commit
+    as `cell.py`'s own real dry_run/plan behavior, P-3) -- `budget`/
+    `idempotency_key` remain `unavailable` (WP-3d/WP-3c), so accepting
+    either of THOSE and silently ignoring it would still be a P-3
+    violation (declaration says `unavailable`, behavior accepts the
     field). `details` is set directly
     on the raised instance (rather than a new `CapabilityError.__init__`
     parameter) so this gate does not preempt WP-3e's own planned `details`
@@ -355,17 +380,23 @@ def _deny_provisional_field(field_name: str) -> None:
     raise err
 
 
-_PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ("dry_run", "plan", "budget")
+# Phase 9 WP-3b: `dry_run`/`plan` removed -- `post_mutate`/`post_cross_
+# entity_mutate` below now pass both through to `session.transact()` for
+# real instead of gating them here. `budget` stays gated (WP-3d).
+_PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ("budget",)
 _PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ("budget",)
 # Phase 9 WP-3a (design docs/design/
 # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (4)):
 # `field_constraints`/`enum`/`nullable` removed from this gate -- same
 # commit as `constraint_declarations` flipping to `enabled` below
 # (`cell.py::ApplicationRuntime.capabilities`) and the real enforcement
-# each governs. `dry_run`/`plan`/`budget`/`idempotency_key` are UNCHANGED
-# -- their own capabilities stay `unavailable` until WP-3b/WP-3d/WP-3e.
+# each governs. Phase 9 WP-3b: `dry_run`/`plan` removed too -- same
+# commit as `dry_run` flipping to `enabled` and `post_schema` below
+# passing both through to `create_entity`/`add_field`/`alter_field` for
+# real. `budget`/`idempotency_key` are UNCHANGED -- their own
+# capabilities stay `unavailable` until WP-3d/WP-3e.
 _PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS = (
-    "dry_run", "plan", "budget", "idempotency_key",
+    "budget", "idempotency_key",
 )
 
 
@@ -716,6 +747,26 @@ def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _mutation_outcome(items: list[dict[str, Any]], results: list[Any]) -> tuple[int, bool, str | None]:
+    """Phase 9 WP-3b: shared by `post_mutate`/`post_cross_entity_mutate`
+    -- `affected` exactly as both computed it before this WP (`zip`
+    truncates to `len(items)`, so this is unaffected by `cell.py::
+    ApplicationCell.transact`'s own dry-run envelope, appended -- when
+    present -- one entry PAST the last real per-item result). `committed`/
+    `plan` are read off that trailing envelope (a dict `transact()` itself
+    never returns for a real, non-dry-run request, design D-4 (4):
+    `committed` then defaults to `True`, unchanged from this peer's own
+    pre-WP-3b hardcoded response literal)."""
+    affected = 0
+    for item, result in zip(items, results):
+        if item["type"] == "insert":
+            affected += 1
+        elif isinstance(result, dict):
+            affected += result.get("updated", result.get("deleted", 0))
+    envelope = results[-1] if results and isinstance(results[-1], dict) else {}
+    return affected, envelope.get("committed", True), envelope.get("plan")
+
+
 @_endpoint
 async def post_mutate(request: Request) -> Response:
     session = _authenticate(request)
@@ -746,14 +797,19 @@ async def post_mutate(request: Request) -> Response:
         raise ValidationError("operations must be a non-empty array")
     items = [_mutation_item(entity, op) for op in operations]
 
-    results = session.transact(items, request_id=_request_id(request))
-    affected = 0
-    for item, result in zip(items, results):
-        if item["type"] == "insert":
-            affected += 1
-        elif isinstance(result, dict):
-            affected += result.get("updated", result.get("deleted", 0))
-    return JSONResponse({"committed": True, "affected": affected}, status_code=200)
+    # Phase 9 WP-3b (design D-4): `dry_run`/`plan` now reach `transact()`
+    # for real -- both defaulted to their own byte-compatible absence
+    # (`False`/`None`) above, so an unchanged (pre-WP-3b) caller's own
+    # request is unaffected.
+    results = session.transact(
+        items, request_id=_request_id(request),
+        dry_run=body.get("dry_run", False), plan=body.get("plan"),
+    )
+    affected, committed, plan_token = _mutation_outcome(items, results)
+    response: dict[str, Any] = {"committed": committed, "affected": affected}
+    if plan_token is not None:
+        response["plan"] = plan_token
+    return JSONResponse(response, status_code=200)
 
 
 def _scoped_mutation_item(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -822,14 +878,15 @@ async def post_cross_entity_mutate(request: Request) -> Response:
         raise ValidationError("operations must be a non-empty array")
     items = [_scoped_mutation_item(op) for op in operations]
 
-    results = session.transact(items, request_id=_request_id(request))
-    affected = 0
-    for item, result in zip(items, results):
-        if item["type"] == "insert":
-            affected += 1
-        elif isinstance(result, dict):
-            affected += result.get("updated", result.get("deleted", 0))
-    return JSONResponse({"committed": True, "affected": affected}, status_code=200)
+    results = session.transact(
+        items, request_id=_request_id(request),
+        dry_run=body.get("dry_run", False), plan=body.get("plan"),
+    )
+    affected, committed, plan_token = _mutation_outcome(items, results)
+    response: dict[str, Any] = {"committed": committed, "affected": affected}
+    if plan_token is not None:
+        response["plan"] = plan_token
+    return JSONResponse(response, status_code=200)
 
 
 @_endpoint
@@ -967,21 +1024,25 @@ async def post_schema(request: Request) -> Response:
         # does not re-validate its shape beyond `_check_object_shape`'s
         # own top-level key check above.
         field_constraints = body.get("field_constraints")
-        session.create_entity(
+        # Phase 9 WP-3b (design D-4): `create_entity` now returns
+        # `{"revision", "descriptor", "committed"}` for real (`cell.py::
+        # ApplicationCell.create_collection`) -- read DIRECTLY off that
+        # same-transaction result rather than the separate, uncounted
+        # `_post_schema_revision()` readback the two branches below used
+        # to need (m-2/裁定 3, pre-WP-3b): a dry run rolls the write back
+        # before this call even returns, so a SEPARATE post-call read
+        # here would race a concurrent writer and could report a revision
+        # this dry run's own `plan` was never computed against.
+        result = session.create_entity(
             entity, fields, field_types=contract_field_types, field_constraints=field_constraints,
+            dry_run=body.get("dry_run", False), plan=body.get("plan"),
             request_id=_request_id(request))
-        # m-2 (independent review): the peer's REAL current schema-revision
-        # counter (`ApplicationRuntime.schema_revision()`, the same value
-        # `cell.py`'s own delete-confirmation fingerprint reads) -- never a
-        # hardcoded placeholder that would falsely claim the same "revision"
-        # after every schema change.
-        # Phase 8 WP-1a rework 1 (裁定 3): `_post_schema_revision`, NOT
-        # `schema_revision` -- this readback is not a second client
-        # request (see `cell.py::ApplicationRuntime._post_schema_
-        # revision`'s own docstring); routing it through the now-gated
-        # `schema_revision()` would double the rate/concurrency cost of
-        # every HTTP schema operation relative to the in-process surface.
-        return JSONResponse({"committed": True, "revision": str(session._post_schema_revision(request_id=_request_id(request)))}, status_code=200)  # noqa: SLF001
+        response: dict[str, Any] = {"committed": result["committed"], "revision": result["revision"]}
+        if result.get("descriptor") is not None:
+            response["descriptor"] = result["descriptor"]
+        if result.get("plan") is not None:
+            response["plan"] = result["plan"]
+        return JSONResponse(response, status_code=200)
 
     if schema_operation == "add_field":
         field = body.get("field")
@@ -1016,17 +1077,20 @@ async def post_schema(request: Request) -> Response:
         # verbatim -- `cell.py::ApplicationCell.add_field` does the real
         # validation, same reasoning as `create_entity`'s own identical
         # comment above.
-        session.add_field(
+        # Phase 9 WP-3b: same reasoning as `create_entity` above -- read
+        # `revision`/`descriptor`/`committed`/`plan` directly off this
+        # same-transaction result, not a separate post-call readback.
+        result = session.add_field(
             entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type],
             contract_type=field_type, enum=body.get("enum"), nullable=body.get("nullable"),
+            dry_run=body.get("dry_run", False), plan=body.get("plan"),
             request_id=_request_id(request))
-        # Phase 8 WP-1a rework 1 (裁定 3): `_post_schema_revision`, NOT
-        # `schema_revision` -- this readback is not a second client
-        # request (see `cell.py::ApplicationRuntime._post_schema_
-        # revision`'s own docstring); routing it through the now-gated
-        # `schema_revision()` would double the rate/concurrency cost of
-        # every HTTP schema operation relative to the in-process surface.
-        return JSONResponse({"committed": True, "revision": str(session._post_schema_revision(request_id=_request_id(request)))}, status_code=200)  # noqa: SLF001
+        response = {"committed": result["committed"], "revision": result["revision"]}
+        if result.get("descriptor") is not None:
+            response["descriptor"] = result["descriptor"]
+        if result.get("plan") is not None:
+            response["plan"] = result["plan"]
+        return JSONResponse(response, status_code=200)
 
     if schema_operation == "alter_field":
         # Phase 9 WP-3a (design D-2 (5)/(6)): present-denial (design R-8
@@ -1051,8 +1115,14 @@ async def post_schema(request: Request) -> Response:
         # the real `None` that means "clear it".
         result = session.alter_field(
             entity, field, enum=body.get("enum", UNCHANGED), nullable=body.get("nullable"),
-            field_type=body.get("field_type"), request_id=_request_id(request))
-        return JSONResponse({"committed": True, "revision": result["revision"]}, status_code=200)
+            field_type=body.get("field_type"), dry_run=body.get("dry_run", False), plan=body.get("plan"),
+            request_id=_request_id(request))
+        response = {"committed": result["committed"], "revision": result["revision"]}
+        if result.get("descriptor") is not None:
+            response["descriptor"] = result["descriptor"]
+        if result.get("plan") is not None:
+            response["plan"] = result["plan"]
+        return JSONResponse(response, status_code=200)
 
     # C-17 present-denial form (design R-8 item 1): `create_index`/
     # `drop_index`/`drop_entity` are all real, contract-shaped requests

@@ -1170,7 +1170,11 @@ def test_alter_field_constraints_is_a_single_transaction(app_pg) -> None:
 
         backend._developer.commit = _counting_commit
         try:
-            new_revision = backend.alter_field_constraints(entity, "status", enum=["a", "b", "z"])
+            # Phase 9 WP-3b: `alter_field_constraints` now returns
+            # `(revision, descriptor)` (design D-4) -- unpack rather than
+            # capture the whole tuple under a name that implies a bare
+            # revision.
+            new_revision, _descriptor = backend.alter_field_constraints(entity, "status", enum=["a", "b", "z"])
         finally:
             backend._developer.commit = original_commit
         assert new_revision is not None
