@@ -379,7 +379,7 @@ def test_c23_idempotency_semantics(adapter: ConformanceAdapter, isolated) -> Non
         # disclosed as observed out of scope, exactly like C-05's own
         # `_MAX_EXERCISABLE_LIMIT` discipline.
         _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES = 200
-        declared_entries = adapter.capability_document().get("limits", {}).get("idempotency_entries")
+        declared_entries = iso.capability_document().get("limits", {}).get("idempotency_entries")
         if (
             isinstance(declared_entries, int)
             and 1 <= declared_entries <= _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES
