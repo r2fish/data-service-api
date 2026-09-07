@@ -1401,7 +1401,12 @@ def _print_upgrade_results(results: Sequence[platform_upgrades.ApplicationUpgrad
 
 def cmd_upgrade_applications(args: argparse.Namespace) -> int:
     """Design D-4: bulk-applies every pending per-application upgrade
-    (design §8: `PLATFORM_UPGRADE_NUMBERS` = {6, 8}) across every
+    (design §8: `PLATFORM_UPGRADE_NUMBERS` = {6, 8, 9} -- `9` added by
+    Phase 9 WP-3a's own `field_constraints` upgrade script; this
+    function needed no change of its own for that addition, since it is
+    driven entirely by `PLATFORM_UPGRADE_NUMBERS`/`discover_upgrade_
+    scripts` (both data, `platform_upgrades.py`), never a number
+    hardcoded here) across every
     provisioned application, or one (`--application`), or one SCRIPT
     across every application still missing it (`--script`, design
     D-4(a): only applied to a database that has not yet recorded it --

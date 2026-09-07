@@ -92,6 +92,15 @@ type, an empty or a duplicated `enum`; each is refused `VALIDATION_FAILED`
 with zero side effects, and the `json`-field case additionally carries
 `declared_type: "json"`.
 
+**監督裁定 N-1 (`{scratchpad}/rulings-r2-closure.md`, contract v1.7 補正 on
+`structured_operations.alter_field`)**: leg (12) below covers an
+`alter_field` carrying neither `enum` nor `nullable` -- it declares
+nothing, and is refused `VALIDATION_FAILED`, `violated_declaration:
+constraint_declaration`, `field: "operation"` (a request-internal path;
+the missing declaration is a defect of the operation as a whole, not
+attributable to any one field) -- bracketed exactly as legs (6)/(7)/(10)
+are, proving the refused attempt does not advance the schema revision.
+
 **Overlaps C-17** (same declaration-agreement posture, a different
 declaration: C-17 fixes mutation-class/addressability/uniqueness, this row
 fixes field-level value constraints).
@@ -750,6 +759,57 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         assert dup_enum_entity not in iso.entities(developer), (
             f"{adapter.name}: a create_entity refused for a duplicated enum must have zero side effects, but "
             f"{dup_enum_entity!r} exists afterward"
+        )
+
+        # (12) 監督裁定 N-1 ({scratchpad}/rulings-r2-closure.md, contract
+        # v1.7 補正 on structured_operations.alter_field): an alter_field
+        # carrying neither enum nor nullable declares nothing and is
+        # refused VALIDATION_FAILED, violated_declaration:
+        # constraint_declaration, field: "operation" (a request-internal
+        # path -- the missing declaration is a defect of the operation as
+        # a whole, not attributable to any one field) -- and does not
+        # advance the schema revision. Same revision-bracket style as
+        # (6)/(7)/(10): a harmless, always-non-conflicting alter_field
+        # (nullable: true on "label", already that field's own current
+        # value) gives a real baseline revision before the refused
+        # attempt, and a second one after gives the "after" value --
+        # exactly one real commit (the second) must separate them,
+        # proving the refused bare alter_field committed none.
+        revision_before_bare = _revision_of(
+            iso.schema_operation_with_result(developer, entity, "alter_field", field="label", nullable=True)
+        )
+        row = _catalog_row(iso, developer, entity)
+        constraints_before_bare = row.get("field_constraints")
+        with pytest.raises(ConformanceDenial) as ei_bare:
+            iso.schema_operation_with_result(developer, entity, "alter_field", field=enum_field)
+        assert ei_bare.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: an alter_field carrying neither 'enum' nor 'nullable' -> {ei_bare.value.code!r}, "
+            "expected VALIDATION_FAILED"
+        )
+        assert ei_bare.value.details.get("violated_declaration") == "constraint_declaration", (
+            ei_bare.value.details
+        )
+        assert ei_bare.value.details.get("field") == "operation", (
+            f"{adapter.name}: a declaration-empty alter_field's details.field must be 'operation' (裁定 N-1) -- "
+            f"{ei_bare.value.details!r}"
+        )
+        row_after_bare = _catalog_row(iso, developer, entity)
+        assert row_after_bare.get("field_constraints") == constraints_before_bare, (
+            f"{adapter.name}: a refused alter_field must not change the catalog's field_constraints"
+        )
+
+        result_bare_bracket = iso.schema_operation_with_result(
+            developer, entity, "alter_field", field="label", nullable=True,
+        )
+        revision_final_bare = result_bare_bracket.get("revision")
+        assert isinstance(result_bare_bracket, dict) and revision_final_bare is not None, (
+            f"{adapter.name}: an alter_field's result carries no 'revision' -- {result_bare_bracket!r}"
+        )
+        assert _revision_advanced_by_one(revision_before_bare, revision_final_bare), (
+            f"{adapter.name}: exactly one real schema commit (this final, non-conflicting alter_field) must "
+            f"separate the pre-refusal baseline and this result -- observed before={revision_before_bare!r}, "
+            f"after={revision_final_bare!r}; a delta other than +1 means the refused bare alter_field above "
+            "also advanced the revision"
         )
 
         observed_branch = "enforced"

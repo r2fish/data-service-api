@@ -1948,15 +1948,18 @@ def test_declared_audit_event_classes_change_only_deliberately() -> None:
 def test_declared_audit_operations_change_only_deliberately() -> None:
     """Snapshot guard: `DECLARED_AUDIT_OPERATIONS` (`audit_query.py`,
     `_CONTROL_PLANE_OPERATIONS | application_audit.DECLARED_AUDIT_
-    OPERATIONS`) currently holds exactly these 29 words -- the full
-    emitted union U (30 words, `_field_literal_union`) minus N's 1 word
-    (`_NON_DURABLE_OPERATIONS`: `control_capabilities`, structurally
-    deny-unreachable). Pins the UNION, not either half alone (mutation 13
-    must go red whichever half loses a word)."""
+    OPERATIONS`) currently holds exactly these 30 words (Phase 9 WP-3a
+    adds `alter_field`, design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)) --
+    the full emitted union U (31 words, `_field_literal_union`) minus N's
+    1 word (`_NON_DURABLE_OPERATIONS`: `control_capabilities`,
+    structurally deny-unreachable). Pins the UNION, not either half alone
+    (mutation 13 must go red whichever half loses a word)."""
     assert DECLARED_AUDIT_OPERATIONS == frozenset(
         {
             "access",
             "add_field",
+            "alter_field",
             "assert_active",
             "audit_buffer",
             "audit_query",

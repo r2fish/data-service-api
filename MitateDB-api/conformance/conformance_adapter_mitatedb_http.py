@@ -1640,6 +1640,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # isolated profile comment for the full measured reason (a
             # `where`-carrying mutation's real wire depth is 5, not 4).
             max_requests_per_minute=50, max_concurrency=3, max_execution_ms=5000, max_operation_depth=5,
+            # Phase 9 WP-3a (design §5 U-1 = (β)): same value/rationale as
+            # the in-process plug's own isolated profile immediately above
+            # (`conformance_adapter_mitatedb.py::isolated_application_
+            # surface`).
+            max_enum_members=5,
         )
 
         def _cell_factory(application_id: str) -> ApplicationCell:
@@ -2472,6 +2477,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             ApplicationDeveloper.create_collection,
             ApplicationDeveloper.create_entity,
             ApplicationDeveloper.add_field,
+            # Phase 9 WP-3a: mirrors the in-process adapter's identical
+            # addition (`conformance_adapter_mitatedb.py::public_operation_
+            # callables`) -- `alter_field` is a new, real public method.
+            ApplicationDeveloper.alter_field,
         ]
 
     def tamper_vectors(self, fixture: Fixture) -> Sequence[TamperVector]:

@@ -77,6 +77,17 @@ class FoundationConfig:
     max_concurrency: int = 32
     max_execution_ms: int = 5_000
     max_operation_depth: int = 8
+    # Phase 9 WP-3a (design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §5 U-1 = (β)):
+    # the one new limit class this WP's own `enum` constraint introduces --
+    # bounds how many members a single field's declared `enum` may carry,
+    # never bytes (member length is bounded by `max_request_bytes` above,
+    # like every other request-carried string). `example_profile` in the
+    # contract's own non-normative reference is 64 (U-1 確定); this
+    # deployment default matches it, same convention as every other
+    # `max_*` field above (a deployment-configurable number, not a final
+    # public-contract one).
+    max_enum_members: int = 64
     # WP-5 (design v1.2 R-7): "control_plane は WP-5 の flip まで両
     # composition とも unavailable のまま。flip は...単一コミットで行う".
     # Defaults `"unavailable"` so an operator who does not explicitly opt
@@ -158,6 +169,10 @@ class FoundationConfig:
             "max_concurrency": "MITATEDB_MAX_CONCURRENCY",
             "max_execution_ms": "MITATEDB_MAX_EXECUTION_MS",
             "max_operation_depth": "MITATEDB_MAX_OPERATION_DEPTH",
+            # Phase 9 WP-3a (design §5 U-1 = (β)): same env-var convention
+            # as every field above -- an unset env var keeps the dataclass
+            # default (64).
+            "max_enum_members": "MITATEDB_MAX_ENUM_MEMBERS",
         }
         parsed = {}
         for field, name in names.items():

@@ -901,8 +901,13 @@ class FoundationTests(unittest.TestCase):
         # (default, in-process composition) behavior.
         self.dev.create_collection("things", {"name": "text"})
         declared = self.dev.capabilities()["capabilities"]["schema_operations"]
-        self.assertEqual(declared["operations"], ["create_entity", "add_field"])
+        # Phase 9 WP-3a (design docs/design/
+        # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)):
+        # `alter_field` joined `operations` in this same commit as
+        # `constraint_declarations` flipping to `enabled`.
+        self.assertEqual(declared["operations"], ["create_entity", "add_field", "alter_field"])
         self.assertNotIn("add_field", declared["unsupported"])
+        self.assertNotIn("alter_field", declared["unsupported"])
         # A runtime session has no schema-mutation surface at all,
         # `add_field` included (same authority boundary `create_collection`
         # already enforces).
@@ -1128,14 +1133,19 @@ class FoundationTests(unittest.TestCase):
         self.runtime.insert("bool_strict", {"flag": False})
         self.assertIs(self.runtime.read("bool_strict")[0]["flag"], False)
 
-    def test_catalog_reports_three_keys_and_undeclared_fields_default_to_json_on_sqlite(self):
+    def test_catalog_reports_four_keys_and_undeclared_fields_default_to_json_on_sqlite(self):
         self.dev.create_entity(
             "catalog_probe", fields={"typed": "integer", "untyped": "json"}, field_types={"typed": "integer"})
         entries = self.runtime.catalog()
         entry = next(e for e in entries if e["entity"] == "catalog_probe")
-        self.assertEqual(set(entry.keys()), {"entity", "fields", "field_types"})
+        # Phase 9 WP-3a (design docs/design/
+        # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)):
+        # `field_constraints` joined this same-commit as `constraint_
+        # declarations` flipping to `enabled` -- four keys now, not three.
+        self.assertEqual(set(entry.keys()), {"entity", "fields", "field_types", "field_constraints"})
         self.assertEqual(set(entry["fields"]), {"typed", "untyped"})
         self.assertEqual(set(entry["field_types"]), set(entry["fields"]))
+        self.assertEqual(set(entry["field_constraints"]), set(entry["fields"]))
         self.assertEqual(entry["field_types"]["typed"], "integer")
         self.assertEqual(entry["field_types"]["untyped"], "json")
 
