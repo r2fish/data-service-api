@@ -2505,6 +2505,17 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             _MitateDataServiceClass.open_session,
             ApplicationRuntime.insert,
             ApplicationRuntime.read,
+            # Phase 9 WP-3e (design D-7 / 裁定 C-25 (A)): the contract-
+            # shaped, request_id-carrying counterpart of `read` above --
+            # same isolated surface, same argument-passing convention
+            # (`query_with_budget` above calls it the same way `read` is
+            # called elsewhere in this file). A genuine additional public
+            # method on `ApplicationRuntime`, not a variant dispatch of
+            # `read` itself, so it gets its own entry here (this file's
+            # own module-level comment: this list is pinned to match
+            # `ApplicationRuntime`/`ApplicationDeveloper`'s real public
+            # methods mechanically).
+            ApplicationRuntime.read_with_result,
             ApplicationRuntime.update,
             ApplicationRuntime.delete,
             ApplicationRuntime.transact,
