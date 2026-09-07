@@ -44,6 +44,7 @@ if "adapter" not in sys.modules:
         sys.path.insert(0, _conformance_tests)
 
 from adapter import (  # noqa: E402
+    ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
     BatchOperation,
@@ -63,6 +64,7 @@ from adapter import (  # noqa: E402
     fresh_identifier,
     resolve_valid_confirmation,
 )
+from adapter import _EnumClear  # noqa: E402  -- type-hint only, mirrors ConformanceAdapter's own signature
 
 from r2db_api import ControlAuthority, CredentialStore, DataService  # noqa: E402
 from r2db_api.audit import ControlAuditSink  # noqa: E402
@@ -1137,7 +1139,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         fields: Sequence[str] | None = None,
         field_types: Mapping[str, str] | None = None,
         field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
-        enum: Sequence[Any] | None = None,
+        enum: Sequence[Any] | _EnumClear | None = None,
         nullable: bool | None = None,
         destructive: bool = False,
         confirmation: Any = None,
@@ -1156,7 +1158,12 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         one dict, exactly as it already does for `field_type`/`field_
         types`) -- this is the `alter_field` primitive (§6.1 item 8; no
         prior port method could express it) and every other schema-side
-        vector C-20/C-22/C-23/C-24/C-25 need.
+        vector C-20/C-22/C-23/C-24/C-25 need. `enum` is tri-state (port
+        v1.13 追補, `adapter.ENUM_CLEAR`): omitted -> no `enum` key on
+        `op`; `ENUM_CLEAR` -> `op["enum"] = None`, a literal JSON `null`
+        once this dict reaches the wire/`bind_schema_operation`'s own
+        `"enum" in operation` / `operation["enum"]` reads; a `Sequence` ->
+        `op["enum"] = [...]`, unchanged from before this addendum.
         """
         op: dict[str, Any] = {"operation": operation, "entity": entity}
         if field is not None:
@@ -1169,7 +1176,9 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             op["field_types"] = dict(field_types)
         if field_constraints:
             op["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
-        if enum is not None:
+        if enum is ENUM_CLEAR:
+            op["enum"] = None
+        elif enum is not None:
             op["enum"] = list(enum)
         if nullable is not None:
             op["nullable"] = nullable

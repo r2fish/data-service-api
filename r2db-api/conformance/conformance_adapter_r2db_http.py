@@ -79,6 +79,7 @@ if "adapter" not in sys.modules:
         sys.path.insert(0, _conformance_tests)
 
 from adapter import (  # noqa: E402
+    ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
     BatchOperation,
@@ -99,6 +100,7 @@ from adapter import (  # noqa: E402
     load_contract_error_codes,
     resolve_valid_confirmation,
 )
+from adapter import _EnumClear  # noqa: E402  -- type-hint only, mirrors ConformanceAdapter's own signature
 
 # CCR-14 WP-5 round 2 (MINOR-3): `r2db_api.control_main` now ends with a
 # module-level `app = build_control_app()` (design §8 m-10) -- a bare
@@ -2547,7 +2549,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         fields: Sequence[str] | None = None,
         field_types: Mapping[str, str] | None = None,
         field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
-        enum: Sequence[Any] | None = None,
+        enum: Sequence[Any] | _EnumClear | None = None,
         nullable: bool | None = None,
         destructive: bool = False,
         confirmation: Any = None,
@@ -2561,7 +2563,10 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # single schema-operations endpoint every other schema method on
         # this adapter already uses. `destructive`/`confirmation` follow
         # the identical VALID_CONFIRMATION sentinel protocol `drop_entity`
-        # below uses.
+        # below uses. `enum` is tri-state (port v1.13 追補, `adapter.
+        # ENUM_CLEAR`): omitted -> no `enum` key on the wire; `ENUM_CLEAR`
+        # -> a literal JSON `enum: null`; a `Sequence` -> `enum: [...]`,
+        # exactly as before this addendum.
         assert isinstance(session, _Session)
         body: dict[str, Any] = {"operation": operation, "entity": entity}
         if field is not None:
@@ -2574,7 +2579,9 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             body["field_types"] = dict(field_types)
         if field_constraints:
             body["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
-        if enum is not None:
+        if enum is ENUM_CLEAR:
+            body["enum"] = None
+        elif enum is not None:
             body["enum"] = list(enum)
         if nullable is not None:
             body["nullable"] = nullable

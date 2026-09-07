@@ -130,6 +130,44 @@ def _expected_branch_for_status(status: str) -> str:
     return "unavailable" if status == "unavailable" else "dry_run_enabled"
 
 
+def _revision_of(result: dict) -> str:
+    """The response `revision` of a real, successful `schema_operation_
+    with_result` call. `SchemaOperationResult.revision` (spec/data-
+    service-api.v1.json `schemas.SchemaOperationResult`) is `required`
+    and always present on a real response -- unlike `EntityDescriptor`,
+    which carries no `revision` property at all (`definitions.
+    EntityDescriptor`, `additionalProperties: false`), and unlike
+    `CatalogDocument`, which carries no document-level revision either.
+    A catalog row's `.get("revision")` is therefore always `None`; this
+    helper is the ONLY contract-defined way to observe a real revision
+    value."""
+    revision = result.get("revision")
+    assert revision is not None, f"schema_operation_with_result carries no 'revision' -- {result!r}"
+    return revision
+
+
+def _revision_advanced_by_one(before: str, after: str) -> bool:
+    """True when `after` is exactly one real commit ahead of `before`.
+
+    Both currently-registered peers keep their schema revision as a
+    monotonic integer counter incremented by exactly one per committed
+    schema operation (`r2db-api/src/r2db_api/structured.py:1583`
+    `self.schema_revision += 1`; `MitateDB-api/src/mitatedb_api/
+    backend_sqlite.py:207`/`:250` `self._schema_revision += 1`; the
+    Postgres backends mirror this via `_bump_revision`/`_bump_schema_
+    revision`), and `SchemaOperationResult.revision` reports that
+    counter stringified (`schema_operation_with_result`'s own
+    docstring, `conformance-tests/adapter.py`). Comparing
+    `int(after) == int(before) + 1` catches a CONFLICT-refused (or
+    CAPABILITY_UNSUPPORTED-refused) `alter_field` that silently also
+    bumps the counter -- exactly the mutation design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md's C-20 (6)
+    row guards against (monotone S-g) -- as a delta of 2 rather than 1,
+    when exactly one real, harmless schema commit is known to separate
+    `before` and `after`."""
+    return int(after) == int(before) + 1
+
+
 def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
     iso = isolated
     status = _status(adapter)
@@ -377,26 +415,50 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
         assert ei_budget.value.details.get("violated_declaration") == "plan", ei_budget.value.details
 
         # (5) schema dry run: descriptor matches the post-apply catalog;
-        # revision stays the PRE-apply value.
+        # revision stays the PRE-apply value (design D-4 S-j / §6.2 C-22
+        # (5)). A catalog row's `.get("revision")` is always `None`:
+        # `EntityDescriptor` (spec/data-service-api.v1.json `definitions.
+        # EntityDescriptor`, `additionalProperties: false`) carries no
+        # `revision` key at all, so comparing against it would assert
+        # nothing (see `_revision_of`'s docstring above, mirrored from
+        # `test_c20_constraint_declaration_agreement.py`, same name/
+        # content there). `SchemaOperationResult.revision` (`required`)
+        # is the only contract-defined way to observe a real revision, so
+        # this leg brackets the dry run with two harmless real `add_
+        # field` commits instead: the FIRST establishes R ("now"), the
+        # dry run's own `revision` must equal R (not the not-yet-
+        # established post-apply value), and the SECOND establishes
+        # R+1, proving the dry run itself did not advance the counter.
         schema_field = fresh_identifier("c22sf")
-        catalog_before = {row["entity"]: row for row in iso.catalog_document(developer)["entities"]}
-        revision_before = catalog_before[entity].get("revision")
+        revision_r = _revision_of(
+            iso.schema_operation_with_result(
+                developer, entity, "add_field", field=fresh_identifier("c22sfa"), field_type="string",
+            )
+        )
         schema_dry = iso.schema_operation_with_result(
             developer, entity, "add_field", field=schema_field, field_type="string", dry_run=True,
         )
-        assert schema_dry.get("revision") == revision_before, (
-            f"{adapter.name}: a dry-run schema operation must report the PRE-apply revision -- expected "
-            f"{revision_before!r}, got {schema_dry.get('revision')!r}"
+        assert schema_dry.get("revision") == revision_r, (
+            f"{adapter.name}: a dry-run schema operation must report the PRE-apply (current) revision -- "
+            f"expected {revision_r!r}, got {schema_dry.get('revision')!r}"
         )
         descriptor = schema_dry.get("descriptor")
         assert isinstance(descriptor, dict) and schema_field in descriptor.get("fields", []), (
             f"{adapter.name}: a dry-run schema operation's 'descriptor' does not name the field it would "
             f"add -- {descriptor!r}"
         )
-        assert schema_field not in {row["entity"]: row for row in iso.catalog_document(developer)["entities"]}[
-            entity
-        ]["fields"], f"{adapter.name}: a dry-run add_field left a real field behind"
-        iso.schema_operation_with_result(developer, entity, "add_field", field=schema_field, field_type="string")
+        catalog_after_dry = {row["entity"]: row for row in iso.catalog_document(developer)["entities"]}
+        assert schema_field not in catalog_after_dry[entity]["fields"], (
+            f"{adapter.name}: a dry-run add_field left a real field behind"
+        )
+        revision_r_plus_1 = _revision_of(
+            iso.schema_operation_with_result(developer, entity, "add_field", field=schema_field, field_type="string")
+        )
+        assert _revision_advanced_by_one(revision_r, revision_r_plus_1), (
+            f"{adapter.name}: the dry-run schema operation must not itself advance the real revision counter -- "
+            f"{revision_r!r} then {revision_r_plus_1!r} after exactly one further real commit, expected a "
+            "one-commit advance"
+        )
         catalog_after = {row["entity"]: row for row in iso.catalog_document(developer)["entities"]}
         assert schema_field in catalog_after[entity]["fields"], (
             f"{adapter.name}: the real (non-dry-run) add_field did not actually add the field"

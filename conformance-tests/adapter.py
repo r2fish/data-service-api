@@ -381,6 +381,55 @@ UNCLASSIFIED = "UNCLASSIFIED_NATIVE_FAILURE"
 CATALOG_SURFACE_ABSENT = "<peer-has-no-catalog-surface>"
 
 
+# Sentinel for `ConformanceAdapter.schema_operation_with_result(..., enum=
+# ...)` (port v1.13 追補, contract 1.7.0's own `alter_field` correction --
+# 監督裁定 A, `alter_field` の文に足された一文 "A constraint the request
+# omits is left as it is; enum: null clears the field's enum, and on
+# add_field enum: null means the same as omitting it."). `enum` is
+# genuinely tri-state on the wire (`SchemaOperationRequest.enum: ["array",
+# "null"]`, contract 1.7.0), and a bare Python `None` default parameter
+# cannot distinguish "omit this key" from "send an explicit JSON `null`"
+# -- both would otherwise collapse onto the same `None` value. This
+# dedicated sentinel class (never a plain string, unlike `VALID_
+# CONFIRMATION`/`CATALOG_SURFACE_ABSENT` above: an `enum` value is itself
+# an arbitrary `Sequence[Any]`, so a string sentinel could theoretically
+# collide with a legitimate declared enum member in a way `confirmation`/
+# `catalog_document`'s own narrower domains cannot) makes the third state
+# a value nothing else could ever equal.
+#
+#   enum=None         (default) -> OMIT the `enum` key entirely; on
+#                                   `alter_field` this leaves the field's
+#                                   existing enum untouched (leg (8),
+#                                   `test_c20_constraint_declaration_
+#                                   agreement.py`)
+#   enum=ENUM_CLEAR              -> carry a literal JSON `enum: null` on
+#                                   the wire; on `alter_field` this clears
+#                                   the field's enum (leg (9), same file);
+#                                   on `add_field` the contract states
+#                                   this means the same as omitting it
+#                                   entirely
+#   enum=<a Sequence>            -> carry `enum: [...]` on the wire,
+#                                   exactly as before this addendum
+#
+# Every adapter's `schema_operation_with_result` resolves this sentinel
+# itself (mirrors `_resolve_confirmation` resolving `VALID_CONFIRMATION`):
+# `enum is ENUM_CLEAR` -> `op["enum"] = None`; `enum is not None` (and not
+# the sentinel) -> `op["enum"] = list(enum)`; `enum is None` -> the key is
+# left out of the request body altogether. This is additive only -- every
+# pre-existing call site passing a `Sequence` or omitting `enum` keeps its
+# exact prior byte-for-byte request shape.
+class _EnumClear:
+    """Singleton sentinel type for `ENUM_CLEAR`. A dedicated class (not a
+    plain string/object()) purely so `repr()` reads as intent rather than
+    as a memory address or an easily-mistyped string literal."""
+
+    def __repr__(self) -> str:  # pragma: no cover -- diagnostic only
+        return "ENUM_CLEAR"
+
+
+ENUM_CLEAR = _EnumClear()
+
+
 def native_cause_of(denial: BaseException) -> BaseException | None:
     """Return the native exception chained onto a ``ConformanceDenial`` via
     ``raise ... from native_exc``. Used only for the non-echo inspection
@@ -2179,7 +2228,7 @@ class ConformanceAdapter(ABC):
         fields: Sequence[str] | None = None,
         field_types: Mapping[str, str] | None = None,
         field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
-        enum: Sequence[Any] | None = None,
+        enum: Sequence[Any] | _EnumClear | None = None,
         nullable: bool | None = None,
         destructive: bool = False,
         confirmation: Any = None,
@@ -2217,14 +2266,22 @@ class ConformanceAdapter(ABC):
         `create_entity`'s `fields` list plus optional plural `field_types`,
         exactly as `create_entity_with_declared_types` already sends).
         `field_constraints` (D-2(1), meaningful on `create_entity` in this
-        version) and `enum`/`nullable` (D-2(1), `add_field`/`alter_field`'s
-        own top-level constraint pair) are carried through exactly as
+        version) and `nullable` (D-2(1), `add_field`/`alter_field`'s own
+        top-level constraint pair) are carried through exactly as
         `field_types` already is on `create_entity_with_declared_types` --
         never validated, simulated, or defaulted by this adapter itself.
-        `destructive`/`confirmation` follow the identical `VALID_
-        CONFIRMATION` sentinel protocol `drop_entity` already uses (needed
-        for C-23 (vii)'s destructive-replay vector against `drop_entity`,
-        and for any future destructive schema vector).
+        `enum` is tri-state (port v1.13 追補, the `ENUM_CLEAR` sentinel
+        defined above this class): omitted (`None`, the default) leaves
+        the `enum` key off the wire request entirely (`alter_field`: no
+        change to the field's existing enum); `ENUM_CLEAR` puts a literal
+        JSON `enum: null` on the wire (`alter_field`: clears the field's
+        enum; `add_field`: the contract states this means the same as
+        omitting it); any other `Sequence` puts `enum: [...]` on the wire,
+        unchanged from pre-addendum behavior. `destructive`/`confirmation`
+        follow the identical `VALID_CONFIRMATION` sentinel protocol
+        `drop_entity` already uses (needed for C-23 (vii)'s
+        destructive-replay vector against `drop_entity`, and for any
+        future destructive schema vector).
 
         `dry_run`/`plan`/`budget`/`idempotency_key` are request-UNIT
         keywords -- exactly one value for this one operation (a schema

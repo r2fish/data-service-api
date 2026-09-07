@@ -46,6 +46,7 @@ if "adapter" not in sys.modules:
 
 from adapter import (  # noqa: E402
     CATALOG_SURFACE_ABSENT,
+    ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
     BatchOperation,
@@ -65,6 +66,7 @@ from adapter import (  # noqa: E402
     fresh_identifier,
     resolve_valid_confirmation,
 )
+from adapter import _EnumClear  # noqa: E402  -- type-hint only, mirrors ConformanceAdapter's own signature
 
 from mitatedb_api import ControlPlane, Filter, MitateDataService, Role  # noqa: E402
 from mitatedb_api.application_audit import ApplicationAuditSink  # noqa: E402
@@ -1379,7 +1381,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         fields: Sequence[str] | None = None,
         field_types: Mapping[str, str] | None = None,
         field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
-        enum: Sequence[Any] | None = None,
+        enum: Sequence[Any] | _EnumClear | None = None,
         nullable: bool | None = None,
         destructive: bool = False,
         confirmation: Any = None,
@@ -1407,6 +1409,26 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         forward-compatible pattern `add_field_with_declared_type` already
         uses for `hasattr(session, "add_field")`), so this method picks up
         that future method automatically with no edit here.
+
+        `enum` is tri-state (port v1.13 追補, `adapter.ENUM_CLEAR`):
+        omitted -> no `enum` kwarg is built into `kwargs` at all;
+        `ENUM_CLEAR` -> `kwargs["enum"] = None` is set EXPLICITLY; a
+        `Sequence` -> `kwargs["enum"] = [...]`, unchanged from before this
+        addendum. Disclosed limit (read directly off this peer's own real
+        in-process entry point, `mitatedb_api.cell.ApplicationDeveloper.
+        add_field`'s keyword signature, `enum=None` default): a plain
+        Python keyword call cannot itself distinguish "omitted" from
+        "explicitly passed as None" the way a wire-level dict/JSON body
+        can -- `session.add_field(..., enum=None)` and `session.add_field
+        (...)` (no `enum` kwarg at all) are the identical call from the
+        callee's point of view. This adapter still resolves the sentinel
+        faithfully as far as its OWN request-shaping goes (the `kwargs`
+        dict this method builds is presence/absence-sensitive, exactly
+        like every other keyword here); carrying that distinction further,
+        into a real behavioral difference on this peer's `add_field` (or a
+        future `alter_field`), would require that peer-side signature to
+        grow its own tri-state sentinel, which is peer-side territory this
+        port change does not reach.
         """
         if operation == "create_entity":
             declared = {name: (field_types or {}).get(name, "json") for name in (fields or [])}
@@ -1471,7 +1493,9 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                 kwargs: dict[str, Any] = {}
                 if field_type is not None:
                     kwargs["contract_type"] = field_type
-                if enum is not None:
+                if enum is ENUM_CLEAR:
+                    kwargs["enum"] = None
+                elif enum is not None:
                     kwargs["enum"] = list(enum)
                 if nullable is not None:
                     kwargs["nullable"] = nullable
@@ -1498,7 +1522,9 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
 
             def op() -> Any:
                 kwargs: dict[str, Any] = {}
-                if enum is not None:
+                if enum is ENUM_CLEAR:
+                    kwargs["enum"] = None
+                elif enum is not None:
                     kwargs["enum"] = list(enum)
                 if nullable is not None:
                     kwargs["nullable"] = nullable
