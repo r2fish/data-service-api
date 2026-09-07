@@ -29,13 +29,21 @@ be echoed back as a request-internal PATH, since that is a position, not
 a value" carve-out means a marker used as the identifier being validated
 is NOT itself a leak if the resulting `field` is a FIXED path constant
 independent of that identifier's own text (`"entity"`, `"field"`,
-`"operations/0/operation"`, an `<n>`-indexed `"order_by/<i>/field"`/
-`"select/<i>"`) -- several probes below do exactly this (the marker IS
-the invalid identifier) precisely because it stays unambiguous: only a
-probe whose `field` path is BUILT FROM the identifier's own text (a
-mutation `values` dict KEY, e.g., which becomes `operations/<i>/values/
-<key>`) would blur that line, so no probe here uses a marker as one of
-those key-shaped identifiers."""
+`"operations/0/operation"`, an `<n>`-indexed `"order_by/<i>"`/`"select"`)
+-- several probes below do exactly this (the marker IS the invalid
+identifier) precisely because it stays unambiguous.
+
+Ruling N-1 (`{scratchpad}/rulings-r3-r7-flip.md` 追補 3): a mutation
+`values` dict KEY used to be the one identifier-syntax position whose
+`field` was BUILT FROM the identifier's own text (`operations/<i>/values/
+<key>`), which is exactly the C-03 `test_identifier_positions_reject_
+every_payload` regression N-1 closes -- an adversarial key echoed
+verbatim through that f-string. N-1 fixes every identifier-syntax call
+site to stop at the CONTAINER position instead (`operations/<i>/values`,
+never `.../<key>`), so a marker used as a `values` key is now ALSO safe
+to use directly below, and doing so is this file's own regression probe
+for the fix (M-5/L-5: "denial's `field` for an invalid identifier must
+never contain that identifier")."""
 from __future__ import annotations
 
 import re
@@ -158,6 +166,21 @@ _PROBES: list[tuple[str, "object", "object"]] = [
         "IDENTIFIER_INVALID add_field name syntax (reserved-prefix-shaped, request-shape)",
         None,
         lambda s, r, d, m: s.schema(d, {"operation": "add_field", "entity": "notes", "field": m, "field_type": "string"}),
+    ),
+    # Ruling N-1 (`{scratchpad}/rulings-r3-r7-flip.md` 追補 3, L-5 regression
+    # probe): the marker used AS the malformed mutation `values` dict key
+    # itself -- the exact C-03 `test_identifier_positions_reject_every_
+    # payload` regression this ruling closes (the key used to be echoed
+    # verbatim into `field` via `operations/<i>/values/<key>`). `field`
+    # must now be the container position `operations/0/values` only, never
+    # containing the marker's own text -- the generic scan below already
+    # asserts this (marker not present in ANY of the 4 keys), so this
+    # probe is this file's own direct exercise of that assertion for the
+    # bug N-1 fixed.
+    (
+        "IDENTIFIER_INVALID mutation values key syntax (marker used AS the key itself)",
+        None,
+        lambda s, r, d, m: s.mutate(r, "notes", [{"operation": "insert", "values": {m: "x"}}]),
     ),
     (
         "CAPABILITY_UNSUPPORTED mutation operation not supported (choke point, field = operations/<i>/operation)",

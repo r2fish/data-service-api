@@ -183,10 +183,13 @@ def test_identifier_invalid_field_is_a_request_path_not_the_literal_identifier(s
 
 
 def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_values_key(service, runtime):
-    """`operations/<i>/values/<name>` (V-3's own worked example) for a
-    malformed key inside ONE mutation item of a multi-item batch -- proves
-    the batch position is real, not just a fixed prefix, by putting the
-    bad key at index 1 (not 0) and asserting the path names index 1."""
+    """`operations/<i>/values` (ruling N-1, rulings-r3-r7-flip.md 追補 3:
+    an identifier_syntax denial's `field` stops at the CONTAINER position,
+    never the malformed identifier itself -- it can carry SQL fragments/
+    control characters, SI-10) for a malformed key inside ONE mutation item
+    of a multi-item batch -- proves the batch position is real, not just a
+    fixed prefix, by putting the bad key at index 1 (not 0) and asserting
+    the path names index 1, without ever echoing the key's own text."""
     with pytest.raises(FoundationError) as exc:
         service.mutate(
             runtime, "notes",
@@ -197,7 +200,7 @@ def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_values_key
         )
     assert exc.value.code == "IDENTIFIER_INVALID"
     assert exc.value.details.get("violated_declaration") == "identifier_syntax"
-    assert exc.value.details.get("field") == "operations/1/values/not a valid identifier!"
+    assert exc.value.details.get("field") == "operations/1/values"
 
 
 def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_unique_key(service, runtime):
@@ -218,6 +221,10 @@ def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_unique_key
 
 
 def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_where_predicate(service, runtime):
+    """`operations/<i>/where/<j>` (ruling N-1) -- the predicate's own
+    container position, not `.../field` (which would only be the fixed
+    literal key name "field", never the malformed value, but N-1's worked
+    examples ("where/0") are followed verbatim across every position)."""
     with pytest.raises(FoundationError) as exc:
         service.mutate(
             runtime, "notes",
@@ -227,7 +234,7 @@ def test_identifier_invalid_field_reflects_batch_index_for_a_mutation_where_pred
             ],
         )
     assert exc.value.code == "IDENTIFIER_INVALID"
-    assert exc.value.details.get("field") == "operations/1/where/0/field"
+    assert exc.value.details.get("field") == "operations/1/where/0"
 
 
 # ---------------------------------------------------------------------------

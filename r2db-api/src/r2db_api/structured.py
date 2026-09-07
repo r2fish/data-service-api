@@ -118,8 +118,17 @@ class Predicate:
         """`base_path` (WP-2e rework, ruling L-3) is THIS predicate's own
         request-internal position (e.g. `"where/2"`, or `"operations/0/
         where/1"` for a mutation's own `where` -- `validate_predicates`
-        below builds it, batch index included)."""
-        validate_identifier(self.field, field=f"{base_path}/field")
+        below builds it, batch index included).
+
+        Ruling N-1 (rulings-r3-r7-flip.md 追補 3): an `identifier_syntax`
+        denial's `field` must not carry the malformed identifier itself
+        (it can hold SQL fragments/control characters -- SI-10), so this
+        stops at `base_path` (the predicate object's own container
+        position, e.g. `"where/2"`), never `f"{base_path}/field"` (which
+        would still just be the literal key name "field", not the
+        identifier value -- but N-1's own container-position examples
+        (`where/0`) omit it, so this matches verbatim)."""
+        validate_identifier(self.field, field=base_path)
         if self.operator not in OPERATORS:
             fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field=f"{base_path}/operator"))
 
@@ -161,7 +170,11 @@ def validate_projection(select: Any, known_fields: set[str]) -> list[str]:
     if not isinstance(select, list) or not select or len(select) > 100:
         fail("VALIDATION_FAILED", "A bounded non-empty projection is required.", details=violation("request_schema", field="select"))
     for i, field_name in enumerate(select):
-        validate_identifier(field_name, field=f"select/{i}")
+        # Ruling N-1: an identifier_syntax denial's `field` stops at the
+        # container position ("select" -- N-1's own example), never the
+        # per-index path (which is harmless on its own here, but N-1's
+        # worked examples are followed verbatim across every position).
+        validate_identifier(field_name, field="select")
     if any(field_name not in known_fields for field_name in select):
         fail("NOT_FOUND", "Field was not found.", status=404)
     return select
@@ -276,7 +289,13 @@ def bind_mutation(operation: Any, known_fields: set[str], *, operation_index: in
         # class exists).
         fail("VALIDATION_FAILED", "Mutation contains too many fields.", details=violation("request_schema", field="values"))
     for key in raw_values:
-        validate_identifier(key, field=f"operations/{operation_index}/values/{key}")
+        # Ruling N-1 (rulings-r3-r7-flip.md 追補 3): an identifier_syntax
+        # denial must not carry the malformed key itself in `field` -- it
+        # was the C-03 test_identifier_positions_reject_every_payload
+        # regression this ruling exists to close (an adversarial `values`
+        # key echoed verbatim through this f-string). Stop at the
+        # container position, `operations/<i>/values` (N-1's own example).
+        validate_identifier(key, field=f"operations/{operation_index}/values")
         if key not in known_fields:
             fail("NOT_FOUND", "Field was not found.", status=404)
     if name in {"insert", "update", "upsert"} and "id" in raw_values:
@@ -945,7 +964,13 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             fail("VALIDATION_FAILED", "Schema fields must be a bounded list.", details=violation("request_schema", field="fields"))
         validated: list[str] = []
         for i, candidate in enumerate(raw_fields):
-            validate_identifier(candidate, field=f"fields/{i}")
+            # Ruling N-1: identifier_syntax stops at the container
+            # position ("fields", N-1's own example) -- never the
+            # malformed candidate or its index. The reserved-name check
+            # below operates on an already syntax-valid string (N-1: "有効
+            # な識別子...予約名など はこれまでどおり path に含めてよい"), so it keeps
+            # the precise per-index path as before.
+            validate_identifier(candidate, field="fields")
             _reject_reserved_field(candidate, field=f"fields/{i}")
             if candidate in validated:
                 fail("CONFLICT", "Field already exists.", status=409)
@@ -1198,7 +1223,10 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             fail("VALIDATION_FAILED", "Index fields must list between 1 and 16 fields.", details=violation("request_schema", field="fields"))
         validated = []
         for i, candidate in enumerate(raw_fields):
-            validate_identifier(candidate, field=f"fields/{i}")
+            # Ruling N-1: container position ("fields"), not the
+            # per-index path -- same reasoning as create_entity's fields
+            # loop above.
+            validate_identifier(candidate, field="fields")
             if candidate == "id":
                 # WP-2 review M-5: `id` is the address, not a domain
                 # uniqueness declaration (§2) -- allowing it here would let
@@ -1575,7 +1603,11 @@ def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, 
         for i, item in enumerate(order_by):
             if not isinstance(item, dict) or "field" not in item or set(item) - {"field", "direction"}:
                 fail("VALIDATION_FAILED", "order_by entry shape is not supported.", details=violation("request_schema", field="order_by"))
-            field_name = validate_identifier(item["field"], field=f"order_by/{i}/field")
+            # Ruling N-1: container position (the order_by entry itself,
+            # "order_by/<i>" -- N-1's own example), not "order_by/<i>/field"
+            # (which would only be the literal key name "field", but N-1's
+            # worked examples are followed verbatim).
+            field_name = validate_identifier(item["field"], field=f"order_by/{i}")
             if field_name not in known_fields:
                 fail("NOT_FOUND", "Field was not found.", status=404)
             if field_name in seen_fields:
