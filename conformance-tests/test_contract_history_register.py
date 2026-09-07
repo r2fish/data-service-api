@@ -1,50 +1,51 @@
 """Register test for `spec/CONTRACT_HISTORY.md`, the R-10 (A) provenance
 companion (design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md §3
 D-4, requester ruling §5 U-2 = (A); work order
-docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md WP-3).
+docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md WP-3), REVISED for
+contract 1.7.0's R-10 (B) prefix/insert removal (design docs/design/
+PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-9; work order
+docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (6)).
 
-U-2 = (A) means the contract JSON (`spec/data-service-api.v1.json`, and both
-peers' packaged copies) is byte-unchanged by this phase -- see the existing
-byte-identity tests (`r2db-api/tests/test_http.py`,
-`MitateDB-api/tests/test_http.py`) and `conformance-tests/test_contract.py`
-(also unchanged). What this file's tests fix instead is that the companion
-(`spec/CONTRACT_HISTORY.md`) exactly and correctly indexes every
-provenance-marker-carrying value already inside the contract, so that a
-future value newly carrying such a marker cannot land without a matching
-companion section.
+Through contract 1.6.0, every provenance-marker-carrying contract value
+carried its marker prefix/clause inline, so this file's scanner and every
+comparison against `CONTRACT_HISTORY.md`'s quotes operated on the live
+contract JSON's own values directly. Contract 1.7.0 removed the marker
+prefix/insert from 26 of those 29 values (`spec/CONTRACT_HISTORY_MANIFEST.
+json`), leaving `CONTRACT_HISTORY.md`'s own quotes holding the PRE-strip
+text. Every scan and every quote comparison below is therefore now done
+against the REVERSE-APPLIED value -- the manifest's `stripped_prefix` /
+`stripped_insert` (and, for the one entry that has one, `rewrite`) restored
+onto today's live contract value at that path -- not the raw live value.
+For the 3 `unstripped: true` manifest entries, reverse-apply is a no-op, so
+this is unchanged behavior for them.
 
-The scanner below is not a new invention: it is the SAME marker-pattern
-regex family the design doc's Appendix A prototype
-({scratchpad}/r10_marker_inventory.py) used to produce the verbatim
-inventory that D-4 and U-2 are based on, moved here verbatim per phase 8
-standing discipline 5 ("static rules move from a verbatim prototype into the
-design/suite, unchanged"). It is intentionally permissive (it flags
-"ruling", not just "subordinate ruling N") to over-collect rather than
-under-collect -- under-collection would let a marker slip through
-unindexed.
+A new, additional assertion (not present through 1.6.0) is added at the
+bottom of this file: the RAW (un-restored) contract JSON must have 0
+scanner hits outside the 3 `unstripped: true` paths -- this is what makes a
+half-finished strip (marker text left behind by accident) fail loudly here
+rather than only via a stale `CONTRACT_HISTORY.md` quote.
 
-Four things are fixed, matching WP-3's completion conditions 1-4:
-  1. The scanner's set of "JSON paths carrying >=1 marker" equals the
-     companion's set of `## <json_path>` heading text, exactly (no more, no
-     fewer) -- and that set is non-empty (an empty-set vacuous pass would
-     repeat the L7-23 trap).
+The scanner itself (the `_PATTERNS` regex family) is UNCHANGED from phase 8
+-- moved here again verbatim; only what it is run against has changed.
+
+Six things are fixed:
+  1. The scanner's set of "JSON paths carrying >=1 marker", computed against
+     REVERSE-APPLIED values, equals the companion's set of `## <json_path>`
+     heading text, exactly.
   2. The companion has no duplicate headings.
   3. Every heading's section body is non-empty.
   4. Every subordinate-ruling reference a section names actually exists as
      a numbered item under `spec/CCR_DISPOSITION.md`'s
      "### 従属判断 -- すべて裁定済み" heading.
+  5. Every `## <json_path>` section's quote byte-matches the REVERSE-APPLIED
+     contract value at that path (`assert checked == 17` for the "Since
+     X.Y.Z" vs "Introduced in" cross-check runs unmodified against these
+     same reverse-applied values).
+  6. (new, contract 1.7.0) The RAW contract JSON has 0 scanner hits outside
+     the 3 `unstripped: true` manifest paths.
 
-No `@pytest.mark.condition(...)` marker is used anywhere in this file (design
-§6.5/§6.6: this WP does not add a new common CONDITIONS.md row).
-
-Two more standing tests were added on code-review remand (supervisor rework 1,
-2026-09-06, rulings 1 and 3): quote-vs-contract verbatim drift (ruling 1 -- a
-named, granted exception to standing discipline 9, since it enforces standing
-disciplines 1/3 rather than adding a new kind of check) and "Introduced in"
-vs. a quote's own "Since X.Y.Z" marker (ruling 3). Ruling 2 dropped the line
-number a "従属判断 N" reference used to carry (see the note above
-`_RULING_REF_RE`); ruling 4 was a wording-only fix to
-`spec/CONTRACT_HISTORY.md` and `spec/README.md`, not to this file.
+No `@pytest.mark.condition(...)` marker is used anywhere in this file
+(design §6.5/§6.6: this WP does not add a new common CONDITIONS.md row).
 """
 from __future__ import annotations
 
@@ -55,6 +56,7 @@ from pathlib import Path
 CONTRACT_PATH = Path(__file__).parent.parent / "spec" / "data-service-api.v1.json"
 COMPANION_PATH = Path(__file__).parent.parent / "spec" / "CONTRACT_HISTORY.md"
 CCR_DISPOSITION_PATH = Path(__file__).parent.parent / "spec" / "CCR_DISPOSITION.md"
+MANIFEST_PATH = Path(__file__).parent.parent / "spec" / "CONTRACT_HISTORY_MANIFEST.json"
 
 # ---------------------------------------------------------------------------
 # The marker-pattern scanner, moved verbatim (regexes unchanged) from the
@@ -100,11 +102,66 @@ def _find_matches(value) -> list[str]:
     return [name for name, rx in _PATTERNS.items() if rx.search(value)]
 
 
+# ---------------------------------------------------------------------------
+# spec/CONTRACT_HISTORY_MANIFEST.json (contract 1.7.0, R-10 (B)) and the
+# reverse-apply ("restore") this file needs to run the scanner and the
+# companion-quote comparison against pre-strip text.
+# ---------------------------------------------------------------------------
+
+
+def _manifest() -> dict:
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _restore(path: str, value, manifest: dict):
+    """Reverse contract 1.7.0's R-10 (B) prefix/insert removal at `path`, if
+    any is recorded for it. Non-string values, and paths the manifest does
+    not name at all, pass through unchanged -- the manifest only ever names
+    the 29 provenance-marker-carrying string values (design Appendix B)."""
+    if not isinstance(value, str):
+        return value
+    entry = manifest.get(path)
+    if entry is None or entry.get("unstripped"):
+        return value
+    restored = value
+    rewrite = entry.get("rewrite")
+    if rewrite:
+        to, frm = rewrite["to"], rewrite["from"]
+        assert to in restored, f"{path}: rewrite.to {to!r} not found in live value -- manifest is stale"
+        restored = restored.replace(to, frm, 1)
+    insert = entry.get("stripped_insert")
+    if insert:
+        # `stripped_insert_suffix_length` names how many characters
+        # followed the removed insert in the original (pre-strip) value,
+        # measured from the end of the value back to the insertion point --
+        # since removing a chunk never changes the characters that came
+        # after it, that same length identifies the correct re-insertion
+        # point in today's (stripped) value too: splice `insert` back in at
+        # position len(restored) - suffix_length.
+        suffix_length = entry.get("stripped_insert_suffix_length")
+        assert suffix_length is not None, f"{path}: has stripped_insert but no stripped_insert_suffix_length"
+        assert 0 <= suffix_length <= len(restored), (
+            f"{path}: stripped_insert_suffix_length {suffix_length} out of range for a "
+            f"{len(restored)}-character value -- manifest is stale relative to the live contract"
+        )
+        split_at = len(restored) - suffix_length
+        restored = restored[:split_at] + insert + restored[split_at:]
+    prefix = entry.get("stripped_prefix")
+    if prefix:
+        restored = prefix + restored
+    return restored
+
+
 def _scanner_paths() -> set[str]:
-    """The set of JSON paths in the live contract whose value matches >=1
-    provenance-marker pattern."""
+    """The set of JSON paths in the live contract whose REVERSE-APPLIED
+    value matches >=1 provenance-marker pattern."""
     contract = json.loads(CONTRACT_PATH.read_text())
-    return {path for path, value in _walk(contract, "") if _find_matches(value)}
+    manifest = _manifest()
+    return {
+        path
+        for path, value in _walk(contract, "")
+        if _find_matches(_restore(path, value, manifest))
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -112,16 +169,6 @@ def _scanner_paths() -> set[str]:
 # ---------------------------------------------------------------------------
 
 _HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-# Supervisor rework 1 (2026-09-06), ruling 2: a "従属判断 N — spec/CCR_DISPOSITION.md:LINE"
-# reference used to carry a line number, but that number was never checked (the
-# original review's MUT-C mutation -- rewriting the line number -- passed all 5
-# original tests) and a single line inserted anywhere above in
-# spec/CCR_DISPOSITION.md would silently shift every one of the 33 references at
-# once. Rather than add a check that only re-derives a fragile line number, the
-# ruling drops the line number from the reference entirely: a section now names
-# only "従属判断 N", and the existing check below (the number is a real numbered
-# item under CCR_DISPOSITION.md's subordinate-ruling heading) is the only
-# validation this reference needs.
 _RULING_REF_RE = re.compile(r"従属判断\s+(\d+)")
 
 
@@ -190,15 +237,16 @@ def test_scanner_finds_at_least_one_marker_carrying_json_path():
     without ever exercising anything."""
     paths = _scanner_paths()
     assert len(paths) >= 1, (
-        f"the marker scanner found 0 JSON paths in {CONTRACT_PATH} -- an empty "
+        f"the marker scanner found 0 JSON paths (reverse-applied) in {CONTRACT_PATH} -- an empty "
         "result would make the set-equality register test vacuously pass"
     )
+    assert len(paths) == 29, f"expected 29 marker-carrying JSON paths (reverse-applied), found {len(paths)}: {sorted(paths)}"
 
 
 def test_contract_history_companion_heading_set_matches_the_scanner():
-    """Completion condition 1: the scanner-derived set of marker-carrying
-    JSON paths equals the companion's set of `## <json_path>` headings,
-    exactly."""
+    """Completion condition 1: the scanner-derived (reverse-applied) set of
+    marker-carrying JSON paths equals the companion's set of `##
+    <json_path>` headings, exactly."""
     scanner_paths = _scanner_paths()
     companion_paths = set(_companion_heading_list())
     missing_from_companion = sorted(scanner_paths - companion_paths)
@@ -227,11 +275,10 @@ def test_contract_history_companion_every_section_is_non_empty():
 
 def test_contract_history_companion_ruling_references_exist_in_ccr_disposition():
     """Completion condition 4: every subordinate-ruling reference named in a
-    companion section (a "従属判断 N" line -- supervisor rework 1 ruling 2
-    dropped the trailing line number these once carried, see the note above
-    `_RULING_REF_RE`) must name an N that actually exists as a numbered item
-    under `spec/CCR_DISPOSITION.md`'s "### 従属判断 -- すべて裁定済み"
-    heading, and every section must name at least one such reference."""
+    companion section (a "従属判断 N" line) must name an N that actually
+    exists as a numbered item under `spec/CCR_DISPOSITION.md`'s "### 従属判断
+    -- すべて裁定済み" heading, and every section must name at least one such
+    reference."""
     valid_numbers = _subordinate_ruling_numbers()
     assert valid_numbers, f"found 0 numbered subordinate rulings in {CCR_DISPOSITION_PATH}"
 
@@ -259,27 +306,18 @@ def test_contract_history_companion_ruling_references_exist_in_ccr_disposition()
 
 
 # ---------------------------------------------------------------------------
-# Supervisor rework 1 (2026-09-06), rulings 1 and 3: two more standing tests,
-# added on code-review remand. The original register test (above) fixed the
-# *set* of anchors and the *presence* of a ruling reference and a non-empty
-# body, but nothing checked that a section's quoted text is still what the
-# contract JSON actually says, or that its "Introduced in" field is still
-# consistent with the "Since X.Y.Z" the quote itself names -- both of these
-# can drift silently (the original review's MUT-A and a version-rewrite
-# mutation each passed all 5 original tests). Ruling 1 is a granted, named
-# exception to standing discipline 9 (do not add checks beyond what the
-# design ordered without a ruling): it is not a new mechanism, only standing
-# disciplines 1 (verbatim) and 3 (no drift) applied to this file's own
-# quotes, using the same `_walk` the scanner already uses.
+# Quote-vs-contract verbatim drift and "Introduced in" checks -- run against
+# REVERSE-APPLIED values as of contract 1.7.0 (previously the raw live
+# value, through contract 1.6.0).
 # ---------------------------------------------------------------------------
 
 
 def _contract_values_by_path() -> dict[str, object]:
-    """Every leaf (path, value) in the live contract JSON, keyed by path --
-    the same `_walk(contract, "")` the scanner uses, just kept as a dict
-    instead of filtered down to marker-carrying paths."""
+    """Every leaf (path, value) in the live contract JSON, REVERSE-APPLIED,
+    keyed by path."""
     contract = json.loads(CONTRACT_PATH.read_text())
-    return dict(_walk(contract, ""))
+    manifest = _manifest()
+    return {path: _restore(path, value, manifest) for path, value in _walk(contract, "")}
 
 
 def _companion_quotes() -> dict[str, str]:
@@ -303,12 +341,11 @@ def _companion_quotes() -> dict[str, str]:
 
 
 def test_contract_history_companion_quote_matches_the_contract_value_verbatim():
-    """Ruling 1: for every `## <json_path>` section, the section's quoted
-    text must byte-match the live value at that JSON path in the contract
-    (via the same `_walk` the scanner uses). A quote that has drifted from
-    the contract value it claims to be a verbatim copy of is exactly the
-    L7-23-shaped risk this companion exists to avoid -- the register test
-    above fixes only the anchor *set*, not the anchor *content*."""
+    """Ruling 1 (phase 8 supervisor rework 1): for every `## <json_path>`
+    section, the section's quoted text must byte-match the REVERSE-APPLIED
+    value at that JSON path in the contract -- i.e. the pre-1.7.0-strip
+    text, reconstructed from today's live contract value via
+    `spec/CONTRACT_HISTORY_MANIFEST.json`."""
     contract_values = _contract_values_by_path()
     quotes = _companion_quotes()
     assert quotes, f"found 0 quoted sections in {COMPANION_PATH}"
@@ -319,11 +356,11 @@ def test_contract_history_companion_quote_matches_the_contract_value_verbatim():
         if contract_value != quote:
             contract_len = len(contract_value) if isinstance(contract_value, str) else -1
             mismatched.append(
-                f"{path} (companion quote {len(quote)} chars, contract value {contract_len} chars)"
+                f"{path} (companion quote {len(quote)} chars, reverse-applied contract value {contract_len} chars)"
             )
     assert not mismatched, (
         f"{COMPANION_PATH} section(s) whose quoted text does not byte-match the "
-        f"live value at that JSON path in {CONTRACT_PATH}: {mismatched}"
+        f"REVERSE-APPLIED value at that JSON path in {CONTRACT_PATH}: {mismatched}"
     )
 
 
@@ -350,18 +387,18 @@ def _companion_introduced_in() -> dict[str, str]:
 
 
 def test_contract_history_companion_introduced_in_agrees_with_a_since_marker_when_present():
-    """Ruling 3 (design D-4 decision 3(iii) was previously checked only for
-    non-emptiness): for every section whose quote names a "Since X.Y.Z"
-    marker, the '**Introduced in:**' field must be consistent with X.Y.Z --
-    either equal to it (the ordinary single-version case), or containing it
-    within the field's own declared range (the one cumulative case,
-    `versioning.version_binding`, whose value is a single paragraph spanning
-    contract 1.2.0 through 1.6.0 and embeds one later "Since 1.5.0" clause
-    added by a revision still under that same paragraph). A section whose
-    quote names no "Since X.Y.Z" gets no machine check here -- format-only,
-    already covered by the non-empty check above. 17 sections are
-    machine-checked this way; the other 12 are not (matching the review's
-    count)."""
+    """Ruling 3 (phase 8 supervisor rework 1): for every section whose quote
+    names a "Since X.Y.Z" marker, the '**Introduced in:**' field must be
+    consistent with X.Y.Z -- either equal to it, or containing it within
+    the field's own declared range (the one cumulative case,
+    `versioning.version_binding`, now `contract 1.2.0 through 1.7.0
+    (cumulative)`). `assert checked == 17` is unchanged by contract 1.7.0:
+    none of 1.7.0's own new prose uses a literal "Since 1.7.0" phrasing
+    (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.
+    md §3 D-8's version_binding paragraph says "Only an implementation
+    declaring 1.7.0 ...", never "Since 1.7.0"), so the set of sections whose
+    quote contains a "Since X.Y.Z" substring is unchanged from phase 8's own
+    count."""
     quotes = _companion_quotes()
     introduced_in = _companion_introduced_in()
 
@@ -386,10 +423,43 @@ def test_contract_history_companion_introduced_in_agrees_with_a_since_marker_whe
             mismatched.append(f"{path} (Since {since_versions}, Introduced in {field!r})")
 
     assert checked == 17, (
-        f"expected 17 sections whose quote names a 'Since X.Y.Z' marker (the "
-        f"review's count), found {checked}: {sorted(p for p, q in quotes.items() if _SINCE_VERSION_RE.search(q))}"
+        f"expected 17 sections whose quote names a 'Since X.Y.Z' marker (unchanged from phase 8), "
+        f"found {checked}: {sorted(p for p, q in quotes.items() if _SINCE_VERSION_RE.search(q))}"
     )
     assert not mismatched, (
         f"{COMPANION_PATH} section(s) whose 'Since X.Y.Z' marker disagrees with their "
         f"'**Introduced in:**' field: {mismatched}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New for contract 1.7.0 (R-10 (B)): the RAW (un-restored) contract JSON
+# must have 0 scanner hits outside the 3 `unstripped: true` manifest paths
+# -- this is what catches a strip that was started but not completed (marker
+# text accidentally left behind in the live contract body).
+# ---------------------------------------------------------------------------
+
+
+def test_stripped_contract_has_zero_scanner_hits_outside_the_unstripped_paths():
+    """New assert (work order §2 WP-1 (6) / (18)): scan the RAW contract
+    JSON (no reverse-apply) and require that every path the scanner still
+    flags is one of the manifest's `unstripped: true` paths -- i.e. that
+    R-10 (B) actually removed every marker it claims to have removed, from
+    every value it claims to have removed it from."""
+    contract = json.loads(CONTRACT_PATH.read_text())
+    manifest = _manifest()
+    unstripped_paths = {path for path, entry in manifest.items() if entry.get("unstripped")}
+    assert unstripped_paths, "manifest must name at least 1 unstripped path"
+
+    raw_hit_paths = {path for path, value in _walk(contract, "") if _find_matches(value)}
+    assert raw_hit_paths, "the marker scanner found 0 hits in the RAW (un-restored) contract JSON"
+
+    unexpected = sorted(raw_hit_paths - unstripped_paths)
+    assert not unexpected, (
+        f"the RAW contract JSON still has scanner hit(s) outside the manifest's `unstripped: true` "
+        f"paths -- R-10 (B) left provenance-marker text behind at: {unexpected}"
+    )
+    assert raw_hit_paths == unstripped_paths, (
+        f"expected the raw contract's hit-path set to equal exactly the manifest's unstripped-path "
+        f"set; raw={sorted(raw_hit_paths)} unstripped={sorted(unstripped_paths)}"
     )

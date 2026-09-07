@@ -49,6 +49,12 @@ _CONTRACT_LIMIT_CLASSES = {
     # Phase 4 WP-2(b) (design D-5, P4-D4 item 8, contract 1.4.0 subordinate
     # ruling 9): `audit_query`'s own separate pre-auth window.
     "audit_requests_per_minute",
+    # Phase 9 WP-1 (contract 1.7.0, subordinate ruling 12, D-2 (7) = U-1
+    # (β)): per-field `enum` member-count bound. Not yet enforced by this
+    # foundation (WP-2a gives it real enforcement in the same commit that
+    # flips `constraint_declarations` to `enabled`) -- mirrored here now so
+    # this vocabulary test does not itself go stale the moment WP-1 lands.
+    "enum_members",
 }
 
 # `ResourceLimits.check(self, kind: str, actual: int)` (limits.py) is the

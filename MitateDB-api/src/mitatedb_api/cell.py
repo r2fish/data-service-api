@@ -1615,6 +1615,22 @@ class ApplicationCell:
             raise AuthorizationError("developer authority required")
 
 
+def _deny_provisional_field(field_name):
+    """Contract 1.7.0 provisional gate (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1 (3); work
+    order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
+    in-process counterpart of `http.py::_deny_provisional_field` -- this
+    peer still declares `constraint_declarations`/`dry_run`/
+    `request_budget` `unavailable`, so any in-process caller passing one of
+    the new keyword-only fields below is refused before anything executes,
+    exactly like the HTTP path. `details` is set on the raised instance
+    rather than via a new `CapabilityError.__init__` parameter, so this
+    does not preempt WP-3e's own planned `details` rollout (D-3 (5))."""
+    err = CapabilityError(f"{field_name} is not supported by this peer")
+    err.details = {"violated_declaration": "capability", "field": field_name}
+    raise err
+
+
 class ApplicationRuntime:
     """Runtime data authority; schema mutation is intentionally absent."""
 
@@ -1662,8 +1678,10 @@ class ApplicationRuntime:
         self.__authorize(request_id=request_id)
         return self.__cell.insert(self.__principal, collection, values, request_id=request_id)
 
-    def read(self, collection, fields=None, filters=None, order_by=None, limit=None, *, request_id=None):
+    def read(self, collection, fields=None, filters=None, order_by=None, limit=None, *, request_id=None, budget=None):
         self.__authorize(request_id=request_id)
+        if budget is not None:
+            _deny_provisional_field("budget")
         return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit, request_id=request_id)
 
     def catalog(self, *, request_id=None):
@@ -1679,8 +1697,14 @@ class ApplicationRuntime:
         return self.__cell.delete(self.__principal, collection, filters,
                                   destructive=destructive, confirm=confirm, request_id=request_id)
 
-    def transact(self, operations, *, request_id=None):
+    def transact(self, operations, *, request_id=None, dry_run=False, plan=None, budget=None):
         self.__authorize(request_id=request_id)
+        if dry_run:
+            _deny_provisional_field("dry_run")
+        if plan is not None:
+            _deny_provisional_field("plan")
+        if budget is not None:
+            _deny_provisional_field("budget")
         return self.__cell.transact(self.__principal, operations, request_id=request_id)
 
     def capabilities(self, *, request_id=None):
@@ -1794,7 +1818,20 @@ class ApplicationRuntime:
                 # this deployment/adapter actually runs cannot drift apart
                 # (R-7: "宣言値と enforce 値が同一ソースから出ることを構造
                 # で保証する").
-                "control_plane": {"status": config.control_plane_status}
+                "control_plane": {"status": config.control_plane_status},
+                # Contract 1.7.0 (subordinate ruling 12, D-1 (3)): three new
+                # capabilities, honestly declared `unavailable` in the SAME
+                # commit as the provisional gate rejecting every field each
+                # one governs (`ApplicationRuntime.read`/`.transact`,
+                # `ApplicationDeveloper.create_entity`/`.add_field` above;
+                # `http.py`'s `post_query`/`post_mutate`/
+                # `post_cross_entity_mutate`/`post_schema`) -- P-3. WP-3a
+                # (`constraint_declarations`), WP-3b (`dry_run`) and WP-3d
+                # (`request_budget`) each flip their own entry in the same
+                # commit that removes the corresponding gate above.
+                "constraint_declarations": {"status": "unavailable"},
+                "dry_run": {"status": "unavailable"},
+                "request_budget": {"status": "unavailable"},
             },
             **_surfaces_document_fragment(config),
             "limits": {
@@ -1944,13 +1981,27 @@ class ApplicationDeveloper(ApplicationRuntime):
         return self._ApplicationRuntime__cell.create_collection(
             self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types)
 
-    def create_entity(self, name, fields=None, *, request_id=None, field_types=None):
+    def create_entity(self, name, fields=None, *, request_id=None, field_types=None,
+                       field_constraints=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
+        for provisional_field, provisional_value in (
+            ("field_constraints", field_constraints), ("dry_run", dry_run or None),
+            ("plan", plan), ("budget", budget), ("idempotency_key", idempotency_key),
+        ):
+            if provisional_value is not None:
+                _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.create_entity(
             self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types)
 
-    def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None):
+    def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None,
+                  enum=None, nullable=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
+        for provisional_field, provisional_value in (
+            ("enum", enum), ("nullable", nullable), ("dry_run", dry_run or None),
+            ("plan", plan), ("budget", budget), ("idempotency_key", idempotency_key),
+        ):
+            if provisional_value is not None:
+                _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.add_field(
             self._ApplicationRuntime__principal, collection, field, field_type,
             request_id=request_id, contract_type=contract_type)

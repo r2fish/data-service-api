@@ -2,11 +2,12 @@
 
 ## 文書情報
 
+- 版数: 1.13 (§23 を新設。port v1.13: phase 9 WP-1、design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1 由来の coordinated revision -- 5 新規 abstract method (`schema_operation_with_result`/`attempt_mutation_with_result`/`attempt_batch_with_result`/`attempt_cross_entity_batch_with_result`/`query_with_budget`) を追加し、契約 1.7.0 が新設する 8 項目 (`dry_run`/`plan`/`budget`/schema `idempotency_key`/`enum`・`nullable`・`field_constraints`/結果側 `request_id`/結果側 `descriptor`/`alter_field`) を運ぶ。`alter_field` は独立 primitive ではなく `schema_operation_with_result` の `operation` 引数へ畳んだ (§23.2、監督裁定 2026-09-07)。5 限界 (i)〜(v) は `ConformanceAdapter` の class docstring に置く (WP-1b rework)。削除は無い。詳細は §23
 - 版数: 1.12 (§22 を新設。port v1.12: phase 8 WP-1b、design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 由来の coordinated revision -- 2 新規追加: `hold_in_flight(session, n)` (C-05 V2 の in-flight 保持 primitive、`concurrency` を初めて駆動可能にする) と `select_eq`/`attempt_filter` への `limit`/`extra_predicates` optional フィールド (L7-21、`result_items` 両側化・`query_complexity` の能力判定化)。削除は無い。詳細は §22
 - 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) 追記日: 2026-09-07
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -3086,3 +3087,124 @@ signature change, and verified (by inspection) not to affect any other
 caller in this repository: every "update" attempt anywhere else that
 carries a real `where_field` is gated behind `revision_preconditions:
 enabled`, which this peer declares `unavailable`.
+
+## 23. v1.13 port revision (Phase 9 WP-1, coordinated with docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1)
+
+Phase 9 contract 1.7.0 adds 7 endpoint-facing capabilities (`dry_run`,
+`plan`, `budget`, schema `idempotency_key`, `field_constraints`/`enum`/
+`nullable`, result-side `request_id`, result-side `descriptor`) and one
+new primitive (`alter_field`) the port had no way to express before this
+revision (neither peer implements it yet either). §6.1's own table lists
+8 additions; this section fixes their exact shape, additive only, no
+removals, matching §21/§22's own compatibility discipline.
+
+### 23.1 New methods and fields
+
+| # | added | to |
+|---|---|---|
+| 1 | `dry_run: bool = False` (request-unit keyword) | `attempt_mutation_with_result`, `attempt_batch_with_result`, `attempt_cross_entity_batch_with_result`, `schema_operation_with_result` |
+| 2 | `plan: str \| None = None` (request-unit keyword) and result-side `plan` | same 4 methods (request side); their return `Mapping`s (result side) |
+| 3 | `budget: Mapping[str, int] \| None = None` (request-unit keyword) | same 4 methods, plus `query_with_budget` |
+| 4 | `idempotency_key: str \| None = None` | `schema_operation_with_result` (new -- `SchemaOperationRequest.idempotency_key` is itself new in contract 1.7.0) |
+| 5 | `enum`/`nullable`/`field_constraints` keywords | `schema_operation_with_result` |
+| 6 | result-side `request_id` | `attempt_mutation_with_result`, `attempt_batch_with_result`, `attempt_cross_entity_batch_with_result`, `schema_operation_with_result`, `query_with_budget` |
+| 7 | result-side `descriptor` | `schema_operation_with_result` (schema dry-run response only) |
+| 8 | `alter_field` primitive | folded into `schema_operation_with_result`'s own `operation` argument (§23.2 below), not a new dedicated method |
+
+Five new abstract methods carry this table: `schema_operation_with_
+result`, `attempt_mutation_with_result`, `attempt_batch_with_result`,
+`attempt_cross_entity_batch_with_result`, `query_with_budget`. The five
+limits §6.1 requires stating (dry_run's observable-state-change scope,
+`plan`'s opacity, the per-request-not-per-operation cardinality of
+`dry_run`/`plan`/`budget`, `budget`'s downward-only narrowing, and
+`BatchOperation`/`ScopedBatchOperation.idempotency_key`'s per-item-field-
+vs-per-request-value fold rule) are stated on `ConformanceAdapter`'s own
+class docstring (WP-1b rework, review point K: a `#` comment block is not
+a docstring -- moved there from a comment block that used to sit just
+above `schema_operation_with_result`), not repeated in this document.
+
+### 23.2 `alter_field` folded into `schema_operation_with_result`, not a dedicated method (§6.1 item 8, review point L, monitor 裁定 2026-09-07)
+
+**§6.1 item 8's own table entry reads "`alter_field` primitive (新設)"** --
+read most narrowly, a literal new sentence, this could mean a SIXTH new
+abstract method, `alter_field(session, entity, field, ...)`, mirroring
+`add_field`'s own dedicated-method shape. **WP-1b's implementation instead
+folds `alter_field` into the existing, single `schema_operation_with_
+result(session, entity, operation, ...)` primitive** as one more value its
+`operation` argument accepts, alongside `create_entity`/`add_field`/
+`drop_entity`.
+
+**Why the general form, not a sixth dedicated method:**
+
+1. `schema_operation_with_result` already exists as this port's ONE
+   general schema-operation primitive (§6.1 items 1-5, 7 all land there:
+   `dry_run`/`plan`/`budget`/`idempotency_key`/`field_constraints`/`enum`/
+   `nullable`), built specifically because C-20/C-22/C-23/C-24/C-25 each
+   need a schema-side observation carrying some subset of these 7 new
+   fields against ANY of `create_entity`/`add_field`/`alter_field`/
+   `drop_entity` -- a dedicated `alter_field(...)` method would need to
+   duplicate that entire keyword surface a second time, or the five new
+   condition files would need to call two different methods depending on
+   which schema operation they meant, for no different underlying
+   request shape.
+2. `r2db-api`'s own real dispatcher (`DataService.schema(session, op)`,
+   `service.py`) is ALREADY the single generic entry point every schema
+   operation on that peer goes through -- there is no PER-OPERATION
+   method on that peer's own product code for the port to mirror in the
+   first place. A dedicated `alter_field` port method would be a port-
+   level distinction the underlying peer does not itself have.
+3. `MitateDB-api`'s own peer is a family of dedicated session methods
+   (`create_entity`/`add_field`), and genuinely has NO `alter_field`
+   session method at all as of this port revision (confirmed by source
+   inspection) -- `schema_operation_with_result`'s own `elif operation ==
+   "alter_field":` branch raises `SurfaceAbsent` there today, exactly the
+   same honest "no real entry point exists yet" claim a dedicated method
+   would have to make too. Folding costs nothing extra on this peer.
+4. The contract itself does not distinguish `alter_field` from the other
+   3 schema operations at the SCHEMA level either --
+   `structured_operations.alter_field` is its own contract section (§6.1
+   item in the json_path table), but `SchemaOperationRequest.operation`
+   is already a single closed-vocabulary field naming all 4 operations on
+   the SAME request shape (`create_entity`/`add_field`/`alter_field`/
+   `drop_entity`) -- the port's own `operation`-argument dispatch already
+   mirrors the wire shape faithfully.
+
+**Limit disclosed**: this folded form means a caller mistyping `operation`
+(a value none of `create_entity`/`add_field`/`alter_field`/`drop_entity`
+recognizes) is a `str`, not a distinct Python method the type checker
+could catch at call sites -- `schema_operation_with_result`'s own `else:`
+branch (WP-1b rework, review point I) raises `SurfaceAbsent` for an
+unrecognized operation name, never a fabricated `ConformanceDenial`, so a
+typo surfaces as a structural-absence claim rather than a silent
+misinterpretation.
+
+**Disposition**: raised as a design-vs-implementation discrepancy during
+WP-1 implementation (差し戻し指示 11); the supervisor's ruling (2026-09-07,
+work order §6 訂正註 3) adopts the folded form as an improvement, records
+the reason here, and leaves the work order's own object/completion
+condition text unedited (the folded form satisfies §6.1 item 8's own
+completion condition -- "port が v1.13 であり、8 追加がすべて入ってい
+る" -- without requiring a sixth method).
+
+### 23.3 Compatibility impact
+
+Additive to the ABC: 5 new abstract methods (§23.1), all 4 registered
+plugs implement them. Existing methods (`attempt_mutation`, `attempt_
+batch_with_addresses`, `attempt_cross_entity_batch`, `create_entity_with_
+declared_types`, `add_field_with_declared_type`, `select_eq`, `attempt_
+filter`, `catalog_document`, etc.) are byte-for-byte unchanged -- no
+existing call site's behavior changes. `BatchOperation`/
+`ScopedBatchOperation.idempotency_key` (port v1.11) is unchanged in
+shape; its own uniform-or-absent fold rule (§6.1 item (v)) is now
+enforced by ONE shared function, `fold_batch_idempotency_key` (module-
+level, `conformance-tests/adapter.py`), which every batch-shaped method
+on all 4 plugs routes through -- including the pre-v1.13 `attempt_batch_
+with_addresses`/`attempt_cross_entity_batch` methods, which before this
+WP-1b rework (review point H) folded the per-item field with either an
+unguarded `next(...)` (both HTTP plugs) or no folding at all, just the
+per-operation raw value (both in-process plugs) -- neither form enforced
+the uniform-or-absent rule at all. No peer's PRODUCT code changed for
+§23: every new field this section adds is carried through unedited to
+the peer's own real entry point (or refused there, pre-flip, by that
+peer's own provisional gate, WP-1's own §2 (9)), exactly as every
+pre-v1.13 optional field on this port already was.

@@ -75,20 +75,20 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_6_0():
-    # Phase 6 WP-1 (docs/design/PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md
-    # §3 D-1/D-2/D-3/D-3(vii), CCR_DISPOSITION.md subordinate ruling 11):
+def test_contract_declares_1_7_0():
+    # Phase 9 WP-1 (docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+    # §3 D-1..D-9, CCR_DISPOSITION.md subordinate ruling 12):
     # the version bump itself, pinned so a future revert of just this one
     # line is caught here rather than only by whichever other test happens
-    # to touch contract_version. Supersedes the 1.5.0 pin (phase 5 WP-1,
-    # subordinate ruling 10) this test itself carried before -- 1.5.0 is
+    # to touch contract_version. Supersedes the 1.6.0 pin (phase 6 WP-1,
+    # subordinate ruling 11) this test itself carried before -- 1.6.0 is
     # already published, so this file never re-adds a standalone
-    # "declares 1.5.0" test: any implementation still declaring 1.5.0 or
+    # "declares 1.6.0" test: any implementation still declaring 1.6.0 or
     # earlier is exercised by version_binding's own retroactivity rule,
     # not by a dedicated pin here for a version this document no longer
     # declares.
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.6.0"
+    assert contract["contract_version"] == "1.7.0"
 
 
 def test_contract_audit_fields_include_optional_target_id_and_it_is_not_forbidden():
@@ -444,8 +444,29 @@ PIN_1_4_0_OBLIGATION_B_ADDENDUM = (
     "and is not what this scoping addresses"
 )
 
+# Phase 9 WP-1 (contract 1.7.0, R-10 (B), design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-9, §5 U-6 S-e):
+# stripping removed this sentence's leading provenance clause ("Since 1.5.0
+# (subordinate ruling 10, item 1, conditional): ") from `audit.
+# query_operation_vocabulary` / `audit.query_target_kind_vocabulary` (both
+# manifest-stripped paths) but NOT from `versioning.version_binding` (an
+# `unstripped: true` manifest path -- the clause stays woven into that
+# cumulative narrative). The requester-finalized normative sentence is
+# identical in both places; only the leading clause differs. PIN_1_5_0_
+# SENTENCE_1 (with the clause) still matches version_binding;
+# PIN_1_5_0_SENTENCE_1_STRIPPED (without it) matches the two audit-section
+# notes. This is the ONLY one of the 15 pre-1.7.0 PIN constants that R-10
+# (B) stripping actually moves (§6.3, monitor ruling S-e) -- every other
+# constant in this file matches its target unchanged.
 PIN_1_5_0_SENTENCE_1 = (
     "Since 1.5.0 (subordinate ruling 10, item 1, conditional): `operations` and `target_kinds` "
+    "are vocabularies each implementation declares for itself at "
+    "`capabilities().audit_query.operations` / `.target_kinds` — the sets of values the "
+    "`operation` and `target_kind` fields of events returned by `audit_query` can take."
+)
+
+PIN_1_5_0_SENTENCE_1_STRIPPED = (
+    "`operations` and `target_kinds` "
     "are vocabularies each implementation declares for itself at "
     "`capabilities().audit_query.operations` / `.target_kinds` — the sets of values the "
     "`operation` and `target_kind` fields of events returned by `audit_query` can take."
@@ -516,7 +537,7 @@ def test_contract_pins_the_requester_finalized_1_4_0_and_1_5_0_prose():
             f"versioning.version_binding no longer contains the requester-finalized 1.5.0 {name} verbatim"
         )
     for name, sentence in (
-        ("sentence 1", PIN_1_5_0_SENTENCE_1),
+        ("sentence 1 (stripped)", PIN_1_5_0_SENTENCE_1_STRIPPED),
         ("sentence 2", PIN_1_5_0_SENTENCE_2),
         ("sentence 3", PIN_1_5_0_SENTENCE_3),
         ("sentence 4", PIN_1_5_0_SENTENCE_4),
@@ -528,6 +549,13 @@ def test_contract_pins_the_requester_finalized_1_4_0_and_1_5_0_prose():
         assert normalized_sentence in query_target_kind_vocabulary, (
             f"audit.query_target_kind_vocabulary no longer contains the requester-finalized 1.5.0 {name} verbatim"
         )
+    # The (still-prefixed) sentence 1 must NOT appear in these two
+    # (stripped) paths -- confirms the strip actually removed the leading
+    # provenance clause rather than the comparison merely happening to
+    # succeed via substring containment of the stripped form within the
+    # unstripped one.
+    assert _normalize_prose_for_pin(PIN_1_5_0_SENTENCE_1) not in query_operation_vocabulary
+    assert _normalize_prose_for_pin(PIN_1_5_0_SENTENCE_1) not in query_target_kind_vocabulary
 
 # ---------------------------------------------------------------------------
 # Phase 6 WP-1 (docs/work-orders/WORK_ORDER_PHASE6_CONTRACT_160_V1.md v1.2 WP-1
@@ -551,16 +579,34 @@ PIN_1_6_0_ITEM_1_SECRET_IS_BEARER = """`CredentialIssued.secret` — and the `se
 PIN_1_6_0_ITEM_2_SURFACES = """`surfaces` names the absolute base URLs at which this deployment's own surfaces are reached, **as declared by the deployer** — never derived, and never to be inferred by a client from the URL it happened to use. `surfaces.data.base_url` ends at `versioning.base_path`; `surfaces.control.base_url` ends at `versioning.control_base_path`. **The data surface's capability document and the control surface's own capability document return the same `surfaces` object**, so a client holding either base URL can reach the other surface, and either document, fetched again at its own declared URL, answers with the same `contract_version` and the same `surfaces` — the rest of each document remains scoped to the credential presented. A deployment declaring `control_plane` as `unavailable` omits `surfaces.control`. Neither URL ends in a trailing slash, so that appending a path to it yields exactly one separator. Whether the two surfaces share a host is read from the **origins** (scheme, host and port — not the path) of these two URLs — the co-hosting `versioning.control_discovery` permits — and is never assumed; where `surfaces.control` is absent, the surfaces are not co-hosted. **Where the two surfaces run as separate processes, both are configured from the same declaration**: neither can verify the other's document, so a deployment whose two documents disagree is non-conformant, and a client is given no rule for preferring one over the other."""
 
 # (3) field-type vocabulary json + EntityDescriptor.field_types + SchemaOperationRequest.field_types (D-3)
+# Phase 9 WP-1 (contract 1.7.0, §5 U-8 #28, design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-2): the middle
+# ("The catalog reports only facts...") sentence was revised because 1.6.0's
+# wording ("declares neither nullability... nor whether a field is
+# required") became false once 1.7.0 gives schema operations a notion of
+# nullability (field_constraints). This revision is independent of R-10 (B)
+# stripping -- it is a meaning change to this PIN's own text, not a
+# provenance-marker removal -- and is why this PIN is one of the 7 that
+# move for 1.7.0 even though its json_path is also one of the 26 stripped
+# ones (the stripped provenance prefix was never part of this PIN's text to
+# begin with; the PIN already excluded it, matching the live contract value
+# both before and after stripping).
 PIN_1_6_0_ITEM_3_FIELD_TYPES = """The field-type vocabulary gains a seventh member, `json`, meaning **any JSON value**. **A field created without a declared type has type `json`** — this names an existing default rather than introducing a new one, and there is no "unknown" member of the vocabulary: every field carries a real type.
 
-`EntityDescriptor.field_types` maps every name in `fields` to that field's type, drawn from that same vocabulary. What a client declared — through `SchemaOperationRequest.field_types` on `create_entity`, or `field_type` on `add_field` — is what the catalog reports back, and a field for which no type was declared reports `json`. Where a schema operation later redeclares a field's type, the catalog reports the type most recently declared. **The catalog reports only facts this contract's own schema operations can establish**: it declares neither nullability, nor default values, nor whether a field is required, because no schema operation defined here establishes any of them; a later version that gives schema operations such a notion gives it to the catalog in that same version.
+`EntityDescriptor.field_types` maps every name in `fields` to that field's type, drawn from that same vocabulary. What a client declared — through `SchemaOperationRequest.field_types` on `create_entity`, or `field_type` on `add_field` — is what the catalog reports back, and a field for which no type was declared reports `json`. Where a schema operation later redeclares a field's type, the catalog reports the type most recently declared. **The catalog reports only facts this contract's own schema operations can establish**: nullability and enum membership through `field_constraints`, and neither default values nor a notion of required distinct from `nullable: false`, because no schema operation defined here establishes either; a later version that gives schema operations such a notion gives it to the catalog in that same version.
 
 `object` and `array` are narrower than `json`: a field declared `json` accepts **any** JSON value, including but not limited to objects and arrays, while a field declared `object` or `array` accepts only that shape — and the catalog reports the narrower word it was declared with, never rounding it up to `json`.
 
 `SchemaOperationRequest.field_types` and `EntityDescriptor.field_types` share one object shape but not one coverage rule: **the request's object may be partial** — any name in `fields` that it omits is created with type `json` — while **the catalog's object is always total over that entity's own `fields`**. `SchemaOperationRequest.field_types` is **never required**: a `create_entity` naming only `fields` remains a valid request, creating `json` fields. A `field_types` naming a field the request's own `fields` does not name, a `field_types` value outside this vocabulary, or a `field_types` sent without `fields`, each fails `VALIDATION_FAILED`; none of the three is silently ignored. `add_field` continues to carry a single `field_type` for the single field it adds."""
 
 # (4) versioning.version_binding 1.6.0 paragraph
-PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only obligation retroactively."""
+# Phase 9 WP-1 (contract 1.7.0, §5 U-8 #24 = (a)): the paragraph's own final
+# sentence (a retroactive-denial row for 1.5.0-declaring peers) is widened
+# from "1.6.0-only" alone to "1.6.0-only or 1.7.0-only", to keep this one
+# subject (which version denies which later-only obligation to which
+# earlier-declaring peer) in a single place rather than splitting it
+# between this paragraph and the new 1.7.0 one.
+PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only or 1.7.0-only obligation retroactively."""
 
 # (5-current) structured_operations.upsert sentence BEFORE the D-3(vii) edit
 # -- pinned so the manual "obligation count unchanged (2)" audit trail (WP-1
@@ -574,22 +620,26 @@ PIN_1_6_0_UPSERT_SENTENCE_BEFORE = """upsert on an entity without a declared uni
 PIN_1_6_0_UPSERT_SENTENCE_AFTER = """upsert on an entity without a declared uniqueness key fails with `CAPABILITY_UNSUPPORTED`; and, where `row_addressability` is provided (other than `unavailable`) — the same precondition `mutation_classes.rule` carries for the declaration itself — upsert or update on an entity not declaring the mutable class fails with `CAPABILITY_UNSUPPORTED` as well. An implementation that does not provide `row_addressability` does not thereby declare a mutation class for any entity, and this sentence does not refuse the mutations its own `atomic_mutation` capability declares."""
 
 # The 4 pre-existing retroactive-denial sentences (1.1.0 / 1.2.0 / 1.3.0 /
-# 1.4.0 rows), each extended with a ", or 1.6.0-only" / " or 1.6.0-only"
-# member per work order v1.2 WP-1 item 1 / G19 -- the 5th row (1.5.0 vs
-# 1.6.0-only) is supplied by confirmed-prose block (4) itself (its own last
-# sentence) and is covered by PIN_1_6_0_VERSION_BINDING_PARAGRAPH above, not
-# repeated here.
-PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_1_0 = (
-    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+# 1.4.0 rows), each extended AGAIN with a ", or 1.7.0-only" / " or 1.7.0-only"
+# member (phase 9 WP-1, §5 U-8 #23) on top of the 1.6.0-only member phase 6
+# already added -- the 5th row (1.5.0 vs 1.6.0-only/1.7.0-only) is supplied
+# by confirmed-prose block (4) itself (its own last sentence) and is covered
+# by PIN_1_6_0_VERSION_BINDING_PARAGRAPH above, not repeated here. These 4
+# constants are renamed PIN_1_7_0_* (their content now includes the
+# 1.7.0-only member; the old PIN_1_6_0_RETROACTIVE_DENIAL_ROW_* names are
+# retired rather than kept as an intermediate, now-incorrect value).
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_1_0 = (
+    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only "
+    "obligation retroactively"
 )
-PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_2_0 = (
-    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0 = (
+    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
 )
-PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_3_0 = (
-    "is not held to any 1.4.0-only, 1.5.0-only, or 1.6.0-only obligation retroactively"
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0 = (
+    "is not held to any 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
 )
-PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_4_0 = (
-    "is not held to any 1.5.0-only or 1.6.0-only obligation retroactively"
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0 = (
+    "is not held to any 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
 )
 
 
@@ -691,15 +741,21 @@ def test_contract_pins_the_requester_finalized_1_6_0_prose():
         "versioning.version_binding no longer contains the requester-finalized 1.6.0 paragraph verbatim"
     )
 
-    # --- 1.6.0-only retroactive-denial extension: the 4 pre-existing rows. ---
+    # --- 1.6.0-only retroactive-denial extension: the 4 pre-existing rows
+    # (now also carrying their 1.7.0-only member -- see
+    # test_contract_pins_the_requester_finalized_1_7_0_prose for the
+    # dedicated 1.7.0 pin of this same fact; kept here too since this test
+    # is what the phase 6 completion condition it documents still refers
+    # to). ---
     for name, row in (
-        ("1.1.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_1_0),
-        ("1.2.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_2_0),
-        ("1.3.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_3_0),
-        ("1.4.0 row", PIN_1_6_0_RETROACTIVE_DENIAL_ROW_1_4_0),
+        ("1.1.0 row", PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_1_0),
+        ("1.2.0 row", PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0),
+        ("1.3.0 row", PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0),
+        ("1.4.0 row", PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0),
     ):
         assert row in version_binding, (
-            f"versioning.version_binding's retroactive-denial {name} does not carry its 1.6.0-only member: {row!r}"
+            f"versioning.version_binding's retroactive-denial {name} does not carry its 1.6.0-only "
+            f"and 1.7.0-only members: {row!r}"
         )
 
     # --- item 4 (D-3 (vii)): the upsert same-label addendum, NOT placed in
@@ -733,3 +789,334 @@ def test_contract_pins_the_requester_finalized_1_6_0_prose():
     assert "mutation_classes.declaration_required" not in upsert, (
         "the D-3(vii) addendum must not cite mutation_classes.declaration_required as its authority (v1.3 G9)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 WP-1 (contract 1.7.0, docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md
+# v1.0 (v1.3 aligned) §2 WP-1 (5); design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1..D-9):
+# literal string pins for the requester-finalized English "契約文案" blocks --
+# copied verbatim from the design document (standing discipline 4; no
+# paraphrase). Unlike the phase 6 PIN blocks above, these blocks are plain
+# running prose in the design doc itself (no backtick/`**` markdown), so no
+# additional normalization beyond whitespace-collapse is needed for most of
+# them; `_normalize_prose_for_pin` is still used for consistency (it is a
+# no-op on backtick/`**` for text that has none).
+# ---------------------------------------------------------------------------
+
+PIN_1_7_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.7.0 or higher additionally claims conformance to the obligations 1.7.0 introduces (subordinate ruling 12). Two of those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.7.0, independent of any capability's own status: (a) every denial it answers with VALIDATION_FAILED, IDENTIFIER_INVALID or CAPABILITY_UNSUPPORTED carries the details keys errors.details_vocabulary requires for that code, with violated_declaration drawn from the closed vocabulary named there, and carries no row value, no suggested value, no corrective action and no internal name; and (b) every successful QueryResult, MutationResult and SchemaOperationResult it returns carries request_id, the same identifier its own audit evidence for that request carries. The remaining 1.7.0 obligations are conditional, in the same sense 1.4.0's and 1.6.0's own conditional lists are: they bind only insofar as the implementation's own capabilities() declares the named capability -- or, where two are named, both of them -- as something other than unavailable. Where it declares constraint_declarations and schema_operations both as something other than unavailable: (1) a create_entity it executes accepts field_constraints, an add_field and an alter_field it executes accept enum and nullable, each field is created or altered with the constraints declared there, those constraints are enforced on every value written to that field, and an alter_field whose declared constraints existing rows would violate is refused in full with CONFLICT, changing nothing. Where it declares constraint_declarations and application_catalog both as something other than unavailable: (2) every EntityDescriptor it returns carries field_constraints, total over that entity's own fields, reporting nullable: true and no enum for a field that declares neither. Where it declares dry_run as something other than unavailable: (3) a request carrying dry_run receives the decision the identical request without it would receive -- the same code and the same details on a refusal, the same affected count on a success -- and leaves no externally visible state change, subject to the two consumptions structured_operations.dry_run.external_effects names; and a plan it returns is deterministic, and is verified by recomputation on the real request, refusing with PRECONDITION_FAILED where it no longer agrees. Where it declares idempotency as something other than unavailable: (4) an idempotency_key is recorded with a digest of the request it accompanied, in the same transaction as that request's own effects; the same key with the same digest, resent within idempotency_retention_ms, returns the original result without re-executing, including the original request_id; and the same key with a different digest is refused with CONFLICT. Where it declares request_budget as something other than unavailable: (5) a budget narrows a bound downward only, a budget above the deployed value or naming a class that does not apply to that endpoint is refused with VALIDATION_FAILED, and exceeding a narrowed bound is refused with LIMIT_EXCEEDED naming that limit class. 1.7.0 introduces no obligation on what a client must send: dry_run, plan, budget, field_constraints, enum, nullable, and SchemaOperationRequest.idempotency_key are optional wherever they appear, and a request valid under 1.6.0 stays valid. An implementation still declaring 1.6.0 is not held to any 1.7.0-only obligation retroactively."
+)
+
+PIN_1_7_0_VIOLATED_DECLARATION_VOCABULARY = (
+    "A closed vocabulary of ten values naming which declaration a denial reports as violated: request_schema (the request does not match this contract's own request schema for that endpoint), identifier_syntax (an identifier does not match the identifier syntax this contract declares), field_type (a value does not match the field's declared type), enum (a non-null value is not a member of the field's declared enum), nullable (a null was written to, or a required value omitted from, a field declared nullable: false), capability (this deployment does not provide the operation or field the request names), budget (the request's own budget declaration is itself invalid -- a class that does not apply to this endpoint, a value above the deployed bound, or a non-integer), unsupported_field (a field this version gives no meaning to, carried where the request schema can still receive it), plan (a plan token does not match the request and schema state it is presented against), and idempotency_key (the same key was resent with a different request digest). The required-key rules above bind VALIDATION_FAILED, IDENTIFIER_INVALID and CAPABILITY_UNSUPPORTED only; any other code's denial may carry violated_declaration drawn from this same vocabulary without being required to -- PRECONDITION_FAILED carries plan, and CONFLICT carries idempotency_key, or enum/nullable where an alter_field is refused because existing rows would violate the constraints it declares. Every value a details key carries under this vocabulary is a statement of declared fact: never a row value, never a suggested value, never a corrective action, never SQL, and never an internal name (SI-10 constrains the content of every details value regardless of key name, as errors.details_vocabulary.open already states)."
+)
+
+PIN_1_7_0_OBLIGATIONS_NOTE = (
+    "obligations is a machine-readable index of what version_binding states in prose: for each version label, the numbered contract decision that introduced it, the obligations that bind unconditionally, and the obligations that bind only where the named capabilities are declared as something other than unavailable. Where an entry names more than one capability, all of them must be so declared for that obligation to bind. This index is derived from version_binding and does not replace it: every limiting clause, exception, same-label addendum and scoping sentence lives in the prose, and where the two could be read as disagreeing, the prose is the contract. The two are held in agreement mechanically -- the set of version labels must match between them, and so must each version's own count of unconditional obligations, where the prose states one."
+)
+
+PIN_1_7_0_REQUEST_BUDGET = (
+    "budget lets one request ask for a smaller bound than the deployment's own, and only a smaller one. Where a request carries budget.<class>, the bound in force for that request is the smaller of the deployment's declared value for that class and the requested value; a request whose budget.<class> exceeds the deployment's own declared value is refused with VALIDATION_FAILED and details.violated_declaration: budget, rather than being silently reduced -- a client that asked for more than the deployment allows has misread the deployment's own declaration, and telling it so is more useful than granting it less than it asked for. Exceeding a bound that is in force because a budget narrowed it is refused exactly as exceeding the deployed bound is: LIMIT_EXCEEDED with details.limit_class naming that class, without distinguishing which of the two values was the smaller. Three classes are budgetable in this version: result_items, execution_ms and batch_items. Each applies only where it has meaning: result_items and execution_ms on a query; execution_ms and batch_items on a single-entity or cross-entity mutation; execution_ms alone on a schema operation. result_items is not budgetable on a mutation: it bounds the rows a query returns, and this version does not give one request a way to narrow how many rows its own mutation may affect. A budget naming a class that does not apply to the endpoint it was sent to, or carrying a value that is not an integer of at least 1, is refused with VALIDATION_FAILED, details.violated_declaration: budget and details.field naming that class within budget; it is not ignored. Every one of those refusals belongs to validating the request itself: a budget is checked where this contract's own request shape is checked, before target existence, destructive confirmation and precondition evaluation, so a request that is both unconfirmed and carrying an invalid budget is refused for the budget first. budget never raises a bound, never introduces a class outside limits.classes, and never changes what this deployment declares at capability discovery -- the declared values remain the deployment's own, and a budget is one request's own narrowing of them."
+)
+
+PIN_1_7_0_DRY_RUN_DECISION = (
+    "dry_run asks the service to reach the same decision it would reach for the identical request without it, and then to leave nothing behind. A dry-run request is subject to the same gates a real one is -- authentication, role, request rate and concurrency, request size, operation depth, request shape, capability availability, and validation -- and any refusal it receives is the refusal the real request would receive, with the same code and the same details: authorization refusals, destructive-confirmation refusals, precondition refusals and limit refusals are all part of what a dry run decides, not steps it skips. Where it is not refused, it answers with the same response schema the real request answers with, carrying committed: false, the affected count the real request would have produced, and a plan. A dry-run mutation does not carry assigned_addresses: the addresses a real execution would assign are not settled, and reporting them would be a false statement rather than a preview. A dry-run schema operation carries descriptor, the EntityDescriptor the entity would have afterwards. Its revision is the Application's schema revision as it stands now -- the revision the plan was taken against -- and not the revision the operation would establish, which for the same reason assigned_addresses is withheld is not settled until it commits."
+)
+
+PIN_1_7_0_DRY_RUN_EXTERNAL_EFFECTS = (
+    'A dry run leaves no externally visible state change: no row, no catalog entry, no schema revision, no idempotency record, and no audit event is created, changed or removed by it. Two consumptions are deliberately outside that statement. First, a dry run is a request, and consumes this deployment\'s own request-rate and concurrency bounds exactly as a real request does -- a bound a client could avoid by asking for a dry run would not be a bound. Second, where an implementation assigns addresses from a non-transactional sequence, a dry run may consume a value from that sequence; it never returns the value it consumed, and the consumed value is not reused, which is what EntityDescriptor.address_reuse: never already declares. An idempotency_key presented on a dry-run request is neither recorded nor looked up: the dry run is not deduplicated against earlier requests, and does not make a later resend of the same key a duplicate. This is stated rather than left to the reader as "ignored", because a client that resends after a dry run must be able to know that its first real send is genuinely the first.'
+)
+
+PIN_1_7_0_DRY_RUN_PLAN = (
+    "plan is an opaque but deterministic token: it is computed from the request itself together with the Application's own schema revision -- the same value SchemaOperationResult.revision reports -- as it stood when the request was decided, and holds no server-side state -- there is nothing on the service that expires, is evicted, or must be cleaned up, and two dry runs of the identical request against unchanged schema return the identical token. The token is computed over this request as this contract defines it -- the request object this endpoint's own request schema names, not the bytes a particular transport delivered it in -- taking every field of that object except plan itself, which cannot contain its own digest, and dry_run, whose value necessarily differs between the dry run and the real request it plans. Every other field, including budget, transaction, confirmation and idempotency_key, is part of what the token commits to: a real request differing from the dry run in any of them is a different request, and the token no longer agrees. The digest is taken over that object serialized with its keys in lexicographic order, without insignificant whitespace, and without escaping non-ASCII characters, as UTF-8; the token an implementation returns is its own representation of that digest together with the revision. A client may present the token it received back on the real request. Where it does, the service recomputes the token by the same rule and executes only if the two agree; where they disagree -- because the request differs, or because any schema operation on that Application advanced its revision in between -- the request is refused with PRECONDITION_FAILED and details.violated_declaration: plan, and nothing is executed. Because that revision is the Application's own, a schema operation on any entity of the same Application invalidates a plan taken against any other: the token names the Application's schema state, not one entity's. A plan is a precondition, and is evaluated where destructive_confirmation.evaluation_order places precondition evaluation -- after confirmation validity and before execution -- so a request that is both unconfirmed and carrying a stale plan is refused for the missing confirmation first. A plan is never required: a real request that omits it executes on the service's own current state, exactly as it did before this version."
+)
+
+PIN_1_7_0_IDEMPOTENCY_RECORD = (
+    "An idempotency_key is recorded together with a deterministic digest of the request it was sent with, and the record is written in the same transaction as the effects it records: a key is present exactly when the request it names committed. A request that fails leaves no record, so resending it is a new attempt, not a duplicate. Within idempotency_retention_ms of the recorded request, resending the same key with the same request digest returns that original request's own recorded result -- the whole MutationResult or SchemaOperationResult, including its request_id -- without executing anything a second time. Resending the same key with a different request digest is refused with CONFLICT and details.violated_declaration: idempotency_key; the denial does not disclose the earlier request. A key whose retention has elapsed is treated as absent: the resend is a new request, and an implementation may delete elapsed records lazily. A key is scoped to one Application: the same key presented under a different credential of the same Application is the same key, because the atomic unit this contract defines is scoped to one Application's storage. Where recording a new key would exceed idempotency_entries after elapsed records are reclaimed, the request is refused with LIMIT_EXCEEDED and details.limit_class: idempotency_entries, before it executes rather than after. A replayed SchemaOperationResult carries the revision the original execution produced, which is the revision that execution established, not necessarily the entity's revision now. The digest is taken over the request object this endpoint's own request schema names, excluding idempotency_key itself, plan and dry_run, and is otherwise computed exactly as structured_operations.dry_run.plan describes: every other field, including budget, transaction and confirmation, is part of what a resend must match. A resend that matches a retained record is answered from that record before target existence, destructive confirmation and any precondition are evaluated -- after this request's own authentication, authorization and bounds, which it consumes like any other request. Without that placement a resent destructive operation could not be answered from its record at all: its target no longer exists, and destructive_confirmation.phrase_construction recomputes a phrase against state the first execution already changed."
+)
+
+PIN_1_7_0_IDEMPOTENCY_CORRELATION = (
+    "Idempotency and audit evidence are correlated through request_id, not through the key: a resend answers with the original execution's own request_id, which is the identifier that execution's audit events carry, so a client holding only its own responses can tell which single execution its repeated sends resolved to. The key itself is not written to audit events."
+)
+
+PIN_1_7_0_IDEMPOTENCY_KEY_SECRECY = (
+    "A client MUST NOT place a credential, token, password, private key, or any other secret in an idempotency_key. The key is not a member of audit.forbidden_fields, and this version writes it neither to audit events nor to any response -- but neither of those facts makes a secret safe to use as a key. A key is a client-chosen name for one request, is compared for equality against other clients' keys within the same Application, and may be retained for as long as idempotency_retention_ms declares; a value that must not be guessable, resent, or retained does not belong in it."
+)
+
+PIN_1_7_0_FIELD_CONSTRAINTS_REQUEST = (
+    "field_constraints declares, per field, the two constraints this version defines: nullable (whether that field accepts a null value) and enum (the closed set of non-null values that field accepts). On create_entity it is an object keyed by field name and may be partial -- any name in fields it omits is created with no enum and nullable: true. On add_field and alter_field the same two constraints are carried as the request's own top-level enum and nullable, for the single field the operation names. nullable defaults to true, which is what a field created before this version, or created without the key, already is: this names an existing default rather than introducing a new one. A field declared nullable: false requires a non-null value on insert -- an operation that omits it is refused -- and cannot be set to null by update or upsert. An upsert that resolves to an insert is refused on the same rule; an upsert that resolves to an update is not, because it writes no value to that field. enum constrains non-null values only; whether null is accepted is decided by nullable alone, and a field may declare both. An enum is a non-empty list of distinct values, each of the field's own declared type, and is declarable only on a field whose type is string, integer, number or boolean: an enum on an object, array or json field, an empty or duplicated enum, an enum member outside the field's declared type, a field_constraints naming a field the request's own fields does not name, or a field_constraints sent without fields, each fails VALIDATION_FAILED; none of them is silently ignored. Constraints bind writes only: a query predicate is never refused for carrying a value outside a field's enum -- such a value simply matches no row."
+)
+
+PIN_1_7_0_FIELD_CONSTRAINTS_ENTITY_DESCRIPTOR = (
+    "field_constraints reports, for every one of this entity's own fields, the constraints currently in force on it: nullable, always present, and enum, present only on a field that declares one. Like field_types, and unlike the request-side object of the same name, this object is always total over that entity's own fields. What a client declared -- through SchemaOperationRequest.field_constraints on create_entity, or enum/nullable on add_field or alter_field -- is what the catalog reports back, and a field for which nothing was declared reports nullable: true and no enum. This is the same-version catalog reporting the 1.6.0 field_types description reserves for whichever later version gives schema operations a notion of nullability: this is that version, and the notion it gives is exactly these two constraints -- not default values, and no notion of a required field beyond what nullable: false itself requires on insert."
+)
+
+PIN_1_7_0_ALTER_FIELD = (
+    "alter_field redeclares the constraints of one existing field: it sets, replaces or clears that field's enum, and switches its nullable. It does not redeclare that field's type -- an alter_field carrying field_type fails VALIDATION_FAILED -- because converting values already stored under one type into another is not defined by this version. Before it changes anything, an alter_field verifies every existing row of the entity against the constraints it would establish, within the same transaction as the change itself; where even one row would violate them, the whole operation is refused with CONFLICT and nothing is changed. The denial names the field and which declaration it would violate, and never the offending values, nor how many rows there are. A committed alter_field advances the entity's schema revision."
+)
+
+# Work order §6 訂正註 6 (supervisor ruling, post-WP-1-audit, 2026-09-07): the
+# 5 supervisor-finalized confirmed-prose values recorded in design v1.4 §5
+# U-8 #30-#32 (WP-1a review L-6 / M-4) were placed in the contract during
+# WP-1 implementation but never gained a string pin here -- the audit's own
+# mutation (`endpoint_fields_note.requires_capability`'s "must" -> "should",
+# changed identically in all 3 packaged copies) stayed green under the full
+# suite, showing the normative strength of that sentence was unpinned.
+# Standing discipline 4 applies exactly as it does to the §3 D-1..D-9
+# blocks above; copied verbatim from design v1.4 §5 U-8 #30-#32, which
+# itself records the contract JSON's own values verbatim.
+PIN_1_7_0_SCHEMA_OPERATION_RESULT_DESCRIPTOR = (
+    "The entity's descriptor -- as it would read afterwards (dry_run), or as committed."
+)
+
+PIN_1_7_0_CAPABILITY_DOCUMENT_OPERATION_CATALOG_URL = (
+    "Optional. The absolute URL at which this deployment publishes its own "
+    "spec/OPERATION_CATALOG.json-shaped derived operation catalog, where it chooses to. "
+    "Not required by any obligation this version introduces (D-8)."
+)
+
+PIN_1_7_0_ENDPOINT_FIELDS_NOTE_ROLES = (
+    "roles lists the roles an endpoint accepts a credential of, restating auth in the vocabulary of "
+    "security.roles (application meaning both runtime and developer). Being accepted is not a promise "
+    "of success: an accepted role is still subject to every other gate the endpoint applies, and auth "
+    "remains the prose the two are held in agreement with."
+)
+
+PIN_1_7_0_ENDPOINT_FIELDS_NOTE_REQUIRES_CAPABILITY = (
+    "requires_capability names the capabilities a deployment must declare as something other than "
+    "unavailable for the endpoint to be provided at all; where a deployment declares any of them "
+    "unavailable, the endpoint is not provided and a request to it is refused with CAPABILITY_UNSUPPORTED. "
+    "It does not list the capabilities that merely extend an endpoint when present -- dry_run, idempotency, "
+    "request_budget and constraint_declarations -- which are discovered from the capability document and "
+    "from versioning.obligations."
+)
+
+PIN_1_7_0_ENDPOINT_FIELDS_NOTE_ATOMICITY = (
+    "atomicity places each endpoint under transactions: atomic (one atomic unit per request), none (a "
+    "read, or a control operation that declares no unit), or atomic_unless_best_effort (atomic unless a "
+    "capability declaring best_effort semantics is invoked for that request)."
+)
+
+
+def test_contract_pins_the_requester_finalized_1_7_0_prose():
+    """Phase 9 WP-1 completion conditions 7, 8, 9, 10, 21: the
+    requester-finalized confirmed-prose blocks for contract 1.7.0 are
+    present verbatim (normalized) at their specific contract JSON paths."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+    version_binding = contract["versioning"]["version_binding"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_VERSION_BINDING_PARAGRAPH) in _normalize_prose_for_pin(version_binding), (
+        "versioning.version_binding no longer contains the requester-finalized 1.7.0 paragraph verbatim"
+    )
+    for row in (
+        PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_1_0,
+        PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0,
+        PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0,
+        PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0,
+    ):
+        assert row in version_binding, f"versioning.version_binding is missing retroactive-denial row: {row!r}"
+
+    obligations_note = contract["versioning"]["obligations_note"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_OBLIGATIONS_NOTE) in _normalize_prose_for_pin(obligations_note)
+
+    request_budget = contract["limits"]["request_budget"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_REQUEST_BUDGET) in _normalize_prose_for_pin(request_budget)
+
+    details_vocabulary = contract["errors"]["details_vocabulary"]
+    violated_declaration_vocabulary = details_vocabulary["violated_declaration_vocabulary"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_VIOLATED_DECLARATION_VOCABULARY) in _normalize_prose_for_pin(
+        violated_declaration_vocabulary
+    )
+    # the closed vocabulary is exactly ten words, named in the pin itself.
+    assert violated_declaration_vocabulary.count("ten values") == 1
+
+    dry_run = contract["structured_operations"]["dry_run"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_DRY_RUN_DECISION) in _normalize_prose_for_pin(dry_run["decision"])
+    assert _normalize_prose_for_pin(PIN_1_7_0_DRY_RUN_EXTERNAL_EFFECTS) in _normalize_prose_for_pin(
+        dry_run["external_effects"]
+    )
+    assert _normalize_prose_for_pin(PIN_1_7_0_DRY_RUN_PLAN) in _normalize_prose_for_pin(dry_run["plan"])
+
+    idempotency = contract["structured_operations"]["idempotency"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_IDEMPOTENCY_RECORD) in _normalize_prose_for_pin(idempotency["record"])
+    assert _normalize_prose_for_pin(PIN_1_7_0_IDEMPOTENCY_CORRELATION) in _normalize_prose_for_pin(
+        idempotency["correlation"]
+    )
+    assert _normalize_prose_for_pin(PIN_1_7_0_IDEMPOTENCY_KEY_SECRECY) in _normalize_prose_for_pin(
+        idempotency["key_secrecy"]
+    )
+
+    field_constraints_request = contract["schemas"]["SchemaOperationRequest"]["properties"]["field_constraints"][
+        "description"
+    ]
+    assert _normalize_prose_for_pin(PIN_1_7_0_FIELD_CONSTRAINTS_REQUEST) in _normalize_prose_for_pin(
+        field_constraints_request
+    )
+    field_constraints_entity_descriptor = contract["definitions"]["EntityDescriptor"]["properties"][
+        "field_constraints"
+    ]["description"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_FIELD_CONSTRAINTS_ENTITY_DESCRIPTOR) in _normalize_prose_for_pin(
+        field_constraints_entity_descriptor
+    )
+
+    alter_field = contract["structured_operations"]["alter_field"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_ALTER_FIELD) in _normalize_prose_for_pin(alter_field)
+
+
+def test_contract_pins_the_supervisor_finalized_1_7_0_prose():
+    """Work order §6 訂正註 6 (supervisor ruling, post-WP-1-audit): pins the
+    5 supervisor-finalized confirmed-prose values recorded in design v1.4
+    §5 U-8 #30-#32 -- schemas.SchemaOperationResult.properties.descriptor.
+    description, schemas.CapabilityDocument.properties.operation_catalog_url.
+    description, and the 3 endpoint_fields_note values (roles /
+    requires_capability / atomicity) -- verbatim (normalized). The audit's
+    own mutation (endpoint_fields_note.requires_capability's "must" ->
+    "should", changed identically in all 3 packaged copies) demonstrated
+    these 5 values had no string pin: the full suite stayed green."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+    descriptor_description = contract["schemas"]["SchemaOperationResult"]["properties"]["descriptor"]["description"]
+    assert _normalize_prose_for_pin(PIN_1_7_0_SCHEMA_OPERATION_RESULT_DESCRIPTOR) in _normalize_prose_for_pin(
+        descriptor_description
+    ), "schemas.SchemaOperationResult.properties.descriptor.description no longer carries the U-8 #30 prose verbatim"
+
+    operation_catalog_url_description = contract["schemas"]["CapabilityDocument"]["properties"][
+        "operation_catalog_url"
+    ]["description"]
+    assert _normalize_prose_for_pin(
+        PIN_1_7_0_CAPABILITY_DOCUMENT_OPERATION_CATALOG_URL
+    ) in _normalize_prose_for_pin(operation_catalog_url_description), (
+        "schemas.CapabilityDocument.properties.operation_catalog_url.description no longer carries the "
+        "U-8 #31 prose verbatim"
+    )
+
+    endpoint_fields_note = contract["endpoint_fields_note"]
+    assert set(endpoint_fields_note) == {"roles", "requires_capability", "atomicity"}
+    for key, pin in (
+        ("roles", PIN_1_7_0_ENDPOINT_FIELDS_NOTE_ROLES),
+        ("requires_capability", PIN_1_7_0_ENDPOINT_FIELDS_NOTE_REQUIRES_CAPABILITY),
+        ("atomicity", PIN_1_7_0_ENDPOINT_FIELDS_NOTE_ATOMICITY),
+    ):
+        assert _normalize_prose_for_pin(pin) in _normalize_prose_for_pin(endpoint_fields_note[key]), (
+            f"endpoint_fields_note.{key} no longer carries the U-8 #32 prose verbatim"
+        )
+
+
+def test_contract_1_7_0_structure_and_additive_only():
+    """Phase 9 WP-1 completion conditions 2, 3, 4, 6, 9, 13, 14, 15, 17:
+    structural assertions the design work order's completion-condition list
+    fixes directly against the parsed contract (as distinct from the
+    literal-prose pins above)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+    # condition 3: capability_status.defined gains exactly 3 new words -> 14.
+    defined = contract["capability_status"]["defined"]
+    assert len(defined) == 14, sorted(defined)
+    for name in ("constraint_declarations", "dry_run", "request_budget"):
+        assert name in defined
+
+    # condition 4: limits.classes gains enum_members -> 17; example_profile -> 16.
+    assert len(contract["limits"]["classes"]) == 17
+    assert "enum_members" in contract["limits"]["classes"]
+    assert len(contract["limits"]["example_profile"]) == 16
+    assert contract["limits"]["example_profile"]["enum_members"] == 64
+    assert "enum_members" in contract["limits"]
+
+    # condition 6: errors.details_vocabulary gains 5 new blocks.
+    dv = contract["errors"]["details_vocabulary"]
+    for key in ("VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED", "violated_declaration_vocabulary", "layer_rule"):
+        assert key in dv, f"errors.details_vocabulary is missing {key!r}"
+    assert set(dv["VALIDATION_FAILED"]) == {"violated_declaration", "field", "declared_type", "observed_type"}
+    assert set(dv["IDENTIFIER_INVALID"]) == {"violated_declaration", "field"}
+    assert set(dv["CAPABILITY_UNSUPPORTED"]) == {"violated_declaration", "field"}
+    # existing LIMIT_EXCEEDED / common_optional / open / cross_reference untouched (禁止事項 2).
+    assert dv["LIMIT_EXCEEDED"] == {
+        "limit_class": "string, required. Must be a member of limits.classes -- the specific finite-resource class this request exceeded."
+    }
+
+    # condition 9: structured_operations.alter_field independent section.
+    assert isinstance(contract["structured_operations"]["alter_field"], str)
+    assert contract["structured_operations"]["alter_field"]
+
+    # condition 2 / 15 / 17 / new-field additive check: schema additions are
+    # all optional, and `required` arrays are byte-for-byte unchanged (this
+    # is also checked exhaustively by the WP-1a mutation-testing report; here
+    # we pin the specific `required` arrays completion condition 2 names).
+    for schema_name, expected_required in (
+        ("QueryRequest", ["select"]),
+        ("MutationRequest", ["operations"]),
+        ("ScopedMutationRequest", ["operations"]),
+        ("SchemaOperationRequest", ["operation", "entity"]),
+        ("QueryResult", ["items", "next_page"]),
+        ("MutationResult", ["committed", "affected"]),
+        ("SchemaOperationResult", ["committed", "revision"]),
+    ):
+        assert contract["schemas"][schema_name]["required"] == expected_required, (
+            f"schemas.{schema_name}.required changed -- 1.7.0 additions must all be optional"
+        )
+    for field, schema_name in (
+        ("field_constraints", "SchemaOperationRequest"),
+        ("enum", "SchemaOperationRequest"),
+        ("nullable", "SchemaOperationRequest"),
+        ("dry_run", "SchemaOperationRequest"),
+        ("plan", "SchemaOperationRequest"),
+        ("budget", "SchemaOperationRequest"),
+        ("idempotency_key", "SchemaOperationRequest"),
+        ("dry_run", "MutationRequest"),
+        ("plan", "MutationRequest"),
+        ("budget", "MutationRequest"),
+        ("dry_run", "ScopedMutationRequest"),
+        ("plan", "ScopedMutationRequest"),
+        ("budget", "ScopedMutationRequest"),
+        ("budget", "QueryRequest"),
+        ("request_id", "QueryResult"),
+        ("request_id", "MutationResult"),
+        ("plan", "MutationResult"),
+        ("request_id", "SchemaOperationResult"),
+        ("plan", "SchemaOperationResult"),
+        ("descriptor", "SchemaOperationResult"),
+    ):
+        assert field in contract["schemas"][schema_name]["properties"], f"{schema_name}.{field} missing"
+
+    assert contract["schemas"]["SchemaOperationRequest"]["properties"]["idempotency_key"] == {
+        "type": "string",
+        "maxLength": 128,
+    }, "SchemaOperationRequest.idempotency_key must be the same shape as the existing MutationRequest/ScopedMutationRequest one"
+
+    # condition 13/14: 19 endpoint entries all carry roles/requires_capability/atomicity,
+    # atomicity drawn from the fixed 3-word vocabulary.
+    atomicity_vocab = {"atomic", "none", "atomic_unless_best_effort"}
+    n = 0
+    for section in ("endpoints", "control_endpoints"):
+        for name, entry in contract[section].items():
+            n += 1
+            assert "roles" in entry and entry["roles"], f"{section}.{name}.roles missing/empty"
+            assert "requires_capability" in entry, f"{section}.{name}.requires_capability missing"
+            assert entry["atomicity"] in atomicity_vocab, f"{section}.{name}.atomicity {entry['atomicity']!r} not in {atomicity_vocab}"
+    assert n == 19
+
+    # condition 33 (capability_status.defined naming, via roles) and D-8:
+    # roles values are drawn only from the 4-word role enum.
+    role_vocab = {"runtime", "developer", "control", "audit"}
+    for section in ("endpoints", "control_endpoints"):
+        for name, entry in contract[section].items():
+            assert set(entry["roles"]) <= role_vocab, f"{section}.{name}.roles has a value outside {role_vocab}"
+
+    # condition 15: destructive_confirmation.applies_to unchanged (1 char),
+    # applies_to_structured is 1:1 with it.
+    dc = contract["destructive_confirmation"]
+    assert dc["applies_to"] == [
+        "Mutation.operation == \"delete\"",
+        "ScopedMutation.operation == \"delete\"",
+        "SchemaOperationRequest.operation in (\"drop_entity\", \"drop_index\")",
+        "CredentialRevokeRequest revoking the last remaining active control credential",
+        "future destructive operations inherit this same definition",
+    ], "destructive_confirmation.applies_to must not change even 1 character (existing array preserved verbatim)"
+    assert len(dc["applies_to_structured"]) == len(dc["applies_to"])
+
+    # condition 33: capability_status.defined has 14 words, all named by
+    # `roles`/`requires_capability` construction above is exercised
+    # separately in test_operation_catalog_register.py; here we just pin
+    # the closed count again for a reader of this file alone.
+    assert len(contract["capability_status"]["defined"]) == 14

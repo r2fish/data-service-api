@@ -315,7 +315,11 @@ async def post_query(request: Request) -> Response:
             kwargs["page_size"] = page["size"]
         if "cursor" in page:
             kwargs["cursor"] = page["cursor"]
-    result = service.query_page(context, entity, request_id=_request_id(request), **kwargs)
+    # Contract 1.7.0 provisional gate (D-1 (3)): `budget` is schema-accepted
+    # but not yet capability-enabled -- passed through so `query_page`'s own
+    # gate (service.py) rejects it with CAPABILITY_UNSUPPORTED, rather than
+    # `_check_object_shape` silently letting it through unread.
+    result = service.query_page(context, entity, request_id=_request_id(request), budget=body.get("budget"), **kwargs)
     # CCR-13 WP-5: `revisions` (index-aligned with `items`) now reaches the
     # response -- `revision_preconditions` is declared `enabled`.
     return JSONResponse({"items": result.items, "next_page": result.next_page, "revisions": result.revisions}, status_code=200)
@@ -329,11 +333,29 @@ async def post_mutate(request: Request) -> Response:
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
     if "idempotency_key" in body:
-        fail("CAPABILITY_UNSUPPORTED", "Idempotency keys are not supported by this foundation.")
+        fail(
+            "CAPABILITY_UNSUPPORTED",
+            "Idempotency keys are not supported by this foundation.",
+            details={"violated_declaration": "capability", "field": "idempotency_key"},
+        )
     transaction = body.get("transaction", "atomic")
     if transaction not in {"atomic", "best_effort"}:
         fail("VALIDATION_FAILED", "Transaction mode is not supported.")
-    result = service.mutate_result(context, entity, body.get("operations"), transaction=transaction, request_id=_request_id(request))
+    # Contract 1.7.0 provisional gate (D-1 (3)): `dry_run`/`plan`/`budget`
+    # are schema-accepted but not yet capability-enabled -- passed through
+    # so `mutate_result`'s own gate (service.py) rejects them with
+    # CAPABILITY_UNSUPPORTED, rather than `_check_object_shape` silently
+    # letting them through unread.
+    result = service.mutate_result(
+        context,
+        entity,
+        body.get("operations"),
+        transaction=transaction,
+        request_id=_request_id(request),
+        dry_run=body.get("dry_run", False),
+        plan=body.get("plan"),
+        budget=body.get("budget"),
+    )
     # CCR-13 WP-5: `assigned_addresses` now reaches the response, in
     # operation order (insert, and insert-resolved upsert, only) -- the
     # per-entity endpoint's own elements never carry an `entity` key

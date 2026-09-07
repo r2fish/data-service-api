@@ -56,6 +56,31 @@ def test_capability_document_conforms_to_schema_and_vocabulary(adapter, fx: Fixt
     unknown = set(capabilities) - defined
     assert not unknown, f"{adapter.name}: declares capability name(s) not in capability_status.defined: {unknown}"
 
+    # Phase 9 WP-1 (contract 1.7.0, monitor ruling T-4; design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.2/§6.4/§9
+    # item 16; work order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.
+    # md §2 WP-1 (9)): the REVERSE direction. The check above only fixes
+    # declared ⊆ defined (a peer must not invent capability names); this
+    # fixes defined ⊆ declared (a peer must name EVERY capability
+    # capability_status.defined lists -- 14 as of 1.7.0 -- even if only to
+    # declare it `unavailable`). This is the mechanical check that a newly
+    # introduced capability (`constraint_declarations`/`dry_run`/
+    # `request_budget`, added alongside this WP-1's provisional gate) is
+    # honestly declared rather than simply omitted -- an omitted capability
+    # entry is indistinguishable from `unavailable` to every OTHER condition
+    # in this suite (each one's declaration-branch helper defaults a missing
+    # entry's status to "unavailable"), so nothing else in the suite would
+    # ever catch a capability that a peer just leaves out entirely. No
+    # version gate: both peers already name all 11 pre-1.7.0 capabilities
+    # (this assertion is not new pressure on them), and the 3 new ones are
+    # declared `unavailable` in the same commit as this WP-1's provisional
+    # gate (P-3), so this passes on 1.6.0-declaring peers too.
+    missing = defined - set(capabilities)
+    assert not missing, (
+        f"{adapter.name}: capabilities() omits capability name(s) capability_status.defined lists "
+        f"(every defined capability must be named, even as 'unavailable'): {sorted(missing)}"
+    )
+
     for name, entry in capabilities.items():
         status = entry.get("status")
         assert status in status_enum, f"{adapter.name}: capability {name!r} has status {status!r} not in status_enum"

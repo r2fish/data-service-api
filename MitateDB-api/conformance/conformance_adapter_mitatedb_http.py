@@ -99,6 +99,7 @@ from adapter import (  # noqa: E402
     ScopeView,
     SurfaceAbsent,
     TamperVector,
+    fold_batch_idempotency_key,
     fresh_identifier,
     resolve_valid_confirmation,
 )
@@ -1000,7 +1001,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     def _data_path(self, entity: str, suffix: str) -> str:
         return f"/v1/data/{quote(entity, safe='')}/{suffix}"
 
-    def _query(self, session: _Session, entity: str, *, select, where=None, order_by=None, page_size=None) -> dict[str, Any]:
+    def _query(
+        self, session: _Session, entity: str, *, select, where=None, order_by=None, page_size=None,
+        extra_body: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"select": list(select)}
         if where is not None:
             body["where"] = where
@@ -1008,6 +1012,11 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             body["order_by"] = order_by
         if page_size is not None:
             body["page"] = {"size": page_size}
+        # port v1.13 (design D-6): `budget` is a QueryRequest top-level
+        # field, carried the same way `_mutate`'s own `extra_body` already
+        # carries `idempotency_key`.
+        if extra_body:
+            body.update(extra_body)
         return self._send("POST", self._data_path(entity, "query"), session, json_body=body)
 
     def _mutate(self, session: _Session, entity: str, operations: list[dict[str, Any]], *, extra_body: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -1968,6 +1977,79 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             body["field_types"] = dict(field_types)
         self._schema(session, body)
 
+    def schema_operation_with_result(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        field: str | None = None,
+        field_type: str | None = None,
+        fields: Sequence[str] | None = None,
+        field_types: Mapping[str, str] | None = None,
+        field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
+        enum: Sequence[Any] | None = None,
+        nullable: bool | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-2/D-4/D-5/D-6/D-8, §6.1 items 1-5, 7, 8): one
+        # general schema-operation primitive presented to the same real,
+        # single `/v1/schema/operations` dispatcher `_schema` already uses.
+        # `destructive`/`confirmation` follow the identical VALID_
+        # CONFIRMATION sentinel protocol `attempt_batch_with_addresses`
+        # above uses for a batch-embedded delete.
+        assert isinstance(session, _Session)
+        body: dict[str, Any] = {"operation": operation, "entity": entity}
+        if field is not None:
+            body["field"] = field
+        if field_type is not None:
+            body["field_type"] = field_type
+        if fields is not None:
+            body["fields"] = list(fields)
+        if field_types:
+            body["field_types"] = dict(field_types)
+        if field_constraints:
+            body["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
+        if enum is not None:
+            body["enum"] = list(enum)
+        if nullable is not None:
+            body["nullable"] = nullable
+        if destructive:
+            body["destructive"] = True
+        if confirmation is not None:
+            if confirmation is VALID_CONFIRMATION:
+                probe_body = dict(body)
+                probe_body["destructive"] = True
+
+                def probe(_probe_body=probe_body) -> None:
+                    self._schema(session, _probe_body)
+
+                peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DROP_ENTITY")
+            else:
+                peer_confirmation = confirmation
+            if peer_confirmation is not None:
+                body["confirmation"] = peer_confirmation
+        if dry_run:
+            body["dry_run"] = True
+        if plan is not None:
+            body["plan"] = plan
+        if budget:
+            body["budget"] = dict(budget)
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
+        result = self._schema(session, body)
+        return {
+            "revision": str(result.get("revision")) if result.get("revision") is not None else None,
+            "descriptor": result.get("descriptor"),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
+
     # port v1.10 (same WP as above).
     def add_field_with_declared_type(self, session: object, entity: str, field: str, field_type: str) -> None:
         assert isinstance(session, _Session)
@@ -2017,6 +2099,46 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # assumption (M-1 correction precedent).
         return result["affected"], result.get("assigned_addresses")
 
+    def attempt_mutation_with_result(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
+        # MutationRequest top-level fields, carried through `_mutate`'s own
+        # `extra_body` exactly as `attempt_batch_with_addresses` already
+        # carries `idempotency_key`.
+        assert isinstance(session, _Session)
+        item = self._attempt_mutation_item(
+            entity, operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        extra_body: dict[str, Any] = {}
+        if dry_run:
+            extra_body["dry_run"] = True
+        if plan is not None:
+            extra_body["plan"] = plan
+        if budget:
+            extra_body["budget"] = dict(budget)
+        result = self._mutate(session, entity, [item], extra_body=extra_body or None)
+        return {
+            "affected": result["affected"],
+            "assigned_addresses": result.get("assigned_addresses"),
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
+
     def attempt_batch_with_addresses(
         self, session: object, entity: str, operations: Sequence[BatchOperation]
     ) -> tuple[int, list[Mapping[str, Any]] | None]:
@@ -2051,14 +2173,76 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # REQUEST-level field on `MutationRequest` (`http.py::post_mutate`
         # refuses it as a top-level `body` key, `MutationRequest.
         # idempotency_key`, contract-closed on the per-operation shape) --
-        # hoisted from whichever operation(s) carry one, never placed
-        # inside an individual item.
-        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
+        # never placed inside an individual item. port v1.13 (design §6.1
+        # item (v)): folded through the shared `fold_batch_idempotency_
+        # key`, exactly like `attempt_batch_with_result` below -- never an
+        # unguarded `next(...)` over each op's own value.
+        idempotency_key = fold_batch_idempotency_key(operations)
         result = self._mutate(
             session, entity, items,
             extra_body={"idempotency_key": idempotency_key} if idempotency_key is not None else None,
         )
         return result["affected"], result.get("assigned_addresses")
+
+    def attempt_batch_with_result(
+        self,
+        session: object,
+        entity: str,
+        operations: Sequence[BatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13: `attempt_batch_with_addresses`'s exact request shape,
+        # extended with the same request-level `dry_run`/`plan`/`budget`/
+        # (folded) `idempotency_key` machinery `attempt_mutation_with_
+        # result` above establishes.
+        assert isinstance(session, _Session)
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"operation": op.operation}
+            if op.values is not None:
+                item["values"] = dict(op.values)
+            if op.where_field is not None:
+                item["where"] = [{"field": op.where_field, "operator": "eq", "value": op.where_value}]
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            if op.destructive:
+                item["destructive"] = True
+            if op.confirmation is not None:
+                if op.confirmation is VALID_CONFIRMATION:
+                    probe_item = dict(item)
+                    probe_item["destructive"] = True
+
+                    def probe(_probe_item=probe_item) -> None:
+                        self._mutate(session, entity, [dict(_probe_item)])
+
+                    peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token="DELETE")
+                    item["confirmation"] = peer_confirm
+                else:
+                    item["confirmation"] = op.confirmation
+            items.append(item)
+        idempotency_key = fold_batch_idempotency_key(operations)
+        extra_body: dict[str, Any] = {}
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
+        if dry_run:
+            extra_body["dry_run"] = True
+        if plan is not None:
+            extra_body["plan"] = plan
+        if budget:
+            extra_body["budget"] = dict(budget)
+        result = self._mutate(session, entity, items, extra_body=extra_body or None)
+        return {
+            "affected": result["affected"],
+            "assigned_addresses": result.get("assigned_addresses"),
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
 
     def _scoped_batch_item(self, session: _Session, op: ScopedBatchOperation) -> dict[str, Any]:
         item: dict[str, Any] = {"operation": op.operation, "entity": op.entity}
@@ -2100,13 +2284,51 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # port v1.11 (design D-6.7 C-07 (ii)): `idempotency_key` is a
         # REQUEST-level field on `ScopedMutationRequest`
         # (`http.py::post_cross_entity_mutate` refuses it as a top-level
-        # `body` key) -- same hoist as `attempt_batch_with_addresses`.
-        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
+        # `body` key). port v1.13 (design §6.1 item (v)): folded through
+        # the shared `fold_batch_idempotency_key`, exactly like `attempt_
+        # cross_entity_batch_with_result` below -- never an unguarded
+        # `next(...)`.
+        idempotency_key = fold_batch_idempotency_key(operations)
         result = self._cross_mutate(
             session, items,
             extra_body={"idempotency_key": idempotency_key} if idempotency_key is not None else None,
         )
         return result["affected"]
+
+    def attempt_cross_entity_batch_with_result(
+        self,
+        session: object,
+        operations: Sequence[ScopedBatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13: `attempt_cross_entity_batch`'s exact request shape,
+        # extended with the same request-level `dry_run`/`plan`/`budget`/
+        # (folded) `idempotency_key` machinery `attempt_batch_with_result`
+        # uses. Unlike `r2db-api`, this composition's `cross_entity_
+        # mutation: partial` is real, so these new fields are genuinely
+        # reachable here once `dry_run`/`request_budget` flip.
+        assert isinstance(session, _Session)
+        items = [self._scoped_batch_item(session, op) for op in operations]
+        idempotency_key = fold_batch_idempotency_key(operations)
+        extra_body: dict[str, Any] = {}
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
+        if dry_run:
+            extra_body["dry_run"] = True
+        if plan is not None:
+            extra_body["plan"] = plan
+        if budget:
+            extra_body["budget"] = dict(budget)
+        result = self._cross_mutate(session, items, extra_body=extra_body or None)
+        return {
+            "affected": result["affected"],
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
 
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
         assert isinstance(session, _Session)
@@ -2147,6 +2369,28 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # never carries a `revisions` key (`http.py::post_query` omits it
         # entirely), observed via `.get(...)` rather than assumed `None`.
         return result["items"], result.get("revisions")
+
+    def query_with_budget(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str | None,
+        value: Any,
+        *,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-6): `budget` is a QueryRequest top-level
+        # field, carried through `_query`'s own `extra_body`.
+        assert isinstance(session, _Session)
+        where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query(session, entity, select=select, where=where, extra_body=extra_body)
+        return {
+            "items": result["items"],
+            "revisions": result.get("revisions"),
+            "request_id": result.get("request_id"),
+        }
 
     # ------------------------------------------------------------------
     # optional raw-accessor methods (WP-2.5 widening, `test_c11_response_

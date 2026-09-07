@@ -329,6 +329,41 @@ def _check_object_shape(value: Any, schema: Mapping[str, Any], *, label: str) ->
     return value
 
 
+def _deny_provisional_field(field_name: str) -> None:
+    """Contract 1.7.0 provisional gate (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1 (3); work
+    order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
+    `_check_object_shape` above now accepts `dry_run`/`plan`/`budget`/
+    `enum`/`nullable`/`field_constraints`/`SchemaOperationRequest.
+    idempotency_key` (the packaged contract copy is already 1.7.0), but this
+    peer still declares `constraint_declarations`/`dry_run`/
+    `request_budget` `unavailable` -- accepting one of these fields and
+    silently ignoring it would be a P-3 violation (declaration says
+    `unavailable`, behavior accepts the field). `details` is set directly
+    on the raised instance (rather than a new `CapabilityError.__init__`
+    parameter) so this gate does not preempt WP-3e's own planned `details`
+    attribute rollout for `CapabilityError`/`ValidationError` (D-3 (5));
+    `_problem_for_exception` already surfaces any `getattr(exc, "details",
+    None)` regardless of how it was set.
+    """
+    err = CapabilityError(f"{field_name} is not supported by this peer")
+    err.details = {"violated_declaration": "capability", "field": field_name}
+    raise err
+
+
+_PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ("dry_run", "plan", "budget")
+_PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ("budget",)
+_PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS = (
+    "field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key",
+)
+
+
+def _deny_first_provisional_field(body: Mapping[str, Any], field_names: tuple[str, ...]) -> None:
+    for field_name in field_names:
+        if field_name in body:
+            _deny_provisional_field(field_name)
+
+
 def _request_id(request: Request) -> str:
     return str(getattr(request.state, "request_id", ""))
 
@@ -611,6 +646,7 @@ async def post_query(request: Request) -> Response:
     entity = request.path_params["entity"]
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
+    _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS)
 
     select = body["select"]
     where_raw = body.get("where")
@@ -682,7 +718,8 @@ async def post_mutate(request: Request) -> Response:
     # is simply not in this schema's own property set.
     _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
     if "idempotency_key" in body:
-        raise CapabilityError("idempotency_key is not supported by this peer")
+        _deny_provisional_field("idempotency_key")
+    _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS)
     transaction = body.get("transaction", "atomic")
     if transaction == "best_effort":
         # `best_effort_transactions: unavailable` (cell.py's own
@@ -766,7 +803,8 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["ScopedMutationRequest"], label="ScopedMutationRequest")
     if "idempotency_key" in body:
-        raise CapabilityError("idempotency_key is not supported by this peer")
+        _deny_provisional_field("idempotency_key")
+    _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS)
 
     operations = body.get("operations")
     if not isinstance(operations, list) or not operations:
@@ -805,6 +843,7 @@ async def post_schema(request: Request) -> Response:
     session = _authenticate(request)
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["SchemaOperationRequest"], label="SchemaOperationRequest")
+    _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS)
     # Phase 5 WP-3 (design docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_
     # V1.md D-1, (d') -- a request body carrying a key literally named
     # "operation" would otherwise be indistinguishable, to the generalized
