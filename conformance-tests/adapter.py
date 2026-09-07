@@ -2459,6 +2459,8 @@ class ConformanceAdapter(ABC):
         where_value: Any,
         expected_revision: str | None = None,
         unique_key: str | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
@@ -2473,6 +2475,29 @@ class ConformanceAdapter(ABC):
         with_addresses` (both left byte-for-byte untouched, still returning
         their own pre-v1.13 shapes) have room to add without breaking every
         existing caller that unpacks their fixed-arity return.
+
+        `destructive`/`confirmation` (port v1.13 追補, C-22's own
+        `_confirm_probe`) follow the IDENTICAL `VALID_CONFIRMATION` sentinel
+        protocol `delete`/`drop_entity`/`schema_operation_with_result`
+        already establish: `destructive` MUST be passed through to the peer
+        faithfully; `confirmation` is `None` (supply nothing, the default --
+        byte-compatible with every pre-addendum caller that never named this
+        keyword), `VALID_CONFIRMATION` (resolve to a real, currently-valid
+        confirmation for this exact request via `resolve_valid_confirmation`/
+        `_resolve_confirmation`), or any other string (passed straight
+        through verbatim). `attempt_mutation`/`attempt_mutation_with_
+        addresses` deliberately do NOT gain these two keywords -- C-12's own
+        docstring already states `attempt_mutation` never exercises `delete`
+        in its non-destructive context, so `delete`'s dedicated method and
+        `BatchOperation.destructive`/`.confirmation` (`attempt_batch_with_
+        result`'s own per-operation carrier, already declared above) remain
+        the only pre-v1.13 destructive-capable entry points; this method is
+        the single-operation, request-level-`dry_run`-carrying entry point
+        C-22's `_confirm_probe` needs for `delete`, so it alone gets the pair
+        added, exactly like `schema_operation_with_result` already carries
+        them for schema operations. An adapter MUST NOT upgrade a non-
+        destructive/unconfirmed request into a confirmed destructive one,
+        for the identical reason `delete`'s own docstring already states.
 
         `dry_run`/`plan`/`budget` are request-UNIT keywords -- exactly one
         value per call, never per-operation (this method presents exactly

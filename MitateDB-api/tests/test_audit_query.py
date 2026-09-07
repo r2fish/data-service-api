@@ -2109,7 +2109,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_86_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_88_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2365,10 +2365,30 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
     ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_DATA_URL"),
+    # Phase 9 pair-closing commit (裁定 T-2, work order §4 の 12 / §6 訂正註
+    # 10, monitor ruling m-3/m-1): WP-2a's own `structured.
+    # validate_enum_declaration`/`enum_member_matches_type` and WP-3a's
+    # `field_types.validate_enum_declaration`/`enum_member_matches_type`
+    # -- the two constraint-declaration validators both peers place under
+    # the identical names m-3 fixed ahead of time so this pairing could be
+    # added once both WPs merged. Verified normalize-and-diff equal
+    # (`_isomorphic_symbol_source` + `_normalize`, both sides) before
+    # adding: the two peers' own exception vocabulary (r2db's `fail()`,
+    # MitateDB's `errors.ValidationError`) is kept OUT of the pinned
+    # function bodies on both sides -- each peer raises its own locally
+    # named `_ConstraintDeclarationError` (never surfaced past its own
+    # module) from inside the pinned function, and each peer's own direct
+    # caller (`structured._fail_constraint_declaration` / `cell._validate_
+    # enum_declaration_with_path`) is the one place that translates it to
+    # the peer's own public denial shape -- so the difference the two
+    # peers' error handling genuinely has never enters text this
+    # comparison reads.
+    ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),
+    ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "enum_member_matches_type"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_86_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_88_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2383,7 +2403,11 @@ def test_isomorphic_target_table_is_pinned_to_its_current_86_rows() -> None:
     declarations_checks`/`cmd_verify_declarations` and five same-named
     `tests/test_ops_verify_declarations.py` constants, verified normalize-
     and-diff equal before adding, not assumed from `ops.py`'s own header
-    comment that already claimed them "pinned"): a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
+    comment that already claimed them "pinned"); widened a seventh time by
+    the phase 9 pair-closing commit (裁定 T-2, work order §4 の 12 / §6
+    訂正註 10), once WP-2a and WP-3a's own same-named `validate_enum_
+    declaration`/`enum_member_matches_type` pair had both merged to main:
+    a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
     CONTENT (not merely its length) catches that. One-time human
@@ -2414,7 +2438,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_86_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_86_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_88_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2542,8 +2566,10 @@ def test_isomorphic_target_table_is_pinned_to_its_current_86_rows() -> None:
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "MIGRATION_NAMES_WITHOUT_DECLARATIONS"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_CONTROL_URL"),
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_DATA_URL"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "enum_member_matches_type"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 86
+    assert len(_ISOMORPHIC_TARGETS) == 88
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:

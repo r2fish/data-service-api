@@ -38,6 +38,7 @@ from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      PreconditionFailedError, ResourceLimitError, ValidationError)
 from .field_types import (
     FOUNDATION_TYPE_TO_CONTRACT_TYPE,
+    _ConstraintDeclarationError,
     check_declared_value,
     json_type_name,
     validate_enum_declaration,
@@ -155,16 +156,32 @@ def _validate_enum_declaration_with_path(enum_values, declared_type, field_path)
     field's own constraints, so there is no per-field path to build).
     `declared_type` is always known and included (`observed_type` is
     deliberately never set -- m-1: "型不一致と誤読される" applies here
-    too, this is a declaration defect, not a value's own type)."""
+    too, this is a declaration defect, not a value's own type).
+
+    Phase 9 pair-closing isomorphism alignment (work order §4 の 12 /
+    §6 訂正註 10): `validate_enum_declaration` itself now raises the
+    internal-only `field_types._ConstraintDeclarationError` (never
+    `errors.ValidationError` directly -- mirrors r2db-api's own
+    `structured._ConstraintDeclarationError` split), so this wrapper is
+    the one place that turns it into the public `errors.ValidationError`
+    with this WP's own `details` shape. Same alignment also changed the
+    shared function's own return shape (a tuple, round-trip fidelity,
+    matching r2db-api's own `FieldConstraints.enum` field) -- `list(...)`
+    here converts it back to this peer's own pre-existing `enum` shape
+    (a plain list, every downstream caller/backend on this peer's own
+    side already assumes) so no caller past THIS direct one needs to
+    change."""
     try:
-        return validate_enum_declaration(enum_values, declared_type)
-    except ValidationError as exc:
-        exc.details = {
-            "violated_declaration": "constraint_declaration",
-            "field": field_path,
-            "declared_type": declared_type,
-        }
-        raise
+        return list(validate_enum_declaration(enum_values, declared_type))
+    except _ConstraintDeclarationError as exc:
+        raise ValidationError(
+            str(exc),
+            details={
+                "violated_declaration": "constraint_declaration",
+                "field": field_path,
+                "declared_type": declared_type,
+            },
+        ) from exc
 
 
 def _resolve_field_constraints(fields, declared_types, field_constraints, *, max_enum_members):
