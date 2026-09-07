@@ -545,6 +545,45 @@ def assert_no_unsafe_diagnostic_content(
             )
 
 
+# Phase 9 WP-1 (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3/§6.2 C-21,
+# work order §2 WP-1 実装の指示 (11), review Minor -- reviewed and carried
+# forward in v1.1). The 4 keys `errors.details_vocabulary` requires on
+# `VALIDATION_FAILED`/`IDENTIFIER_INVALID`/`CAPABILITY_UNSUPPORTED`.
+_DETAILS_VOCABULARY_KEYS = ("field", "declared_type", "observed_type", "violated_declaration")
+
+
+def assert_details_vocabulary_values_safe(details: Mapping[str, Any], *, adapter_name: str) -> None:
+    """C-21's own SI-10 scan, deliberately narrower than `assert_no_unsafe_
+    diagnostic_content`'s ordinary whole-`details` scan (used by C-04/C-06
+    and others): this scans ONLY the values of the 4 keys `errors.details_
+    vocabulary` requires (`_DETAILS_VOCABULARY_KEYS`), never the full
+    `details` mapping.
+
+    Restricted on purpose (design D-3 実装の指示, review finding 1.1 minor
+    -- adjudicated as part of this same batch): `details.field` is a
+    REQUEST-INTERNAL PATH the client itself chose to name -- an ordinary
+    field/entity identifier the caller supplied, not server-generated
+    content -- so scanning it against an adversarial-identifier corpus
+    would make this check red on its own echo, not on a real hazard. C-21
+    itself only ever constructs `field` from benign, `fresh_identifier`-
+    generated names; presenting an adversarial identifier through this
+    exact position is C-03's own territory, not C-21's -- scanning here
+    only the 4 vocabulary keys keeps that boundary structural rather than
+    a matter of which values a caller happens to have passed in.
+
+    A denial's `details` mapping may carry OTHER keys this scan does not
+    touch at all (for example `PRECONDITION_FAILED`'s own pre-existing
+    keys, unrelated to this vocabulary) -- callers that need the broader
+    scan already have `assert_no_unsafe_diagnostic_content` for that.
+    """
+    for key in _DETAILS_VOCABULARY_KEYS:
+        if key in details:
+            assert_no_unsafe_diagnostic_content(
+                details[key], adapter_name=adapter_name, context=f"details.{key}",
+            )
+
+
 class ScanningAdapterProxy:
     """C-10's own test primitive (port unchanged; design D-6.7, phase 7
     WP-5): wraps a real `ConformanceAdapter` so every public method call

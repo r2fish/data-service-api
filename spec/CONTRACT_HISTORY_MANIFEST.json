@@ -1,0 +1,135 @@
+{
+  "audit.query_cursor": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 1, conditional): ",
+    "unstripped": false
+  },
+  "audit.query_event_class_vocabulary": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 4, conditional): ",
+    "unstripped": false
+  },
+  "audit.query_event_fields_note": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, items 1 and 3, conditional): ",
+    "stripped_insert": " (subordinate ruling 7(A))",
+    "stripped_insert_suffix_length": 50,
+    "unstripped": false
+  },
+  "audit.query_operation_vocabulary": {
+    "stripped_prefix": "Since 1.5.0 (subordinate ruling 10, item 1, conditional): ",
+    "unstripped": false
+  },
+  "audit.query_ordering": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 2, conditional on audit_query being provided -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "audit.query_target_kind_vocabulary": {
+    "stripped_prefix": "Since 1.5.0 (subordinate ruling 10, item 1, conditional): ",
+    "unstripped": false
+  },
+  "capability_status.defined.atomic_mutation": {
+    "stripped_insert": " (CCR_DISPOSITION.md subordinate ruling 8-F)",
+    "stripped_insert_suffix_length": 372,
+    "unstripped": false
+  },
+  "control_endpoints.audit_query.semantics": {
+    "stripped_insert": " (subordinate ruling 9, item 7)",
+    "stripped_insert_suffix_length": 924,
+    "unstripped": false
+  },
+  "control_endpoints.revoke_credential.semantics": {
+    "stripped_insert": " Resolved in contract 1.2.0 (previously a pending contract decision, the destructive-confirmation semantics question).",
+    "stripped_insert_suffix_length": 0,
+    "unstripped": false
+  },
+  "control_plane.authority": {
+    "stripped_insert": " (since 1.4.0, subordinate ruling 9)",
+    "stripped_insert_suffix_length": 84,
+    "unstripped": false
+  },
+  "definitions.EntityDescriptor.properties.field_types.description": {
+    "stripped_prefix": "Since 1.6.0 (subordinate ruling 11, item 3, conditional on application_catalog being provided -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "definitions.Mutation.properties.values.description": {
+    "stripped_insert": " (subordinate ruling 7(A))",
+    "stripped_insert_suffix_length": 189,
+    "unstripped": false
+  },
+  "definitions.ScopedMutation.properties.values.description": {
+    "stripped_insert": " (subordinate ruling 7(A))",
+    "stripped_insert_suffix_length": 189,
+    "unstripped": false
+  },
+  "destructive_confirmation.phrase_construction.rules[3]": {
+    "unstripped": true,
+    "reason": "no 'Since 1.x.0 (...)' clause at the value's start, and no balanced (...) group anywhere in the value contains a provenance-marker trigger substring -- the scanner's match here is a bare keyword (see matched-patterns) sitting inside ordinary normative prose with no bracketed/prefixed marker clause to separate out. spec/CONTRACT_HISTORY.md's own note for this path (where present) says the same thing."
+  },
+  "destructive_confirmation.resolved_in": {
+    "stripped_insert": " (CCR_DISPOSITION.md subordinate ruling 6)",
+    "stripped_insert_suffix_length": 1,
+    "unstripped": false
+  },
+  "endpoints.audit_query.deprecation_note": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 7): ",
+    "unstripped": false
+  },
+  "limits.audit_requests_per_minute_note": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 8, conditional on audit_query being provided -- versioning.version_binding). ",
+    "unstripped": false
+  },
+  "schemas.AuditResult.properties.events.items.description": {
+    "stripped_prefix": "Deliberately left open (subordinate ruling 7(A)): ",
+    "unstripped": false,
+    "rewrite": {
+      "from": "this ruling closes",
+      "to": "this contract closes"
+    }
+  },
+  "schemas.CapabilityDocument.description": {
+    "stripped_insert": " (subordinate ruling 7(A))",
+    "stripped_insert_suffix_length": 1,
+    "unstripped": false
+  },
+  "schemas.CapabilityDocument.properties.surfaces.description": {
+    "stripped_prefix": "Since 1.6.0 (subordinate ruling 11, item 2; unconditional -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "schemas.CredentialIssued.properties.secret.description": {
+    "stripped_prefix": "Since 1.6.0 (subordinate ruling 11, item 1; unconditional -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "schemas.CredentialRotated.properties.secret.description": {
+    "stripped_prefix": "Since 1.6.0 (subordinate ruling 11, item 1; unconditional -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "schemas.MutationResult.properties.assigned_addresses.items.properties.address.description": {
+    "stripped_insert": " (subordinate ruling 7(A))",
+    "stripped_insert_suffix_length": 116,
+    "unstripped": false
+  },
+  "schemas.SchemaOperationRequest.properties.field_types.description": {
+    "stripped_prefix": "Since 1.6.0 (subordinate ruling 11, item 3, conditional on schema_operations being provided -- versioning.version_binding): ",
+    "unstripped": false
+  },
+  "security.schemes.application_credential.description": {
+    "stripped_insert": "Since 1.6.0 (subordinate ruling 11, item 1; unconditional -- versioning.version_binding): ",
+    "stripped_insert_suffix_length": 955,
+    "unstripped": false
+  },
+  "security.schemes.control_credential.description": {
+    "stripped_insert": "Since 1.6.0 (subordinate ruling 11, item 1; unconditional -- versioning.version_binding): ",
+    "stripped_insert_suffix_length": 955,
+    "unstripped": false
+  },
+  "structured_operations.reserved_entity_names_note": {
+    "stripped_prefix": "Since 1.4.0 (subordinate ruling 9, item 6; unconditional -- versioning.version_binding). ",
+    "unstripped": false
+  },
+  "versioning.compatibility": {
+    "unstripped": true,
+    "reason": "no 'Since 1.x.0 (...)' clause at the value's start, and no balanced (...) group anywhere in the value contains a provenance-marker trigger substring -- the scanner's match here is a bare keyword (see matched-patterns) sitting inside ordinary normative prose with no bracketed/prefixed marker clause to separate out. spec/CONTRACT_HISTORY.md's own note for this path (where present) says the same thing."
+  },
+  "versioning.version_binding": {
+    "unstripped": true,
+    "reason": "value is 10269 chars and is a single cumulative narrative: it restates obligations version-by-version, and later sentences depend on earlier ones IN THE SAME VALUE (e.g. the 1.5.0 paragraph's sentence 4 says 'the same superset relation holds for event_classes, stated here explicitly', referring back across the value; the 1.6.0 paragraph's retroactive-denial rows extend four EARLIER sentences already inside this same value). The generic Rule A/B algorithm used on the other 28 values would find 8 separate bracketed provenance-marker parentheticals scattered through it plus at least one embedded 'Since 1.5.0 (...): ' clause reused verbatim from audit.query_operation_vocabulary -- fragmenting it into that many discrete extraction points is not a single mechanical prefix/insert split, it is a re-authoring of the paragraph's own cross-references, which is out of scope for a before/after inventory. Named explicitly in the task as the unstrippable example."
+  }
+}

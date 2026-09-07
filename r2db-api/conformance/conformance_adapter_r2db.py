@@ -59,6 +59,7 @@ from adapter import (  # noqa: E402
     SurfaceAbsent,
     TamperVector,
     apply_limits_override,
+    fold_batch_idempotency_key,
     fresh_identifier,
     resolve_valid_confirmation,
 )
@@ -1119,6 +1120,93 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         operation = {"operation": "add_field", "entity": entity, "field": field, "field_type": field_type}
         self._call(lambda: self._service.schema(session, operation))
 
+    def schema_operation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        field: str | None = None,
+        field_type: str | None = None,
+        fields: Sequence[str] | None = None,
+        field_types: Mapping[str, str] | None = None,
+        field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
+        enum: Sequence[Any] | None = None,
+        nullable: bool | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-2/D-4/D-5/D-6/D-8, §6.1 items 1-5, 7, 8): one
+        general schema-operation primitive, presented to the same real,
+        single `DataService.schema()` dispatcher `create_entity_with_
+        declared_types`/`add_field_with_declared_type` above already use.
+        Every new field is carried as a key on the SAME operation dict
+        those two methods already build (`structured.py`'s `bind_schema_
+        operation` reads the whole `SchemaOperationRequest` shape off this
+        one dict, exactly as it already does for `field_type`/`field_
+        types`) -- this is the `alter_field` primitive (§6.1 item 8; no
+        prior port method could express it) and every other schema-side
+        vector C-20/C-22/C-23/C-24/C-25 need.
+        """
+        op: dict[str, Any] = {"operation": operation, "entity": entity}
+        if field is not None:
+            op["field"] = field
+        if field_type is not None:
+            op["field_type"] = field_type
+        if fields is not None:
+            op["fields"] = list(fields)
+        if field_types:
+            op["field_types"] = dict(field_types)
+        if field_constraints:
+            op["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
+        if enum is not None:
+            op["enum"] = list(enum)
+        if nullable is not None:
+            op["nullable"] = nullable
+        if destructive:
+            op["destructive"] = True
+        if confirmation is not None:
+            if confirmation is VALID_CONFIRMATION:
+                probe_op = dict(op)
+                probe_op["destructive"] = True
+
+                def probe(_probe_op=probe_op) -> None:
+                    self._call(lambda: self._service.schema(session, dict(_probe_op)))
+
+                peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DROP_ENTITY")
+            else:
+                peer_confirmation = confirmation
+            if peer_confirmation is not None:
+                op["confirmation"] = peer_confirmation
+        if dry_run:
+            op["dry_run"] = True
+        if plan is not None:
+            op["plan"] = plan
+        if budget:
+            op["budget"] = dict(budget)
+        if idempotency_key is not None:
+            op["idempotency_key"] = idempotency_key
+        result = self._call(lambda: self._service.schema(session, op))
+        if isinstance(result, int):
+            # Pre-D-4/D-8 shape (measured, `service.py:1060`): `schema()`
+            # returns a bare post-request revision `int`, structurally with
+            # no place `descriptor`/`plan`/`request_id` could occupy --
+            # `None` for those three states that structural fact, not an
+            # assumption (conformance-review correction M-1's convention).
+            return {"revision": str(result), "descriptor": None, "plan": None, "request_id": None}
+        return {
+            "revision": str(result.revision) if hasattr(result, "revision") else (
+                str(result.get("revision")) if isinstance(result, Mapping) and result.get("revision") is not None else None
+            ),
+            "descriptor": getattr(result, "descriptor", None) if not isinstance(result, Mapping) else result.get("descriptor"),
+            "plan": getattr(result, "plan", None) if not isinstance(result, Mapping) else result.get("plan"),
+            "request_id": getattr(result, "request_id", None) if not isinstance(result, Mapping) else result.get("request_id"),
+        }
+
     def _build_mutation_item(
         self,
         operation: str,
@@ -1252,15 +1340,73 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         result = self._call(lambda: self._service.mutate_result(session, entity, [item]))
         return result.affected, list(result.assigned_addresses)
 
+    def _mutation_outcome_to_mapping(self, result: Any, *, dry_run: bool) -> Mapping[str, Any]:
+        """Shared by `attempt_mutation_with_result`/`attempt_batch_with_
+        result` (port v1.13): normalizes `DataService.mutate_result`'s own
+        return value (a `MutationResult`-shaped object today; `getattr`
+        with a `None` default observes `committed`/`plan`/`request_id`
+        only where the real object structurally carries them, pre-D-4/D-7
+        included, mirroring `query_with_revisions`'s own "observe, don't
+        assume" convention)."""
+        return {
+            "affected": result.affected,
+            "assigned_addresses": list(result.assigned_addresses) if result.assigned_addresses is not None else None,
+            "committed": getattr(result, "committed", not dry_run),
+            "plan": getattr(result, "plan", None),
+            "request_id": getattr(result, "request_id", None),
+        }
+
+    def attempt_mutation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
+        request-unit keywords on `DataService.mutate_result`, exactly like
+        the existing `transaction`/`request_id` keywords there -- never
+        placed on the operation-item dict (that dict is per-OPERATION;
+        these three are per-REQUEST, D-4(1)/D-6(1))."""
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        kwargs: dict[str, Any] = {}
+        if dry_run:
+            kwargs["dry_run"] = True
+        if plan is not None:
+            kwargs["plan"] = plan
+        if budget:
+            kwargs["budget"] = dict(budget)
+        result = self._call(lambda: self._service.mutate_result(session, entity, [item], **kwargs))
+        return self._mutation_outcome_to_mapping(result, dry_run=dry_run)
+
     def attempt_batch_with_addresses(
         self, session, entity: str, operations: Sequence[BatchOperation]
     ) -> tuple[int, list[Mapping[str, Any]] | None]:
+        # port v1.13 (design §6.1 "port docstring に書く限界" item (v)):
+        # folded through the shared `fold_batch_idempotency_key`, exactly
+        # like `attempt_batch_with_result` below -- never each op's own
+        # raw `idempotency_key` (a caller mixing distinct per-op values
+        # here would silently reach the peer as "the first item's value",
+        # which is precisely the uniform-or-absent rule `fold_batch_
+        # idempotency_key` exists to enforce instead of leaving unguarded).
+        idempotency_key = fold_batch_idempotency_key(operations)
         items = [
             self._build_mutation_item(
                 op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
                 expected_revision=op.expected_revision, unique_key=op.unique_key,
                 destructive=op.destructive, confirmation=op.confirmation,
-                session=session, entity=entity, idempotency_key=op.idempotency_key,
+                session=session, entity=entity, idempotency_key=idempotency_key,
             )
             for op in operations
         ]
@@ -1271,6 +1417,40 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         # single-operation calls this adapter stitches together itself.
         result = self._call(lambda: self._service.mutate_result(session, entity, items))
         return result.affected, list(result.assigned_addresses)
+
+    def attempt_batch_with_result(
+        self,
+        session,
+        entity: str,
+        operations: Sequence[BatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13: `attempt_batch_with_addresses`'s exact request shape,
+        extended with the same request-level `dry_run`/`plan`/`budget`/
+        (folded) `idempotency_key` machinery `attempt_mutation_with_
+        result` establishes."""
+        idempotency_key = fold_batch_idempotency_key(operations)
+        items = [
+            self._build_mutation_item(
+                op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
+                expected_revision=op.expected_revision, unique_key=op.unique_key,
+                destructive=op.destructive, confirmation=op.confirmation,
+                session=session, entity=entity, idempotency_key=idempotency_key,
+            )
+            for op in operations
+        ]
+        kwargs: dict[str, Any] = {}
+        if dry_run:
+            kwargs["dry_run"] = True
+        if plan is not None:
+            kwargs["plan"] = plan
+        if budget:
+            kwargs["budget"] = dict(budget)
+        result = self._call(lambda: self._service.mutate_result(session, entity, items, **kwargs))
+        return self._mutation_outcome_to_mapping(result, dry_run=dry_run)
 
     def attempt_cross_entity_batch(self, session, operations: Sequence[ScopedBatchOperation]) -> int:
         # P35 WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
@@ -1301,6 +1481,27 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             "DataService has no cross-entity mutation entry point -- query/mutate each take a single entity "
             "argument, schema takes one operation dict whose entity is a key (not a second entity slot), and "
             "no generic multi-entity dispatcher exists on this peer "
+            f"(requested {len(operations)} operation(s) across "
+            f"{sorted({op.entity for op in operations})!r})",
+            surface=self.public_operation_callables(),
+            forbidden_parameters=["entities", "cross_entity", "scoped"],
+        )
+
+    def attempt_cross_entity_batch_with_result(
+        self,
+        session,
+        operations: Sequence[ScopedBatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13: identical structural absence to `attempt_cross_
+        entity_batch` above -- `DataService` has no cross-entity entry
+        point at all, independent of these new fields."""
+        raise SurfaceAbsent(
+            self.name, "attempt_cross_entity_batch_with_result",
+            "DataService has no cross-entity mutation entry point (identical to attempt_cross_entity_batch) "
             f"(requested {len(operations)} operation(s) across "
             f"{sorted({op.entity for op in operations})!r})",
             surface=self.public_operation_callables(),
@@ -1362,6 +1563,30 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         page = self._call(lambda: self._service.query_page(session, entity, select=list(select), where=where))
         return page.items, list(page.revisions)
+
+    def query_with_budget(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str | None,
+        value: Any,
+        *,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-6): `budget` is a QueryRequest top-level
+        keyword on `DataService.query_page`, exactly like `page_size`/
+        `order_by`/`cursor`/`request_id` already are there."""
+        where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        kwargs: dict[str, Any] = {}
+        if budget:
+            kwargs["budget"] = dict(budget)
+        page = self._call(lambda: self._service.query_page(session, entity, select=list(select), where=where, **kwargs))
+        return {
+            "items": page.items,
+            "revisions": list(page.revisions) if page.revisions is not None else None,
+            "request_id": getattr(page, "request_id", None),
+        }
 
     # ------------------------------------------------------------------
     # attack-surface declarations

@@ -770,6 +770,20 @@ class BatchOperation:
     # yet, and adding it now would grow the port's surface with no real
     # caller. `None` (the default) omits the key from the presented
     # request entirely, identical to every other optional field here.
+    #
+    # port v1.13 (design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1 "port
+    # docstring に書く限界" item (v), supervisor ruling S-m): this field is
+    # per-ITEM, but the contract's own `idempotency_key` is a REQUEST-level
+    # field with no per-operation slot on the wire -- a caller presenting a
+    # batch whose operations carry anything other than "every operation the
+    # same value" or "every operation none" has described a request this
+    # wire shape cannot express. `fold_batch_idempotency_key` (module-level,
+    # this file) is the one place that rule is enforced, raising
+    # `AssertionError` on a genuine mix rather than silently resolving it;
+    # every plug's `attempt_batch_with_result`/`attempt_cross_entity_
+    # batch_with_result` folds through it rather than re-implementing the
+    # rule per plug.
     idempotency_key: str | None = None
 
 
@@ -802,7 +816,9 @@ class ScopedBatchOperation:
     destructive: bool = False
     confirmation: Any = None
     # port v1.11 -- identical field, identical rationale, as `BatchOperation.
-    # idempotency_key` above.
+    # idempotency_key` above. port v1.13: folded the same way, through the
+    # same `fold_batch_idempotency_key`, by `attempt_cross_entity_batch_
+    # with_result`.
     idempotency_key: str | None = None
 
 
@@ -831,6 +847,66 @@ def apply_limits_override(limits: Any, overrides: Mapping[str, int] | None) -> A
     if not overrides:
         return limits
     return replace(limits, **dict(overrides))
+
+
+def fold_batch_idempotency_key(operations: "Sequence[BatchOperation | ScopedBatchOperation]") -> str | None:
+    """Shared plumbing (port v1.13, design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1 "port
+    docstring に書く限界" item (v), supervisor ruling S-m). Folds the per-
+    item `idempotency_key` field every `BatchOperation`/`ScopedBatchOperation`
+    in `operations` carries (port v1.11) down to the single value the
+    contract's own `idempotency_key` actually is: `MutationRequest.
+    idempotency_key`/`ScopedMutationRequest.idempotency_key` are REQUEST-
+    level fields -- there is no per-operation slot for it anywhere on the
+    wire (`additionalProperties: false` on `Mutation`/`ScopedMutation`
+    leaves no room for it) -- while this port's own `BatchOperation`/
+    `ScopedBatchOperation` dataclasses carry it per item, purely so a
+    caller building a batch from what would otherwise be several separate
+    single-operation calls does not need a second, batch-specific way to
+    say "this request's key is X" (each single-operation primitive already
+    takes it, where it takes it at all, as a plain keyword).
+
+    The one request-level value `operations` can honestly be sent as is
+    therefore constrained to two shapes: every operation carries the exact
+    same `idempotency_key` value, or none of them carries one at all. A
+    caller presenting anything else -- two operations with two DIFFERENT
+    non-`None` keys, or a mix of one key-bearing operation and one bare
+    one, within what is meant to be a single atomic request -- has
+    described a request this wire shape cannot actually express, not a
+    request this function may silently resolve by picking one value and
+    discarding the rest: doing so would make the suite exercise a
+    different request than the one the caller thinks it built, silently.
+    This function refuses that outright: it raises `AssertionError` (a
+    port-usage error, caught by no `ConformanceDenial` machinery, exactly
+    like a caller error anywhere else in this module) naming every distinct
+    value observed, rather than folding a mixture down to "the first one"
+    or "the last one" the way an unguarded `next(...)` generator expression
+    would (the exact form every one of this port's own 4 concrete plugs
+    used before this port revision -- each replaced with a call to this
+    function so the uniform-or-absent rule is enforced once, identically,
+    everywhere, rather than re-implemented per plug with a chance of
+    drifting apart).
+
+    Returns `None` when `operations` is empty or when every operation's
+    `idempotency_key` is `None` (no key presented at all); otherwise
+    returns that one shared value.
+    """
+    keys: set[str | None] = {op.idempotency_key for op in operations}
+    if len(keys) > 1:
+        raise AssertionError(
+            "fold_batch_idempotency_key: BatchOperation.idempotency_key/"
+            "ScopedBatchOperation.idempotency_key must be uniform across one request's "
+            "operations -- every operation the same value, or every operation none -- "
+            f"but got {sorted(repr(k) for k in keys)}. The contract's own idempotency_key "
+            "is a REQUEST-level field with no per-operation slot on the wire; a caller "
+            "mixing distinct values (or a value alongside an absent one) across "
+            "operations of what is meant to be ONE request has described a request this "
+            "wire shape cannot express, not one this function may resolve by picking one "
+            "value and silently discarding the others."
+        )
+    if not keys:
+        return None
+    return next(iter(keys))
 
 
 @dataclass(frozen=True)
@@ -901,6 +977,53 @@ COMMON_FIELD_TYPES = ("text", "integer")
 
 
 class ConformanceAdapter(ABC):
+    """Common port ABC every peer plug implements (see this module's own
+    header docstring for the port's overall contract).
+
+    port v1.13 (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1) adds five
+    methods below (`schema_operation_with_result`, `attempt_mutation_with_
+    result`, `attempt_batch_with_result`, `attempt_cross_entity_batch_with_
+    result`, `query_with_budget`), additive only -- no existing method's
+    signature or return type changes. §6.1 requires this docstring
+    (WP-1b rework, review point K: a `#` comment block is not a docstring)
+    to state five limits, verbatim in substance (design's own Japanese,
+    restated here in this module's own English) -- every one of the five
+    new methods above is bound by all five:
+
+    (i) `dry_run`'s "zero externally visible state change" is bounded by
+        what an adapter can actually observe -- rows, catalog, schema
+        revision, and (where `audit_query` is available) audit events.
+        Consumption of a non-transactional address sequence is possible
+        but not asserted by any of these methods (permitted, not
+        required, design D-4 開示事項).
+    (ii) `plan` is opaque: every method here, and every caller of them,
+         treats it as a value to pass through and compare for equality
+         only -- never a structure to parse or construct.
+    (iii) `dry_run`/`plan`/`budget` are each exactly one value per
+          request, never one per operation -- they are keyword-only
+          parameters on these request-level methods, not fields on
+          `BatchOperation`/`ScopedBatchOperation`.
+    (iv) `budget` narrows a deployment's own declared bound DOWNWARD
+         only -- no method here, and no caller, may use it to raise a
+         bound above what the deployment itself declares.
+    (v) `BatchOperation.idempotency_key`/`ScopedBatchOperation.
+        idempotency_key` are per-ITEM fields, but the contract's own
+        `idempotency_key` is a per-REQUEST field: the operations
+        presented in one call to `attempt_batch_with_result`/`attempt_
+        cross_entity_batch_with_result` must carry either the identical
+        key on every operation, or no key on any operation at all.
+        `fold_batch_idempotency_key` (module-level, above) is where that
+        rule is enforced -- a genuine mixture is a port-usage error,
+        raised as `AssertionError` with a reason, never silently
+        resolved by picking one value. port v1.13 rework (WP-1b, review
+        point H): every one of this port's own 4 concrete plugs' batch-
+        shaped methods (`attempt_batch_with_addresses`/`attempt_cross_
+        entity_batch` alongside the newer `_with_result` siblings) folds
+        through this same function -- none re-implements the rule with an
+        unguarded `next(...)` or a raw per-item value.
+    """
+
     name: str
 
     # --- control plane (outside application authority) ---
@@ -2032,6 +2155,109 @@ class ConformanceAdapter(ABC):
         ABC already carries.
         """
 
+    # ------------------------------------------------------------------
+    # port v1.13 (design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1): five
+    # new methods below (`schema_operation_with_result`, `attempt_
+    # mutation_with_result`, `attempt_batch_with_result`, `attempt_cross_
+    # entity_batch_with_result`, `query_with_budget`), additive only --
+    # no existing method's signature or return type changes. The five
+    # limits §6.1 requires stating are on THIS CLASS's own docstring
+    # (above `name: str`), not here -- every one of the five methods below
+    # is bound by all five of them.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def schema_operation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        field: str | None = None,
+        field_type: str | None = None,
+        fields: Sequence[str] | None = None,
+        field_types: Mapping[str, str] | None = None,
+        field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
+        enum: Sequence[Any] | None = None,
+        nullable: bool | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        """A single, general schema-operation primitive (port v1.13, design
+        docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+        D-2/D-4/D-5/D-6/D-8, §6.1 items 1-5, 7, 8) that presents any of
+        `create_entity`/`add_field`/`alter_field`/`create_index`/
+        `drop_entity` to the peer's real schema entry point, carrying every
+        field contract 1.7.0 newly declares on `SchemaOperationRequest`.
+
+        This is deliberately ONE method, not five (one per operation name)
+        or a family of variants bolted onto `create_entity_with_declared_
+        types`/`add_field_with_declared_type`: those two pre-existing
+        methods are left byte-for-byte untouched (no new keyword, same
+        `None` return) so `test_c19_client_self_sufficiency.py`'s existing
+        callers keep their exact pre-v1.13 behavior. This new method is
+        `alter_field`'s own primitive (§6.1 item 8 -- no port method could
+        express `alter_field` at all before this port revision, since
+        neither peer implements it yet either), and is what every C-20/
+        C-22/C-23/C-24/C-25 vector needing a schema-side observation uses,
+        including `create_entity`/`add_field` ones, so the six new
+        condition files speak one schema vocabulary instead of mixing this
+        method with the two pre-existing ones.
+
+        `field`/`field_type`/`fields`/`field_types` mirror the pre-existing
+        per-operation shapes (`add_field`'s single `field` name + singular
+        `field_type`, exactly as `add_field_with_declared_type` already
+        sends; `alter_field`'s single `field` name with no `field_type`
+        (D-2(5): redeclaring type is undefined in this version);
+        `create_entity`'s `fields` list plus optional plural `field_types`,
+        exactly as `create_entity_with_declared_types` already sends).
+        `field_constraints` (D-2(1), meaningful on `create_entity` in this
+        version) and `enum`/`nullable` (D-2(1), `add_field`/`alter_field`'s
+        own top-level constraint pair) are carried through exactly as
+        `field_types` already is on `create_entity_with_declared_types` --
+        never validated, simulated, or defaulted by this adapter itself.
+        `destructive`/`confirmation` follow the identical `VALID_
+        CONFIRMATION` sentinel protocol `drop_entity` already uses (needed
+        for C-23 (vii)'s destructive-replay vector against `drop_entity`,
+        and for any future destructive schema vector).
+
+        `dry_run`/`plan`/`budget`/`idempotency_key` are request-UNIT
+        keywords -- exactly one value for this one operation (a schema
+        request never batches more than one operation) -- carried through
+        unedited to whatever real schema entry point already receives the
+        rest of the request, never interpreted, validated, or narrowed by
+        this adapter. Each keyword defaults to its own byte-compatible
+        absence (`False`/`None`), identical to omitting it from the
+        request entirely -- pre-v1.13 callers of the two untouched schema
+        methods above are unaffected.
+
+        Returns a `Mapping` with:
+          - `revision`: `str`, the peer's real post-request schema revision
+            as a string. `SchemaOperationResult.revision` is `required` and
+            always present on a real response; where the underlying real
+            call this plug drives returns a bare revision value (e.g. the
+            pre-v1.13 `int` shape `schema()`/`schema` dispatchers already
+            return on every currently-registered peer), that value is
+            stringified rather than the call failing.
+          - `descriptor`: `Mapping | None` (D-4(3)) -- the `EntityDescriptor`
+            a dry-run or real schema operation returns, observed from the
+            real response; `None` where that response structurally carries
+            no such concept (every currently-registered peer, pre-D-4),
+            never fabricated.
+          - `plan`: `str | None`, opaque, observed the same way.
+          - `request_id`: `str | None`, observed the same way.
+
+        Raises `ConformanceDenial` on the peer's own real refusal, or
+        `SurfaceAbsent` where no real entry point could carry this request
+        at all, exactly like `create_entity_with_declared_types`/`drop_
+        entity`.
+        """
+
     @abstractmethod
     def attempt_mutation(
         self,
@@ -2165,6 +2391,60 @@ class ConformanceAdapter(ABC):
         """
 
     @abstractmethod
+    def attempt_mutation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """`attempt_mutation`'s exact request shape, extended with the
+        contract's own request-level `dry_run`/`plan`/`budget` (port v1.13,
+        design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+        D-4/D-6, §6.1 items 1-3), returning the full observed result as a
+        `Mapping` instead of a bare `int` -- C-22/C-24/C-25 need
+        `committed`/`plan`/`request_id` alongside `affected`/`assigned_
+        addresses`, none of which `attempt_mutation`/`attempt_mutation_
+        with_addresses` (both left byte-for-byte untouched, still returning
+        their own pre-v1.13 shapes) have room to add without breaking every
+        existing caller that unpacks their fixed-arity return.
+
+        `dry_run`/`plan`/`budget` are request-UNIT keywords -- exactly one
+        value per call, never per-operation (this method presents exactly
+        one operation, like `attempt_mutation` itself) -- carried through
+        unedited to whatever real entry point already receives the rest of
+        this operation, never interpreted by this adapter. Each defaults to
+        its own byte-compatible absence (`False`/`None`/`None`), identical
+        to omitting it from the request entirely.
+
+        Returns a `Mapping` with:
+          - `affected`: `int`.
+          - `assigned_addresses`: `list[Mapping] | None`, same observed-
+            fact convention as `attempt_mutation_with_addresses`.
+          - `committed`: `bool` -- `True` for a real, non-dry-run
+            execution. Observed from the real result where it structurally
+            carries the concept; where it does not (every currently-
+            registered peer, pre-D-4), this is `not dry_run` -- a real
+            request that is not a dry run always commits today, so this
+            default states an existing fact rather than assuming a new
+            one (mirrors the `assigned_addresses`/`revisions` "structural
+            absence" convention, applied to a boolean instead of a list).
+          - `plan`: `str | None`, opaque, observed.
+          - `request_id`: `str | None`, observed.
+
+        Raises `ConformanceDenial` on the peer's own real refusal, exactly
+        like `attempt_mutation`.
+        """
+
+    @abstractmethod
     def attempt_batch_with_addresses(
         self, session, entity: str, operations: Sequence[BatchOperation]
     ) -> tuple[int, list[Mapping[str, Any]] | None]:
@@ -2186,6 +2466,45 @@ class ConformanceAdapter(ABC):
         sending multiple operations at once would use -- never split into
         several separate single-operation calls by the adapter itself,
         which would prove nothing about batch-level behavior at all.
+        """
+
+    @abstractmethod
+    def attempt_batch_with_result(
+        self,
+        session,
+        entity: str,
+        operations: Sequence[BatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """`attempt_batch_with_addresses`'s exact request shape, extended
+        with the contract's own request-level `dry_run`/`plan`/`budget`
+        (port v1.13, design docs/design/
+        PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-4/D-6,
+        §6.1 items 1-3) -- used by C-24's `batch_items` vector (the
+        `budget` that narrows how many operations one request may carry)
+        and by C-22's batch-shaped dry-run vectors alike, returning a
+        `Mapping` (`affected`/`assigned_addresses`/`committed`/`plan`/
+        `request_id`, same shape and same observed-fact conventions as
+        `attempt_mutation_with_result`) rather than growing `attempt_
+        batch_with_addresses`'s own fixed 2-tuple.
+
+        `operations`' own per-item `idempotency_key` (existing since port
+        v1.11) is folded to the single request-level value the contract's
+        `MutationRequest.idempotency_key` actually is, via the module-level
+        `fold_batch_idempotency_key` -- see that function's own docstring
+        for the uniform-or-absent rule and the `AssertionError` it raises
+        on a genuine mix (a port-usage error, never silently resolved by
+        picking one value). `dry_run`/`plan`/`budget` are request-UNIT
+        keywords exactly as on `attempt_mutation_with_result` -- one value
+        for the whole batch, never per-operation; each defaults to its own
+        byte-compatible absence.
+
+        Every operation MUST be presented to the same real batch entry
+        point a real client sending multiple operations at once would use,
+        exactly like `attempt_batch_with_addresses` itself.
         """
 
     @abstractmethod
@@ -2237,6 +2556,32 @@ class ConformanceAdapter(ABC):
         calls this adapter stitches together itself, which would prove
         nothing about cross-entity atomicity at all (identical discipline
         to `attempt_batch_with_addresses`'s own docstring).
+        """
+
+    @abstractmethod
+    def attempt_cross_entity_batch_with_result(
+        self,
+        session,
+        operations: Sequence[ScopedBatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """`attempt_cross_entity_batch`'s exact request shape, extended the
+        same way `attempt_batch_with_result` extends `attempt_batch_with_
+        addresses` (port v1.13, design D-4/D-6, §6.1 items 1-3) -- returns
+        a `Mapping` with `affected`, `committed`, `plan` and `request_id`
+        (deliberately no `assigned_addresses` key, mirroring `attempt_
+        cross_entity_batch`'s own bare-`int` choice: no currently-
+        registered peer providing this capability also declares `row_
+        addressability`, design M-6). `idempotency_key` is folded across
+        `operations` exactly as `attempt_batch_with_result` does, via the
+        same module-level `fold_batch_idempotency_key`. `dry_run`/`plan`/
+        `budget` are request-unit keywords, one value for the whole unit.
+
+        Raises `SurfaceAbsent`/`ConformanceDenial` exactly like `attempt_
+        cross_entity_batch`.
         """
 
     @abstractmethod
@@ -2292,6 +2637,51 @@ class ConformanceAdapter(ABC):
         occupy at all (a bare `list[dict]`, not a wrapping object) does
         `None` stand on that structural fact alone, with no dict left
         unlooked-at (conformance-review correction M-1).
+        """
+
+    @abstractmethod
+    def query_with_budget(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str | None,
+        value: Any,
+        *,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """Same request shape as `query_with_revisions` (port v1.13, design
+        docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+        D-6, §6.1 item 3), presenting the contract's own request-level
+        `budget` (`QueryRequest.budget`, D-6(1)) and returning the full
+        observed result as a `Mapping` rather than a bare tuple, so C-24's
+        `result_items`/`execution_ms` vectors and C-25's `request_id`
+        vector both use this one primitive instead of the port growing a
+        fourth query method.
+
+        `budget` is a request-UNIT keyword (there is no per-item position
+        on a query request to begin with), carried through exactly as
+        `field`/`value` are on `query_with_revisions`: never interpreted,
+        validated, or narrowed by this adapter itself. `None` (the
+        default) omits it from the presented request entirely, byte-
+        identical to `query_with_revisions`'s own pre-v1.13 behavior --
+        this method does not replace `query_with_revisions`, which stays
+        untouched for its own existing callers.
+
+        Returns a `Mapping` with:
+          - `items`: `list[dict]`, same value `query_with_revisions`
+            returns as its own first tuple element.
+          - `revisions`: `list[str] | None`, same observed-fact convention
+            as `query_with_revisions`.
+          - `request_id`: `str | None` (C-25), observed the same way --
+            `None` when the real response carries no such key/attribute at
+            all, never fabricated.
+
+        Raises `ConformanceDenial` on the peer's own real refusal (for
+        example `VALIDATION_FAILED` for a `budget` naming a class that does
+        not apply to `query`, or one exceeding the deployment's own
+        declared value; `CAPABILITY_UNSUPPORTED` while `request_budget` is
+        declared `unavailable`), exactly like every other primitive here.
         """
 
     # --- attack surface declarations ---

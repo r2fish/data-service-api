@@ -931,7 +931,22 @@ class DataService:
                     # R-9: reflects this instance's own constructor-injected
                     # deployer declaration -- never hardcoded (see __init__'s
                     # comment on this field).
-                    "control_plane": {"status": self._control_plane_status}
+                    "control_plane": {"status": self._control_plane_status},
+                    # Contract 1.7.0 (subordinate ruling 12, D-1 (3)): three
+                    # new capabilities, honestly declared `unavailable` in
+                    # the SAME commit as the provisional gate that rejects
+                    # every field each one governs (`schema`/`mutate_result`/
+                    # `_query_outcome` above, `http.py`'s `post_mutate`/
+                    # `post_query`) -- P-3 (宣言と挙動は同一コミット). WP-2a
+                    # (`constraint_declarations`), WP-2b (`dry_run`) and
+                    # WP-2d (`request_budget`) each flip their own entry to
+                    # `enabled`/`partial` in the same commit that removes
+                    # their name from `_PROVISIONAL_UNSUPPORTED_SCHEMA_
+                    # FIELDS` / the `mutate_result`/`_query_outcome` gates
+                    # above.
+                    "constraint_declarations": {"status": "unavailable"},
+                    "dry_run": {"status": "unavailable"},
+                    "request_budget": {"status": "unavailable"},
                 },
                 "limits": self.limits.as_dict(),
                 "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},
@@ -965,7 +980,7 @@ class DataService:
         """
         return list(self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id).items)
 
-    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None) -> "QueryPage":
+    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None, budget: dict[str, int] | None = None) -> "QueryPage":
         """The HTTP-facing shape (`{items, next_page, revisions}`,
         `spec/data-service-api.v1.json`'s `QueryResult`) -- used by `http.
         post_query` instead of `query` above, since building a real
@@ -976,12 +991,33 @@ class DataService:
         `revision_preconditions` is declared `enabled`, and every entity
         both cells provision is `mutable`, so a query response always
         carries revisions (R-4).
+
+        `budget` (contract 1.7.0, `QueryRequest.budget`): provisional gate
+        only (docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1
+        (9)) -- this foundation declares `request_budget` `unavailable`, so
+        any caller-supplied `budget` is refused outright rather than
+        silently accepted-and-ignored, matching this method's own existing
+        `idempotency_key`-style present-denial precedent
+        (`http.py:post_mutate`). WP-2d gives this parameter real narrowing
+        semantics in the same commit it flips `request_budget` to `enabled`.
         """
-        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id)
+        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id, budget=budget)
         return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []))
 
-    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None):
+    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None):
         rid = request_id or str(uuid.uuid4())
+        if budget is not None:
+            # Provisional gate (contract 1.7.0 D-1 (3)): `request_budget` is
+            # declared `unavailable` (service.py's `capabilities()`) -- this
+            # fires before the rate/concurrency slot is entered, mirroring
+            # the existing `idempotency_key` present-denial's unaudited,
+            # pre-slot placement (`http.py:post_mutate`) rather than the
+            # slot-scoped `VALIDATION_FAILED`s below.
+            fail(
+                "CAPABILITY_UNSUPPORTED",
+                "Request budgets are not supported by this foundation.",
+                details={"violated_declaration": "capability", "field": "budget"},
+            )
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
@@ -1017,11 +1053,27 @@ class DataService:
         """
         return self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id).affected
 
-    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None) -> "MutationResult":
+    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str = "atomic", request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None) -> "MutationResult":
         """The HTTP-facing shape (`{affected, assigned_addresses}`,
         `spec/data-service-api.v1.json`'s `MutationResult`) -- used by
         `http.post_mutate` instead of `mutate` above, mirroring the
-        `query`/`query_page` split (WP-4/WP-5)."""
+        `query`/`query_page` split (WP-4/WP-5).
+
+        `dry_run`/`plan`/`budget` (contract 1.7.0): provisional gate only
+        (docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9))
+        -- this foundation declares `dry_run` and `request_budget`
+        `unavailable`, so any caller-supplied value for these is refused
+        outright. WP-2b (`dry_run`/`plan`) and WP-2d (`budget`) give these
+        parameters real semantics in the same commit each flips its own
+        capability to `enabled`.
+        """
+        if dry_run or plan is not None or budget is not None:
+            field = "dry_run" if dry_run else ("plan" if plan is not None else "budget")
+            fail(
+                "CAPABILITY_UNSUPPORTED",
+                "dry_run/plan/budget are not supported by this foundation.",
+                details={"violated_declaration": "capability", "field": field},
+            )
         outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id)
         return MutationResult(affected=outcome.affected, assigned_addresses=list(outcome.assigned_addresses or []))
 
@@ -1057,8 +1109,26 @@ class DataService:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
 
+    # Contract 1.7.0 provisional gate (D-1 (3), work order §2 WP-1 (9)):
+    # every one of these fields is schema-accepted (the packaged contract
+    # copy is already 1.7.0) but not yet capability-enabled -- passing one
+    # through unrejected would be a P-3 violation (declaring `unavailable`
+    # while quietly accepting the field). WP-2a (`field_constraints`/`enum`/
+    # `nullable`), WP-2b (`dry_run`/`plan`), WP-2c (`idempotency_key`) and
+    # WP-2d (`budget`) each remove their own name from this tuple in the
+    # same commit that flips the corresponding capability to `enabled`.
+    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key")
+
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
         rid = request_id or str(uuid.uuid4())
+        if isinstance(operation, dict):
+            for provisional_field in self._PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS:
+                if provisional_field in operation:
+                    fail(
+                        "CAPABILITY_UNSUPPORTED",
+                        f"{provisional_field} is not supported by this foundation.",
+                        details={"violated_declaration": "capability", "field": provisional_field},
+                    )
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):

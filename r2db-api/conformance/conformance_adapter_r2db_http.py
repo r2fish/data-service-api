@@ -94,6 +94,7 @@ from adapter import (  # noqa: E402
     SurfaceAbsent,
     TamperVector,
     apply_limits_override,
+    fold_batch_idempotency_key,
     fresh_identifier,
     load_contract_error_codes,
     resolve_valid_confirmation,
@@ -1343,6 +1344,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         select: list[Any],
         where: list[dict[str, Any]] | None = None,
         page_size: int | None = None,
+        extra_body: Mapping[str, Any] | None = None,
         extra_header_pairs: Sequence[tuple[str, str]] = (),
         params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1351,6 +1353,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             body["where"] = where
         if page_size is not None:
             body["page"] = {"size": page_size}
+        # port v1.13 (design docs/design/
+        # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-6):
+        # `budget` is a QueryRequest top-level field -- carried the same way
+        # `attempt_batch_with_addresses`' own `extra_body={"idempotency_
+        # key": ...}` already carries a request-level field through.
+        if extra_body:
+            body.update(extra_body)
         return self._send(
             "POST", self._data_path(entity, "query"), session, json_body=body,
             extra_header_pairs=extra_header_pairs, params=params,
@@ -2521,6 +2530,79 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             body["field_types"] = dict(field_types)
         self._send("POST", self._schema_path(), session, json_body=body)
 
+    def schema_operation_with_result(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        field: str | None = None,
+        field_type: str | None = None,
+        fields: Sequence[str] | None = None,
+        field_types: Mapping[str, str] | None = None,
+        field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
+        enum: Sequence[Any] | None = None,
+        nullable: bool | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-2/D-4/D-5/D-6/D-8, §6.1 items 1-5, 7, 8): one
+        # general schema-operation primitive, presented to the same real,
+        # single schema-operations endpoint every other schema method on
+        # this adapter already uses. `destructive`/`confirmation` follow
+        # the identical VALID_CONFIRMATION sentinel protocol `drop_entity`
+        # below uses.
+        assert isinstance(session, _Session)
+        body: dict[str, Any] = {"operation": operation, "entity": entity}
+        if field is not None:
+            body["field"] = field
+        if field_type is not None:
+            body["field_type"] = field_type
+        if fields is not None:
+            body["fields"] = list(fields)
+        if field_types:
+            body["field_types"] = dict(field_types)
+        if field_constraints:
+            body["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
+        if enum is not None:
+            body["enum"] = list(enum)
+        if nullable is not None:
+            body["nullable"] = nullable
+        if destructive:
+            body["destructive"] = True
+        if confirmation is not None:
+            if confirmation is VALID_CONFIRMATION:
+                probe_body = dict(body)
+                probe_body["destructive"] = True
+
+                def probe(_probe_body=probe_body) -> None:
+                    self._send("POST", self._schema_path(), session, json_body=dict(_probe_body))
+
+                peer_confirmation = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DROP_ENTITY")
+            else:
+                peer_confirmation = confirmation
+            if peer_confirmation is not None:
+                body["confirmation"] = peer_confirmation
+        if dry_run:
+            body["dry_run"] = True
+        if plan is not None:
+            body["plan"] = plan
+        if budget:
+            body["budget"] = dict(budget)
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
+        result = self._send("POST", self._schema_path(), session, json_body=body)
+        return {
+            "revision": str(result.get("revision")) if result.get("revision") is not None else None,
+            "descriptor": result.get("descriptor"),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
+
     # port v1.10 (same WP as above).
     def add_field_with_declared_type(self, session: object, entity: str, field: str, field_type: str) -> None:
         assert isinstance(session, _Session)
@@ -2631,6 +2713,46 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         result = self._mutate_request(session, entity, [item])
         return result["affected"], result.get("assigned_addresses")
 
+    def attempt_mutation_with_result(
+        self,
+        session: object,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
+        # MutationRequest top-level fields -- carried through `_mutate_
+        # request`'s own `extra_body`, the same real mechanism `attempt_
+        # batch_with_addresses` already uses for `idempotency_key`.
+        assert isinstance(session, _Session)
+        item = self._build_mutation_item(
+            operation, values=values, where_field=where_field, where_value=where_value,
+            expected_revision=expected_revision, unique_key=unique_key,
+        )
+        extra_body: dict[str, Any] = {}
+        if dry_run:
+            extra_body["dry_run"] = True
+        if plan is not None:
+            extra_body["plan"] = plan
+        if budget:
+            extra_body["budget"] = dict(budget)
+        result = self._mutate_request(session, entity, [item], extra_body=extra_body or None)
+        return {
+            "affected": result["affected"],
+            "assigned_addresses": result.get("assigned_addresses"),
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
+
     def attempt_batch_with_addresses(
         self, session: object, entity: str, operations: Sequence[BatchOperation]
     ) -> tuple[int, list[Mapping[str, Any]] | None]:
@@ -2648,11 +2770,14 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # `idempotency_key` is a REQUEST-level field
         # (`MutationRequest.idempotency_key`, `additionalProperties:
         # false` on the per-operation `Mutation` shape has no slot for
-        # it) -- never placed inside an individual operation item. Hoisted
-        # from whichever operation(s) in this batch carry one; every
-        # currently-registered caller of this port method sends exactly
-        # one operation when it wants this field exercised at all.
-        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
+        # it) -- never placed inside an individual operation item. port
+        # v1.13 (design §6.1 item (v)): folded through the shared
+        # `fold_batch_idempotency_key`, exactly like `attempt_batch_with_
+        # result` below -- never an unguarded `next(...)` over each op's
+        # own value, which would silently pick "whichever op happens
+        # first" on a genuine mix instead of enforcing the uniform-or-
+        # absent rule that function exists for.
+        idempotency_key = fold_batch_idempotency_key(operations)
         # Same real HTTP mutation endpoint as `attempt_mutation_with_
         # addresses` above, given every operation in one request body --
         # exactly what a real client sending a multi-operation atomic batch
@@ -2662,6 +2787,49 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             extra_body={"idempotency_key": idempotency_key} if idempotency_key is not None else None,
         )
         return result["affected"], result.get("assigned_addresses")
+
+    def attempt_batch_with_result(
+        self,
+        session: object,
+        entity: str,
+        operations: Sequence[BatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13: `attempt_batch_with_addresses`'s exact request shape,
+        # extended with the same request-level `dry_run`/`plan`/`budget`/
+        # (folded) `idempotency_key` machinery `attempt_mutation_with_
+        # result`/`attempt_batch_with_addresses` already establish.
+        assert isinstance(session, _Session)
+        items = [
+            self._build_mutation_item(
+                op.operation, values=op.values, where_field=op.where_field, where_value=op.where_value,
+                expected_revision=op.expected_revision, unique_key=op.unique_key,
+                destructive=op.destructive, confirmation=op.confirmation,
+                session=session, entity=entity,
+            )
+            for op in operations
+        ]
+        idempotency_key = fold_batch_idempotency_key(operations)
+        extra_body: dict[str, Any] = {}
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
+        if dry_run:
+            extra_body["dry_run"] = True
+        if plan is not None:
+            extra_body["plan"] = plan
+        if budget:
+            extra_body["budget"] = dict(budget)
+        result = self._mutate_request(session, entity, items, extra_body=extra_body or None)
+        return {
+            "affected": result["affected"],
+            "assigned_addresses": result.get("assigned_addresses"),
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
 
     def attempt_cross_entity_batch(self, session: object, operations: Sequence[ScopedBatchOperation]) -> int:
         # P35 WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_
@@ -2709,14 +2877,69 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # port v1.11 (design D-6.7 C-07 (ii)): `idempotency_key` is a
         # REQUEST-level field on `ScopedMutationRequest`
         # (`additionalProperties: false` on the per-operation
-        # `ScopedMutation` shape has no slot for it) -- same hoist as
-        # `attempt_batch_with_addresses` above.
-        idempotency_key = next((op.idempotency_key for op in operations if op.idempotency_key is not None), None)
+        # `ScopedMutation` shape has no slot for it). port v1.13 (design
+        # §6.1 item (v)): folded through the shared `fold_batch_
+        # idempotency_key`, exactly like `attempt_cross_entity_batch_
+        # with_result` below -- same fold, not an unguarded `next(...)`.
+        idempotency_key = fold_batch_idempotency_key(operations)
         body: dict[str, Any] = {"operations": items}
         if idempotency_key is not None:
             body["idempotency_key"] = idempotency_key
         result = self._send("POST", "/v1/data/mutations", session, json_body=body)
         return result["affected"]
+
+    def attempt_cross_entity_batch_with_result(
+        self,
+        session: object,
+        operations: Sequence[ScopedBatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13: `attempt_cross_entity_batch`'s exact request shape
+        # (same real `POST /v1/data/mutations` route, same present-denial
+        # reasoning -- this peer's `cross_entity_mutation` stays
+        # `unavailable`, P35-D1, so every call here observes CAPABILITY_
+        # UNSUPPORTED regardless of the new fields), extended with the
+        # same request-level `dry_run`/`plan`/`budget`/(folded)
+        # `idempotency_key` machinery `attempt_batch_with_result` uses.
+        assert isinstance(session, _Session)
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"operation": op.operation, "entity": op.entity}
+            if op.values is not None:
+                item["values"] = dict(op.values)
+            if op.where_field is not None:
+                item["where"] = [{"field": op.where_field, "operator": "eq", "value": op.where_value}]
+            if op.destructive:
+                item["destructive"] = True
+            if op.confirmation is not None:
+                item["confirmation"] = (
+                    op.confirmation if op.confirmation is not VALID_CONFIRMATION else "DELETE"
+                )
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            items.append(item)
+        idempotency_key = fold_batch_idempotency_key(operations)
+        body: dict[str, Any] = {"operations": items}
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
+        if dry_run:
+            body["dry_run"] = True
+        if plan is not None:
+            body["plan"] = plan
+        if budget:
+            body["budget"] = dict(budget)
+        result = self._send("POST", "/v1/data/mutations", session, json_body=body)
+        return {
+            "affected": result["affected"],
+            "committed": result.get("committed", not dry_run),
+            "plan": result.get("plan"),
+            "request_id": result.get("request_id"),
+        }
 
     def create_unique_index(self, session: object, entity: str, index: str, fields: Sequence[str]) -> None:
         assert isinstance(session, _Session)
@@ -2774,6 +2997,31 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
         result = self._query_request(session, entity, select=list(select), where=where)
         return result["items"], result.get("revisions")
+
+    def query_with_budget(
+        self,
+        session: object,
+        entity: str,
+        select: Sequence[str],
+        field: str | None,
+        value: Any,
+        *,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        # port v1.13 (design D-6, §6.1 item 3): `budget` is a QueryRequest
+        # top-level field, carried through `_query_request`'s own
+        # `extra_body` exactly as `query_with_revisions` above carries
+        # `select`/`where`. `request_id` is observed off the real response
+        # the same way `revisions` already is.
+        assert isinstance(session, _Session)
+        where = [{"field": field, "operator": "eq", "value": value}] if field is not None else None
+        extra_body = {"budget": dict(budget)} if budget else None
+        result = self._query_request(session, entity, select=list(select), where=where, extra_body=extra_body)
+        return {
+            "items": result["items"],
+            "revisions": result.get("revisions"),
+            "request_id": result.get("request_id"),
+        }
 
     # ------------------------------------------------------------------
     # WP-1 (contract 1.2.0, docs/design/DESTRUCTIVE_CONFIRMATION_V1.md R-1,

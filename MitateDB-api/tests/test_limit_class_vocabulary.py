@@ -56,6 +56,12 @@ _CONTRACT_LIMIT_CLASSES = {
     # dedicated pre-auth window (`ControlPlaneService.check_audit_rate`/
     # `_check_audit_rate`).
     "audit_requests_per_minute",
+    # Phase 9 WP-1 (contract 1.7.0, subordinate ruling 12, D-2 (7) = U-1
+    # (β)): per-field `enum` member-count bound. Not yet enforced by this
+    # peer (WP-3a gives it real enforcement in the same commit that flips
+    # `constraint_declarations` to `enabled`) -- mirrored here now so this
+    # vocabulary test does not itself go stale the moment WP-1 lands.
+    "enum_members",
 }
 
 

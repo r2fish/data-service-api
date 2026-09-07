@@ -61,6 +61,7 @@ from adapter import (  # noqa: E402
     SurfaceAbsent,
     TamperVector,
     apply_limits_override,
+    fold_batch_idempotency_key,
     fresh_identifier,
     resolve_valid_confirmation,
 )
@@ -1367,6 +1368,212 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             session.add_field(entity, field, CONTRACT_TYPE_TO_FOUNDATION_TYPE[field_type], contract_type=field_type)
         self._call(op)
 
+    def schema_operation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        field: str | None = None,
+        field_type: str | None = None,
+        fields: Sequence[str] | None = None,
+        field_types: Mapping[str, str] | None = None,
+        field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
+        enum: Sequence[Any] | None = None,
+        nullable: bool | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+        idempotency_key: str | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-2/D-4/D-5/D-6/D-8, §6.1 items 1-5, 7, 8): one
+        general schema-operation primitive. Unlike `r2db-api` (a single
+        generic dict-shaped `schema()` dispatcher), this peer's public
+        surface is a family of DEDICATED session methods -- `create_
+        collection`/`create_entity`, `add_field` -- with no generic
+        fallthrough for an operation name neither recognizes at all.
+        `create_entity`/`add_field` are real, present entry points this
+        method extends with the new keyword args those methods themselves
+        gate (mirrors `create_entity_with_declared_types`'s own `field_
+        types` kwarg). `alter_field`/`drop_entity` have no session method
+        on this peer as of this port revision (confirmed by source
+        inspection, `create_unique_index`/`drop_entity` above make the
+        identical claim for the schema-mutation surface as a whole) --
+        this method raises `SurfaceAbsent` for either UNTIL a future WP
+        adds a real `session.alter_field`/`session.drop_entity` method,
+        checked via `hasattr` rather than a peer-name branch (the same
+        forward-compatible pattern `add_field_with_declared_type` already
+        uses for `hasattr(session, "add_field")`), so this method picks up
+        that future method automatically with no edit here.
+        """
+        if operation == "create_entity":
+            declared = {name: (field_types or {}).get(name, "json") for name in (fields or [])}
+            full_fields = {name: CONTRACT_TYPE_TO_FOUNDATION_TYPE[t] for name, t in declared.items()}
+
+            def op() -> Any:
+                # Phase 9 WP-1 (measured directly against `cell.py`'s real
+                # provisional-gate commit): the new `field_constraints`/
+                # `dry_run`/`plan`/`budget`/`idempotency_key` keywords are
+                # gated on `ApplicationDeveloper.create_entity`, NOT on
+                # `create_collection` (the older, foundation-level method
+                # `create_entity_with_declared_types` above still calls) --
+                # `create_entity` accepts the identical `{name: foundation_
+                # type}` `fields` shape `create_collection` does (it is a
+                # thin wrapper defaulting a missing `fields` to `{"id":
+                # "integer"}`, `cell.py::ApplicationCell.create_entity`),
+                # so passing a real, non-empty `full_fields` dict here
+                # behaves identically while also reaching the real gate.
+                if not hasattr(session, "create_entity"):
+                    # WP-1b rework (review point I): every currently-
+                    # registered caller of this method presents a real
+                    # `developer` session (schema_operation_with_result is
+                    # never exercised against a non-developer session by
+                    # this suite); a session lacking `create_entity` here
+                    # is therefore a PORT-usage error by the caller, not a
+                    # denial this adapter may fabricate on the peer's
+                    # behalf the way `AuthorizationError("developer
+                    # authority required")` would (that would assert a
+                    # real FORBIDDEN outcome no dispatch to the peer ever
+                    # produced). Raised as a plain `AssertionError`, exactly
+                    # like `fold_batch_idempotency_key`'s own caller-error
+                    # convention elsewhere in this port.
+                    raise AssertionError(
+                        "schema_operation_with_result(create_entity): session has no create_entity method -- "
+                        "every registered caller of this method presents a developer session; this is a "
+                        "port-usage error, not a peer denial"
+                    )
+                kwargs: dict[str, Any] = {"field_types": declared}
+                if field_constraints:
+                    kwargs["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
+                if dry_run:
+                    kwargs["dry_run"] = True
+                if plan is not None:
+                    kwargs["plan"] = plan
+                if budget:
+                    kwargs["budget"] = dict(budget)
+                if idempotency_key is not None:
+                    kwargs["idempotency_key"] = idempotency_key
+                return session.create_entity(entity, full_fields, **kwargs)
+            result = self._call(op)
+        elif operation == "add_field":
+            def op() -> Any:
+                if not hasattr(session, "add_field"):
+                    # WP-1b rework (review point I): same reasoning as the
+                    # `create_entity` branch above -- port-usage error, not
+                    # a fabricated peer denial.
+                    raise AssertionError(
+                        "schema_operation_with_result(add_field): session has no add_field method -- "
+                        "every registered caller of this method presents a developer session; this is a "
+                        "port-usage error, not a peer denial"
+                    )
+                kwargs: dict[str, Any] = {}
+                if field_type is not None:
+                    kwargs["contract_type"] = field_type
+                if enum is not None:
+                    kwargs["enum"] = list(enum)
+                if nullable is not None:
+                    kwargs["nullable"] = nullable
+                if dry_run:
+                    kwargs["dry_run"] = True
+                if plan is not None:
+                    kwargs["plan"] = plan
+                if budget:
+                    kwargs["budget"] = dict(budget)
+                if idempotency_key is not None:
+                    kwargs["idempotency_key"] = idempotency_key
+                foundation_type = CONTRACT_TYPE_TO_FOUNDATION_TYPE[field_type] if field_type is not None else "json"
+                return session.add_field(entity, field, foundation_type, **kwargs)
+            result = self._call(op)
+        elif operation == "alter_field":
+            if not hasattr(session, "alter_field"):
+                raise SurfaceAbsent(
+                    self.name, "schema_operation_with_result(alter_field)",
+                    "no session.alter_field method exists on this peer as of this port revision "
+                    f"(requested: entity={entity!r}, field={field!r})",
+                    surface=self.public_operation_callables(),
+                    forbidden_parameters=["alter_field", "enum", "nullable"],
+                )
+
+            def op() -> Any:
+                kwargs: dict[str, Any] = {}
+                if enum is not None:
+                    kwargs["enum"] = list(enum)
+                if nullable is not None:
+                    kwargs["nullable"] = nullable
+                if dry_run:
+                    kwargs["dry_run"] = True
+                if plan is not None:
+                    kwargs["plan"] = plan
+                if budget:
+                    kwargs["budget"] = dict(budget)
+                if idempotency_key is not None:
+                    kwargs["idempotency_key"] = idempotency_key
+                return session.alter_field(entity, field, **kwargs)
+            result = self._call(op)
+        elif operation == "drop_entity":
+            if not hasattr(session, "drop_entity"):
+                raise SurfaceAbsent(
+                    self.name, "schema_operation_with_result(drop_entity)",
+                    f"no session.drop_entity method exists on this peer as of this port revision (entity={entity!r})",
+                    surface=self.public_operation_callables(),
+                    forbidden_parameters=["drop", "destroy"],
+                )
+
+            def op() -> Any:
+                kwargs: dict[str, Any] = {"destructive": destructive}
+                if confirmation is not None:
+                    if confirmation is VALID_CONFIRMATION:
+                        def probe() -> None:
+                            self._call(lambda: session.drop_entity(entity, destructive=True))
+                        kwargs["confirm"] = self._resolve_confirmation(confirmation, probe=probe, legacy_token=True)
+                    else:
+                        kwargs["confirm"] = confirmation
+                if dry_run:
+                    kwargs["dry_run"] = True
+                if plan is not None:
+                    kwargs["plan"] = plan
+                if idempotency_key is not None:
+                    kwargs["idempotency_key"] = idempotency_key
+                return session.drop_entity(entity, **kwargs)
+            result = self._call(op)
+        else:
+            # WP-1b rework (review point I): an operation name none of
+            # `create_entity`/`add_field`/`alter_field`/`drop_entity`
+            # recognizes has no session method AT ALL on this peer's
+            # dedicated-method-family surface -- a structural absence, not
+            # a peer denial this adapter may fabricate by inventing a
+            # `ConformanceDenial(code="CAPABILITY_UNSUPPORTED", ...)` no
+            # real dispatch ever produced. Raised the same way `alter_
+            # field`/`drop_entity` above raise it for their own genuinely-
+            # absent surfaces.
+            raise SurfaceAbsent(
+                self.name, f"schema_operation_with_result({operation!r})",
+                f"no session method exists on this peer for operation {operation!r} -- only create_entity/"
+                f"add_field/alter_field/drop_entity are recognized (entity={entity!r})",
+                surface=self.public_operation_callables(),
+                forbidden_parameters=[operation],
+            )
+
+        if isinstance(result, int) or result is None:
+            return {"revision": (str(result) if result is not None else None), "descriptor": None, "plan": None, "request_id": None}
+        if isinstance(result, Mapping):
+            rev = result.get("revision")
+            return {
+                "revision": str(rev) if rev is not None else None,
+                "descriptor": result.get("descriptor"),
+                "plan": result.get("plan"),
+                "request_id": result.get("request_id"),
+            }
+        rev = getattr(result, "revision", None)
+        return {
+            "revision": str(rev) if rev is not None else None,
+            "descriptor": getattr(result, "descriptor", None),
+            "plan": getattr(result, "plan", None),
+            "request_id": getattr(result, "request_id", None),
+        }
+
     def _attempt_mutation_outcome(
         self,
         session,
@@ -1637,6 +1844,73 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # peer itself does not declare or publish to a real caller.
         return affected, None
 
+    def _mutation_result_to_mapping(self, results: Sequence[Any], items: Sequence[Mapping[str, Any]], *, dry_run: bool) -> Mapping[str, Any]:
+        """Shared by `attempt_mutation_with_result`/`attempt_batch_with_
+        result` (port v1.13): normalizes `session.transact()`'s own
+        per-item results list the same way `attempt_batch_with_addresses`'
+        `op()` already sums real per-item outcomes, plus the new `dry_run`/
+        `plan`/`budget`/`request_id` outcomes -- observed via a dict-shaped
+        result item where present (`.get(..., default)`), never assumed."""
+        affected = 0
+        for item, result in zip(items, results):
+            if item["type"] == "insert":
+                affected += 1
+            elif isinstance(result, Mapping):
+                affected += result.get("updated", result.get("deleted", 0))
+        envelope = results[-1] if results and isinstance(results[-1], Mapping) else {}
+        return {
+            "affected": affected,
+            "assigned_addresses": None,
+            "committed": envelope.get("committed", not dry_run),
+            "plan": envelope.get("plan"),
+            "request_id": envelope.get("request_id"),
+        }
+
+    def attempt_mutation_with_result(
+        self,
+        session,
+        entity: str,
+        operation: str,
+        *,
+        values: Mapping[str, Any] | None,
+        where_field: str | None,
+        where_value: Any,
+        expected_revision: str | None = None,
+        unique_key: str | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-4/D-6): always routed through `session.
+        transact()` (the same real atomic dispatcher `attempt_batch_with_
+        addresses` uses), never through the plain `session.insert`/
+        `.update`/`.delete` methods `_attempt_mutation_outcome`'s own
+        fast-path branches use -- `dry_run`/`plan`/`budget` are request-
+        unit keywords on the request as a whole, and `transact()` is this
+        peer's one entry point that has ever taken such a keyword
+        (`request_id`, pre-existing)."""
+        filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
+        item: dict[str, Any] = {"type": operation, "collection": entity, "values": dict(values or {})}
+        if expected_revision is not None:
+            item["expected_revision"] = expected_revision
+        if unique_key is not None:
+            item["unique_key"] = unique_key
+        if filters is not None:
+            item["filters"] = filters
+        kwargs: dict[str, Any] = {}
+        if dry_run:
+            kwargs["dry_run"] = True
+        if plan is not None:
+            kwargs["plan"] = plan
+        if budget:
+            kwargs["budget"] = dict(budget)
+
+        def op() -> Sequence[Any]:
+            return session.transact([item], **kwargs)
+
+        results = self._call(op)
+        return self._mutation_result_to_mapping(results, [item], dry_run=dry_run)
+
     def attempt_batch_with_addresses(
         self, session, entity: str, operations: Sequence[BatchOperation]
     ) -> tuple[int, list[Mapping[str, Any]] | None]:
@@ -1667,6 +1941,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # several single-operation calls this adapter stitches together
         # itself, which would prove nothing real about this peer's own
         # batch-mixing support either way.
+        #
+        # port v1.13 (design §6.1 "port docstring に書く限界" item (v)):
+        # folded through the shared `fold_batch_idempotency_key`, exactly
+        # like `attempt_batch_with_result` below -- never each op's own
+        # raw `idempotency_key`, which would silently reach the peer as
+        # "whichever op the loop below builds last" rather than enforcing
+        # the uniform-or-absent rule that function exists for.
+        idempotency_key = fold_batch_idempotency_key(operations)
         items: list[dict[str, Any]] = []
         for op in operations:
             item: dict[str, Any] = {"type": op.operation, "collection": entity, "values": dict(op.values or {})}
@@ -1711,15 +1993,18 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     item["confirm"] = peer_confirm
                 else:
                     item["confirm"] = op.confirmation
-            if op.idempotency_key is not None:
+            if idempotency_key is not None:
                 # port v1.11 (design D-6.7 C-07 (ii)): `_plan_operation`'s
                 # own `_TRANSACT_*_KEYS` excess-key check (cell.py) already
                 # refuses ANY unrecognized operation-dict key -- including
                 # this one -- with a real, present `CapabilityError`
                 # BEFORE this operation's own row is ever built (`idempotency:
                 # unavailable`). Carried through unevaluated, exactly like
-                # `expected_revision`/`unique_key` above.
-                item["idempotency_key"] = op.idempotency_key
+                # `expected_revision`/`unique_key` above. port v1.13: the
+                # folded request-level value (see method docstring), not
+                # `op.idempotency_key` -- identical on every item in this
+                # batch by construction.
+                item["idempotency_key"] = idempotency_key
             items.append(item)
 
         def op() -> int:
@@ -1727,6 +2012,64 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             return len(results)
         affected = self._call(op)
         return affected, None
+
+    def attempt_batch_with_result(
+        self,
+        session,
+        entity: str,
+        operations: Sequence[BatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13: `attempt_batch_with_addresses`'s exact request shape
+        (identical per-item construction, including the VALID_CONFIRMATION
+        declare-and-echo protocol and the folded `idempotency_key`),
+        extended with the same request-level `dry_run`/`plan`/`budget`
+        top-level `transact()` keywords `attempt_mutation_with_result`
+        establishes."""
+        idempotency_key = fold_batch_idempotency_key(operations)
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"type": op.operation, "collection": entity, "values": dict(op.values or {})}
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            if op.where_field is not None:
+                item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
+            if op.destructive:
+                item["destructive"] = True
+            if op.confirmation is not None:
+                if op.confirmation is VALID_CONFIRMATION:
+                    probe_item = dict(item)
+                    probe_item["destructive"] = True
+
+                    def probe(_probe_item=probe_item) -> None:
+                        self._call(lambda: session.transact([dict(_probe_item)]))
+
+                    peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token=True)
+                    item["confirm"] = peer_confirm
+                else:
+                    item["confirm"] = op.confirmation
+            if idempotency_key is not None:
+                item["idempotency_key"] = idempotency_key
+            items.append(item)
+
+        kwargs: dict[str, Any] = {}
+        if dry_run:
+            kwargs["dry_run"] = True
+        if plan is not None:
+            kwargs["plan"] = plan
+        if budget:
+            kwargs["budget"] = dict(budget)
+
+        def op() -> Sequence[Any]:
+            return session.transact(items, **kwargs)
+
+        results = self._call(op)
+        return self._mutation_result_to_mapping(results, items, dry_run=dry_run)
 
     def attempt_cross_entity_batch(self, session, operations: Sequence[ScopedBatchOperation]) -> int:
         # P35 WP-2/WP-3 (design docs/design/PHASE35_CROSS_ENTITY_AND_
@@ -1742,6 +2085,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # what gives C-16 its atomicity/validation-ordering observations --
         # never split into several single-entity calls this adapter
         # stitches together itself.
+        #
+        # port v1.13 (design §6.1 "port docstring に書く限界" item (v)):
+        # folded through the shared `fold_batch_idempotency_key`, exactly
+        # like `attempt_cross_entity_batch_with_result` below -- never each
+        # op's own raw `idempotency_key`.
+        idempotency_key = fold_batch_idempotency_key(operations)
         items: list[dict[str, Any]] = []
         for op in operations:
             item: dict[str, Any] = {"type": op.operation, "collection": op.entity, "values": dict(op.values or {})}
@@ -1774,12 +2123,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     item["confirm"] = peer_confirm
                 else:
                     item["confirm"] = op.confirmation
-            if op.idempotency_key is not None:
+            if idempotency_key is not None:
                 # port v1.11 (design D-6.7 C-07 (ii)): same real
                 # `_TRANSACT_*_KEYS` excess-key rejection as `attempt_
                 # batch_with_addresses` above -- this dispatcher is the
-                # identical `session.transact` entry point.
-                item["idempotency_key"] = op.idempotency_key
+                # identical `session.transact` entry point. port v1.13:
+                # the folded request-level value (see method docstring),
+                # not `op.idempotency_key`.
+                item["idempotency_key"] = idempotency_key
             items.append(item)
 
         # m-1 (phase 3.5 WP-3 review): the real summed `affected` -- 1 per
@@ -1810,6 +2161,65 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     affected += result.get("updated", result.get("deleted", 0))
             return affected
         return self._call(op)
+
+    def attempt_cross_entity_batch_with_result(
+        self,
+        session,
+        operations: Sequence[ScopedBatchOperation],
+        *,
+        dry_run: bool = False,
+        plan: str | None = None,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13: `attempt_cross_entity_batch`'s exact request shape,
+        extended with the same request-level `dry_run`/`plan`/`budget`/
+        (folded) `idempotency_key` machinery `attempt_batch_with_result`
+        uses -- `cross_entity_mutation: partial` is real on this peer, so
+        these new fields are genuinely reachable here once `dry_run`/
+        `request_budget` flip."""
+        idempotency_key = fold_batch_idempotency_key(operations)
+        items: list[dict[str, Any]] = []
+        for op in operations:
+            item: dict[str, Any] = {"type": op.operation, "collection": op.entity, "values": dict(op.values or {})}
+            if op.expected_revision is not None:
+                item["expected_revision"] = op.expected_revision
+            if op.unique_key is not None:
+                item["unique_key"] = op.unique_key
+            if op.where_field is not None:
+                item["filters"] = [Filter(op.where_field, "eq", op.where_value)]
+            if op.destructive:
+                item["destructive"] = True
+            if op.confirmation is not None:
+                if op.confirmation is VALID_CONFIRMATION:
+                    probe_item = dict(item)
+                    probe_item["destructive"] = True
+
+                    def probe(_probe_item=probe_item) -> None:
+                        self._call(lambda: session.transact([dict(_probe_item)]))
+
+                    peer_confirm = self._resolve_confirmation(op.confirmation, probe=probe, legacy_token=True)
+                    item["confirm"] = peer_confirm
+                else:
+                    item["confirm"] = op.confirmation
+            if idempotency_key is not None:
+                item["idempotency_key"] = idempotency_key
+            items.append(item)
+
+        kwargs: dict[str, Any] = {}
+        if dry_run:
+            kwargs["dry_run"] = True
+        if plan is not None:
+            kwargs["plan"] = plan
+        if budget:
+            kwargs["budget"] = dict(budget)
+
+        def op() -> Sequence[Any]:
+            return session.transact(items, **kwargs)
+
+        results = self._call(op)
+        outcome = self._mutation_result_to_mapping(results, items, dry_run=dry_run)
+        outcome.pop("assigned_addresses", None)
+        return outcome
 
     def create_unique_index(self, session, entity: str, index: str, fields: Sequence[str]) -> None:
         # `session` is unavailable-regardless of *any* session (the answer
@@ -1885,6 +2295,33 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         # correction M-1).
         items = self.select_eq(session, entity, select, field, value)
         return items, None
+
+    def query_with_budget(
+        self,
+        session,
+        entity: str,
+        select: Sequence[str],
+        field: str | None,
+        value: Any,
+        *,
+        budget: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
+        """port v1.13 (design D-6): `budget` is a QueryRequest top-level
+        keyword on `session.read()`, exactly like `limit` (port v1.12)
+        already is there."""
+        filters = [Filter(field, "eq", value)] if field is not None else None
+        kwargs: dict[str, Any] = {}
+        if budget:
+            kwargs["budget"] = dict(budget)
+        result = self._call(lambda: session.read(entity, fields=list(select), filters=filters, **kwargs))
+        if isinstance(result, Mapping):
+            # Structurally has a place for `revisions`/`request_id` --
+            # observed, not assumed absent (M-1 convention). Not exercised
+            # by any currently-registered call (`session.read()` returns a
+            # bare list today), kept for the real eventual shape a future
+            # WP may give it.
+            return {"items": list(result.get("items", [])), "revisions": result.get("revisions"), "request_id": result.get("request_id")}
+        return {"items": result, "revisions": None, "request_id": None}
 
     # ------------------------------------------------------------------
     # attack-surface declarations
