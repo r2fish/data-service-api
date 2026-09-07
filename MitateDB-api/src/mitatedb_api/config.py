@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, replace
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from .errors import ResourceLimitError, ValidationError
 from .surfaces import build_surfaces, validate_control_base_url, validate_data_base_url
@@ -293,7 +293,49 @@ _BUDGET_APPLICABLE_CLASSES = {
 }
 
 
-def narrow_limits_by_budget(deployed: "FoundationConfig", budget, endpoint_kind: str) -> "FoundationConfig":
+def _json_type_name(value: Any) -> str:
+    """Contract `errors.details_vocabulary.VALIDATION_FAILED.observed_
+    type`'s own vocabulary: "the JSON type of the value actually received
+    (string, integer, number, boolean, object, array or null)". Only
+    reached from `narrow_limits_by_budget` below, for a `budget/<class>`
+    value that failed the `isinstance(int) and not bool` test. Mirrors
+    r2db's identical `_json_type_name` (`limits.py`) -- same 7-way
+    mapping, same lowercase-leading-underscore naming convention (Phase 9
+    R-5/R-6 pair-closing commit: renamed from `_JSON_TYPE_NAME`, and the
+    `bool` special case folded IN here rather than left to the caller's
+    own ternary, so `narrow_limits_by_budget`'s own pinned body can call
+    this the same single way both peers do)."""
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "integer"
+
+
+def _budget_denied(message: str, field: str, **extra: Any) -> None:
+    """Phase 9 R-5/R-6 pair-closing commit: the ONE place `narrow_limits_
+    by_budget` below turns a budget-shape violation into this peer's own
+    denial (`errors.ValidationError`) -- pulled out of the pinned function
+    body itself (isomorphism table row `narrow_limits_by_budget`, `tests/
+    test_audit_query.py`) so that body's own text never has to spell
+    either peer's own exception vocabulary. r2db-api's `limits.py` places
+    an identically-named, identically-signatured wrapper next to its own
+    `narrow_limits_by_budget` that calls `fail()` instead -- the two
+    wrappers are deliberately NOT pinned isomorphic to each other (only
+    the function that calls them, identically, is); each is free to stay
+    exactly as small as its own peer's error type requires."""
+    raise ValidationError(message, details={"violated_declaration": "budget", "field": field, **extra})
+
+
+def narrow_limits_by_budget(deployed: FoundationConfig, budget: dict[str, Any] | None, endpoint_kind: str) -> FoundationConfig:
     """Phase 9 WP-3d (design D-6, 追補 R-g/S-l; 監督裁定集約 rulings-r5-
     r6.md B-1/B-2/B-5): the ONE point that turns a request's own optional
     `budget` object into the `effective_limits` every existing check
@@ -301,10 +343,10 @@ def narrow_limits_by_budget(deployed: "FoundationConfig", budget, endpoint_kind:
     `batch_items` check, `read`'s own `result_items` check) reads instead
     of `self.config` directly -- no check point is individually rewritten
     to know about `budget` (B-2: "検査点を個別に書き換えない"). `budget is
-    None` (the overwhelming common case -- every pre-WP-3d caller) returns
-    `deployed` UNCHANGED (identity-shaped narrowing), so a caller that
-    never presents a budget sees exactly the deployed profile it always
-    did (completion condition 2, the positive control).
+    None` OR `{}` (the overwhelming common case -- every pre-WP-3d caller)
+    returns `deployed` UNCHANGED (identity-shaped narrowing), so a caller
+    that never presents a budget sees exactly the deployed profile it
+    always did (completion condition 2, the positive control).
 
     Validity (checked HERE, at the request's own validation stage, before
     target existence / destructive confirmation / precondition -- design
@@ -330,63 +372,49 @@ def narrow_limits_by_budget(deployed: "FoundationConfig", budget, endpoint_kind:
     deployment's declared value ... and the requested value").
 
     Every class `budget` does not name keeps `deployed`'s own value --
-    this is a NARROWING, never a second, independent declaration."""
+    this is a NARROWING, never a second, independent declaration.
+
+    Peer-symmetry note (isomorphism table row, `tests/test_audit_query.
+    py`, Phase 9 R-5/R-6 pair-closing commit): isomorphic to r2db-api's
+    own `limits.narrow_limits_by_budget(deployed, budget, endpoint_kind)`
+    -- same name, same 3-argument signature, same behaviour. No code is
+    shared between peers; `_budget_denied`/`_BUDGET_CLASS_TO_FIELD`
+    immediately above absorb the two peers' own exception vocabulary and
+    dataclass-field-naming difference OUTSIDE this body."""
     if not budget:
         return deployed
     if not isinstance(budget, dict):
-        raise ValidationError(
-            "budget must be an object", details={"violated_declaration": "budget", "field": "budget"})
+        _budget_denied("budget must be an object.", "budget")
     applicable = _BUDGET_APPLICABLE_CLASSES.get(endpoint_kind, frozenset())
     narrowed: dict[str, int] = {}
-    for cls, value in budget.items():
-        if cls not in applicable:
-            raise ValidationError(
-                f"budget/{cls} does not apply to this endpoint",
-                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
+    for class_name, requested in budget.items():
+        if class_name not in applicable:
+            _budget_denied(
+                "budget names a resource class that does not apply to this endpoint.",
+                f"budget/{class_name}",
             )
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValidationError(
-                f"budget/{cls} must be an integer of at least 1",
-                details={
-                    "violated_declaration": "budget", "field": f"budget/{cls}",
-                    "declared_type": "integer",
-                    "observed_type": "boolean" if isinstance(value, bool) else _JSON_TYPE_NAME(value),
-                },
+        # Ruling J-2 (WP-2cd audit N-2, monitor's (α)): the non-integer leg
+        # is split from the `< 1` leg so ONLY the former carries `declared_
+        # type`/`observed_type` -- ruling B-1's own parenthetical ("declared_
+        # type / observed_type は非整数のときのみ") read literally, and now
+        # matching MitateDB's identical 2-branch shape (`config.py`'s own
+        # `narrow_limits_by_budget`) so the SAME rejection returns the SAME
+        # `details` shape on both peers.
+        if not isinstance(requested, int) or isinstance(requested, bool):
+            _budget_denied(
+                "budget values must be integers of at least 1.",
+                f"budget/{class_name}",
+                declared_type="integer", observed_type=_json_type_name(requested),
             )
-        if value < 1:
-            raise ValidationError(
-                f"budget/{cls} must be an integer of at least 1",
-                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
+        if requested < 1:
+            _budget_denied("budget values must be integers of at least 1.", f"budget/{class_name}")
+        field_name = _BUDGET_CLASS_TO_FIELD[class_name]
+        deployed_value = getattr(deployed, field_name)
+        if requested > deployed_value:
+            _budget_denied(
+                "budget exceeds this deployment's own declared value for this resource class.",
+                f"budget/{class_name}",
             )
-        field = _BUDGET_CLASS_TO_FIELD[cls]
-        deployed_value = getattr(deployed, field)
-        if value > deployed_value:
-            raise ValidationError(
-                f"budget/{cls} exceeds this deployment's own declared value",
-                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
-            )
-        narrowed[field] = min(value, deployed_value)
-    if not narrowed:
-        return deployed
+        # P-5/D-6 (3): downward-only -- `min` never `max` (C-24 variant 1).
+        narrowed[field_name] = min(deployed_value, requested)
     return replace(deployed, **narrowed)
-
-
-def _JSON_TYPE_NAME(value) -> str:
-    """Contract `errors.details_vocabulary.VALIDATION_FAILED.observed_
-    type`'s own vocabulary: "the JSON type of the value actually received
-    (string, integer, number, boolean, object, array or null)". Only
-    reached from `narrow_limits_by_budget` above for a non-integer
-    `budget/<class>` value -- `bool` is handled by its own caller (JSON
-    `true`/`false` is contract type `boolean`, never `integer`, even
-    though Python's `bool` is an `int` subclass)."""
-    if value is None:
-        return "null"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, float):
-        return "number"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, dict):
-        return "object"
-    return "integer"
