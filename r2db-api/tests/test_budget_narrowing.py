@@ -74,12 +74,35 @@ def test_schema_endpoint_only_accepts_execution_ms() -> None:
     assert effective.execution_ms == 1000
 
 
-@pytest.mark.parametrize("bad_value", [0, -1, 1.5, "2", True, None])
+@pytest.mark.parametrize("bad_value", [0, -1])
 def test_non_positive_integer_budget_values_are_rejected(bad_value) -> None:
+    """Ruling B-1/J-2: a genuine integer that is merely `< 1` carries NO
+    `declared_type`/`observed_type` -- those two keys are reserved for the
+    non-integer leg below (ruling B-1's own parenthetical, read literally)."""
     with pytest.raises(FoundationError) as exc:
         narrow_limits_by_budget(LIMITS, {"batch_items": bad_value}, "mutate")
     assert exc.value.code == "VALIDATION_FAILED"
     assert exc.value.details == {"violated_declaration": "budget", "field": "budget/batch_items"}
+
+
+@pytest.mark.parametrize(
+    "bad_value,observed_type",
+    [(1.5, "number"), ("2", "string"), (True, "boolean"), (None, "null"), ([1], "array"), ({"n": 1}, "object")],
+)
+def test_non_integer_budget_values_carry_declared_and_observed_type(bad_value, observed_type) -> None:
+    """Ruling J-2 (WP-2cd audit N-2, monitor's (α)): a non-integer `budget/
+    <class>` value's details additionally carry `declared_type: "integer"`
+    and `observed_type` (the contract `errors.details_vocabulary.VALIDATION_
+    FAILED.observed_type` JSON-type name of the value actually received) --
+    matching MitateDB's identical shape for the identical rejection (`{scratchpad}/
+    rulings-r5-r6.md` addendum 2, N-2's (α))."""
+    with pytest.raises(FoundationError) as exc:
+        narrow_limits_by_budget(LIMITS, {"batch_items": bad_value}, "mutate")
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {
+        "violated_declaration": "budget", "field": "budget/batch_items",
+        "declared_type": "integer", "observed_type": observed_type,
+    }
 
 
 def test_narrowing_is_min_never_max() -> None:

@@ -15,6 +15,6 @@
     "operation_depth": "enforced",
     "enum_members": "enforced",
     "idempotency_entries": "enforced",
-    "idempotency_retention_ms": "enforced"
+    "idempotency_retention_ms": "reference_wall_clock"
   }
 }

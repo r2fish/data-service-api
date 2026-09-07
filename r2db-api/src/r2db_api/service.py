@@ -997,7 +997,18 @@ class DataService:
                     "request_budget": {"status": "enabled"},
                 },
                 "limits": self.limits.as_dict(),
-                "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},
+                # Ruling J-3 (WP-2cd audit N-3): `idempotency_retention_ms`
+                # joins `execution_ms` in the `reference_wall_clock` set --
+                # both are wall-clock DURATIONS a deployment cannot drive to
+                # a deterministic N/N+1 boundary within a bounded test run
+                # (unlike every COUNT-valued class here, `idempotency_
+                # entries` included, which genuinely IS `enforced`: a
+                # record's own retention window is checked lazily, against
+                # real elapsed time, not a request-counted budget).
+                "limit_enforcement": {
+                    name: "reference_wall_clock" if name in ("execution_ms", "idempotency_retention_ms") else "enforced"
+                    for name in self.limits.as_dict()
+                },
                 # `_check()` (called by `_slot()` above) re-validates
                 # credential/application authorization state on every
                 # single application-plane operation; there is no cache, so
@@ -1227,14 +1238,27 @@ class DataService:
                 # pre-commit hook already durably recorded this batch --
                 # `already_durable` tells `_event` to skip the buffer-class
                 # enqueue in that case (at most one durable row per
-                # operation). Contract 1.7.0 (D-5 (1)(v), ruling I-11,
-                # WP-2c): `outcome.replayed` -- a resend answered from an
-                # idempotency record earns no new audit event of its own
-                # (nothing below the idempotency lookup executed); its only
-                # audit trail is the ORIGINAL execution's own event,
-                # correlated through `request_id` once R-7 (WP-2e) exists.
-                if not dry_run and not outcome.replayed:
-                    self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
+                # operation). Contract 1.7.0 (D-5 (1)(v), ruling I-11/J-4,
+                # WP-2c/WP-2cd): `outcome.replayed` -- a resend answered
+                # from an idempotency record still earns its OWN audit line
+                # (SI-14, WP-2cd audit N-5: a destructive resend must never
+                # return `committed: true` while leaving zero evidence of
+                # its own that this Application was touched at time T) --
+                # `outcome="replayed"`, never `"allow"`, keeps a resend
+                # distinguishable from a genuine new execution in the audit
+                # trail itself; it carries THIS resend's own `request_id`
+                # (never the original), and, like every event this method
+                # emits, never the `idempotency_key` value (I-11). Always
+                # `already_durable=False`: a replay never invokes the
+                # pre-commit hook (nothing below the idempotency lookup
+                # executed), so no durable row has already been written for
+                # THIS event the way a genuinely destructive fresh commit's
+                # hook already wrote one for its own.
+                if not dry_run:
+                    if outcome.replayed:
+                        self._event(canonical, operation="mutate", outcome="replayed", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=False)
+                    else:
+                        self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
@@ -1311,11 +1335,20 @@ class DataService:
                 )
                 # D-4 (4)/U-2 = (A): no audit event at all for a dry_run
                 # that reached this point (the "would succeed" decision).
-                # Ruling I-11 (D-5 (1)(v), WP-2c): likewise none for a
-                # replay (`outcome.replayed`) -- see `_mutate_outcome`'s
-                # identical comment.
-                if not dry_run and not outcome.replayed:
-                    self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
+                # Ruling I-11/J-4 (D-5 (1)(v), WP-2c/WP-2cd): a replay
+                # (`outcome.replayed`) still earns its own `outcome=
+                # "replayed"` line -- see `_mutate_outcome`'s identical
+                # comment (a resent `drop_entity` must not return
+                # `committed: true` with zero evidence of its own). Unlike
+                # a genuine schema commit (`already_durable=True` -- the
+                # pre-commit hook already wrote the durable row
+                # synchronously), a replay never invoked that hook at all,
+                # so `already_durable=False` here.
+                if not dry_run:
+                    if outcome.replayed:
+                        self._event(canonical, operation="schema", outcome="replayed", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=False)
+                    else:
+                        self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)

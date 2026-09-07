@@ -273,7 +273,11 @@ def test_capability_idempotency_is_enabled_with_limits_declared_in_the_same_docu
     assert "idempotency_entries" in document["limits"]
     assert "idempotency_retention_ms" in document["limits"]
     assert document["limit_enforcement"]["idempotency_entries"] == "enforced"
-    assert document["limit_enforcement"]["idempotency_retention_ms"] == "enforced"
+    # Ruling J-3 (WP-2cd audit N-3): a wall-clock DURATION, like
+    # `execution_ms`, not a count -- `reference_wall_clock`, not `enforced`
+    # (a retention window cannot be driven to a deterministic N/N+1
+    # boundary within a bounded test run).
+    assert document["limit_enforcement"]["idempotency_retention_ms"] == "reference_wall_clock"
 
 
 def test_provisional_gate_is_removed_idempotency_key_is_accepted_not_rejected() -> None:
@@ -319,6 +323,52 @@ def test_idempotency_key_is_included_in_the_plan_digest() -> None:
     assert idempotency_digest(with_key) == idempotency_digest(with_other_key)
 
 
+def test_service_plan_token_changes_with_idempotency_key_through_the_real_request_path() -> None:
+    """Ruling J-1 (WP-2cd audit N-1, addendum I-13): fixes I-13's wiring
+    THROUGH `DataService._mutate_outcome`'s own `plan_request` assembly
+    (`service.py:1202-1203`), never by handing a hand-built dict straight
+    to `normalize_request_for_plan`/`compute_plan_token` the way `test_
+    idempotency_key_is_included_in_the_plan_digest` above does (that test
+    fixes the HELPER; this one fixes the WIRING -- the monitor's own
+    self-mutation, `service.py:1202-1203` turned into `if False:`, left
+    that helper-level test, `r2db-api/tests` in full, and `test_c23_
+    idempotency_semantics.py` all green; only a request-path test like
+    this one goes red under that exact mutation).
+
+    1. A `dry_run` WITHOUT `idempotency_key` gets plan token A.
+    2. The identical `entity`/`operations` `dry_run` WITH `idempotency_
+       key="k1"` gets plan token B -- `A != B` (G-1: `service.py` includes
+       `idempotency_key` in `plan_request` only when the caller's own
+       request object actually carried it).
+    3. Token B, presented on the real (non-dry-run) request WITH
+       `idempotency_key="k1"`, is honored (commits).
+    4. Token B, presented WITHOUT `idempotency_key` (or with a different
+       one), is refused `PRECONDITION_FAILED` -- fail-closed, never
+       silently honored as if it were the no-key plan."""
+    service, _control = build_service()
+    runtime = runtime_context(service)
+    operations = [{"operation": "insert", "values": {"body": "j1-wiring"}}]
+
+    token_a = service.mutate_result(runtime, "notes", list(operations), dry_run=True).plan
+    token_b = service.mutate_result(runtime, "notes", list(operations), dry_run=True, idempotency_key="k1").plan
+    assert token_a is not None
+    assert token_b is not None
+    assert token_a != token_b, "the plan token must depend on whether idempotency_key was presented at all"
+
+    # Step 3: the SAME key the plan was captured with -- honored, commits.
+    committed = service.mutate_result(runtime, "notes", list(operations), plan=token_b, idempotency_key="k1")
+    assert committed.committed is True
+    assert committed.affected == 1
+
+    # Step 4: token B presented WITHOUT idempotency_key -- fail-closed, no
+    # second row (a silent "close enough" honor would double-insert).
+    with pytest.raises(FoundationError) as exc:
+        service.mutate_result(runtime, "notes", list(operations), plan=token_b)
+    assert exc.value.code == "PRECONDITION_FAILED"
+    rows = [r for r in service.query(runtime, "notes", select=["id", "body"]) if r.get("body") == "j1-wiring"]
+    assert len(rows) == 1, "the fail-closed PRECONDITION_FAILED resend must not have executed"
+
+
 def test_audit_key_is_never_written_to_an_audit_event() -> None:
     """I-11: key を監査行に載せない。相関は request_id (2e で成立) --
     2c 時点では `_event`/`_make_audit_hook` に渡る `details`/フィールドの
@@ -339,6 +389,64 @@ def test_audit_key_is_never_written_to_an_audit_event() -> None:
     assert len(events) >= 1, "test setup sanity check: at least one durable event must have been written"
     for event in events:
         assert "top-secret-key-value" not in repr(event)
+
+
+def test_replay_of_a_destructive_delete_writes_its_own_audit_line() -> None:
+    """Ruling J-4 (WP-2cd audit N-5, SI-14): a resend answered from the
+    idempotency record still earns its OWN audit line -- a destructive
+    `delete`'s replay must not return `committed: true` while leaving ZERO
+    evidence of its own that this Application was touched at that time
+    (SI-14's minimal "destructive schema/data operation" event class).
+    Uses `ControlAuthority.audit_events()` (the legacy in-memory sink
+    `_event` always appends to FIRST, unconditionally -- `service.py`'s own
+    `_event` docstring) rather than the durable/buffered surface: this
+    property must hold regardless of how the buffer-class routing beneath
+    it behaves. The new row carries the REPLAY's own `request_id` (never
+    the original), `outcome: "replayed"` (never `"allow"`), and -- like
+    every event this method emits -- never the `idempotency_key` value
+    itself (I-11)."""
+    from r2db_api.structured import Predicate, delete_confirmation_phrase
+
+    service, control = build_service()
+    context = runtime_context(service)
+    phrase = delete_confirmation_phrase("notes", [Predicate(field="id", operator="eq", value=1)], 0)
+    op = {"operation": "delete", "where": [{"field": "id", "operator": "eq", "value": 1}], "destructive": True, "confirmation": phrase}
+
+    first = service.mutate_result(context, "notes", [op], idempotency_key="k-replay-audit", request_id="rid-original")
+    assert first.committed is True
+    before = len(control.audit_events())
+
+    second = service.mutate_result(context, "notes", [dict(op)], idempotency_key="k-replay-audit", request_id="rid-replay")
+    assert second.committed is True
+    after = control.audit_events()
+    assert len(after) == before + 1, "the destructive replay must add EXACTLY one audit row"
+
+    new_events = [event for event in after if event.get("request_id") == "rid-replay"]
+    assert len(new_events) == 1
+    event = new_events[0]
+    assert event["outcome"] == "replayed"
+    assert event["operation"] == "mutate"
+    assert "k-replay-audit" not in repr(event)
+
+
+def test_declared_audit_outcomes_include_replayed() -> None:
+    """Ruling J-4 (WP-2cd audit N-5): the peer-local `outcome` vocabulary
+    pin (`audit_query.py`'s `DECLARED_AUDIT_OUTCOMES`) includes `"replayed"`
+    -- fixed against every real `outcome=` literal in `src/r2db_api/` by
+    the SAME generalized AST scanner `test_audit_query.py`'s own
+    `DECLARED_AUDIT_OPERATIONS`/`_TARGET_KINDS`/`_EVENT_CLASSES` tests use,
+    so a future new `outcome=` word left undeclared here is caught, not
+    silently permitted."""
+    from r2db_api.audit_query import DECLARED_AUDIT_OUTCOMES
+    from test_audit_query import _field_literal_union, _iter_src_files
+
+    assert "replayed" in DECLARED_AUDIT_OUTCOMES
+    emitted = _field_literal_union(_iter_src_files(), "outcome")
+    assert emitted, "the AST scanner found zero outcome literals -- it is itself broken"
+    assert emitted == DECLARED_AUDIT_OUTCOMES, (
+        f"emittable-vs-declared mismatch: emitted but not declared: {emitted - DECLARED_AUDIT_OUTCOMES!r}; "
+        f"declared but never actually emitted: {DECLARED_AUDIT_OUTCOMES - emitted!r}"
+    )
 
 
 # ===========================================================================
@@ -383,5 +491,133 @@ def test_postgres_record_is_written_in_the_same_transaction_as_the_data(app_a) -
         replay = cell.transact("pgwidgets", ok_ops, LIMITS, plan_request={"entity": "pgwidgets", "operations": ok_ops}, idempotency_key="pg-k1")
         assert replay.replayed is True
         assert _row_count() == 1, "a replay must not add a second row"
+    finally:
+        cell.close()
+
+
+def test_postgres_upgrade_11_not_applied_fails_closed_at_lookup_before_execution(app_a, monkeypatch) -> None:  # noqa: F811
+    """Ruling J-5 (WP-2cd audit N-6): an application that has never run
+    upgrade `11` (`public._r2db_idempotency` missing) gets `SERVICE_
+    UNAVAILABLE` for an `idempotency_key`-carrying request at the LOOKUP
+    stage -- before target-existence/execution, with NO row added to the
+    entity table (fail-closed, no execution cost paid first). Drops the
+    real side table (never restored -- unlike `test_ops_declarations.py`'s
+    module-scoped `platform` fixture that its own analogous test must put
+    back, `app_a` here is function-scoped: `deprovision_app` drops this
+    entire per-test database in its own `finally` block regardless of this
+    table's state, so there is nothing further to protect) rather than
+    provisioning a whole second Application that has genuinely never run
+    upgrade 11 -- `app_a`'s own already-applied upgrade 11 is otherwise
+    indistinguishable from one that was never applied, from `_idempotency_
+    lookup`'s own point of view, once the table itself is gone.
+
+    The FINAL error code and row count alone do NOT distinguish this fix
+    from the pre-J-5 behavior: without it, `_idempotency_lookup` swallowed
+    `UndefinedTable` into "no record", execution proceeded (catalog load,
+    the real INSERT), and `_idempotency_store` then hit the SAME
+    `UndefinedTable` at COMMIT time, unwinding the whole transaction back
+    to the SAME `SERVICE_UNAVAILABLE` + 0 rows (confirmed empirically: this
+    exact test, with the pre-fix `_idempotency_lookup` restored, still
+    passes on those two assertions alone -- N-6's own "実行費用を払ってから"
+    point exactly). What DOES distinguish them is real `_run()` dispatch
+    count before the failure -- counted the same way `{scratchpad}/
+    rtplugin.py`/`test_postgres_keyed_write_round_trip_count_after_
+    removing_the_redundant_delete` above do: the fix fails after ONLY
+    `_set_timeouts`'s 2 SET LOCAL statements + the lookup's own 2
+    statements (`DELETE`+`SELECT`) -- 4 total, identical to a keyed
+    REPLAY's own cost -- never reaching catalog load or the INSERT at all
+    (measured directly at 10 `_run()` calls with the pre-fix behavior
+    restored)."""
+    import psycopg
+    from psycopg import sql as psycopg_sql
+    import r2db_api.postgres as pg_module
+
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "j5widgets", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+
+        def _row_count(table: str) -> int:
+            with psycopg.connect(app_a.developer_dsn, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT count(*) FROM public.{table}")
+                    return cur.fetchone()[0]
+
+        with psycopg.connect(app_a.developer_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(psycopg_sql.SQL("DROP TABLE {table}").format(table=psycopg_sql.Identifier("_r2db_idempotency")))
+            conn.commit()
+
+        counts = {"n": 0}
+        orig_run = pg_module._run
+
+        def counting_run(cur, *args, **kwargs):
+            counts["n"] += 1
+            return orig_run(cur, *args, **kwargs)
+
+        monkeypatch.setattr(pg_module, "_run", counting_run)
+
+        ops = [{"operation": "insert", "values": {"label": "one"}}]
+        with pytest.raises(FoundationError) as exc:
+            cell.transact("j5widgets", ops, LIMITS, plan_request={"entity": "j5widgets", "operations": ops}, idempotency_key="j5-k1")
+        assert exc.value.code == "SERVICE_UNAVAILABLE"
+        assert counts["n"] == 4, (
+            f"_run() dispatch count before the failure: {counts['n']} (expected 4 -- `_set_timeouts`'s own 2 SET LOCAL "
+            f"statements + the lookup's own DELETE+SELECT, matching a keyed REPLAY's identical 4-statement cost; a value "
+            f"near/above 10 means catalog load and/or the INSERT ran first too, i.e. the pre-J-5 execute-then-roll-back path "
+            f"-- measured directly: 10, with `_idempotency_lookup`'s old `UndefinedTable`-swallowing restored)"
+        )
+        assert _row_count("j5widgets") == 0, "the fail-closed request must not have executed at all -- no row growth"
+    finally:
+        cell.close()
+
+
+def test_postgres_keyed_write_round_trip_count_after_removing_the_redundant_delete(app_a, monkeypatch) -> None:  # noqa: F811
+    """Ruling J-6 (WP-2cd audit N-7): `_idempotency_reserve`'s own
+    lazy-reclaim DELETE (a second one on this same path, always 0 rows --
+    `_idempotency_lookup`, same transaction, already ran the first one
+    moments earlier) is removed. Counts real `postgres._run()` dispatch
+    calls (the same technique `{scratchpad}/rtplugin.py` used for the
+    audit's own P-8 measurement) for one keyed WRITE (a new record, no
+    prior row) and one keyed REPLAY, pinning both exactly -- a mutation
+    that re-introduces the DELETE turns the write assertion red (12, not
+    11; verified directly by re-adding it and re-running this same test:
+    `{scratchpad}/j6-verify-backup/` is that mutation's own cp/sha256
+    restore point). This scenario's own absolute counts (11/4) differ from
+    the audit's own reported baseline (10/4, a different insert scenario)
+    -- what this test pins is the DELTA the fix produces (-1 on the write
+    leg), measured directly against ITS OWN mutation, not a cross-scenario
+    absolute number. The replay assertion (never calls `_idempotency_
+    reserve` at all, since it returns before reaching it) stays at 4
+    either way, pinned here as a non-regression contrast."""
+    import r2db_api.postgres as pg_module
+
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "rtwidgets", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+        counts = {"n": 0}
+        orig_run = pg_module._run
+
+        def counting_run(cur, *args, **kwargs):
+            counts["n"] += 1
+            return orig_run(cur, *args, **kwargs)
+
+        monkeypatch.setattr(pg_module, "_run", counting_run)
+
+        ops = [{"operation": "insert", "values": {"label": "one"}}]
+        counts["n"] = 0
+        outcome = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1")
+        assert outcome.replayed is False
+        assert counts["n"] == 11, f"keyed write round trips: {counts['n']} (expected 11 after J-6 removes the redundant reserve-stage DELETE; 12 before it, measured directly by re-adding the DELETE)"
+
+        counts["n"] = 0
+        replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1")
+        assert replay.replayed is True
+        assert counts["n"] == 4, f"replay round trips: {counts['n']} (expected 4, unchanged by J-6 -- a replay never reaches _idempotency_reserve)"
     finally:
         cell.close()

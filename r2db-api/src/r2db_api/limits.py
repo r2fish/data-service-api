@@ -137,6 +137,33 @@ _BUDGET_APPLICABLE_CLASSES: dict[str, frozenset[str]] = {
 }
 
 
+def _json_type_name(value: Any) -> str:
+    """Ruling J-2/contract `errors.details_vocabulary.VALIDATION_FAILED.
+    observed_type`'s own vocabulary: "the JSON type of the value actually
+    received (string, integer, number, boolean, object, array or null)".
+    Only reached from `narrow_limits_by_budget` below, for a `budget/
+    <class>` value that failed the `isinstance(int) and not bool` test --
+    `bool` is handled by its own caller (JSON `true`/`false` is contract
+    type `boolean`, never `integer`, even though Python's `bool` is an
+    `int` subclass), so this function itself never needs to special-case
+    it. Mirrors MitateDB's identical `_JSON_TYPE_NAME` (`config.py`) --
+    same 7-way mapping, this peer's own naming convention (lowercase,
+    leading underscore) rather than a verbatim port of the name."""
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "integer"
+
+
 def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | None, endpoint_kind: str) -> ResourceLimits:
     """Contract 1.7.0 (D-6, addendum 2 S-l, work order §2 WP-2d, ruling
     B-2/B-5): the SINGLE point that turns one request's own `budget` into
@@ -173,7 +200,22 @@ def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | N
                 "VALIDATION_FAILED", "budget names a resource class that does not apply to this endpoint.",
                 details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
             )
-        if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
+        # Ruling J-2 (WP-2cd audit N-2, monitor's (α)): the non-integer leg
+        # is split from the `< 1` leg so ONLY the former carries `declared_
+        # type`/`observed_type` -- ruling B-1's own parenthetical ("declared_
+        # type / observed_type は非整数のときのみ") read literally, and now
+        # matching MitateDB's identical 2-branch shape (`config.py`'s own
+        # `narrow_limits_by_budget`) so the SAME rejection returns the SAME
+        # `details` shape on both peers.
+        if not isinstance(requested, int) or isinstance(requested, bool):
+            fail(
+                "VALIDATION_FAILED", "budget values must be integers of at least 1.",
+                details={
+                    "violated_declaration": "budget", "field": f"budget/{class_name}",
+                    "declared_type": "integer", "observed_type": _json_type_name(requested),
+                },
+            )
+        if requested < 1:
             fail(
                 "VALIDATION_FAILED", "budget values must be integers of at least 1.",
                 details={"violated_declaration": "budget", "field": f"budget/{class_name}"},

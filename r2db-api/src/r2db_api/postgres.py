@@ -1162,31 +1162,36 @@ class PostgresCell:
     # `ApplicationCell`'s single-process dict, so the DATABASE's own notion
     # of "now" is what a lazy reclaim compares against.
     #
-    # Read/reclaim (`_idempotency_lookup`/`_idempotency_reserve`) mirror
-    # `_load_field_constraints`'s own graceful "table absent" handling
-    # (a nested SAVEPOINT, `UndefinedTable` treated as "no record"/"no
-    # entries") -- an application that has never run upgrade 11 has no
-    # existing records to find or count. The WRITE (`_idempotency_store`)
-    # mirrors `_write_field_constraints`'s own strict handling instead (NO
-    # nested savepoint -- `UndefinedTable` propagates to `transact`/`apply_
-    # schema`'s own `except psycopg.Error` clause, `SERVICE_UNAVAILABLE`,
-    # rolling the WHOLE batch back): a client that presented `idempotency_
-    # key` asked for a durable guarantee this deployment cannot honor
-    # without the table, and silently completing the batch without
-    # actually recording it would misrepresent `capabilities().idempotency:
-    # enabled` as true when it was not, for this one Application (P-3).
+    # Read (`_idempotency_lookup`) fails CLOSED on a missing table (ruling
+    # J-5, WP-2cd audit N-6) -- an application that has never run upgrade
+    # 11 gets `SERVICE_UNAVAILABLE` right here, before target-existence/
+    # execution, exactly like the WRITE (`_idempotency_store`) already did:
+    # `UndefinedTable` is left to propagate to `transact`/`apply_schema`'s
+    # own `except psycopg.Error` clause, rolling back the (as yet empty)
+    # transaction and touching no row. This method runs FIRST on the
+    # idempotent path (before `catalog`/target-existence in `transact`;
+    # right after `catalog` but before any operation-specific work in
+    # `apply_schema`), so nothing has executed yet when it raises. Before
+    # this ruling, this method instead caught `UndefinedTable` and
+    # returned `None` ("no record found"), which let a request pay for
+    # target-existence/execution before failing at `_store` regardless --
+    # same eventual `SERVICE_UNAVAILABLE`, strictly more work done first.
+    # `_idempotency_reserve` (below) can therefore no longer actually
+    # observe `UndefinedTable` in practice: on this same path it always
+    # runs after this method has already succeeded (or already raised),
+    # in the SAME transaction, so the table's existence cannot change in
+    # between -- its own guard is kept anyway (defense in depth, and it
+    # matches `_load_field_constraints`'s own posture of not depending on
+    # a caller having gotten the ordering right).
 
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
-        try:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
-                with conn.cursor() as cur:
-                    _run(cur, sql.SQL("SELECT request_digest, kind, response FROM public.{table} WHERE idempotency_key = {ph}").format(table=table, ph=sql.Placeholder()), [key])
-                    row = cur.fetchone()
-        except psycopg.errors.UndefinedTable:
-            return None
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
+            with conn.cursor() as cur:
+                _run(cur, sql.SQL("SELECT request_digest, kind, response FROM public.{table} WHERE idempotency_key = {ph}").format(table=table, ph=sql.Placeholder()), [key])
+                row = cur.fetchone()
         if row is None:
             return None
         digest, kind, payload = row
@@ -1194,10 +1199,15 @@ class PostgresCell:
 
     def _idempotency_reserve(self, conn: "psycopg.Connection[Any]", limits: ResourceLimits) -> None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
+        # Ruling J-6 (WP-2cd audit N-7): the lazy-reclaim DELETE this method
+        # used to also issue here is dropped -- `_idempotency_lookup`, this
+        # same transaction, always runs first on this path and already
+        # reclaimed every expired record moments earlier; a second DELETE
+        # here was always a 0-row no-op (measured, WP-2cd closure: `_run`
+        # count for a keyed write drops from 11 to 10; a replay never
+        # reaches this method at all and stays at 4).
         try:
             with conn.transaction():
-                with conn.cursor() as cur:
-                    _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
                 with conn.cursor() as cur:
                     _run(cur, sql.SQL("SELECT count(*) FROM public.{table}").format(table=table))
                     (count,) = cur.fetchone()
