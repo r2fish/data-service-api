@@ -485,8 +485,21 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
             )
             plan4 = iso.attempt_mutation_with_result(**insert4_kwargs, dry_run=True).get("plan")
             assert plan4, f"{adapter.name}: a fourth dry run carries no plan"
+            # Declaration-based, not a fixed value: this leg only needs the
+            # ADDED budget to be in-bound (so the refusal it drives is the
+            # digest's own PRECONDITION_FAILED, never an out-of-bound
+            # VALIDATION_FAILED reached first) -- this deployment's own
+            # declared `execution_ms` bound, never a hardcoded literal,
+            # which a narrow isolation profile can sit below.
+            declared_execution_ms = adapter.capability_document().get("limits", {}).get("execution_ms")
+            assert isinstance(declared_execution_ms, int), (
+                f"{adapter.name}: capability_document()['limits']['execution_ms'] is not an int -- "
+                f"{adapter.capability_document().get('limits')!r}"
+            )
             with pytest.raises(ConformanceDenial) as ei_budget:
-                iso.attempt_mutation_with_result(**insert4_kwargs, plan=plan4, budget={"execution_ms": 1_000_000})
+                iso.attempt_mutation_with_result(
+                    **insert4_kwargs, plan=plan4, budget={"execution_ms": declared_execution_ms},
+                )
             assert ei_budget.value.code == "PRECONDITION_FAILED", (
                 f"{adapter.name}: the same plan re-presented with an ADDED budget (nothing else different) -> "
                 f"{ei_budget.value.code!r}, expected PRECONDITION_FAILED (the plan digest must cover budget too)"
