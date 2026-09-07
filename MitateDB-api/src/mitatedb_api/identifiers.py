@@ -32,10 +32,14 @@ def validate_identifier(value, label="identifier"):
     violation this function raises stays `VALIDATION_FAILED`, but now
     carries the SAME `violated_declaration: "identifier_syntax"` word
     `IDENTIFIER_INVALID` would have carried on r2db-api. `field` is
-    `label` itself -- this call's own caller already names the position
-    the identifier occupies (`"collection"`/`"field"`/`"application_id"`,
-    the bare, request-relative words `cell.py::ApplicationCell._identifier`
-    already passes at every call site) rather than a synthesized generic
+    `label` itself -- this call's own caller already names the REQUEST-
+    RELATIVE PATH the identifier occupies (`"entity"`, `"operations/<i>/
+    values/<name>"`, `"select/<i>"`, `"where/<i>/field"`, `"order_by/<i>/
+    field"`, `"fields/<name>"`, the bare top-level `"field"` word on
+    `SchemaOperationRequest.field` -- `cell.py::ApplicationCell.
+    _identifier`'s own call sites, reworked WP-3e T2 per 追補 L-3/M-4 to
+    stop passing a generic, position-blind literal like the pre-rework
+    bare `"collection"`/`"field"`) rather than a synthesized generic
     literal -- a deliberate, disclosed difference from r2db-api's own
     choice for `IDENTIFIER_INVALID` (`structured.validate_identifier`,
     which always carries the fixed literal `field="identifier"`

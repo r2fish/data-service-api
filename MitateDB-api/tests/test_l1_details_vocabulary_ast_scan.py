@@ -317,7 +317,10 @@ def test_ast_full_count_matches_a_non_trivial_floor():
     counts = {module: len(_fail_call_sites(SRC / module)) for module in SCANNED_MODULES}
     assert counts == {
         "cell.py": 49,
-        "http.py": 26,
+        # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
+        # new "present but wrong type" leg (a genuine new choke-point
+        # call site, not a relabeling of an existing one).
+        "http.py": 27,
         "field_types.py": 4,
         "identifiers.py": 1,
         "backend_postgres.py": 29,

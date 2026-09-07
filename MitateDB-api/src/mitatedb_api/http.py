@@ -361,6 +361,30 @@ def _schema_property_type_name(schema: Mapping[str, Any], key: str) -> "str | No
     return None
 
 
+def _schema_property_type_mismatch(value: Any, prop: Any) -> bool:
+    """WP-3e rework T2 (追補 L-4): does `value`'s own JSON type fail to
+    match `prop["type"]` (a bare string, or this contract's `[type,
+    "null"]` union convention -- `_schema_property_type_name`'s own
+    sibling reader)? A property schema naming no single JSON type at all
+    (a `$ref` object like `QueryRequest.page`, or an `enum`-only scalar
+    like `SchemaOperationRequest.operation`) never mismatches here --
+    this leg is deliberately confined to a JSON TYPE violation, never an
+    enum-membership or nested-shape one (those stay exactly where they
+    already lived, downstream of this shape layer)."""
+    if not isinstance(prop, dict):
+        return False
+    raw = prop.get("type")
+    if isinstance(raw, str):
+        allowed = {raw}
+    elif isinstance(raw, list):
+        allowed = {t for t in raw if isinstance(t, str)}
+    else:
+        return False
+    if not allowed:
+        return False
+    return observed_type_of(value) not in allowed
+
+
 def _check_object_shape(
     value: Any, schema: Mapping[str, Any], *, label: str, own_path: "str | None" = None,
 ) -> Mapping[str, Any]:
@@ -414,6 +438,34 @@ def _check_object_shape(
             f"{label} is missing required fields: {sorted(missing)}",
             details=violation("request_schema"),
         )
+    # WP-3e rework T2 (追補 L-4): the leg this function used to lack --
+    # a key that IS declared by `schema` and IS present in `value`, whose
+    # own VALUE's JSON type does not match what `schema` declares for it
+    # (design D-3 (2)/(4)'s own "値の型の違反のときだけ型対" rule, V-6
+    # applied to this shape layer, not only to `cell.py`'s downstream
+    # choke points). Checked in a stable (sorted) key order so a request
+    # violating more than one property's type still reports the SAME one
+    # deterministically. `missing`-before-`value` (checked above, D-2 (3)
+    # "検査順序は欠落検査 -> 値検査") already guarantees every key this
+    # loop inspects is genuinely present, never `absent`. Before this
+    # leg existed, a request like `{"select": "abc"}` sailed through this
+    # function unchecked (a known JSON type property carrying the WRONG
+    # JSON type is not "unknown" and not "missing") and reached a later
+    # choke point with no `details` at all, or -- worse, `values: "x"`,
+    # `dict("x")` -- an unhandled exception before any `ValidationError`
+    # was ever raised.
+    for key in sorted(value):
+        prop = schema.get("properties", {}).get(key)
+        if _schema_property_type_mismatch(value[key], prop):
+            field = f"{own_path}/{key}" if own_path else key
+            raise ValidationError(
+                f"{label}.{key} has the wrong type",
+                details=violation(
+                    "request_schema", field=field,
+                    declared_type=_schema_property_type_name(schema, key),
+                    observed_type=observed_type_of(value[key]),
+                ),
+            )
     return value
 
 

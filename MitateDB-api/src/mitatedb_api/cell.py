@@ -1199,7 +1199,7 @@ class ApplicationCell:
         # for two different jobs.
         request = {"name": name, "fields": fields}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
-            name = self._identifier(name, "collection")
+            name = self._identifier(name, "entity")
             if not isinstance(fields, dict) or not fields:
                 # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape
                 # violation about the `fields` key's own type/presence --
@@ -1248,7 +1248,20 @@ class ApplicationCell:
             validated_fields = {}
             declared_types = {}
             for field, field_type in fields.items():
-                field = self._identifier(field, "field")
+                # WP-3e rework T2 (追補 L-3, corrected against a real
+                # C-03 failure this WP's own first draft produced): the
+                # IDENTIFIER SYNTAX check itself must NOT embed the raw,
+                # NOT-YET-validated key into `field` -- `field=f"fields/
+                # {field}"` (this loop's own sibling `enum`-vocabulary
+                # violation two lines below, which only ever runs on a
+                # field name that has ALREADY passed this exact check)
+                # is safe there because a syntax-valid name can carry no
+                # injection payload; here, before validation, the raw
+                # dict key IS the untrusted candidate value C-03's own
+                # `assert_no_payload_echo_in_details` probes with -- so
+                # this call's own `label` stays the bare container
+                # (`"fields"`), never `f"fields/{field}"`.
+                field = self._identifier(field, "fields")
                 if field_type not in _FIELD_TYPE_VOCABULARY:
                     # WP-3e rework T1 (追補 L-1): `enum` -- the declared
                     # type name itself must be a member of the closed
@@ -1549,7 +1562,7 @@ class ApplicationCell:
         # `_limit_gate` sizing exactly).
         request = {"collection": collection, "field": field, "field_type": field_type}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
-            collection = self._identifier(collection, "collection")
+            collection = self._identifier(collection, "entity")
             field = self._identifier(field, "field")
             if field_type not in _FIELD_TYPE_VOCABULARY:
                 # WP-3e rework T1 (追補 L-1): mirrors `create_collection`'s
@@ -1799,7 +1812,7 @@ class ApplicationCell:
                         "field": "operation",
                     },
                 )
-            collection = self._identifier(collection, "collection")
+            collection = self._identifier(collection, "entity")
             field = self._identifier(field, "field")
             # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c rework,
             # I-13): hoisted above `field_domains` below (this method's
@@ -2128,7 +2141,7 @@ class ApplicationCell:
             # REQUESTED `limit` value, never the row count actually
             # returned, L9-11).
             limits = narrow_limits_by_budget(self.config, budget, "query")
-            collection = self._identifier(collection, "collection")
+            collection = self._identifier(collection, "entity")
             selected = self._select_fields(collection, fields)
             bound_filters = self._bind_filters(collection, filters, limits=limits)
             order = self._bind_order_by(collection, order_by)
@@ -2160,8 +2173,10 @@ class ApplicationCell:
         anywhere in this file.
 
         `path_prefix` (code review §2 D, 監督裁定 D 2026-09-07): forwarded
-        to `_prepare_values` verbatim -- `"values"` for a direct
-        `update()` call, `"operations/<i>/values"` for one batch item.
+        to `_prepare_values` verbatim -- `"operations/0/values"` for a
+        direct `update()` call, `"operations/<i>/values"` for one batch
+        item (N-4's "no wire shape omits the operations envelope"
+        convention).
 
         Returns `(collection, fields, values_params, bound_filters)` on
         success. Does not execute the update itself and does not touch
@@ -2169,16 +2184,20 @@ class ApplicationCell:
         both, same division of responsibility as
         `_validate_delete_confirmation`.
         """
+        item_prefix = path_prefix.rsplit("/", 1)[0] if "/" in path_prefix else path_prefix
         if not isinstance(filters, list) or not filters:
-            # Phase 9 WP-3e (design D-3 (2)): `filters`'s own request-
-            # relative path is `path_prefix`'s own sibling -- `"filters"`
-            # for a direct `update()` call (`path_prefix == "values"`),
-            # `"operations/<i>/filters"` for one batch item (`path_prefix
-            # == "operations/<i>/values"`).
-            filters_path = (path_prefix.rsplit("/", 1)[0] + "/filters") if "/" in path_prefix else "filters"
+            # Phase 9 WP-3e (design D-3 (2)): `where`'s own request-
+            # relative path is `path_prefix`'s own sibling -- `"operations/
+            # 0/where"` for a direct `update()` call, `"operations/<i>/
+            # where"` for one batch item. WP-3e rework T2 (追補 L-3/M-4):
+            # the wire contract's own predicate container is named
+            # `where` (`ScopedMutation.where`/`Mutation.where`), never
+            # `filters` (this module's own internal Python parameter name
+            # only) -- the label this raise used to carry was wrong.
+            where_path = f"{item_prefix}/where"
             raise ValidationError(
                 "update requires non-empty filters",
-                details={"violated_declaration": "request_schema", "field": filters_path},
+                details={"violated_declaration": "request_schema", "field": where_path},
             )
         collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
         if not fields:
@@ -2196,7 +2215,7 @@ class ApplicationCell:
                 "values must be non-empty",
                 details=violation("request_schema", field=path_prefix),
             )
-        bound_filters = self._bind_filters(collection, filters, limits=limits)
+        bound_filters = self._bind_filters(collection, filters, limits=limits, path_prefix=f"{item_prefix}/")
         return collection, fields, values_params, bound_filters
 
     def update(self, principal, collection, values, filters, *, request_id=None):
@@ -2216,7 +2235,8 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="update", target_id=collection, request_id=request_id)
         return result
 
-    def _validate_delete_confirmation(self, collection, filters, destructive, confirm, limits=None):
+    def _validate_delete_confirmation(self, collection, filters, destructive, confirm, limits=None,
+                                       path_prefix="operations/0/values"):
         """P3-D2 (design v1.2 R-5, WP-1.5): the single choke BOTH
         `ApplicationCell.delete` below AND `transact()`'s own
         batch-embedded delete branch (`_plan_operation`, since P35 WP-2's
@@ -2259,18 +2279,22 @@ class ApplicationCell:
         before this is ever reached" describes the pre-WP-2, single-pass
         call site and is no longer true of the current one.
         """
+        # WP-3e rework T2 (追補 L-3/M-4): every `field` this method raises
+        # is derived from `path_prefix` -- `"operations/0/..."` for a
+        # direct `delete()` call, `"operations/<i>/..."` for one batch
+        # item (mirrors `_validate_update`'s own `filters_path` derivation
+        # immediately above) -- so a batch-embedded delete's own index is
+        # always reflected, closing the "known limitation" this comment
+        # used to disclose.
+        item_prefix = path_prefix.rsplit("/", 1)[0] if "/" in path_prefix else path_prefix
         if not isinstance(destructive, bool):
             # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape type
             # violation about this operation's own top-level `destructive`
-            # key. `field` is the bare key name -- this function has no
-            # `path_prefix` parameter (unlike `_validate_update` above),
-            # so a batch-embedded delete's own `operations/<i>/` prefix
-            # is not available here; disclosed as a known limitation
-            # (report).
+            # key.
             raise ValidationError(
                 "destructive must be a boolean",
                 details={
-                    "violated_declaration": "request_schema", "field": "destructive",
+                    "violated_declaration": "request_schema", "field": f"{item_prefix}/destructive",
                     "declared_type": "boolean", "observed_type": observed_type_of(destructive),
                 },
             )
@@ -2278,7 +2302,7 @@ class ApplicationCell:
             raise ValidationError(
                 "confirm must be a string",
                 details={
-                    "violated_declaration": "request_schema", "field": "confirm",
+                    "violated_declaration": "request_schema", "field": f"{item_prefix}/confirm",
                     "declared_type": "string", "observed_type": observed_type_of(confirm),
                 },
             )
@@ -2289,13 +2313,16 @@ class ApplicationCell:
         # reflect an unvalidated client-supplied collection name back to
         # the client, and evaluation_order requires target existence to be
         # settled before confirmation validity is evaluated.
-        collection = self._identifier(collection, "collection")
+        collection = self._identifier(collection, f"{item_prefix}/entity")
         if not isinstance(filters, list) or not filters:
+            # WP-3e rework T2 (追補 L-3/M-4): `where`, not `filters` --
+            # same wire-contract-name correction `_validate_update`'s own
+            # identical check above now carries.
             raise ValidationError(
                 "delete requires non-empty filters",
-                details={"violated_declaration": "request_schema", "field": "filters"},
+                details={"violated_declaration": "request_schema", "field": f"{item_prefix}/where"},
             )
-        bound_filters = self._bind_filters(collection, filters, limits=limits)
+        bound_filters = self._bind_filters(collection, filters, limits=limits, path_prefix=f"{item_prefix}/")
         schema_revision = self._backend.schema_revision()
         phrase = _delete_confirmation_phrase(collection, filters, schema_revision)
         if destructive is not True or confirm != phrase:
@@ -2998,8 +3025,13 @@ class ApplicationCell:
                 details=violation("request_schema", field="select"),
             )
         result = []
-        for field in requested:
-            field = self._identifier(field, "field")
+        for i, field in enumerate(requested):
+            # WP-3e rework T2 (追補 L-3): `select/<i>` -- the request's
+            # own list-index position, not a generic `"field"` literal
+            # (the value at this position may not even be a string, so
+            # there is no safe raw value to echo the way an already-
+            # syntax-valid identifier can be below).
+            field = self._identifier(field, f"select/{i}")
             if field not in available:
                 # Phase 9 WP-3e (design D-3 (2)/(4)): mirrors `_prepare_
                 # values`'s identical "this entity has no field by this
@@ -3083,7 +3115,10 @@ class ApplicationCell:
                     "order_by must be an object or a non-empty list of objects",
                     details=violation("request_schema", field=f"order_by/{i}"),
                 )
-            field = self._identifier(item.get("field"), "order field")
+            # WP-3e rework T2 (追補 L-3): `order_by/<i>/field`, not the
+            # generic `"order field"` literal -- this predicate's own
+            # request-relative position.
+            field = self._identifier(item.get("field"), f"order_by/{i}/field")
             if field not in available:
                 raise ValidationError(
                     "unknown order field",
@@ -3151,7 +3186,16 @@ class ApplicationCell:
         return declared_types, declared_constraints
 
     def _prepare_values(self, collection, values, *, path_prefix="values", prefetched=None):
-        collection = self._identifier(collection, "collection")
+        # WP-3e rework T2 (追補 L-3/M-4): `entity_path` mirrors this
+        # method's own `path_prefix` sibling derivation elsewhere in this
+        # class (`_validate_update`'s `filters_path`) -- `path_prefix` is
+        # always `"operations/<i>/values"` (every caller of this method
+        # passes that exact shape, direct single-operation entry points
+        # included -- N-4's "operations/0/..." convention), so the
+        # entity name this same operation item names sits at
+        # `"operations/<i>/entity"`, its own path_prefix sibling.
+        entity_path = (path_prefix.rsplit("/", 1)[0] + "/entity") if "/" in path_prefix else "entity"
+        collection = self._identifier(collection, entity_path)
         available = self._backend.field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
         # declared-type choke point -- `field_types.check_declared_value`
@@ -3202,7 +3246,26 @@ class ApplicationCell:
         fields = []
         params = []
         for field, value in values.items():
-            field = self._identifier(field, "field")
+            # WP-3e rework T2 (追補 L-3, corrected against a real C-03
+            # failure this WP's own first draft produced -- `test_
+            # identifier_positions_reject_every_payload`'s own
+            # `assert_no_payload_echo_in_details`, which treats `field`
+            # as a scanned string leaf like any other): the IDENTIFIER
+            # SYNTAX check itself must not embed the raw, NOT-YET-
+            # validated dict key into `field` -- a syntax-invalid key IS
+            # exactly the untrusted candidate value C-03's own injection
+            # payloads exercise at this position (`insert_field`), so
+            # this call's own `label` stays the bare `path_prefix`
+            # container (`"operations/<i>/values"`), matching the
+            # "values must be a non-empty object"/"field limit exceeded"
+            # siblings immediately above. `f"{path_prefix}/{field}"` --
+            # `values/<k>`/`operations/<i>/values/<k>` -- is what the
+            # "unknown field"/`enum` checks BELOW still use, safely,
+            # because by the time either of them runs `field` has
+            # ALREADY passed this exact call without raising, so it is
+            # guaranteed to match `identifiers._IDENTIFIER` and carry no
+            # injection payload.
+            field = self._identifier(field, path_prefix)
             if field not in available:
                 # Phase 9 WP-3e (design D-3 (2)/(4), V-6): this entity
                 # has no field by this name -- an unrecognized-field
@@ -3253,14 +3316,15 @@ class ApplicationCell:
         return collection, fields, params
 
     @staticmethod
-    def _check_predicate_value(value, declared_type, field_name):
+    def _check_predicate_value(value, declared_type, value_path):
         """Phase 9 WP-3e (design D-3 (2)): `field_types.check_declared_
         value` (the SAME choke point `_prepare_values`'s write side uses,
         `constraints=None` here -- D-2 (2): "query の predicate 値は
         enum を検査しない") has no request-path context of its own; this
-        wrapper attaches the predicate's own `field` (the value's request
-        position IS the filter's own field name -- there is no `values/`-
-        style container to nest it under, unlike a write) the same way
+        wrapper attaches the predicate's own request-relative VALUE path
+        (WP-3e rework T2, 追補 M-4: `where/<i>/value`, `_bind_filters`'s
+        own caller-supplied path -- never the bare field name, which
+        names a POSITION, not the value being checked) the same way
         `_prepare_values`'s own `except ValidationError` clause does for
         the write side."""
         try:
@@ -3268,10 +3332,10 @@ class ApplicationCell:
         except ValidationError as exc:
             details = getattr(exc, "details", None)
             if isinstance(details, dict) and "field" not in details:
-                details["field"] = field_name
+                details["field"] = value_path
             raise
 
-    def _bind_filters(self, collection, filters, limits=None):
+    def _bind_filters(self, collection, filters, limits=None, path_prefix=""):
         """`limits` (Phase 9 WP-3cd closure, 監督裁定集約 rulings-r5-r6.md
         K-3/B-2): the `in`-filter `batch_items` check below is the ONE
         check point in this method that budget can ever narrow (`max_filter_
@@ -3280,7 +3344,22 @@ class ApplicationCell:
         caller with no `budget` in scope -- `update()`/`delete()`, which
         accept no `budget` argument at all) resolves to `self.config`
         unchanged, identity-shaped, matching every other budget-narrowing
-        fallback in this file."""
+        fallback in this file.
+
+        `path_prefix` (WP-3e rework T2, 追補 L-3/M-4): the request-relative
+        container this call's own `filters` occupies -- `""` for a direct
+        `read()` (`where` sits at the query request's own root) or
+        `"operations/<i>/"` for a batch-embedded update/delete (including
+        a direct `update()`/`delete()` call, which occupies `"operations/
+        0/"` -- the same "no wire shape omits the operations envelope for
+        a mutation" reasoning `_validate_update`'s own `path_prefix`
+        already documents). Every `field`/`value` position this method
+        raises for is `f"{path_prefix}where/{i}/..."`, replacing the
+        WRONG `"filters/<i>"`/bare-field-name labels this method used to
+        emit -- the wire contract's own `Predicate` container is named
+        `where` (`spec/data-service-api.v1.json` `QueryRequest.where`/
+        `ScopedMutation.where`), never `filters` (that word is this
+        module's own internal Python parameter name only)."""
         limits = limits if limits is not None else self.config
         if filters is None:
             return []
@@ -3296,6 +3375,7 @@ class ApplicationCell:
         declared_types = self._backend.field_types(collection)
         bound = []
         for i, item in enumerate(filters):
+            where_path = f"{path_prefix}where/{i}"
             if not isinstance(item, Filter):
                 # WP-3e rework T1 (追補 L-1): unreachable through the
                 # HTTP surface (`http.py`'s own `_parse_filter` always
@@ -3303,13 +3383,13 @@ class ApplicationCell:
                 # called) -- a defensive internal-shape guard against a
                 # direct caller passing the wrong Python type, kept
                 # `request_schema` with the list index it can still
-                # attribute (`filters/<i>`), same treatment as this
-                # method's own unreachable-in-practice siblings above.
+                # attribute, same treatment as this method's own
+                # unreachable-in-practice siblings above.
                 raise ValidationError(
                     "filters must contain Filter values",
-                    details=violation("request_schema", field=f"filters/{i}"),
+                    details=violation("request_schema", field=where_path),
                 )
-            field = self._identifier(item.field, "filter field")
+            field = self._identifier(item.field, f"{where_path}/field")
             if item.operator in _UNSUPPORTED_CONTRACT_OPERATORS:
                 # Contract 1.1.0 (CCR-13, §0.5 Q-2 adjudication): `contains`/
                 # `matches`/`is_null` are real members of the common
@@ -3321,7 +3401,7 @@ class ApplicationCell:
                 # happens to exist).
                 raise CapabilityError(
                     f"{item.operator} is not supported by this foundation",
-                    details=violation("capability", field=field),
+                    details=violation("capability", field=f"{where_path}/field"),
                 )
             if field not in available:
                 # Phase 9 WP-3e (design D-3 (2)/(4), V-6): mirrors
@@ -3329,18 +3409,27 @@ class ApplicationCell:
                 # by this name" treatment -- a predicate naming a field
                 # the entity does not have.
                 raise ValidationError(
-                    "invalid filter", details=violation("request_schema", field=field),
+                    "invalid filter", details=violation("request_schema", field=f"{where_path}/field"),
                 )
             if item.operator not in SQL_OPERATOR_TOKENS:
                 # A genuinely unrecognized operator string, outside the
                 # common contract's vocabulary entirely (every contract
                 # member this peer does not implement is handled by the
                 # `_UNSUPPORTED_CONTRACT_OPERATORS` branch above instead).
-                raise ValidationError("invalid filter", details=violation("request_schema", field=field))
+                raise ValidationError(
+                    "invalid filter", details=violation("request_schema", field=f"{where_path}/field"))
             if item.operator == "in":
                 if not isinstance(item.value, list) or not item.value:
+                    # WP-3e rework T2 (追補 M-3): an empty (or non-list)
+                    # `in` value is a defect of the VALUE this predicate
+                    # carries, not of the field name it names -- `field`
+                    # is `where/<i>/value`, unconditionally refused on
+                    # both backends (this is the ONE choke point either
+                    # backend's own `transact`/`read` path reaches before
+                    # a SQL `IN (...)` clause is ever built).
                     raise ValidationError(
-                        "in filter requires values", details=violation("request_schema", field=field),
+                        "in filter requires values",
+                        details=violation("request_schema", field=f"{where_path}/value"),
                     )
                 if len(item.value) > limits.max_batch_items:
                     # Reuses `config.max_batch_items` itself (not a
@@ -3360,7 +3449,7 @@ class ApplicationCell:
                 domain = available[field]
                 declared_type = declared_types.get(field)
                 for v in item.value:
-                    self._check_predicate_value(v, declared_type, field)
+                    self._check_predicate_value(v, declared_type, f"{where_path}/value")
                 encoded = [
                     self._backend.encode_value(self._normalize_value_for_storage(v, declared_type), domain=domain)
                     for v in item.value
@@ -3368,7 +3457,7 @@ class ApplicationCell:
                 bound.append(Filter(field, "in", encoded))
             else:
                 declared_type = declared_types.get(field)
-                self._check_predicate_value(item.value, declared_type, field)
+                self._check_predicate_value(item.value, declared_type, f"{where_path}/value")
                 encoded = self._backend.encode_value(
                     self._normalize_value_for_storage(item.value, declared_type), domain=available[field])
                 bound.append(Filter(field, item.operator, encoded))

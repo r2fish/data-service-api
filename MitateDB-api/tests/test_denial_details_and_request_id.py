@@ -576,3 +576,233 @@ def test_verify_declarations_exit_code_table_has_f14():
     from mitatedb_api.ops import _VERIFY_DECLARATIONS_EXIT_CODES
 
     assert _VERIFY_DECLARATIONS_EXIT_CODES["F-14"] == 13
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework T2 (追補 L-5/M-5): SI-10 leak scan.
+#
+# The single, minimal probe above (`test_details_do_not_carry_the_
+# offending_value`) checks one VALIDATION_FAILED site for one forbidden
+# substring (the probe's own value). This section widens that to a real
+# SCAN: >= 10 probes, spanning every issuance LAYER this peer's own
+# `errors.violation()` 4-key `details` can come from (request-shape
+# `identifier_syntax` at several distinct request-relative positions,
+# `request_schema` value-type/shape violations, and `capability` --
+# `CAPABILITY_UNSUPPORTED`'s own `violated_declaration`) -- and, for
+# every probe, scans the RENDERED `details` dict for FIVE distinct
+# categories of leak: the probe's own raw value, a SQL fragment, a
+# PostgreSQL DSN, a Python type-name repr, and this foundation's own
+# internal storage names (`_mdb_`-prefixed physical table names, the
+# `public.` schema qualifier PostgreSQL-backed deployments use). A
+# CLIENT-SUPPLIED identifier being echoed back as a `field` PATH (V-3:
+# "entity 名 / field 名は client 由来の識別子なのでそのまま載せてよい")
+# is explicitly NOT a leak -- it is the request's own POSITION, not a
+# value read from storage -- so probes deliberately give their
+# identifiers a syntax-INVALID shape (never a valid one that could be
+# confused with a real field/table name) wherever `field` is expected to
+# echo the position.
+# ---------------------------------------------------------------------------
+
+from mitatedb_api.cell import Filter  # noqa: E402  (grouped near its own section, matches this file's existing per-section local-import style)
+
+#: SI-10: none of these substrings may ever appear in a denial's own
+#: `details` dict, regardless of which probe raised it. Each corresponds
+#: to a distinct leak category 追補 2 M-5 names: SQL, a DSN, a Python
+#: type-name repr, and this foundation's own internal storage names
+#: (`_mdb_`-prefixed physical tables, the `public.` schema qualifier).
+_SI10_FORBIDDEN_SUBSTRINGS = (
+    "SELECT", "INSERT INTO", "UPDATE ", "DELETE FROM", "WHERE ",  # SQL
+    "postgres://", "postgresql://", "host=", "dbname=",  # DSN
+    "<class '", "psycopg", "sqlite3.",  # Python type names / driver names
+    "_mdb_", "public.",  # internal storage names
+)
+
+
+def _si10_denial_details(fn):
+    """Calls the zero-argument `fn`, expecting it to raise `ValidationError`
+    or `CapabilityError` with a real `details` dict -- returns that dict.
+    Fails loudly (not vacuously) if `fn` raises neither, or raises with no
+    `details` at all, so a probe that stops reaching its own choke point
+    (e.g. a future WP changes evaluation order) is visible as a scan
+    failure, never silently skipped."""
+    from mitatedb_api.errors import CapabilityError as _CapabilityError
+    from mitatedb_api.errors import ValidationError as _ValidationError
+
+    try:
+        fn()
+    except (_ValidationError, _CapabilityError) as exc:
+        details = getattr(exc, "details", None)
+        assert isinstance(details, dict) and details, (
+            f"SI-10 probe raised {type(exc).__name__} with no (or empty) details -- "
+            "not a scannable denial"
+        )
+        return details
+    raise AssertionError("SI-10 probe did not raise ValidationError/CapabilityError at all")
+
+
+def _si10_probes(service):
+    """>= 10 probes (L-5's own floor), each returning `(label, marker,
+    thunk)` -- `marker` is a probe-specific secret substring that must
+    never appear in that probe's own rendered `details` (`None` when the
+    probe's `field` is legitimately allowed to echo a client-supplied
+    identifier back as a request-relative PATH rather than a value, V-3).
+    Spans both codes this peer actually emits with a 4-key `details`
+    (`VALIDATION_FAILED`/`CAPABILITY_UNSUPPORTED` -- L9-2a: never
+    `IDENTIFIER_INVALID`) and every request-relative POSITION L-3/M-4
+    named (`entity`, `values/<k>`/`operations/<i>/values/<k>`,
+    `select/<i>`, `where/<i>/field`, `where/<i>/value`, `order_by/<i>/
+    field`, `fields/<name>`)."""
+    control, svc, dev, runtime = service
+    return [
+        # -- identifier_syntax (VALIDATION_FAILED), several distinct
+        # request-relative positions (L-3) --
+        ("create_collection entity", "SI10-MARK-1",
+         lambda: dev.create_collection("SI10-MARK-1!!not-valid", {"title": "text"})),
+        # `marker=None` for these two: `fields/<name>`/`values/<k>` are
+        # the ONE pair of positions where V-3 explicitly permits the
+        # client-supplied (here, syntactically invalid) identifier
+        # itself to be echoed back as part of the PATH -- that echo is
+        # not a leak (it is the request's own position, never a value
+        # read from storage); the forbidden-substring scan below still
+        # runs against these probes' own details.
+        ("create_collection fields/<name>", None,
+         lambda: dev.create_collection("si10_probe_2", {"SI10-MARK-2!!bad": "text"})),
+        ("insert operations/0/values/<k>", None,
+         lambda: runtime.insert("widgets", {"SI10-MARK-3!!bad": "x"})),
+        ("read select/<i>", "SI10-MARK-4",
+         lambda: runtime.read("widgets", fields=["SI10-MARK-4!!bad"])),
+        ("read where/<i>/field", "SI10-MARK-5",
+         lambda: runtime.read("widgets", filters=[Filter("SI10-MARK-5!!bad", "eq", "x")])),
+        ("read order_by/<i>/field", "SI10-MARK-6",
+         lambda: runtime.read("widgets", order_by=[{"field": "SI10-MARK-6!!bad"}])),
+        ("delete entity", "SI10-MARK-7",
+         lambda: runtime.delete("SI10-MARK-7!!bad", filters=[Filter("title", "eq", "x")],
+                                destructive=True, confirm="whatever")),
+        ("update entity", "SI10-MARK-8",
+         lambda: runtime.update("SI10-MARK-8!!bad", {"title": "y"}, [Filter("title", "eq", "x")])),
+        ("transact operations/<i>/entity", "SI10-MARK-9",
+         lambda: runtime.transact(
+             [{"type": "insert", "collection": "SI10-MARK-9!!bad", "values": {"title": "z"}}])),
+        # -- request_schema (VALIDATION_FAILED), value-type/shape --
+        ("field_type value", "SI10-MARK-10-secret-value",
+         lambda: runtime.insert("widgets", {"count": "SI10-MARK-10-secret-value"})),
+        ("where/<i>/value empty in (M-3)", None,
+         lambda: runtime.read("widgets", filters=[Filter("count", "in", [])])),
+        # -- capability (CAPABILITY_UNSUPPORTED) --
+        ("where/<i>/field contains operator", "SI10-MARK-11-secret-value",
+         lambda: runtime.read("widgets", filters=[Filter("title", "contains", "SI10-MARK-11-secret-value")])),
+        ("where/<i>/field is_null operator", None,
+         lambda: runtime.read("widgets", filters=[Filter("title", "is_null", None)])),
+        ("transact operation type", "SI10-MARK-12",
+         lambda: runtime.transact(
+             [{"type": "upsert", "collection": "widgets", "values": {"title": "SI10-MARK-12"}}])),
+    ]
+
+
+def test_si10_leak_scan_across_denial_issuance_layers(service):
+    """L-5/M-5: >= 10 probes (14 here), each striking a DIFFERENT
+    VALIDATION_FAILED/CAPABILITY_UNSUPPORTED issuance layer/position, none
+    of whose rendered `details` may carry: this probe's own value, SQL, a
+    DSN, a Python type name, or this foundation's own internal storage
+    names (`_mdb_`/`public.`). Asserts `observed >= 1` (non-vacuous: the
+    scan actually inspected real denials, not zero)."""
+    probes = _si10_probes(service)
+    assert len(probes) >= 10, "L-5 requires at least 10 probes"
+    observed = 0
+    for label, marker, thunk in probes:
+        details = _si10_denial_details(thunk)
+        rendered = repr(details)
+        observed += 1
+        if marker is not None:
+            assert marker not in rendered, f"{label}: probe value {marker!r} leaked into details: {details}"
+        for forbidden in _SI10_FORBIDDEN_SUBSTRINGS:
+            assert forbidden not in rendered, f"{label}: forbidden substring {forbidden!r} leaked into details: {details}"
+    assert observed >= 1, "SI-10 scan observed zero denials -- vacuous scan"
+    assert observed == len(probes)
+
+
+def test_si10_scan_catches_an_internal_prefix_leaked_onto_field():
+    """Positive control for the scan above: a `details["field"]` value
+    that DOES carry the internal `public._mdb_` prefix (the exact shape
+    the audit mutation 追補 2 M-5 names -- "`field` に `public._mdb_` を
+    前置" -- is expected to produce) must fail the SAME substring check
+    `test_si10_leak_scan_across_denial_issuance_layers` runs, proving the
+    scan is not vacuously green regardless of what `field` actually
+    contains."""
+    details = {"violated_declaration": "identifier_syntax", "field": "public._mdb_entity"}
+    rendered = repr(details)
+    with pytest.raises(AssertionError):
+        for forbidden in _SI10_FORBIDDEN_SUBSTRINGS:
+            assert forbidden not in rendered, f"forbidden substring {forbidden!r} leaked: {details}"
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework T2 (追補 L-4): `_check_object_shape`'s new "present but
+# wrong type" leg (`http.py`).
+# ---------------------------------------------------------------------------
+
+
+def test_check_object_shape_rejects_a_present_field_of_the_wrong_json_type():
+    """L-4: a top-level key that IS declared by the schema and IS present
+    in the body, whose own VALUE's JSON type does not match what the
+    schema declares, is refused with the full 4-key `request_schema`
+    shape (`declared_type` = the schema's own JSON type name,
+    `observed_type` = the JSON type actually received) -- never an empty/
+    missing `details`, and never silently accepted (before this leg
+    existed, `QueryRequest.select` carrying a bare string sailed through
+    this function unchecked: `_check_object_shape` only ever checked key
+    presence/absence, never a present key's own value type)."""
+    from mitatedb_api.http import _SCHEMAS, _check_object_shape
+
+    with pytest.raises(ValidationError) as ctx:
+        _check_object_shape({"select": "abc"}, _SCHEMAS["QueryRequest"], label="QueryRequest")
+    details = ctx.value.details
+    assert details == {
+        "violated_declaration": "request_schema", "field": "select",
+        "declared_type": "array", "observed_type": "string",
+    }
+
+
+def test_check_object_shape_still_accepts_a_ref_or_enum_only_property_of_any_json_type():
+    """The new leg is confined to properties the schema names a real JSON
+    `type` for -- a `$ref`-shaped property (`QueryRequest.page`) or an
+    `enum`-only one has no single JSON type to check against, so this
+    function must not invent a mismatch for either; `page`'s own nested
+    shape is still checked (`_check_object_shape` recurses into it via
+    `post_query`, not this top-level call), just not by this leg."""
+    from mitatedb_api.http import _SCHEMAS, _check_object_shape
+
+    # `page` is declared as `{"$ref": "#/definitions/Page"}` -- no bare
+    # `type`, so an object here (a well-formed nested shape) passes this
+    # top-level call's own new leg without raising.
+    result = _check_object_shape({"select": ["a"], "page": {"size": 1}}, _SCHEMAS["QueryRequest"], label="QueryRequest")
+    assert result["page"] == {"size": 1}
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework T2 (追補 2 M-3): an empty `in` filter value is refused,
+# unconditionally, on both backends this peer ships (the check is a
+# single, backend-agnostic choke point, `cell.py::ApplicationCell.
+# _bind_filters`, that runs on every `read`/`update`/`delete`/`transact`
+# path before either backend ever builds a SQL `IN (...)` clause).
+# ---------------------------------------------------------------------------
+
+
+def test_empty_in_filter_is_rejected_with_where_value_path(service):
+    from mitatedb_api.cell import Filter
+
+    _, _, _dev, runtime = service
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("widgets", filters=[Filter("count", "in", [])])
+    details = ctx.value.details
+    assert details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+
+def test_non_list_in_filter_value_is_also_rejected_with_where_value_path(service):
+    from mitatedb_api.cell import Filter
+
+    _, _, _dev, runtime = service
+    with pytest.raises(ValidationError) as ctx:
+        runtime.read("widgets", filters=[Filter("count", "in", "not-a-list")])
+    details = ctx.value.details
+    assert details == {"violated_declaration": "request_schema", "field": "where/0/value"}
