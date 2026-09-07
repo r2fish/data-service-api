@@ -371,8 +371,19 @@ def test_c23_idempotency_semantics(adapter: ConformanceAdapter, isolated) -> Non
         # DEFAULT Application this test provisioned, and this leg must
         # know precisely how many committed keys separate it from the
         # bound.
+        # Exercisability cap (supervisor, 2026-09-07): a deployment declaring a
+        # large bound (the production default is 10000) is NOT driven -- driving
+        # it would mean thousands of committed keys per run. The leg runs only
+        # when the declared bound is small enough to fill deterministically
+        # (the conformance isolation profiles declare 5); otherwise it is
+        # disclosed as observed out of scope, exactly like C-05's own
+        # `_MAX_EXERCISABLE_LIMIT` discipline.
+        _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES = 200
         declared_entries = adapter.capability_document().get("limits", {}).get("idempotency_entries")
-        if isinstance(declared_entries, int) and declared_entries >= 1:
+        if (
+            isinstance(declared_entries, int)
+            and 1 <= declared_entries <= _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES
+        ):
             full_developer, full_runtime, _full_app_id = provision_pair(iso, app_prefix="c23full")
             full_entity = fresh_identifier("c23full")
             iso.create_entity(full_developer, full_entity, {"label": "text"})
