@@ -1151,9 +1151,25 @@ class ApplicationCell:
                 # request writes", D-3 (4)'s own request_schema branch
                 # wording -- the same reasoning `field_constraints must
                 # be an object`, immediately below, already applies).
+                #
+                # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4,
+                # 2026-09-08): when `field_constraints` was ALSO given, the
+                # request's real defect is that a schema-request
+                # DECLARATION (`field_constraints`) is meaningless without
+                # `fields` to be partial over -- N-4 attributes a schema-
+                # declaration violation's `field` to the declaration key
+                # itself (`"field_constraints"`, one of its own bare-word
+                # vocabulary), not to `"fields"` (a VALUE-shape complaint
+                # that does not apply here: `fields` is not what the
+                # caller got structurally wrong on purpose, it is simply
+                # absent). Plain "no fields at all, no field_constraints
+                # either" keeps pointing at `"fields"`, unchanged.
                 raise ValidationError(
                     "fields must be a non-empty object",
-                    details={"violated_declaration": "request_schema", "field": "fields"},
+                    details={
+                        "violated_declaration": "request_schema",
+                        "field": "field_constraints" if field_constraints else "fields",
+                    },
                 )
             if len(fields) > self.config.max_fields:
                 # Q1-D11 (design v1.5 §7, supersedes the WP-5 body's own
@@ -1989,9 +2005,23 @@ class ApplicationCell:
             # `_prepare_values` immediately below (`prefetched=`) --
             # this insert makes one backend round trip for declared
             # types/constraints, not two.
-            prefetched = self._check_missing_required_fields(collection, values, path_prefix="values")
+            # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08):
+            # `path_prefix` is `"operations/0/values"`, not the bare
+            # `"values"` this used before -- N-4 requires every VALUE-
+            # position `details.field` to read `operations/<i>/values/
+            # <field>` UNCONDITIONALLY (rulings-r2-closure.md; mirrors
+            # r2db-api's own `structured.py::_apply`, whose `values_path`
+            # is `f"operations/{operation_index}/values/"` for every
+            # mutation, including a solo one -- there is no wire shape
+            # that omits the `operations` envelope: `http.py::post_mutate`
+            # always builds `{"operations": [...]}`, so this direct,
+            # single-operation in-process entry point occupies the SAME
+            # request-internal position (`operations/0/...`) a real client
+            # submitting one operation would, even though this method's
+            # own Python-level `values` argument carries no such envelope.
+            prefetched = self._check_missing_required_fields(collection, values, path_prefix="operations/0/values")
             collection, fields, params = self._prepare_values(
-                collection, values, path_prefix="values", prefetched=prefetched)
+                collection, values, path_prefix="operations/0/values", prefetched=prefetched)
             with self._lock:
                 result = self._backend.insert(collection, fields, params, deadline=deadline)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- a NEW
@@ -2088,7 +2118,13 @@ class ApplicationCell:
         self._require_data(principal, request_id=request_id)
         request = {"collection": collection, "values": values, "filters": filters}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
-            collection, fields, values_params, bound_filters = self._validate_update(collection, values, filters)
+            # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08):
+            # `path_prefix="operations/0/values"` -- same reasoning as
+            # `insert()` immediately above (this direct entry point
+            # occupies the same request-internal position a real client's
+            # solo-operation mutation would).
+            collection, fields, values_params, bound_filters = self._validate_update(
+                collection, values, filters, path_prefix="operations/0/values")
             with self._lock:
                 result = self._backend.update(collection, fields, values_params, bound_filters, deadline=deadline)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit.
@@ -3399,6 +3435,33 @@ class ApplicationRuntime:
         # observable peer asymmetry this closure fixes).
         return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit,
                                 request_id=request_id, budget=budget)
+
+    def read_with_result(self, collection, fields=None, filters=None, order_by=None, limit=None, *,
+                         request_id=None, budget=None):
+        """Phase 9 WP-3e rework (裁定 C-25 (A), 監督裁定 2026-09-08): the
+        in-process counterpart of `http.py::post_query`'s own contract-
+        shaped `QueryResult` envelope (`{"items", "next_page",
+        "request_id"}`) -- `read()` above is left UNCHANGED (its bare-
+        list return shape has 195 existing in-process callers) and stays
+        the normal in-process entry point; this is an ADDITIONAL method
+        for callers (the conformance adapter's in-process wiring) that
+        need the same `request_id` a caller can observe on the audit row
+        for this SAME call.
+
+        `ApplicationCell.read` (`cell.py` above) has no return-shape room
+        of its own to echo `request_id` back through (a bare row list) --
+        so, matching `post_query`'s own comment immediately above, this
+        method resolves `request_id` ONCE, here, before calling `read()`,
+        and echoes that SAME already-held value back on the envelope,
+        rather than trying to read it back out of `read()`'s return value.
+        `next_page` is always `None`, matching `post_query` (this peer
+        implements no cursor pagination, D-7 Q-2's `next_page` slot is
+        contract-shaped but unpopulated on both surfaces alike).
+        """
+        request_id = request_id or uuid.uuid4().hex
+        rows = self.read(collection, fields=fields, filters=filters, order_by=order_by, limit=limit,
+                         request_id=request_id, budget=budget)
+        return {"items": rows, "next_page": None, "request_id": request_id}
 
     def catalog(self, *, request_id=None):
         self.__authorize(request_id=request_id)

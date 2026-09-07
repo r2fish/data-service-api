@@ -92,7 +92,12 @@ def test_nullable_violation_on_insert_omission_carries_absent(service):
     assert details["violated_declaration"] == "nullable"
     assert details["observed_type"] == "absent"
     assert details["declared_type"] == "string"
-    assert details["field"] == "values/required_field"
+    # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): was
+    # bare "values/required_field" -- the direct `insert()` entry point
+    # now occupies request-internal position `operations/0/...`, the
+    # same position a real client's solo-operation mutation would (see
+    # `test_field_is_a_request_internal_path_not_a_bare_name` below).
+    assert details["field"] == "operations/0/values/required_field"
 
 
 def test_enum_violation_carries_declared_type_never_observed_type(service):
@@ -121,7 +126,9 @@ def test_single_unknown_field_names_it_as_field(service):
         runtime.insert("widgets", {"no_such_field": "x"})
     details = ctx.value.details
     assert details["violated_declaration"] == "request_schema"
-    assert details["field"] == "values/no_such_field"
+    # Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): was
+    # bare "values/no_such_field".
+    assert details["field"] == "operations/0/values/no_such_field"
     assert "declared_type" not in details
     assert "observed_type" not in details
 
@@ -156,22 +163,34 @@ def test_field_is_a_request_internal_path_not_a_bare_name(service):
     """`field` is the request BODY's own '/'-separated path, with no
     leading separator -- never a bare entity/column name in isolation
     (the choke point's own `_prepare_values` join, `path_prefix +
-    "/" + field`)."""
+    "/" + field`).
+
+    Phase 9 WP-3e rework (裁定 C-21 (B)/監督裁定 N-4, 2026-09-08): the
+    direct, single-operation `insert()` entry point below has no
+    `operations[]` envelope of its own on the Python side, but it
+    occupies the SAME request-internal position (`operations/0/...`) a
+    real client's solo-operation mutation would -- `http.py::post_mutate`
+    always wraps every mutation in an `operations` list on the wire (see
+    `test_field_path_reflects_batch_index_for_a_transact_operation`
+    below), and r2db-api's own `structured.py::_apply` names this same
+    position (`values_path = f"operations/{operation_index}/values/"`)
+    for every mutation, batched or solo alike -- so this path is `"operations/0/values/count"`."""
     _, _, _dev, runtime = service
     with pytest.raises(ValidationError) as ctx:
         runtime.insert("widgets", {"count": "nope"})
     field = ctx.value.details["field"]
     assert _NO_LEADING_SLASH.match(field)
-    assert field == "values/count"
+    assert field == "operations/0/values/count"
 
 
 def test_field_path_reflects_batch_index_for_a_transact_operation(service):
     """The SAME violation, presented through `transact()`'s batch entry
-    point, names the batch item's own position -- `operations/<i>/
-    values/<field>` -- not the bare `values/<field>` form the direct
-    `insert()` entry point produces (design D-3 (2): `field` names a
-    POSITION IN THE REQUEST, and only the caller who knows which list
-    position an operation came from can build it)."""
+    point at a non-zero position, names THAT position -- `operations/<i>/
+    values/<field>` -- matching the direct `insert()` entry point's own
+    `operations/0/values/<field>` form immediately above (design D-3 (2):
+    `field` names a POSITION IN THE REQUEST; the direct entry point is
+    always position 0 of an implicit single-item batch, the batch entry
+    point names whichever position the operation actually sits at)."""
     _, _, _dev, runtime = service
     with pytest.raises(ValidationError) as ctx:
         runtime.transact([
