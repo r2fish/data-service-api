@@ -34,11 +34,16 @@ branch`, and cross-checks it against the branch the declaration implies:
     validity (the same plan against unchanged schema lets the real
     request through), plan staleness after a schema change and after a
     body change alike (`PRECONDITION_FAILED`, `violated_declaration:
-    plan`), the digest's own scope (a `budget`-only change under the same
-    plan also triggers staleness -- proof the digest is not `operations`-
-    only), and the one externally observable ordering fact (D-4(2)): a
-    stale plan on an UNCONFIRMED destructive `drop_entity` is refused for
-    the missing confirmation first, not for the stale plan.
+    plan`), the digest's own scope -- a `transaction: "atomic"`-only
+    change under the same plan (an always-available `MutationRequest` key,
+    run unconditionally) and, where this plug declares `request_budget` as
+    anything other than `unavailable`, a `budget`-only change too -- each
+    also triggers staleness, proof the digest is not `operations`-only,
+    and the one externally observable ordering fact (D-4(2)): a stale plan
+    on an UNCONFIRMED destructive operation is refused for the missing
+    confirmation first, not for the stale plan -- proved via `drop_entity`
+    where this plug provides it, a destructive `delete` dry run otherwise
+    (declare-first on `capabilities.schema_operations`, WP-1c rework).
 
 **Disclosed (D-4 開示事項, carried into this row)**: address-sequence
 consumption by a dry run is possible but not asserted here (permitted, not
@@ -53,7 +58,18 @@ the method, rather than a peer denial) -- never from only one side, which
 would itself be a real finding. The (1) precondition/limit sub-legs are
 narrowed to the plugs that declare `revision_preconditions`/`request_
 budget` as anything other than `unavailable`, disclosed rather than run
-unconditionally.
+unconditionally. **WP-1c rework, disclosed scope limits**: the (10)
+digest-scope leg's `budget` half is narrowed the same way `request_
+budget` already narrows the (1) limit sub-leg above -- a plug refusing
+any `budget`-carrying request outright (provisional gate, D-1) can never
+reach this leg's own `PRECONDITION_FAILED`; the `transaction` half is
+never narrowed. The (11) ordering leg's destructive primitive is
+declare-first on `capabilities.schema_operations` (`drop_entity` in its
+own `unsupported` list, or the whole surface `unavailable`, falls back to
+`delete`); a `SurfaceAbsent` from a `drop_entity` this plug's declaration
+did NOT name unsupported is tolerated the same way rather than failing
+this leg -- the declared-vs-actual disagreement it would represent is
+test_c06_destructive_confirmation.py's own territory.
 """
 from __future__ import annotations
 
@@ -78,6 +94,22 @@ def _status(adapter: ConformanceAdapter) -> str:
 
 def _capability_status(adapter: ConformanceAdapter, name: str) -> str:
     return adapter.capability_document().get("capabilities", {}).get(name, {}).get("status", "unavailable")
+
+
+def _drop_entity_declared_unsupported(adapter: ConformanceAdapter) -> bool:
+    """(11) ordering, declare-first branch: `capabilities.schema_operations`
+    (test_c06_destructive_confirmation.py's own `_schema_operations_
+    capability`/`_assert_drop_entity_absence_agrees_with_declaration`,
+    mirrored here rather than imported -- this module stays independent of
+    that file's own destructive-confirmation fixtures) says `drop_entity`
+    is NOT a real primitive on this plug either by declaring the whole
+    surface `unavailable` or by naming `drop_entity` in its own
+    `unsupported` list (MitateDB-api's real declaration, measured:
+    `status: "partial"`, `unsupported` includes `"drop_entity"`)."""
+    schema_ops = adapter.capability_document().get("capabilities", {}).get("schema_operations", {})
+    return schema_ops.get("status", "unavailable") == "unavailable" or "drop_entity" in (
+        schema_ops.get("unsupported") or []
+    )
 
 
 def _assert_dry_run_matches_real_refusal(adapter: ConformanceAdapter, label: str, call) -> None:
@@ -397,8 +429,15 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
             f"{adapter.name}: the stale-plan apply must not have executed"
         )
 
-        # (10) digest scope: a budget-only change under the SAME plan is
-        # also refused -- proof the digest is not operations-only.
+        # (10) digest scope: proof the digest is not operations-only. The
+        # always-available sub-leg uses `transaction` -- `MutationRequest`'s
+        # own PRE-EXISTING optional key, not behind any declare-first
+        # capability gate the way `budget` is behind `request_budget` --
+        # so it runs unconditionally, on every plug: the SAME plan
+        # re-presented with `transaction: "atomic"` ADDED (the peer's own
+        # default value, semantically a no-op) must still be refused
+        # PRECONDITION_FAILED, proving the digest covers more than
+        # `operations` regardless of what this plug declares.
         marker3 = fresh_identifier("c22row3")
         insert3_kwargs = dict(
             session=runtime, entity=entity, operation="insert",
@@ -406,13 +445,44 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
         )
         plan3 = iso.attempt_mutation_with_result(**insert3_kwargs, dry_run=True).get("plan")
         assert plan3, f"{adapter.name}: a third dry run carries no plan"
-        with pytest.raises(ConformanceDenial) as ei_budget:
-            iso.attempt_mutation_with_result(**insert3_kwargs, plan=plan3, budget={"execution_ms": 1_000_000})
-        assert ei_budget.value.code == "PRECONDITION_FAILED", (
-            f"{adapter.name}: the same plan re-presented with an ADDED budget (nothing else different) -> "
-            f"{ei_budget.value.code!r}, expected PRECONDITION_FAILED (the plan digest must cover budget too)"
+        with pytest.raises(ConformanceDenial) as ei_transaction:
+            iso.attempt_mutation_with_result(**insert3_kwargs, plan=plan3, transaction="atomic")
+        assert ei_transaction.value.code == "PRECONDITION_FAILED", (
+            f"{adapter.name}: the same plan re-presented with an ADDED transaction: 'atomic' (the peer's own "
+            f"default value, nothing else different) -> {ei_transaction.value.code!r}, expected "
+            "PRECONDITION_FAILED (the plan digest must cover transaction too, not operations-only)"
         )
-        assert ei_budget.value.details.get("violated_declaration") == "plan", ei_budget.value.details
+        assert ei_transaction.value.details.get("violated_declaration") == "plan", ei_transaction.value.details
+
+        # Declare-first (this row's own C-22 CONDITIONS.md addendum): the
+        # budget-carrying sub-leg only where this plug declares `request_
+        # budget` as anything other than `unavailable` -- a plug that
+        # refuses a request CARRYING `budget` at all with CAPABILITY_
+        # UNSUPPORTED before precondition evaluation (provisional gate,
+        # design D-1) can never reach THIS leg's own PRECONDITION_FAILED;
+        # disclosed, not silently run, exactly like the (1) precondition/
+        # limit sub-legs above. The `transaction` sub-leg above already
+        # proves the digest is not `operations`-only unconditionally, so
+        # this half adds coverage rather than being load-bearing alone.
+        if _capability_status(adapter, "request_budget") != "unavailable":
+            marker4 = fresh_identifier("c22row4")
+            insert4_kwargs = dict(
+                session=runtime, entity=entity, operation="insert",
+                values={"label": marker4}, where_field=None, where_value=None,
+            )
+            plan4 = iso.attempt_mutation_with_result(**insert4_kwargs, dry_run=True).get("plan")
+            assert plan4, f"{adapter.name}: a fourth dry run carries no plan"
+            with pytest.raises(ConformanceDenial) as ei_budget:
+                iso.attempt_mutation_with_result(**insert4_kwargs, plan=plan4, budget={"execution_ms": 1_000_000})
+            assert ei_budget.value.code == "PRECONDITION_FAILED", (
+                f"{adapter.name}: the same plan re-presented with an ADDED budget (nothing else different) -> "
+                f"{ei_budget.value.code!r}, expected PRECONDITION_FAILED (the plan digest must cover budget too)"
+            )
+            assert ei_budget.value.details.get("violated_declaration") == "plan", ei_budget.value.details
+        # else: disclosed in this row's own C-22 CONDITIONS.md entry --
+        # `request_budget: unavailable` on this plug leaves the budget half
+        # of this leg unobserved here (the `transaction` half above still
+        # runs unconditionally, on every plug, regardless).
 
         # (5) schema dry run: descriptor matches the post-apply catalog;
         # revision stays the PRE-apply value (design D-4 S-j / §6.2 C-22
@@ -465,30 +535,92 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
         )
 
         # (11) ordering: a stale plan on an UNCONFIRMED destructive
-        # drop_entity is refused for the missing confirmation first, never
+        # operation is refused for the missing confirmation first, never
         # PRECONDITION_FAILED (design D-4(2)). The plan itself must come
         # from a CONFIRMED dry run: an unconfirmed destructive dry run
         # reaches the SAME refusal a real unconfirmed request would
         # (D-4(2)'s own "dry_run subject to the same gates" rule), so it
         # never returns a plan at all -- only a confirmed dry run reaches
-        # the "would succeed" decision that carries one.
-        doomed_entity = fresh_identifier("c22doomed")
-        iso.create_entity(developer, doomed_entity, {"label": "text"})
-        stale_plan = iso.schema_operation_with_result(
-            developer, doomed_entity, "drop_entity", destructive=True, confirmation=VALID_CONFIRMATION, dry_run=True,
-        ).get("plan")
-        assert stale_plan, f"{adapter.name}: a CONFIRMED dry-run drop_entity carries no plan"
-        iso.schema_operation_with_result(developer, entity, "add_field", field=fresh_identifier("c22f2"), field_type="string")
-        with pytest.raises(ConformanceDenial) as ei_order:
-            iso.schema_operation_with_result(
-                developer, doomed_entity, "drop_entity", destructive=True, plan=stale_plan,
+        # the "would succeed" decision that carries one. Declare-first on
+        # WHICH destructive primitive proves it: `drop_entity` where this
+        # plug provides it, a destructive `delete` dry run otherwise
+        # (every registered plug supports `delete`; D-4(2)'s own ordering
+        # fact does not depend on which destructive primitive carries it).
+        # `drop_entity` absence is read from `capabilities.schema_
+        # operations` first (`_drop_entity_declared_unsupported`); a
+        # `SurfaceAbsent` from the real call despite a declaration that did
+        # not name it is tolerated the SAME way, never a hard failure of
+        # this leg -- the declared-vs-actual mismatch it would represent is
+        # test_c06_destructive_confirmation.py's own V6/M-6 territory, not
+        # this leg's concern. Exactly one of the two forms is expected to
+        # actually run per plug; `observed_ordering_form` records which.
+        observed_ordering_form: str | None = None
+        if not _drop_entity_declared_unsupported(adapter):
+            doomed_entity = fresh_identifier("c22doomed")
+            try:
+                iso.create_entity(developer, doomed_entity, {"label": "text"})
+                stale_plan = iso.schema_operation_with_result(
+                    developer, doomed_entity, "drop_entity", destructive=True, confirmation=VALID_CONFIRMATION,
+                    dry_run=True,
+                ).get("plan")
+                assert stale_plan, f"{adapter.name}: a CONFIRMED dry-run drop_entity carries no plan"
+                iso.schema_operation_with_result(
+                    developer, entity, "add_field", field=fresh_identifier("c22f2"), field_type="string",
+                )
+                with pytest.raises(ConformanceDenial) as ei_order:
+                    iso.schema_operation_with_result(
+                        developer, doomed_entity, "drop_entity", destructive=True, plan=stale_plan,
+                    )
+                assert ei_order.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+                    f"{adapter.name}: an UNCONFIRMED destructive drop_entity carrying a now-stale plan -> "
+                    f"{ei_order.value.code!r}, expected DESTRUCTIVE_CONFIRMATION_REQUIRED (confirmation precedes "
+                    "precondition evaluation, design D-4(2)/destructive_confirmation.evaluation_order)"
+                )
+                assert doomed_entity in iso.entities(developer), (
+                    f"{adapter.name}: the unconfirmed drop_entity executed"
+                )
+                observed_ordering_form = "drop_entity"
+            except SurfaceAbsent:
+                observed_ordering_form = None
+
+        if observed_ordering_form is None:
+            # drop_entity unavailable (declared unsupported, or a
+            # SurfaceAbsent this leg tolerates the same way): the identical
+            # ordering fact via a CONFIRMED destructive `delete` dry run
+            # instead -- same shape, confirmed-dry-run-then-stale-then-
+            # unconfirmed-replay -- against a real row rather than a
+            # doomed entity.
+            order_marker = fresh_identifier("c22order")
+            iso.attempt_mutation(
+                runtime, entity, "insert", values={"label": order_marker}, where_field=None, where_value=None,
             )
-        assert ei_order.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
-            f"{adapter.name}: an UNCONFIRMED destructive drop_entity carrying a now-stale plan -> "
-            f"{ei_order.value.code!r}, expected DESTRUCTIVE_CONFIRMATION_REQUIRED (confirmation precedes "
-            "precondition evaluation, design D-4(2)/destructive_confirmation.evaluation_order)"
+            stale_delete_plan = iso.attempt_mutation_with_result(
+                runtime, entity, "delete", values=None, where_field="label", where_value=order_marker,
+                destructive=True, confirmation=VALID_CONFIRMATION, dry_run=True,
+            ).get("plan")
+            assert stale_delete_plan, f"{adapter.name}: a CONFIRMED dry-run destructive delete carries no plan"
+            iso.schema_operation_with_result(
+                developer, entity, "add_field", field=fresh_identifier("c22f2b"), field_type="string",
+            )
+            with pytest.raises(ConformanceDenial) as ei_order_delete:
+                iso.attempt_mutation_with_result(
+                    runtime, entity, "delete", values=None, where_field="label", where_value=order_marker,
+                    destructive=True, plan=stale_delete_plan,
+                )
+            assert ei_order_delete.value.code == "DESTRUCTIVE_CONFIRMATION_REQUIRED", (
+                f"{adapter.name}: an UNCONFIRMED destructive delete carrying a now-stale plan -> "
+                f"{ei_order_delete.value.code!r}, expected DESTRUCTIVE_CONFIRMATION_REQUIRED (confirmation "
+                "precedes precondition evaluation, design D-4(2)/destructive_confirmation.evaluation_order)"
+            )
+            assert iso.select_eq(runtime, entity, ["label"], "label", order_marker) != [], (
+                f"{adapter.name}: the unconfirmed destructive delete executed -- row {order_marker!r} is gone"
+            )
+            observed_ordering_form = "delete"
+
+        assert observed_ordering_form in ("drop_entity", "delete"), (
+            f"{adapter.name}: C-22 (11) ordering leg recorded no observed form -- this test's own per-plug "
+            "non-vacuity requirement"
         )
-        assert doomed_entity in iso.entities(developer), f"{adapter.name}: the unconfirmed drop_entity executed"
 
         observed_branch = "dry_run_enabled"
 

@@ -1387,6 +1387,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
+        transaction: str | None = None,
     ) -> Mapping[str, Any]:
         """port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         request-unit keywords on `DataService.mutate_result`, exactly like
@@ -1398,7 +1399,12 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         `BatchOperation.destructive`/`.confirmation` -- the SAME
         `VALID_CONFIRMATION` declare-and-echo protocol `delete` above uses,
         needed for C-22's `_confirm_probe` (destructive delete under
-        dry_run)."""
+        dry_run). port v1.13 追補 2 (C-22 leg (10)): `transaction` is
+        `DataService.mutate_result`'s own PRE-EXISTING keyword (already
+        named in this docstring's first sentence, `transaction: str =
+        "atomic"`) -- carried through unedited, defaulting to `None`
+        (omitted -- `mutate_result` then applies its own `"atomic"`
+        default exactly as every pre-addendum caller already gets)."""
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
             expected_revision=expected_revision, unique_key=unique_key,
@@ -1411,6 +1417,8 @@ class R2DBConformanceAdapter(ConformanceAdapter):
             kwargs["plan"] = plan
         if budget:
             kwargs["budget"] = dict(budget)
+        if transaction is not None:
+            kwargs["transaction"] = transaction
         result = self._call(lambda: self._service.mutate_result(session, entity, [item], **kwargs))
         return self._mutation_outcome_to_mapping(result, dry_run=dry_run)
 
