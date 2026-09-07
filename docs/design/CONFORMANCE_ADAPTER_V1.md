@@ -6,6 +6,7 @@
 - 版数: 1.12 (§22 を新設。port v1.12: phase 8 WP-1b、design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 由来の coordinated revision -- 2 新規追加: `hold_in_flight(session, n)` (C-05 V2 の in-flight 保持 primitive、`concurrency` を初めて駆動可能にする) と `select_eq`/`attempt_filter` への `limit`/`extra_predicates` optional フィールド (L7-21、`result_items` 両側化・`query_complexity` の能力判定化)。削除は無い。詳細は §22
 - 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
+- §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
 - 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
@@ -3208,3 +3209,51 @@ the uniform-or-absent rule at all. No peer's PRODUCT code changed for
 the peer's own real entry point (or refused there, pre-flip, by that
 peer's own provisional gate, WP-1's own §2 (9)), exactly as every
 pre-v1.13 optional field on this port already was.
+
+### 23.4 追補 (2026-09-07): `enum` の tri-state 化 (`ENUM_CLEAR` sentinel, 監督裁定 A)
+
+Contract 1.7.0 amended `alter_field`'s own text (監督裁定 A,
+`{scratchpad}/rulings-wp3a-review.md`): "A constraint the request omits
+is left as it is; enum: null clears the field's enum, and on add_field
+enum: null means the same as omitting it." `SchemaOperationRequest.enum`
+is therefore genuinely tri-state on the wire (`["array", "null"]`), but
+`schema_operation_with_result`'s own `enum: Sequence[Any] | None = None`
+parameter (§23.1) could not express the difference between "the caller
+omitted `enum`" and "the caller wants a literal JSON `enum: null`" -- both
+collapsed onto the same Python `None`. `test_c20_constraint_declaration_
+agreement.py`'s own leg (8) (omit -> unchanged) could be written under the
+pre-addendum port; the sibling leg (9) (`enum: null` -> cleared) could
+not, and was left as an explicit, disclosed gap in that test module's own
+docstring pending this port addition.
+
+This addendum adds one module-level sentinel to `conformance-tests/
+adapter.py`, `ENUM_CLEAR` (a single instance of a dedicated `_EnumClear`
+class, carrying its own `repr()` for diagnostics -- not a plain string,
+unlike `VALID_CONFIRMATION`/`CATALOG_SURFACE_ABSENT`, because an `enum`
+value is itself an arbitrary `Sequence[Any]` and a string sentinel could
+collide with a legitimate declared enum member). `schema_operation_with_
+result`'s `enum` parameter is now `Sequence[Any] | _EnumClear | None`:
+`None` (default, unchanged) omits the `enum` key entirely; `ENUM_CLEAR`
+puts a literal `enum: null` on the wire; any other `Sequence` puts
+`enum: [...]` on the wire, exactly as before. All 4 registered plugs
+(`conformance_adapter_r2db.py`, `conformance_adapter_r2db_http.py`,
+`conformance_adapter_mitatedb.py`, `conformance_adapter_mitatedb_http.py`)
+resolve the sentinel the same way, at the same request-construction site
+`field_constraints`/`field_types` already use (`enum is ENUM_CLEAR ->
+key = None`; `enum is not None -> key = list(enum)`; `enum is None ->` no
+key). Disclosed limit (`conformance_adapter_mitatedb.py`'s own in-process
+`add_field` branch, read directly off `mitatedb_api.cell.
+ApplicationDeveloper.add_field`'s real `enum=None` keyword default): a
+bare Python keyword call cannot itself distinguish "omitted" from
+"explicitly `None`" the way a wire-level dict/JSON body can, so this
+adapter's own `kwargs` construction resolves the sentinel faithfully, but
+that distinction reaching a real behavioral difference on this ONE
+in-process entry point would additionally require that peer-side
+signature to grow its own tri-state convention -- peer-side territory
+this port change does not reach. `test_c20_constraint_declaration_
+agreement.py`'s leg (9) (`alter_field(enum=ENUM_CLEAR)` clears the
+field's enum, observed both via the catalog's `field_constraints` and via
+a subsequent write outside the old enum) replaces that test module's own
+prior disclosed-gap comment. Additive only: every pre-addendum call site
+(passing a `Sequence`, or omitting `enum`) keeps its exact prior
+byte-for-byte request shape.

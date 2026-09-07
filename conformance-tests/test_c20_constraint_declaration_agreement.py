@@ -61,6 +61,37 @@ commit is not observable from this common suite -- (6) below only observes
 between a separate scan and a separate DDL transaction. That race is
 peer-local territory (design D-2 実装の形 4, disclosed there for WP-3a).
 
+**Design v1.5 補正 (監督裁定 A, `{scratchpad}/rulings-wp3a-review.md`)**: the
+`enabled`/`partial`/`planned` branch also covers `alter_field`'s corrected
+`enum` semantics -- an `alter_field` that OMITS `enum` leaves the field's
+existing `enum` untouched (leg (8) below), and an `alter_field` that
+carries an explicit `enum: null` clears the field's enum (leg (9) below).
+Port v1.13 追補 (`docs/design/CONFORMANCE_ADAPTER_V1.md` §23.4): leg (9)
+needs `schema_operation_with_result` to carry a literal JSON `enum: null`
+on the wire, distinct from omitting the key entirely -- both used to
+collapse onto the same Python `None` default. `conformance-tests/
+adapter.py` now exposes a dedicated tri-state sentinel, `ENUM_CLEAR`, for
+exactly this: `enum=None` (default) omits the key, `enum=ENUM_CLEAR` sends
+`enum: null`, and any other `Sequence` sends `enum: [...]`, unchanged from
+before.
+
+**監督裁定 M-6 (`{scratchpad}/rulings-wp2a-review.md`, contract addendum on
+`structured_operations.alter_field`)**: leg (10) below covers `add_field`
+declaring `nullable: false` on an entity that already holds rows -- refused
+`CONFLICT` on the same rule `alter_field` uses, since every existing row
+would hold `null` in the new field -- bracketed by real `alter_field`
+revisions exactly as legs (6)/(7) are, and contrasted with the same
+`add_field` succeeding on a zero-row entity.
+
+**監督裁定 m-1 (同上, `errors.details_vocabulary.violated_declaration_
+vocabulary`'s new eleventh word)**: leg (11) below covers a declaration
+that is itself invalid -- `constraint_declaration` -- on `create_entity`
+and `add_field` alike: an `enum` declared on a field whose own declared
+type admits none (an untyped/`json` field), and, regardless of field
+type, an empty or a duplicated `enum`; each is refused `VALIDATION_FAILED`
+with zero side effects, and the `json`-field case additionally carries
+`declared_type: "json"`.
+
 **Overlaps C-17** (same declaration-agreement posture, a different
 declaration: C-17 fixes mutation-class/addressability/uniqueness, this row
 fixes field-level value constraints).
@@ -69,7 +100,7 @@ from __future__ import annotations
 
 import pytest
 
-from adapter import ConformanceAdapter, ConformanceDenial, SurfaceAbsent, fresh_identifier
+from adapter import ENUM_CLEAR, ConformanceAdapter, ConformanceDenial, SurfaceAbsent, fresh_identifier
 from conftest import provision_pair
 
 pytestmark = pytest.mark.condition("C-20")
@@ -90,6 +121,44 @@ def _catalog_row(iso: ConformanceAdapter, developer, entity: str) -> dict:
     return {row["entity"]: row for row in catalog["entities"]}[entity]
 
 
+def _revision_of(result: dict) -> str:
+    """The response `revision` of a real, successful `schema_operation_
+    with_result` call. `SchemaOperationResult.revision` (spec/data-
+    service-api.v1.json `schemas.SchemaOperationResult`) is `required`
+    and always present on a real response -- unlike `EntityDescriptor`,
+    which carries no `revision` property at all (`definitions.
+    EntityDescriptor`, `additionalProperties: false`), and unlike
+    `CatalogDocument`, which carries no document-level revision either.
+    A catalog row's `.get("revision")` is therefore always `None`; this
+    helper is the ONLY contract-defined way to observe a real revision
+    value."""
+    revision = result.get("revision")
+    assert revision is not None, f"schema_operation_with_result carries no 'revision' -- {result!r}"
+    return revision
+
+
+def _revision_advanced_by_one(before: str, after: str) -> bool:
+    """True when `after` is exactly one real commit ahead of `before`.
+
+    Both currently-registered peers keep their schema revision as a
+    monotonic integer counter incremented by exactly one per committed
+    schema operation (`r2db-api/src/r2db_api/structured.py:1583`
+    `self.schema_revision += 1`; `MitateDB-api/src/mitatedb_api/
+    backend_sqlite.py:207`/`:250` `self._schema_revision += 1`; the
+    Postgres backends mirror this via `_bump_revision`/`_bump_schema_
+    revision`), and `SchemaOperationResult.revision` reports that
+    counter stringified (`schema_operation_with_result`'s own
+    docstring, `conformance-tests/adapter.py`). Comparing
+    `int(after) == int(before) + 1` catches a CONFLICT-refused (or
+    CAPABILITY_UNSUPPORTED-refused) `alter_field` that silently also
+    bumps the counter -- exactly the mutation design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md's C-20 (6)
+    row guards against (monotone S-g) -- as a delta of 2 rather than 1,
+    when exactly one real, harmless schema commit is known to separate
+    `before` and `after`."""
+    return int(after) == int(before) + 1
+
+
 def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isolated) -> None:
     iso = isolated
     status = _status(adapter)
@@ -101,7 +170,8 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         with pytest.raises(ConformanceDenial) as ei:
             iso.schema_operation_with_result(
                 developer, entity, "create_entity",
-                fields=["status"], field_constraints={"status": {"enum": ["a", "b"], "nullable": False}},
+                fields=["status"], field_types={"status": "string"},
+                field_constraints={"status": {"enum": ["a", "b"], "nullable": False}},
             )
         assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
             f"{adapter.name}: constraint_declarations is 'unavailable', but a create_entity carrying "
@@ -115,7 +185,9 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         plain_entity = fresh_identifier("c20u2")
         iso.create_entity(developer, plain_entity, {"label": "text"})
         with pytest.raises(ConformanceDenial) as ei2:
-            iso.schema_operation_with_result(developer, plain_entity, "add_field", field="tag", enum=["x", "y"])
+            iso.schema_operation_with_result(
+                developer, plain_entity, "add_field", field="tag", field_type="string", enum=["x", "y"],
+            )
         assert ei2.value.code == "CAPABILITY_UNSUPPORTED", (
             f"{adapter.name}: add_field carrying 'enum' was refused with {ei2.value.code!r} instead of "
             "CAPABILITY_UNSUPPORTED while constraint_declarations is unavailable"
@@ -133,8 +205,33 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         # declarations` is declared) -- `SurfaceAbsent` is accepted here
         # exactly like the upsert leg below accepts it for `create_unique_
         # index`, never silently swallowed for any OTHER exception.
+        # C-20 test defect fix (subordinate ruling, WP-3a's first real
+        # 'enabled' run): `row.get("revision")` read a key `EntityDescriptor`
+        # does not define (see `_revision_of`'s docstring above), so the
+        # comparison below always held vacuously (`None == None`) rather
+        # than asserting anything. It is dropped here rather than patched:
+        # this branch's own refusal is `SurfaceAbsent`/`CAPABILITY_
+        # UNSUPPORTED` BEFORE execution, and on this port revision every
+        # currently-registered schema-mutation call this branch could use
+        # as an independent "real revision" probe is itself unusable --
+        # `alter_field` is the very primitive under refusal here (`Surface
+        # Absent` on a peer with no real entry point at all), and `add_
+        # field`/`create_entity`'s own in-process response does not carry
+        # a revision on every currently-registered adapter either
+        # (`MitateDB-api/src/mitatedb_api/cell.py`'s `add_field`/`create_
+        # collection` return nothing; only the HTTP surface's `post_schema`
+        # computes one post-hoc via `_post_schema_revision`). Design docs/
+        # design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+        # §6.2's own `unavailable`-branch assert list (D-2) does not
+        # require a revision check here -- only "refused before execution,
+        # zero side effects" -- so the `field_constraints`-unchanged
+        # assert below (a real, working check) already carries that
+        # requirement for this leg; the revision-unchanged assert design
+        # adds is specific to (6) in the `enforced` branch below, where
+        # `alter_field` is a genuine, executing primitive whose own
+        # response revision this suite can and does rely on.
+        row = _catalog_row(iso, developer, plain_entity)
         constraints_before = row.get("field_constraints")
-        revision_before_alter = row.get("revision")
         try:
             iso.schema_operation_with_result(developer, plain_entity, "alter_field", field="label", nullable=False)
         except SurfaceAbsent:
@@ -148,9 +245,6 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
             assert row_after_alter.get("field_constraints") == constraints_before, (
                 f"{adapter.name}: a refused alter_field must not change the catalog's field_constraints"
             )
-            assert row_after_alter.get("revision") == revision_before_alter, (
-                f"{adapter.name}: a refused alter_field must not advance the schema revision"
-            )
         else:
             pytest.fail(
                 f"{adapter.name}: alter_field carrying 'nullable' succeeded while constraint_declarations is "
@@ -163,6 +257,7 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         iso.schema_operation_with_result(
             developer, entity, "create_entity",
             fields=[enum_field, nonnull_field, "label"],
+            field_types={enum_field: "string", nonnull_field: "string"},
             field_constraints={enum_field: {"enum": ["a", "b"]}, nonnull_field: {"nullable": False}},
         )
 
@@ -355,15 +450,40 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         # enum value ("b") that the narrower alter_field below excludes,
         # so the conflict is genuine (the earlier rows above only ever
         # carry "a").
+        #
+        # C-20 test defect fix (subordinate ruling, WP-3a's first real
+        # 'enabled' run): `row.get("revision")` read a key `EntityDescriptor`
+        # does not define, and `CatalogDocument` carries no document-level
+        # revision either (see `_revision_of`'s docstring above) -- every
+        # comparison below against a catalog row's `.get("revision")` was
+        # always `None == None`, asserting nothing. `add_field`'s own
+        # in-process response does not reliably carry a revision on every
+        # currently-registered adapter either (see the comment on the
+        # `unavailable` branch above -- `MitateDB-api`'s in-process
+        # `add_field`/`create_entity` return nothing; only its HTTP
+        # surface computes one post-hoc). `alter_field` itself -- the
+        # PRIMITIVE actually under test here, and the one this suite
+        # already requires to carry a real `revision` on success (the
+        # pre-existing assert right below) -- brackets the refusal
+        # instead: a harmless, always-non-conflicting `alter_field`
+        # (`nullable: true` on `"label"`, already that field's own
+        # default, so no existing row can possibly violate it) gives a
+        # real baseline revision BEFORE the CONFLICT attempt, and the
+        # FINAL successful, non-conflicting `alter_field` below gives the
+        # "after" value. Exactly one real commit (that final `alter_
+        # field`) must separate them -- proving the CONFLICT-refused
+        # `alter_field` in between committed none.
         conflict_marker = fresh_identifier("c20conflict")
         iso.attempt_mutation(
             runtime, entity, "insert",
             values={enum_field: "b", nonnull_field: "ok", "label": conflict_marker},
             where_field=None, where_value=None,
         )
+        revision_before = _revision_of(
+            iso.schema_operation_with_result(developer, entity, "alter_field", field="label", nullable=True)
+        )
         row = _catalog_row(iso, developer, entity)
         constraints = row.get("field_constraints")
-        revision_before = row.get("revision")
         count_before = iso.count(runtime, entity)
         with pytest.raises(ConformanceDenial) as ei_alter:
             iso.schema_operation_with_result(developer, entity, "alter_field", field=enum_field, enum=["a"])
@@ -380,27 +500,258 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         assert row_after_conflict.get("field_constraints") == constraints, (
             f"{adapter.name}: a refused alter_field must not change the catalog's field_constraints"
         )
-        assert row_after_conflict.get("revision") == revision_before, (
-            f"{adapter.name}: a refused alter_field must not advance the schema revision -- before="
-            f"{revision_before!r}, after={row_after_conflict.get('revision')!r}"
-        )
         assert iso.count(runtime, entity) == count_before, f"{adapter.name}: a refused alter_field changed row count"
 
         result = iso.schema_operation_with_result(
             developer, entity, "alter_field", field=enum_field, enum=["a", "b", "z"],
         )
-        assert isinstance(result, dict) and result.get("revision") is not None, (
+        revision_final = result.get("revision")
+        assert isinstance(result, dict) and revision_final is not None, (
             f"{adapter.name}: a successful alter_field's result carries no 'revision' -- {result!r}"
         )
-        row_final = _catalog_row(iso, developer, entity)
-        assert row_final.get("revision") != revision_before, (
-            f"{adapter.name}: a successful, non-conflicting alter_field did not advance the schema revision "
-            f"(before={revision_before!r}, after={row_final.get('revision')!r})"
+        assert _revision_advanced_by_one(revision_before, revision_final), (
+            f"{adapter.name}: exactly one real schema commit (this final, non-conflicting alter_field) must "
+            f"separate the pre-CONFLICT baseline and this result -- observed before={revision_before!r}, "
+            f"after={revision_final!r}; a delta other than +1 means the CONFLICT-refused alter_field above "
+            "also advanced the revision"
         )
+        row_final = _catalog_row(iso, developer, entity)
         assert row_final.get("field_constraints", {}).get(enum_field, {}).get("enum") == ["a", "b", "z"], (
             f"{adapter.name}: the successful alter_field's new enum did not round-trip -- "
             f"{row_final.get('field_constraints')!r}"
         )
+
+        # (8) design v1.5 補正 (監督裁定 A, {scratchpad}/rulings-wp3a-
+        # review.md): "a constraint the request omits is left as it is".
+        # An `alter_field` that names only `nullable` (re-asserting the
+        # field's own CURRENT value, `True` -- already established above
+        # -- so no existing row can violate it and no CONFLICT risk is
+        # introduced) omits `enum` entirely; the field's enum from the
+        # (6)/(7) alter_field just above (`["a", "b", "z"]`) must be left
+        # untouched.
+        result_omit = iso.schema_operation_with_result(
+            developer, entity, "alter_field", field=enum_field, nullable=True,
+        )
+        assert isinstance(result_omit, dict) and result_omit.get("revision") is not None, (
+            f"{adapter.name}: an alter_field omitting 'enum' carries no 'revision' -- {result_omit!r}"
+        )
+        row_after_omit = _catalog_row(iso, developer, entity)
+        assert row_after_omit.get("field_constraints", {}).get(enum_field, {}).get("enum") == ["a", "b", "z"], (
+            f"{adapter.name}: an alter_field that omits 'enum' must leave the field's existing enum "
+            f"untouched -- {row_after_omit.get('field_constraints')!r}"
+        )
+
+        # (9) design v1.5 補正 (同上, 監督裁定 A): "enum: null clears the
+        # field's enum" -- an explicit JSON `null`, distinct from omitting
+        # the key (leg (8) just above). Port v1.13 追補 (`docs/design/
+        # CONFORMANCE_ADAPTER_V1.md` §23.4) adds the `ENUM_CLEAR` sentinel
+        # precisely so this call can carry a literal `enum: null` on the
+        # wire instead of colliding with leg (8)'s own "omit the key"
+        # shape. The field under test (`enum_field`) currently declares
+        # `["a", "b", "z"]` (the (6)/(7) alter_field above); clearing it
+        # is observed two ways -- the catalog no longer reports an `enum`
+        # key for this field at all, and a value outside that old set
+        # becomes writable and readable back (the field-level observation
+        # this test's own docstring requires, "observed >= 1").
+        result_clear = iso.schema_operation_with_result(
+            developer, entity, "alter_field", field=enum_field, enum=ENUM_CLEAR,
+        )
+        assert isinstance(result_clear, dict) and result_clear.get("revision") is not None, (
+            f"{adapter.name}: an alter_field clearing 'enum' (enum=ENUM_CLEAR) carries no 'revision' -- "
+            f"{result_clear!r}"
+        )
+        row_after_clear = _catalog_row(iso, developer, entity)
+        constraints_after_clear = row_after_clear.get("field_constraints", {}).get(enum_field, {})
+        assert "enum" not in constraints_after_clear, (
+            f"{adapter.name}: an alter_field with enum: null must clear the field's 'enum' from the "
+            f"catalog's field_constraints -- {constraints_after_clear!r}"
+        )
+
+        cleared_marker = fresh_identifier("c20cleared")
+        iso.attempt_mutation(
+            runtime, entity, "insert",
+            values={enum_field: "outside-old-enum", nonnull_field: "ok", "label": cleared_marker},
+            where_field=None, where_value=None,
+        )
+        cleared_rows = iso.select_eq(runtime, entity, [enum_field], "label", cleared_marker)
+        assert cleared_rows and cleared_rows[0].get(enum_field) == "outside-old-enum", (
+            f"{adapter.name}: after enum: null cleared {enum_field!r}'s enum, a value outside the old set "
+            f"(['a', 'b', 'z']) must be writable and readable back -- {cleared_rows!r}"
+        )
+
+        # (10) 監督裁定 M-6 ({scratchpad}/rulings-wp2a-review.md): an
+        # add_field declaring nullable: false on an entity that already
+        # holds rows is refused CONFLICT on the same rule alter_field
+        # uses -- every existing row would hold null in the new field.
+        # `entity` already carries several rows by this point (`marker`,
+        # `conflict_marker`, `cleared_marker`, ...) from the legs above.
+        # Same revision-bracket style as (6)/(7): a harmless, always-non-
+        # conflicting alter_field (`nullable: true` on "label", already
+        # that field's own current value) gives a real baseline revision
+        # before the CONFLICT attempt, and a second one after gives the
+        # "after" value -- exactly one real commit (the second) must
+        # separate them, proving the CONFLICT-refused add_field committed
+        # none.
+        revision_before_addfield = _revision_of(
+            iso.schema_operation_with_result(developer, entity, "alter_field", field="label", nullable=True)
+        )
+        row = _catalog_row(iso, developer, entity)
+        constraints_before_addfield = row.get("field_constraints")
+        count_before_addfield = iso.count(runtime, entity)
+        new_field = fresh_identifier("c20newfield")
+        with pytest.raises(ConformanceDenial) as ei_addfield_conflict:
+            iso.schema_operation_with_result(
+                developer, entity, "add_field", field=new_field, field_type="string", nullable=False,
+            )
+        assert ei_addfield_conflict.value.code == "CONFLICT", (
+            f"{adapter.name}: add_field declaring nullable: false on {entity!r}, which already holds rows, "
+            f"-> {ei_addfield_conflict.value.code!r}, expected CONFLICT"
+        )
+        assert ei_addfield_conflict.value.details.get("violated_declaration") == "nullable", (
+            ei_addfield_conflict.value.details
+        )
+        addfield_conflict_field = ei_addfield_conflict.value.details.get("field")
+        assert isinstance(addfield_conflict_field, str) and not addfield_conflict_field.startswith("/"), (
+            f"{adapter.name}: details.field {addfield_conflict_field!r} must be a '/'-separated request-body "
+            f"path with no leading separator -- {ei_addfield_conflict.value.details!r}"
+        )
+        row_after_addfield_conflict = _catalog_row(iso, developer, entity)
+        assert new_field not in row_after_addfield_conflict["fields"], (
+            f"{adapter.name}: a CONFLICT-refused add_field must not add the field -- "
+            f"{row_after_addfield_conflict!r}"
+        )
+        assert row_after_addfield_conflict.get("field_constraints") == constraints_before_addfield, (
+            f"{adapter.name}: a CONFLICT-refused add_field must not change the catalog's field_constraints"
+        )
+        assert iso.count(runtime, entity) == count_before_addfield, (
+            f"{adapter.name}: a CONFLICT-refused add_field changed row count"
+        )
+
+        result_addfield_bracket = iso.schema_operation_with_result(
+            developer, entity, "alter_field", field="label", nullable=True,
+        )
+        revision_final_addfield = result_addfield_bracket.get("revision")
+        assert isinstance(result_addfield_bracket, dict) and revision_final_addfield is not None, (
+            f"{adapter.name}: an alter_field's result carries no 'revision' -- {result_addfield_bracket!r}"
+        )
+        assert _revision_advanced_by_one(revision_before_addfield, revision_final_addfield), (
+            f"{adapter.name}: exactly one real schema commit (this final, non-conflicting alter_field) must "
+            f"separate the pre-CONFLICT baseline and this result -- observed before="
+            f"{revision_before_addfield!r}, after={revision_final_addfield!r}; a delta other than +1 means "
+            "the CONFLICT-refused add_field above also advanced the revision"
+        )
+
+        # Same add_field, on an entity holding zero rows: no existing row
+        # can violate nullable: false, so it succeeds and the catalog
+        # reports the declared constraint back.
+        empty_entity = fresh_identifier("c20empty")
+        iso.create_entity(developer, empty_entity, {"label": "text"})
+        result_addfield_ok = iso.schema_operation_with_result(
+            developer, empty_entity, "add_field", field=new_field, field_type="string", nullable=False,
+        )
+        assert isinstance(result_addfield_ok, dict) and result_addfield_ok.get("revision") is not None, (
+            f"{adapter.name}: a successful add_field's result carries no 'revision' -- {result_addfield_ok!r}"
+        )
+        row_empty = _catalog_row(iso, developer, empty_entity)
+        assert row_empty.get("field_constraints", {}).get(new_field, {}).get("nullable") is False, (
+            f"{adapter.name}: add_field declaring nullable: false on a zero-row entity must succeed and the "
+            f"catalog must report nullable: false for the new field -- {row_empty.get('field_constraints')!r}"
+        )
+
+        # (11) 監督裁定 m-1 ({scratchpad}/rulings-wp2a-review.md): a
+        # declaration-invalid `enum` -- here, one declared on a field
+        # whose own declared type admits none, an untyped (`json`) field
+        # (the field-type vocabulary's own default, 1.6.0 obligation (1),
+        # "A field created without a declared type has type json") -- is
+        # refused VALIDATION_FAILED, violated_declaration:
+        # constraint_declaration, declared_type: "json", before anything
+        # is created, on create_entity and on add_field alike.
+        json_field = "payload"
+        bad_entity = fresh_identifier("c20decl")
+        with pytest.raises(ConformanceDenial) as ei_decl_create:
+            iso.schema_operation_with_result(
+                developer, bad_entity, "create_entity",
+                fields=[json_field], field_constraints={json_field: {"enum": ["a", "b"]}},
+            )
+        assert ei_decl_create.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: an enum declared on a json (type-undeclared) field in create_entity -> "
+            f"{ei_decl_create.value.code!r}, expected VALIDATION_FAILED"
+        )
+        assert ei_decl_create.value.details.get("violated_declaration") == "constraint_declaration", (
+            ei_decl_create.value.details
+        )
+        assert ei_decl_create.value.details.get("declared_type") == "json", ei_decl_create.value.details
+        decl_create_field = ei_decl_create.value.details.get("field")
+        assert isinstance(decl_create_field, str) and not decl_create_field.startswith("/"), (
+            ei_decl_create.value.details
+        )
+        assert bad_entity not in iso.entities(developer), (
+            f"{adapter.name}: a create_entity refused for an invalid enum declaration must have zero side "
+            f"effects, but {bad_entity!r} exists afterward"
+        )
+
+        plain_entity2 = fresh_identifier("c20decl2")
+        iso.create_entity(developer, plain_entity2, {"label": "text"})
+        bad_field = fresh_identifier("c20declfld")
+        with pytest.raises(ConformanceDenial) as ei_decl_addfield:
+            iso.schema_operation_with_result(
+                developer, plain_entity2, "add_field", field=bad_field, enum=["a", "b"],
+            )
+        assert ei_decl_addfield.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: an enum declared on a json (type-undeclared) field in add_field -> "
+            f"{ei_decl_addfield.value.code!r}, expected VALIDATION_FAILED"
+        )
+        assert ei_decl_addfield.value.details.get("violated_declaration") == "constraint_declaration", (
+            ei_decl_addfield.value.details
+        )
+        assert ei_decl_addfield.value.details.get("declared_type") == "json", ei_decl_addfield.value.details
+        decl_addfield_field = ei_decl_addfield.value.details.get("field")
+        assert isinstance(decl_addfield_field, str) and not decl_addfield_field.startswith("/"), (
+            ei_decl_addfield.value.details
+        )
+        row_decl_addfield = _catalog_row(iso, developer, plain_entity2)
+        assert bad_field not in row_decl_addfield["fields"], (
+            f"{adapter.name}: an add_field refused for an invalid enum declaration must not add the field -- "
+            f"{row_decl_addfield!r}"
+        )
+
+        # Same vocabulary word for a declaration that is invalid for a
+        # different reason -- an empty enum, and a duplicated enum --
+        # regardless of the field's own declared type.
+        empty_enum_entity = fresh_identifier("c20declempt")
+        with pytest.raises(ConformanceDenial) as ei_empty:
+            iso.schema_operation_with_result(
+                developer, empty_enum_entity, "create_entity",
+                fields=["status"], field_types={"status": "string"},
+                field_constraints={"status": {"enum": []}},
+            )
+        assert ei_empty.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: an empty enum -> {ei_empty.value.code!r}, expected VALIDATION_FAILED"
+        )
+        assert ei_empty.value.details.get("violated_declaration") == "constraint_declaration", (
+            ei_empty.value.details
+        )
+        assert empty_enum_entity not in iso.entities(developer), (
+            f"{adapter.name}: a create_entity refused for an empty enum must have zero side effects, but "
+            f"{empty_enum_entity!r} exists afterward"
+        )
+
+        dup_enum_entity = fresh_identifier("c20decldup")
+        with pytest.raises(ConformanceDenial) as ei_dup:
+            iso.schema_operation_with_result(
+                developer, dup_enum_entity, "create_entity",
+                fields=["status"], field_types={"status": "string"},
+                field_constraints={"status": {"enum": ["a", "a"]}},
+            )
+        assert ei_dup.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: a duplicated enum -> {ei_dup.value.code!r}, expected VALIDATION_FAILED"
+        )
+        assert ei_dup.value.details.get("violated_declaration") == "constraint_declaration", ei_dup.value.details
+        assert dup_enum_entity not in iso.entities(developer), (
+            f"{adapter.name}: a create_entity refused for a duplicated enum must have zero side effects, but "
+            f"{dup_enum_entity!r} exists afterward"
+        )
+
         observed_branch = "enforced"
 
     expected_branch = _expected_branch_for_status(status)
