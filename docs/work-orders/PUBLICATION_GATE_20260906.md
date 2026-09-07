@@ -578,8 +578,8 @@ gh repo view <GITHUB_OWNER>/<REPO_NAME> --json visibility
 | 0.5 worktree 畳み | 監督 | 2026-09-08 | 書換は fresh clone 上 (共有 objects を参照しない) | 畳んだ本数 = 0 (手順 5 で全 worktree を作り直すため、この時点では畳まない。全 worktree はクリーン、共有ツリーの未追跡は Drive の `.gdoc` 1 件のみ) |
 | 1 filter-repo | 監督 | 2026-09-08 | 成功 (`git filter-repo --replace-text` 23 規則 + `--mailmap` 1 行、リポジトリ外) | commit-map の行数 = 423 (422 commit) / 補助検査 `total_flagged` = 0 (481 commit、書換前 662) / identity は r2fish noreply 1 種 |
 | 2 hash 参照の一括更新 | 監督 | 2026-09-08 | 成功 (`tools/rewrite_hash_refs.py --check / --apply / --verify`、44 ファイル 718 件) | `--verify` の未一致 = 0 / 非一意 = 0 (allowed 19 = UUID 断片・sha256 digest・合成 id) |
-| 3 delete + 再作成 + push | | | | ref 名の集合が一致 (はい / いいえ) |
-| 4 再作成後の remote からの履歴スキャン | | | | 掛けたクローン = / `total_flagged` = |
+| 3 delete + 再作成 + push | 依頼者 (delete + 再作成、r2fish、Web UI、sudo mode 経由) / 監督 (push) | 2026-09-08 | 成功: 同名リポジトリを delete → private・初期化なしで再作成 (`isEmpty=true` を確認) → gate clone から `git push --all` (28 branch、tag 0) | ref 名の集合が一致 (はい) — 削除前の 28 ref と一致、default branch = main |
+| 4 再作成後の remote からの履歴スキャン | 監督 | 2026-09-08 | 成功 | 掛けたクローン = 再作成後の remote からの新規 clone (`gh repo clone`、HEAD `a15f03a`) / `total_flagged` = 0 (482 commit、ツリー 0、identity 1 種、`rewrite_hash_refs.py --verify` 残存 0) |
 | 5 clone・worktree の作り直し | | | | 作り直した対象 = |
 | 6 credential の revoke + 再発行 | | | | 2 件とも revoke + 再発行 (rotate ではない) |
 | 6.5 R7 の人手確認 | | | | 確認した語数 = / ヒット総数 = |
