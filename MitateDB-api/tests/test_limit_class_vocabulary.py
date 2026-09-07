@@ -122,8 +122,12 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 32, (
-        f"expected exactly 31 ResourceLimitError(...) call sites (pre-Phase-8 count was 12: Q1-D11's cell.py x5 + "
+    assert len(findings) == 33, (
+        f"expected exactly 33 ResourceLimitError(...) call sites (Phase 9 WP-3c adds 1 more, cell.py's own "
+        f"`_idempotency_check` -- design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5, "
+        f"監督裁定集約 rulings-r5-r6.md I-6 -- refusing a new idempotency record once this Application's own "
+        f"retained-record count, after reclaiming elapsed ones, meets `config.idempotency_entries`. 32 + 1 = 33. "
+        f"pre-Phase-8 count was 12: Q1-D11's cell.py x5 + "
         f"config.py x1 + WP-3's http.py x1 + WP-4's control_plane.py x3 + P35 WP-2's cell.py x1 + Phase 4 "
         f"WP-3(b)'s control_plane.py x1 -- see git history for that count's own full breakdown) -- Phase 8 WP-1a "
         f"(design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-1, L7-1) adds 13 new call sites for the "

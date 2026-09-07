@@ -41,7 +41,7 @@ from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationCell, Filter, _measure_request_bytes
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
-from mitatedb_api.errors import ResourceLimitError
+from mitatedb_api.errors import ResourceLimitError, ValidationError
 from mitatedb_api.http import HttpService, create_app
 from mitatedb_api.service import MitateDataService, ProvisioningFacade
 
@@ -210,6 +210,54 @@ def test_gate_denies_request_bytes_before_operation_depth():
     with pytest.raises(ResourceLimitError) as excinfo2:
         cell2.insert(dev2, "t", deep_and_big)
     assert excinfo2.value.details == {"limit_class": "operation_depth"}
+
+
+def test_gate_denies_operation_depth_before_budget_validation():
+    """Phase 9 WP-3cd closure (監督裁定集約 rulings-r5-r6.md K-1): a
+    `transact` request that is BOTH depth-oversized AND carries an
+    invalid `budget` (here, `execution_ms` above this deployment's own
+    declared bound) is denied `operation_depth`, never `VALIDATION_
+    FAILED` for `budget` -- proving `narrow_limits_by_budget`'s own
+    validity check now runs AFTER `requests_per_minute`/`concurrency`/
+    `request_bytes`/`operation_depth` (`_limit_gate`), matching r2db's
+    own `_slot` -> `check_request` -> `check_depth` -> `narrow_limits_by_
+    budget` order (audit-wp3cd.md §3 N-3: MitateDB used to validate
+    `budget` at the FACADE layer, before this gate was ever entered --
+    an observable peer asymmetry this closure fixes). The SAME request
+    shape is then shown to genuinely violate the budget bound too, once
+    `max_operation_depth` is raised out of the way -- proving the first
+    result is really about ORDER, not about this shape never being able
+    to trip the budget check at all. Mutation: revert `_limit_gate`'s own
+    `narrow_limits_by_budget` call to run BEFORE `_check_operation_depth`
+    (or move it back to the facade layer, before `_gate` is entered) and
+    this goes red (the denial flips to `VALIDATION_FAILED`)."""
+    deep = {"a": {"b": {"c": "x"}}}  # depth 4 (dict->dict->dict->str)
+
+    tight_depth = FoundationConfig(
+        max_requests_per_minute=100, max_concurrency=10, max_request_bytes=1_000_000,
+        max_operation_depth=2, max_execution_ms=5_000)
+    cell = ApplicationCell("app1", tight_depth)
+    dev = _principal(credential_id="dev5", role=Role.DEVELOPER)
+    runtime = _principal(credential_id="rt5", role=Role.RUNTIME)
+    cell.create_collection(dev, "t", {"a": "json"})
+    with pytest.raises(ResourceLimitError) as excinfo:
+        cell.transact(
+            runtime, [{"type": "insert", "collection": "t", "values": deep}],
+            budget={"execution_ms": 1_000_000})
+    assert excinfo.value.details == {"limit_class": "operation_depth"}
+
+    loose_depth = FoundationConfig(
+        max_requests_per_minute=100, max_concurrency=10, max_request_bytes=1_000_000,
+        max_operation_depth=10, max_execution_ms=5_000)
+    cell2 = ApplicationCell("app1", loose_depth)
+    dev2 = _principal(credential_id="dev6", role=Role.DEVELOPER)
+    runtime2 = _principal(credential_id="rt6", role=Role.RUNTIME)
+    cell2.create_collection(dev2, "t", {"a": "json"})
+    with pytest.raises(ValidationError) as excinfo2:
+        cell2.transact(
+            runtime2, [{"type": "insert", "collection": "t", "values": deep}],
+            budget={"execution_ms": 1_000_000})
+    assert excinfo2.value.details["violated_declaration"] == "budget"
 
 
 def test_measure_request_bytes_rejects_a_container_with_too_many_elements_before_the_running_total_would():

@@ -219,17 +219,67 @@ def test_c21_denial_details_vocabulary(adapter: ConformanceAdapter, isolated, re
     else:
         pytest.fail(f"{adapter.name}: create_entity accepted a malformed identifier 'not a valid identifier!'")
 
-    # CAPABILITY_UNSUPPORTED -- a 1.7.0-only request field this deployment
-    # does not (yet) provide (the provisional gate every peer's WP-1
-    # commit installs, D-1(3)).
+    # CAPABILITY_UNSUPPORTED -- declaration-based probe, 2nd rework
+    # (supervisor ruling, 2026-09-08, superseding the S-c `budget=
+    # {"batch_items": 10}` probe this replaces): main `f30fb85` flips BOTH
+    # peers' `request_budget` to `enabled` (WP-2cd / WP-3cd), so the S-c
+    # probe now also `DID NOT RAISE` -- the identical failure mode that
+    # made S-c itself replace the `dry_run=True` probe before it. Rather
+    # than chase a third request-level capability that might flip
+    # `enabled` under it too, this probe uses the SAME "operation name
+    # not declared for this request" shape `test_c12_capability_
+    # agreement.py`/`test_c04_unsupported_and_safe_errors.py` already use
+    # elsewhere in this suite, in the one form that is universal across
+    # every currently-registered plug regardless of that plug's own
+    # whole-capability `atomic_mutation` declaration: `upsert` presented
+    # against `entity`, which (unlike the C-12 positive-control entity)
+    # declares no uniqueness key at all. `test_c17_declaration_agreement.
+    # py::test_upsert_on_entity_with_no_declared_unique_key_is_capability_
+    # unsupported` already establishes this is refused CAPABILITY_
+    # UNSUPPORTED unconditionally, on every peer, independent of whether
+    # that peer's own capability document declares `upsert` supported at
+    # the whole-capability level (r2db-api does; MitateDB-api does not) --
+    # the entity-level uniqueness *declaration* upsert actually needs is
+    # what is missing here, so this is a genuine "declared-in-the-contract-
+    # vocabulary, undeclared-for-this-request" capability gap, presented to
+    # each peer's real dispatcher, never fabricated by the adapter (design
+    # principle 4).
+    #
+    # Measured `details` at the two real call sites (phase9-r2db WP-2e /
+    # phase9-mitatedb worktrees, read-only): r2db-api's `structured.py::
+    # _apply_upsert` (`fail("CAPABILITY_UNSUPPORTED", "Upsert requires a
+    # declared domain uniqueness key.", details=violation("capability",
+    # field="operation"))`) carries the full 2-key shape, `field` the bare
+    # word `"operation"`. MitateDB-api's `cell.py::_plan_operation`
+    # (`raise CapabilityError(f"transact does not support operation type
+    # {op_type!r}")`) carries NO `details` at all yet -- `CapabilityError`
+    # is a pre-existing call site `errors.ValidationError`'s own WP-3a
+    # docstring already discloses as out of THIS work package's scope (the
+    # D-3 vocabulary rollout onto every pre-existing choke point is WP-3e's
+    # own, separate task). Because the two peers' `field` values differ
+    # (one bare word, one absent), only the closed vocabulary/generic
+    # request-internal-path shape is asserted below, not a literal value;
+    # `field`'s presence itself is not required while this gap stands (the
+    # `_assert_details_field_path_shape`/`.get` calls below already
+    # tolerate `None`).
+    count_before = iso.count(runtime, entity)
     with pytest.raises(ConformanceDenial) as ei_cap:
-        iso.attempt_mutation_with_result(
-            runtime, entity, "insert", values={"label": "x"}, where_field=None, where_value=None, dry_run=True,
+        iso.attempt_mutation(
+            runtime, entity, "upsert", values={"label": "x"}, where_field=None, where_value=None,
         )
     assert ei_cap.value.code == "CAPABILITY_UNSUPPORTED", f"{adapter.name}: {ei_cap.value.code!r}"
     assert ei_cap.value.details.get("violated_declaration") == "capability", ei_cap.value.details
+    _assert_details_field_path_shape(ei_cap.value.details.get("field"), kind=None, adapter_name=adapter.name)
     assert_details_vocabulary_values_safe(ei_cap.value.details, adapter_name=adapter.name)
     observed_codes.add("CAPABILITY_UNSUPPORTED")
+    # No side effect: a refused upsert must not have inserted/updated
+    # anything (SI-09), same discipline C-17's own no-declared-key upsert
+    # negative control already asserts.
+    count_after = iso.count(runtime, entity)
+    assert count_after == count_before, (
+        f"{adapter.name}: row count changed ({count_before} -> {count_after}) despite the "
+        "no-declared-unique-key upsert being refused CAPABILITY_UNSUPPORTED"
+    )
 
     # WP-1b rework (review point G, supervisor ruling 2026-09-07 item 6):
     # the OLD `assert observed_codes` here was structurally dead --

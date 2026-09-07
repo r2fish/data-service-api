@@ -12,6 +12,7 @@ DATA_SERVICE_FOUNDATION.md`) -- never the production persistence topology
 (that is ``backend_postgres.PostgresBackend``).
 """
 
+import json
 import sqlite3
 import time
 
@@ -115,6 +116,14 @@ class SQLiteBackend:
         # present only on a field that declares one; `"nullable"` is
         # always present (default `True`, the contract default, D-2 (2)).
         self._declared_constraints = {}
+        # Phase 9 WP-3c (design D-5, 追補 R-a: "SQLite backend はプロセス
+        # 内である"; 監督裁定集約 rulings-r5-r6.md I-1): idempotency
+        # records for this backend are a private, in-process dict -- this
+        # backend already IS the process-local, non-durable foundation
+        # (no upgrade script, matching `_declared_types`/`_declared_
+        # constraints` above), never a SQL table. `{key: {"digest": str,
+        # "response_json": str, "created_at_ms": int}}`.
+        self._idempotency = {}
 
     @property
     def raw_connection(self):
@@ -179,7 +188,7 @@ class SQLiteBackend:
         self._db.execute("BEGIN")
 
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          deadline=None, dry_run=False):
+                          deadline=None, dry_run=False, idempotency_record=None):
         _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
@@ -240,9 +249,37 @@ class SQLiteBackend:
             try:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
+                # Phase 9 WP-3c (design D-5, I-1/I-8): the idempotency
+                # record is written as the LAST thing before this
+                # backend's own commit, exactly like `audit_hook.pre_
+                # commit()` immediately above -- a raise anywhere before
+                # this point (including from `pre_commit()` itself) leaves
+                # no record, mirrored by the `except Exception: self._db.
+                # rollback(); raise` below. The stored response is built
+                # HERE, from the SAME locals (`self._schema_revision + 1`,
+                # `resolved`/`resolved_constraints`) the return statement
+                # at the end of this method also uses, so a later replay
+                # returns byte-identical content to what a real,
+                # uncached call would have (I-8) -- never a second,
+                # independently-drifting construction.
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    predicted_revision = self._schema_revision + 1
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(predicted_revision),
+                        "descriptor": {
+                            "entity": name, "fields": sorted(fields), "field_types": dict(resolved),
+                            "field_constraints": {f: dict(v) for f, v in resolved_constraints.items()},
+                        },
+                    })
+                    self._idempotency[key] = {
+                        "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
+                    }
                 self._db.commit()
             except Exception:
                 self._db.rollback()
+                if idempotency_record is not None:
+                    self._idempotency.pop(idempotency_record[0], None)
                 raise
             self._schema_revision += 1
             # Phase 6 WP-3 (design D-3): registry write lands only on this
@@ -258,7 +295,7 @@ class SQLiteBackend:
         }
 
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, deadline=None, dry_run=False):
+                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
         _check_deadline(deadline)
         resolved_nullable = True if nullable is None else nullable
         if resolved_nullable is False:
@@ -322,9 +359,40 @@ class SQLiteBackend:
             try:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
+                # Phase 9 WP-3c (design D-5, I-1/I-8): see `create_
+                # collection`'s own identical comment above -- the
+                # predicted descriptor here uses the SAME `**existing,
+                # field: ...` formula this method's own final `descriptor`
+                # (below) uses, reading `self._declared_types`/`self.
+                # _declared_constraints` BEFORE this call's own registry
+                # write (which lands after this `try` block, on success).
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    predicted_revision = self._schema_revision + 1
+                    existing_types_before = dict(self._declared_types.get(collection, {}))
+                    existing_constraints_before = {
+                        f: dict(v) for f, v in self._declared_constraints.get(collection, {}).items()
+                    }
+                    predicted_fields = (
+                        sorted(list(existing_types_before) + [field]) if field not in existing_types_before
+                        else sorted(existing_types_before)
+                    )
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(predicted_revision),
+                        "descriptor": {
+                            "entity": collection, "fields": predicted_fields,
+                            "field_types": {**existing_types_before, field: contract_type},
+                            "field_constraints": {**existing_constraints_before, field: dict(declared)},
+                        },
+                    })
+                    self._idempotency[key] = {
+                        "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
+                    }
                 self._db.commit()
             except Exception:
                 self._db.rollback()
+                if idempotency_record is not None:
+                    self._idempotency.pop(idempotency_record[0], None)
                 raise
             self._schema_revision += 1
             self._declared_types.setdefault(collection, {})[field] = contract_type
@@ -408,7 +476,7 @@ class SQLiteBackend:
         }
 
     def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
-                                deadline=None, dry_run=False):
+                                deadline=None, dry_run=False, idempotency_record=None):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g):
         see `backend.StorageBackend.alter_field_constraints`'s own
         contract. This backend has no separate DDL step for a constraint
@@ -504,6 +572,18 @@ class SQLiteBackend:
         # correct for both branches.
         existing_types = dict(self._declared_types.get(collection, {}))
         existing_constraints = {f: dict(v) for f, v in self._declared_constraints.get(collection, {}).items()}
+        # Phase 9 WP-3c rework (design D-5, I-1/I-8): built here, BEFORE
+        # the commit/rollback branch below, so both this method's own
+        # idempotency write (inside the `try`, using the ALREADY-bumped
+        # `self._schema_revision`) and its final `return` (further below)
+        # read the identical dict -- never a second, independently
+        # constructed copy.
+        descriptor = {
+            "entity": collection,
+            "fields": sorted(existing_types),
+            "field_types": existing_types,
+            "field_constraints": {**existing_constraints, field: dict(new_constraints)},
+        }
         if dry_run:
             self._db.rollback()
         else:
@@ -512,6 +592,18 @@ class SQLiteBackend:
             try:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
+                # Phase 9 WP-3c (design D-5, I-1/I-8): unlike `create_
+                # collection`/`add_field` above, `self._schema_revision`
+                # is ALREADY the post-bump value at this point (bumped two
+                # lines above, before this `try`) -- no "+1" needed.
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(self._schema_revision), "descriptor": descriptor,
+                    })
+                    self._idempotency[key] = {
+                        "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
+                    }
                 self._db.commit()
             except Exception:
                 self._db.rollback()
@@ -522,13 +614,9 @@ class SQLiteBackend:
                 # step with the database.
                 self._declared_constraints[collection][field] = current
                 self._schema_revision -= 1
+                if idempotency_record is not None:
+                    self._idempotency.pop(idempotency_record[0], None)
                 raise
-        descriptor = {
-            "entity": collection,
-            "fields": sorted(existing_types),
-            "field_types": existing_types,
-            "field_constraints": {**existing_constraints, field: dict(new_constraints)},
-        }
         return self._schema_revision, descriptor
 
     def encode_value(self, value, domain=None):
@@ -759,3 +847,50 @@ class SQLiteBackend:
 
     def close(self):
         self._db.close()
+
+    # ------------------------------------------------------------------
+    # Phase 9 WP-3c (design D-5, 追補 R-a; 監督裁定集約 rulings-r5-r6.md
+    # I-1): the process-local `self._idempotency` dict this backend keeps
+    # -- see `backend.StorageBackend`'s own docstrings for the full
+    # contract each method below implements.
+    # ------------------------------------------------------------------
+
+    def idempotency_get(self, key):
+        record = self._idempotency.get(key)
+        if record is None:
+            return None
+        return {"digest": record["digest"], "response_json": record["response_json"]}
+
+    def idempotency_reap_expired(self, now_ms, retention_ms):
+        expired = [key for key, record in self._idempotency.items() if now_ms - record["created_at_ms"] > retention_ms]
+        for key in expired:
+            del self._idempotency[key]
+
+    def idempotency_count(self):
+        return len(self._idempotency)
+
+    def record_idempotency(self, key, digest, response_json, now_ms):
+        # `transact()`'s own single-batch path: `ApplicationCell.transact`
+        # calls this directly (not through a DDL method's own
+        # `idempotency_record` parameter), immediately before its own
+        # `self._backend.commit()` -- a failed batch never reaches this
+        # line at all (the execution loop above it raises first), so this
+        # write and the batch's own commit share the identical fate,
+        # UNLESS `self._backend.commit()` itself is what fails -- see
+        # `idempotency_discard_pending` below (K-5, N-8), the cleanup
+        # `ApplicationCell.transact`'s own `except Exception:` calls for
+        # exactly that case.
+        self._idempotency[key] = {"digest": digest, "response_json": response_json, "created_at_ms": now_ms}
+
+    def idempotency_discard_pending(self, key):
+        # Phase 9 WP-3cd closure (K-5, N-8): this dict write above is NOT
+        # part of `self._db`'s own real transaction -- `self.rollback()`
+        # (`self._db.rollback()`) cannot undo it, so `ApplicationCell.
+        # transact`'s `except Exception:` handler calls this directly,
+        # unconditionally, right after its own `self.rollback()` -- a
+        # `key` this dict never held (the ordinary case: SOME earlier
+        # step failed, before `record_idempotency` was ever reached) is a
+        # silent no-op, exactly like `create_collection`/`add_field`/
+        # `alter_field_constraints`'s own identical `self._idempotency.
+        # pop(idempotency_record[0], None)` cleanup.
+        self._idempotency.pop(key, None)

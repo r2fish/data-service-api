@@ -631,18 +631,62 @@ class AuditRouter:
     def push_buffer_event(
         self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],
         actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
-        target_kind: Optional[str], target_id: Optional[str] = None,
+        target_kind: Optional[str], target_id: Optional[str] = None, outcome: str = "allow",
     ) -> None:
         """Phase 4 (design D-4/§7.3): enqueues an ordinary (buffer-class)
-        data-operation success event -- `outcome="allow"` always; this
-        method exists only for events D-2's dispatch rule places in the
-        buffer-class bucket (query/insert/update success; catalog reads
-        have no MitateDB equivalent)."""
+        event -- `outcome="allow"` for every pre-WP-3cd-closure caller
+        (query/insert/update success; catalog reads have no MitateDB
+        equivalent). `outcome` (Phase 9 WP-3cd closure, 監督裁定集約
+        rulings-r5-r6.md J-4/SI-14): `cell.ApplicationCell.transact`'s own
+        idempotency-replay branch passes `outcome="replayed"` here --
+        mirroring r2db-api's own `outcome.replayed` -> `_event(...,
+        event_class="data_operation", ...)` dispatch (a mutate replay
+        never becomes MORE durable than a fresh `data_operation` success
+        would have been, buffer-class either way; a SCHEMA replay's own
+        `event_class="schema_change"` line goes through `write_replayed_
+        fail_closed_event` below instead, matching that class's own
+        unconditional fail-closed rule, D-2 item 2)."""
         self._buffer.push(ApplicationAuditEvent(
             event_id=str(uuid.uuid4()), event_class=event_class, occurred_at=_now_iso(), request_id=request_id,
             application_id=application_id, actor_type=actor_type, actor_id=actor_id, role=role,
-            operation=operation, target_kind=target_kind, outcome="allow", reason_code=None, target_id=target_id,
+            operation=operation, target_kind=target_kind, outcome=outcome, reason_code=None, target_id=target_id,
         ))
+
+    def write_replayed_fail_closed_event(
+        self, *, event_class: str, request_id: Optional[str], application_id: Optional[str],
+        actor_type: Optional[str], actor_id: Optional[str], role: Optional[str], operation: str,
+        target_kind: Optional[str], target_id: Optional[str] = None,
+    ) -> None:
+        """Phase 9 WP-3cd closure (design D-5 (1)(v), 監督裁定集約
+        rulings-r5-r6.md J-4/SI-14): a single durable row -- `outcome=
+        "replayed"` -- for an idempotency REPLAY of a schema operation
+        (`create_collection`/`add_field`/`alter_field`), written
+        synchronously, immediately, exactly like `_PreCommitHook.pre_
+        commit()` writes a fresh schema operation's own `outcome="allow"`
+        row: schema operations are UNCONDITIONALLY fail-closed class
+        (D-2 item 2), and a replay of one is no less so -- a resent
+        `create_entity`/`add_field`/`alter_field` that answers from a
+        retained record must never return `committed: true` while
+        leaving zero durable evidence this Application's schema was
+        touched at time T (SI-14, WP-2cd/WP-3cd audit N-5). Raises
+        `errors.AuditSinkUnavailable` (never swallowed, matching `pre_
+        commit()`'s own identical raise) when the durable sink itself
+        cannot record it -- the replay is NOT answered in that case,
+        rather than silently succeeding with zero evidence. Never
+        buffered (unlike `push_buffer_event`): nothing below the
+        idempotency lookup executed for a replay, so there is no LATER
+        commit point this row could be deferred past -- it is written
+        here, once, before the replay response is returned."""
+        try:
+            self._durable_sink.append(
+                event_class=event_class, request_id=request_id, application_id=application_id,
+                actor_type=actor_type, actor_id=actor_id, role=role, operation=operation,
+                target_kind=target_kind, outcome="replayed", reason_code=None, target_id=target_id, count=None,
+            )
+        except Exception as exc:
+            raise AuditSinkUnavailable(
+                "the durable audit sink could not record this replay; it was not answered"
+            ) from exc
 
     def flush(self, *, force_expire_denial_windows: bool = False) -> None:
         """Phase 4 (design D-4/§7.3/§7.4): synchronously drains the

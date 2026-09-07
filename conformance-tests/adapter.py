@@ -2465,6 +2465,7 @@ class ConformanceAdapter(ABC):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         """`attempt_mutation`'s exact request shape, extended with the
         contract's own request-level `dry_run`/`plan`/`budget` (port v1.13,
@@ -2523,6 +2524,24 @@ class ConformanceAdapter(ABC):
         (even the same `"atomic"` value the peer already defaults to), is
         the one always-available way to prove the plan's digest is not
         `operations`-only without depending on what any one peer declares.
+
+        `idempotency_key` (WP-1 addendum, C-25 (4)'s own replay leg,
+        `docs/design/CONFORMANCE_ADAPTER_V1.md` §23): the contract's
+        REQUEST-level `MutationRequest.idempotency_key` -- this method
+        presents exactly one operation per call, so it is carried through
+        directly (never folded), exactly like `dry_run`/`plan`/`budget`/
+        `transaction` above and like `schema_operation_with_result`'s own
+        identical keyword. Each currently-registered adapter places it
+        wherever its own real entry point expects a request-level
+        idempotency key -- embedded on the single operation item for an
+        in-process peer whose real dispatcher reads it there (the same
+        position `fold_batch_idempotency_key`'s callers already use on
+        that peer), or on the request body's own top-level key for a
+        wire-surface peer (`extra_body`, the same mechanism `attempt_
+        batch_with_addresses` already uses there) -- never interpreted,
+        validated, or narrowed by this adapter itself. Defaults to `None`
+        (omit the key entirely, byte-compatible with every pre-addendum
+        caller that never names this keyword).
 
         Returns a `Mapping` with:
           - `affected`: `int`.

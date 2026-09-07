@@ -3265,3 +3265,7 @@ byte-for-byte request shape.
 ### 23.6 追補 (2026-09-07): `attempt_mutation_with_result` gains `transaction`
 
 `test_c22_dry_run_and_plan.py`'s (10) digest-scope leg needs an always-available (never capability-gated, unlike `budget`) request key to prove a plan digest is not `operations`-only -- added as keyword-only `transaction: str | None = None`, carrying `MutationRequest`'s own PRE-EXISTING `transaction` key (`spec/data-service-api.v1.json`) through unedited to whatever real entry point already receives `dry_run`/`plan`/`budget`, in all 4 registered plugs; byte-compatible for every pre-addendum caller that omits it (the key stays off the wire entirely, same as before this addendum).
+
+### 23.7 追補 (2026-09-07): `attempt_mutation_with_result` gains `idempotency_key`
+
+`test_c25_result_request_id.py`'s (4) replay leg needs a request-level idempotency key on a single-operation call -- added as keyword-only `idempotency_key: str | None = None`, carried through unedited to whatever real entry point already receives `dry_run`/`plan`/`budget`/`transaction` (embedded on the single operation item for an in-process plug whose real dispatcher reads it there, exactly where `fold_batch_idempotency_key`'s existing callers already place it; on the request body's own top-level `extra_body` key for a wire-surface plug, exactly where `attempt_batch_with_addresses` already places its own folded value), in all 4 registered plugs; byte-compatible for every pre-addendum caller that omits it.
