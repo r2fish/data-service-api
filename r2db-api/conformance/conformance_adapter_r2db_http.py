@@ -2737,6 +2737,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         where_value: Any,
         expected_revision: str | None = None,
         unique_key: str | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
@@ -2744,11 +2746,17 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields -- carried through `_mutate_
         # request`'s own `extra_body`, the same real mechanism `attempt_
-        # batch_with_addresses` already uses for `idempotency_key`.
+        # batch_with_addresses` already uses for `idempotency_key`. port
+        # v1.13 追補: `destructive`/`confirmation` are carried through
+        # `_build_mutation_item` exactly as `attempt_batch_with_result`
+        # already carries `BatchOperation.destructive`/`.confirmation` --
+        # the SAME `VALID_CONFIRMATION` declare-and-echo protocol `delete`
+        # above uses, needed for C-22's `_confirm_probe`.
         assert isinstance(session, _Session)
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
             expected_revision=expected_revision, unique_key=unique_key,
+            destructive=destructive, confirmation=confirmation, session=session, entity=entity,
         )
         extra_body: dict[str, Any] = {}
         if dry_run:

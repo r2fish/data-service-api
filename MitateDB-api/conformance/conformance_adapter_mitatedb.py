@@ -1911,6 +1911,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         where_value: Any,
         expected_revision: str | None = None,
         unique_key: str | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
@@ -1922,7 +1924,12 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         fast-path branches use -- `dry_run`/`plan`/`budget` are request-
         unit keywords on the request as a whole, and `transact()` is this
         peer's one entry point that has ever taken such a keyword
-        (`request_id`, pre-existing)."""
+        (`request_id`, pre-existing). port v1.13 追補: `destructive`/
+        `confirmation` follow the IDENTICAL `VALID_CONFIRMATION` declare-
+        and-echo protocol `attempt_batch_with_result`'s own per-operation
+        loop already applies to `BatchOperation.destructive`/`.confirmation`
+        below -- needed for C-22's `_confirm_probe` (destructive delete
+        under dry_run)."""
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
         item: dict[str, Any] = {"type": operation, "collection": entity, "values": dict(values or {})}
         if expected_revision is not None:
@@ -1931,6 +1938,27 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             item["unique_key"] = unique_key
         if filters is not None:
             item["filters"] = filters
+        if destructive:
+            # `destructive` is only ever meaningful when true (mirrors
+            # `attempt_batch_with_addresses`'s identical `if op.destructive:`
+            # gate above).
+            item["destructive"] = True
+        # V2b-wire (C-06): `confirm` is set whenever the caller supplies a
+        # `confirmation`, INDEPENDENT of `destructive` -- identical
+        # rationale and identical VALID_CONFIRMATION sentinel resolution as
+        # `attempt_batch_with_addresses`'s own per-operation loop above.
+        if confirmation is not None:
+            if confirmation is VALID_CONFIRMATION:
+                probe_item = dict(item)
+                probe_item["destructive"] = True
+
+                def probe(_probe_item=probe_item) -> None:
+                    self._call(lambda: session.transact([dict(_probe_item)]))
+
+                peer_confirm = self._resolve_confirmation(confirmation, probe=probe, legacy_token=True)
+                item["confirm"] = peer_confirm
+            else:
+                item["confirm"] = confirmation
         kwargs: dict[str, Any] = {}
         if dry_run:
             kwargs["dry_run"] = True
