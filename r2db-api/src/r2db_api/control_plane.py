@@ -722,7 +722,13 @@ class ControlPlaneService:
             # deployment; the 1.4.0 obligations that are conditional on
             # `audit_query` being provided stay conditional per version_
             # binding's own text).
-            "contract_version": "1.6.0",
+            #
+            # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/
+            # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1
+            # (5)): the SAME commit as `service.py`'s own data-plane flip
+            # (C-19's control-plane/data-plane match assert) -- never ahead
+            # of the R-3/R-7 behavior this data-plane host now implements.
+            "contract_version": "1.7.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

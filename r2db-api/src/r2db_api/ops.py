@@ -102,6 +102,7 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .errors import FoundationError, fail
+from .limits import ResourceLimits
 from .platform_declarations import (
     MIGRATION_NUMBER,
     PEER_MODULE,
@@ -1343,6 +1344,12 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-11": 10,
     "F-13": 11,
     "F-9": 12,
+    # Contract 1.7.0 (work order §2 WP-2e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3): `check_contract_170_resource_limits`'s
+    # own new condition -- the next unused exit code (F-12 is reserved,
+    # out of scope for this command, `_verify_declarations_checks`'s own
+    # docstring / the trailing disclosure line below).
+    "F-14": 13,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1415,6 +1422,17 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-7/F-10/F-11/F-13/F-9", "connected role's writer timeout settings valid")
+
+    # Contract 1.7.0 (work order §2 WP-2e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3): the two new 1.7.0 limit classes
+    # (`enum_members` D-2 (7), `idempotency_entries`/`idempotency_
+    # retention_ms` D-5) -- a pure-Python self-consistency check (no `conn`
+    # read), run unconditionally like the writer-role check just above.
+    try:
+        platform_declarations.check_contract_170_resource_limits(ResourceLimits())
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok("F-14", "contract 1.7.0 enum_members/idempotency_entries/idempotency_retention_ms limits valid")
     return 0
 
 
@@ -1423,9 +1441,11 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     prefixed, in `read_platform_declarations`'s own fixed order followed
     by F-3c (only when `--control` is given), F-6 (only when this peer's
     own `*_CONTROL_PLANE_STATUS` env var is defined), then the writer-role
-    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally. The first FAIL
-    stops the run and returns that F-number's own fixed exit code
-    (`_VERIFY_DECLARATIONS_EXIT_CODES`, via `_verify_declarations_checks`).
+    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally, then (contract
+    1.7.0, work order §2 WP-2e F-3) the new limit-class check (F-14)
+    unconditionally. The first FAIL stops the run and returns that
+    F-number's own fixed exit code (`_VERIFY_DECLARATIONS_EXIT_CODES`, via
+    `_verify_declarations_checks`).
 
     Exit codes follow design D-5 実装の形 (a) literally: 1 is a USAGE
     error (this command's own required env var, `R2DB_CONTROL_DSN`, is
@@ -1450,7 +1470,8 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
     are out of this command's reach -- named, with the reason, on the last
     output line, printed for every code `_verify_declarations_checks`
-    returns (0 through 12 alike), never only on the 0 path."""
+    returns (0 through 13 alike -- F-14's own exit code, contract 1.7.0),
+    never only on the 0 path."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:

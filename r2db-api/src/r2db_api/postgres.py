@@ -110,7 +110,7 @@ from psycopg.types.json import Jsonb
 
 from .audit_hook import ApplicationAuditHook
 from .backend import StorageBackend as _StorageBackend
-from .errors import fail
+from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
 from .structured import (
@@ -1373,6 +1373,7 @@ class PostgresCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         the single tx-exit point sits right before the pre-commit hook,
@@ -1437,6 +1438,7 @@ class PostgresCell:
                             return MutationOutcome(
                                 affected=stored_payload["affected"], assigned_addresses=stored_payload["assigned_addresses"],
                                 destructive=False, committed=True, plan=None, replayed=True,
+                                request_id=stored_payload.get("request_id"),
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -1516,7 +1518,7 @@ class PostgresCell:
                     if idempotency_key is not None and idempotency_digest_value is not None:
                         self._idempotency_store(
                             conn, idempotency_key, digest=idempotency_digest_value, kind="mutation",
-                            payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                            payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
             except psycopg.errors.QueryCanceled:
@@ -1553,7 +1555,7 @@ class PostgresCell:
         # commit (`committed=True`), matching `ApplicationCell.transact`.
         return MutationOutcome(
             affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
-            committed=committed, plan=(expected_plan if not committed else None),
+            committed=committed, plan=(expected_plan if not committed else None), request_id=request_id,
         )
 
     def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
@@ -1823,7 +1825,7 @@ class PostgresCell:
         field_types = table_info.columns
         declared = {name: info for name, info in table_info.indexes.items() if info["unique"]}
         if not declared:
-            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.")
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.", details=violation("capability", field="operation"))
         if bound.unique_key is not None:
             if bound.unique_key not in declared:
                 fail("NOT_FOUND", "No declared uniqueness key matches unique_key.", status=404)
@@ -2034,6 +2036,7 @@ class PostgresCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above --
@@ -2105,6 +2108,7 @@ class PostgresCell:
                             # against it, are both long gone.
                             return SchemaOutcome(
                                 committed=True, revision=stored_payload["revision"], descriptor=None, plan=None, replayed=True,
+                                request_id=stored_payload.get("request_id"),
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -2429,7 +2433,7 @@ class PostgresCell:
                     if idempotency_key is not None and idempotency_digest_value is not None:
                         self._idempotency_store(
                             conn, idempotency_key, digest=idempotency_digest_value, kind="schema",
-                            payload={"revision": outcome_revision},
+                            payload={"revision": outcome_revision, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
             except psycopg.errors.QueryCanceled:
@@ -2455,7 +2459,7 @@ class PostgresCell:
         # apply_schema(...)` call sites among them) now reads `.revision`
         # off the result instead of comparing the result itself to an
         # `int`.
-        return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan)
+        return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan, request_id=request_id)
 
     def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...], field_types: dict[str, str | None] | None = None) -> None:
         # R-1/R-4: every entity table gets a server-assigned `id` address

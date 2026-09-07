@@ -130,7 +130,7 @@ VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000
 
 
 class PlatformDeclarationError(RuntimeError):
-    """Every F-1..F-11/F-13 fail-fast condition this module raises. A
+    """Every F-1..F-11/F-13/F-14 fail-fast condition this module raises. A
     composition-root startup failure only -- never mapped to a contract
     error code, never returned over HTTP (design §3.8's own SI-10 note).
 
@@ -656,6 +656,53 @@ def check_writer_role_timeouts(
     return declared
 
 
+# Contract 1.7.0 (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work
+# order §2 WP-2e F-3, `{scratchpad}/rulings-r3-r7-flip.md` F-3): a new
+# `ops verify-declarations` check for the two 1.7.0 limit classes this
+# process's own `ResourceLimits` newly carries (`enum_members` -- D-2 (7)
+# -- and `idempotency_entries`/`idempotency_retention_ms` -- D-5) --
+# out-of-band, before this process ever starts, in the same "is this
+# process' declared state one it could actually start against" spirit as
+# every other check in this module. Unlike F-3..F-13 above, these three
+# values are process-local Python constants (`r2db_api.limits.
+# ResourceLimits`'s own defaults), never rows this connection reads back
+# from `platform_declarations` -- there is no per-application migration
+# ledger entry for a limit CLASS's own bound, only for the side tables the
+# capabilities they gate need (migrations `0010`/`0011`). This check is
+# therefore a pure-Python self-consistency check, not a DB read, and takes
+# no `conn` -- included in `_verify_declarations_checks` unconditionally,
+# the same way F-7/F-10/F-11/F-13/F-9's writer-role check is, so that a
+# regression shipping a non-positive bound for either new class is caught
+# by the SAME gate operators already run before/after a deployment, rather
+# than only by `r2db_api.limits`'s own unit tests.
+def check_contract_170_resource_limits(limits: "ResourceLimits") -> None:
+    """F-14: `limits.enum_members` (D-2 (7)) and `limits.idempotency_
+    entries`/`limits.idempotency_retention_ms` (D-5) must each be a
+    positive integer -- the same "a deployed bound must be usable at all"
+    property every other `limits.classes` value in this contract already
+    has, checked here because these three are new with 1.7.0 and a
+    regression introducing a non-positive default would otherwise only
+    surface as a confusing `LIMIT_EXCEEDED(0)` on the very first request
+    that touches either class."""
+    for name in ("enum_members", "idempotency_entries", "idempotency_retention_ms"):
+        value = getattr(limits, name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.limits.ResourceLimits.{name} must be a positive integer; got {value!r}.",
+                code="F-14",
+            )
+
+
+def ops_module_hint() -> str:
+    """`PEER_MODULE`, named through a function (not referenced directly by
+    `check_contract_170_resource_limits`'s own f-string) so this check's
+    error-message wording stays isomorphic across peers the same way the
+    `_fN_message` builders above do (peer-IDENTICAL name, peer-SPECIFIC
+    value read from this module's own `PEER_MODULE` constant)."""
+    return PEER_MODULE
+
+
 __all__ = [
     "CONTROL_PLANE_STATUS_ENV",
     "DEFAULT_SCHEMA",
@@ -672,6 +719,7 @@ __all__ = [
     "PlatformDeclarations",
     "RoleTimeoutCatalog",
     "Surfaces",
+    "check_contract_170_resource_limits",
     "check_control_surface_consistency",
     "check_writer_role_timeouts",
     "derive_visibility_lag_ms",

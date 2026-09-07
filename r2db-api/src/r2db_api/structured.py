@@ -12,7 +12,7 @@ import re
 from typing import Any, Callable
 
 from .audit_hook import ApplicationAuditHook
-from .errors import fail
+from .errors import fail, observed_type_of, violation
 from .limits import ResourceLimits
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -47,13 +47,13 @@ _RESERVED_PREFIX = "_r2db"
 
 def validate_identifier(value: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value) or len(value) > MAX_IDENTIFIER_LENGTH:
-        fail("IDENTIFIER_INVALID", "Identifier has an unsupported format.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier has an unsupported format.", details=violation("identifier_syntax", field="identifier"))
     return value
 
 
 def _reject_reserved_field(name: str) -> None:
     if name == "id" or name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field="identifier"))
 
 
 def _reject_reserved_prefix(name: str) -> None:
@@ -62,7 +62,7 @@ def _reject_reserved_prefix(name: str) -> None:
     is not reserved here (an entity or index literally named `id` does not
     collide with the per-row address column)."""
     if name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field="identifier"))
 
 
 # WP-2(b) review B-2 (major, supervisor ruling 2026-09-03 -- "義務として
@@ -82,7 +82,7 @@ _RESERVED_ENTITY_NAMES = frozenset({"audit_events"})
 
 def _reject_reserved_entity_name(name: str) -> None:
     if name in _RESERVED_ENTITY_NAMES:
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field="identifier"))
 
 
 def _mapping(value: Any, message: str) -> dict[str, Any]:
@@ -201,7 +201,7 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
         fail("VALIDATION_FAILED", "Mutation shape is not supported.")
     name = operation.get("operation")
     if name not in MUTATION_OPERATIONS:
-        fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.")
+        fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.", details=violation("capability", field="operation"))
     # Contract 1.7.0 (D-5, WP-2c, ruling I-12): the present-denial that
     # used to sit here unconditionally is removed in the SAME commit as
     # `capabilities().idempotency` flipping to `enabled` -- `idempotency_
@@ -848,7 +848,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # here) -- silently accepting and ignoring it is exactly the kind
         # of gap `field_type`'s own precedent below closes, so stop
         # tolerating it instead of leaving it a silent no-op.
-        fail("CAPABILITY_UNSUPPORTED", "Schema operation optimistic locking is not available.")
+        fail("CAPABILITY_UNSUPPORTED", "Schema operation optimistic locking is not available.", details=violation("capability", field="revision"))
     if name != "add_field" and "field_type" in operation:
         # R-2 (corrigendum m-1): `field_type` is accepted only by
         # `add_field`; every other operation rejects it exactly as before
@@ -1193,7 +1193,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         index_name = validate_identifier(operation.get("index", ""))
         _reject_reserved_prefix(index_name)
     elif name != "drop_entity":
-        fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.")
+        fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.", details=violation("capability", field="operation"))
     return BoundSchemaOperation(
         name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique,
         field_types=field_types, field_constraints=field_constraints, constraints=constraints, constraint_patch=constraint_patch,
@@ -1284,6 +1284,17 @@ class MutationOutcome:
     # "監査行にkeyを載せない" -- the ONLY audit trail a resend has is the
     # original execution's own event, correlated through `request_id`).
     replayed: bool = False
+    # Contract 1.7.0 (D-7, WP-2e): the `request_id` `MutationResult`
+    # carries (`service.py`'s own `DataService.mutate_result` is a pure
+    # passthrough of this field). For a genuine execution (real commit or
+    # `dry_run`), this is THIS call's own `request_id` -- the same value
+    # the audit event `_mutate_outcome` writes carries. For a REPLAY
+    # (`replayed=True`), this is the ORIGINAL execution's own `request_id`,
+    # read back from the idempotency record's payload (D-7 (3): "a
+    # response returned from an idempotency record ... the original
+    # execution's own, not a new one") -- never this resend's own `rid`,
+    # which is used only for the resend's OWN, separate audit event.
+    request_id: str | None = None
 
 
 # --- value type validation (R-7) -------------------------------------------
@@ -1378,7 +1389,18 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
     if field_type == "integer":
         ok = isinstance(value, int) and not isinstance(value, bool)
         if ok and not (_INT64_MIN <= value <= _INT64_MAX):
-            fail("VALIDATION_FAILED", "Value is out of range for the field's declared type.", details={"field": field_name})
+            # Contract 1.7.0 (D-3, WP-2e): out-of-range is a `field_type`
+            # violation like any other -- the value's JSON type matches
+            # (`observed_type` == `declared_type` == "integer"), but the
+            # field's own declared type does not admit this value's
+            # magnitude. `errors.details_vocabulary` has no separate word
+            # for "domain"/"range"; this choke point's own docstring
+            # already treats range/NUL-byte violations as the same error
+            # code/disclosure shape as the type check itself.
+            fail(
+                "VALIDATION_FAILED", "Value is out of range for the field's declared type.",
+                details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+            )
     elif field_type == "number":
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     elif field_type == "boolean":
@@ -1392,9 +1414,19 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
     else:  # pragma: no cover - field_type is always one of FIELD_TYPES or None
         ok = True
     if not ok:
-        fail("VALIDATION_FAILED", "Value does not match the field's declared type.", details={"field": field_name})
+        # Contract 1.7.0 (D-3, WP-2e): the plain JSON-type mismatch --
+        # `violated_declaration: field_type`, both `declared_type` (the
+        # field's own declared type) and `observed_type` (the JSON type of
+        # the value actually received) required (D-3 (4)'s first branch).
+        fail(
+            "VALIDATION_FAILED", "Value does not match the field's declared type.",
+            details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+        )
     if field_type in ("string", "object", "array") and _contains_nul(value):
-        fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+        fail(
+            "VALIDATION_FAILED", "Value must not contain a NUL character.",
+            details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+        )
     # Contract 1.7.0 (D-2, WP-2a): checked LAST, only once `value` has
     # already passed the basic type/domain/NUL checks above -- a value of
     # the WRONG type is `violated_declaration: field_type` (the existing,
@@ -1782,6 +1814,11 @@ class SchemaOutcome:
     # Contract 1.7.0 (D-5 (1)(viii), ruling I-3/I-8, WP-2c): see
     # `MutationOutcome.replayed`'s identical comment.
     replayed: bool = False
+    # Contract 1.7.0 (D-7, WP-2e): see `MutationOutcome.request_id`'s
+    # identical comment -- this call's own `request_id` for a genuine
+    # execution (real commit or `dry_run`), the ORIGINAL execution's own
+    # (read back from the idempotency record) for a replay.
+    request_id: str | None = None
 
 
 @dataclass
@@ -2008,6 +2045,7 @@ class ApplicationCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         `dry_run` walks every gate a real request would (no early-out
@@ -2076,6 +2114,10 @@ class ApplicationCell:
                 return MutationOutcome(
                     affected=payload["affected"], assigned_addresses=payload["assigned_addresses"],
                     destructive=False, committed=True, plan=None, replayed=True,
+                    # Contract 1.7.0 (D-7 (3), WP-2e): the ORIGINAL
+                    # execution's own `request_id`, not this resend's own
+                    # -- read back from the record's own payload.
+                    request_id=payload.get("request_id"),
                 )
             # Ruling I-6/D-5 (5): capacity is checked BEFORE this request
             # executes anything -- reclaiming elapsed records first.
@@ -2145,7 +2187,7 @@ class ApplicationCell:
                 self.entities[entity] = before
                 return MutationOutcome(
                     affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
-                    committed=False, plan=expected_plan,
+                    committed=False, plan=expected_plan, request_id=request_id,
                 )
             # Phase 4 (design D-2/D-10): the pre-commit hook is the LAST
             # thing this method does before its own commit point (here:
@@ -2172,10 +2214,14 @@ class ApplicationCell:
             if idempotency_key is not None and idempotency_digest_value is not None:
                 self._idempotency_store(
                     idempotency_key, digest=idempotency_digest_value, kind="mutation",
-                    payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                    # Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides
+                    # in the same payload the replay branch above reads
+                    # back from -- so a future replay returns THIS
+                    # execution's own `request_id`, not a fresh one.
+                    payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                     now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
                 )
-            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True)
+            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True, request_id=request_id)
         except Exception:
             self.entities[entity] = before
             raise
@@ -2287,7 +2333,7 @@ class ApplicationCell:
         if not declared:
             # R-5 / §0.5 Q-1 (adjudicated 案B): an entity declaring no
             # uniqueness key at all has no existence test upsert could use.
-            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.")
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.", details=violation("capability", field="operation"))
         if bound.unique_key is not None:
             # Q-1 案B: an explicit `unique_key` always names the deciding
             # key by catalog name, whether the entity has one declared key
@@ -2408,6 +2454,7 @@ class ApplicationCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above,
@@ -2454,6 +2501,7 @@ class ApplicationCell:
                 payload = record.payload
                 return SchemaOutcome(
                     committed=True, revision=payload["revision"], descriptor=None, plan=None, replayed=True,
+                    request_id=payload.get("request_id"),
                 )
             self._idempotency_reserve(limits, now=idempotency_now)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like
@@ -2731,7 +2779,7 @@ class ApplicationCell:
             # (4): `service.py` never builds one for a dry_run).
             descriptor = self._describe_entity(bound.entity) if bound.entity in self.entities else None
             _restore_before_snapshot()
-            return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan)
+            return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan, request_id=request_id)
         # Phase 4 (design D-2, item 2): every schema operation is
         # fail-closed class, unconditionally (unlike `transact`, there is
         # no non-destructive schema operation) -- the pre-commit hook is
@@ -2756,7 +2804,10 @@ class ApplicationCell:
         if idempotency_key is not None and idempotency_digest_value is not None:
             self._idempotency_store(
                 idempotency_key, digest=idempotency_digest_value, kind="schema",
-                payload={"revision": self.schema_revision},
+                # Contract 1.7.0 (D-7 (3), WP-2e): see `transact`'s
+                # identical comment -- `request_id` rides in the payload a
+                # future replay reads back.
+                payload={"revision": self.schema_revision, "request_id": request_id},
                 now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
             )
         # Review round F-8: always `SchemaOutcome`, plan or no plan --
@@ -2764,7 +2815,7 @@ class ApplicationCell:
         # declaration.py`'s many `cell.apply_schema(...)` call sites among
         # them) now reads `.revision` off the result instead of comparing
         # the result itself to an `int`.
-        return SchemaOutcome(committed=True, revision=self.schema_revision)
+        return SchemaOutcome(committed=True, revision=self.schema_revision, request_id=request_id)
 
 
 # Contract 1.1.0 (CCR-13, §0.5 Q-2): `matches`'s wildcard grammar is

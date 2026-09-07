@@ -227,10 +227,17 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     `test_control_plane_service.py`/`test_audit_query.py`). Two SEPARATE
     pins for the two planes -- a mutation reverting only one plane's flip
     (work order mutation 15) turns exactly one of the two red, never
-    both."""
+    both.
+
+    Phase 9 WP-2e (design D-1 (5)): re-flipped to 1.7.0 in the same commit
+    as the R-3/R-7 behavior this WP ships -- function name kept (matching
+    this file's own precedent of retaining an earlier version's name on a
+    since-re-flipped pin, e.g. `test_control_capabilities_declares_
+    contract_version_1_5_0` in `test_audit_query.py`, which already
+    asserted 1.6.0 before this WP)."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.6.0"
+    assert document["contract_version"] == "1.7.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
@@ -1446,7 +1453,13 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed():
         # review.md): `field` is now the request-internal path through the
         # choke point's shared `field_name` argument, not the bare entity
         # field name -- the single insert here is always index 0.
-        assert exc.value.details == {"field": "operations/0/values/n"}
+        # Contract 1.7.0 (D-3, WP-2e): out-of-range is a `field_type`
+        # violation -- `declared_type`/`observed_type` both "integer" (the
+        # JSON type matches; only the magnitude does not).
+        assert exc.value.details == {
+            "field": "operations/0/values/n", "violated_declaration": "field_type",
+            "declared_type": "integer", "observed_type": "integer",
+        }
         rendered = repr(exc.value)
         assert str(bad) not in rendered
     # The boundary values themselves are valid.
@@ -1474,12 +1487,25 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
     for name, field_type in (("s", "string"), ("o", "object"), ("a", "array"), ("u", None)):
         _add_field(cell, "docs", name, field_type)
     bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+    # Contract 1.7.0 (D-3, WP-2e): a typed field's NUL-byte refusal is a
+    # `field_type` violation (same error code/disclosure shape as the type
+    # check itself, `_check_type`'s own docstring) -- `declared_type`/
+    # `observed_type` both name the field's own type. The untyped field
+    # ("u", `field_type=None`) has no declared type to violate, so its
+    # denial stays the bare `field` form (no `violated_declaration`).
+    declared_types = {"s": "string", "o": "object", "a": "array"}
     for field_name, bad_value in bad_values.items():
         with pytest.raises(FoundationError) as exc:
             cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         # Monitor ruling M-3/D: request-internal path, not a bare field name.
-        assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+        if field_name in declared_types:
+            assert exc.value.details == {
+                "field": f"operations/0/values/{field_name}", "violated_declaration": "field_type",
+                "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
+            }
+        else:
+            assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
         assert "\x00" not in repr(exc.value)
     # Untyped field: NUL nested inside a dict/list value too.
     with pytest.raises(FoundationError) as exc:

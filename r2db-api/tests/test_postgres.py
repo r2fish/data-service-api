@@ -2272,8 +2272,13 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed(app_a: typ
                 cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
             # Monitor ruling M-3/D (rulings-wp2a-review.md): request-
-            # internal path, not a bare field name.
-            assert exc.value.details == {"field": "operations/0/values/n"}
+            # internal path, not a bare field name. Contract 1.7.0 (D-3,
+            # WP-2e): out-of-range is a `field_type` violation --
+            # `declared_type`/`observed_type` both "integer".
+            assert exc.value.details == {
+                "field": "operations/0/values/n", "violated_declaration": "field_type",
+                "declared_type": "integer", "observed_type": "integer",
+            }
         cell.transact("readings", [{"operation": "insert", "values": {"n": 2**63 - 1}}, {"operation": "insert", "values": {"n": -(2**63)}}], LIMITS)
         rows = {row["n"] for row in cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items}
         assert rows == {2**63 - 1, -(2**63)}
@@ -2291,12 +2296,23 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: t
         for name, field_type in (("s", "string"), ("o", "object"), ("a", "array")):
             cell.apply_schema({"operation": "add_field", "entity": "docs", "field": name, "field_type": field_type}, developer=True, limits=LIMITS)
         bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+        # Contract 1.7.0 (D-3, WP-2e): see `test_foundation.py`'s identical
+        # comment -- a typed field's NUL-byte refusal is `field_type`
+        # (`declared_type`/`observed_type` both the field's own type); the
+        # untyped field ("u") has no declared type and keeps the bare form.
+        declared_types = {"s": "string", "o": "object", "a": "array"}
         for field_name, bad_value in bad_values.items():
             with pytest.raises(FoundationError) as exc:
                 cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
             # Monitor ruling M-3/D: request-internal path.
-            assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+            if field_name in declared_types:
+                assert exc.value.details == {
+                    "field": f"operations/0/values/{field_name}", "violated_declaration": "field_type",
+                    "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
+                }
+            else:
+                assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
         assert cell.query("docs", select=["u"], where=[], page_size=10, limits=LIMITS).items == []
     finally:
         cell.close()
@@ -2407,12 +2423,20 @@ def test_object_and_array_field_types_use_domains_and_are_distinguishable(app_a:
             cell.transact("typed", [{"operation": "insert", "values": {"o": [1, 2]}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         # Monitor ruling M-3/D (rulings-wp2a-review.md): request-internal
-        # path, not a bare field name.
-        assert exc.value.details == {"field": "operations/0/values/o"}
+        # path, not a bare field name. Contract 1.7.0 (D-3, WP-2e):
+        # `field_type` -- `declared_type` the field's own declared type,
+        # `observed_type` the JSON type of the value actually received.
+        assert exc.value.details == {
+            "field": "operations/0/values/o", "violated_declaration": "field_type",
+            "declared_type": "object", "observed_type": "array",
+        }
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "insert", "values": {"a": {"k": 1}}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": "operations/0/values/a"}
+        assert exc.value.details == {
+            "field": "operations/0/values/a", "violated_declaration": "field_type",
+            "declared_type": "array", "observed_type": "object",
+        }
         # Same rejection on update.
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"o": [1]}}], LIMITS)
