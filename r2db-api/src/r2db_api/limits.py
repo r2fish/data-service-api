@@ -1,7 +1,7 @@
 """Finite, discoverable resource bounds."""
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from typing import Any, Callable
 
 from .errors import fail
@@ -136,6 +136,25 @@ _BUDGET_APPLICABLE_CLASSES: dict[str, frozenset[str]] = {
     "schema": frozenset({"execution_ms"}),
 }
 
+# Phase 9 R-5/R-6 pair-closing commit (peer symmetry with MitateDB-api's
+# own `config._BUDGET_CLASS_TO_FIELD`): the budget-class-name -> dataclass-
+# field-name lookup `narrow_limits_by_budget` below reads through `getattr`/
+# the `replace(deployed, **narrowed)` call, so the pinned function's own
+# body never has to know whether a class name and its deployment field
+# happen to share a spelling. On THIS peer they always do (`ResourceLimits`
+# was named field-for-field after `limits.classes`, D-6's own applicable-
+# classes table above); this identity table exists only so the technique
+# itself -- not merely its outcome -- matches MitateDB-api's `Foundation
+# Config`, whose fields do NOT share the budget classes' own spelling
+# (`max_result_rows`, not `result_items`). A peer-specific VALUE table
+# (like `_BUDGET_APPLICABLE_CLASSES` above), intentionally kept OUTSIDE
+# the isomorphism-pinned function body.
+_BUDGET_CLASS_TO_FIELD: dict[str, str] = {
+    "result_items": "result_items",
+    "execution_ms": "execution_ms",
+    "batch_items": "batch_items",
+}
+
 
 def _json_type_name(value: Any) -> str:
     """Ruling J-2/contract `errors.details_vocabulary.VALIDATION_FAILED.
@@ -164,6 +183,22 @@ def _json_type_name(value: Any) -> str:
     return "integer"
 
 
+def _budget_denied(message: str, field: str, **extra: Any) -> None:
+    """Phase 9 R-5/R-6 pair-closing commit: the ONE place `narrow_limits_
+    by_budget` below turns a budget-shape violation into this peer's own
+    denial (`fail()`, `VALIDATION_FAILED`) -- pulled out of the pinned
+    function body itself (isomorphism table row `narrow_limits_by_budget`,
+    `tests/test_audit_query.py`) so that body's own text never has to
+    spell either peer's own exception vocabulary. MitateDB-api's `config.
+    py` places an identically-named, identically-signatured wrapper next
+    to its own `narrow_limits_by_budget` that raises `errors.
+    ValidationError` instead -- the two wrappers are deliberately NOT
+    pinned isomorphic to each other (only the function that calls them,
+    identically, is); each is free to stay exactly as small as its own
+    peer's error type requires."""
+    fail("VALIDATION_FAILED", message, details={"violated_declaration": "budget", "field": field, **extra})
+
+
 def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | None, endpoint_kind: str) -> ResourceLimits:
     """Contract 1.7.0 (D-6, addendum 2 S-l, work order §2 WP-2d, ruling
     B-2/B-5): the SINGLE point that turns one request's own `budget` into
@@ -183,22 +218,31 @@ def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | N
     meaning for, a value that is not a plain positive int, or a value
     above `deployed`'s own declared bound for that class, is refused with
     `VALIDATION_FAILED`/`violated_declaration: budget`/`field: budget/
-    <class>` -- never silently clamped or ignored. `budget is None` (the
-    ordinary, unbudgeted request) returns `deployed` itself unchanged --
-    no new object, no validation cost paid.
+    <class>` -- never silently clamped or ignored. `budget is None` OR
+    `{}` (no class named at all -- Phase 9 R-5/R-6 pair-closing commit,
+    matching MitateDB-api's own established behaviour) returns `deployed`
+    itself unchanged -- no new object, no validation cost paid.
+
+    Peer-symmetry note (isomorphism table row, `tests/test_audit_query.
+    py`): isomorphic to MitateDB-api's own `config.narrow_limits_by_
+    budget(deployed, budget, endpoint_kind)` -- same name, same 3-argument
+    signature, same behaviour. No code is shared between peers; `_budget_
+    denied`/`_BUDGET_CLASS_TO_FIELD` immediately above absorb the two
+    peers' own exception vocabulary and dataclass-field-naming difference
+    OUTSIDE this body, mirroring `validate_enum_declaration`'s own `_fail_
+    constraint_declaration` precedent above in this same module.
     """
-    if budget is None:
+    if not budget:
         return deployed
     if not isinstance(budget, dict):
-        fail("VALIDATION_FAILED", "budget must be an object.", details={"violated_declaration": "budget", "field": "budget"})
+        _budget_denied("budget must be an object.", "budget")
     applicable = _BUDGET_APPLICABLE_CLASSES.get(endpoint_kind, frozenset())
-    deployed_values = deployed.as_dict()
-    narrowed_values = dict(deployed_values)
+    narrowed: dict[str, int] = {}
     for class_name, requested in budget.items():
         if class_name not in applicable:
-            fail(
-                "VALIDATION_FAILED", "budget names a resource class that does not apply to this endpoint.",
-                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
+            _budget_denied(
+                "budget names a resource class that does not apply to this endpoint.",
+                f"budget/{class_name}",
             )
         # Ruling J-2 (WP-2cd audit N-2, monitor's (α)): the non-integer leg
         # is split from the `< 1` leg so ONLY the former carries `declared_
@@ -208,26 +252,23 @@ def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | N
         # `narrow_limits_by_budget`) so the SAME rejection returns the SAME
         # `details` shape on both peers.
         if not isinstance(requested, int) or isinstance(requested, bool):
-            fail(
-                "VALIDATION_FAILED", "budget values must be integers of at least 1.",
-                details={
-                    "violated_declaration": "budget", "field": f"budget/{class_name}",
-                    "declared_type": "integer", "observed_type": _json_type_name(requested),
-                },
+            _budget_denied(
+                "budget values must be integers of at least 1.",
+                f"budget/{class_name}",
+                declared_type="integer", observed_type=_json_type_name(requested),
             )
         if requested < 1:
-            fail(
-                "VALIDATION_FAILED", "budget values must be integers of at least 1.",
-                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
-            )
-        if requested > deployed_values[class_name]:
-            fail(
-                "VALIDATION_FAILED", "budget exceeds this deployment's own declared value for this resource class.",
-                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
+            _budget_denied("budget values must be integers of at least 1.", f"budget/{class_name}")
+        field_name = _BUDGET_CLASS_TO_FIELD[class_name]
+        deployed_value = getattr(deployed, field_name)
+        if requested > deployed_value:
+            _budget_denied(
+                "budget exceeds this deployment's own declared value for this resource class.",
+                f"budget/{class_name}",
             )
         # P-5/D-6 (3): downward-only -- `min` never `max` (C-24 variant 1).
-        narrowed_values[class_name] = min(deployed_values[class_name], requested)
-    return ResourceLimits(**narrowed_values)
+        narrowed[field_name] = min(deployed_value, requested)
+    return replace(deployed, **narrowed)
 
 
 @dataclass(frozen=True)
