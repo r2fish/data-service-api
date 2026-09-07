@@ -1062,7 +1062,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # for real would make the suite itself slow, `test_c23`'s own
             # module docstring), so this value only needs to outlast one
             # test run, not match any production number.
-            idempotency_entries=5,
+            idempotency_entries=20,
             idempotency_retention_ms=60_000,
         )
         fresh = MitateDBConformanceAdapter(config=small_config)
