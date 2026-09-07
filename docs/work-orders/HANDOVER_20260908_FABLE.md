@@ -13,28 +13,28 @@
 
 | コミット (実装 → merge) | WP | 内容 | 集計行 |
 |---|---|---|---|
-| `40334be` → `e922943` | WP-0 | 設計 v1.3 + 作業指示書 v1.0 (完了条件 130 件 / 変異 130 件の 1 対 1) | 文書のみ |
-| `8f1142e` → `e6dd131` | WP-1 | **契約 1.7.0 公開 (従属判断 12)** — R-2〜R-8 + R-10 (B) + port v1.13 + C-20〜C-25。**両 peer は 1.6.0 のまま、新 3 capability を `unavailable` と宣言** | `conformance-tests` `638 passed, 8 xfailed` |
-| 訂正 1〜12 (`f6b66bb` / `13bfec8` / `9779aef` / `2bc0ce1` / `60c2dff` / `0228de4` / `9b247dd` / `ed9e9f6` / `0f2d5ae` / `dec0cb9` / `f18d909` / `e6ba09e` / `e71fe00` / `efbe6ae` / `ac40934`) | WP-1 訂正 | 契約補正 3 回 (`96854a6b…` → `afd6bb4f…0052` → `16517954…fcc4`)、port v1.13 の追補、C-20〜C-25 の leg 追加、隔離 profile、`CONDITIONS.md` 行 | 各コミット本文 |
-| `5d17976` + `4b59799` → `33d91eb` | WP-2a | **r2db R-2** (`constraint_declarations: enabled`) | `r2db-api/tests` **1020 passed** |
-| `1dd1878` + `3df3116` → `b06c68a` | WP-3a | **MitateDB R-2** | `MitateDB-api/tests` **839 passed** |
-| `3e9b361` → `124ffa7` | pair-closing | R-2 の同型性表 2 行 (86 → 88) | — |
-| `58f9a98` … `491bbff` → `6e2f1bf` | WP-2b | **r2db R-4** (`dry_run: enabled`) | `r2db-api/tests` **1061 passed** |
-| `a0fde9c` … `f1af9a9` → `2b5bbd6` | WP-3b | **MitateDB R-4** | `MitateDB-api/tests` **877 passed** |
-| `659f57e` → `720eaee` | pair-closing | R-4 の同型性表 2 行 (88 → 90) | CI 3.11 `2593 passed` |
-| `bbd47db` + `d9b406f` → `79754f6` | WP-2cd | **r2db R-5 + R-6** (`idempotency` / `request_budget` = `enabled`) | `r2db-api/tests` **1108 passed** |
-| `a51d667` … `a619bf9` → `f30fb85` | WP-3cd | **MitateDB R-5 + R-6** | `MitateDB-api/tests` **917 passed** |
-| `86c1933` → `37a5cfa` | pair-closing | R-5 / R-6 の同型性表 3 行 (90 → 93) | CI 3.11 / 3.12 **`2681 passed / 0 failed / 8 xfailed`** |
-| `c415816` … `c13831e` → **`e16422d`** | WP-2e | **r2db R-3 + R-7 + 版フリップ (1.7.0)** | `r2db-api/tests` `1 failed, 1167 passed` (赤は同型性 pin のみ) |
-| `d494bca` … `d9201b5` → **`a1cee5b`** | WP-3e | **MitateDB R-3 + R-7 + 版フリップ (1.7.0)** | `MitateDB-api/tests` `2 failed, 983 passed` (赤は同型性 pin と adapter coverage) |
-| `a350a8b` (+ `a91ed01`) → **`b3cfc0c`** | pair-closing | **版フリップの pair-closing** (同型性表 93/95 → **97 行 (両 peer 一致)**、O-8 の CONFLICT、C-21 / C-25 行の更新) | `r2db-api/tests` **1169 passed**、`MitateDB-api/tests` **992 passed**、`conformance-tests` **646 passed (failed 0 / xfailed 0)** |
-| `(本記録の merge。ハッシュは次回引き継ぎ §1 に記載)` | WP-4 | 記録 (設計 v1.8 §10 / §11)、計画文書 v1.5、作業指示書 §6 訂正註 19、本書、`COLLECTION_FLOOR` | **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) / `2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `9060d3a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた) / `PERFRUN host=Darwin/arm64 python=3.11.15 commit=b3cfc0c date=2026-09-08`、EXIT 0、`pg_database` 22 → 22。同一 plug の版間差は `backend_calls` が r2db-api-http の mutate 14.00 → 15.00 / batch 18.00 → 19.00 の +1.00 のみ (書き込み経路の `_load_field_constraints` の SELECT 1 文。SAVEPOINT / RELEASE は `conn.transaction()` 経由で `Cursor.execute` に載らない)、他 12 行は ±0.00。p50 の最大増は r2db in-process batch 0.746 → 0.883 ms、p95 の最大増は MitateDB-http mutate 6.101 → 8.099 ms、HTTP 4 plug の p50 は r2db 側 3 op と MitateDB query / mutate で減少 (§11.2 の表) / run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向) |
+| `95b57bf` → `dd635b0` | WP-0 | 設計 v1.3 + 作業指示書 v1.0 (完了条件 130 件 / 変異 130 件の 1 対 1) | 文書のみ |
+| `ca8920c` → `0fb3d14` | WP-1 | **契約 1.7.0 公開 (従属判断 12)** — R-2〜R-8 + R-10 (B) + port v1.13 + C-20〜C-25。**両 peer は 1.6.0 のまま、新 3 capability を `unavailable` と宣言** | `conformance-tests` `638 passed, 8 xfailed` |
+| 訂正 1〜12 (`55e1f5b` / `07ebd5d` / `6b2f14c` / `2e565fe` / `6328602` / `83c705b` / `4ec8177` / `8888b8f` / `8740cf0` / `eb77398` / `64fc3e0` / `a0e1c71` / `b37099d` / `7904098` / `bf7478e`) | WP-1 訂正 | 契約補正 3 回 (`96854a6b…` → `afd6bb4f…0052` → `16517954…fcc4`)、port v1.13 の追補、C-20〜C-25 の leg 追加、隔離 profile、`CONDITIONS.md` 行 | 各コミット本文 |
+| `fdef94e` + `8a82f39` → `b6c5917` | WP-2a | **r2db R-2** (`constraint_declarations: enabled`) | `r2db-api/tests` **1020 passed** |
+| `7c41c9d` + `04b69c0` → `bc87590` | WP-3a | **MitateDB R-2** | `MitateDB-api/tests` **839 passed** |
+| `da64edf` → `3846886` | pair-closing | R-2 の同型性表 2 行 (86 → 88) | — |
+| `71e97b1` … `b361d8c` → `ab52ce6` | WP-2b | **r2db R-4** (`dry_run: enabled`) | `r2db-api/tests` **1061 passed** |
+| `bcf69f5` … `a9f172d` → `c9ea605` | WP-3b | **MitateDB R-4** | `MitateDB-api/tests` **877 passed** |
+| `896a1dc` → `ad3d11d` | pair-closing | R-4 の同型性表 2 行 (88 → 90) | CI 3.11 `2593 passed` |
+| `66a23a9` + `c661a06` → `71ff97b` | WP-2cd | **r2db R-5 + R-6** (`idempotency` / `request_budget` = `enabled`) | `r2db-api/tests` **1108 passed** |
+| `712648a` … `aa6f737` → `96cf930` | WP-3cd | **MitateDB R-5 + R-6** | `MitateDB-api/tests` **917 passed** |
+| `b734d56` → `b3936b5` | pair-closing | R-5 / R-6 の同型性表 3 行 (90 → 93) | CI 3.11 / 3.12 **`2681 passed / 0 failed / 8 xfailed`** |
+| `fd3d4ab` … `5eeef33` → **`3efa79f`** | WP-2e | **r2db R-3 + R-7 + 版フリップ (1.7.0)** | `r2db-api/tests` `1 failed, 1167 passed` (赤は同型性 pin のみ) |
+| `4f4fb2e` … `30f1086` → **`ab89f64`** | WP-3e | **MitateDB R-3 + R-7 + 版フリップ (1.7.0)** | `MitateDB-api/tests` `2 failed, 983 passed` (赤は同型性 pin と adapter coverage) |
+| `12f825e` (+ `0de6ed1`) → **`85e99fa`** | pair-closing | **版フリップの pair-closing** (同型性表 93/95 → **97 行 (両 peer 一致)**、O-8 の CONFLICT、C-21 / C-25 行の更新) | `r2db-api/tests` **1169 passed**、`MitateDB-api/tests` **992 passed**、`conformance-tests` **646 passed (failed 0 / xfailed 0)** |
+| `(本記録の merge。ハッシュは次回引き継ぎ §1 に記載)` | WP-4 | 記録 (設計 v1.8 §10 / §11)、計画文書 v1.5、作業指示書 §6 訂正註 19、本書、`COLLECTION_FLOOR` | **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `85e99fa` と同一 tree) / `2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `670dd8a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた) / `PERFRUN host=Darwin/arm64 python=3.11.15 commit=85e99fa date=2026-09-08`、EXIT 0、`pg_database` 22 → 22。同一 plug の版間差は `backend_calls` が r2db-api-http の mutate 14.00 → 15.00 / batch 18.00 → 19.00 の +1.00 のみ (書き込み経路の `_load_field_constraints` の SELECT 1 文。SAVEPOINT / RELEASE は `conn.transaction()` 経由で `Cursor.execute` に載らない)、他 12 行は ±0.00。p50 の最大増は r2db in-process batch 0.746 → 0.883 ms、p95 の最大増は MitateDB-http mutate 6.101 → 8.099 ms、HTTP 4 plug の p50 は r2db 側 3 op と MitateDB query / mutate で減少 (§11.2 の表) / run **34159431523** (main `85e99fa`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向) |
 
-**集計行の出所**: **完了ゲートは監督がローカルで単独実行したものが正本である。** **`e16422d` / `a1cee5b` / `b3cfc0c` の 3 つの merge は、間に他のコミットを 1 つも挟まずに連続している** (設計 §5 U-7 = (A)、作業指示書 §4 の 7)。
+**集計行の出所**: **完了ゲートは監督がローカルで単独実行したものが正本である。** **`3efa79f` / `ab89f64` / `85e99fa` の 3 つの merge は、間に他のコミットを 1 つも挟まずに連続している** (設計 §5 U-7 = (A)、作業指示書 §4 の 7)。
 
-**並行セッションが本フェーズ中に main を進めた** — 「開発プロセス衛生 v1」(`ddc87f7` / `051406e` / `d6ed8de` / `8c71507` とその merge) が `OPERATING_CONDITIONS.md`、`tools/check_doc_refs.py` の常時実行 job、`tools/change_class.py` と変更クラス job、計画文書 v1.3 / v1.4 を入れた。**フェーズ9 の各 merge は `git pull --ff-only origin main` の後に行った。**
+**並行セッションが本フェーズ中に main を進めた** — 「開発プロセス衛生 v1」(`31b4a16` / `ca72b81` / `5ff1b39` / `18367dd` とその merge) が `OPERATING_CONDITIONS.md`、`tools/check_doc_refs.py` の常時実行 job、`tools/change_class.py` と変更クラス job、計画文書 v1.3 / v1.4 を入れた。**フェーズ9 の各 merge は `git pull --ff-only origin main` の後に行った。**
 
-**CI について**: **課金停止 (GitHub の「recent account payments have failed」) で一時 job が走らなくなり、依頼者が 2026-09-07 に解消して再実行で緑になった。** **フリップ前の直近の緑は main `933ca53` / `37a5cfa` の `2681 passed / 0 failed / 8 xfailed` である。** **`b3cfc0c` 以降の run は run **34159431523** (main `b3cfc0c`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向)。**
+**CI について**: **課金停止 (GitHub の「recent account payments have failed」) で一時 job が走らなくなり、依頼者が 2026-09-07 に解消して再実行で緑になった。** **フリップ前の直近の緑は main `3c1e1c1` / `b3936b5` の `2681 passed / 0 failed / 8 xfailed` である。** **`85e99fa` 以降の run は run **34159431523** (main `85e99fa`): 7 job すべて success。3.11 `2807 passed in 501.82s (0:08:21)`、3.12 `2807 passed in 487.82s (0:08:07)` (ローカルの 2807 と一致)、`tally-consistency` 緑、collection floor step は両 job で `COLLECTION_FLOOR check OK: measured=2807 floor=2340` (floor 更新コミット前の run。差は正の方向)。**
 
 正本の所在 (第 15 次から更新された箇所のみ):
 
@@ -44,7 +44,7 @@
 - **契約** = **1.7.0**。3 複製の sha256 = **`1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4`**。**従属判断 12** (`spec/CCR_DISPOSITION.md`)、**provenance マニフェスト** = `spec/CONTRACT_HISTORY_MANIFEST.json` (29 エントリ)、**派生カタログ** = `spec/OPERATION_CATALOG.json` (生成は `tools/contract_catalog.py`)
 - **conformance の port は v1.13** (`docs/design/CONFORMANCE_ADAPTER_V1.md` §23)。**新条件は C-20〜C-25 の 6 本** (`conformance-tests/test_c2[0-5]_*.py`)
 - **同型性表 `_ISOMORPHIC_TARGETS` は両 peer 97 行** (両 peer の `tests/test_audit_query.py`)
-- **テスト総数の下限** = `conformance-tests/COLLECTION_FLOOR` (**`2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `9060d3a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた)**。着手時は 2340)
+- **テスト総数の下限** = `conformance-tests/COLLECTION_FLOOR` (**`2807 tests collected in 0.24s`、`conformance-tests/COLLECTION_FLOOR` 2340 → **2807** (コミット `670dd8a`、`tools/check_collection_floor.py`: `COLLECTION_FLOOR check OK: measured=2807 floor=2807 diff=0`。floor 更新コミットは PERF 取得の後に置いた)**。着手時は 2340)
 
 ## 2. 到達した状態
 
@@ -97,7 +97,7 @@
 
 **フェーズ9 が足した前提は 3 つである。**
 
-- **`tools/rewrite_hash_refs.py` は本フェーズで 1 バイトも触っていない** (作業指示書 §5、全 WP に掛かる禁止事項)。**WP-9 のリハーサル成果 (main `523753c` までの `rewrite_hash_refs` 改良) はそのまま有効である。**
+- **`tools/rewrite_hash_refs.py` は本フェーズで 1 バイトも触っていない** (作業指示書 §5、全 WP に掛かる禁止事項)。**WP-9 のリハーサル成果 (main `59403e0` までの `rewrite_hash_refs` 改良) はそのまま有効である。**
 - **畳む worktree がさらに増えた。** フェーズ9 側だけで **`goofy-taussig-e21ba0` (session)、`phase9-r2db`、`phase9-mitatedb`** と、並行セッションの **`process-hygiene` 系**がある。**手順 0.5 (filter-repo の前に全 linked worktree を畳む) の実行時は `git worktree list` で実数を確認すること** — この列挙は 2026-09-08 時点の記録であって網羅リストではない。
 - **本フェーズが新設・改訂した文書には commit hash が入っている** (本書 §1、設計 §11、計画文書 §1.0b)。**手順 2 (commit-map による hash 参照の一括更新) の対象になるだけであり、衝突はしない。**
 
@@ -150,5 +150,5 @@
 - **subagent には peer 側 worktree への `cd` を明示で許可する。** 許可が無いと監査は片側だけを読み、「相手側は未確認」で終わる — pair-closing の判断材料が揃わない。
 - **並行セッションが main を進める前提で運用する。** **merge 前に `git pull --ff-only origin main` を必ず行う。** 本フェーズは「開発プロセス衛生 v1」と 4 回交差した。
 - **契約補正はフリップ前にまとめて 1 コミットにし、裁定は実装前に全部渡し、レビューと監査を 1 pass に統合する** (依頼者承認の短縮 3 点、訂正註 14)。**この 3 つで WP あたりの往復が 1 回減った。** **ただし「レビュー 2 回目を省く」ことの代償は実測できていない** — 統合パスが見つけた指摘の数は 2 回に分けたときと同等だったが、それが偶然かどうかは 1 フェーズでは分からない。
-- **過大な WIP コミットメッセージは `git reset --soft` で正直に書き直す。** コミットメッセージは監査が「何が入っているか」を判断する一次資料であり、実態と食い違うと監査が誤った前提で走る。**本フェーズはこれを 1 件、記録として残した** — **pair-closing コミット `a350a8b` のメッセージは `_served_capabilities_document` を同型表に登録したと書いているが、実際には登録していない** (裁定 O-7 の対象外であり、両 peer の本文が本質的に非同型だった)。**メッセージは書き換えず、設計 §11.3 に訂正を書いた。**
+- **過大な WIP コミットメッセージは `git reset --soft` で正直に書き直す。** コミットメッセージは監査が「何が入っているか」を判断する一次資料であり、実態と食い違うと監査が誤った前提で走る。**本フェーズはこれを 1 件、記録として残した** — **pair-closing コミット `12f825e` のメッセージは `_served_capabilities_document` を同型表に登録したと書いているが、実際には登録していない** (裁定 O-7 の対象外であり、両 peer の本文が本質的に非同型だった)。**メッセージは書き換えず、設計 §11.3 に訂正を書いた。**
 - **「宣言より先に挙動を入れることを禁じる機構」は、`xfail(strict=True)` だけでは成立しないことがある。** **本フェーズの C-21 / C-25 は当初、pre-1.7.0 枝の末尾に `observed_branch` の突合を置いていたため、その枝は構造上どうやっても pass できず、strict XPASS が原理的に起こり得なかった** (監査が adapter に `request_id` を注入しても xfail のままであることで実証した)。**訂正註 7 で「pre-1.7.0 枝では突合を本体に含めない」と形を確定した。** **「strict xfail を置いた」ことと「早期実装が赤になる」ことは別の命題である。**

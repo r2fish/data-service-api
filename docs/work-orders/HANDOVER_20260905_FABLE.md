@@ -11,10 +11,10 @@
 
 | コミット (merge) | WP | 内容 | root suite (単独実行) |
 |---|---|---|---|
-| `6ddcd19` | WP-0 | 共通基盤 (静的規則スキャナ / ms 正規化ヘルパの src 引き上げ / 対応表 18 → 24 行) | **1868 / 0 / 0 / 4 xfailed** |
-| `a01bdf0` | WP-1 (r2db `9ae8ea6`) + WP-2 (MitateDB `0379827`) | 宣言を DB 側の一次情報へ (`0008` / `0007` + composition root + 二重検査 + ops 宣言系) | **2077 / 0 / 0 / 4 xfailed** |
-| `0301c10` | WP-3 (r2db `55998b2`) + WP-4 (MitateDB `370fe33`) | per-application 台帳と一括適用 (`0003` 改訂 + `0009` / `0008` + cell open 検査 + ops) | **2165 / 0 / 0 / 0** |
-| `4b438ee` → main `2ab012b` (確定コミットは次回引き継ぎ §1) | WP-5 | 記録整理 (`CONTROL_MAPPING.md` / runbook 3 本 / DEPLOY_Q4 / 閉止注記 / 設計 §10・§12・§13 / 作業指示書 §11 / 本書) | 文書のみ (**2165** のまま) |
+| `0cc87fa` | WP-0 | 共通基盤 (静的規則スキャナ / ms 正規化ヘルパの src 引き上げ / 対応表 18 → 24 行) | **1868 / 0 / 0 / 4 xfailed** |
+| `1f1ef2b` | WP-1 (r2db `c5fd9a4`) + WP-2 (MitateDB `0379827`) | 宣言を DB 側の一次情報へ (`0008` / `0007` + composition root + 二重検査 + ops 宣言系) | **2077 / 0 / 0 / 4 xfailed** |
+| `c82ce06` | WP-3 (r2db `3d186a9`) + WP-4 (MitateDB `bde32c1`) | per-application 台帳と一括適用 (`0003` 改訂 + `0009` / `0008` + cell open 検査 + ops) | **2165 / 0 / 0 / 0** |
+| `02e209e` → main `dd5fd86` (確定コミットは次回引き継ぎ §1) | WP-5 | 記録整理 (`CONTROL_MAPPING.md` / runbook 3 本 / DEPLOY_Q4 / 閉止注記 / 設計 §10・§12・§13 / 作業指示書 §11 / 本書) | 文書のみ (**2165** のまま) |
 
 **集計行の出所**: 各 WP のコミットメッセージ末尾の `Root suite alone:` 行 (`git log` で確認できる)。いずれも**監督が完了ゲートで単独実行して得た実測値**であり、ゲートログは `{scratchpad}/wp0-gate2.log` / `wp12-gate.log` / `wp34-gate2.log` に残っている。**最終形のディレクトリ別内訳は `r2db-api/tests` 934 / `MitateDB-api/tests` 756 / `conformance-tests` 475 = 2165**。conformance は**本フェーズを通じて 475 のまま不変**である。
 
@@ -74,7 +74,7 @@
 
 ### 4-2. フェーズ7 (並行して進んでいる。main の履歴で確認できる範囲)
 
-- **7-A は完了済み** — WP-3 (r2db 配備資産) `df35451`、WP-1 (公開規律とスキャナ) `393b9f1`、WP-2 (constraints と CI) `e1d33c3`、7-A の記録 `79ed0c9`。**CI (GitHub Actions、PostgreSQL 16 コンテナ、Python 3.11 / 3.12 の 2 job が required) が成立している。**
+- **7-A は完了済み** — WP-3 (r2db 配備資産) `dd08594`、WP-1 (公開規律とスキャナ) `448c660`、WP-2 (constraints と CI) `50c307f`、7-A の記録 `b3bf310`。**CI (GitHub Actions、PostgreSQL 16 コンテナ、Python 3.11 / 3.12 の 2 job が required) が成立している。**
 - **7-B (WP-4〜WP-8) の着手条件は「Q4 の main マージ後」であり、本フェーズの完了でその条件は満たされる。**
 - **公開ゲート (WP-9)** の着手条件は **(g)(b) の完了**であり、残るのは **WP-6 ((b)(iii) `DeprecationWarning` の error 化と `httpx2` 移行)** だけである。すなわち **WP-9 は「Q4 マージ → WP-6 完了 → 依頼者の実行合図」で着手可能になる。**
 - **フェーズ7 候補として残るのは (a)〜(e)** である。**(d) (r2db の `surfaces` 検証ヘルパの重複解消) は本フェーズ WP-1 で閉じた** ので、実質は (a)(b)(c)(e)。

@@ -4,7 +4,7 @@
 - 位置づけ: **監督が確定した枠 (2026-09-07) の実施設計**である。本書は**開発プロセスの文書と道具**だけを対象とし、**共通契約・spec・Security Invariants・conformance-tests・両 peer のコードには一切触れない**。契約版数は **1.6.0 のまま**であり、フェーズ9 (契約 1.7.0) とは**別線**である
 - 応える G (計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §0): **G-3** (信頼性 = 運用条件と証拠の参照が腐らないこと)。**G-2** には副次的に応える — 公開リポジトリとして「何が現行の規律か」が 1 冊で読めることは、外部から見た監査可能性の一部である
 - テーマ: **「着手時に読むべき運用条件が 1 冊に集まっており、文書間の ID 参照が機械的に検査され、作業指示書が設計の複製ではなく発注の manifest である」状態にすること**
-- 前提となる main: **`124ffa7`**。作業 branch **`process-hygiene-id-refs`**、worktree `{repo}/.claude/worktrees/process-hygiene`
+- 前提となる main: **`3846886`**。作業 branch **`process-hygiene-id-refs`**、worktree `{repo}/.claude/worktrees/process-hygiene`
 - 出自: 依頼者が 2026-09-07 に持ち込んだ外部提案 (Mitate リポジトリ向けの開発プロセス改善 6 項目) を本 repo に照らして評価した結果、監督が「今すぐ (Class A/B)」に分類した 2 項目 — (1) 現行運用条件の単一ファイル化、(2) 文書 ID の参照検査 — と、フェーズ10 以降に適用する計画文書 §9 追記案である
 - **フェーズ9 は進行中である。** 本作業は `docs/design/PHASE9_*.md`・`docs/work-orders/WORK_ORDER_PHASE9_*.md`・両 peer のコードに**触れない** (§2)
 - 体制・規律: Fable 監督/判断/コミット、Opus 起草/独立レビュー/受け入れ監査、Sonnet 実装 (**コミットしない**)。**設計レビューは 1 回** (契約を触らない。計画文書 §9 の 3)

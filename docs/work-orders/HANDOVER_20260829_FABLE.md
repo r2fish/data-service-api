@@ -6,18 +6,18 @@
 
 ## 1. 現在地 (branch `conformance-effectivation-and-r2db-service-layer`、origin へ push 済み、`main` 未マージ)
 
-**フェーズ1 (CCR-13 storage 実装) は完了した。** 本セッションの7コミット (`831afff`〜`2403ea2`):
+**フェーズ1 (CCR-13 storage 実装) は完了した。** 本セッションの7コミット (`b5216e7`〜`c0f7ac3`):
 
 | コミット | 内容 |
 |---|---|
-| `831afff` | 設計 `docs/design/R2DB_CCR13_STORAGE_V1.md` v1.1 (WP-0 独立レビュー反映済み) |
+| `b5216e7` | 設計 `docs/design/R2DB_CCR13_STORAGE_V1.md` v1.1 (WP-0 独立レビュー反映済み) |
 | `1979385` | WP-1: conformance port v1.2、C-17/C-18 登録、共通 fixture の `id` 退避、C-12 upsert 対照の精密化 |
-| `a13bf45` | WP-2: in-memory 参照実装 (`ApplicationCell`) への CCR-13 full 意味論 + `DataService` 暫定ゲート + Q-1 (案B) 契約追補 |
-| `6b57a14` | Q-2 裁定反映: `contains` リテラル定義 + `matches` 演算子追加 |
-| `fbb5529` | WP-3: PostgreSQL 実実装 (id identity・`_r2db_revision`・upsert 2文構成・DOMAIN 型・contains/matches) + 両 cell parity |
-| `ccc30b3` | WP-4: order_by / cursor pagination の HTTP 公開 |
-| `b3a6244` | WP-5: 申告更新 + ゲート撤去 (単一コミット)、C-17/C-18 の3 adapter 実行可能化、**逆向き C-12**、port v1.3/v1.4 |
-| `2403ea2` | WP-6: CONTROL_MAPPING (SI-09 drop_index)・deploy (PostgreSQL 13+ 前提・0003 DOMAIN catch-up)・README・実装記録 |
+| `63e3ab3` | WP-2: in-memory 参照実装 (`ApplicationCell`) への CCR-13 full 意味論 + `DataService` 暫定ゲート + Q-1 (案B) 契約追補 |
+| `b16652e` | Q-2 裁定反映: `contains` リテラル定義 + `matches` 演算子追加 |
+| `7e7b6ad` | WP-3: PostgreSQL 実実装 (id identity・`_r2db_revision`・upsert 2文構成・DOMAIN 型・contains/matches) + 両 cell parity |
+| `3170d14` | WP-4: order_by / cursor pagination の HTTP 公開 |
+| `8d1691e` | WP-5: 申告更新 + ゲート撤去 (単一コミット)、C-17/C-18 の3 adapter 実行可能化、**逆向き C-12**、port v1.3/v1.4 |
+| `c0f7ac3` | WP-6: CONTROL_MAPPING (SI-09 drop_index)・deploy (PostgreSQL 13+ 前提・0003 DOMAIN catch-up)・README・実装記録 |
 
 - テスト: `./.venv/bin/python -m pytest` で **544 passed** (r2db in-process / r2db HTTP+実PostgreSQL / MitateDB の3 adapter 込み)。`r2db-api/tests/test_postgres.py` 単独 180 (root testpaths 外なので個別実行が要る)
 - 実装記録と**将来課題台帳** (レビュー minor 繰越8件 + 契約 additive 候補4件) は設計文書 §11/§12

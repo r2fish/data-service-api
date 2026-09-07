@@ -11,18 +11,18 @@
 
 | コミット (merge) | WP | 内容 | root suite (単独実行) |
 |---|---|---|---|
-| `e26e794` | WP-0 | 設計 v1.3 + 作業指示書 v1.1 (依頼者裁定 Q1+Q2 → 契約 1.5.0、Q3 = 案 A) | 文書のみ (基準 **1545**) |
-| `d7a5ffd` | WP-1 | **契約 1.5.0 公開** + 従属判断 10 + port v1.9 + 共通 vector 4 本 + 全体 vacuity guard (`xfail(strict)`) | **1562 passed / 0 failed / 0 skipped / 1 xfailed** |
-| `3fd72ad` | WP-2 | **r2db の 1.5.0 出荷** (走査器一般化 + 宣言 2 キー + flip) | **1586 / 0 / 0 / 2 xfailed** |
-| `98d2010` | WP-3 | **MitateDB の 1.5.0 出荷** (同型 + flip + guard の `xfail` 撤去) | **1612 / 0 / 0 / 0** |
-| `d11c86f` | WP-4 | **Q3 (D-3)** MitateDB の request-count limit 上限撤廃 (契約不変) | `**1611 passed / 0 failed / 0 skipped / 0 xfailed** (WP-4 後の最終値。WP-3 時点 1612 から 201 拒否ケース 3 件の削除と 2 件の追加)` |
-| `b0b558a` | WP-5 | 記録整理 (設計 §10、PHASE4 §11 結審、CONDITIONS、CONTROL_MAPPING、runbook、本引き継ぎ) | 文書のみ (`**1611 passed / 0 failed / 0 skipped / 0 xfailed** (WP-4 後の最終値。WP-3 時点 1612 から 201 拒否ケース 3 件の削除と 2 件の追加)` のまま) |
+| `a7ae8db` | WP-0 | 設計 v1.3 + 作業指示書 v1.1 (依頼者裁定 Q1+Q2 → 契約 1.5.0、Q3 = 案 A) | 文書のみ (基準 **1545**) |
+| `b49c0b7` | WP-1 | **契約 1.5.0 公開** + 従属判断 10 + port v1.9 + 共通 vector 4 本 + 全体 vacuity guard (`xfail(strict)`) | **1562 passed / 0 failed / 0 skipped / 1 xfailed** |
+| `9164127` | WP-2 | **r2db の 1.5.0 出荷** (走査器一般化 + 宣言 2 キー + flip) | **1586 / 0 / 0 / 2 xfailed** |
+| `4ba2737` | WP-3 | **MitateDB の 1.5.0 出荷** (同型 + flip + guard の `xfail` 撤去) | **1612 / 0 / 0 / 0** |
+| `3801cc5` | WP-4 | **Q3 (D-3)** MitateDB の request-count limit 上限撤廃 (契約不変) | `**1611 passed / 0 failed / 0 skipped / 0 xfailed** (WP-4 後の最終値。WP-3 時点 1612 から 201 拒否ケース 3 件の削除と 2 件の追加)` |
+| `1b49711` | WP-5 | 記録整理 (設計 §10、PHASE4 §11 結審、CONDITIONS、CONTROL_MAPPING、runbook、本引き継ぎ) | 文書のみ (`**1611 passed / 0 failed / 0 skipped / 0 xfailed** (WP-4 後の最終値。WP-3 時点 1612 から 201 拒否ケース 3 件の削除と 2 件の追加)` のまま) |
 
 **集計行の出所**: 各 WP のコミットメッセージ末尾の `Root suite alone:` 行 (`git log` で確認できる)。いずれも**監督が完了ゲートで単独実行して得た実測値**である。`conformance` は WP-1 で **404 → 421 passed / 1 xfailed**、WP-3 で **422 passed / 0 xfailed** となった (WP-2 では不変)。
 
 正本の所在 (第11次から更新された箇所のみ):
 
-- **本フェーズの実施設計** = `docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` (**v1.4**)。§3 D-1〜D-4 が確定事項、**§10 が実施記録** (WP-1 / WP-2 は確定、WP-3 以降は `Q3 は案 A で実施済み (WP-4 `d11c86f`): MitateDB の request-count limit 4 クラスの上限 `[1, 200]` を撤廃し正の整数のみ (r2db と対称、エラー文言 `must be a positive integer`)。201 拒否ケース 3 件を削除し大値受理テスト (100_000 を含む 4 クラス) を追加。adapter 構成は 200 据え置き。変異 1〜5 は赤、6/7 (adapter 構成値 / `_MAX_EXERCISABLE_LIMIT`) は C-14 vector 5 の駆動コストが構成値に比例し 1 時間超で打ち切り (台帳 L5-7、完了条件 7/8 は zero-diff で担保)。契約不変。root suite 1611 passed / 0 / 0 / 0` のプレースホルダが残っている)、§11 が将来課題
+- **本フェーズの実施設計** = `docs/design/PHASE5_CONTRACT_150_AND_LIMIT_RANGE_V1.md` (**v1.4**)。§3 D-1〜D-4 が確定事項、**§10 が実施記録** (WP-1 / WP-2 は確定、WP-3 以降は `Q3 は案 A で実施済み (WP-4 `3801cc5`): MitateDB の request-count limit 4 クラスの上限 `[1, 200]` を撤廃し正の整数のみ (r2db と対称、エラー文言 `must be a positive integer`)。201 拒否ケース 3 件を削除し大値受理テスト (100_000 を含む 4 クラス) を追加。adapter 構成は 200 据え置き。変異 1〜5 は赤、6/7 (adapter 構成値 / `_MAX_EXERCISABLE_LIMIT`) は C-14 vector 5 の駆動コストが構成値に比例し 1 時間超で打ち切り (台帳 L5-7、完了条件 7/8 は zero-diff で担保)。契約不変。root suite 1611 passed / 0 / 0 / 0` のプレースホルダが残っている)、§11 が将来課題
 - **発注と WP 分割** = `docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md` (**v1.7**)。**§0.1 の常設規律 7 項目**は本フェーズで新設された全 WP 共通の規律である (§2.3)
 - **契約の裁定記録** = `spec/CCR_DISPOSITION.md` の **従属判断 10** (項目 1 = Q1 / 項目 2 = Q2、(a)〜(d) + 義務の条件付き性の独立段落)
 - **フェーズ4 台帳の各項目の状態** = `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` **§11.1** 冒頭表。**L4-1 / L4-2 は CLOSED**、L4-4 / L4-7(iii) は WP-4 待ち
@@ -75,7 +75,7 @@ N の各要素には「耐久表へ届かない根拠」をコメントで付し
 
 ### 2.2 Q3 (WP-4) — 未了
 
-`Q3 は案 A で実施済み (WP-4 `d11c86f`): MitateDB の request-count limit 4 クラスの上限 `[1, 200]` を撤廃し正の整数のみ (r2db と対称、エラー文言 `must be a positive integer`)。201 拒否ケース 3 件を削除し大値受理テスト (100_000 を含む 4 クラス) を追加。adapter 構成は 200 据え置き。変異 1〜5 は赤、6/7 (adapter 構成値 / `_MAX_EXERCISABLE_LIMIT`) は C-14 vector 5 の駆動コストが構成値に比例し 1 時間超で打ち切り (台帳 L5-7、完了条件 7/8 は zero-diff で担保)。契約不変。root suite 1611 passed / 0 / 0 / 0`
+`Q3 は案 A で実施済み (WP-4 `3801cc5`): MitateDB の request-count limit 4 クラスの上限 `[1, 200]` を撤廃し正の整数のみ (r2db と対称、エラー文言 `must be a positive integer`)。201 拒否ケース 3 件を削除し大値受理テスト (100_000 を含む 4 クラス) を追加。adapter 構成は 200 据え置き。変異 1〜5 は赤、6/7 (adapter 構成値 / `_MAX_EXERCISABLE_LIMIT`) は C-14 vector 5 の駆動コストが構成値に比例し 1 時間超で打ち切り (台帳 L5-7、完了条件 7/8 は zero-diff で担保)。契約不変。root suite 1611 passed / 0 / 0 / 0`
 
 ### 2.3 常設規律 7 項目 (作業指示書 §0.1、全 WP に適用)
 
@@ -128,7 +128,7 @@ N の各要素には「耐久表へ届かない根拠」をコメントで付し
 ### 4-3. 本フェーズの未処理事項 (WP-5 で片付ける)
 
 - **設計 §10 のプレースホルダ**を全て埋める — §10.1 の WP-3 / WP-4 / WP-5 行、§10.4 の差し戻しの閉じ方と MitateDB 固有の受理境界、§10.5。**プレースホルダが 1 つでも残る状態で本フェーズを完了としてはならない**
-- **作業指示書 §10 の WP-1 集計行 `1561` は誤り**である。WP-1 の最終ログ (`scratchpad/wp1-150-fix3-test.log`) とコミット `6e38ef8` はいずれも **1562 passed / 1 xfailed** (1561 は fix3 前の値)。設計 §10.1 は 1562 を採っている。**作業指示書側を訂正する**
+- **作業指示書 §10 の WP-1 集計行 `1561` は誤り**である。WP-1 の最終ログ (`scratchpad/wp1-150-fix3-test.log`) とコミット `c9720c1` はいずれも **1562 passed / 1 xfailed** (1561 は fix3 前の値)。設計 §10.1 は 1562 を採っている。**作業指示書側を訂正する**
 - **WP-3 完了条件 16 の文言**が「`xfailed` 1 → 0」のままで、v1.5 の WP-2 訂正 (`xfailed 2`) に追随していない。実態は **2 → 0** であり、2 本とも WP-3 が外すべきものであった (全体 vacuity guard + WP-2 の同型性 placeholder)。実装側の欠陥ではなく指示書の文言
 - **WP-1 レビュー指摘 F-5 / F-7 / F-8 / F-9 の本文は失われている** — `scratchpad/review-wp1-150.log` が pytest 出力で上書きされたためであり、受け入れ監査は反映可否を**判定不能**とした。**記録として残す欠落であり、隠さない**
 

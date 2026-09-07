@@ -10,13 +10,13 @@
 
 | コミット (merge) | WP | 内容 |
 |---|---|---|
-| `127e57f` | WP-0 | 設計 v1.1 (独立レビュー blocker 4 全数裁定 — audit role in-band 発行撤回、WP 順序反転ほか) |
-| `e2093c5` | WP-1 | **契約 1.3.0 公開** (cross-entity 意味論明確化 + 束4件 + atomic_mutation 明確化 + 従属判断8。以後の契約変更は 1.4.0) |
-| `3988c4a` | WP-2 | MitateDB cross_entity (二段パス transact / batch_entities=10 / HTTP 実体化 / 宣言 flip status=partial。**B-2: 孤立サロゲートの原子性穴を実測発見・二重閉塞**) |
-| `49b97ce` | WP-3 | 共通 suite: port v1.7 + **C-16 executable 化 (4 adapter)** + C-12/C-11 拡張 |
-| `cc92fe7` | WP-4 | r2db 制御面束 + L4 request_bytes + **contract_version 1.3.0 flip** |
-| `754c3ae` | WP-5 | MitateDB 制御面束 + **contract_version 1.3.0 flip** (B-1 テスト 13 等値復元) |
-| `6c2841d` | WP-6 | 記録整理 (CONTROL_MAPPING 8 行 / 台帳 4 冊 RESOLVED 追記 / 陳腐 prose 全数) |
+| `a3873ca` | WP-0 | 設計 v1.1 (独立レビュー blocker 4 全数裁定 — audit role in-band 発行撤回、WP 順序反転ほか) |
+| `9b0dd87` | WP-1 | **契約 1.3.0 公開** (cross-entity 意味論明確化 + 束4件 + atomic_mutation 明確化 + 従属判断8。以後の契約変更は 1.4.0) |
+| `bd13604` | WP-2 | MitateDB cross_entity (二段パス transact / batch_entities=10 / HTTP 実体化 / 宣言 flip status=partial。**B-2: 孤立サロゲートの原子性穴を実測発見・二重閉塞**) |
+| `85e60e2` | WP-3 | 共通 suite: port v1.7 + **C-16 executable 化 (4 adapter)** + C-12/C-11 拡張 |
+| `064f4dd` | WP-4 | r2db 制御面束 + L4 request_bytes + **contract_version 1.3.0 flip** |
+| `04235b7` | WP-5 | MitateDB 制御面束 + **contract_version 1.3.0 flip** (B-1 テスト 13 等値復元) |
+| `100fc3f` | WP-6 | 記録整理 (CONTROL_MAPPING 8 行 / 台帳 4 冊 RESOLVED 追記 / 陳腐 prose 全数) |
 
 最終実測 (単独実行、2026-09-01): **root suite 1292 passed / 0 failed / 0 skipped** (フェーズ開始時 1161 から +131)。conformance 364 (4 adapter、C-16 含む)。
 

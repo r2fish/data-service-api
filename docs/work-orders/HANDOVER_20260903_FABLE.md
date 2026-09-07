@@ -10,16 +10,16 @@
 
 | コミット (merge) | WP | 内容 | root suite (単独実行) |
 |---|---|---|---|
-| `b99368d` | WP-0 | 設計 v1.4 + 作業指示書 v1.2 (依頼者裁定 5 件を確定形へ反映) | 1292 / 0 / 0 (基準値確認) |
-| `a107f6b` | WP-1 | **契約 1.4.0 公開** (従属判断 9 = 8 項目の一括束) + C-09/C-11 executable 化 + port v1.8。**以後の契約変更は 1.5.0** | **1331** passed / 0 / 0 / xfailed 1 |
-| `1e643e9` | WP-2(a) | r2db 耐久 sink (migration 0007、pre-commit hook、合体 denial、bounded buffer + alert)。宣言不変 | **1370** / 0 / 0 / xfailed 1 |
-| `13c899a` | WP-2(b) | r2db `audit_query` (control ホスト 2 パス・reader role・不透明 cursor・専用 rate 窓) + **1.4.0 flip** | **1419** / 0 / 0 / xfailed 1 |
-| `6df2713` | WP-3(a) | MitateDB 耐久 sink (migration 0005、13 列 emitter、P4-D5 の emit サイト新設、`request_id` 縦断)。宣言不変 | **1485** / 0 / 0 / xfailed 1 |
-| `afd24ef` | follow-up 1 | r2db flush の swap-out 化 + 失敗復元時の容量切り詰め (`411c034`。MitateDB レビュー発見の対称適用) | **1487** / 0 / 0 / xfailed 1 |
-| `e60eb1e` | WP-3(b) | MitateDB `audit_query` + **1.4.0 flip** + 全体 vacuity guard の `xfail` 削除 (`a3571dc`)。**r2db テスト補強 follow-up 2 (`cb9f7a3`) を同一 merge に含む** | **1526** passed / 0 failed / 0 skipped / **xfailed 0** |
-| `741add3` | WP-4 | 記録整理 (設計 v1.5 §5.1/§9.4/§11.1、作業指示書 §9、CONTROL_MAPPING、CONDITIONS、両 peer runbook・配備文書、CCR_DISPOSITION) | 文書のみ |
+| `fcb2c4b` | WP-0 | 設計 v1.4 + 作業指示書 v1.2 (依頼者裁定 5 件を確定形へ反映) | 1292 / 0 / 0 (基準値確認) |
+| `1ef89c0` | WP-1 | **契約 1.4.0 公開** (従属判断 9 = 8 項目の一括束) + C-09/C-11 executable 化 + port v1.8。**以後の契約変更は 1.5.0** | **1331** passed / 0 / 0 / xfailed 1 |
+| `5e9d6ed` | WP-2(a) | r2db 耐久 sink (migration 0007、pre-commit hook、合体 denial、bounded buffer + alert)。宣言不変 | **1370** / 0 / 0 / xfailed 1 |
+| `ea4b8b5` | WP-2(b) | r2db `audit_query` (control ホスト 2 パス・reader role・不透明 cursor・専用 rate 窓) + **1.4.0 flip** | **1419** / 0 / 0 / xfailed 1 |
+| `b651324` | WP-3(a) | MitateDB 耐久 sink (migration 0005、13 列 emitter、P4-D5 の emit サイト新設、`request_id` 縦断)。宣言不変 | **1485** / 0 / 0 / xfailed 1 |
+| `c77fa56` | follow-up 1 | r2db flush の swap-out 化 + 失敗復元時の容量切り詰め (`a2a88e5`。MitateDB レビュー発見の対称適用) | **1487** / 0 / 0 / xfailed 1 |
+| `54b6bf3` | WP-3(b) | MitateDB `audit_query` + **1.4.0 flip** + 全体 vacuity guard の `xfail` 削除 (`009ca42`)。**r2db テスト補強 follow-up 2 (`8473011`) を同一 merge に含む** | **1526** passed / 0 failed / 0 skipped / **xfailed 0** |
+| `4dc4868` | WP-4 | 記録整理 (設計 v1.5 §5.1/§9.4/§11.1、作業指示書 §9、CONTROL_MAPPING、CONDITIONS、両 peer runbook・配備文書、CCR_DISPOSITION) | 文書のみ |
 
-**最終実測 (単独実行、2026-09-03): root suite 1526 passed / 0 failed / 0 skipped / 0 xfailed** (フェーズ開始時 1292 から +234)。**conformance 404** (4 adapter、C-09/C-11 が全 adapter で PROVIDED 分岐)。xfailed は WP-1 で登録した全体 vacuity guard 1 本であり、最後の flip コミット `a3571dc` が `xfail(strict=True)` を外して 0 に戻した (作業指示書 §4 の想定どおり)。skipped は全 WP で 0 — 未接続 PostgreSQL による skip は 1 件も無い。
+**最終実測 (単独実行、2026-09-03): root suite 1526 passed / 0 failed / 0 skipped / 0 xfailed** (フェーズ開始時 1292 から +234)。**conformance 404** (4 adapter、C-09/C-11 が全 adapter で PROVIDED 分岐)。xfailed は WP-1 で登録した全体 vacuity guard 1 本であり、最後の flip コミット `009ca42` が `xfail(strict=True)` を外して 0 に戻した (作業指示書 §4 の想定どおり)。skipped は全 WP で 0 — 未接続 PostgreSQL による skip は 1 件も無い。
 
 正本の所在:
 
@@ -90,7 +90,7 @@
 
 ## 5. 教訓の追加 (前書全項継承に追加)
 
-- **対称実装の発注書に前 WP の欠陥一覧を織り込むと、対称側のレビューは「テスト側の空振り」へ収束する**: WP-3(b) の 4 major は**全てテストの空振り**だった (順序・cursor の `plane` を固定しているはずのテストが実際には固定していない / `visibility_lag_ms` の適用を固定するテストが 1 本も無い / 共通テストへの不要かつ未開示の語彙追加)。実装は正しく、テストが嘘をついていた。**織り込みが効くほど、残る欠陥は製品コードから証拠側へ移る** — 対称 2 週目のレビューは実装より先にテストを疑うこと。ただし織り込みは「同じ指摘を出さない」ことを保証しない (WP-2(a) の M-1 = timeout 配線の無テストは WP-3(a) で**再発**した)。対称実装の価値は指摘数の減少ではなく**両向きの照合**にある — WP-3(a) の B-2 (並行 flush の二重書込み) は後発 peer のレビューが先行 peer の潜在欠陥を見つけ、follow-up `411c034` を生んだ
+- **対称実装の発注書に前 WP の欠陥一覧を織り込むと、対称側のレビューは「テスト側の空振り」へ収束する**: WP-3(b) の 4 major は**全てテストの空振り**だった (順序・cursor の `plane` を固定しているはずのテストが実際には固定していない / `visibility_lag_ms` の適用を固定するテストが 1 本も無い / 共通テストへの不要かつ未開示の語彙追加)。実装は正しく、テストが嘘をついていた。**織り込みが効くほど、残る欠陥は製品コードから証拠側へ移る** — 対称 2 週目のレビューは実装より先にテストを疑うこと。ただし織り込みは「同じ指摘を出さない」ことを保証しない (WP-2(a) の M-1 = timeout 配線の無テストは WP-3(a) で**再発**した)。対称実装の価値は指摘数の減少ではなく**両向きの照合**にある — WP-3(a) の B-2 (並行 flush の二重書込み) は後発 peer のレビューが先行 peer の潜在欠陥を見つけ、follow-up `a2a88e5` を生んだ
 - **受け入れ監査は実装ラウンドより多く回り、欠陥は「失敗経路の第 2 段」に集中する**: WP-2(a) はレビュー後さらに**受け入れ監査 3 ラウンド**を要した。そこで閉じたのは二重計上・alert 行の無制限化・requeue/overwrite 経路であり、いずれも「1 回目の失敗をどう受け止めるか」の側にあった。同じ形が follow-up 1 (**flush 失敗時の復元で容量を超える** = bounded buffer の上限そのものが破れる) と WP-2(a) B-1 (**監査パイプライン自身の失敗が生む `SERVICE_UNAVAILABLE` が新規 denial として再入**し 1 操作が耐久 3 行を生む) にも現れた。**復元・切り詰め・再入を、正常系と同じ密度で設計し検証すること** — B-1 は P4-D7 (包含列挙) の決定根拠そのものになった
 - **変異注入の復元は、ハッシュ照合だけでは製品コードへの残骸混入を防げない**: WP-2(a) では変異復元時に backup を取り忘れ、fallback の `git checkout` が実装者の変更を一度消した (レビュー開始時の `git diff` 全文から逐語復元し `git diff --stat` の完全一致で復旧)。WP-3(b) では受け入れ監査が **`cell.py` に残っていた変異残骸 1 行を除去**している。差分の一致確認は「消えていないこと」しか保証しない — **コミット前に変異文字列そのものを全文 grep すること**を手順に加える
 - **「両論併記の候補集合」は、共通テストに peer 固有語彙が漏れ込んでいる兆候である**: 共通 C-09 vector 1 が `operation` を `{delete, mutate}`、`target_kind` を `{entity, collection}` と手で列挙しているのは、両 peer の実語彙を暫定的に吸収した形にすぎない。**候補集合を書きたくなったら、それは宣言化すべき語彙が宣言されていないという事実の現れ**であり、テストで丸めずに台帳へ起票する (→ L4-1、1.5.0 候補)

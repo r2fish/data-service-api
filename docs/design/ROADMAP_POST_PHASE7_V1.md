@@ -4,11 +4,11 @@
 - 旧 **v1.4 (2026-09-07)**。v1.3 からの変更: §9 の 11 に訂正注 — `tools/check_doc_refs.py` の CI 上の位置を「3.11 / 3.12 両 job の pytest 前段」から**常時実行の独立 job `doc-refs`** に改めた (Class A の push で conformance が回らなくても検査は要る。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-2 訂正 v1.5 / D-4)。§8 の R-15 行に D-4 (CI は変更クラスで conformance の要否を決める) を追記した。**R-14 に従い、旧文は残し訂正注を添える形である。**
 - 旧 **v1.3 (2026-09-07)**。v1.2 からの変更: §9 に 7〜11 を追加、§8 に R-15 / R-16 を追加。根拠: 設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-3、依頼者裁定 2026-09-07 (U-4 (A))。
 - 旧 **v1.2 (2026-09-07)**。v1.1 からの変更: **フェーズ8 が完了した**ので §1「現状」を更新し (§9 の 6)、§5 のフェーズ8 節に完了と完了条件の充足を書き、§8 の R-9〜R-12 の行き先を「フェーズ8 完了」に改めた。**R-14 に従い、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行を、根拠と日付を添えて改版した** (フェーズ8 設計 §10 L8-8)。**行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。
-- 旧 **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `ef9cade` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
+- 旧 **v1.1 (2026-09-06)**。v1.0 からの変更: フェーズ7 WP-8 (第 14 次引き継ぎ `docs/work-orders/HANDOVER_20260906_FABLE.md`) が main `e26f704` に入ったので §1 / §5 の「WP-8 残」を訂正し、第 14 次引き継ぎ §4-2 の開いている台帳項目 (L7-18 / L7-21 / L7-23) を該当する R 項目へ結び付けた。
 - 旧 **v1.0 (2026-09-06)**。外部提案 2 本の評価と依頼者の目標宣言を受けて起草。
 - 起草: Fable (監督)。依頼者の目標 (§0) は逐語。判定 (§3, §6) は本会話での監督評価であり、各フェーズの設計文書で再審議してよい。
 - 位置づけ: 本書は **計画文書**であり、`CLAUDE.md` の source-of-truth 順位には入らない。各フェーズの正本は、そのフェーズの設計文書 (`docs/design/PHASE*_V1.md`) と作業指示書である。本書はそれらの**着手順・範囲・着手条件・守るべき条件**を先に固定し、次フェーズの設計起草者が「何を、なぜ、どの順で」を再導出せずに済むようにする。
-- 前提となる main: `ef9cade` (フェーズ7 WP-8 マージ後。WP-7 の gate 2265 passed / 9 xfailed)。
+- 前提となる main: `e26f704` (フェーズ7 WP-8 マージ後。WP-7 の gate 2265 passed / 9 xfailed)。
 
 ---
 
@@ -35,7 +35,7 @@
 
 **§1.0 (2026-09-07 時点) と §1.1 は下に残す。以下が現在形である。**
 
-- **フェーズ9 は完了した (2026-09-08)。** main の最新 merge は **`b3cfc0c`** (版フリップの pair-closing)。**その直前 2 つが `e16422d` (r2db の版フリップ) と `a1cee5b` (MitateDB の版フリップ) であり、3 つの merge の間に他のコミットは 1 つも挟まっていない。** 完了ゲート (root suite 単独実行) は ****`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree)** (failed 0 / xfailed 0 / skipped 0)。
+- **フェーズ9 は完了した (2026-09-08)。** main の最新 merge は **`85e99fa`** (版フリップの pair-closing)。**その直前 2 つが `3efa79f` (r2db の版フリップ) と `ab89f64` (MitateDB の版フリップ) であり、3 つの merge の間に他のコミットは 1 つも挟まっていない。** 完了ゲート (root suite 単独実行) は ****`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `85e99fa` と同一 tree)** (failed 0 / xfailed 0 / skipped 0)。
 - **契約は 1.6.0 から 1.7.0 になった。** 契約 JSON と両 peer の packaged 複製 2 本の sha256 は 3 本とも **`1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4`** である (フェーズ8 の `968d3c72…45e6` から動いた)。**両 peer が 1.7.0 を宣言する** — `r2db-api/src/r2db_api/service.py:942` / `control_plane.py:731`、`MitateDB-api/src/mitatedb_api/cell.py:3852` / `control_plane.py:1424`。
 - **能力は 11 種 → 14 種**(`constraint_declarations` / `dry_run` / `request_budget` を新設し、既存の `idempotency` を両 peer で `enabled` にした)、**limit class は 16 種 → 17 種**(`enum_members`)、**error code は 17 種のまま**、**共通条件は C-00〜C-19 の 20 件 → C-00〜C-25 の 26 件**であり、**新 6 条件 (C-20〜C-25) はすべて four adapters で実行可能**である。
 - **エージェントの 1 周 (P-2) が宣言だけで閉じた。** **R-2** 制約宣言 (`field_constraints` の enum / nullable、新設 `alter_field`、同じ版で catalog が報告)、**R-3** 検証エラーの固定 details 語彙 (`violated_declaration` は 11 語の閉じた語彙、`field` は要求内パス)、**R-4** `dry_run` と無状態 plan (token = `"<sha256hex>.<application schema revision>"`)、**R-5** idempotency の両 peer 実装、**R-6** request budget (配備値を下回る方向にのみ効く)、**R-7** 成功応答の `request_id`、**R-8** 派生の操作カタログ (`tools/contract_catalog.py` + `spec/OPERATION_CATALOG.json`、19 行、再生成一致テスト) と `versioning.obligations`。
@@ -49,14 +49,14 @@
 
 **§1.1 (2026-09-06 時点) は下に残す。以下が現在形である。**
 
-- **フェーズ8 は完了した (2026-09-07)。** main の最新 merge は **`9f75428`** (WP-1 = L7-1 + port v1.12 + L7-21)。完了ゲート (root suite 単独実行) は **`2340 passed, 5 warnings in 349.31s (0:05:49)`**、**failed 0 / xfailed 0 / skipped 0**。
+- **フェーズ8 は完了した (2026-09-07)。** main の最新 merge は **`f4635ed`** (WP-1 = L7-1 + port v1.12 + L7-21)。完了ゲート (root suite 単独実行) は **`2340 passed, 5 warnings in 349.31s (0:05:49)`**、**failed 0 / xfailed 0 / skipped 0**。
 - **契約は 1.6.0 のまま 1 バイトも動いていない。** 契約 JSON と両 peer の packaged 複製 2 本の sha256 は 3 本とも `968d3c72…45e6` である (フェーズ8 設計 §11.1)。**能力 11 種、error code 17 種、limit class 16 種、共通条件 C-00〜C-19 の 20 件が全件 four adapters で実行可能**という状態も変わらない (新しい共通条件は足していない)。
 - **宣言した bound が全 peer で実効になった (G-2 の土台)。** **L7-1 が閉じた** — MitateDB の application plane が `execution_ms` (`reference_wall_clock`) / `concurrency` / `requests_per_minute` / `operation_depth` と in-process の `request_bytes` を実際に強制し、**C-05 V3 の `xfail(strict=True)` は 9 → 0 になった**。**`operation_depth` は in-process / HTTP の両面で `enforced` であり、非対称は残っていない。**
 - **`concurrency` が共通 suite で初めて駆動されるようになった。** **port は v1.12** — `hold_in_flight` (in-flight 保持 primitive、4 plug すべてが実装、待ち上限 30 秒) と、要求側の optional フィールド (`limit` / `extra_predicates`) が入った。**L7-21 が閉じた** — V2 の除外判定は peer 名固定から能力判定になり、**`test_c05` の `adapter.name` 読みは allowlist 3 行だけである** (AST 走査で固定)。
 - **CI にテスト総数の下限が入った (R-9)。** `conformance-tests/COLLECTION_FLOOR` = **2340** (フェーズ8 のゲート時実測)。検査は `tools/check_collection_floor.py` で、CI の 3.11 / 3.12 の両 job が pytest の前に走らせる。**減少は明示の更新コミット無しに赤である。** **L7-23 (register テストの収集 0 件ガード) も閉じた。** **CI の `conformance` job には `timeout-minutes: 30` が入った。**
 - **`spec/` に provenance companion が入った (R-10 (A))。** `spec/CONTRACT_HISTORY.md` が **29 個の JSON パス anchor** を持ち、各 anchor が値の全文の逐語複製・該当する subordinate ruling・導入版を記録する。**契約 JSON は 0 バイト動いていない。** 常設スキャナと companion の anchor 集合の一致、引用の byte 一致、導入版の照合 (17 件) を register テスト 7 本が固定する。
 - **運用項目が揃った (R-11)。** 両 peer に **`ops verify-declarations`** (F 番号ごとの固定終了コード、同型) が入り、`tools/deploy_smoke.py`、`docs/ops/BACKUP_RESTORE_R2DB.md` (実証記録付き)、argv secret の常設静的検査が入った。**provision script の psql argv から secret が消えた** (6 件 → 0 件、`\getenv` + `ON_ERROR_STOP`)。**L7-18 は閉じた。L7-19 は撤去条件未達のまま据え置き** (上流の Starlette 待ち)。**L7-22 は起票時点で既に充足していたことが判明し、記述訂正で閉じた。**
-- **性能基準値がある (R-12、G-4 の土台)。** `tools/perf_baseline.py` と、**4 plug × 3 op (`query` / `mutate` / `batch`) = 12 行 + MitateDB 2 plug × `cross_entity` = 2 行、計 14 行**の基準値がフェーズ8 設計 §11.2 に記録された (`--warmup 20 --n 200`、`commit=2ab4edc-dirty`)。**閾値は置いていない** (P-8)。**この基準値が §7 の 3 が言う「2 フェーズ安定」の起点である** — フェーズ9 と フェーズ10 の完了ゲートが同じ形で差分を添えた後に、ゲート化を審議する。
+- **性能基準値がある (R-12、G-4 の土台)。** `tools/perf_baseline.py` と、**4 plug × 3 op (`query` / `mutate` / `batch`) = 12 行 + MitateDB 2 plug × `cross_entity` = 2 行、計 14 行**の基準値がフェーズ8 設計 §11.2 に記録された (`--warmup 20 --n 200`、`commit=3c85e96-dirty`)。**閾値は置いていない** (P-8)。**この基準値が §7 の 3 が言う「2 フェーズ安定」の起点である** — フェーズ9 と フェーズ10 の完了ゲートが同じ形で差分を添えた後に、ゲート化を審議する。
 - **フェーズ7 の残は WP-9 (公開ゲート) だけであり、着手条件は依然として依頼者の実行合図のみである。** フェーズ8 とは触るファイルが重ならなかった。
 - **開いている台帳項目**: **L7-2** (実 socket HTTP plug、フェーズ10)、**L7-19** (上流待ち)、**L6-5a** (`surfaces` の DB 側単一真実、フェーズ10)、および フェーズ8 が起票した **L8-2 / L8-3 (閉) / L8-5 / L8-6 / L8-10 / L8-11 / L8-12 / L8-13** — 詳細はフェーズ8 設計 §10。
 
@@ -158,12 +158,12 @@
 
 ### フェーズ7 残 (変更なし)
 
-- **WP-8** は完了した (main `ef9cade`)。本書への参照は第 14 次引き継ぎ §4-2 の末尾に 1 行で置いた。
+- **WP-8** は完了した (main `e26f704`)。本書への参照は第 14 次引き継ぎ §4-2 の末尾に 1 行で置いた。
 - **WP-9** 公開ゲート。着手条件は依頼者の実行合図のみ (L7-12 状態注記)。**公開は G-2 の「人から見て」を成立させる前提**であり、フェーズ8 以降のどの機能よりも先に価値を生む。フェーズ8 の着手を WP-9 の完了に**依存させない** (触るファイルが重ならない) が、順序としては WP-9 を先に置くことを推奨する。
 
 ### フェーズ8 — 実効 bound と基盤衛生 (契約変更なし) 【完了 (2026-09-07)】
 
-**【状態注記 2026-09-07】本節は完了した。** 正本は `docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` (**v1.3**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` (訂正註は §5) である。**main の最新 merge は `9f75428`、完了ゲートは `2340 passed, 5 warnings in 349.31s (0:05:49)` (failed 0 / xfailed 0 / skipped 0)。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
+**【状態注記 2026-09-07】本節は完了した。** 正本は `docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` (**v1.3**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` (訂正註は §5) である。**main の最新 merge は `f4635ed`、完了ゲートは `2340 passed, 5 warnings in 349.31s (0:05:49)` (failed 0 / xfailed 0 / skipped 0)。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
 
 - **完了条件 1「C-05 V3 の xfail が 0 (または実測で残る class とその理由が台帳に載る)」= 充足。** **xfail は 0 である。** `operation_depth` が in-process / HTTP の両面で `enforced` になったため、残った class は無い (設計 §5 U-1 状態注記、§10 L8-3)。
 - **完了条件 2「CI に総数下限 job」= 充足。** `tools/check_collection_floor.py` を CI の 3.11 / 3.12 の両 job が pytest の前に走らせる。`conformance-tests/COLLECTION_FLOOR` = **2340**。
@@ -185,7 +185,7 @@
 
 ### フェーズ9 — 契約 1.7.0「宣言と検証」【完了 (2026-09-08)】
 
-**【状態注記 2026-09-08】本節は完了した。** 正本は `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` (**v1.8**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md` (訂正註は §6、19 件) である。**main の最新 merge は `b3cfc0c`、完了ゲートは **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `b3cfc0c` と同一 tree) である。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
+**【状態注記 2026-09-08】本節は完了した。** 正本は `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` (**v1.8**、§11 が実施記録) と `docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md` (訂正註は §6、19 件) である。**main の最新 merge は `85e99fa`、完了ゲートは **`2807 passed, 5 warnings in 323.70s (0:05:23)`** (failed 0 / xfailed 0 / skipped 0 / error 0 — 集計行にいずれの語も無い。終了コード変数は zsh の `pipestatus` 差で取得漏れ、判定は集計行による。`pg_database` 22 → 22、`ps` で他の pytest 0 件、2026-09-08 05:26〜05:32 JST、main `85e99fa` と同一 tree) である。** 下記「完了条件」の 4 項目の充足は次のとおりである (R-14 に従い、元の行は消さずに残す)。
 
 - **完了条件 1「契約 1.7.0」= 充足。** 3 複製の sha256 は `1651795480511be5476c554ea95dda67152fe2512beedee352049d17c19afcc4` で一致する (フェーズ8 の値から動いた)。**従属判断 12 を `spec/CCR_DISPOSITION.md` に新設した。**
 - **完了条件 2「両 peer の `contract_version` 1.7.0」= 充足。** 4 箇所すべてを実測した (§1.0b)。**版フリップは peer ごとに 1 コミットで、完了ゲート内で連続して main にマージし、間に他のコミットを挟んでいない** (設計 §5 U-7 = (A))。

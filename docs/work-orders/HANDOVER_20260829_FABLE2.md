@@ -10,10 +10,10 @@
 
 | コミット | 内容 |
 |---|---|
-| `13cb58a` | 設計 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.1 (WP-0 独立レビュー Opus: blocker 3 / major 10 / minor 10 / nit 2、全件実測裏取り・誤指摘 0、全反映) |
-| `27cd37d` | v1.2: 依頼者との Q-1 検討の反映 (確認機構の守備範囲、CLI break-glass の control credential enable/rotate、R-11 誤配・侵害への装備、契約 additive 候補) |
-| `d933ab7` | v1.3: 抑止宣言の採用 (拒否応答への「徒労」「帰属」の真実の宣言。期待効果は「利用者側エージェントの警告」までと依頼者が確定) |
-| `970a0b6` | 依頼者検討の一次記録 `docs/work-orders/CCR14_DESIGN_PHASE_RECORD_20260829.md` (**依頼者指示: リファクタリングで削除禁止**。設計文書 §0.5/R-11/§9 も同様) |
+| `38f22fb` | 設計 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.1 (WP-0 独立レビュー Opus: blocker 3 / major 10 / minor 10 / nit 2、全件実測裏取り・誤指摘 0、全反映) |
+| `6ffd152` | v1.2: 依頼者との Q-1 検討の反映 (確認機構の守備範囲、CLI break-glass の control credential enable/rotate、R-11 誤配・侵害への装備、契約 additive 候補) |
+| `6ba673c` | v1.3: 抑止宣言の採用 (拒否応答への「徒労」「帰属」の真実の宣言。期待効果は「利用者側エージェントの警告」までと依頼者が確定) |
+| `c8009f7` | 依頼者検討の一次記録 `docs/work-orders/CCR14_DESIGN_PHASE_RECORD_20260829.md` (**依頼者指示: リファクタリングで削除禁止**。設計文書 §0.5/R-11/§9 も同様) |
 
 - 設計文書が単一の正: 規範 (契約 1.1.0 は CCR-14 文言化済み)、R-1〜R-11、endpoint 対応表 (§2)、conformance 計画 (§4: port v1.5、C-14/C-15、surface-absent/provided の adapter×フェーズ割当)、WP-1〜WP-6 (§5)、監督決定一覧 (§6)、訂正・改訂記録 (§8/§9)
 - 依頼者は設計に満足を表明済み

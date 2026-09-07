@@ -1761,7 +1761,7 @@ bootstrap_reset_lifecycle.py`'s own `register_application_inband` audit
 call with `LIMIT_EXCEEDED` (`details={"resource": "applications", "limit":
 100}`) at session end, on BOTH r2db plugs. The regression was verified
 genuine (not pre-existing) the correct way: the whole WP's diff was
-stashed, the full root suite was run against the byte-identical fe8d0b7
+stashed, the full root suite was run against the byte-identical 7d739be
 tree (727 passed, 0 failed), then the diff was restored and the full suite
 re-run with this file present (2 failed) and absent (0 unexpected
 failures) -- an earlier attempt to establish "pre-existing" by running a

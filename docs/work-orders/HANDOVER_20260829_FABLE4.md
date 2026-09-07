@@ -10,8 +10,8 @@
 
 | コミット | 内容 |
 |---|---|
-| `b83fe9a` | 既存欠陥の先行修正: 並行セッション `3e0e678` が spec の非 OpenAPI 宣言を packaged copy (`r2db_api.contract`) へ同期し忘れ、main の byte-identity テストが赤だった。spec 原本を逐語コピーで同期 |
-| `b3a817a` | **WP-6 本体**: CONTROL_MAPPING (SI-00/02/03/06/08/13/14 + C-14/C-15、SI-14 行に監査対象外2系統の並記 = WP-3 条件付き承認の履行)、runbook 2冊 (0006・儀式・ロックアウト3経路と軽量復旧・`R2DB_CONTROL_PLANE_STATUS`・begin 残骸2分岐回収)、新規 `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (R-11)、`ops.py audit-report --since/--until` (テスト10本・変異6本赤 + 受理境界1)、README、設計文書 v1.9 (§15 実装・レビュー記録、台帳整理) |
+| `75c270c` | 既存欠陥の先行修正: 並行セッション `faf357f` が spec の非 OpenAPI 宣言を packaged copy (`r2db_api.contract`) へ同期し忘れ、main の byte-identity テストが赤だった。spec 原本を逐語コピーで同期 |
+| `c9a2e90` | **WP-6 本体**: CONTROL_MAPPING (SI-00/02/03/06/08/13/14 + C-14/C-15、SI-14 行に監査対象外2系統の並記 = WP-3 条件付き承認の履行)、runbook 2冊 (0006・儀式・ロックアウト3経路と軽量復旧・`R2DB_CONTROL_PLANE_STATUS`・begin 残骸2分岐回収)、新規 `r2db-api/docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md` (R-11)、`ops.py audit-report --since/--until` (テスト10本・変異6本赤 + 受理境界1)、README、設計文書 v1.9 (§15 実装・レビュー記録、台帳整理) |
 
 - テスト実測: root suite **719 passed** (~186s。監督・レビュア・実装者の3者がそれぞれ独立に全数実行) / `r2db-api/tests/test_postgres.py` 単独 **180 passed**
 - 全記録は設計文書 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.9 の **§15** (WP-6 実装記録・レビュー往復 §15.7・変異表・監督決定)
@@ -32,7 +32,7 @@
 
 ## 4. 本セッションの教訓 (§3/§4 継承に追加)
 
-- **契約ファイルを触るコミットは root suite 完走を完了条件にする**: 並行セッションの spec 1行変更が packaged copy との byte-identity テストを赤にしたまま main に乗っていた (`b83fe9a` で修正)。「文書だけの変更」にもテストの網が掛かっている前提で動く
+- **契約ファイルを触るコミットは root suite 完走を完了条件にする**: 並行セッションの spec 1行変更が packaged copy との byte-identity テストを赤にしたまま main に乗っていた (`75c270c` で修正)。「文書だけの変更」にもテストの網が掛かっている前提で動く
 - **ドキュメント WP のレビューも実測型が機能する**: レビュアは runbook/playbook の手順を**字義通り実行**して3件の実行不能・誤案内を再現した (無資格 capabilities は 401 + 監査行 / playbook revoke は app 面 pepper 不足で rc=2 / begin 残骸回収は DB 作成後クラッシュで DROP ROLE 失敗)。文書の宣言はコマンド実行と SQL 実観察で検証させること
 - **設計本文が後続決定で古くなる**: R-5 m-2「復旧は reset 唯一」は R-10 の break-glass 追加で古くなっていた。実装者が逸脱として報告 → レビュアが3経路とも実測で機能確認 → 設計に補記、の流れが機能した。設計の規範文に矛盾する記述を見たら、新しい方が正しい可能性をまず実測で確かめる
 - **CLI 出力の性質 (順序タイブレーカー・TZ 規約・read-only) は明示テストで固定する**: 実装者の変異3本が赤でも、レビュアの別角度の変異3本 (event_id タイブレーカー除去・naive→UTC 除去・読取後の書込み追加) は全部生き残った。宣言した性質1つにつきテスト1本

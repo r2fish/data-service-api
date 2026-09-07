@@ -10,7 +10,7 @@
   1. **Q4 案 B** — `visibility_lag_ms` / `coalescing_window_ms` の 2 プロセス整合 (`PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 Q4、:1067-1077)
   2. **L6-5a** — `surfaces` の 2 プロセス間ドリフト (`PHASE6_CONTRACT_160_CLIENT_DISCOVERY_V1.md` §11 L6-5a、:794、および §3 D-2 の F9、:291-296)
   3. **L6-20 (f)** — per-application upgrade script の運用性 (台帳 / 一括適用 / 適用状態の可視化、同 :855)
-- ブランチ: `q4-db-single-truth` (main `730e5a2` から)
+- ブランチ: `q4-db-single-truth` (main `a5bc810` から)
 - 体制: Fable 監督/設計/コミット、Opus 起草/独立レビュー/受け入れ監査、Sonnet 実装 (コミットしない)。完了条件・単一コミット規律・identity 確認は既存フェーズと同一
 - 設計原則 (依頼者、2026-09-02): 先送りしない / シンプル / 制約・制限で回避しない / 誇れる成果物。既定の重み付けは「最小変更」ではなく「長期に正しい形」。利用者・運用者は AI エージェント (宣言は確実に読まれる)
 - 決定軸 (監督、2026-09-05): **堅牢で安全が第一、次に最大限の自由。ガードレールでありゲートではない** — 止めるときは必ず「次に打つコマンド」を示す
@@ -878,7 +878,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **完了条件 6 のとおり**: 違反 0 かつ 免除 = r2db 空 / MitateDB `{6}` (本フェーズにまだ per-application upgrade script が無いため 適合 は両 peer とも 0 — 完了条件 8 のとおり `xfail(strict=True)` で登録し、r2db = WP-3 / MitateDB = WP-4 で撤去する)。
 
-**最終実測 (WP-3 / WP-4 出荷後、2026-09-05)** — 本フェーズの per-application upgrade script (r2db `0009` / MitateDB `0008`) が出荷され、**WP-0 が登録した `xfail(strict=True)` 4 本 (両 peer の「適合 ≥ 1」と「三者一致」) は当該 peer の WP と同一コミットで撤去された** (r2db = WP-3 `55998b2`、MitateDB = WP-4 `370fe33`)。各 peer のテストが自 peer の `migrations/` だけを走査した結果:
+**最終実測 (WP-3 / WP-4 出荷後、2026-09-05)** — 本フェーズの per-application upgrade script (r2db `0009` / MitateDB `0008`) が出荷され、**WP-0 が登録した `xfail(strict=True)` 4 本 (両 peer の「適合 ≥ 1」と「三者一致」) は当該 peer の WP と同一コミットで撤去された** (r2db = WP-3 `3d186a9`、MitateDB = WP-4 `bde32c1`)。各 peer のテストが自 peer の `migrations/` だけを走査した結果:
 
 ```
 ### r2db-api/migrations  (peer=r2db-api)
@@ -978,7 +978,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 **本フェーズで新たに見えた項目 (WP-5 起票、2026-09-05)**
 
 - **LQ4-24 配備資産 (`r2db-api/deploy/scripts/part1_provision_host_and_db.sh`) が本フェーズに追随していない**。同 script はフェーズ7 WP-3 の成果物であり、`0001`/`0002`/`0005`/`0006`/`0007` と最初の application の `0003` を当てるが、**`0008` を当てず `ops declare-surfaces` も打たない**。この script だけで作った新規ホストは、両プロセスが F-8 → F-3 で起動しない。**当面の手当ては手順書側**である (`DEPLOYMENT_RUNBOOK.md` §7 の注記、`DEPLOY_Q4_20260905.md` §7)。script 本体の更新は配備資産の作業であり、本フェーズの文書 WP の範囲外とした。
-  - **【閉止 2026-09-06 (フェーズ7 側で消化、Q4 セッションからの引き継ぎ)】** `r2db-api/deploy/scripts/` を本設計に追随させた (branch `phase7-wp3` commit `d952533`、main merge `c4bc89f`): part1 が `0001`〜`0008` (0008 は `api_role` / `controlplane_role` の psql 変数付き、role 名を 0005/0006 のリテラルと `pg_roles` で照合) → 改訂 `0003` → `ops upgrade-applications` を流し、新設 `part1c_declare_surfaces.sh` が `declare-surfaces` (control は `--no-control` 可) と marker を担い、part2 は unit を上げる前に両 surface 前提の gate・廃止 4 変数の拒否 (`sudo grep`、rc 分岐)・`R2DB_CONTROL_PLANE_STATUS` と control 宣言の F-6 両方向整合 (systemd 準拠の値解釈) を検査し、起動後に両 surface の 401 と `ops upgrade-status` (pending = 停止) を検証、`show-declarations` は診断表示。runbook §7 は「enabled → part2」の順に、`POSTGRES_PROVISIONING_RUNBOOK` §6/§10/§17 と `ops.py` のコメントは `R2DB_MIGRATIONS_DIR` を正式な運用変数として記載。レビュー 7 件・監査 5 件を反映し、fake ops/psql/sudo/curl の E2E と変異 (F-6 検査除去 / role 照合除去) で各 gate の load-bearing を実測。残件は Phase 7 台帳 L7-18 (終了コード付き `verify-declarations` は未実装、宣言側の検証は起動時 fail-fast が担う)。
+  - **【閉止 2026-09-06 (フェーズ7 側で消化、Q4 セッションからの引き継ぎ)】** `r2db-api/deploy/scripts/` を本設計に追随させた (branch `phase7-wp3` commit `c90f199`、main merge `a4d5b3a`): part1 が `0001`〜`0008` (0008 は `api_role` / `controlplane_role` の psql 変数付き、role 名を 0005/0006 のリテラルと `pg_roles` で照合) → 改訂 `0003` → `ops upgrade-applications` を流し、新設 `part1c_declare_surfaces.sh` が `declare-surfaces` (control は `--no-control` 可) と marker を担い、part2 は unit を上げる前に両 surface 前提の gate・廃止 4 変数の拒否 (`sudo grep`、rc 分岐)・`R2DB_CONTROL_PLANE_STATUS` と control 宣言の F-6 両方向整合 (systemd 準拠の値解釈) を検査し、起動後に両 surface の 401 と `ops upgrade-status` (pending = 停止) を検証、`show-declarations` は診断表示。runbook §7 は「enabled → part2」の順に、`POSTGRES_PROVISIONING_RUNBOOK` §6/§10/§17 と `ops.py` のコメントは `R2DB_MIGRATIONS_DIR` を正式な運用変数として記載。レビュー 7 件・監査 5 件を反映し、fake ops/psql/sudo/curl の E2E と変異 (F-6 検査除去 / role 照合除去) で各 gate の load-bearing を実測。残件は Phase 7 台帳 L7-18 (終了コード付き `verify-declarations` は未実装、宣言側の検証は起動時 fail-fast が担う)。
 - **LQ4-25 r2db の `database_name` NULL 系テストは出荷済みスキーマでは到達不能な状態を人工的に作る** (受け入れ監査の両論、2026-09-05)。r2db は throwaway registry に `ALTER TABLE … ALTER COLUMN database_name DROP NOT NULL` を打ってその状態を作る (docstring に明記あり) のに対し、MitateDB は二段階 registry のため自然に到達する。**同名テストだが意味は同じではない** — r2db 側は「将来 `NOT NULL` が緩んだときの防御」であり、現行スキーマの経路の実測ではない。
 - **LQ4-26 ops 出力の細部に peer 非対称が残る**。`--script` の「skipped (already recorded) を偽報告しない」assert は MitateDB のみ、失敗時の tail は r2db が stderr のみ / MitateDB が stdout + stderr である。**集計行の書式と計数規則は両 peer で揃え、両 peer 同名のテスト (`::test_upgrade_applications_tally_line_counts_one_of_each_outcome`) で固定した** (受理境界の解消、§13)。残るのは上記 2 点である。
 - **LQ4-27 fail-fast の文字列ピンの形が peer 非対称**。F-3 の逐語ピンは r2db が実 PG 版のみ、MitateDB は純関数版と実 PG 版の 2 本を持つ。廃止 env の 16 ケースも r2db は `for` ループ、MitateDB は `parametrize` であり、**どちらも条件は満たすがテスト id から読める粒度が違う**。同型性対応表が固定するのは製品コードのヘルパであってテストの形ではないため、これは記録として残す。
@@ -995,12 +995,12 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 | WP | 内容 | 実装コミット | merge | root suite (単独実行、passed / failed / skipped / xfailed) |
 |---|---|---|---|---|
 | **基準値** | フェーズ6 完了 + 配備記録の main | — | — | **1802 / 0 / 0 / 0** (2026-09-04、`DEPLOY_PHASE6_20260904.md` §7.1 に記録された監督の単独実行値。**Q4 着手時点での再実測は記録に無い**) |
-| **WP-0** | 共通基盤 (静的規則スキャナ + ms 正規化ヘルパの src 引き上げ + 同型性対応表) | `977cb7d` | `6ddcd19` | **1868 / 0 / 0 / 4 xfailed** (`{scratchpad}/wp0-gate2.log`。差し戻し前の第 1 ラウンドは `1862 / 0 / 0 / 4`、`wp0-gate.log`) |
-| **WP-1** | r2db — 宣言を DB 側へ (`0008` + composition root + 二重検査 + ops 宣言系) | `9ae8ea6` | `a01bdf0` (WP-1 と WP-2 の合流) | **2077 / 0 / 0 / 4 xfailed** (WP-2 と同一ゲート、`{scratchpad}/wp12-gate.log`) |
-| **WP-2** | MitateDB — 同 (`0007` + 参照実装 `platform_declarations.py`) | `0379827` | `a01bdf0` | **2077 / 0 / 0 / 4 xfailed** (同上) |
-| **WP-3** | r2db — per-application 台帳と一括適用 (`0003` 改訂 + `0009` + cell open 検査 + ops) | `55998b2` | `0301c10` (WP-3 と WP-4 の合流) | **2165 / 0 / 0 / 0** (WP-4 と同一ゲート、`{scratchpad}/wp34-gate2.log`。差し戻し前は `2161 / 0 / 0 / 0`、`wp34-gate.log`) |
-| **WP-4** | MitateDB — 同 (`0003` 改訂 + `0008` + backfill + ops) | `370fe33` | `0301c10` | **2165 / 0 / 0 / 0** (同上) |
-| **WP-5** | 記録整理 (`CONTROL_MAPPING.md` 3 行 + runbook 3 本 + DEPLOY_Q4 + 閉止注記 3 件 + 本節 + 作業指示書 §11 + 引き継ぎ第14次) | ``4b438ee` (main `2ab012b`; 本記録の確定コミットは次回引き継ぎ §1 に記載)` | `(同上)` | 文書のみ (**2165** のまま。製品コード・テスト・migration・spec を触っていない) |
+| **WP-0** | 共通基盤 (静的規則スキャナ + ms 正規化ヘルパの src 引き上げ + 同型性対応表) | `5e85e95` | `0cc87fa` | **1868 / 0 / 0 / 4 xfailed** (`{scratchpad}/wp0-gate2.log`。差し戻し前の第 1 ラウンドは `1862 / 0 / 0 / 4`、`wp0-gate.log`) |
+| **WP-1** | r2db — 宣言を DB 側へ (`0008` + composition root + 二重検査 + ops 宣言系) | `c5fd9a4` | `1f1ef2b` (WP-1 と WP-2 の合流) | **2077 / 0 / 0 / 4 xfailed** (WP-2 と同一ゲート、`{scratchpad}/wp12-gate.log`) |
+| **WP-2** | MitateDB — 同 (`0007` + 参照実装 `platform_declarations.py`) | `0379827` | `1f1ef2b` | **2077 / 0 / 0 / 4 xfailed** (同上) |
+| **WP-3** | r2db — per-application 台帳と一括適用 (`0003` 改訂 + `0009` + cell open 検査 + ops) | `3d186a9` | `c82ce06` (WP-3 と WP-4 の合流) | **2165 / 0 / 0 / 0** (WP-4 と同一ゲート、`{scratchpad}/wp34-gate2.log`。差し戻し前は `2161 / 0 / 0 / 0`、`wp34-gate.log`) |
+| **WP-4** | MitateDB — 同 (`0003` 改訂 + `0008` + backfill + ops) | `bde32c1` | `c82ce06` | **2165 / 0 / 0 / 0** (同上) |
+| **WP-5** | 記録整理 (`CONTROL_MAPPING.md` 3 行 + runbook 3 本 + DEPLOY_Q4 + 閉止注記 3 件 + 本節 + 作業指示書 §11 + 引き継ぎ第14次) | ``02e209e` (main `dd5fd86`; 本記録の確定コミットは次回引き継ぎ §1 に記載)` | `(同上)` | 文書のみ (**2165** のまま。製品コード・テスト・migration・spec を触っていない) |
 
 **ディレクトリ別内訳 (収集件数)**
 
@@ -1017,7 +1017,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 ### 13.2 WP ごとの記録
 
-#### WP-0 — 共通基盤 (`977cb7d` → merge `6ddcd19`)
+#### WP-0 — 共通基盤 (`5e85e95` → merge `0cc87fa`)
 
 **採った形**: `ms_from_pg_timeout_text` を両 peer の `src/<peer_pkg>/pg_timeouts.py` へ引き上げ (PG の受理単位 `us`/`ms`/`s`/`min`/`h`/`d` + 単位無し、端数は基底 ms 換算後に round-half-even = PG の `rint` 相当)、per-application upgrade script の静的規則スキャナを両 peer の `tests/test_platform_upgrade_ledger_scan.py` に設置、対応表を 24 行へ拡張。**実 `migrations/` に対する「適合 ≥ 1」と三者一致は、この時点ではまだ真でないので `xfail(strict=True)` で先置きした。**
 
@@ -1027,7 +1027,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 
 **受理境界**: **モジュール定数は同型性対応表の対象外である** (`_UNIT_MULTIPLIER_MS` / `_PATTERN` — 対応表は関数を pin するが、その関数が参照するモジュール定数までは辿らない)。片 peer だけが定数値をドリフトさせても対応表は赤にならず、**担保は各 peer の `tests/test_pg_timeouts.py` の単位別ケース**である。§12 **LQ4-21** に起票した。
 
-#### WP-1 / WP-2 — 宣言を DB 側の一次情報へ (`9ae8ea6` / `0379827` → merge `a01bdf0`)
+#### WP-1 / WP-2 — 宣言を DB 側の一次情報へ (`c5fd9a4` / `0379827` → merge `1f1ef2b`)
 
 **採った形**: platform 単発 migration (r2db `0008` / MitateDB `0007`) が **`ALTER ROLE … SET` の 4 文と宣言表 `<registry>.platform_declarations` を 1 トランザクションで**作り、`audit_coalescing_window_ms` の既定 (`60000`) と `audit_writer_roles` (`ALTER ROLE` と**同じ psql 変数から**組んだ値) を seed する (`surfaces` は seed しない)。両 peer の composition root は起動時にこの表と `pg_db_role_setting` を読み、廃止 env 4 本を拒否し (F-1 / F-2)、書き手プロセスは自 role について二重検査を行う (F-13 → F-7 / F-10 / F-11 → F-9)。control は宣言された各 role の catalog から `visibility_lag_ms` を導出する。ops に宣言系 4 コマンドを追加した。
 
@@ -1044,7 +1044,7 @@ GRANT  SELECT ON public._r2db_platform_upgrades TO SESSION_USER;
 - **完了条件 11 (ops の終了コード 1) は `psycopg.OperationalError` 経路でのみ観測**しており、`FoundationError` 分岐は未観測である。
 - **テストの形に peer 非対称が残る** — 廃止 env の 16 ケースが r2db は `for` ループ / MitateDB は `parametrize`、F-3 の逐語ピンが r2db は実 PG 版のみ / MitateDB は純関数版 + 実 PG 版。**条件は両 peer とも満たすが、テスト id から読める粒度が違う。** §12 **LQ4-27** に起票した。
 
-#### WP-3 / WP-4 — per-application 台帳と一括適用 (`55998b2` / `370fe33` → merge `0301c10`)
+#### WP-3 / WP-4 — per-application 台帳と一括適用 (`3d186a9` / `bde32c1` → merge `c82ce06`)
 
 **採った形**: `0003` テンプレートを改訂して台帳表 `public._<peer>_platform_upgrades` を作り現時点の全番号を seed し (r2db `{9}` / MitateDB `{6, 8}`)、既存 DB 用の per-app upgrade script (r2db `0009` / MitateDB `0008`) を対で出した (MitateDB は `_mdb_field_types` の存在で `0006` を backfill する)。backend の bookkeeping 除外集合、r2db の `_r2db_missing_rls` ビュー、`schema_objects` の会計を台帳表について更新した。cell open 時の集合検査と **F-12** を実装し、ops に `upgrade-applications` / `upgrade-status` を追加した (終了コード 0/1/2/3/4、`enabled` 非依存、`database_name` NULL は失敗、失敗 DB ごとに `REVOKE` の掃除文と psql stderr の tail)。**WP-0 の `xfail` 4 本は当該 peer の WP と同一コミットで撤去した。**
 

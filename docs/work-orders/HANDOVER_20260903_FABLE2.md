@@ -11,11 +11,11 @@
 
 | コミット (merge) | WP | 内容 | root suite (単独実行) |
 |---|---|---|---|
-| `f47739c` | WP-A1 | **配備適用パケット** (運用者手順書 + r2db env テンプレート + MitateDB ctrl 呼び出し経路) | 文書のみ (基準 **1526**) |
-| `499f388` | WP-B1 | **L4-5** 宣言語彙 AST 走査の再構成 (両 peer、P4-D16 v3) | **1534** (純増 8) |
-| `ac8fd92` | WP-B2 | **L4-3** `failing` フラグの意味論変更 (両 peer、P4-D15) | **1538** |
-| `3e10a7a` | WP-B3 | **L4-6** + **L4-7(i)(ii)** + **L4-10** + **L4-11** 宣言スナップショット | **1545** (レビュー差し戻し後の最終値は下記) |
-| `9a4ff03` | WP-B4 | 記録整理 (設計 v1.6、CONDITIONS、CONTROL_MAPPING) | 文書のみ |
+| `3a0e147` | WP-A1 | **配備適用パケット** (運用者手順書 + r2db env テンプレート + MitateDB ctrl 呼び出し経路) | 文書のみ (基準 **1526**) |
+| `7854359` | WP-B1 | **L4-5** 宣言語彙 AST 走査の再構成 (両 peer、P4-D16 v3) | **1534** (純増 8) |
+| `0bc9f65` | WP-B2 | **L4-3** `failing` フラグの意味論変更 (両 peer、P4-D15) | **1538** |
+| `0fca814` | WP-B3 | **L4-6** + **L4-7(i)(ii)** + **L4-10** + **L4-11** 宣言スナップショット | **1545** (レビュー差し戻し後の最終値は下記) |
+| `93db62a` | WP-B4 | 記録整理 (設計 v1.6、CONDITIONS、CONTROL_MAPPING) | 文書のみ |
 
 **最終実測 (単独実行、2026-09-03): root suite **1545 passed / 0 failed / 0 skipped / 0 xfailed** (WP-B3 差し戻し後の最終形を監督が単独再実行して確認。WP-B3 差し戻しは 1 回: MitateDB adapter timeout guard を ms 数値比較へ / 複製理由と 413 判別子の docstring 訂正 / L4-7(ii) を両 peer AST ベースへ。件数は 1545 のまま)。** `conformance` は **404 passed** で本セッション全 WP を通じて**不変**である (共通 port `conformance-tests/adapter.py` は **v1.8 のまま**、`docs/design/CONFORMANCE_ADAPTER_V1.md` は無変更 — P4-D17)。
 
@@ -52,7 +52,7 @@
 - **L4-10 起票 → CLOSED (WP-B3)** — r2db `control_main` が `request_bytes` を env から読んでいなかった非対称を、`R2DB_CONTROL_LIMIT_REQUEST_BYTES` の配線で閉じた。**既定は現行の 1_048_576 を維持**する (既定値の peer 差 65536 / 1_048_576 は開示済み差として据え置き)
 - **L4-11 起票 → CLOSED (WP-B3 追加項目)** — P4-D16 v3 の `U == D ∪ N` は、**耐久語彙を D から抜いて同時に N へ足す**変更を等式を保ったまま通してしまう (実測済み)。両 peer に**宣言スナップショットテスト** `test_declared_audit_event_classes_change_only_deliberately` を置き、`DECLARED_AUDIT_EVENT_CLASSES` がテスト内固定の `frozenset` (**r2db 11 語 / MitateDB 12 語**) と一致することを要求した。宣言を縮める変更は必ず赤になり、実装者に「意図した縮小である」ことをテスト側でも宣言させる
 - **L4-8 据え置き (P4-D18) — CLOSED ではない** — C-09 vector 4 は**射程を「共通 port の構造保証」と明示**して据え置いた。peer 側に監査変更面が無いことは **DB 権限**で担保されており (両 peer に権限テストが実在)、peer 観測形へ作り直しても**新しい安全結果は得られない**。作り直すか否かは将来の判断に残る
-- **L4-9 RESOLVED** — 起票時点で既に解消済みだった (WP-1 `09233dd` の `_event_identity` は既に `(plane, event_id)` を使っていた)。台帳の記述が受け入れ監査時点の指摘のまま残っていた
+- **L4-9 RESOLVED** — 起票時点で既に解消済みだった (WP-1 `f394da8` の `_event_identity` は既に `(plane, event_id)` を使っていた)。台帳の記述が受け入れ監査時点の指摘のまま残っていた
 
 **記録の更新先**: 設計 v1.6 (§5.1 に P4-D15〜P4-D18、§11.1 に全項目の状態と閉じ方、§11.2 に Q1〜Q5)、`conformance-tests/CONDITIONS.md` の **C-09 行** (vector 4 の射程明示)、`security/CONTROL_MAPPING.md` の **SI-14 行 (7)(12)(13)**。
 

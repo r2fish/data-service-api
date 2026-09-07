@@ -145,7 +145,7 @@ blocker 4 / major 8 / minor 8 / nit 3 — 全数裁定。主要な裁定:
 
 ### 10.1 WP-1 (契約 1.3.0)
 
-独立レビュー 0 blocker / 3 major / 5 minor / 3 nit、全数裁定・反映。M-1 = `versioning.version_binding` へ 1.3.0 導入義務の列挙を追記 (audit role 受理 + FORBIDDEN fail-closed、凍結拒否、optional 2 フィールドの「emit したときの意味論」拘束)。M-2 = A/D/E/F への回帰ピン (auth 等値 4 本 + 文言 substring 4 本、`test_contract.py`)。M-3 = 凍結 FORBIDDEN は role=control capability 拒否の後に評価 (C-14 vector 3 の規範読みと整合)。m-1 (§1-D 列挙外の `control_plane.authority` 追記) は監督追認。root suite 1166 passed / 0 failed / 0 skipped。main マージ `e2093c5`。**1.3.0 は公開済み — 以後の契約変更は 1.4.0 以上。**
+独立レビュー 0 blocker / 3 major / 5 minor / 3 nit、全数裁定・反映。M-1 = `versioning.version_binding` へ 1.3.0 導入義務の列挙を追記 (audit role 受理 + FORBIDDEN fail-closed、凍結拒否、optional 2 フィールドの「emit したときの意味論」拘束)。M-2 = A/D/E/F への回帰ピン (auth 等値 4 本 + 文言 substring 4 本、`test_contract.py`)。M-3 = 凍結 FORBIDDEN は role=control capability 拒否の後に評価 (C-14 vector 3 の規範読みと整合)。m-1 (§1-D 列挙外の `control_plane.authority` 追記) は監督追認。root suite 1166 passed / 0 failed / 0 skipped。main マージ `9b0dd87`。**1.3.0 は公開済み — 以後の契約変更は 1.4.0 以上。**
 
 ### 10.2 WP-2 (MitateDB cross_entity)
 

@@ -3,7 +3,7 @@
 **設計文書 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` (v1.5) が唯一の正本である。本書は manifest のみを持ち、裁定・根拠・却下案・実装の具体形を複製しない — 食い違ったら設計が正であり、本書の誤りとして監督へ差し戻す。**
 
 - 版数: **v1.2 (2026-09-07、WP-4 を追加)**。変更は末尾の**改版履歴**にある。上位計画: `docs/design/ROADMAP_POST_PHASE7_V1.md` (§4・§8・§9)
-- 前提となる main: **`124ffa7`**。作業 branch **`process-hygiene-id-refs`**、worktree `{repo}/.claude/worktrees/process-hygiene`
+- 前提となる main: **`3846886`**。作業 branch **`process-hygiene-id-refs`**、worktree `{repo}/.claude/worktrees/process-hygiene`
 - 体制: Fable 監督/判断/コミット、Opus 起草/レビュー/監査、Sonnet 実装 (**コミットしない**)
 - **本書の形式は設計 §3 D-3 の Change Set Manifest そのものである。本作業がその実証を兼ねる。**
 - **未確定**: 設計 §5 の **U-1 / U-3 / U-4 / U-5 は依頼者判断待ち**である (**U-2 は監督裁定 2026-09-07 で解消済み** — 実施形は設計 §3 D-2)。**U-3 は WP-2 の範囲**、**U-4 は WP-3 の着手条件**、**U-5 は WP-1 のパス**に効く。裁定前に着手する場合は監督推奨案を仮採用し、裁定が異なったときは**本文を書き換えず §4 の訂正註で直す**
@@ -225,10 +225,10 @@ python3 tools/public_value_scan.py docs/design/ROADMAP_POST_PHASE7_V1.md
 **(b) `change-class` job のシェル断片をローカルで実コミットに対して実行する** (**課金停止のため GitHub 側で run を取れない**)。
 
 ```
-git diff --name-only e26f5cd..9f36dc9 | ./.venv/bin/python tools/change_class.py
-git diff --name-only 051406e^..051406e | ./.venv/bin/python tools/change_class.py
+git diff --name-only 4b77aa9..279920c | ./.venv/bin/python tools/change_class.py
+git diff --name-only ca72b81^..ca72b81 | ./.venv/bin/python tools/change_class.py
 ```
-**期待**: 1 本目 (WP-3。roadmap と設計の `.md` のみ) → `class=A` / `conformance_required=false`。2 本目 (WP-2 のコミット単体。`ci.yml`・`.pre-commit-config.yaml`・`tools/`・文書) → `class=B` / `conformance_required=true`。**【訂正 2026-09-07 (監督)】当初の範囲 `9f36dc9..fa2b37b` は main のマージ範囲にフェーズ9 のコミット (`conformance-tests/` 配下) が混ざり `class=C` になるため、WP-2 コミット単体に狭めた。****`before` が全 0 (`0000000…`) の場合** → `class=unknown` / `conformance_required=true`。**いずれも終了コード 0** である (判定不能は非 0 ではなく `unknown` で表す)。
+**期待**: 1 本目 (WP-3。roadmap と設計の `.md` のみ) → `class=A` / `conformance_required=false`。2 本目 (WP-2 のコミット単体。`ci.yml`・`.pre-commit-config.yaml`・`tools/`・文書) → `class=B` / `conformance_required=true`。**【訂正 2026-09-07 (監督)】当初の範囲 `279920c..38c66bf` は main のマージ範囲にフェーズ9 のコミット (`conformance-tests/` 配下) が混ざり `class=C` になるため、WP-2 コミット単体に狭めた。****`before` が全 0 (`0000000…`) の場合** → `class=unknown` / `conformance_required=true`。**いずれも終了コード 0** である (判定不能は非 0 ではなく `unknown` で表す)。
 
 **(c) `ci.yml` の構造確認** — YAML として parse し、**job 名・`needs`・`if`** を機械的に確認する (**PyYAML が `.venv` に無ければ標準ライブラリで最小限の構造確認を行う**)。
 **期待**: `change-class` が存在し `needs` を持たない。`conformance` が `needs: change-class` と `if: needs.change-class.outputs.conformance_required == 'true'` を持つ。`tally-consistency` が `needs: [change-class, conformance]` と**同じ `if`** を持つ。`doc-refs` が存在し **`needs` も `if` も持たない**。`scanner` / `deploy-assets-lint` が**無変更**である。

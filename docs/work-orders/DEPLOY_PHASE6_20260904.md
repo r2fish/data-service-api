@@ -46,7 +46,7 @@ bearer は 1 文字も書かない。**それらは Secret Manager と `/etc/r2d
 
 ### 0.1 前提
 
-1. **適用元は main `4e48d1a`** (フェーズ6 完了、契約 1.6.0)。root suite の
+1. **適用元は main `24038d7`** (フェーズ6 完了、契約 1.6.0)。root suite の
    実測は **1802 passed / 0 failed / 0 skipped / 0 xfailed**
    (`pytest -q -n 5 --dist loadgroup`、監督が単独実行した完了ゲート)。
 2. **両実配備ともフェーズ4 以前のコードのままである。**したがって本適用は
@@ -215,7 +215,7 @@ C を既定から動かす場合は、**その peer の data プロセスと con
 
 ### 1.1 適用元の確認 [監督]
 
-1. 作業ツリーが main `4e48d1a` を含むこと (`git rev-parse HEAD`、
+1. 作業ツリーが main `24038d7` を含むこと (`git rev-parse HEAD`、
    `git log --oneline -1`)。**イメージのビルドと CLI の実行は、必ずこの
    ツリーから行う** — 旧ツリーの CLI は旧形式の secret を印字する。
 2. root suite を**単独実行**し、**1802 passed / 0 failed / 0 skipped /
@@ -362,7 +362,7 @@ traffic に一切触れないので、(b) の完了を待たずに進められ�
 > 成功し、2 本の tag が push された:
 > `mitatedb-api:1.6.0-data` (`sha256:5fb2d292…`) と
 > `mitatedb-api:1.6.0-control` (`sha256:ac626232…`)。
-> **ビルドソースは main `4e48d1a` の `git archive`** である — 作業ツリーの
+> **ビルドソースは main `24038d7` の `git archive`** である — 作業ツリーの
 > 未追跡ファイル (scratchpad の一時 yaml を含む) がコンテキストに混ざらない
 > ことを、この作り方自体が保証している。digest の完全形は §7.2 に記録する。
 
@@ -636,7 +636,7 @@ locator 形であり、**flip は credential を失効させない**。したが
 > できない (credential が要る)。**旧 revision に対して行うので、(f) の前に
 > 実施できる。**結果は §7.2 に書く。
 
-再発行する場合 (裁定 E-2 = する。**今回は該当しない**)、**§7 の break-glass CLI を、main `4e48d1a`
+再発行する場合 (裁定 E-2 = する。**今回は該当しない**)、**§7 の break-glass CLI を、main `24038d7`
 のソースツリーから、Cloud SQL Auth Proxy 経由で実行する** (どちらの Cloud Run
 サービス経由でもない)。**旧ツリーで実行すると印字されるのが旧形式になる。**
 
@@ -1134,7 +1134,7 @@ step ごとの、この配備での要点だけ:
    自身の `GET /control/v1/capabilities` であり、data 側の宣言ではない
    (MitateDB の Invariant 3 と同じ性質)。
 
-**CLI は main `4e48d1a` のソースツリーから実行する。**旧ツリーの CLI は旧形式の
+**CLI は main `24038d7` のソースツリーから実行する。**旧ツリーの CLI は旧形式の
 secret を印字する。CLI は DB へ直接つながるので、**サービスの稼働状態とは
 独立に実行できる。**
 
@@ -1432,7 +1432,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 
 | 項目 | 実測値 |
 |---|---|
-| main のコミット | **`4e48d1a`** — (a) の Cloud Build のソースはこのコミットの `git archive` である |
+| main のコミット | **`24038d7`** — (a) の Cloud Build のソースはこのコミットの `git archive` である |
 | root suite (単独実行、`-n 5 --dist loadgroup`) | **1802 passed / 0 failed / 0 skipped / 0 xfailed** (2026-09-04、監督が単独実行した完了ゲート) |
 | 実行日時 / 実行者 | 配備作業の開始 **2026-09-05**、監督 (`gcloud`) + 運用者 (秘密・psql・SSH) |
 
@@ -1549,7 +1549,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer .xyz"   <data
 7. **§4 検証 [運用者、2026-09-05 06:45 JST 前後] 完了** — `gcloud run services proxy` 2 本 (ctrl 18082 / data 18081) 経由、credential は Secret Manager から `$( )` で渡し画面に出さない。(i) control 文書: `contract_version` **1.6.0**、`surfaces.data.base_url = https://mitatedb-data-<GCP_PROJECT_NUMBER>.<REGION>.run.app/v1`、`surfaces.control.base_url = https://mitatedb-ctrl-<GCP_PROJECT_NUMBER>.<REGION>.run.app/control/v1`、control credential (合成形、version 3) で認証成功。(ii) data 文書: 同じ 1.6.0、**`surfaces` は control 文書と同一**、`application_catalog = {status: enabled}`、runtime credential で認証成功。(iii) `GET /v1/catalog`: `application_scope = mitate`、entity `entity_a` / `entity_b` / `entity_c` / `entity_d` (以下省略) の全 `fields` に `field_types` が付く (backfill どおり `integer` / `string` のみ)。**`json` / `boolean` 宣言の列が存在しないため、挙動変更 β / γ は既存データに影響しない** (α は新規の型未宣言 field のみ)。`entity_b.<json_field_1>` / `entity_c.<json_field_2>` は JSON テキストを `string` として保持 (object 化は `add_field` で型付き列を足す運用、設計 §11 L6-16)。
 8. **MitateDB の 1.6.0 実機適用はここで完了**。残: r2db の初回導入 (§3、運用者)、裁定 D (alert 結線) は未結線のまま次フェーズへ。
 
-9. **§3 r2db 初回導入の準備 [監督、2026-09-05 07:00〜07:30 JST]** — SSH (ユーザー `<VPS_USER>`、非特権) で実測・準備した。**実測**: Ubuntu 24.04、PostgreSQL 16 (`16-main`、socket `/var/run/postgresql`)、Python は 3.12.3 のみ (3.11 なし)、8443 / 8081 / 8082 は空き、disk 88 GB / mem 1.3 GB 空き、既存 443 ブロックは `db.example.invalid` の Let's Encrypt 証明書 + `options-ssl-nginx.conf` + `proxy_pass 127.0.0.1:<EXISTING_APP_PORT>`、`r2dbsvc` OS アカウント無し、PG role `<VPS_USER>` 無し (接続数の実測は `sudo -u postgres` が要るため運用者)。**GitHub リポジトリは private** (VPS からの https clone は認証要求で失敗) のため、コードは `git archive main` (4e9960c) を SSH 標準入力で `/home/<VPS_USER>/data-service-api` へ展開。`/home/<VPS_USER>/r2dbsvc-venv` (python 3.12) に `r2db-api` を install し、パッケージ import と同梱契約 1.6.0 を確認 (3.12 で動作、psycopg 3.3.5 / uvicorn 0.52.4 / starlette 1.6.0)。**準備物** (`/home/<VPS_USER>/r2dbsvc-stage1/`、運用者が `sudo cp` するだけ): `r2dbsvc-api-8443.conf` (server_name `db.example.invalid`、既存証明書を再利用、`/v1/` → 127.0.0.1:8081、`/control/v1/` → 127.0.0.1:8082、それ以外 404)、`r2dbsvc-api.service` (port 8081、`/opt/r2dbsvc/venv`)、`r2dbsvc-control.service` (`control_main:app`、port 8082、`control.env`)、`api.env` / `control.env` (非秘密値記入済み: `R2DB_DATA_BASE_URL=https://db.example.invalid:8443/v1`、`R2DB_CONTROL_BASE_URL=https://db.example.invalid:8443/control/v1`、posture B の DSN 形、`R2DB_CONTROL_PLANE_STATUS=unavailable` 初期値、`R2DB_AUDIT_DSN` 未設定 = 裁定 F)、`pg_hba_posture_b.txt`、そして **`OPERATOR_STEPS.sh`** (sudo を要する全手順を順序どおりに並べたスクリプト: 0 前提確認 → 1 アカウントと `/opt/r2dbsvc` への配置と venv 再構築 → 2 秘密の生成 → 3 migration 0001→0002→0005→0006→0007→0003 → 4 posture B の pg_hba / pg_ident → 5 env 配置 → 6 control unit と bootstrap → 7 data unit と nginx 8443 と `enabled` 化 → 8 最初の application credential 発行)。**設計上の注意**: unit は `ProtectHome=true` なので `/home/<VPS_USER>` 配下の venv は使えない (`/opt/r2dbsvc` に再構築する。私の home venv は互換性確認用)。**未決 (運用者裁定)**: 最初の application slug、posture (B が 2026-08-28 の裁定、A は fallback)、8443 で `db.example.invalid` を再利用すること (server_name 同一の方針どおり)。
+9. **§3 r2db 初回導入の準備 [監督、2026-09-05 07:00〜07:30 JST]** — SSH (ユーザー `<VPS_USER>`、非特権) で実測・準備した。**実測**: Ubuntu 24.04、PostgreSQL 16 (`16-main`、socket `/var/run/postgresql`)、Python は 3.12.3 のみ (3.11 なし)、8443 / 8081 / 8082 は空き、disk 88 GB / mem 1.3 GB 空き、既存 443 ブロックは `db.example.invalid` の Let's Encrypt 証明書 + `options-ssl-nginx.conf` + `proxy_pass 127.0.0.1:<EXISTING_APP_PORT>`、`r2dbsvc` OS アカウント無し、PG role `<VPS_USER>` 無し (接続数の実測は `sudo -u postgres` が要るため運用者)。**GitHub リポジトリは private** (VPS からの https clone は認証要求で失敗) のため、コードは `git archive main` (7887180) を SSH 標準入力で `/home/<VPS_USER>/data-service-api` へ展開。`/home/<VPS_USER>/r2dbsvc-venv` (python 3.12) に `r2db-api` を install し、パッケージ import と同梱契約 1.6.0 を確認 (3.12 で動作、psycopg 3.3.5 / uvicorn 0.52.4 / starlette 1.6.0)。**準備物** (`/home/<VPS_USER>/r2dbsvc-stage1/`、運用者が `sudo cp` するだけ): `r2dbsvc-api-8443.conf` (server_name `db.example.invalid`、既存証明書を再利用、`/v1/` → 127.0.0.1:8081、`/control/v1/` → 127.0.0.1:8082、それ以外 404)、`r2dbsvc-api.service` (port 8081、`/opt/r2dbsvc/venv`)、`r2dbsvc-control.service` (`control_main:app`、port 8082、`control.env`)、`api.env` / `control.env` (非秘密値記入済み: `R2DB_DATA_BASE_URL=https://db.example.invalid:8443/v1`、`R2DB_CONTROL_BASE_URL=https://db.example.invalid:8443/control/v1`、posture B の DSN 形、`R2DB_CONTROL_PLANE_STATUS=unavailable` 初期値、`R2DB_AUDIT_DSN` 未設定 = 裁定 F)、`pg_hba_posture_b.txt`、そして **`OPERATOR_STEPS.sh`** (sudo を要する全手順を順序どおりに並べたスクリプト: 0 前提確認 → 1 アカウントと `/opt/r2dbsvc` への配置と venv 再構築 → 2 秘密の生成 → 3 migration 0001→0002→0005→0006→0007→0003 → 4 posture B の pg_hba / pg_ident → 5 env 配置 → 6 control unit と bootstrap → 7 data unit と nginx 8443 と `enabled` 化 → 8 最初の application credential 発行)。**設計上の注意**: unit は `ProtectHome=true` なので `/home/<VPS_USER>` 配下の venv は使えない (`/opt/r2dbsvc` に再構築する。私の home venv は互換性確認用)。**未決 (運用者裁定)**: 最初の application slug、posture (B が 2026-08-28 の裁定、A は fallback)、8443 で `db.example.invalid` を再利用すること (server_name 同一の方針どおり)。
 
 10. **§3 r2db 初回導入 [運用者 + 監督、2026-09-05 07:10〜07:50 JST] — 完了 (外部到達を除く)**。`OPERATOR_STEPS_part1.sh` (SLUG=`sandbox`) → 0005 が `api_password` 未指定で停止 (監督のスクリプト不備。`r2dbsvc_api` role のパスワード変数) → `part1b` で 0005 (api_password 付き) / 0006 / 0007 / 0003 を適用 (登録: `sandbox|t`)。posture B の pg_hba / pg_ident 追記と `reload postgresql` は運用者が監督提供の 1 コマンドで実施。`part2`: `/etc/r2dbsvc/{api,control}.env` (root 0600)、`r2dbsvc-control.service` (8082) と `r2dbsvc-api.service` (8081) が active、loopback で両方 `401 application/problem+json`、bootstrap 実行、`R2DB_CONTROL_PLANE_STATUS=enabled` で再起動。**nginx は `http2 on;` が nginx 1.24 で未対応のため `nginx -t` 失敗** → `listen 8443 ssl http2;` 形に修正して再配置、`nginx -t` 成功・reload。VPS 上から 8443 の data / control とも `401 application/problem+json`、443 の既存本番は無変更 (307)。**bootstrap と最初の runtime credential の印字を運用者が紛失** → `reset --confirm RESET_CONTROL_CREDENTIALS` で control credential を作り直し (旧は失効)、`issue-credential sandbox runtime` を再発行 (旧 runtime credential は値不明のまま有効。control plane から revoke する)。出力は `~/r2dbsvc-stage1/{control,runtime}-credential.txt` (0600) に保存し、秘密管理へ転記後 `shred -u` する。**検証 (loopback、運用者)**: control 文書 `1.6.0`、`surfaces.data = https://db.example.invalid:8443/v1`、`surfaces.control = https://db.example.invalid:8443/control/v1`; data 文書 `1.6.0`、**同一の `surfaces`**、`control_plane = {status: enabled}`; 両 credential で認証成功。**未完**: 外部からの 8443 到達 — ホストの `ufw allow 8443/tcp` は実施済みだが <VPS_PROVIDER> のセキュリティグループが 8443 を通していない (Mac から `Timeout`、443 は到達)。コントロールパネルで TCP 8443 の受信許可を追加する (運用者)。その後: control credential の初回 rotate (must_rotate 解除)、紛失した旧 runtime credential の revoke、`shred -u secrets.env`。
 

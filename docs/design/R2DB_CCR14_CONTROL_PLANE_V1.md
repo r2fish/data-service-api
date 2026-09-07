@@ -424,7 +424,7 @@ WP-5 (申告 flip — 単一コミット) を実装した。実装: Sonnet、独
 ### 14.4 台帳 (将来課題) — WP-6 で整理 (v1.9)
 
 - **L1 (予定化のまま)**: conformance fixture の Application deprovision フック — registry 消費を O(1) にし、上限 100 の残余裕枯渇 (テスト追加ごとに悪化) を根治。WP-6 では未着手 (docs WP のスコープ外、コード変更を要する)
-- **L2— 修正済み (`ae815ee`、per-prefix advisory lock)**: `_sweep_stale_artifacts` の liveness ガード欠如 (別プロセスの pytest `--collect-only` を含む実行中 run の role/DB 破壊) は、本 WP-6 着手前に独立コミット `ae815ee` で修正済み。per-prefix の advisory lock により、他プロセスが同一 prefix を扱っている間のスイープを排他する形で対処した (§14.4 が「次コミットで修正」と記していた課題はクローズ)
+- **L2— 修正済み (`43c00e3`、per-prefix advisory lock)**: `_sweep_stale_artifacts` の liveness ガード欠如 (別プロセスの pytest `--collect-only` を含む実行中 run の role/DB 破壊) は、本 WP-6 着手前に独立コミット `43c00e3` で修正済み。per-prefix の advisory lock により、他プロセスが同一 prefix を扱っている間のスイープを排他する形で対処した (§14.4 が「次コミットで修正」と記していた課題はクローズ)
 - **L3 — WP-6 で検討し、継続と判断**: 特権 setup 専用の control stack 分離 (周期再構築の決定性改善)。WP-5 で導入した「特権経路の service 周期再構築」(§14.2-4) は conformance adapter 内部の対症療法であり、専用スタックへの分離はテストの決定性を高める改善ではあるが、配備安全性には影響しない (本番の control-plane プロセスは conformance adapter のような周期再構築を必要としない — session-scoped adapter 固有の事情)。優先度は低いまま台帳に残す
 - **L4 — D-2 のとおり、WP-6 では実施しない**: `request_bytes` の control discovery 宣言 (§13.3 で識別されたギャップ — enforce はされているが `GET /control/v1/capabilities` が当該クラスを公開していない)。宣言面の変更は公開 API の申告に触れるため、conformance 証拠を伴うコード WP (Q-1 バッチ、契約 1.2.0 検討時) に載せる。docs WP である WP-6 の対象外 (監督決定 D-2、依頼者への申し送り)
   > **RESOLVED — 追記 (2026-08-31、フェーズ3.5 WP-4、house style — 原文は上記のまま保持)**: `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` §4「L4」が引き取り、出荷した。`ControlPlaneLimits.request_bytes` を単一ソース化 (`control_http` の `_BYTE_BOUND_LIMITS` が同一フィールドを読む)、service 層既定 `unavailable` / HTTP mount 側 `enforced` の二層宣言 (MitateDB と対称形)。`r2db-api/tests/test_control_http.py`・`test_control_plane_service.py` のローカル完全一致固定 2 箇所を同一コミット更新 (レビュー M-2)。`docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` §8.1(d) にも同種の追記あり。
@@ -488,7 +488,7 @@ WP-6 (ドキュメント WP + 帯域外 CLI `audit-report`) を実装した。**
 
 ### 15.5 テスト実測
 
-- root suite (`./.venv/bin/python -m pytest`): 初回実測 **715 passed, 1 failed** (185.98秒)。失敗1件 (`r2db-api/tests/test_http.py::test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`) は本 WP 開始前から存在する無関係の既存不具合 — `spec/data-service-api.v1.json` (直近改訂コミット `3e0e678`) とパッケージ同梱コピー `r2db-api/src/r2db_api/contract/data-service-api.v1.json` (直近改訂コミット `fbb55295`) が非同期のまま (`3e0e678` の description 文言変更がパッケージコピーへ反映されていない)。`git status` で本 WP が `spec/`/`contract/` 配下を一切触っていないことを確認済み。ベースライン 709 passed (引き継ぎ記録) + 本 WP 追加の `audit-report` テスト7本 = 716 件収集、うち715 passed/1 failed で数が一致 (追加テストは全て green)。**この不一致は監督が同セッション中にコミット `b83fe9a` (パッケージコピーを spec 側に同期) で解消済み** — 以後の root suite 実測は 716 passed (MI-3 のテスト3本追加後は 719 passed、§15.7)。別セッションへ spawn した修正提案 (task_fe72a99f) は監督対応により不要となり dismiss 済み
+- root suite (`./.venv/bin/python -m pytest`): 初回実測 **715 passed, 1 failed** (185.98秒)。失敗1件 (`r2db-api/tests/test_http.py::test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth`) は本 WP 開始前から存在する無関係の既存不具合 — `spec/data-service-api.v1.json` (直近改訂コミット `faf357f`) とパッケージ同梱コピー `r2db-api/src/r2db_api/contract/data-service-api.v1.json` (直近改訂コミット `7e7b6ad4`) が非同期のまま (`faf357f` の description 文言変更がパッケージコピーへ反映されていない)。`git status` で本 WP が `spec/`/`contract/` 配下を一切触っていないことを確認済み。ベースライン 709 passed (引き継ぎ記録) + 本 WP 追加の `audit-report` テスト7本 = 716 件収集、うち715 passed/1 failed で数が一致 (追加テストは全て green)。**この不一致は監督が同セッション中にコミット `75c270c` (パッケージコピーを spec 側に同期) で解消済み** — 以後の root suite 実測は 716 passed (MI-3 のテスト3本追加後は 719 passed、§15.7)。別セッションへ spawn した修正提案 (task_fe72a99f) は監督対応により不要となり dismiss 済み
 - `r2db-api/tests/test_postgres.py` 単独: **180 passed** (22.0秒) — ベースライン (180 passed) と完全一致、無変化
 - `audit-report` 関連7本単独: 7 passed (変異注入前後で確認、§15.3)
 
@@ -518,7 +518,7 @@ WP-6 成果物の独立レビュー (Opus) を受け、指摘全件を作業ツ�
 | MI-1 | `POSTGRES_PROVISIONING_RUNBOOK.md` §9「Every subcommand … writes a canonical, durable event」が過大主張 (list-credentials/list-apps/audit-report は書かない) | `ops.py` docstring と同じ「Every **state-changing** subcommand」に訂正し、読み取り専用サブコマンドは監査を書かない旨を明記 |
 | MI-2 | playbook「Each step is idempotent to re-run」が step 1 (`reset`) で偽 (成功後の再実行は直前に保存した秘密を失効させる) | 「steps 2-4 のみ idempotent、step 1 は一度だけ・未完了時のみ再実行」に限定し、step 1 自身にも同旨の注記を追加 |
 | MI-3 | `audit-report` の宣言済み性質3つ (event_id タイブレーカー/naive `--since` の UTC 扱い/read-only) が専用テストで固定されていなかった | 3テストを追加 (`test_audit_report_ties_break_by_event_id_ascending`/`test_audit_report_naive_since_is_interpreted_as_utc`/`test_audit_report_does_not_modify_control_audit`)。追加後、変異 M-C/M-D/M-E を自ら再注入し赤を実測 (§15.7.1) |
-| MI-4 | 設計文書 §15.5 の root suite 実測記録が、監督が同セッションでコミット `b83fe9a` により packaged copy を解消したことを反映していなかった | §15.5 に「監督が `b83fe9a` で解消済み、以後 716 passed」を追記。spawn 済み task (`task_fe72a99f`) は不要となり dismiss 済み |
+| MI-4 | 設計文書 §15.5 の root suite 実測記録が、監督が同セッションでコミット `75c270c` により packaged copy を解消したことを反映していなかった | §15.5 に「監督が `75c270c` で解消済み、以後 716 passed」を追記。spawn 済み task (`task_fe72a99f`) は不要となり dismiss 済み |
 | MI-5 | 設計文書 §1 R-5 m-2「唯一の復旧は CLI reset」が R-10 の break-glass 追加後も無条件のまま (ロックアウト経路 (i)(ii) にはより軽い復旧が今は存在する) | m-2 原文は削除・書き換えせず、直後に「(補記、WP-6 レビュー: ...)」を追記するのみ (§1 R-5 参照) |
 
 **nit (3件、全件修正)**

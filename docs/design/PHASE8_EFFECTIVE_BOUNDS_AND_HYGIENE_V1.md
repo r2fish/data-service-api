@@ -6,7 +6,7 @@
 - 旧版: **v1.0 (2026-09-06)** — 起草初稿。設計レビュー 1 回目の対象となった版である
 - 位置づけ: **監督が確定した枠 (2026-09-06) の実施設計**である。計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` (v1.1) の §5「フェーズ8」節・§4 (P-1〜P-9)・§7・§8 (R-9〜R-12)・§9 が**正本**であり、本書 §1〜§2 はそれを**転記**する (再導出しない)。§3 の D-1〜D-6 は監督確定であり、**§5 の U-1 / U-2 だけが依頼者判断待ち**である。WP 分割は §8 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md`) は別途起こす。構成・粒度・文体はフェーズ7 設計文書 (`docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md`) を踏襲する
 - テーマ: **「宣言した bound が全 peer で実効であり、それが機械的に証明され、以後の改版に耐える計測と検知が置かれている」状態にすること**
-- 前提となる main: **`472e2ac`** (計画文書 v1.1 マージ後)。作業 branch **`phase8-effective-bounds`**、worktree `.claude/worktrees/phase8`。**root `--collect-only -q` = 2274 tests collected** (実測 2026-09-06)
+- 前提となる main: **`9389fd5`** (計画文書 v1.1 マージ後)。作業 branch **`phase8-effective-bounds`**、worktree `.claude/worktrees/phase8`。**root `--collect-only -q` = 2274 tests collected** (実測 2026-09-06)
 - **契約は不変である**。本フェーズは契約の**意味**を 1 文字も変えない (1.6.0 のまま)。`limit_enforcement` の値語彙 (`enforced` / `reference_wall_clock` / `deployment_required` / `unavailable`) と `limits.classes` の 16 語は既存のまま使う。**契約 JSON のテキストは、R-10 が U-2 (A) なら 0 バイト不変、(B) なら接頭辞の剥離分だけ動く**。動く場合も計画文書 §5 が「契約の意味は 1 文字も変えない」と既に固定した範囲内である (§3 D-4、§5 U-2)
 - 応える G (計画文書 §0): **G-2** (人から見て比類なきセキュリティ = 宣言 bound の実効性とその証明可能性)、**G-4** (高性能は大前提 = 基準値の取得)。**G-3** (信頼性) には副次的に応える — 宣言が真であること (P-3) は信頼性の一部である
 - 体制・規律: 既存フェーズと同一である。Fable 監督/設計/コミット、Opus 起草/独立レビュー/受け入れ監査、Sonnet 実装 (コミットしない)。**設計レビューは 1 回** (契約を触らないフェーズ。計画文書 §9 の 3)
@@ -40,7 +40,7 @@
 
 ### 1.2 探索で確定した事実 (根拠)
 
-以下はすべて worktree `.claude/worktrees/phase8` (main `472e2ac`) の現物を読んで確認した事実である。**テストは実行していない** (§1.3 の実測 2 件を除く)。
+以下はすべて worktree `.claude/worktrees/phase8` (main `9389fd5`) の現物を読んで確認した事実である。**テストは実行していない** (§1.3 の実測 2 件を除く)。
 
 **(1) MitateDB application plane の 4 class は実装が無く、宣言が正直にそう言っている。**
 
@@ -92,7 +92,7 @@
 
 ### 1.3 起草時に実行した 2 件 (実測)
 
-1. **`--collect-only -q` の件数** = **2274 tests collected** (worktree phase8、main `472e2ac`)。R-9 の下限の初期値の根拠である。
+1. **`--collect-only -q` の件数** = **2274 tests collected** (worktree phase8、main `9389fd5`)。R-9 の下限の初期値の根拠である。
 2. **argv secret 静的規則のプロトタイプ** (常設規律 5) = **現行ツリーで 6 件 flagged**。逐語の規則と出力は §3 D-5 に置く。
 
 ---
@@ -331,7 +331,7 @@ def hold_in_flight(self, session, n: int) -> AbstractContextManager[None]:
 2. **隔離 profile の `operation_depth` を 4 → 5 にし、V2 のレシピを `update` + `where` に改めた (監督裁定 R-A、2026-09-06)。** 本文 §1.2 (4) が前提にしていた「フラット insert が深さ 4 に座る」レシピは、**depth=4 のままだと隔離面で `where` 付き mutation が全て拒否される** — MitateDB の唯一の破壊的操作である `delete` を含むので、C-04 の MitateDB-http が赤になる (WP-1a rework 3 の実測)。**新しいレシピは「`update` + `where` (深さ 5) が成功 / `where` の value を dict にして深さ 6 で `LIMIT_EXCEEDED`」であり、4 plug とも隔離 profile は `operation_depth=5` を宣言する** (driver は `bound == 5` を assert する)。**変異 R-A (MitateDB in-process の profile を 4 に戻す) → C-05 V2 [MitateDB-api] が赤。** **フェーズ7 設計 D-6.2 の `operation_depth` 行 (旧レシピ) にも訂正註を置いた。**
 3. **`result_items` のレシピは「表に bound+1 行を 1 度だけ入れ、成功側 `limit=bound` / 拒否側 `limit=bound+1`」である (監督裁定、WP-1 差し戻し 3 の 4)。** 本文「実装の形」(c) が書いた「N 行 / N+1 行を返してもらう」形では、**r2db の実検査 (`min(len(rows), page_size)`) は実行数側だけで位置が決まり、port の `limit` を adapter が捨てても suite が全緑になる** (監査の自作変異 B / B2 で実測)。改めたレシピでは **`limit` だけで N / N+1 が決まる**ので、**4 plug すべてで `limit` が load-bearing** になる (変異「r2db in-process の `limit` を無視」→ C-05 V2 [r2db-api] が赤)。**N / N+1 の位置は 4 plug とも `bound=5`、5 成功 / 6 拒否で一致した** (r2db = `min(rows, page_size)`、MitateDB = 要求 `limit` 値そのもの)。
 4. **`query_complexity` は本文どおり片側のままである** (metric 定義の算術から決まる、実測待ちではない)。ただし片側検査の**安全側 / 拒否側を固定小定数ではなく `bound-1` / `bound+1` に締め直した** — 固定小定数では宣言値の膨張を検出できないためである。**MitateDB 自身の宣言偽装は検出できない** (r2db 型の "+1 tax" が metric に無い) ので、**変異は r2db 側の宣言値 +1 偽装で実証した**。
-5. **`hold_in_flight` の待ち合わせには 30 秒の上限を置いた (監督裁定、WP-1 差し戻し 2 の 3)。** 停止点に到達しない回帰が**ハングではなく理由文付きの `AssertionError`** として赤になる形である (4 adapter とも)。保持スレッドは `daemon=True`、`join()` にも同 timeout を置いた。**あわせて CI の `conformance` job に `timeout-minutes: 30` を足した** (main `b039846`) — 壊れた前提は runner の上限まで待つのではなく赤として出るべきだからである。
+5. **`hold_in_flight` の待ち合わせには 30 秒の上限を置いた (監督裁定、WP-1 差し戻し 2 の 3)。** 停止点に到達しない回帰が**ハングではなく理由文付きの `AssertionError`** として赤になる形である (4 adapter とも)。保持スレッドは `daemon=True`、`join()` にも同 timeout を置いた。**あわせて CI の `conformance` job に `timeout-minutes: 30` を足した** (main `f4c2590`) — 壊れた前提は runner の上限まで待つのではなく赤として出るべきだからである。
 6. **`hold_in_flight` の意味 1 文は port ABC (`conformance-tests/adapter.py`) の docstring に逐語で複製し、逐語一致を assert する文字列ピンのテストを test_c05 に置いた** (監督裁定、WP-1 差し戻し 3 の 1)。監査が「逐語 3 文がツリー内に 0 件、port docstring は言い換え」を検出したことへの是正である (常設規律 4)。
 7. **`_drive_concurrency` の非空振り assert は、`hold_in_flight` が yield する実測保持本数 (semaphore の実測値) に対して取る** (監督裁定、WP-1 差し戻し 3 の 5)。初稿の `held = bound` 直後の `held >= 1` はトートロジーだった (監査 (E))。
 8. **L7-21 の静的 assert は (i)(ii) とも AST 走査に統一した。** (ii) は `ast.Compare` (`==` / `in`) と `ast.Call` (`.startswith`) の全ノード (関数定義・非同期関数定義・モジュール直下) を歩き、**allowlist 3 行が実コードとして一致すること**も assert する (初稿はコメント行にマッチしていた)。(i) は `ast.If` + 同じ visitor に揃えた。
@@ -413,7 +413,7 @@ def hold_in_flight(self, session, n: int) -> AbstractContextManager[None]:
 7. **版数は 1.6.0 のままである。** (A) では契約 JSON が 1 バイトも動かないので、版を刻むかどうかの論点自体が生じない。
 8. **(B) (接頭辞の剥離) を採る場合の条件付き追加。** 依頼者裁定が (B) になった場合にのみ、次の 4 点を足す。
    - (i) **`spec/CONTRACT_HISTORY_MANIFEST.json`** — 1 エントリ = `{ "json_path": …, "kind": "prefix", "anchor": … }`。**マニフェストは「何を剥がしたか」だけを言い、契約の意味を持たない。**
-   - (ii) **意味不変の機械検査** — 分離前 (main `472e2ac` の JSON) と分離後の JSON を、マニフェストの操作を逆適用したうえで **deep-equal 比較**する使い捨ての検証。**`tools/` に常設しない**。結果は §11.1 に記録する。
+   - (ii) **意味不変の機械検査** — 分離前 (main `9389fd5` の JSON) と分離後の JSON を、マニフェストの操作を逆適用したうえで **deep-equal 比較**する使い捨ての検証。**`tools/` に常設しない**。結果は §11.1 に記録する。
    - (iii) **PIN 定数の書き換え** (18 件) と、その前段としての**対象文の before/after 一覧の依頼者提示と再確定** (常設規律 4)。
    - (iv) **契約 JSON と両 peer の packaged 複製 2 本を同一コミットで同一バイトに更新すること** (既存のバイト一致テストが漏れを即座に検出する)。
    - **`versioning.version_binding` は接頭辞ではなく本文に版の言及が織り込まれているので、(B) でも動かない** (別枝 (C)、§5 U-2)。
@@ -444,7 +444,7 @@ def hold_in_flight(self, session, n: int) -> AbstractContextManager[None]:
 4. **`spec/data-service-api.v1.json` と両 peer の packaged 複製 2 本 — 無変更である。** 既存のバイト一致テスト 2 本が、うっかりの変更を即座に赤にする。**ゲート時に 3 本の sha256 を §11.1 に記録する** (付録 A §A.0 の値と一致すること)。
 5. **`conformance-tests/test_contract.py` — 無変更である。** PIN の参照先も定数も動かさない。
 6. **計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` の §5 / §8 R-10 行** — 上記「決定」6 の改版 (WP-6、R-14 に従い根拠と日付を添える)。
-7. **(B) を採る場合にのみ**: マニフェスト、使い捨ての deep-equal 検証 (scratchpad。`git show 472e2ac:spec/data-service-api.v1.json` と現行を比較)、PIN 18 件の書き換え、契約 JSON と複製 2 本の同一コミット更新。
+7. **(B) を採る場合にのみ**: マニフェスト、使い捨ての deep-equal 検証 (scratchpad。`git show 9389fd5:spec/data-service-api.v1.json` と現行を比較)、PIN 18 件の書き換え、契約 JSON と複製 2 本の同一コミット更新。
 
 #### 検査の形
 
@@ -699,7 +699,7 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mut
 4. **ハーネスは `isolated_application_surface()` ではなく `build_adapter()` の結果を直接使い、op ごとに新しい runtime credential を発行して rate 窓を分離する** (本文「実装の形」は `build_adapter()` としか書いていない)。
 5. **`--warmup` の値は出力に残らない。** 裁定 1 で `n=` を「集計標本数 (`len(durations_ms)`)」にした結果、warmup は PERF 行からも §11.2 の表からも復元できない。**PERF / PERFRUN は確定文言なのでフィールドを増やさず、ゲート時のコマンド行 (warmup と n) を §11.2 の注記に添える形で決着した** (監督裁定)。
 6. **`_classify_plug` は名前接尾辞と属性形状が食い違う adapter に対して非 0 終了する** — 実 socket plug (L7-2) が入ったときに黙って `asgi-inprocess` とラベルしないためである。**L7-2 導入時にはラベルを明示的に足す必要がある** (README に 1 行)。
-7. **計測窓に `BatchOperation` / `ScopedBatchOperation` の生成が残る** (監査 (1)、部分充足)。実測の窓内コストは **batch 0.00252 ms/回 (in-process p50 の 2.4〜4.7%)、cross_entity 0.00109 ms (3.6%)、mutate 0.00004 ms (≒0%)** である。**旧欠陥 (約 10%) からは下がったが「計測区間は adapter 呼び出しだけ」には未到達であり、この残余を §11.2 の注記に開示する。** **`BatchOperation` の事前生成は監督が最終修正した** (main `c59075d`)。
+7. **計測窓に `BatchOperation` / `ScopedBatchOperation` の生成が残る** (監査 (1)、部分充足)。実測の窓内コストは **batch 0.00252 ms/回 (in-process p50 の 2.4〜4.7%)、cross_entity 0.00109 ms (3.6%)、mutate 0.00004 ms (≒0%)** である。**旧欠陥 (約 10%) からは下がったが「計測区間は adapter 呼び出しだけ」には未到達であり、この残余を §11.2 の注記に開示する。** **`BatchOperation` の事前生成は監督が最終修正した** (main `02afb01`)。
 
 ---
 
@@ -906,7 +906,7 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mut
 | 項 | 結果 | 根拠 |
 |---|---|---|
 | **1** root suite | **充足** | `2340 passed, 5 warnings in 349.31s (0:05:49)`、EXIT=0。**`xfailed` = 0 / `skipped` = 0 / `failed` = 0**。**逃げ枝は使われず、`operation_depth` は両面 `enforced` である** (§5 U-1 状態注記)。§11.1 |
-| **2** CI | **充足** (監督追記: run 34047745958、3.11 / 3.12 とも `2340 passed`、floor step 緑、tally-consistency success) | **WP-1 マージ前の記録は §11.1 に逐語で残した** (main `ca4e285` = WP-2/3/4/5 の run 34038494519 で 3.11 / 3.12 とも緑、**collection floor step が両 job で緑**、`tally-consistency` success)。**WP-1 入りの main `9f75428` の run 34047745958 は監督が確認し §11.1 に追記した** (3.11 / 3.12 とも `2340 passed`、4 数一致) |
+| **2** CI | **充足** (監督追記: run 34047745958、3.11 / 3.12 とも `2340 passed`、floor step 緑、tally-consistency success) | **WP-1 マージ前の記録は §11.1 に逐語で残した** (main `f21d763` = WP-2/3/4/5 の run 34038494519 で 3.11 / 3.12 とも緑、**collection floor step が両 job で緑**、`tally-consistency` success)。**WP-1 入りの main `f4635ed` の run 34047745958 は監督が確認し §11.1 に追記した** (3.11 / 3.12 とも `2340 passed`、4 数一致) |
 | **3** PERF 14 行 | **充足** | §11.2 に PERFRUN 行 + PERF **14 行** (4 plug × 3 op = 12 + MitateDB 2 plug × `cross_entity` = 2) を記録した |
 | **4** `COLLECTION_FLOOR` | **充足** | **2274 → 2340** (ゲート時実測 `measured=2340 floor=2340 diff=0`)。§11.1 |
 | **5** R-10 の記録 | **充足** | 3 複製とも sha256 `968d3c72…45e6` = 付録 A §A.0 と一致 (0 バイト不変)、常設スキャナの列挙 = companion anchor = **29 件**。§11.1 |
@@ -946,12 +946,12 @@ PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mut
 
 ### 11.1 集計行
 
-**取得条件 (全項共通)**: worktree `.claude/worktrees/phase8` = branch `phase8-effective-bounds` **`2ab4edc`** (main への merge は **`9f75428`**)。**監督が単独で実行し、`ps` で他の pytest が 0 件であることを確認してから取った。** ローカル PostgreSQL の `max_connections = 300`、`statement_timeout = 0`。**`pg_database` の件数は前後とも 21 → 21 で残留は無い。**
+**取得条件 (全項共通)**: worktree `.claude/worktrees/phase8` = branch `phase8-effective-bounds` **`3c85e96`** (main への merge は **`f4635ed`**)。**監督が単独で実行し、`ps` で他の pytest が 0 件であることを確認してから取った。** ローカル PostgreSQL の `max_connections = 300`、`statement_timeout = 0`。**`pg_database` の件数は前後とも 21 → 21 で残留は無い。**
 
 | 項目 | 値 | 取得条件 |
 |---|---|---|
-| **完了ゲート (root suite 単独実行)** | **`2340 passed, 5 warnings in 349.31s (0:05:49)`** / **EXIT=0**。**failed 0 / xfailed 0 / skipped 0**。日付 2026-09-07、branch head `2ab4edc` | `./.venv/bin/python -m pytest -q -n 5 --dist loadgroup`、監督単独実行。**`5 warnings` は共有 `.venv` に `httpx2` を入れていないことによる `StarletteDeprecationWarning` (第 14 次 §4-3 記載) であり、CI 側は `httpx2` が入るので 0 である。warnings の数は一致判定に用いない** |
-| **CI 3.11 job の集計行** | **【監督追記 2026-09-07】run 34047745958 (main `9f75428` = WP-1 入り): 3.11 (正本) `2340 passed in 433.13s (0:07:13)`、3.12 `2340 passed in 456.24s (0:07:36)`、両 job `COLLECTION_FLOOR check OK: measured=2340 floor=2274 diff=66`、`tally-consistency` / scanner / deploy-assets-lint すべて success。failed 0 / xfailed 0 / skipped 0 — ローカル root suite `2340 passed` と 4 数一致 (L7-6 の突合済み)。** 旧記述: **WP-1 入りの main `9f75428` に対する run は本書執筆時点で未確認である。** 参考として WP-1 マージ前の 2 run を逐語で残す: **run 34038494519** (main `ca4e285` = WP-2/3/4/5) 3.11 `2312 passed, 9 xfailed in 464.96s (0:07:44)`、3.12 `2312 passed, 9 xfailed in 443.99s (0:07:23)`、両 job `COLLECTION_FLOOR check OK: measured=2321 floor=2274 diff=47`、**全 job success** (`tally-consistency` を含む)。**run 34034469614** (main `5ccdda6` = WP-2/3) 3.11 `2272 passed, 9 xfailed in 427.86s (0:07:07)`、3.12 `2272 passed, 9 xfailed in 369.68s (0:06:09)`、floor step OK (measured 2281 / floor 2274)、`tally-consistency` success。**この 2 run の `9 xfailed` は WP-1 が未マージだったためであり、WP-1 マージ後は 0 になる** (完了ゲートの実測) | run id、`tally-consistency` の結果、両 job の floor step ログ行。**main の run は docs-only push のたびに `concurrency` の cancel-in-progress で消えるので、ゲートは最終 push の run で読む** |
+| **完了ゲート (root suite 単独実行)** | **`2340 passed, 5 warnings in 349.31s (0:05:49)`** / **EXIT=0**。**failed 0 / xfailed 0 / skipped 0**。日付 2026-09-07、branch head `3c85e96` | `./.venv/bin/python -m pytest -q -n 5 --dist loadgroup`、監督単独実行。**`5 warnings` は共有 `.venv` に `httpx2` を入れていないことによる `StarletteDeprecationWarning` (第 14 次 §4-3 記載) であり、CI 側は `httpx2` が入るので 0 である。warnings の数は一致判定に用いない** |
+| **CI 3.11 job の集計行** | **【監督追記 2026-09-07】run 34047745958 (main `f4635ed` = WP-1 入り): 3.11 (正本) `2340 passed in 433.13s (0:07:13)`、3.12 `2340 passed in 456.24s (0:07:36)`、両 job `COLLECTION_FLOOR check OK: measured=2340 floor=2274 diff=66`、`tally-consistency` / scanner / deploy-assets-lint すべて success。failed 0 / xfailed 0 / skipped 0 — ローカル root suite `2340 passed` と 4 数一致 (L7-6 の突合済み)。** 旧記述: **WP-1 入りの main `f4635ed` に対する run は本書執筆時点で未確認である。** 参考として WP-1 マージ前の 2 run を逐語で残す: **run 34038494519** (main `f21d763` = WP-2/3/4/5) 3.11 `2312 passed, 9 xfailed in 464.96s (0:07:44)`、3.12 `2312 passed, 9 xfailed in 443.99s (0:07:23)`、両 job `COLLECTION_FLOOR check OK: measured=2321 floor=2274 diff=47`、**全 job success** (`tally-consistency` を含む)。**run 34034469614** (main `56ff04c` = WP-2/3) 3.11 `2272 passed, 9 xfailed in 427.86s (0:07:07)`、3.12 `2272 passed, 9 xfailed in 369.68s (0:06:09)`、floor step OK (measured 2281 / floor 2274)、`tally-consistency` success。**この 2 run の `9 xfailed` は WP-1 が未マージだったためであり、WP-1 マージ後は 0 になる** (完了ゲートの実測) | run id、`tally-consistency` の結果、両 job の floor step ログ行。**main の run は docs-only push のたびに `concurrency` の cancel-in-progress で消えるので、ゲートは最終 push の run で読む** |
 | **`--collect-only -q` の件数 (ゲート時)** | **2340**。逐語: `collected=2340` / `COLLECTION_FLOOR check OK: measured=2340 floor=2340 diff=0` / `EXIT=0` | `COLLECTION_FLOOR` を **2274 → 2340** へ更新した後の値。**以後この件数を下回れば、明示の更新コミットが無いかぎり CI が赤になる** |
 | **C-05 V3 の `xfailed` 件数と内訳** | **0**。内訳は無い (残った組が無い) | U-1 裁定 (A)。**逃げ枝 (in-process 1 組を `unavailable` で残す) は条件不成立であり使われなかった** (§5 U-1 状態注記、§3 D-1 訂正註 3)。`_V3_KNOWN_UNAVAILABLE = frozenset()`。**V3 の parametrize 基底は固定 9 class × 4 plug = 36 ケースのまま変わらない** |
 | **R-10 の記録** | **契約 JSON と両 peer の packaged 複製 2 本の sha256 = `968d3c72415d4536c0393ce451497324c182cbc2ae9d9213e0ec6ed4444f45e6` (3 本一致)** — 付録 A §A.0 の値と一致する = **契約 JSON は 0 バイト不変**である。**常設スキャナが列挙した JSON パス件数 = companion の anchor 件数 = 29 (過不足なし)** | U-2 = (A)。対象は `spec/data-service-api.v1.json` / `MitateDB-api/src/mitatedb_api/contract/data-service-api.v1.json` / `r2db-api/src/r2db_api/contract/data-service-api.v1.json`。**WP-3 の着手時・変異の復元後・完了時のいずれでも同一であり、監査も独立に 3 回照合した** |
@@ -1008,12 +1008,12 @@ FAIL F-8  relation <PEER>_registry.platform_declarations does not exist: ...
 **実行環境行 (逐語)**:
 
 ```
-PERFRUN host=Darwin/arm64 python=3.11.15 commit=2ab4edc-dirty date=2026-09-07
+PERFRUN host=Darwin/arm64 python=3.11.15 commit=3c85e96-dirty date=2026-09-07
 ```
 
 **実行コマンド (逐語)**: `./.venv/bin/python tools/perf_baseline.py --warmup 20 --n 200` / **EXIT=0**。**監督が完了ゲート (root suite 終了後) に単独で実行した。他の pytest は 0 件、`pg_database` は前後とも 21 → 21 で残留無し。**
 
-**`commit=2ab4edc-dirty` の `-dirty` は `conformance-tests/COLLECTION_FLOOR` の未コミット更新 (2274 → 2340) だけによるものである** — ゲート作業の順序上、floor の更新コミットは PERF 取得の後に置いた。`2ab4edc` は本フェーズの branch head であり、main への merge は `9f75428` である。
+**`commit=3c85e96-dirty` の `-dirty` は `conformance-tests/COLLECTION_FLOOR` の未コミット更新 (2274 → 2340) だけによるものである** — ゲート作業の順序上、floor の更新コミットは PERF 取得の後に置いた。`3c85e96` は本フェーズの branch head であり、main への merge は `f4635ed` である。
 
 **行順はハーネスの出力順 (`conformance-tests/registry.json` の順 = r2db in-process → MitateDB in-process → r2db-http → MitateDB-http) に合わせて転記した** — 起票時の表 (plug 順) とは順序が異なる。転記時の取り違えを避けるためである。
 
@@ -1077,7 +1077,7 @@ PERFRUN host=Darwin/arm64 python=3.11.15 commit=2ab4edc-dirty date=2026-09-07
   - **変異**: 実装 **3 件** + 差し戻し **4 件の異常系** + 監査の自作 **4 件 (A / B / D / E)**。**差し戻し 1 回** (レビュー 7 件)。
   - **記録が要る実測項目 (設計 §11.3 の指定)**: **L7-23 のガード (`assert ids`) は完了ゲート形式 (`-n 5 --dist loadgroup`) で緑である。** 監査が計測プラグイン (scratchpad、リポジトリ無改変) で観測件数を独立に取った — **conformance 全体で `AUDIT_MARKED_IDS n=20 items=584`、register 単独で `n=0 items=10`**。**xdist の各 worker が session 全体を収集するという前提は実測で成立している。**
   - **監査の指摘とその処置**: **収集エラーが「緑」として報告される穴** (レビュー R-1) → **`returncode != 0` / summary 行の `error` を見る枝を足した** (差し戻し)。監査の自作変異 B (`collect_ignore_glob` で 238 件を静かに落とす、終了コード 0・エラー無し) が **`measured=2036 floor=2274 diff=-238` / EXIT=1** で捕まったことが、この機構が本来守るべき形 (静かな証拠消失) に効くことの実証である。
-  - **監査の未充足とその処置**: **(1) 設計 §11.3 の WP-2 行が「(未記入)」だった** → **本項で記入した** (記録の帰属は WP-6 である)。**(2) CI run id と両 job の floor step ログ行が未取得だった** (未 push のため原理的に不可) → **§11.1 に main `5ccdda6` / `ca4e285` の 2 run を逐語で記録した。** **(3) 完了ゲート形式の実測が root suite ではなく `conformance-tests` 限定だった** → **監督の完了ゲート (root suite `2340 passed`) で解消した。** **(4) `public_value_scan.py` が未追跡の新設 2 ファイルを走査していなかった** → **明示引数での走査で `total_flagged=0` を確認した** (§3 D-3 訂正註 4)。
+  - **監査の未充足とその処置**: **(1) 設計 §11.3 の WP-2 行が「(未記入)」だった** → **本項で記入した** (記録の帰属は WP-6 である)。**(2) CI run id と両 job の floor step ログ行が未取得だった** (未 push のため原理的に不可) → **§11.1 に main `56ff04c` / `f21d763` の 2 run を逐語で記録した。** **(3) 完了ゲート形式の実測が root suite ではなく `conformance-tests` 限定だった** → **監督の完了ゲート (root suite `2340 passed`) で解消した。** **(4) `public_value_scan.py` が未追跡の新設 2 ファイルを走査していなかった** → **明示引数での走査で `total_flagged=0` を確認した** (§3 D-3 訂正註 4)。
   - **作業指示書の誤記 (訂正註へ)**: テストコマンド 3 本目 `test_c00_contract_discovery.py` は実在しない (実在は `test_c00_application_escape.py`)。**ファイル名を直しても目的を果たさない** — 実測 `1 failed, 17 passed`。**ガードは「観測 0 件」だけを閉じる設計であり、部分実行では救えない** (D-3 どおり、実装の逸脱ではない)。**台帳 L8-16 (a)。**
   - **費用開示の訂正**: `--collect-only` の provisioning 倍化は実測と合わなかった (`pg_database` / `pg_roles` の差分 0)。**`README.md` は訂正後の文言 (接続検証のみ) で書かれている** (§3 D-3 訂正註 1)。
 
@@ -1106,7 +1106,7 @@ PERFRUN host=Darwin/arm64 python=3.11.15 commit=2ab4edc-dirty date=2026-09-07
   - **集計行 (試走、基準値ではない)**: `--warmup 2 --n 5` で **PERFRUN + PERF 14 行 / EXIT=0**。`tools/public_value_scan.py` → `# mode=tree files_scanned=2 total_flagged=0`。**基準値そのものは監督が完了ゲートで単独実行し、§11.2 に記録した。**
   - **変異**: 実装 **1 件** (自己検査の非空性) + registry 増加の実測 **1 件** + 監査の自作 **3 件 (A / B / C)**。**差し戻し 1 回** (レビュー 8 件)。
   - **非空振りの実測**: **カウンタを無効化する変異 → EXIT=1**、in-process 2 plug が `min=0 < 1 over N samples` で赤 (HTTP 2 plug は別コードパスなので無傷)。**registry を +1 した複製で走らせると PERF 行が 14 → 17 行になる** (plug 名・module 名をハーネスに手書きしていないことの実証。`conformance-tests/registry.json` 本体は無変更)。**閾値の grep は自己検査の 1 件のみ。**
-  - **監査の残余とその処置**: **(1) 裁定 2 (値生成を計測窓の外へ) が部分充足** — `BatchOperation` / `ScopedBatchOperation` の生成が窓内に残る (窓内コストの実測は §11.2 の注記に開示)。**`BatchOperation` の事前生成は監督が最終修正した (main `c59075d`)。** **(2) `README:33` の誤記** (「warmup も PERF 行の `n=` に echo される」) → 訂正。**(3) `--warmup` が出力に残らない** → **§11.2 にゲート時のコマンド行 (warmup と n) を注記として添える形で決着した** (PERF / PERFRUN は確定文言なのでフィールドを増やさない)。**(4) §11.2 の表の行順がハーネスの出力順と異なる** → **本記録では表を出力順 (registry 順) に差し替えた** (転記時の取り違え防止)。
+  - **監査の残余とその処置**: **(1) 裁定 2 (値生成を計測窓の外へ) が部分充足** — `BatchOperation` / `ScopedBatchOperation` の生成が窓内に残る (窓内コストの実測は §11.2 の注記に開示)。**`BatchOperation` の事前生成は監督が最終修正した (main `02afb01`)。** **(2) `README:33` の誤記** (「warmup も PERF 行の `n=` に echo される」) → 訂正。**(3) `--warmup` が出力に残らない** → **§11.2 にゲート時のコマンド行 (warmup と n) を注記として添える形で決着した** (PERF / PERFRUN は確定文言なのでフィールドを増やさない)。**(4) §11.2 の表の行順がハーネスの出力順と異なる** → **本記録では表を出力順 (registry 順) に差し替えた** (転記時の取り違え防止)。
   - **設計への疑義 (記録)**: **`cross_entity` の操作数 (2 entity × 1 insert)**、**in-process 2 plug の `backend_calls` 粒度差 (台帳 L8-11)**、**`build_adapter()` 直使い + op ごとの credential 発行**の 3 点。**いずれも設計が固定していない範囲であり逸脱ではない** — 前 2 者は §11.2 の注記と台帳へ、3 点目はハーネスの docstring / README へ落とした。
   - **衛生**: 出力に hostname・ユーザー名・絶対パスは 0 件。`pg_database` の残留 0 (`datname ilike '%perf%'` が空)。**レビュー中に `mtdbctl…_platform` DB が出現したが、他 WP の並行実行由来であり帰属不能である** — **以後、完了ゲートでは `pg_database` の前後差分を取る** (ゲート時は 21 → 21)。
 
@@ -1114,13 +1114,13 @@ PERFRUN host=Darwin/arm64 python=3.11.15 commit=2ab4edc-dirty date=2026-09-07
   - **触ったファイル**: 本書 (§3 の各 D に訂正註、§5 U-1 に状態注記、§9 に結果、§10 に状態注記と新規起票 L8-10〜L8-16、§11 の全記入、版数行)、`docs/design/ROADMAP_POST_PHASE7_V1.md` (**v1.2** — §1 現状、§5 フェーズ8 節、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行の改版、§8 の R-9〜R-12 の行き先)、`docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md` (§11 の L7-1 / L7-18 / L7-19 / L7-21 / L7-22 / L7-23 に状態注記、D-6.2 の `operation_depth` 行に訂正註、版数行 1 行)、`docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` (**§5 訂正註のみ。本文は書き換えていない**)、`docs/work-orders/HANDOVER_20260907_FABLE.md` (**第 15 次、新設**)、`docs/work-orders/HANDOVER_20260906_FABLE.md` (§4-2 末尾に第 15 次へのポインタ 1 行)、`conformance-tests/COLLECTION_FLOOR` (**2274 → 2340。監督のゲート作業**)。
   - **集計行**: `./.venv/bin/python tools/public_value_scan.py` → **`# mode=tree files_scanned=267 total_flagged=0`** (未追跡の新設 1 ファイルは明示引数で走査し `total_flagged=0`)。**本 WP の成果物はすべて文書・記録であり、変異は作らない** (全項目が監査照合である)。
   - **計画文書の改版 (R-14)**: **行を 1 つも消していない。** R-10 行と R-12 行は**旧文を残したうえで、根拠と日付を添えた改版文を足す**形にした (L8-8)。
-  - **記録の限界 (開示)**: **CI の WP-1 入り run (main `9f75428`) は起草時点で未確認だったが、監督が 2026-09-07 に run 34047745958 を確認し §11.1 に追記した** (3.11 / 3.12 とも `2340 passed`、4 数一致)。 台帳 L7-6 (CI とローカルの集計行が食い違ったときの正本) と同じ扱いである。
+  - **記録の限界 (開示)**: **CI の WP-1 入り run (main `f4635ed`) は起草時点で未確認だったが、監督が 2026-09-07 に run 34047745958 を確認し §11.1 に追記した** (3.11 / 3.12 とも `2340 passed`、4 数一致)。 台帳 L7-6 (CI とローカルの集計行が食い違ったときの正本) と同じ扱いである。
 
 ---
 
 ## 付録 A. R-10 の経緯マーカー逐語インベントリ (常設規律 5)
 
-**本付録は `spec/data-service-api.v1.json` (main `472e2ac`) に対する機械走査の結果であり、判断を含まない事実の記録である。** §3 D-4 と §5 U-2 はこの表を根拠にしている。走査は逐語プロトタイプ (`{scratchpad}/r10_marker_inventory.py`) が出力したものを、見出しの階層だけ 1 段下げて**そのまま転記**した (内容は 1 文字も変えていない)。
+**本付録は `spec/data-service-api.v1.json` (main `9389fd5`) に対する機械走査の結果であり、判断を含まない事実の記録である。** §3 D-4 と §5 U-2 はこの表を根拠にしている。走査は逐語プロトタイプ (`{scratchpad}/r10_marker_inventory.py`) が出力したものを、見出しの階層だけ 1 段下げて**そのまま転記**した (内容は 1 文字も変えていない)。
 
 **読み方**:
 - **`chars`** = その値の全長。**`matched patterns`** = その値に現れた経緯マーカーの種別。

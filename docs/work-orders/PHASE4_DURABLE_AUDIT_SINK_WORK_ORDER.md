@@ -491,21 +491,21 @@ WP-2 の完了条件 1〜23 と**同一の性質**を `MitateDB-api/tests/test_a
 
 | WP | 完了日 | コミット (merge) | 集計行 (root suite、単独実行) | §2.1 の (a)/(b) 分割 |
 |---|---|---|---|---|
-| WP-0 | 2026-09-02 | `3ec95cf` (`b99368d`) | 1292 passed / 0 failed / 0 skipped (基準値確認のみ) | — |
-| WP-1 | 2026-09-02 | `09233dd` (`a107f6b`) | 1331 passed / 0 / 0 / xfailed 1 | 対象外 |
-| WP-2(a) | 2026-09-02 | `2c5288a` (`1e643e9`) | 1370 passed / 0 / 0 / xfailed 1 | **実施した** |
-| WP-2(b) | 2026-09-03 | `a1a1409` (`13c899a`) | 1419 passed / 0 / 0 / xfailed 1 | **実施した** (flip は (b) に束縛) |
-| WP-3(a) | 2026-09-03 | `54318c6` (`6df2713`) | 1485 passed / 0 / 0 / xfailed 1 | **実施した** |
-| follow-up 1 | 2026-09-03 | `411c034` (`afd24ef`) | 1487 passed / 0 / 0 / xfailed 1 | — |
-| WP-3(b) | 2026-09-03 | `a3571dc` (`e60eb1e`) | — (follow-up 2 と同一 merge で計測) | **実施した** (flip + `xfail` 削除を (b) に束縛) |
-| follow-up 2 | 2026-09-03 | `cb9f7a3` (`e60eb1e`) | **1526 passed / 0 failed / 0 skipped / xfailed 0** | — |
+| WP-0 | 2026-09-02 | `f42b6c2` (`fcb2c4b`) | 1292 passed / 0 failed / 0 skipped (基準値確認のみ) | — |
+| WP-1 | 2026-09-02 | `f394da8` (`1ef89c0`) | 1331 passed / 0 / 0 / xfailed 1 | 対象外 |
+| WP-2(a) | 2026-09-02 | `333b411` (`5e9d6ed`) | 1370 passed / 0 / 0 / xfailed 1 | **実施した** |
+| WP-2(b) | 2026-09-03 | `f41a9a9` (`ea4b8b5`) | 1419 passed / 0 / 0 / xfailed 1 | **実施した** (flip は (b) に束縛) |
+| WP-3(a) | 2026-09-03 | `0cf40e7` (`b651324`) | 1485 passed / 0 / 0 / xfailed 1 | **実施した** |
+| follow-up 1 | 2026-09-03 | `a2a88e5` (`c77fa56`) | 1487 passed / 0 / 0 / xfailed 1 | — |
+| WP-3(b) | 2026-09-03 | `009ca42` (`54b6bf3`) | — (follow-up 2 と同一 merge で計測) | **実施した** (flip + `xfail` 削除を (b) に束縛) |
+| follow-up 2 | 2026-09-03 | `8473011` (`54b6bf3`) | **1526 passed / 0 failed / 0 skipped / xfailed 0** | — |
 | WP-4 | 2026-09-03 | (本コミット) | 文書のみ | — |
 
-**分割**: WP-2 / WP-3 はいずれも §2.1 の許可どおり (a)/(b) の 2 コミットに分割した。それ以外の分割は行っていない。`contract_version` 1.4.0 flip はどちらも (b) の単一コミットに含まれ、(a) の時点では公開面の宣言を一切変えていない (`audit_query` は `unavailable`、`contract_version` は 1.3.0 のまま)。全体 vacuity guard の `xfail(strict=True)` 削除は **WP-3(b) = 最後の flip コミット `a3571dc` に含まれる** (§2.1 / §6-8b の要求どおり。先に外すことも、後から別コミットで外すこともしていない)。
+**分割**: WP-2 / WP-3 はいずれも §2.1 の許可どおり (a)/(b) の 2 コミットに分割した。それ以外の分割は行っていない。`contract_version` 1.4.0 flip はどちらも (b) の単一コミットに含まれ、(a) の時点では公開面の宣言を一切変えていない (`audit_query` は `unavailable`、`contract_version` は 1.3.0 のまま)。全体 vacuity guard の `xfail(strict=True)` 削除は **WP-3(b) = 最後の flip コミット `009ca42` に含まれる** (§2.1 / §6-8b の要求どおり。先に外すことも、後から別コミットで外すこともしていない)。
 
 **follow-up 2 件 (発注書に無い追加コミット)**: どちらも「一方の peer のレビュー/監査で見つかった欠陥を、対称な他方へ適用する」ためのものであり、監督の許可を得て単独コミットとした。
-- `411c034` (WP-2(a) follow-up、製品コード + テスト) — MitateDB WP-3(a) レビューが発見した並行 flush の二重書込みを r2db にも適用 (swap-out 化 + 失敗復元時の容量切り詰め)。
-- `cb9f7a3` (WP-2(b) follow-up、**テストのみ**) — MitateDB WP-3(b) 受け入れ監査の指摘を r2db へ対称適用 (宣言語彙 AST 走査のパッケージ全体化、`audit_query` 宣言と `R2DB_AUDIT_DSN` の実 HTTP 固定)。
+- `a2a88e5` (WP-2(a) follow-up、製品コード + テスト) — MitateDB WP-3(a) レビューが発見した並行 flush の二重書込みを r2db にも適用 (swap-out 化 + 失敗復元時の容量切り詰め)。
+- `8473011` (WP-2(b) follow-up、**テストのみ**) — MitateDB WP-3(b) 受け入れ監査の指摘を r2db へ対称適用 (宣言語彙 AST 走査のパッケージ全体化、`audit_query` 宣言と `R2DB_AUDIT_DSN` の実 HTTP 固定)。
 
 **§1.3 の成果物 6 項の充足**: 全項充足。(i) 両 peer の fail-closed 耐久記録、(ii) buffer + alert、(iii) control ホスト上で実際に動く `audit_query` (2 パス・control/audit 認証・不透明 cursor)、(iv) C-09/C-11 の executable 化と zero-coverage 解消、(v) 契約 1.4.0 の公開と両 peer の同一コミット flip、(vi) §5 の 11 性質の実測固定 — (vi) の最終対応表は設計 §9.2.1 が正本であり、**本書 §5 の表は発注時点の予定テスト名を含む** (実装が採った名前と一部食い違う。設計 §9.2.1 を参照すること)。
 

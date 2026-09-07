@@ -12,22 +12,22 @@
 
 | コミット (merge) | WP | 内容 | root suite (単独実行) |
 |---|---|---|---|
-| `6a27d7a` | WP-0(docs) | 設計 v1.2 + 作業指示書 v1.0/v1.1 | 文書のみ |
-| `bb365d0` | WP-0(裁定) | (α)(β)(γ) の確定記録 + 7-A 前倒し | 文書のみ |
-| `df35451` | WP-3 | **(h) r2db 配備資産** (control unit / nginx `location /control/v1/` / operator script 3 本 / runbook §7) | CI で評価 (7-A) |
-| `393b9f1` | WP-1 | **(g) 公開規律とスキャナ** (`public-repository-policy.md` / `tools/public_value_scan.py` / `.pre-commit-config.yaml`) | 同上 |
-| `e1d33c3` | WP-2 | **(b)(i)(ii) constraints と CI** (`constraints.txt` / `.github/workflows/ci.yml`) | **1868 / 0 / 0 / 4 xfailed** (CI 3.11 job、run 33962523499) |
-| `79ed0c9` | 7-A 記録 | 設計 §13 + 台帳 L7-14〜L7-17 + 作業指示書 v1.2 + 第13次 §4-2 | 文書のみ |
-| `8212dc1` | (前提) | **main の CI 緑化** (Q4 由来テスト 2 件の小修正) | **2165 / 0 / 0 / 0** (CI 3.11 job) |
-| `c4bc89f` / `4ccbe77` | (前提) | **LQ4-24 追補** (r2db 配備資産の Q4 追随) | **2165** のまま |
-| `2ddee6c` | WP-4 | **(a) C-05 の共通化 + (e) 隔離 surface の資源検査**、port v1.11 | **2214 / 0 / 0 / 9 xfailed** |
-| `10df489` | WP-5 | **(a) C-00 / C-02 / C-04 / C-07 / C-10 の共通化 + conformance の資源管理** | **2250 / 0 / 0 / 9 xfailed** |
-| `073afbb` | WP-6 | **(b)(iii) `DeprecationWarning` の error 化と `httpx2` 採用** | **2252 / 0 / 0 / 9 xfailed** |
-| `ee712c5` | 7-B 記録 | 設計 §13 / §11 + 作業指示書 v1.3 | 文書のみ (**2252** のまま) |
-| `a8353fe` | WP-7 | **(i) 現行結論と履歴の分離** (companion 2 本 + 現行行化 + 更新規約 + register テスト) | **2265 / 0 / 0 / 9 xfailed** — main CI run 34025563291 緑、3.11 `2265 passed, 9 xfailed` で 4 数一致 |
+| `8c982eb` | WP-0(docs) | 設計 v1.2 + 作業指示書 v1.0/v1.1 | 文書のみ |
+| `56f100e` | WP-0(裁定) | (α)(β)(γ) の確定記録 + 7-A 前倒し | 文書のみ |
+| `dd08594` | WP-3 | **(h) r2db 配備資産** (control unit / nginx `location /control/v1/` / operator script 3 本 / runbook §7) | CI で評価 (7-A) |
+| `448c660` | WP-1 | **(g) 公開規律とスキャナ** (`public-repository-policy.md` / `tools/public_value_scan.py` / `.pre-commit-config.yaml`) | 同上 |
+| `50c307f` | WP-2 | **(b)(i)(ii) constraints と CI** (`constraints.txt` / `.github/workflows/ci.yml`) | **1868 / 0 / 0 / 4 xfailed** (CI 3.11 job、run 33962523499) |
+| `b3bf310` | 7-A 記録 | 設計 §13 + 台帳 L7-14〜L7-17 + 作業指示書 v1.2 + 第13次 §4-2 | 文書のみ |
+| `1c31655` | (前提) | **main の CI 緑化** (Q4 由来テスト 2 件の小修正) | **2165 / 0 / 0 / 0** (CI 3.11 job) |
+| `a4d5b3a` / `c25b1ed` | (前提) | **LQ4-24 追補** (r2db 配備資産の Q4 追随) | **2165** のまま |
+| `9ab4245` | WP-4 | **(a) C-05 の共通化 + (e) 隔離 surface の資源検査**、port v1.11 | **2214 / 0 / 0 / 9 xfailed** |
+| `0650855` | WP-5 | **(a) C-00 / C-02 / C-04 / C-07 / C-10 の共通化 + conformance の資源管理** | **2250 / 0 / 0 / 9 xfailed** |
+| `a090e80` | WP-6 | **(b)(iii) `DeprecationWarning` の error 化と `httpx2` 採用** | **2252 / 0 / 0 / 9 xfailed** |
+| `1656ad3` | 7-B 記録 | 設計 §13 / §11 + 作業指示書 v1.3 | 文書のみ (**2252** のまま) |
+| `b2f9224` | WP-7 | **(i) 現行結論と履歴の分離** (companion 2 本 + 現行行化 + 更新規約 + register テスト) | **2265 / 0 / 0 / 9 xfailed** — main CI run 34025563291 緑、3.11 `2265 passed, 9 xfailed` で 4 数一致 |
 | `(本記録の merge。ハッシュは次回引き継ぎ §1 に記載)` | WP-8 | 記録整理 (設計 §10 / §11 / §13、作業指示書 v1.4、フェーズ6 §11 L6-20、第13次 §4-2、本書) | 文書のみ (**2265** のまま) |
 
-**集計行の出所**: **7-A は CI の 3.11 job の集計行が正本である** — 3 WP とも root `pyproject.toml` の `testpaths` の外しか触っておらず、収集対象不変を `--collect-only` **1872 件** の一致で確認したうえで正本を CI へ移した (設計 §13.1、L7-17)。**7-B は監督がローカルで単独実行した完了ゲートが正本である** (`{scratchpad}/wp4-gate.log` / `wp5-gate.log` / `wp6-gate.log` / `wp7-gate.log`)。**WP-7 の最終ゲートは `2265 passed, 9 xfailed, 5 warnings in 150.20s (0:02:30)`** である。**CI との突合は WP-4 のマージ後 (`2ddee6c`) と WP-5 / WP-6 のマージ後 (`073afbb`) で行い、4 数 (passed / failed / skipped / xfailed) がローカルと一致した。** **WP-7 のマージ後 (`a8353fe`) の CI run は本書の執筆時点では未確認であり、次に main の CI を見たときに 4 数の一致を突き合わせること** (台帳 L7-6)。
+**集計行の出所**: **7-A は CI の 3.11 job の集計行が正本である** — 3 WP とも root `pyproject.toml` の `testpaths` の外しか触っておらず、収集対象不変を `--collect-only` **1872 件** の一致で確認したうえで正本を CI へ移した (設計 §13.1、L7-17)。**7-B は監督がローカルで単独実行した完了ゲートが正本である** (`{scratchpad}/wp4-gate.log` / `wp5-gate.log` / `wp6-gate.log` / `wp7-gate.log`)。**WP-7 の最終ゲートは `2265 passed, 9 xfailed, 5 warnings in 150.20s (0:02:30)`** である。**CI との突合は WP-4 のマージ後 (`9ab4245`) と WP-5 / WP-6 のマージ後 (`a090e80`) で行い、4 数 (passed / failed / skipped / xfailed) がローカルと一致した。** **WP-7 のマージ後 (`b2f9224`) の CI run は本書の執筆時点では未確認であり、次に main の CI を見たときに 4 数の一致を突き合わせること** (台帳 L7-6)。
 
 **`warnings` の数は一致判定に用いない** — ローカルの `5 warnings` は共有 `.venv` に `httpx2` を入れていないことによる `StarletteDeprecationWarning` 5 件であり、**CI 側は `constraints.txt` 経由で `httpx2` が入るので 0 である**。**`StarletteDeprecationWarning` は `UserWarning` 派生**なので、WP-6 が有効化した `error::DeprecationWarning` の対象外である。
 
@@ -108,7 +108,7 @@
 - **その他の台帳項目 (L7-4〜L7-9 / L7-11 / L7-14〜L7-17)** — **各項に日付付きの状態注記を付した**。設計 §11 が現在形の正本である。**「閉じた」と書いてある項目は L7-9 (セル長上限の確定) と L7-13 (裁定としての確定。実行分は残る) の 2 つだけである。**
 - **依頼者判断待ちの新規項目は本フェーズでは増えていない。**
 - **【追記 2026-09-06、WP-8 後】フェーズ7 以降の計画は `docs/design/ROADMAP_POST_PHASE7_V1.md` に固定した** — 依頼者の目標 (G-1〜G-4、逐語)、外部提案 2 本の判定、横断の守るべき条件 P-1〜P-9、フェーズ8 (L7-1 + 衛生 + 性能基準値) / フェーズ9 (契約 1.7.0「宣言と検証」) / フェーズ10 (L7-2 + L6-5a) の範囲と着手条件、却下案、台帳 R-1〜R-14。**上記の開いている台帳項目 (L7-18 / L7-19 / L7-21 / L7-22 / L7-23) はフェーズ8 の該当 R 項目に同梱先が書いてある。** 次フェーズの設計起草者は同書 §9 の手順で着手する。
-- **【追記 2026-09-07、フェーズ8 完了後】本書の「現在地」は第 15 次引き継ぎ `docs/work-orders/HANDOVER_20260907_FABLE.md` が上書きする。** フェーズ8 (実効 bound と基盤衛生) は WP-1〜WP-6 をもって完了し (main の最新 merge `9f75428`、完了ゲート `2340 passed, 5 warnings in 349.31s (0:05:49)`、failed 0 / xfailed 0 / skipped 0)、**上記の開いている台帳項目のうち L7-1 / L7-18 / L7-21 / L7-22 / L7-23 は閉じた** (L7-19 は上流待ちで据え置き、L7-2 はフェーズ10)。**契約 1.6.0 は 1 バイトも動いていない。** **本書の §2 到達した状態・§3 クライアント連携・§4-1 WP-9 の手順・§4-3 運用規律・§5 教訓はすべて継続する** — 第 15 次はそれを継承したうえで、フェーズ8 が足した分だけを書いている。
+- **【追記 2026-09-07、フェーズ8 完了後】本書の「現在地」は第 15 次引き継ぎ `docs/work-orders/HANDOVER_20260907_FABLE.md` が上書きする。** フェーズ8 (実効 bound と基盤衛生) は WP-1〜WP-6 をもって完了し (main の最新 merge `f4635ed`、完了ゲート `2340 passed, 5 warnings in 349.31s (0:05:49)`、failed 0 / xfailed 0 / skipped 0)、**上記の開いている台帳項目のうち L7-1 / L7-18 / L7-21 / L7-22 / L7-23 は閉じた** (L7-19 は上流待ちで据え置き、L7-2 はフェーズ10)。**契約 1.6.0 は 1 バイトも動いていない。** **本書の §2 到達した状態・§3 クライアント連携・§4-1 WP-9 の手順・§4-3 運用規律・§5 教訓はすべて継続する** — 第 15 次はそれを継承したうえで、フェーズ8 が足した分だけを書いている。
 
 ### 4-3. 運用規律 (第13次 §4-3 と Q4 側第 14 次 §6 を継承。本フェーズが足したもの)
 

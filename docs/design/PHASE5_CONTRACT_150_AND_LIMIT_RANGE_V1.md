@@ -1,6 +1,6 @@
 # フェーズ5 実施設計: 契約 1.5.0 (監査語彙の宣言化 + 無条件義務 (b) の適用範囲) + request-count limit 受理レンジの対称化
 
-- 版数: **v1.5 (2026-09-04、WP-5 記録整理 part 2 + 監督裁定による WP-5 追補)** — **v1.4 が残した `{WP-4 後に確定}` プレースホルダを全数解消**した。§10.1 の集計行表を WP-3 (`3f2da59` → merge `98d2010`、**1612 passed / 0 / 0 / 0**) と WP-4 (**1611 passed / 0 / 0 / 0**) の実測で埋め、**§10.4 (WP-3) を「進行中」から確定記録へ書き換え** (レビュー 7 件の閉じ方・変異実測・受理境界)、**§10.5 (WP-4) を新規に記述**した (上限撤廃 4 クラス・テスト差し替え・adapter 構成据え置き・**変異 6/7 が未実測である事実**)。§11 に将来課題 **L5-5 (同型性テストが兄弟ファイル外の同名ヘルパを対象にできない)** / **L5-6 (同型性テストのソース取得方式の左右非対称)** / **L5-7 (WP-4 変異 6/7 の実測コストが禁止的)** / **L5-8 (下限検査の peer 非対称 — MitateDB は `bool` を拒否、r2db は受理)** を追加した。**監督裁定による追補 (同日)**: D-3 で偽になった先行文書の記述 2 箇所に日付付きの否定注記を置いた — `spec/CCR_DISPOSITION.md` 従属判断 9 の実施記録 (受理レンジの非対称は解消済み。契約 JSON は不変) と `docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` R-6 (製品側上限は撤廃、`_MAX_EXERCISABLE_LIMIT` は conformance 構成の上限としてのみ残る)。どちらも原文は当時の記述として残してある。**残るプレースホルダは WP-4 / WP-5 のコミットハッシュ (`d11c86f` / `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)`) のみ**であり、監督がコミット後に埋める
+- 版数: **v1.5 (2026-09-04、WP-5 記録整理 part 2 + 監督裁定による WP-5 追補)** — **v1.4 が残した `{WP-4 後に確定}` プレースホルダを全数解消**した。§10.1 の集計行表を WP-3 (`51699f7` → merge `4ba2737`、**1612 passed / 0 / 0 / 0**) と WP-4 (**1611 passed / 0 / 0 / 0**) の実測で埋め、**§10.4 (WP-3) を「進行中」から確定記録へ書き換え** (レビュー 7 件の閉じ方・変異実測・受理境界)、**§10.5 (WP-4) を新規に記述**した (上限撤廃 4 クラス・テスト差し替え・adapter 構成据え置き・**変異 6/7 が未実測である事実**)。§11 に将来課題 **L5-5 (同型性テストが兄弟ファイル外の同名ヘルパを対象にできない)** / **L5-6 (同型性テストのソース取得方式の左右非対称)** / **L5-7 (WP-4 変異 6/7 の実測コストが禁止的)** / **L5-8 (下限検査の peer 非対称 — MitateDB は `bool` を拒否、r2db は受理)** を追加した。**監督裁定による追補 (同日)**: D-3 で偽になった先行文書の記述 2 箇所に日付付きの否定注記を置いた — `spec/CCR_DISPOSITION.md` 従属判断 9 の実施記録 (受理レンジの非対称は解消済み。契約 JSON は不変) と `docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md` R-6 (製品側上限は撤廃、`_MAX_EXERCISABLE_LIMIT` は conformance 構成の上限としてのみ残る)。どちらも原文は当時の記述として残してある。**残るプレースホルダは WP-4 / WP-5 のコミットハッシュ (`3801cc5` / `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)`) のみ**であり、監督がコミット後に埋める
 - 旧 v1.4 (2026-09-04、WP-5 記録整理 part 1) — **§10 「実施記録」を新設**し (旧 §10 = 将来課題は **§11** へ繰り下げ)、WP-1 (契約 1.5.0 公開) と WP-2 (r2db の 1.5.0 出荷) の実装記録・レビュー往復・変異注入結果・**受理境界**、および WP-3 (MitateDB) の現況を記録した。§1.4 の 8 の候補表に**訂正註**を置き (実際の N は候補表と食い違う)、§11 にフェーズ5 起票の将来課題 **L5-1〜L5-4** を追加した
 - 旧 v1.3 (2026-09-03、再レビュー N-1〜N-7 反映) — 2 回目の独立レビュー (`scratchpad/review-design-150-r2.md`) の新規指摘 7 件を全件裁定・反映。主要な変更: **除外リストの検証条件 (ii) を (ii′) へ差し替えた** (N-1 — r2db `DataService.schema` は**除外必須でありながら監査 literal を運ぶ**ため、v1.2 の「監査 literal を運ぶ定義は除外できない構造」は現行コードに反証された)、**起草英文の `never accepted or forwarded` を許容形へ** (N-2 — `forwarded` の禁止は 1.4.0 条件付き義務 (5) を分離配備で満たす転送実装を遡って非適合にする)、**補筆第 1 文に `endpoints.audit_query.deprecation_note` の host scoping と義務 (5) への参照を追加** (N-3)、**従属判断 10 の additive 根拠に両 peer の control ホスト alias 同一ハンドラの実測を追加** (N-4)、(b‴) の許容位置を添字代入・属性代入まで明記 (N-5)、**(b‴) の導入に製品変更は不要** (実測 0 件、N-6)、**`event_class` の返却 vector は 1.4.0 条件付き**で §6.1 と §9 を統一 (N-7)
 - 旧 v1.2 (2026-09-03、独立レビュー全件反映) — レビュー (`scratchpad/review-design-150.md`、重大 6 / 中 8 / 小 5) を全件裁定・反映。主要な変更: **(c) を「無差別 + 名指し除外リスト」形へ改めた** (A-1 — 規則 (c) は名前ベースなので、監査と無関係な `operation` 仮引数 9 定義を巻き込む。「keyword-only 化の対象が全数」は誤りだった)、**`http.py:731` は (d′) 違反として実際に検出される** ため変数リネームを WP-3 の製品変更として明記 (A-2)、**`Subscript` passthrough をキーワード引数値では禁止** しリクエスト由来値の逃げ道を構文で閉じた (A-3)、**D-2 を「1.4.0 の同ラベル改訂」へ変更**し起草英文を許容形へ落とした (B-1 / B-2 / B-3 — 義務形の `AUTH_INVALID` は `control_discovery` の co-hosting 容認を狭め additive 性を崩す)、**N の判定基準を両 peer 共通で静的に定義** (A-6)、**port v1.9 は data ホストの alias ハンドラ自体へ提示する形を要求** し到達できない plug は限界開示 (C-1 / C-2 / C-3)、**「conformance は小さい値」は事実誤り**を訂正 (D-1)、その他 A-4 / A-5 / B-4 / B-5 / D-2 / E-1 / E-2 / C-4 をレビューの修正提案どおり反映
@@ -308,7 +308,7 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 
 ## 8. 版束縛と移行
 
-契約 1.4.0 の出荷 (従属判断 9、WP-1 `09233dd` → r2db `a1a1409` → MitateDB `a3571dc`) と同じ形を踏襲する。
+契約 1.4.0 の出荷 (従属判断 9、WP-1 `f394da8` → r2db `f41a9a9` → MitateDB `009ca42`) と同じ形を踏襲する。
 
 1. **契約 1.5.0 の公開 (WP-1、単一コミット)**
    - `spec/data-service-api.v1.json`: `contract_version` を 1.5.0 へ。**項目 1 (D-1)** の宣言キー 2 本 (`operations` / `target_kinds`) を `audit` 節の注記として「Since 1.5.0 (subordinate ruling 10, item 1, conditional on audit_query being provided)」書式で追加し、`versioning.version_binding` の **1.5.0 段落**に条件付き義務として逐条列挙する。末尾の「An implementation still declaring X.Y.Z is not held to any later-version obligation retroactively」の列挙にも 1.5.0 を加える。
@@ -344,7 +344,7 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 
 ## 10. 実施記録 (WP-5 記録整理、2026-09-04)
 
-**本節の完成度 (v1.5)**: v1.4 が留保した `{WP-4 後に確定}` は**全数解消済み**である。**Q1 (WP-1 / WP-2 / WP-3)・Q2 (WP-1)・Q3 (WP-4) のすべてについて、実装記録・レビュー往復・変異注入結果・受理境界を書いた。** 残るプレースホルダは **WP-4 / WP-5 のコミットハッシュ (`d11c86f` / `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)`) だけ**であり、これは監督がコミット後に埋める欄である — **本文中の事実に未確定は無い**。
+**本節の完成度 (v1.5)**: v1.4 が留保した `{WP-4 後に確定}` は**全数解消済み**である。**Q1 (WP-1 / WP-2 / WP-3)・Q2 (WP-1)・Q3 (WP-4) のすべてについて、実装記録・レビュー往復・変異注入結果・受理境界を書いた。** 残るプレースホルダは **WP-4 / WP-5 のコミットハッシュ (`3801cc5` / `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)`) だけ**であり、これは監督がコミット後に埋める欄である — **本文中の事実に未確定は無い**。
 
 ### 10.1 集計行
 
@@ -352,20 +352,20 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 
 | WP | 内容 | 実装コミット | merge コミット | root suite (単独実行) |
 |---|---|---|---|---|
-| **WP-0** | 設計 v1.3 + 作業指示書 v1.1 | `809a113` | `e26e794` | 文書のみ (基準 **1545 passed / 0 failed / 0 skipped / 0 xfailed** のまま) |
-| **WP-1** | 契約 1.5.0 公開 + port v1.9 + 共通 vector | `6e38ef8` | `d7a5ffd` | **1562 passed / 0 failed / 0 skipped / 1 xfailed** |
-| **WP-2** | r2db の 1.5.0 出荷 | `ed4394a` | `3fd72ad` | **1586 passed / 0 failed / 0 skipped / 2 xfailed** |
-| **WP-3** | MitateDB の 1.5.0 出荷 | `3f2da59` | `98d2010` | **1612 passed / 0 failed / 0 skipped / 0 xfailed** |
-| **WP-4** | Q3 (MitateDB の上限撤廃) | `d11c86f` | `d11c86f` の merge | **1611 passed / 0 failed / 0 skipped / 0 xfailed** |
+| **WP-0** | 設計 v1.3 + 作業指示書 v1.1 | `ebf735c` | `a7ae8db` | 文書のみ (基準 **1545 passed / 0 failed / 0 skipped / 0 xfailed** のまま) |
+| **WP-1** | 契約 1.5.0 公開 + port v1.9 + 共通 vector | `c9720c1` | `b49c0b7` | **1562 passed / 0 failed / 0 skipped / 1 xfailed** |
+| **WP-2** | r2db の 1.5.0 出荷 | `a5bd17b` | `9164127` | **1586 passed / 0 failed / 0 skipped / 2 xfailed** |
+| **WP-3** | MitateDB の 1.5.0 出荷 | `51699f7` | `4ba2737` | **1612 passed / 0 failed / 0 skipped / 0 xfailed** |
+| **WP-4** | Q3 (MitateDB の上限撤廃) | `3801cc5` | `3801cc5` の merge | **1611 passed / 0 failed / 0 skipped / 0 xfailed** |
 | **WP-5** | 記録整理 | `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)` | `(本記録コミット。ハッシュは HANDOVER_20260904_FABLE.md §1 に記載)` の merge | 文書のみ (**1611** のまま) |
 
 **`xfailed` の推移**: WP-1 で 1 (全体 vacuity guard)、WP-2 で 2 (guard + 同型性 placeholder)、**WP-3 で 0** (同一差分で 2 本とも撤去)、WP-4 で 0。**WP-3 以降 `xfailed` は 0 であり、フェーズ5 は xfail を 1 本も残していない。**
 
 **WP-3 → WP-4 の増減内訳**: 1612 − 3 (`201` 拒否ケース 3 件の削除) + 1 (下限 `0` ケースの 4 クラス化による 1 件増) + 1 (`test_limits_accept_generous_values_beyond_the_former_ceiling` の新設) = **1611**。ディレクトリ別では MitateDB 489 → 488、r2db 701 → 701、conformance 422 → 422 であり、**conformance は WP-4 で不変** (設計 §6.4 の非影響判断どおり)。
 
-**起草時に見つけた照合上の食い違い (監督裁定事項)**: `docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md` §10 (実施記録) は WP-1 の root suite を **1561 passed** と記録しているが、WP-1 の最終ログ (`scratchpad/wp1-150-fix3-test.log`) とコミット `6e38ef8` のメッセージはいずれも **1562 passed / 1 xfailed** である (1561 は fix3 前の値。WP-2 受け入れ監査 §6-3 の指摘)。本表は **1562** を採る。作業指示書側の訂正は本書の管轄外であり、監督へ差し戻す。
+**起草時に見つけた照合上の食い違い (監督裁定事項)**: `docs/work-orders/WORK_ORDER_PHASE5_CONTRACT_150_V1.md` §10 (実施記録) は WP-1 の root suite を **1561 passed** と記録しているが、WP-1 の最終ログ (`scratchpad/wp1-150-fix3-test.log`) とコミット `c9720c1` のメッセージはいずれも **1562 passed / 1 xfailed** である (1561 は fix3 前の値。WP-2 受け入れ監査 §6-3 の指摘)。本表は **1562** を採る。作業指示書側の訂正は本書の管轄外であり、監督へ差し戻す。
 
-### 10.2 WP-1 — 契約 1.5.0 の公開 (`6e38ef8` → merge `d7a5ffd`)
+### 10.2 WP-1 — 契約 1.5.0 の公開 (`c9720c1` → merge `b49c0b7`)
 
 **実際に採った形** (発注時の予定と食い違った点は**実装が正**として記す):
 
@@ -389,7 +389,7 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 - **宣言整合 vector が見るのは「そのセッションが実際に観測した値」だけ**である。宣言語彙全体の固定点検査ではない — `_require_nonvacuous_provided` が保証するのは「観測が 1 件以上あること」であって「宣言の全語を観測すること」ではない。**宣言の真実性の逆向き半分 (宣言にあるが `audit_query` が決して返さない語彙) は共通 suite の射程外**であり、peer-local の (e) 等式と N の根拠だけが担う (§6.1)。
 - **到達できない plug の認証面代替**は、**現時点で使っている plug が無い**ことを確認したうえで機構だけ残してある。将来使う plug が現れたら `CONDITIONS.md` にその plug 名と「alias エンドポイントではなく認証面で観測している」旨を開示する必要がある。
 
-### 10.3 WP-2 — r2db の 1.5.0 出荷 (`ed4394a` → merge `3fd72ad`)
+### 10.3 WP-2 — r2db の 1.5.0 出荷 (`a5bd17b` → merge `9164127`)
 
 **実際に採った形**:
 
@@ -414,7 +414,7 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 - **除外リストは「(c) の無差別性を名指しで緩める」機構である**。緩めた範囲そのものを (i)(ii′) が機械検証するが、**リストが伸び続けること自体が構造の表れ**である (§11 L5-2)。
 - **`control_capabilities` の到達不能性の主張は半分だけが pin されている** — 構造側 (許可リストのメンバシップ) は assert されるが、`_authorize_role` の audit-role 分岐を実際に通す挙動側の裏打ちは無い。WP-3 も同型であり、両 peer 共通の既知の限界として受理した。
 
-### 10.4 WP-3 — MitateDB の 1.5.0 出荷 (`3f2da59` → merge `98d2010`)
+### 10.4 WP-3 — MitateDB の 1.5.0 出荷 (`51699f7` → merge `4ba2737`)
 
 **状態**: **完了**。独立コードレビューの指摘 **7 件 (M-1〜M-3 = 中 3、L-4〜L-7 = 小 4)** を受けて**差し戻し 1 回**、その後 受け入れ監査を経てコミットした。root suite (単独実行) **1612 passed / 0 failed / 0 skipped / 0 xfailed**。ディレクトリ別内訳は MitateDB **489** / r2db **701** / conformance **422** = **1612**。
 
@@ -448,7 +448,7 @@ Q3 の上限撤廃は adapter 構成を変えない。**MitateDB の conformance
 - **同型性テストのソース取得方式が左右非対称である**。MitateDB 側は `inspect.getsource` (デコレータを含む)、r2db 側は `ast.get_source_segment` (`FunctionDef.lineno` 起点でデコレータを**含まない**)。対象 11 ヘルパは現在いずれも無デコレータのため実害はないが、将来どちらかにデコレータが付くと**実装差ではなく取得方式差で赤/緑がぶれる**。§11 **L5-6**。
 - **完了条件 15 (対応表 18 行全数) の証拠は一様ではない** — 上記のとおり監査が独立再現したのは 10 行である。とくに**対照行 2 本** (変異 7 の `Constant` 対照 / 変異 9 の guard 弱化) が「緑になってしまうこと」の実測は実装報告側にのみ存在する。
 
-### 10.5 WP-4 — Q3 (MitateDB の request-count limit 上限撤廃、`d11c86f`)
+### 10.5 WP-4 — Q3 (MitateDB の request-count limit 上限撤廃、`3801cc5`)
 
 **状態**: **完了**。契約は 1 バイトも変わっていない (`spec/` 配下は差分に 1 件も含まれない)。root suite (単独実行) **1611 passed / 0 failed / 0 skipped / 0 xfailed**。
 

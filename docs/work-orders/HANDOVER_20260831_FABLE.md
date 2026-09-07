@@ -17,11 +17,11 @@
 | — | WP-2.5 | 共通側変更 (C-17 present-denial 形態、C-11 全 adapter 反復化、繰延べ2件) |
 | — | WP-3 | application-plane HTTP + composition root + `MitateDB-api-http` adapter 登録 |
 | — | WP-4 | control plane 本体 (未 mount で実装、二重 store parity、同一 tx 監査、topology 実行可能証拠) |
-| `8a7d11c` | WP-5 | 宣言 flip (/control/v1 mount、`control_plane: enabled` 両 adapter、C-13 実ベクタ、C-14/C-15 PROVIDED 初実行) |
-| `516c955` | WP-6 | 記録整理 (Dockerfile / Cloud Run runbook / compromise playbook / break-glass CLI / CONTROL_MAPPING TBD 解消 / CONDITIONS / README) |
-| `89c52ad` | — | WP-6 の main マージ (本セッション)。`CONTROL_MAPPING.md` SI-10 行の競合を解決 |
+| `d52f6dd` | WP-5 | 宣言 flip (/control/v1 mount、`control_plane: enabled` 両 adapter、C-13 実ベクタ、C-14/C-15 PROVIDED 初実行) |
+| `0c1bacc` | WP-6 | 記録整理 (Dockerfile / Cloud Run runbook / compromise playbook / break-glass CLI / CONTROL_MAPPING TBD 解消 / CONDITIONS / README) |
+| `a196bb7` | — | WP-6 の main マージ (本セッション)。`CONTROL_MAPPING.md` SI-10 行の競合を解決 |
 
-**SI-10 競合解決の内容 (89c52ad)**: WP-6 分岐は「control-plane HTTP に専用の非漏洩ネガティブテストが無い」を open gap として正直に記録していたが、main 側 `79884d9` が先にそのテスト (`MitateDB-api/tests/test_control_http_unmounted.py::test_control_problem_response_never_leaks_the_underlying_exception_message`、実 mount `/control/v1` 経由・secret-shaped marker の全身不在 assert) を追加してギャップを閉じていた。解決は WP-6 の二面構造 (Application-plane / Control-plane) を採り、open-gap 記述だけを main の閉鎖 evidence へ置換。SI-10 以外の 11 行は base から WP-6 側のみの変更であり WP-6 版をそのまま採用。
+**SI-10 競合解決の内容 (a196bb7)**: WP-6 分岐は「control-plane HTTP に専用の非漏洩ネガティブテストが無い」を open gap として正直に記録していたが、main 側 `36e0d41` が先にそのテスト (`MitateDB-api/tests/test_control_http_unmounted.py::test_control_problem_response_never_leaks_the_underlying_exception_message`、実 mount `/control/v1` 経由・secret-shaped marker の全身不在 assert) を追加してギャップを閉じていた。解決は WP-6 の二面構造 (Application-plane / Control-plane) を採り、open-gap 記述だけを main の閉鎖 evidence へ置換。SI-10 以外の 11 行は base から WP-6 側のみの変更であり WP-6 版をそのまま採用。
 
 マージ後 main での実測 (本セッション、同期実行):
 

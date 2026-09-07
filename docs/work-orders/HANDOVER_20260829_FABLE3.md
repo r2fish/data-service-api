@@ -10,14 +10,14 @@
 
 | コミット | 内容 |
 |---|---|
-| `d3d7091` (merge) | 初回 main マージ = **契約 1.1.0 の公開**。以後の契約変更は版数を上げる (additive なら 1.2.0) |
-| `a869dc1` | WP-1: conformance port v1.5 (14 op + `ControlCredentialHandle` + `exempt_parameters`)、C-14/C-15 executable 化 (3 adapter surface-absent) |
-| `9f815f1` | WP-2: 0006 migration (二状態 registry — **列確定は finish 側** (設計訂正)、control_credentials/control_audit/r2dbsvc_controlplane)、work 必須 unit-of-work、ControlCredentialStore ペア、儀式 CLI |
+| `79161fb` (merge) | 初回 main マージ = **契約 1.1.0 の公開**。以後の契約変更は版数を上げる (additive なら 1.2.0) |
+| `782e3ee` | WP-1: conformance port v1.5 (14 op + `ControlCredentialHandle` + `exempt_parameters`)、C-14/C-15 executable 化 (3 adapter surface-absent) |
+| `f36c551` | WP-2: 0006 migration (二状態 registry — **列確定は finish 側** (設計訂正)、control_credentials/control_audit/r2dbsvc_controlplane)、work 必須 unit-of-work、ControlCredentialStore ペア、儀式 CLI |
 | `8408813` | WP-3: `ControlPlaneService` + backend ペア。AUTH_REQUIRED 監査対象化、抑止宣言2分割 (記録/帰属)、同一トランザクション監査 + 拒否耐久記録 |
-| `0ae47d5` | WP-4: `control_http.py` (11 endpoint) + `control_main.py` (factory) + topology 拡張。rate 前課金 (`check_rate`+`rate_precharged`)、control_plane_http→audit 辺の訂正 |
-| `1758213`/`f17b762`/`3e0e678` | **並行セッション**: Q-1 裁定記録 (declare-and-echo、`spec/CCR_DISPOSITION.md` 従属判断6)、抑止宣言パターン文書化、非 OpenAPI 宣言 |
-| `c3f181c` | WP-5: **申告 flip 単一コミット** — 両 r2db adapter provided 化、C-14/C-15 provided 分岐初実行 green、C-08 格上げ、儀式コア製品コード化、C-13 ベクタ5本追加、逆向き両方向の変異赤 |
-| `ae815ee` | 台帳 L2: conformance sweeper の並行性バグ修正 (per-prefix advisory lock — レビュアが `--collect-only` による実行中 run 破壊を決定的に再現した実在バグ) |
+| `09511ca` | WP-4: `control_http.py` (11 endpoint) + `control_main.py` (factory) + topology 拡張。rate 前課金 (`check_rate`+`rate_precharged`)、control_plane_http→audit 辺の訂正 |
+| `1758213`/`1fc7050`/`faf357f` | **並行セッション**: Q-1 裁定記録 (declare-and-echo、`spec/CCR_DISPOSITION.md` 従属判断6)、抑止宣言パターン文書化、非 OpenAPI 宣言 |
+| `5a83e89` | WP-5: **申告 flip 単一コミット** — 両 r2db adapter provided 化、C-14/C-15 provided 分岐初実行 green、C-08 格上げ、儀式コア製品コード化、C-13 ベクタ5本追加、逆向き両方向の変異赤 |
+| `43c00e3` | 台帳 L2: conformance sweeper の並行性バグ修正 (per-prefix advisory lock — レビュアが `--collect-only` による実行中 run 破壊を決定的に再現した実在バグ) |
 
 - テスト実測: root suite **709 passed** (~190-210s、C-14 ベクタ5 の rate 回復 sleep ≤61s×2 を含む) / `conformance-tests/` 単独 **202 passed** (~153s) / `r2db-api/tests/test_postgres.py` 単独 **180 passed**。root の 709 は conformance と test_postgres を**包含する** (testpaths 確認済み)
 - **全記録は設計文書 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.8 の §10〜§14** (WP ごとのレビュー結果・監督決定・変異注入・台帳)。port 側は `docs/design/CONFORMANCE_ADAPTER_V1.md` v1.5 §15
@@ -29,7 +29,7 @@
 2. DEPLOYMENT_RUNBOOK / POSTGRES_PROVISIONING_RUNBOOK: 0006・儀式手順・ロックアウト復旧 (R-5 m-2)・`R2DB_CONTROL_PLANE_STATUS` 運用・begin が残す role 残骸 (クラッシュ時) の手動回収
 3. R-11 成果物: 侵害/誤操作 playbook・sandbox 規則・`ops.py audit-report --since`
 4. README・`ops.py` 再定義文言 (「儀式 + break-glass」へ。--help の "CCR-14" アサートに注意)・`WWW-Authenticate` の両面判断
-5. 設計文書 §14.4 の L2 記載を「修正済み (`ae815ee`)」へ更新。台帳整理 (L1 fx deprovision フック=予定化 / L3 特権 stack 分離 / L4 request_bytes 宣言 / target_id 監査語彙 (契約 additive 候補) / audit role 読み取り / 発行凍結 / CredentialsResult.must_rotate)
+5. 設計文書 §14.4 の L2 記載を「修正済み (`43c00e3`)」へ更新。台帳整理 (L1 fx deprovision フック=予定化 / L3 特権 stack 分離 / L4 request_bytes 宣言 / target_id 監査語彙 (契約 additive 候補) / audit role 読み取り / 発行凍結 / CredentialsResult.must_rotate)
 
 ## 3. WP-6 の後の残作業 (順序)
 

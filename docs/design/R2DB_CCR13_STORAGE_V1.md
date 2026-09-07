@@ -271,7 +271,7 @@ blocker 2・major 4群・minor 数件。SQL 合成面 (識別子二段階防御�
 
 ## 11. 実装記録 (フェーズ1 完了、2026-08-28)
 
-全 WP 完了。コミット列: 設計 `831afff` → WP-1 `1979385` → WP-2 + Q-1 追補 `a13bf45` → Q-2 追補 `6b57a14` → WP-3 `fbb5529` → WP-4 `ccc30b3` → WP-5 `b3a6244` → WP-6 (文書)。最終状態:
+全 WP 完了。コミット列: 設計 `b5216e7` → WP-1 `1979385` → WP-2 + Q-1 追補 `63e3ab3` → Q-2 追補 `b16652e` → WP-3 `7e7b6ad` → WP-4 `3170d14` → WP-5 `8d1691e` → WP-6 (文書)。最終状態:
 
 - 契約 1.1.0 (公開前追補込み): `unique_key` 選択規則、`unique_keys[].name` 必須、`query_operators` (contains リテラル / matches / 大文字小文字区別 / 末尾裸 `\` 拒否)
 - r2db-api: 両 cell が CCR-13 意味論を実装し、`row_addressability` / `revision_preconditions` enabled、`atomic_mutation` enabled (upsert 込み)、`structured_query` に matches、`schema_operations` に create_index/drop_index。応答は revisions / assigned_addresses / next_page を運ぶ

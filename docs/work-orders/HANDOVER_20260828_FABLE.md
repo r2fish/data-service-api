@@ -6,7 +6,7 @@
 
 ## 1. 現在地 (branch `conformance-effectivation-and-r2db-service-layer`、origin へ push 済み、`main` 未マージ)
 
-本セッションの9コミット (`2e5e427`〜`7f65853`):
+本セッションの9コミット (`9f8c3fa`〜`618cfc7`):
 
 | 領域 | 状態 |
 |---|---|

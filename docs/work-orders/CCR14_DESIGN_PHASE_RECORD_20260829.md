@@ -8,9 +8,9 @@
 
 | コミット | 内容 |
 |---|---|
-| `13cb58a` | 設計 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.1 (WP-0 独立レビュー Opus、blocker 3 / major 10 / minor 10 / nit 2 を全件実測裏取りのうえ反映。誤指摘 0) |
-| `27cd37d` | v1.2: 依頼者との Q-1 検討の反映 (確認機構の守備範囲、CLI break-glass の control credential enable/rotate、R-11 誤配・侵害への装備、契約 additive 候補2件) |
-| `d933ab7` | v1.3: 抑止宣言の採用 (拒否応答への「徒労」「帰属」の真実の宣言) |
+| `38f22fb` | 設計 `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` v1.1 (WP-0 独立レビュー Opus、blocker 3 / major 10 / minor 10 / nit 2 を全件実測裏取りのうえ反映。誤指摘 0) |
+| `6ffd152` | v1.2: 依頼者との Q-1 検討の反映 (確認機構の守備範囲、CLI break-glass の control credential enable/rotate、R-11 誤配・侵害への装備、契約 additive 候補2件) |
+| `6ba673c` | v1.3: 抑止宣言の採用 (拒否応答への「徒労」「帰属」の真実の宣言) |
 
 設計の規範・判断・WP 分割・訂正記録はすべて設計文書本体にある。本書は依頼者との検討の経緯と言明を固定する。
 

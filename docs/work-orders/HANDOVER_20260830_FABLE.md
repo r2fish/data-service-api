@@ -12,12 +12,12 @@ WP-1〜WP-5 のコミット (**全て main マージ済み・push 済み**):
 
 | コミット | WP | 内容 |
 |---|---|---|
-| `16be7cb` | WP-0 | 設計 (Q-1 実効化: 宣言と復唱、契約 1.2.0) |
-| `fe8d0b7` | WP-1 | 契約 1.2.0 公開 — declare-and-echo 意味論 + maxLength 256 + 従属判断7 (A)(B) スキーマ閉鎖/details codify + packaged copy 同期 + 逆向き検証テスト |
-| `5d3e930` | WP-2 | C-06 destructive-confirmation suite 新設 + conformance port v1.6 (details マッピング・`drop_entity`・probe→echo) |
-| `4cfe00a` | WP-3 | r2db-api 実効化単一コミット — 句構成共有モジュール・6 call site の details 宣言・制御面ゲート (uow 内直列化)・`limit_class` 全数・版数 flip 両面 |
-| `97163de` | WP-4 | 儀式 CLI (`ops.py` の `reset`/`delete-credential`) の declare-and-echo 化 + runbook/playbook 更新 |
-| `dcff077` | WP-5 | MitateDB-api 適合修正単一コミット — truthy 判定廃止・句構成・`limit_class` 適合 (Q1-D11) + 版数 flip |
+| `fa7bb6f` | WP-0 | 設計 (Q-1 実効化: 宣言と復唱、契約 1.2.0) |
+| `7d739be` | WP-1 | 契約 1.2.0 公開 — declare-and-echo 意味論 + maxLength 256 + 従属判断7 (A)(B) スキーマ閉鎖/details codify + packaged copy 同期 + 逆向き検証テスト |
+| `cf05f9d` | WP-2 | C-06 destructive-confirmation suite 新設 + conformance port v1.6 (details マッピング・`drop_entity`・probe→echo) |
+| `bf08813` | WP-3 | r2db-api 実効化単一コミット — 句構成共有モジュール・6 call site の details 宣言・制御面ゲート (uow 内直列化)・`limit_class` 全数・版数 flip 両面 |
+| `32c94f9` | WP-4 | 儀式 CLI (`ops.py` の `reset`/`delete-credential`) の declare-and-echo 化 + runbook/playbook 更新 |
+| `2ee41c4` | WP-5 | MitateDB-api 適合修正単一コミット — truthy 判定廃止・句構成・`limit_class` 適合 (Q1-D11) + 版数 flip |
 
 **WP-6 (本セッション、記録整理 — 最終 WP) はドキュメントのみで、コミットしていない** (発注の制約どおり)。作業ツリーに以下の変更を残したまま報告する:
 

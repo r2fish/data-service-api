@@ -12,21 +12,21 @@
 
 | コミット (merge) | WP | 内容 | root suite / CI |
 |---|---|---|---|
-| `049f339` / `4d5304f` | WP-0(docs) | 設計 v1.1 / v1.2 (U-1・U-2 の依頼者裁定) | 文書のみ |
-| `271ebdf` | WP-0(発注) | 作業指示書 v1.0 | 文書のみ |
-| `b5fb489` → `acf8cfe` | WP-3 | **R-10 (A) provenance companion** (`spec/CONTRACT_HISTORY.md` 29 anchor + register 7 本 + `spec/README.md`)。契約 JSON は 0 バイト不変 | — |
-| `b155eca` → `3ceacdb` / `5ccdda6` | WP-2 | **R-9 + L7-23 + L7-22 注記** (`COLLECTION_FLOOR` / `tools/check_collection_floor.py` / CI step / 収集 0 件ガード) | CI run **34034469614** (main `5ccdda6`): 3.11 `2272 passed, 9 xfailed in 427.86s (0:07:07)`、3.12 `2272 passed, 9 xfailed in 369.68s (0:06:09)`、floor step OK (2281 / 2274) |
-| `c59075d` → `3e17f25` | WP-5 | **R-12 性能ハーネス** (`tools/perf_baseline.py` + README) | — |
-| `7d7d780` → `ca4e285` / `e5e39ec` | WP-4 | **R-11 運用項目** (両 peer の `ops verify-declarations` / `tools/deploy_smoke.py` / `docs/ops/BACKUP_RESTORE_R2DB.md` / argv secret 検査 / provision script の `\getenv` + `ON_ERROR_STOP`) | CI run **34038494519** (main `ca4e285` = WP-2/3/4/5): 3.11 `2312 passed, 9 xfailed in 464.96s (0:07:44)`、3.12 `2312 passed, 9 xfailed in 443.99s (0:07:23)`、両 job `COLLECTION_FLOOR check OK: measured=2321 floor=2274 diff=47`、**全 job success** |
-| `b039846` | (レビュー由来) | **CI の `conformance` job に `timeout-minutes: 30`** (WP-1 レビュー指摘 3 — 壊れた in-flight 前提は runner の上限まで待たず赤として出るべき) | — |
-| `1a74b85` → `2ab4edc` / **`9f75428`** | WP-1 | **L7-1 + port v1.12 + L7-21** (MitateDB application plane の 4 class + in-process `request_bytes`、`hold_in_flight`、`_drive_concurrency`、`result_items` 両側化、peer 名分岐の撤去、C-05 行の書き換え、V3 xfail 9 → 0) | **完了ゲート (監督単独実行): `2340 passed, 5 warnings in 349.31s (0:05:49)` / EXIT=0、failed 0 / xfailed 0 / skipped 0** |
+| `69c9e7a` / `845d0a1` | WP-0(docs) | 設計 v1.1 / v1.2 (U-1・U-2 の依頼者裁定) | 文書のみ |
+| `d2de484` | WP-0(発注) | 作業指示書 v1.0 | 文書のみ |
+| `d91dba4` → `264cc9f` | WP-3 | **R-10 (A) provenance companion** (`spec/CONTRACT_HISTORY.md` 29 anchor + register 7 本 + `spec/README.md`)。契約 JSON は 0 バイト不変 | — |
+| `b1984bb` → `4d2a6d2` / `56ff04c` | WP-2 | **R-9 + L7-23 + L7-22 注記** (`COLLECTION_FLOOR` / `tools/check_collection_floor.py` / CI step / 収集 0 件ガード) | CI run **34034469614** (main `56ff04c`): 3.11 `2272 passed, 9 xfailed in 427.86s (0:07:07)`、3.12 `2272 passed, 9 xfailed in 369.68s (0:06:09)`、floor step OK (2281 / 2274) |
+| `02afb01` → `23bc88c` | WP-5 | **R-12 性能ハーネス** (`tools/perf_baseline.py` + README) | — |
+| `277603f` → `f21d763` / `76d260c` | WP-4 | **R-11 運用項目** (両 peer の `ops verify-declarations` / `tools/deploy_smoke.py` / `docs/ops/BACKUP_RESTORE_R2DB.md` / argv secret 検査 / provision script の `\getenv` + `ON_ERROR_STOP`) | CI run **34038494519** (main `f21d763` = WP-2/3/4/5): 3.11 `2312 passed, 9 xfailed in 464.96s (0:07:44)`、3.12 `2312 passed, 9 xfailed in 443.99s (0:07:23)`、両 job `COLLECTION_FLOOR check OK: measured=2321 floor=2274 diff=47`、**全 job success** |
+| `f4c2590` | (レビュー由来) | **CI の `conformance` job に `timeout-minutes: 30`** (WP-1 レビュー指摘 3 — 壊れた in-flight 前提は runner の上限まで待たず赤として出るべき) | — |
+| `72df9d6` → `3c85e96` / **`f4635ed`** | WP-1 | **L7-1 + port v1.12 + L7-21** (MitateDB application plane の 4 class + in-process `request_bytes`、`hold_in_flight`、`_drive_concurrency`、`result_items` 両側化、peer 名分岐の撤去、C-05 行の書き換え、V3 xfail 9 → 0) | **完了ゲート (監督単独実行): `2340 passed, 5 warnings in 349.31s (0:05:49)` / EXIT=0、failed 0 / xfailed 0 / skipped 0** |
 | `(本記録の merge。ハッシュは次回引き継ぎ §1 に記載)` | WP-6 | 記録 (設計 v1.3 §9〜§11)、計画文書 v1.2、フェーズ7 設計 §11 の状態注記、作業指示書 §5 訂正註、本書 | 文書のみ |
 
-**集計行の出所**: **完了ゲートは監督がローカルで単独実行したものが正本である** (`{scratchpad}/gate-record.md`)。worktree `.claude/worktrees/phase8` = branch `phase8-effective-bounds` **`2ab4edc`**、`ps` で他の pytest が 0 件、ローカル PG の `max_connections = 300` / `statement_timeout = 0`、`pg_database` は前後とも **21 → 21** (残留なし)。
+**集計行の出所**: **完了ゲートは監督がローカルで単独実行したものが正本である** (`{scratchpad}/gate-record.md`)。worktree `.claude/worktrees/phase8` = branch `phase8-effective-bounds` **`3c85e96`**、`ps` で他の pytest が 0 件、ローカル PG の `max_connections = 300` / `statement_timeout = 0`、`pg_database` は前後とも **21 → 21** (残留なし)。
 
 **`5 warnings` は共有 `.venv` に `httpx2` を入れていないことによる `StarletteDeprecationWarning` であり、CI 側は 0 である** (第 14 次 §1 / §4-3 と同じ。**warnings の数は一致判定に用いない**)。
 
-**CI の WP-1 入り run (main `9f75428`、run 34047745958) は監督が 2026-09-07 に確認済み**: 3.11 `2340 passed in 433.13s (0:07:13)`、3.12 `2340 passed in 456.24s (0:07:36)`、両 job floor step 緑、`tally-consistency` success。ローカル root suite `2340 passed` と 4 数一致 (L7-6 の突合済み)。**main の run は docs-only push のたびに `concurrency` の cancel-in-progress で消えるので、ゲートは最終 push の run で読む。**
+**CI の WP-1 入り run (main `f4635ed`、run 34047745958) は監督が 2026-09-07 に確認済み**: 3.11 `2340 passed in 433.13s (0:07:13)`、3.12 `2340 passed in 456.24s (0:07:36)`、両 job floor step 緑、`tally-consistency` success。ローカル root suite `2340 passed` と 4 数一致 (L7-6 の突合済み)。**main の run は docs-only push のたびに `concurrency` の cancel-in-progress で消えるので、ゲートは最終 push の run で読む。**
 
 **集計行の推移**: `2265` (フェーズ7 完了時) → `2272` (WP-2) → `2281` (WP-3) → `2321` (WP-4/5 込みの CI 実測) → **`2340`** (WP-1 込みの完了ゲート)。
 

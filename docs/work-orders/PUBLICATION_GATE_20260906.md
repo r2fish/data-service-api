@@ -574,10 +574,10 @@ gh repo view <GITHUB_OWNER>/<REPO_NAME> --json visibility
 
 | 手順 | 実施者 | 日時 (JST) | 結果 | 備考 |
 |---|---|---|---|---|
-| 0 着手合図の確認 | | | | |
-| 0.5 worktree 畳み | | | | 畳んだ本数 = |
-| 1 filter-repo | | | | commit-map の行数 = / 補助検査 `total_flagged` = |
-| 2 hash 参照の一括更新 | | | | `--verify` の未一致 = 0 / 非一意 = 0 |
+| 0 着手合図の確認 | 依頼者 | 2026-09-06 (「WP-9 に着手してください」) / 2026-09-08 (「作業中のものはない」) | 合図あり | 全 remote branch が main にマージ済み、main (書換後 `39e1a81`) の CI 緑を確認 (旧 hash は本書に残さない — 手順 2 の規律) |
+| 0.5 worktree 畳み | 監督 | 2026-09-08 | 書換は fresh clone 上 (共有 objects を参照しない) | 畳んだ本数 = 0 (手順 5 で全 worktree を作り直すため、この時点では畳まない。全 worktree はクリーン、共有ツリーの未追跡は Drive の `.gdoc` 1 件のみ) |
+| 1 filter-repo | 監督 | 2026-09-08 | 成功 (`git filter-repo --replace-text` 23 規則 + `--mailmap` 1 行、リポジトリ外) | commit-map の行数 = 423 (422 commit) / 補助検査 `total_flagged` = 0 (481 commit、書換前 662) / identity は r2fish noreply 1 種 |
+| 2 hash 参照の一括更新 | 監督 | 2026-09-08 | 成功 (`tools/rewrite_hash_refs.py --check / --apply / --verify`、44 ファイル 718 件) | `--verify` の未一致 = 0 / 非一意 = 0 (allowed 19 = UUID 断片・sha256 digest・合成 id) |
 | 3 delete + 再作成 + push | | | | ref 名の集合が一致 (はい / いいえ) |
 | 4 再作成後の remote からの履歴スキャン | | | | 掛けたクローン = / `total_flagged` = |
 | 5 clone・worktree の作り直し | | | | 作り直した対象 = |
