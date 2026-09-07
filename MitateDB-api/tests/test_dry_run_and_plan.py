@@ -43,7 +43,7 @@ from mitatedb_api.cell import (ApplicationCell, ApplicationDeveloper, Applicatio
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import (AuthorizationError, DestructiveConfirmationRequired,
                                  PreconditionFailedError)
-from mitatedb_api.http import _mutation_item, _problem_for_exception
+from mitatedb_api.http import _mutation_digest_item, _mutation_item, _problem_for_exception
 
 # ===========================================================================
 # Fixtures -- mirrors test_constraints_declaration.py's own WP-3a precedent.
@@ -751,3 +751,239 @@ def test_dry_run_transact_update_and_delete_never_carry_assigned_addresses(sessi
     )
     assert "assigned_addresses" not in update_dry[-1], update_dry[-1]
     assert runtime.read(entity) == [{"label": "seed"}], "the dry-run update must not have executed"
+
+
+# ===========================================================================
+# Phase 9 WP-3b closure (WP-3b acceptance audit, 監督裁定 追補 2 H-1..H-5,
+# `{scratchpad}/audit-wp3b.md`/`rulings-r4.md`): regression tests for the
+# remaining unfulfilled items -- G-1's 3 residual deviations (A-1/A-2/A-3),
+# G-4's load-bearing `default=` hook, and (indirectly, via `test_audit_
+# query.py`'s own restored, unfiltered `U == D | N` equality) H-4's
+# scanner-exception removal.
+# ===========================================================================
+
+
+# --- H-1/H-2/A-3: the mutation plan digest commits to the CONTRACT-level
+# request object (`_mutation_digest_item`, `http.py`), never `_mutation_
+# item`'s own internal execution-item shape (`type`/`collection`/`filters`/
+# `confirm`) -- key names, an omitted `values` vs an explicit `values: {}`,
+# and (via `ApplicationCell.transact`'s new `entity=` keyword) the request's
+# own target entity. ---
+
+
+def test_mutation_digest_item_uses_contract_key_names_never_the_internal_item_shape() -> None:
+    """A-3.1: `_mutation_digest_item` (unlike `_mutation_item` immediately
+    above it in `http.py`) must NOT rename `operation`->`type`, `where`->
+    `filters`, `confirmation`->`confirm`, and must NOT inject the URL path
+    `entity` as a `collection` key `MutationRequest`/`Mutation` never
+    declare (A-3.2 -- `entity` is threaded separately, via `transact`'s own
+    `entity=` keyword, proven by `test_plan_digest_covers_entity_not_only_
+    operations` below)."""
+    raw = {
+        "operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "s"}],
+        "destructive": True, "confirmation": "X",
+    }
+    digest_item = _mutation_digest_item(raw)
+    assert digest_item == raw, digest_item
+    assert digest_item is not raw, "must be a copy, not the SAME mapping object"
+    assert {"type", "collection", "filters", "confirm"}.isdisjoint(digest_item), (
+        f"internal execution-item key names leaked into the digest object: {digest_item!r}"
+    )
+
+
+def test_mutation_digest_item_distinguishes_omitted_values_from_explicit_empty_object() -> None:
+    """A-3.3 (WP-3b review M-6's own defect class, reopened by the fix that
+    closed it): an omitted `values` and an explicit `values: {}` must stay
+    two DIFFERENT digest objects -- unlike `_mutation_item`'s own
+    unconditional `dict(raw.get("values") or {})` (`test_http_mutation_
+    item_always_carries_a_values_key_matching_the_in_process_port` above
+    pins that THAT forcing is correct for the EXECUTION item), `_mutation_
+    digest_item` must NOT force `values` present."""
+    without_values = _mutation_digest_item({
+        "operation": "delete", "where": [{"field": "label", "operator": "eq", "value": "s"}],
+        "destructive": True, "confirmation": "X",
+    })
+    with_empty_values = _mutation_digest_item({
+        "operation": "delete", "values": {}, "where": [{"field": "label", "operator": "eq", "value": "s"}],
+        "destructive": True, "confirmation": "X",
+    })
+    assert "values" not in without_values
+    assert with_empty_values["values"] == {}
+    assert without_values != with_empty_values
+    token_revision = 1
+    assert (compute_plan_token(without_values, token_revision)
+            != compute_plan_token(with_empty_values, token_revision)), (
+        "an omitted `values` and an explicit `values: {}` must produce DIFFERENT plan tokens"
+    )
+
+
+def test_plan_digest_covers_entity_not_only_operations(sessions) -> None:
+    """H-1 (追補 2, WP-3b acceptance audit): the plan digest for a single-
+    entity mutation commits to the request's own TARGET entity -- the URL
+    path segment `http.py::post_mutate` hoists to `ApplicationCell.
+    transact`'s new `entity=` keyword (contract "computed from the request
+    itself": the request's own path IS part of "the request itself"). A
+    plan taken for entity A must be refused, `PRECONDITION_FAILED`, when
+    presented against the SAME body applied to entity B (fail-closed) --
+    reproduced here directly against `ApplicationCell.transact` (mirrors
+    `test_plan_digest_covers_budget_not_only_operations`'s own style
+    above: bypasses the HTTP layer, proves the digest MECHANISM itself).
+
+    `digest_operations` is supplied explicitly here, contract-shaped with
+    NO `entity` key of its own (`Mutation` has none -- exactly what
+    `http.py::post_mutate`'s own `_mutation_digest_item` builds) -- this
+    isolates the TOP-LEVEL `entity=` keyword as the ONLY source of the
+    entity signal in the digest; the execution `items`' own `collection`
+    key (mutated to differ too, matching a real request) would otherwise
+    let `ApplicationCell.transact`'s in-process FALLBACK reconstruction
+    (`_reconstruct_digest_operation`, which always embeds `entity` per
+    operation from `item["collection"]`) mask a broken top-level `entity=`
+    -- confirmed by mutation testing (`{scratchpad}/wp3b-closure.log`):
+    dropping the `if entity is not None: digest_request["entity"] = entity`
+    line while still passing `digest_operations` here turns this test red,
+    but leaves it green if `digest_operations` is omitted (the fallback's
+    OWN per-operation `entity` masks that specific mutation)."""
+    dev, runtime = sessions
+    entity_a = _make_entity(dev, "entity_a_h1")
+    entity_b = _make_entity(dev, "entity_b_h1")
+    cell = runtime._ApplicationRuntime__cell  # noqa: SLF001
+    principal = runtime._ApplicationRuntime__principal  # noqa: SLF001
+
+    digest_ops = [{"operation": "insert", "values": {"label": "h1-row"}}]
+    item_a = {"type": "insert", "collection": entity_a, "values": {"label": "h1-row"}}
+    dry = cell.transact(principal, [item_a], dry_run=True, entity=entity_a, digest_operations=digest_ops)
+    plan = dry[-1]["plan"]
+
+    # Same body, DIFFERENT entity -- must be refused, and must leave no row.
+    item_b = {"type": "insert", "collection": entity_b, "values": {"label": "h1-row"}}
+    with pytest.raises(PreconditionFailedError) as ei:
+        cell.transact(principal, [item_b], plan=plan, entity=entity_b, digest_operations=digest_ops)
+    assert ei.value.details == {"violated_declaration": "plan"}
+    assert cell.read(principal, entity_b, fields=["label"], filters=None, order_by=None, limit=None) == []
+
+    # Positive control: presenting the SAME entity validates and commits.
+    cell.transact(principal, [dict(item_a)], plan=plan, entity=entity_a, digest_operations=digest_ops)
+    assert cell.read(principal, entity_a, fields=["label"], filters=None, order_by=None, limit=None) == [
+        {"label": "h1-row"}
+    ]
+
+
+# --- H-3 (a)/A-1: the `add_field` plan digest must distinguish an omitted
+# `field_type` from an explicit `field_type: "json"` -- both back-fill to
+# the SAME foundation storage type, but `field_type` itself must stay
+# ABSENT from the digest (never backfilled) when the request omitted it. ---
+
+
+def test_add_field_plan_digest_distinguishes_omitted_field_type_from_explicit_json(sessions) -> None:
+    """A-1 (WP-3b acceptance audit, reproduces `audit_probe_wp3b.py` P-B):
+    pre-closure, `http.py::post_schema` passed its OWN backfilled local
+    (`field_type`, `"json"` even when the request omitted the key) as
+    `add_field`'s `contract_type=` argument, so an omitting dry run's
+    `plan` validated against an apply spelling out `field_type: "json"`
+    explicitly -- a real, observable peer/contract divergence (G-1's own
+    "省略された optional は key ごと無し"). `contract_type=None` here is
+    what `http.py` now forwards for an omitted `field_type` (the RAW
+    value, never backfilled) -- `dev.add_field(..., contract_type="json")`
+    is the explicit-`field_type: "json"` request."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+
+    omitted = dev.add_field(entity, "untyped_field", "json", contract_type=None, dry_run=True)
+    explicit_json = dev.add_field(entity, "untyped_field", "json", contract_type="json", dry_run=True)
+    assert omitted["plan"] != explicit_json["plan"], (
+        "an omitted field_type and an explicit field_type: \"json\" must NOT collide on one plan token"
+    )
+
+    # The omitting dry run's plan must be refused against the explicit-
+    # "json" apply (and vice versa is exercised by the positive control).
+    with pytest.raises(PreconditionFailedError) as ei:
+        dev.add_field(entity, "untyped_field", "json", contract_type="json", plan=omitted["plan"])
+    assert ei.value.details == {"violated_declaration": "plan"}
+    catalog = {row["entity"]: row for row in dev.catalog()}
+    assert "untyped_field" not in catalog[entity]["fields"], "the mismatched apply must not have executed"
+
+    # Positive control: the IDENTICAL (omitted) contract_type validates.
+    real = dev.add_field(entity, "untyped_field", "json", contract_type=None, plan=omitted["plan"])
+    assert real["committed"] is True
+
+
+# --- H-3 (b)/A-2: `destructive`/`confirmation`/`revision`/`index`/`unique`
+# are real `SchemaOperationRequest` properties `add_field`/`alter_field`/
+# `create_entity` never read for their own purposes, but the contract still
+# requires the plan token to commit to them ("Every other field ... is part
+# of what the token commits to") -- `digest_extra` (`http.py::post_schema`,
+# forwarded unread) is the fix. ---
+
+
+def test_schema_plan_digest_covers_digest_extra_destructive_confirmation_revision_index_unique(sessions) -> None:
+    """A-2 (WP-3b acceptance audit, reproduces `audit_probe_wp3b.py` P-D):
+    pre-closure, none of these 5 keys ever reached the digest at all --
+    `dev.add_field`'s own `digest_extra` keyword is what `http.py::post_
+    schema` now uses to forward whichever of the 5 the wire request
+    actually carried, unread and unvalidated (H-3 (b)); this test drives
+    that keyword directly (no ASGI needed), one representative key
+    (`revision` -- an always-legal `SchemaOperationRequest` property on
+    every operation) standing in for all 5 (each is forwarded through the
+    identical `if digest_extra: digest_request.update(digest_extra)` merge
+    -- `cell.py::ApplicationCell.add_field`/`.alter_field`/`.create_
+    collection`, all 3 sharing this same one-line mechanism)."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+
+    without_extra = dev.add_field(entity, "extra_field", "text", contract_type="string", dry_run=True)
+    with_extra = dev.add_field(
+        entity, "extra_field", "text", contract_type="string", dry_run=True,
+        digest_extra={"revision": "5"},
+    )
+    assert without_extra["plan"] != with_extra["plan"], (
+        "digest_extra must change the plan token -- destructive/confirmation/revision/index/unique are "
+        "part of what the token commits to (H-3 (b))"
+    )
+
+    with pytest.raises(PreconditionFailedError) as ei:
+        dev.add_field(entity, "extra_field", "text", contract_type="string", plan=without_extra["plan"],
+                      digest_extra={"revision": "5"})
+    assert ei.value.details == {"violated_declaration": "plan"}
+    catalog = {row["entity"]: row for row in dev.catalog()}
+    assert "extra_field" not in catalog[entity]["fields"], "the mismatched apply must not have executed"
+
+    # Positive control: the IDENTICAL digest_extra validates and commits.
+    real = dev.add_field(entity, "extra_field", "text", contract_type="string", plan=with_extra["plan"],
+                         digest_extra={"revision": "5"})
+    assert real["committed"] is True
+
+
+# --- G-4: `normalize_request_for_plan`'s own body carries no `default=`
+# hook any more -- a genuinely non-JSON-native value (the one this peer's
+# own request objects could ever carry, a `Filter` dataclass) now raises
+# the SAME bare `TypeError` `json.dumps` itself would raise with no hook at
+# all, never silently absorbed. Reproduces WP-3b review B-2 directly (mutation
+# M1: the pre-closure `default=_dataclass_default` was load-bearing, not
+# the defensive backstop its own docstring claimed). ---
+
+
+def test_normalize_request_for_plan_has_no_default_hook_for_non_json_native_values() -> None:
+    request = {"operations": [{"operation": "update", "where": [Filter("label", "eq", "seed")]}]}
+    with pytest.raises(TypeError):
+        normalize_request_for_plan(request)
+
+
+def test_dry_run_transact_succeeds_without_a_default_hook_because_filters_never_reach_the_digest(sessions) -> None:
+    """The flip side of the test immediately above: a real `transact(...,
+    dry_run=True)` call carrying `Filter` instances in its own `operations`
+    (`ApplicationRuntime.transact`'s own public shape, unchanged) must NOT
+    raise -- `ApplicationCell.transact`'s own fallback digest builder
+    (`_reconstruct_digest_operation`, module level) converts each `Filter`
+    to a plain `{"field", "operator", "value"}` dict BEFORE it ever reaches
+    `normalize_request_for_plan`, so the `TypeError` the test above proves
+    is reachable is never actually hit on this path."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    runtime.insert(entity, {"label": "seed"})
+    dry = runtime.transact(
+        [{"type": "update", "collection": entity, "values": {"label": "updated"},
+          "filters": [Filter("label", "eq", "seed")]}],
+        dry_run=True,
+    )
+    assert dry[-1]["committed"] is False
+    assert isinstance(dry[-1]["plan"], str) and dry[-1]["plan"], dry[-1]

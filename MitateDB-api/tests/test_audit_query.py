@@ -1236,12 +1236,15 @@ def _iter_field_definitions(paths: list[Path], field: str) -> list[tuple[str, Pa
 # reacts to every definition anywhere under `src/mitatedb_api/` whose
 # formal parameters include `operation` -- and `operation` is not an
 # audit-only word (280 identifier occurrences in this package, design §3
-# D-1). `cell.ApplicationCell._plan_operation` is the ONLY definition this
-# package has whose `operation` parameter is a CLIENT-SUPPLIED mutation
-# dict, never an audit field -- keyword-only-ifying it would change
-# `transact()`'s own pass-1 planning loop's established positional-call
-# convention (`self._plan_operation(operation)`, `cell.py`) for no
-# audit-safety benefit. This entry names its qualified definition and its
+# D-1). `cell.ApplicationCell._plan_operation` and (WP-3b closure)
+# `cell._reconstruct_digest_operation` are the definitions this package
+# has whose `operation` parameter is a CLIENT-SUPPLIED mutation value,
+# never an audit field -- keyword-only-ifying either would change an
+# established positional-call convention (`self._plan_operation(operation)`
+# for the first; `_reconstruct_digest_operation`'s own `{"operation":
+# operation, ...}` dict-literal forward, which needs a genuine parameter
+# to resolve safely either way, for the second) for no audit-safety
+# benefit. Each entry names its qualified definition and its
 # rationale; the two validation tests immediately below hold this list
 # itself accountable: (i) the entry must still resolve to a real
 # `operation`-parameter definition (a renamed/removed function goes red
@@ -1253,6 +1256,26 @@ _NON_AUDIT_OPERATION_PARAMETERS: frozenset[str] = frozenset(
         # Client-supplied mutation-item dict (`transact()`'s pass-1
         # planning loop) -- `operation` here is never an audit field.
         "cell.ApplicationCell._plan_operation",
+        # WP-3b closure (H-1/H-2, 追補 2 監査後): `_reconstruct_digest_
+        # operation` is `ApplicationCell.transact`'s own in-process-port
+        # fallback for building ONE contract-shaped `operations[]` element
+        # the PLAN digest commits to (`cell.py`'s own module level, not a
+        # method) -- its `operation` parameter is this one mutation item's
+        # contract operation name (`"insert"`/`"update"`/`"delete"`), read
+        # from the caller's own internal execution item (`op["type"]`,
+        # never a literal), the SAME "plan-digest vocabulary, not audit
+        # vocabulary" category `_plan_operation` above already documents.
+        # Positional (not keyword-only) is deliberate here too: this
+        # function's own `{"operation": operation, ...}` dict-literal use
+        # (below) needs `operation` to resolve as a genuine PARAMETER
+        # forward for `test_no_field_string_literal_is_smuggled_through_a_
+        # dict` to accept it -- a keyword-only parameter would still need
+        # this same entry (rule (c) does not distinguish), and its ONE
+        # call site (`ApplicationCell.transact`) has no `operation`-named
+        # local of its own to forward through a `operation=` keyword call
+        # (H-4 -- see `_NON_AUDIT_OPERATION_LITERALS`'s own removal note
+        # above -- rules out reintroducing one there).
+        "cell._reconstruct_digest_operation",
     }
 )
 
@@ -1267,44 +1290,31 @@ _NON_AUDIT_FIELD_PARAMETERS: dict[str, frozenset[str]] = {
     "target_kind": frozenset(),
 }
 
-# Phase 9 WP-3b rework (2026-09-07): this list's own PARAMETER-position
-# sibling immediately above (`_NON_AUDIT_OPERATION_PARAMETERS`) already
-# documents "`operation` is not an audit-only word" for a FUNCTION
-# PARAMETER named `operation`; this is that identical principle's VALUE-
-# LITERAL counterpart, load-bearing for `test_declared_operations_cover_
-# every_emittable_operation`'s own `U == D | N` completeness equality
-# (`_field_literal_union` below, which -- unlike the smuggling checks --
-# scans keyword-argument AND `name_assign` sites for field="operation"
-# PACKAGE-WIDE, with no notion of "this one is for an unrelated
-# vocabulary").
-#
-# `cell.py::ApplicationCell.create_collection` binds a LOCAL variable
-# literally named `operation` to the string `"create_entity"` -- the
-# CONTRACT's own `SchemaOperationRequest.operation` vocabulary word for
-# a `create_entity` request (design docs/design/PHASE9_CONTRACT_170_
-# DECLARATION_AND_VERIFICATION_V1.md D-4 (7), 監督裁定 G-1), needed
-# because the `plan` token's own digest commits to the request's own
-# `operation` field (S-a: "the request object this endpoint's own
-# request schema names"). `create_collection` itself names no `Schema
-# OperationRequest.operation` of its own -- it is reached ONLY through
-# `create_entity`'s contract operation -- so this is the one genuinely
-# NEW word this rework's own digest mechanism introduces to the
-# `operation`-named-binding universe. It is NOT an audit word: this
-# SAME method's own `_make_audit_hook(..., operation="create_collection",
-# ...)` call a few lines below uses the FOUNDATION-internal name instead
-# (unchanged by this rework) -- the digest's contract-level vocabulary
-# and the audit trail's foundation-level vocabulary are two DIFFERENT
-# words for the identical call, by design (P3-D1's own pre-existing
-# split between this peer's wire-facing and foundation-facing names).
-#
-# `add_field`/`alter_field` need NO entry here: each one's own new
-# digest `operation` binding (`operation = "add_field"` / `operation =
-# "alter_field"`) is the SAME literal that method's own pre-existing
-# `_make_audit_hook(..., operation="add_field"/"alter_field", ...)` call
-# already contributes to U -- so neither adds anything U does not
-# already contain, and the equality below stays exact without listing
-# them.
-_NON_AUDIT_OPERATION_LITERALS: frozenset[str] = frozenset({"create_entity"})
+# WP-3b closure (H-4, 追補 2 監査後): NO value-literal exclusion set for
+# `operation` -- unlike `_NON_AUDIT_OPERATION_PARAMETERS` above (a real,
+# permanent exemption: `_plan_operation`'s own `operation` PARAMETER is a
+# client-supplied mutation-item dict, genuinely never an audit field, no
+# matter how it is spelled), the WP-3b review round's own `_NON_AUDIT_
+# OPERATION_LITERALS = frozenset({"create_entity"})` was a scanner
+# work-around for one SPECIFIC name_assign site (`cell.py::Application
+# Cell.create_collection` used to bind a local variable literally named
+# `operation` to the string `"create_entity"` for its own plan-digest
+# object) -- removed by the closure round, per 監督裁定 H-4 ("採らない"):
+# `create_collection` now carries that value as its own keyword-only
+# PARAMETER default (`operation="create_entity"`, invisible to this
+# scanner -- a parameter default lives in `ast.arguments`, never an
+# `ast.Assign`/`ast.Call` node `_scan_source_field_sites` below visits at
+# all) instead of a local `Assign`, and the client's own request-received
+# value (`http.py::post_schema`'s `schema_operation`) is threaded through
+# as a real argument on the one path that has it. No literal "create_
+# entity" tied to keyword/dict-key "operation" remains anywhere in
+# `src/mitatedb_api/` for `_field_literal_union` to find, so `U == D | N`
+# (no `N` term at all) holds without any exclusion -- verified by the
+# unfiltered assertion in `test_declared_operations_cover_every_
+# emittable_operation` below. Reverting this exclusion-set-based
+# work-around in favor of the alternative already used elsewhere in this
+# same file (`http.py::post_schema`'s own `schema_operation` rename) was
+# the precedent WP-3b's own audit round pointed to (C-1).
 
 
 def _field_positional_definitions(paths: list[Path], field: str) -> list[str]:
@@ -1904,37 +1914,30 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
 
 def test_declared_operations_cover_every_emittable_operation() -> None:
     """P4-D16 v3(e) for `operation` (design D-1). Same `U == D | N`, `D & N
-    == set()` equality as `event_class` above, now load-bearing (this WP
-    flips `contract_version` to 1.5.0 in the same commit).
+    == set()` equality as `event_class` above, load-bearing (contract
+    `1.5.0`).
 
-    Phase 9 WP-3b rework (2026-09-07): `U` is filtered through `_NON_
-    AUDIT_OPERATION_LITERALS` FIRST -- see that constant's own docstring
-    for exactly which single word it removes and why (the plan-digest
-    mechanism's contract-level `operation` vocabulary, unrelated to this
-    audit-vocabulary completeness proof). This filtering is itself
-    pinned non-vacuous below: the exclusion set must be a REAL, non-empty
-    subset of the raw scan, or this test would silently stop meaning
-    anything the moment that literal stopped being emitted."""
+    WP-3b closure (H-4, 追補 2 監査後): the WP-3b review round's own `U`
+    filtering step (`_NON_AUDIT_OPERATION_LITERALS`, a work-around for one
+    plan-digest `name_assign` site the scanner could not otherwise tell
+    apart from a real audit-vocabulary literal) is REMOVED -- `cell.py`
+    no longer contains that site at all (moved to a keyword-only
+    parameter default, invisible to this scanner by construction; see
+    `_NON_AUDIT_OPERATION_LITERALS`'s own former docstring, still present
+    immediately above as a removal note). `U` is therefore compared
+    directly against `D | N`, unfiltered, exactly like `event_class`
+    above."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
     declared = set(document["capabilities"]["audit_query"]["operations"])
     assert declared == DECLARED_AUDIT_OPERATIONS
 
-    raw_emitted = _field_literal_union(_iter_src_files(), "operation")
-    assert raw_emitted, "the AST scanner found zero operation literals -- it is itself broken"
-    assert _NON_AUDIT_OPERATION_LITERALS <= raw_emitted, (
-        f"_NON_AUDIT_OPERATION_LITERALS names a word the scanner no longer finds at all -- "
-        f"{_NON_AUDIT_OPERATION_LITERALS - raw_emitted!r} -- the exclusion is stale, not filtering anything real"
-    )
-    emitted = raw_emitted - _NON_AUDIT_OPERATION_LITERALS
+    emitted = _field_literal_union(_iter_src_files(), "operation")
+    assert emitted, "the AST scanner found zero operation literals -- it is itself broken"
 
     d = DECLARED_AUDIT_OPERATIONS
     n = _NON_DURABLE_OPERATIONS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
-    assert not (d & _NON_AUDIT_OPERATION_LITERALS), (
-        f"a word in _NON_AUDIT_OPERATION_LITERALS is ALSO a declared audit operation -- it is not actually "
-        f"non-audit, the exclusion is wrong: {d & _NON_AUDIT_OPERATION_LITERALS!r}"
-    )
     assert emitted == d | n, (
         f"emittable-vs-(declared|N) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "

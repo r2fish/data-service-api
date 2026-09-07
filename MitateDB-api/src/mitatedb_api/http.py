@@ -728,18 +728,17 @@ async def post_query(request: Request) -> Response:
 
 def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     _check_object_shape(raw, _DEFINITIONS["Mutation"], label="mutation operation")
-    # Phase 9 WP-3b rework (M-6/G-1): `values` is now ALWAYS present
+    # Phase 9 WP-3b rework (M-6): `values` is unconditionally present here
     # (`raw.get("values") or {}`, never conditional on `"values" in raw`)
-    # -- the in-process port's own `attempt_mutation_with_result`/
-    # `attempt_batch_with_result` (`conformance/conformance_adapter_
-    # mitatedb.py`) build EVERY item with `"values": dict(values or {})`
-    # unconditionally; the two plugs must build the identical `request_
-    # object` for `cell.py::normalize_request_for_plan` to digest
-    # (design D-4 (7): "HTTP 層から来ても in-process port から来ても同じ
-    # object になる") -- a `delete`/`where`-only `update` used to digest
-    # to a DIFFERENT object on this plug (`{}` key absent) than on the
-    # in-process plug (`{"values": {}}`), so a plan taken on one plug
-    # could never validate on the other (WP-3b review M-6).
+    # -- this is this peer's own INTERNAL execution-item vocabulary
+    # (`ApplicationCell.transact`'s `_TRANSACT_*_KEYS`/`_plan_operation`
+    # consume it via `.get("values")` either way, so an absent key would
+    # have executed identically), not something the plan digest reads any
+    # more (WP-3b closure, H-2): `_mutation_digest_item` immediately below
+    # builds the digest's own per-operation object straight from `raw`,
+    # BEFORE this forcing, so an omitted `values` and an explicit `values:
+    # {}` stay two different digested requests regardless of what this
+    # execution item itself always carries.
     item: dict[str, Any] = {"type": raw["operation"], "collection": entity, "values": dict(raw.get("values") or {})}
     if "where" in raw:
         item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
@@ -755,6 +754,28 @@ def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         # unchanged by this WP).
         item["confirm"] = raw["confirmation"]
     return item
+
+
+def _mutation_digest_item(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Phase 9 WP-3b closure (追補 2, H-2): the plan digest's own per-
+    operation object -- unlike `_mutation_item` above (this peer's
+    INTERNAL execution vocabulary: `type`/`collection`/`filters`/
+    `confirm`, `values` forced present unconditionally), this is the
+    contract-level `Mutation`/`ScopedMutation` object AS THE CLIENT
+    PRESENTED IT: `raw` has already passed `_check_object_shape` against
+    that exact schema (`_mutation_item`'s own first line, called
+    immediately before or after this one at every call site), so it
+    carries only contract-named keys already -- a plain shallow copy, no
+    key renamed, no optional backfilled, no key forced present. `values`
+    in particular stays ABSENT here when the request omitted it (WP-3b
+    review A-3.3: an omitting request and a `values: {}` request must NOT
+    collide on one plan token -- the exact defect class M-2 already closed
+    for schema `field_constraints`). `where`'s own predicate objects stay
+    plain dicts (never converted to a `Filter` dataclass, unlike `_
+    mutation_item`'s `filters`) -- JSON-native by construction, so no
+    `default=` hook is ever needed feeding this into `cell.py::normalize_
+    request_for_plan` (G-4)."""
+    return dict(raw)
 
 
 def _mutation_outcome(items: list[dict[str, Any]], results: list[Any], *,
@@ -834,6 +855,11 @@ async def post_mutate(request: Request) -> Response:
     if not isinstance(operations, list) or not operations:
         raise ValidationError("operations must be a non-empty array")
     items = [_mutation_item(entity, op) for op in operations]
+    # `digest_items` (WP-3b closure, H-2): the SAME `operations` list,
+    # built into the CONTRACT-shaped digest object instead of the
+    # execution item `_mutation_item` builds -- see `_mutation_digest_
+    # item`'s own docstring.
+    digest_items = [_mutation_digest_item(op) for op in operations]
 
     # Phase 9 WP-3b (design D-4): `dry_run`/`plan` now reach `transact()`
     # for real -- both defaulted to their own byte-compatible absence
@@ -850,6 +876,17 @@ async def post_mutate(request: Request) -> Response:
         # default. `post_cross_entity_mutate` below has no `transaction`
         # field on `ScopedMutationRequest` at all, so it never passes one.
         transaction=transaction_raw,
+        # `entity`/`digest_operations` (WP-3b closure, H-1/H-2): `entity`
+        # is this endpoint's own URL path segment -- `MutationRequest` has
+        # no `entity` property of its own (it is implicit from the path),
+        # so it is hoisted to the digest object's own TOP level here
+        # (`cell.py::ApplicationCell.transact`'s own `entity` keyword) --
+        # an entity substitution between a dry run and its apply must fail
+        # closed (H-1). `digest_operations=digest_items` supplies the
+        # CONTRACT-shaped per-operation objects built above, so `cell.py`
+        # never falls back to reconstructing them from `items`' own
+        # internal execution vocabulary.
+        entity=entity, digest_operations=digest_items,
     )
     affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
@@ -923,10 +960,20 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     if not isinstance(operations, list) or not operations:
         raise ValidationError("operations must be a non-empty array")
     items = [_scoped_mutation_item(op) for op in operations]
+    # `digest_items` (WP-3b closure, H-1/H-2): built straight from `raw`
+    # per operation -- `ScopedMutation` already names `entity` as one of
+    # its own contract properties, so each digest item carries its own
+    # target entity without this endpoint needing a top-level `entity`
+    # keyword the way `post_mutate` above does (`_mutation_digest_item`
+    # is the SAME helper `post_mutate` uses -- it does no `Mutation`-vs-
+    # `ScopedMutation`-specific work of its own, just a shallow copy of
+    # whatever contract-shaped keys `raw` already carries).
+    digest_items = [_mutation_digest_item(op) for op in operations]
 
     results = session.transact(
         items, request_id=_request_id(request),
         dry_run=body.get("dry_run", False), plan=body.get("plan"),
+        digest_operations=digest_items,
     )
     affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
@@ -983,6 +1030,21 @@ async def post_schema(request: Request) -> Response:
     # `AttributeError`, not this peer's own `AuthorizationError`.
     if not isinstance(session, ApplicationDeveloper):
         raise AuthorizationError("developer authority required")
+
+    # `digest_extra` (WP-3b closure, H-3 (b)): `destructive`/`confirmation`/
+    # `revision`/`index`/`unique` are real `SchemaOperationRequest`
+    # properties (`_check_object_shape` above already lets them through)
+    # that `create_entity`/`add_field`/`alter_field` below never read --
+    # they carry no meaning for any of the three real operations this
+    # dispatcher executes today -- but the contract still requires the
+    # plan token to commit to "every other field" the request presented
+    # (structured_operations.dry_run.plan). Forwarded to `cell.py`
+    # verbatim, unread and unvalidated here beyond the shape check above;
+    # whichever of the 5 the request did not carry stays entirely absent
+    # (G-1's own "省略された optional は key ごと無し" -- never backfilled
+    # to `None`/a default).
+    digest_extra = {key: body[key] for key in ("destructive", "confirmation", "revision", "index", "unique")
+                    if key in body}
 
     if schema_operation == "create_entity":
         # M-3 (independent review): `SchemaOperationRequest.field_type` is
@@ -1095,11 +1157,24 @@ async def post_schema(request: Request) -> Response:
         # and one explicitly spelling out the same defaults used to
         # collide on one token) to committing to what the request itself
         # named.
+        # `operation` NOT forwarded here (WP-3b closure, H-4): `cell.py::
+        # ApplicationCell.create_collection`'s own keyword-only PARAMETER
+        # default (`operation="create_entity"`) already supplies the
+        # correct digest value for this branch -- this call is only ever
+        # reached when `schema_operation == "create_entity"` (the `if`
+        # above), so the two are provably always equal; a genuine
+        # variable forward from `schema_operation` here would itself be a
+        # NEW `test_audit_query.py` scanner violation (a `operation=`
+        # keyword call site whose value's own Name id is not literally
+        # "operation" is never a recognized safe forward, regardless of
+        # what it holds) -- the SAME shape of problem `_NON_AUDIT_
+        # OPERATION_LITERALS` used to work around differently, which H-4
+        # asks not to reintroduce.
         result = session.create_entity(
             entity, fields, field_types=(field_types_map if field_types_raw is not None else None),
             field_constraints=field_constraints,
             dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request))
+            request_id=_request_id(request), digest_extra=digest_extra)
         response: dict[str, Any] = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]
@@ -1145,9 +1220,19 @@ async def post_schema(request: Request) -> Response:
         # same-transaction result, not a separate post-call readback.
         result = session.add_field(
             entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type],
-            contract_type=field_type, enum=body.get("enum"), nullable=body.get("nullable"),
+            # `contract_type=field_type_raw` (WP-3b closure, H-3 (a)): the
+            # RAW value the request actually carried -- `None` when
+            # `field_type` was omitted -- NOT `field_type` (this method's
+            # own local, backfilled to `"json"` two lines above for
+            # EXECUTION purposes only). `cell.py::ApplicationCell.add_
+            # field`'s own digest now reads straight off this argument,
+            # present in the digest only when not `None`; passing the
+            # backfilled value here would make an omitting request and one
+            # explicitly spelling out `field_type: "json"` collide on one
+            # plan token (reproduced: `audit_probe_wp3b.py` P-B).
+            contract_type=field_type_raw, enum=body.get("enum"), nullable=body.get("nullable"),
             dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request))
+            request_id=_request_id(request), digest_extra=digest_extra)
         response = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]
@@ -1179,7 +1264,7 @@ async def post_schema(request: Request) -> Response:
         result = session.alter_field(
             entity, field, enum=body.get("enum", UNCHANGED), nullable=body.get("nullable"),
             field_type=body.get("field_type"), dry_run=body.get("dry_run", False), plan=body.get("plan"),
-            request_id=_request_id(request))
+            request_id=_request_id(request), digest_extra=digest_extra)
         response = {"committed": result["committed"], "revision": result["revision"]}
         if result.get("descriptor") is not None:
             response["descriptor"] = result["descriptor"]
