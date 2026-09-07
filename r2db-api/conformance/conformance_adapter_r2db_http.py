@@ -863,6 +863,15 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     # can exercise the bound with a handful of members instead of the
     # production default's 64.
     enum_members=5,
+    # Contract 1.7.0 (D-5 (5)/S-f, WP-2c, 裁定 J-7 / rulings-r5-r6.md 追補
+    # 2): same value/rationale as the in-process plug's own identical
+    # constant (`conformance_adapter_r2db.py::_ISOLATED_APPLICATION_
+    # LIMITS`) -- small enough for `test_c23_idempotency_semantics.py`'s
+    # own (full) leg to drive `declared_entries` distinct-key inserts
+    # plus one overflow over HTTP too (`ResourceLimits.check` is
+    # backend-independent, `service.py`).
+    idempotency_entries=5,
+    idempotency_retention_ms=60_000,
 )
 
 
@@ -2743,6 +2752,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields -- carried through `_mutate_
@@ -2757,7 +2767,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # EXISTING top-level key -- carried through `extra_body` the same
         # way, defaulting to `None` (omitted, `http.py::post_mutate`'s own
         # `body.get("transaction", "atomic")` default then applies exactly
-        # as every pre-addendum caller already gets).
+        # as every pre-addendum caller already gets). WP-1 addendum (C-25
+        # (4)): `idempotency_key` is a `MutationRequest` top-level field on
+        # this peer too (`additionalProperties: false` on the per-
+        # operation `Mutation` shape has no slot for it) -- carried through
+        # `extra_body` the same way `attempt_batch_with_addresses` already
+        # does with its own folded value, never per-item.
         assert isinstance(session, _Session)
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
@@ -2773,6 +2788,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             extra_body["budget"] = dict(budget)
         if transaction is not None:
             extra_body["transaction"] = transaction
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
         result = self._mutate_request(session, entity, [item], extra_body=extra_body or None)
         return {
             "affected": result["affected"],

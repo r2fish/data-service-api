@@ -167,6 +167,20 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     # can exercise the bound with a handful of members instead of the
     # production default's 64.
     enum_members=5,
+    # Contract 1.7.0 (D-5 (5)/S-f, WP-2c, 裁定 J-7 / rulings-r5-r6.md 追補
+    # 2): small like every other COUNT-valued class above (<= C-14's own
+    # `_MAX_EXERCISABLE_LIMIT`, 200) -- `test_c23_idempotency_semantics.
+    # py`'s own (full) leg reads this deployment's own declared
+    # `idempotency_entries` back out of `capabilities()` and drives
+    # exactly that many distinct-key inserts before asserting the
+    # (declared + 1)-th distinct key is refused `LIMIT_EXCEEDED`/
+    # `idempotency_entries` -- a small bound keeps that leg cheap.
+    # `idempotency_retention_ms=60_000` (60s) is declared-only on this
+    # leg (never driven -- waiting it out for real would make the suite
+    # itself slow, `test_c23`'s own module docstring), so this value only
+    # needs to outlast one test run, not match any production number.
+    idempotency_entries=5,
+    idempotency_retention_ms=60_000,
 )
 
 
@@ -1388,6 +1402,7 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         """port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         request-unit keywords on `DataService.mutate_result`, exactly like
@@ -1404,11 +1419,18 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         named in this docstring's first sentence, `transaction: str =
         "atomic"`) -- carried through unedited, defaulting to `None`
         (omitted -- `mutate_result` then applies its own `"atomic"`
-        default exactly as every pre-addendum caller already gets)."""
+        default exactly as every pre-addendum caller already gets). WP-1
+        addendum (C-25 (4)): `idempotency_key` is carried through `_build_
+        mutation_item` exactly as `attempt_batch_with_addresses`/`attempt_
+        batch_with_result` already carry their own folded value -- this
+        peer's real `Mutation.idempotency_key` is a per-item field, not a
+        `mutate_result` keyword, so it belongs on `item`, never in
+        `kwargs` below."""
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
             expected_revision=expected_revision, unique_key=unique_key,
             destructive=destructive, confirmation=confirmation, session=session, entity=entity,
+            idempotency_key=idempotency_key,
         )
         kwargs: dict[str, Any] = {}
         if dry_run:
