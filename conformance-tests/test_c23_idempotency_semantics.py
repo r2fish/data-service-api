@@ -30,7 +30,15 @@ written in the same house style as C-20/C-22 -- ONE test, no `pytest.skip`:
     (vii) a destructive `delete`, executed once with a valid confirmation
     and a key, replays its original result on an identical resend --
     neither `NOT_FOUND` (the row it deleted is gone) nor `DESTRUCTIVE_
-    CONFIRMATION_REQUIRED` (state has moved on) may appear.
+    CONFIRMATION_REQUIRED` (state has moved on) may appear; (full) once
+    this deployment's own declared `idempotency_entries` bound is reached,
+    recording one more NEW key is refused `LIMIT_EXCEEDED`/`limit_class:
+    idempotency_entries`, decided at the record-lookup step BEFORE the
+    request executes -- never execute-then-rollback (design D-5 (4)/(8),
+    監督裁定 I-6) -- narrowed to plugs declaring a real (int)
+    `idempotency_entries` bound in `limits`, disclosed as observed out of
+    scope otherwise, driven in a FRESH Application so this leg's own
+    committed-key count stays exact.
 
 **Disclosed scope limits**: (iii) retention-window expiry is not tested --
 it would need to actually wait out `idempotency_retention_ms`, which this
@@ -343,6 +351,76 @@ def test_c23_idempotency_semantics(adapter: ConformanceAdapter, isolated) -> Non
             )
         # else: disclosed above (module docstring) -- cross_entity_mutation
         # unavailable on this plug leaves this leg unobserved here.
+
+        # (full) idempotency_entries: recording a NEW key beyond this
+        # deployment's own declared bound -- after any expired entries are
+        # reclaimed -- is refused LIMIT_EXCEEDED / limit_class:
+        # idempotency_entries, decided at the (8) lookup step BEFORE the
+        # request executes, never execute-then-rollback (design D-5
+        # (4)/(8), 監督裁定 I-6: separating "does it fit" from "run it" so
+        # a request that will be refused never pays execution cost, SI-08).
+        # Declaration-based, not a fixed driven count: this deployment's
+        # own declared `idempotency_entries` -- narrowed to plugs that
+        # declare it as a real (int) `limits` bound, disclosed as observed
+        # out of scope otherwise (the same declare-first discipline every
+        # other narrowed sub-leg in this file already uses; a plug may
+        # declare `idempotency` enabled while this suite still has no
+        # deterministic bound to drive against). A FRESH Application (own
+        # `provision_pair`) keeps this leg's own committed-key count exact
+        # -- the legs above already committed several keys into the
+        # DEFAULT Application this test provisioned, and this leg must
+        # know precisely how many committed keys separate it from the
+        # bound.
+        # Exercisability cap (supervisor, 2026-09-07): a deployment declaring a
+        # large bound (the production default is 10000) is NOT driven -- driving
+        # it would mean thousands of committed keys per run. The leg runs only
+        # when the declared bound is small enough to fill deterministically
+        # (the conformance isolation profiles declare 5); otherwise it is
+        # disclosed as observed out of scope, exactly like C-05's own
+        # `_MAX_EXERCISABLE_LIMIT` discipline.
+        _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES = 200
+        declared_entries = adapter.capability_document().get("limits", {}).get("idempotency_entries")
+        if (
+            isinstance(declared_entries, int)
+            and 1 <= declared_entries <= _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES
+        ):
+            full_developer, full_runtime, _full_app_id = provision_pair(iso, app_prefix="c23full")
+            full_entity = fresh_identifier("c23full")
+            iso.create_entity(full_developer, full_entity, {"label": "text"})
+            for i in range(declared_entries):
+                iso.attempt_batch_with_result(
+                    full_runtime, full_entity,
+                    [
+                        BatchOperation(
+                            operation="insert", values={"label": fresh_identifier(f"c23fullrow{i}")},
+                            idempotency_key=fresh_identifier(f"c23fullkey{i}"),
+                        )
+                    ],
+                )
+            count_before_full = iso.count(full_runtime, full_entity)
+            with pytest.raises(ConformanceDenial) as ei_full:
+                iso.attempt_batch_with_result(
+                    full_runtime, full_entity,
+                    [
+                        BatchOperation(
+                            operation="insert", values={"label": fresh_identifier("c23fulloverflowrow")},
+                            idempotency_key=fresh_identifier("c23fulloverflowkey"),
+                        )
+                    ],
+                )
+            assert ei_full.value.code == "LIMIT_EXCEEDED", (
+                f"{adapter.name}: recording a new idempotency key beyond the declared idempotency_entries "
+                f"bound ({declared_entries}) -> {ei_full.value.code!r}, expected LIMIT_EXCEEDED"
+            )
+            assert ei_full.value.details.get("limit_class") == "idempotency_entries", ei_full.value.details
+            assert iso.count(full_runtime, full_entity) == count_before_full, (
+                f"{adapter.name}: an idempotency_entries-full refusal must be rejected BEFORE execution -- "
+                "row count changed (design D-5 (8): the room check happens at the lookup step, before the "
+                "request runs, never execute-then-rollback)"
+            )
+        # else: disclosed above -- a plug declaring `idempotency` enabled
+        # without a real (int) `idempotency_entries` bound in `limits`
+        # leaves this leg unobserved here.
 
         observed_branch = "retry_same_result"
 
