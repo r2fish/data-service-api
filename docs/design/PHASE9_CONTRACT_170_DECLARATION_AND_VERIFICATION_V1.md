@@ -1,12 +1,13 @@
 # フェーズ9 実施設計: 契約 1.7.0「宣言と検証」
 
-- 版数: **v1.5 (2026-09-07)**。**改版履歴**:
+- 版数: **v1.6 (2026-09-07)**。**改版履歴**:
   - **v1.0 (2026-09-07)** — 起草初稿。設計レビュー 1 回目の対象となる版である。
   - **v1.1 (2026-09-07)** — 設計レビュー 1 回目 (Blocker 4 / Major 9 / Minor 10) を全件反映、§5 U-1〜U-8 を依頼者裁定の委任に基づき監督が確定。**設計レビュー 2 回目の対象となる版**である。
   - **v1.2 (2026-09-07)** — 設計レビュー 2 回目 (Blocker 4 / Major 9 / Minor 13) を全件反映 (監督裁定 S-a〜S-n)。U-3 / U-4 の確定文を訂正後の本文に差し替え。
   - **v1.3 (2026-09-07)** — 作業指示書起草者の疑義 4 件に対する監督裁定 T-1〜T-4 を反映、§6.1 表の整形。
   - **v1.4 (2026-09-07)**: WP-1a レビュー M-4 / L-6 の監督裁定 — endpoint_fields_note の新設と requires_capability の意味の確定、実装起草 2 値の確定記録 (#30〜#32)。
   - **v1.5 (2026-09-07)**: WP-3a レビュー A — alter_field の enum 解除の表現 (enum: null) を契約に補正。
+  - **v1.6 (2026-09-07)**: WP-2a レビュー M-6 / m-1 — add_field nullable:false と既存行の CONFLICT、violated_declaration 語彙に constraint_declaration を追加
 - 位置づけ: **監督が確定した枠 (2026-09-07) の実施設計**であり、**2 回の設計レビューを経て確定した設計 (v1.3) であって、作業指示書の正本である。** 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` (v1.2) の §5「フェーズ9」節・§4 (P-1〜P-9)・§7・§8 (R-2〜R-8 / R-10)・§9 が**正本**であり、本書 §1.1 / §2.1 はそれを**逐語で転記**する (再導出しない)。§3 の D-1〜D-9 と §4 の A-1〜A-10 は**監督確定**である。**§5 の U-1〜U-8 は、依頼者裁定 (2026-09-07) が判断を監督に委任したことに基づき、設計レビュー 1 回目の反映時に監督が確定した (v1.1)。U-3 / U-4 の確定文は v1.2 で監督の訂正後の本文に差し替えた (枝の確定は不変)。** **作業指示書の起草中に生じた疑義 4 件は監督裁定 T-1〜T-4 として v1.3 に反映した** (§3 D-4 の実装の形 / §5 U-8 #29 / §6.2 / §6.3 / §6.4 / §6.6 / §8 / §8.1 / §9)。 **§3 D-10 は v1.1 で撤回した** (レビュー 1 B1。前提事実の誤り)。WP 分割は §8 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md`) は別途起こす。構成・粒度・文体はフェーズ8 設計文書 (`docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` v1.3) を踏襲する。
 - テーマ: **「エージェントの 1 周 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) が、宣言だけで閉じており、その宣言がすべて検査されている」状態にすること。**
 - 前提となる main: **`523753c`** (= フェーズ8 完了の `ef7bd57` に WP-9 リハーサルのコミット群を重ねたもの)。作業 branch **`phase9-contract-170`**、worktree はフェーズ8 と同じ運用 (`.claude/worktrees/` 配下、WP ごとに分ける。§8)。
@@ -280,6 +281,12 @@
 
 **v1.5 補正 (2026-09-07。監督裁定 A、`{scratchpad}/rulings-wp3a-review.md`)**: 上記契約文案の末尾に 1 文を足した。**この文により `schemas.SchemaOperationRequest.properties.enum` の型は `["array", "null"]` になる** (array 側は従来どおり `minItems: 1`)。**`enum` を省略した `alter_field` はその field の既存 `enum` を変えず、`enum: null` を明示した `alter_field` はその `enum` を解除する。`add_field` では `enum: null` は省略と同じ意味である** (`add_field` にはまだ解除すべき既存 `enum` が無いため)。`nullable` はこの補正の対象外 (boolean は 3 状態を必要としない)。
 
+**v1.6 補正 (2026-09-07。監督裁定 M-6、`{scratchpad}/rulings-wp2a-review.md`)**: 上記契約文案 (v1.5 補正後) の末尾にさらに 1 文を足した (逐語)。
+
+> An add_field declaring nullable: false on an entity that already holds rows is refused with CONFLICT on the same rule, because every existing row would hold null in the new field.
+
+**理由**: `add_field` で `nullable: false` を宣言した field は、その entity に既存行が 1 行でもあれば全既存行が新 field に `null` を持つことになり、宣言そのものに反する。**`alter_field` の既存行検証 (同節、上記) と同じ規則を `add_field` にも及ぼす。** 両 peer とも実装は `alter_field` と同じ tx + ロックの走査を用いる (D-2 実装の形と同じ場所)。C-20 に leg を 1 つ足す。
+
 **`definitions.EntityDescriptor.properties.field_constraints.description`**:
 
 > `field_constraints` reports, for every one of this entity's own `fields`, the constraints currently in force on it: `nullable`, always present, and `enum`, present only on a field that declares one. Like `field_types`, and unlike the request-side object of the same name, this object is always total over that entity's own `fields`. What a client declared -- through `SchemaOperationRequest.field_constraints` on `create_entity`, or `enum`/`nullable` on `add_field` or `alter_field` -- is what the catalog reports back, and a field for which nothing was declared reports `nullable: true` and no `enum`. This is the same-version catalog reporting the 1.6.0 `field_types` description reserves for whichever later version gives schema operations a notion of nullability: this is that version, and the notion it gives is exactly these two constraints -- not default values, and no notion of a required field beyond what `nullable: false` itself requires on `insert`.
@@ -348,7 +355,7 @@
 
 **`field` の形式を「要求 body 根からのパス」1 形式に固定する理由**: D-6 が `budget` 違反の `field` を `budget/<class>` と定めており、entity field 名では表せない位置がすでに要求されている。**batch の何番目かを名指せるのもこの形だけである** (`operations/3/values/x`)。したがって**要求内の位置を指す 1 形式**に統一し、entity field 名を裸で置く形は採らない。
 
-**(3) `violated_declaration` の固定語彙 (10 語)。**
+**(3) `violated_declaration` の固定語彙 (11 語。v1.6 補正で `constraint_declaration` を追加した。本節末尾の「v1.6 補正」・§5 U-8 #8 を参照)。**
 
 | 値 | 意味 | 主な発行元 |
 |---|---|---|
@@ -400,6 +407,12 @@
 **`errors.details_vocabulary.violated_declaration_vocabulary`**:
 
 > A closed vocabulary of ten values naming which declaration a denial reports as violated: request_schema (the request does not match this contract's own request schema for that endpoint), identifier_syntax (an identifier does not match the identifier syntax this contract declares), field_type (a value does not match the field's declared type), enum (a non-null value is not a member of the field's declared enum), nullable (a null was written to, or a required value omitted from, a field declared nullable: false), capability (this deployment does not provide the operation or field the request names), budget (the request's own budget declaration is itself invalid -- a class that does not apply to this endpoint, a value above the deployed bound, or a non-integer), unsupported_field (a field this version gives no meaning to, carried where the request schema can still receive it), plan (a plan token does not match the request and schema state it is presented against), and idempotency_key (the same key was resent with a different request digest). The required-key rules above bind VALIDATION_FAILED, IDENTIFIER_INVALID and CAPABILITY_UNSUPPORTED only; any other code's denial may carry violated_declaration drawn from this same vocabulary without being required to -- PRECONDITION_FAILED carries plan, and CONFLICT carries idempotency_key, or enum/nullable where an alter_field is refused because existing rows would violate the constraints it declares. Every value a details key carries under this vocabulary is a statement of declared fact: never a row value, never a suggested value, never a corrective action, never SQL, and never an internal name (SI-10 constrains the content of every details value regardless of key name, as errors.details_vocabulary.open already states).
+
+**v1.6 補正 (2026-09-07。監督裁定 m-1、`{scratchpad}/rulings-wp2a-review.md`)**: 上記契約文案に 11 語目 `constraint_declaration` を足した。「A closed vocabulary of ten values」を「A closed vocabulary of eleven values」に改め、`idempotency_key (...)` の項の後 (「The required-key rules above ...」の前) に次の項を足す (逐語、既存の列挙と同じ区切りに揃える — 最後の項は `idempotency_key (...), and constraint_declaration (...)` の形になる)。
+
+> constraint_declaration (a field_constraints, enum or nullable declaration is itself invalid: an enum on a field whose type admits none, an empty or duplicated enum, a member outside the field's declared type, or a declaration naming a field the request does not create)
+
+**理由**: D-3 (3) の固定語彙表は「宣言される制約の値そのもの (enum / nullable 違反)」と「宣言の形そのものが不正であること (field_constraints / enum / nullable 宣言自体の誤り)」を区別していなかった。**後者の denial は `VALIDATION_FAILED` + `violated_declaration: constraint_declaration` + `field` = 要求内パス (例: `field_constraints/status/enum`、`enum`) であり、`declared_type` = その field の宣言型 (`json` 等) を載せ、`observed_type` は載せない。** 両 peer とも同じ。改訂後の全文は `conformance-tests/test_contract.py` の `PIN_1_7_0_VIOLATED_DECLARATION_VOCABULARY` に逐語で複製する。
 
 **`errors.details_vocabulary.layer_rule`**:
 
@@ -1154,13 +1167,13 @@
 | # | json_path | 出所 | 状態 |
 |---|---|---|---|
 | 1 | `schemas.SchemaOperationRequest.properties.field_constraints.description` | D-2 | 新規。単一案 |
-| 2 | `structured_operations.alter_field` (または `SchemaOperationRequest.operation` の説明に併記) | D-2 | 新規。単一案。**置き場所 (独立節か既存節への併記か) は設計の裁量として作業指示書で確定する。** **v1.5 補正 (監督裁定 A): 末尾に「enum: null が enum を解除し、省略は現状維持、add_field の enum: null は省略と同義」の 1 文を追加。同じ補正で `SchemaOperationRequest.properties.enum` の型が `["array", "null"]` になる (§3 D-2 v1.5 補正を参照)** |
+| 2 | `structured_operations.alter_field` (または `SchemaOperationRequest.operation` の説明に併記) | D-2 | 新規。単一案。**置き場所 (独立節か既存節への併記か) は設計の裁量として作業指示書で確定する。** **v1.5 補正 (監督裁定 A): 末尾に「enum: null が enum を解除し、省略は現状維持、add_field の enum: null は省略と同義」の 1 文を追加。同じ補正で `SchemaOperationRequest.properties.enum` の型が `["array", "null"]` になる (§3 D-2 v1.5 補正を参照)。** **v1.6 補正 (監督裁定 M-6): 末尾にさらに「既存行を持つ entity への `add_field` の `nullable: false` 宣言は `CONFLICT` で拒否される」の 1 文を追加 (§3 D-2 v1.6 補正を参照)** |
 | 3 | `definitions.EntityDescriptor.properties.field_constraints.description` | D-2 | 新規。単一案 |
 | 4 | `limits.enum_members` + `limits.classes` への 1 語追加 + `limits.example_profile` への `enum_members: 64` | D-2 / U-1 | **確定 (U-1 = (β))。** 文案は §3 D-2 の当該ブロック |
 | 5 | `errors.details_vocabulary.VALIDATION_FAILED` | D-3 | 新規。単一案 |
 | 6 | `errors.details_vocabulary.IDENTIFIER_INVALID` | D-3 | 新規。単一案 |
 | 7 | `errors.details_vocabulary.CAPABILITY_UNSUPPORTED` | D-3 | 新規。単一案 |
-| 8 | `errors.details_vocabulary.violated_declaration_vocabulary` | D-3 | 新規。単一案 (10 語) |
+| 8 | `errors.details_vocabulary.violated_declaration_vocabulary` | D-3 | 新規。単一案 (10 語)。**v1.6 補正 (監督裁定 m-1): 11 語目 `constraint_declaration` を追加、「ten values」→「eleven values」(§3 D-3 v1.6 補正を参照)** |
 | 9 | `errors.details_vocabulary.layer_rule` | D-3 | 新規。単一案 |
 | 10 | `structured_operations.dry_run.decision` (3 request schema から参照) | D-4 | 新規。単一案 |
 | 11 | `structured_operations.dry_run.external_effects` | D-4 | **確定 (U-2 = (A))。掲載案どおり「no audit event」。** |
@@ -1194,7 +1207,7 @@
 
 **確定: #1〜#3、#5〜#10、#14〜#22、#25 は掲載案 (単一案) を採る。#4 は U-1 = (β) の形。#11 は U-2 = (A) の掲載案どおり。#12 は U-4 = (A) の具体化。#13 は U-3 = (A) の掲載案どおり。#24 は (a) — 1.6.0 段落最終文を「1.6.0-only or 1.7.0-only」へ広げる (PIN_1_6_0_VERSION_BINDING_PARAGRAPH を剥離後の文字列 + この改訂で書き換える。#23 で retroactive-denial 4 文の PIN も同時に動くので、同じ主題を 1 箇所に保つ方を採る)。#26 は U-5 = (B) により置かない。#27 は U-6 のとおり。**
 
-**起草者の指摘 2〜5 (「契約文書のみの変更」の第 3 種、条件付き義務の capability 配列 (AND)、violated_declaration の閉じた 10 語彙、field の `/` 区切りパス) はいずれも採る。**
+**起草者の指摘 2〜5 (「契約文書のみの変更」の第 3 種、条件付き義務の capability 配列 (AND)、violated_declaration の閉じた 10 語彙 (v1.6 補正で 11 語彙)、field の `/` 区切りパス) はいずれも採る。**
 
 **根拠: 各 D の根拠のとおり。**
 
