@@ -197,7 +197,7 @@ class PostgresCredentialStore:
         if not pepper:
             raise ValueError("R2DB_CREDENTIAL_PEPPER is required")
         self._pepper = pepper.encode()
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         # P2-D4's own dedicated pool: deliberately *not* registered with
         # `postgres.SharedPoolManager` (whose key space is `(application_id,
         # role)`, `application_id` constrained to
@@ -648,7 +648,7 @@ class PostgresControlCredentialStore:
         if not pepper:
             raise ValueError("R2DB_CONTROL_CREDENTIAL_PEPPER is required")
         self._pepper = pepper.encode()
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
         pool_kwargs: dict[str, Any] = {}
         if connect_timeout is not None:
@@ -990,7 +990,7 @@ class PostgresApplicationRegistry:
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
     ) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
         pool_kwargs: dict[str, Any] = {}
         if connect_timeout is not None:
@@ -1163,7 +1163,7 @@ class PostgresControlAuditSink:
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
     ) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
         pool_kwargs: dict[str, Any] = {}
         if connect_timeout is not None:
@@ -1348,7 +1348,7 @@ class PostgresApplicationAuditSink:
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
     ) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
         pool_kwargs: dict[str, Any] = {}
         if connect_timeout is not None:
@@ -1578,7 +1578,7 @@ class PostgresAuditQueryStore:
         connect_timeout: int | None = None,
         acquire_timeout: float | None = None,
     ) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         maxconn = pool_size if pool_size is not None else _env_int("R2DB_PLATFORM_POOL_SIZE", 4)
         pool_kwargs: dict[str, Any] = {}
         if connect_timeout is not None:

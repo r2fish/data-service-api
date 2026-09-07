@@ -118,12 +118,18 @@ def test_condition_2_same_key_same_body_replays_without_re_executing() -> None:
     cell = _memory_cell_with_widgets()
     ops = [{"operation": "insert", "values": {"label": "one"}}]
     plan_request = _mutate_plan_request("widgets", ops)
-    first = cell.transact("widgets", ops, LIMITS, plan_request=plan_request, idempotency_key="k1")
+    # M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2): a record with
+    # no `request_id` is treated as absent -- a real caller (`DataService`)
+    # always supplies one, so this direct-to-cell test does too, to
+    # exercise a genuinely REPLAYABLE record rather than accidentally
+    # simulating the pre-1.7.0 (request_id-less) shape `test_idempotency_
+    # records.py`'s condition-1-style tests are not testing here.
+    first = cell.transact("widgets", ops, LIMITS, plan_request=plan_request, idempotency_key="k1", request_id="rid-cond2-1")
     assert first.replayed is False
     assert first.affected == 1
     assert len(cell.entities["widgets"]) == 1
 
-    second = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="k1")
+    second = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="k1", request_id="rid-cond2-2")
     assert second.replayed is True
     assert second.affected == first.affected
     assert second.assigned_addresses == first.assigned_addresses
@@ -136,11 +142,15 @@ def test_condition_3_same_key_different_body_is_conflict() -> None:
     に出てこない (denial は先の要求を開示しない)。"""
     cell = _memory_cell_with_widgets()
     ops_a = [{"operation": "insert", "values": {"label": "one"}}]
-    cell.transact("widgets", ops_a, LIMITS, plan_request=_mutate_plan_request("widgets", ops_a), idempotency_key="k1")
+    # M-6: a `request_id`-bearing record is what makes this a genuine
+    # CONFLICT test -- a request_id-less record would be treated as
+    # absent (M-6) and the differing-digest resend would simply re-
+    # execute instead of conflicting.
+    cell.transact("widgets", ops_a, LIMITS, plan_request=_mutate_plan_request("widgets", ops_a), idempotency_key="k1", request_id="rid-cond3-1")
 
     ops_b = [{"operation": "insert", "values": {"label": "two"}}]
     with pytest.raises(FoundationError) as exc:
-        cell.transact("widgets", ops_b, LIMITS, plan_request=_mutate_plan_request("widgets", ops_b), idempotency_key="k1")
+        cell.transact("widgets", ops_b, LIMITS, plan_request=_mutate_plan_request("widgets", ops_b), idempotency_key="k1", request_id="rid-cond3-2")
     assert exc.value.code == "CONFLICT"
     assert exc.value.details == {"violated_declaration": "idempotency_key", "field": "idempotency_key"}
     assert len(cell.entities["widgets"]) == 1, "the conflicting resend must not have executed"
@@ -158,7 +168,9 @@ def test_condition_4_replay_of_a_destructive_operation_skips_target_existence_an
     phrase = drop_entity_confirmation_phrase("gadgets", cell.schema_revision)
     op = {"operation": "drop_entity", "entity": "gadgets", "destructive": True, "confirmation": phrase}
     plan_request = {key: value for key, value in op.items() if key not in ("plan", "dry_run")}
-    first = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=plan_request, idempotency_key="k-drop")
+    # M-6: a request_id-bearing record, so the resend below is a genuine
+    # replay (never a request_id-less record, treated as absent).
+    first = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=plan_request, idempotency_key="k-drop", request_id="rid-cond4-1")
     assert first.committed is True
     assert "gadgets" not in cell.entities
 
@@ -166,7 +178,7 @@ def test_condition_4_replay_of_a_destructive_operation_skips_target_existence_an
     # confirmation phrase (computed from schema_revision) is now stale --
     # yet the resend must answer from the record, never NOT_FOUND/
     # DESTRUCTIVE_CONFIRMATION_REQUIRED.
-    second = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-drop")
+    second = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-drop", request_id="rid-cond4-2")
     assert second.replayed is True
     assert second.committed is True
     assert second.revision == first.revision
@@ -184,8 +196,8 @@ def test_condition_5_key_scope_is_application_not_credential() -> None:
     # which is exactly the point: the record is keyed only by
     # `idempotency_key`, scoped to the Application (the cell), never to a
     # caller identity.
-    first = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="shared-key")
-    second = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="shared-key")
+    first = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="shared-key", request_id="rid-cond5-1")
+    second = cell.transact("widgets", ops, LIMITS, plan_request=_mutate_plan_request("widgets", ops), idempotency_key="shared-key", request_id="rid-cond5-2")
     assert second.replayed is True
     assert second.affected == first.affected
     assert len(cell.entities["widgets"]) == 1
@@ -197,11 +209,11 @@ def test_condition_6_applies_to_schema_operation_request() -> None:
     cell = ApplicationCell(application_id="app-mem")
     op = {"operation": "create_entity", "entity": "sprockets", "fields": ["label"]}
     plan_request = {key: value for key, value in op.items() if key not in ("plan", "dry_run")}
-    first = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-create")
+    first = cell.apply_schema(op, developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-create", request_id="rid-cond6-1")
     assert first.replayed is False
     assert first.committed is True
 
-    second = cell.apply_schema(dict(op), developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-create")
+    second = cell.apply_schema(dict(op), developer=True, limits=LIMITS, plan_request=dict(plan_request), idempotency_key="k-create", request_id="rid-cond6-2")
     assert second.replayed is True
     assert second.revision == first.revision
     # A genuine second create_entity (no key) would have failed CONFLICT
@@ -484,13 +496,110 @@ def test_postgres_record_is_written_in_the_same_transaction_as_the_data(app_a) -
         assert _row_count() == 0, "a failed attempt must leave no row in the side table"
 
         ok_ops = [{"operation": "insert", "values": {"label": "one"}}]
-        outcome = cell.transact("pgwidgets", ok_ops, LIMITS, plan_request={"entity": "pgwidgets", "operations": ok_ops}, idempotency_key="pg-k1")
+        # M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2): a
+        # request_id-bearing record, so the replay below is genuine (a
+        # request_id-less record is treated as absent).
+        outcome = cell.transact("pgwidgets", ok_ops, LIMITS, plan_request={"entity": "pgwidgets", "operations": ok_ops}, idempotency_key="pg-k1", request_id="rid-pg-1")
         assert outcome.replayed is False
         assert _row_count() == 1
 
-        replay = cell.transact("pgwidgets", ok_ops, LIMITS, plan_request={"entity": "pgwidgets", "operations": ok_ops}, idempotency_key="pg-k1")
+        replay = cell.transact("pgwidgets", ok_ops, LIMITS, plan_request={"entity": "pgwidgets", "operations": ok_ops}, idempotency_key="pg-k1", request_id="rid-pg-2")
         assert replay.replayed is True
         assert _row_count() == 1, "a replay must not add a second row"
+    finally:
+        cell.close()
+
+
+def _pg_strip_request_id(dsn: str, key: str) -> None:
+    """Simulates the pre-1.7.0 `_r2db_idempotency` row shape directly
+    against the real side table: strips `request_id` from the stored
+    `response` jsonb for `key`, exactly what a record written before
+    contract 1.7.0 would already look like on disk."""
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT response FROM public._r2db_idempotency WHERE idempotency_key = %s", (key,))
+            (payload,) = cur.fetchone()
+            del payload["request_id"]
+            cur.execute("UPDATE public._r2db_idempotency SET response = %s WHERE idempotency_key = %s", (Jsonb(payload), key))
+
+
+def _pg_stored_payload(dsn: str, key: str) -> dict:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT response FROM public._r2db_idempotency WHERE idempotency_key = %s", (key,))
+            (payload,) = cur.fetchone()
+            return payload
+
+
+def test_postgres_replay_of_a_pre_1_7_0_record_is_treated_as_absent_and_re_executes(app_a) -> None:  # noqa: F811
+    """WP-2e closure audit R-1 (`{scratchpad}/audit-wp2e-2.md`, ruling
+    M-6): the real-`PostgresCell` mirror of `test_denial_details_and_
+    request_id.py::test_idempotency_replay_of_a_pre_1_7_0_record_is_
+    treated_as_absent_and_re_executes` -- M-6 point 4 ("postgres.py 側も
+    同じ規律にすること") demands the SAME behaviour hold against the real
+    side table, not only the in-memory dict."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "pgpre170", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+        ops = [{"operation": "insert", "values": {"label": "one"}}]
+        first = cell.transact("pgpre170", ops, LIMITS, plan_request={"entity": "pgpre170", "operations": ops}, idempotency_key="pg-pre170-key", request_id="rid-pg-pre170-1")
+        assert first.replayed is False
+        assert first.request_id == "rid-pg-pre170-1"
+
+        _pg_strip_request_id(app_a.developer_dsn, "pg-pre170-key")
+        assert "request_id" not in _pg_stored_payload(app_a.developer_dsn, "pg-pre170-key")
+
+        second = cell.transact("pgpre170", ops, LIMITS, plan_request={"entity": "pgpre170", "operations": ops}, idempotency_key="pg-pre170-key", request_id="rid-pg-pre170-2")
+        assert second.replayed is False, "a request_id-less record must be treated as absent -- a genuine re-execution, never a replay"
+        assert second.request_id == "rid-pg-pre170-2"
+        assert second.request_id != first.request_id
+        # M-6: a REAL second insert, not a replay of the first's own
+        # recorded result -- a distinct row address is the decisive proof.
+        assert second.assigned_addresses != first.assigned_addresses
+
+        # M-6 point 3: the new execution's result OVERWRITES the same
+        # key's row (the `ON CONFLICT (idempotency_key) DO UPDATE` this
+        # WP added to `_idempotency_store`) -- a request_id-less row is
+        # not left behind forever, and this INSERT does not raise a
+        # primary-key violation despite the row already existing.
+        overwritten = _pg_stored_payload(app_a.developer_dsn, "pg-pre170-key")
+        assert overwritten["request_id"] == "rid-pg-pre170-2"
+    finally:
+        cell.close()
+
+
+def test_postgres_resend_of_a_request_id_less_record_with_a_different_digest_re_executes_rather_than_conflicting(app_a) -> None:  # noqa: F811
+    """M-6 (R-1 point 2), Postgres-plug mirror: a request_id-less record
+    is excluded from the digest comparison entirely -- checked BEFORE it,
+    not after -- so a resend under the SAME key but a DIFFERENT request
+    body must NOT raise `CONFLICT` against the real side table either."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "pgpre170b", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+        ops_a = [{"operation": "insert", "values": {"label": "original"}}]
+        first = cell.transact("pgpre170b", ops_a, LIMITS, plan_request={"entity": "pgpre170b", "operations": ops_a}, idempotency_key="pg-pre170b-key", request_id="rid-pg-pre170b-1")
+
+        _pg_strip_request_id(app_a.developer_dsn, "pg-pre170b-key")
+
+        # A DIFFERENT body -> a different idempotency digest than the
+        # record (still) carries -- would be CONFLICT if the record were
+        # honoured.
+        ops_b = [{"operation": "insert", "values": {"label": "different-body-should-not-conflict"}}]
+        second = cell.transact("pgpre170b", ops_b, LIMITS, plan_request={"entity": "pgpre170b", "operations": ops_b}, idempotency_key="pg-pre170b-key", request_id="rid-pg-pre170b-2")
+        assert second.replayed is False
+        assert second.request_id == "rid-pg-pre170b-2"
+        assert second.assigned_addresses != first.assigned_addresses
     finally:
         cell.close()
 
@@ -611,12 +720,13 @@ def test_postgres_keyed_write_round_trip_count_after_removing_the_redundant_dele
 
         ops = [{"operation": "insert", "values": {"label": "one"}}]
         counts["n"] = 0
-        outcome = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1")
+        # M-6: request_id-bearing, so the replay leg below is genuine.
+        outcome = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-1")
         assert outcome.replayed is False
         assert counts["n"] == 11, f"keyed write round trips: {counts['n']} (expected 11 after J-6 removes the redundant reserve-stage DELETE; 12 before it, measured directly by re-adding the DELETE)"
 
         counts["n"] = 0
-        replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1")
+        replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-2")
         assert replay.replayed is True
         assert counts["n"] == 4, f"replay round trips: {counts['n']} (expected 4, unchanged by J-6 -- a replay never reaches _idempotency_reserve)"
     finally:

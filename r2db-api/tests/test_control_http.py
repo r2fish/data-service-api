@@ -265,7 +265,11 @@ async def test_unknown_field_in_request_body_is_validation_failed(control_harnes
     assert response.status_code == 400
     body = response.json()
     assert body["code"] == "VALIDATION_FAILED"
-    assert body["details"]["fields"] == ["unexpected_field"]
+    # Contract 1.7.0 (D-3, WP-2e): `_check_object_shape` (shared with the
+    # data-plane HTTP layer, `.http._check_object_shape`) now builds the
+    # 4-key `errors.details_vocabulary` form -- a single unknown field
+    # names its own request-internal path (no leading "/") as `field`.
+    assert body["details"] == {"violated_declaration": "request_schema", "field": "unexpected_field"}
 
 
 async def test_missing_required_field_in_request_body_is_validation_failed(control_harness):

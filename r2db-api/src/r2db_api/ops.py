@@ -1343,6 +1343,12 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-11": 10,
     "F-13": 11,
     "F-9": 12,
+    # Contract 1.7.0 (work order §2 WP-2e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3): `check_contract_170_resource_limits`'s
+    # own new condition -- the next unused exit code (F-12 is reserved,
+    # out of scope for this command, `_verify_declarations_checks`'s own
+    # docstring / the trailing disclosure line below).
+    "F-14": 13,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1378,7 +1384,7 @@ def _verify_declarations_fail(exc: "platform_declarations.PlatformDeclarationErr
 #: the trailing disclosure line itself) lets `cmd_verify_declarations`
 #: print that line exactly once, unconditionally, for every code this
 #: returns -- 0 through 12 alike.
-def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Namespace, schema: str) -> int:
+def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Namespace, schema: str, dsn: str) -> int:
     try:
         declarations = platform_declarations.read_platform_declarations(
             conn, schema=schema, ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER)
@@ -1415,7 +1421,91 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     except platform_declarations.PlatformDeclarationError as exc:
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-7/F-10/F-11/F-13/F-9", "connected role's writer timeout settings valid")
+
+    # Contract 1.7.0 (work order §2 WP-2e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3; WP-2e rework `{scratchpad}/
+    # audit-wp2e.md` D-2, ruling L-2 = (A); closure audit M-7, `{scratchpad}
+    # /audit-wp2e-2.md` R-7): the "enabled" declaration checked against the
+    # actual deployed state -- the served capabilities document (its
+    # `capabilities` AND `limits` blocks alike, never a separately
+    # constructed `ResourceLimits`), AND (the one part that can genuinely
+    # fail against a real deployment) every registered application's own
+    # per-application upgrade ledger (R-2/R-5). Run unconditionally like
+    # the writer-role check just above.
+    try:
+        applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
+        platform_declarations.check_contract_170_declarations(
+            _served_capabilities_document(),
+            applied_by_application,
+            platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok(
+        "F-14",
+        "contract 1.7.0 capabilities enabled, enum_members/idempotency_entries/idempotency_retention_ms limits valid, "
+        f"and every registered application has applied upgrades {sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)}",
+    )
     return 0
+
+
+def _served_capabilities_document() -> dict[str, Any]:
+    """O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): extracted out of `_verify_declarations_checks` under this
+    SAME name on both peers, so that function's own body -- one of the
+    isomorphism-pinned symbols -- calls this helper with no arguments and
+    carries no peer-specific complexity of its own (MitateDB's own
+    equivalent, unlike this one, first has to build a `FoundationConfig`
+    from `declarations.surfaces` before it can construct its own probe
+    cell -- that peer-specific difference now lives entirely INSIDE this
+    helper's own body on each peer, never inside `_verify_declarations_
+    checks`'s). Previously named `_contract_170_capabilities_document`
+    (still the name mirrored 1:1 on MitateDB-api before this rework); the
+    isomorphism table row addition itself is pair-closing work, not done
+    here (O-7's own instruction: "同型性表への行追加は監督の pair-closing で
+    行う").
+
+    The REAL `DataService.capabilities()` document for a throwaway,
+    entirely in-memory application/credential -- never a second, hand-
+    written copy of what `service.py` is expected to declare (WP-2e
+    rework, audit-wp2e.md D-2, ruling L-2 = (A)): this exercises the SAME
+    production code path a real client's `GET /v1/capabilities` reaches,
+    so a future regression that stops declaring one of the contract 1.7.0
+    capabilities `enabled` is caught here too, not only by `r2db_api.
+    service`'s own unit tests. No network/PostgreSQL connection is
+    involved -- `DataService`/`CredentialStore`/`ControlAuthority` are
+    pure in-process objects."""
+    from .auth import CredentialStore
+    from .service import ControlAuthority, DataService
+
+    credentials = CredentialStore(pepper="verify-declarations-f14")
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-f14", "verify-declarations-probe", "runtime", "secret-f14", work=work)
+    service = DataService(credentials)
+    ControlAuthority(service).register_application("verify-declarations-probe")
+    runtime = service.authenticate("cred-f14.secret-f14")
+    return service.capabilities(runtime)
+
+
+def _applied_upgrade_numbers_by_application(conn: "psycopg.Connection", provision_dsn: str) -> dict[str, frozenset[int] | None]:
+    """`platform_upgrades.read_applied_upgrade_numbers` for EVERY
+    registered, provisioned application (`database_name IS NOT NULL`,
+    `enabled` not a filter -- same target set `ops upgrade-status` already
+    uses, `_registry_applications_for_upgrade`). An application with no
+    `database_name` at all (registered but never provisioned) is reported
+    with an empty-ledger sentinel (`None`, "every number pending") rather
+    than skipped -- an unprovisioned application cannot have applied
+    anything, so it is not silently exempt from F-14's own declaration."""
+    result: dict[str, frozenset[int] | None] = {}
+    for app in _registry_applications_for_upgrade(conn, application=None):
+        application_id = app["application_slug"]
+        database_name = app["database_name"]
+        if database_name is None:
+            result[application_id] = None
+            continue
+        app_dsn = _application_dsn(provision_dsn, database_name)
+        result[application_id] = _read_ledger_applied(app_dsn)
+    return result
 
 
 def cmd_verify_declarations(args: argparse.Namespace) -> int:
@@ -1423,9 +1513,11 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     prefixed, in `read_platform_declarations`'s own fixed order followed
     by F-3c (only when `--control` is given), F-6 (only when this peer's
     own `*_CONTROL_PLANE_STATUS` env var is defined), then the writer-role
-    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally. The first FAIL
-    stops the run and returns that F-number's own fixed exit code
-    (`_VERIFY_DECLARATIONS_EXIT_CODES`, via `_verify_declarations_checks`).
+    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally, then (contract
+    1.7.0, work order §2 WP-2e F-3) the new limit-class check (F-14)
+    unconditionally. The first FAIL stops the run and returns that
+    F-number's own fixed exit code (`_VERIFY_DECLARATIONS_EXIT_CODES`, via
+    `_verify_declarations_checks`).
 
     Exit codes follow design D-5 実装の形 (a) literally: 1 is a USAGE
     error (this command's own required env var, `R2DB_CONTROL_DSN`, is
@@ -1450,7 +1542,8 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
     are out of this command's reach -- named, with the reason, on the last
     output line, printed for every code `_verify_declarations_checks`
-    returns (0 through 12 alike), never only on the 0 path."""
+    returns (0 through 13 alike -- F-14's own exit code, contract 1.7.0),
+    never only on the 0 path."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
@@ -1462,7 +1555,7 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
         print(f"error: cannot connect to platform database: {exc}", file=sys.stderr)
         return 2
     try:
-        rc = _verify_declarations_checks(conn, args, schema)
+        rc = _verify_declarations_checks(conn, args, schema, dsn)
     finally:
         conn.close()
     print(

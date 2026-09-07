@@ -110,7 +110,7 @@ from psycopg.types.json import Jsonb
 
 from .audit_hook import ApplicationAuditHook
 from .backend import StorageBackend as _StorageBackend
-from .errors import fail
+from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
 from .structured import (
@@ -129,6 +129,7 @@ from .structured import (
     _declared_type_label,
     _encode_cursor,
     _fail_constraint_declaration,
+    _idempotency_record_has_request_id,
     _resolve_order_by,
     _shape_hash,
     _validate_predicate_types,
@@ -787,7 +788,7 @@ class PostgresCell:
     """
 
     def __init__(self, application_id: str, schema: str, *, runtime_dsn: str, developer_dsn: str, runtime_role: str, developer_role: str, pool_size: int | None = None, pool_manager: SharedPoolManager | None = None) -> None:
-        validate_identifier(schema)
+        validate_identifier(schema, field="schema")
         self.application_id = application_id
         self.schema = schema
         # Role *names* (not credentials) are needed at table-creation time to
@@ -796,8 +797,8 @@ class PostgresCell:
         # distinct DB roles. They are control-plane-assigned constants, the
         # same trust level as `schema` above -- never taken from a client
         # request.
-        validate_identifier(runtime_role)
-        validate_identifier(developer_role)
+        validate_identifier(runtime_role, field="runtime_role")
+        validate_identifier(developer_role, field="developer_role")
         self._runtime_role = runtime_role
         self._developer_role = developer_role
         # Q4 WP-3 (design D-3(f)): kept as a plain attribute, separate from
@@ -1220,13 +1221,25 @@ class PostgresCell:
         limits.check("idempotency_entries", count + 1)
 
     def _idempotency_store(self, conn: "psycopg.Connection[Any]", key: str, *, digest: str, kind: str, payload: dict[str, Any], retention_ms: int) -> None:
+        # M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2, WP-2e
+        # closure audit R-1): `ON CONFLICT (idempotency_key) DO UPDATE`,
+        # not a bare `INSERT` -- a resend of a key whose stored record was
+        # just treated as absent (`_idempotency_record_has_request_id`
+        # returned false, at both call sites below) reaches this SAME
+        # method for the SAME key, and must overwrite the stale row
+        # rather than fail on the primary key it still holds. Mirrors
+        # `ApplicationCell._idempotency_store`'s plain dict assignment,
+        # which overwrites unconditionally by construction.
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
         with conn.cursor() as cur:
             _run(
                 cur,
                 sql.SQL(
                     "INSERT INTO public.{table} (idempotency_key, request_digest, kind, response, expires_at) "
-                    "VALUES ({k}, {d}, {kind}, {r}, now() + ({ms} * interval '1 millisecond'))"
+                    "VALUES ({k}, {d}, {kind}, {r}, now() + ({ms} * interval '1 millisecond')) "
+                    "ON CONFLICT (idempotency_key) DO UPDATE SET "
+                    "request_digest = EXCLUDED.request_digest, kind = EXCLUDED.kind, "
+                    "response = EXCLUDED.response, expires_at = EXCLUDED.expires_at"
                 ).format(table=table, k=sql.Placeholder(), d=sql.Placeholder(), kind=sql.Placeholder(), r=sql.Placeholder(), ms=sql.Placeholder()),
                 [key, digest, kind, Jsonb(payload), retention_ms],
             )
@@ -1248,8 +1261,8 @@ class PostgresCell:
     ) -> QueryOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
-        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
+        validate_identifier(entity, field="entity")
+        _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         validate_page_size(page_size, limits)
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
@@ -1373,6 +1386,7 @@ class PostgresCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         the single tx-exit point sits right before the pre-commit hook,
@@ -1388,10 +1402,10 @@ class PostgresCell:
         """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
-        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
+        validate_identifier(entity, field="entity")
+        _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         if not operations:
-            fail("VALIDATION_FAILED", "At least one mutation is required.")
+            fail("VALIDATION_FAILED", "At least one mutation is required.", details=violation("request_schema", field="operations"))
         limits.check("batch_items", len(operations))
         affected = 0
         assigned_addresses: list[dict[str, Any]] = []
@@ -1424,7 +1438,10 @@ class PostgresCell:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
                         record = self._idempotency_lookup(conn, idempotency_key)
-                        if record is not None:
+                        # L-6/M-6: a record with no `request_id` (pre-1.7.0)
+                        # is not a usable replay source -- treated as
+                        # absent, checked before the digest comparison.
+                        if record is not None and _idempotency_record_has_request_id(record[2]):
                             stored_digest, _stored_kind, stored_payload = record
                             if stored_digest != idempotency_digest_value:
                                 fail(
@@ -1437,6 +1454,10 @@ class PostgresCell:
                             return MutationOutcome(
                                 affected=stored_payload["affected"], assigned_addresses=stored_payload["assigned_addresses"],
                                 destructive=False, committed=True, plan=None, replayed=True,
+                                # M-6: the ORIGINAL execution's own
+                                # `request_id` (guaranteed present), no
+                                # fallback to this resend's own.
+                                request_id=stored_payload["request_id"],
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -1516,7 +1537,7 @@ class PostgresCell:
                     if idempotency_key is not None and idempotency_digest_value is not None:
                         self._idempotency_store(
                             conn, idempotency_key, digest=idempotency_digest_value, kind="mutation",
-                            payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                            payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
             except psycopg.errors.QueryCanceled:
@@ -1553,7 +1574,7 @@ class PostgresCell:
         # commit (`committed=True`), matching `ApplicationCell.transact`.
         return MutationOutcome(
             affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
-            committed=committed, plan=(expected_plan if not committed else None),
+            committed=committed, plan=(expected_plan if not committed else None), request_id=request_id,
         )
 
     def _fail_unique_conflict(self, entity: str, exc: "psycopg.errors.UniqueViolation") -> None:
@@ -1623,7 +1644,7 @@ class PostgresCell:
     def _apply(self, conn: "psycopg.Connection[Any]", entity: str, operation: dict[str, Any], table_info: "_TableInfo", operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = table_info.columns
         known_fields = set(field_types)
-        bound = bind_mutation(operation, known_fields)
+        bound = bind_mutation(operation, known_fields, operation_index=operation_index)
         # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
         # constraints, already read by `_load_catalog` into `table_info`
         # (addendum 2 S-k's 6 write call sites all pass this through to
@@ -1663,7 +1684,7 @@ class PostgresCell:
         # type (predicate values, and for `update` the write values too)
         # before executing anything, symmetric with the `insert` branch
         # above and with `ApplicationCell._apply`.
-        _validate_predicate_types(bound.where, field_types)
+        _validate_predicate_types(bound.where, field_types, path_prefix=f"operations/{operation_index}/where")
         if bound.operation == "update":
             for key, value in bound.values.items():
                 _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
@@ -1823,7 +1844,7 @@ class PostgresCell:
         field_types = table_info.columns
         declared = {name: info for name, info in table_info.indexes.items() if info["unique"]}
         if not declared:
-            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.")
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.", details=violation("capability", field="operation"))
         if bound.unique_key is not None:
             if bound.unique_key not in declared:
                 fail("NOT_FOUND", "No declared uniqueness key matches unique_key.", status=404)
@@ -1831,13 +1852,13 @@ class PostgresCell:
         elif len(declared) == 1:
             key_name = next(iter(declared))
         else:
-            fail("VALIDATION_FAILED", "unique_key is required when an entity declares more than one uniqueness key.")
+            fail("VALIDATION_FAILED", "unique_key is required when an entity declares more than one uniqueness key.", details=violation("request_schema", field="unique_key"))
         if bound.where:
-            fail("VALIDATION_FAILED", "Upsert does not accept a filter; its existence test is the entity's declared uniqueness key.")
+            fail("VALIDATION_FAILED", "Upsert does not accept a filter; its existence test is the entity's declared uniqueness key.", details=violation("unsupported_field", field="where"))
         key_fields: tuple[str, ...] = declared[key_name]["fields"]
         for key_field in key_fields:
             if bound.values.get(key_field) is None:
-                fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details={"field": key_field})
+                fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details=violation("request_schema", field="values/" + key_field))
         # Contract 1.7.0 (D-2 (4), WP-2a): this entity's own declared
         # constraints, same source `_apply` above reads.
         entity_constraints = table_info.constraints
@@ -1983,8 +2004,16 @@ class PostgresCell:
         if predicate.operator == "is_null":
             return sql.SQL("{col} IS NULL").format(col=column), []
         if predicate.operator == "in":
+            # M-3 (rulings addendum 2)/R-2: unreachable in practice -- both
+            # call sites of `_where_clause` (`query`/`_apply` above) already
+            # run `_validate_predicate_types` first, which now rejects an
+            # empty/non-list `in` value at the shared choke point before
+            # any SQL is built. Kept as a defensive fallback with the same
+            # 4-key vocabulary that choke point uses (never a bare
+            # `fail()`), mirroring `_predicate_sql`'s "Unsupported filter
+            # operator" fallback below.
             if not isinstance(predicate.value, list) or not predicate.value:
-                fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
+                fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
             placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in predicate.value)
             # R-7, corrigendum m-7: each element gets the same per-column
             # type-aware bind (native for a typed column, `Jsonb(...)` for
@@ -2015,8 +2044,14 @@ class PostgresCell:
             # rejects any operator outside `structured.OPERATORS`. Kept as
             # an explicit, fixed-literal-only fallback rather than trusting
             # that invariant silently (D-4: "operators map to fixed
-            # literals").
-            fail("VALIDATION_FAILED", "Unsupported filter operator.", details={"field": predicate.field})
+            # literals"). M-1: this is a redundant application-level shape
+            # backstop, not a storage-rejection translation -- so it is
+            # NOT allowlist-eligible (`layer_rule`'s defence-in-depth
+            # exemption is for backend/storage denials only); it carries
+            # the same 4-key vocabulary `Predicate.validate`'s own operator
+            # check uses (`errors.violation("capability", ...)`), no field-
+            # index available this deep, so a generic `"where"` path.
+            fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field="where"))
         return sql.SQL("{col} {op} {ph}").format(col=column, op=operator, ph=sql.Placeholder()), [self._bind_value(predicate.value, field_type)]
 
     # ---- schema ----------------------------------------------------------
@@ -2034,6 +2069,7 @@ class PostgresCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above --
@@ -2091,7 +2127,10 @@ class PostgresCell:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
                         record = self._idempotency_lookup(conn, idempotency_key)
-                        if record is not None:
+                        # L-6/M-6: a record with no `request_id` (pre-1.7.0)
+                        # is not a usable replay source -- treated as
+                        # absent, checked before the digest comparison.
+                        if record is not None and _idempotency_record_has_request_id(record[2]):
                             stored_digest, _stored_kind, stored_payload = record
                             if stored_digest != idempotency_digest_value:
                                 fail(
@@ -2105,6 +2144,10 @@ class PostgresCell:
                             # against it, are both long gone.
                             return SchemaOutcome(
                                 committed=True, revision=stored_payload["revision"], descriptor=None, plan=None, replayed=True,
+                                # M-6: the ORIGINAL execution's own
+                                # `request_id` (guaranteed present), no
+                                # fallback to this resend's own.
+                                request_id=stored_payload["request_id"],
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
                         # request executes anything.
@@ -2171,7 +2214,7 @@ class PostgresCell:
                         # it directly too, mirroring MitateDB's per-backend
                         # `check_reserved` redundancy rather than relying
                         # solely on the shared caller never being bypassed.
-                        _reject_reserved_entity_name(bound.entity)
+                        _reject_reserved_entity_name(bound.entity, field="entity")
                         if bound.entity in catalog:
                             fail("CONFLICT", "Entity already exists.", status=409)
                         # Contract 1.7.0 (D-2 (1)/(7), WP-2a): `enum_
@@ -2429,7 +2472,7 @@ class PostgresCell:
                     if idempotency_key is not None and idempotency_digest_value is not None:
                         self._idempotency_store(
                             conn, idempotency_key, digest=idempotency_digest_value, kind="schema",
-                            payload={"revision": outcome_revision},
+                            payload={"revision": outcome_revision, "request_id": request_id},
                             retention_ms=limits.idempotency_retention_ms,
                         )
             except psycopg.errors.QueryCanceled:
@@ -2455,7 +2498,7 @@ class PostgresCell:
         # apply_schema(...)` call sites among them) now reads `.revision`
         # off the result instead of comparing the result itself to an
         # `int`.
-        return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan)
+        return SchemaOutcome(committed=outcome_committed, revision=outcome_revision, descriptor=outcome_descriptor, plan=outcome_plan, request_id=request_id)
 
     def _create_entity(self, conn: "psycopg.Connection[Any]", entity: str, fields: tuple[str, ...], field_types: dict[str, str | None] | None = None) -> None:
         # R-1/R-4: every entity table gets a server-assigned `id` address

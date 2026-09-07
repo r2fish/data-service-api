@@ -227,10 +227,17 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     `test_control_plane_service.py`/`test_audit_query.py`). Two SEPARATE
     pins for the two planes -- a mutation reverting only one plane's flip
     (work order mutation 15) turns exactly one of the two red, never
-    both."""
+    both.
+
+    Phase 9 WP-2e (design D-1 (5)): re-flipped to 1.7.0 in the same commit
+    as the R-3/R-7 behavior this WP ships -- function name kept (matching
+    this file's own precedent of retaining an earlier version's name on a
+    since-re-flipped pin, e.g. `test_control_capabilities_declares_
+    contract_version_1_5_0` in `test_audit_query.py`, which already
+    asserted 1.6.0 before this WP)."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.6.0"
+    assert document["contract_version"] == "1.7.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
@@ -627,7 +634,10 @@ def test_mutation_values_over_100_fields_is_validation_failed_not_limit_exceeded
         service.mutate(runtime, "notes", [{"operation": "insert", "values": too_many_values}])
     assert exc.value.code == "VALIDATION_FAILED"
     assert exc.value.code != "LIMIT_EXCEEDED"
-    assert exc.value.details == {"field": "values"}
+    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1): this choke-point
+    # site now also carries `violated_declaration` (contract shape bound,
+    # not a declared field/type/capability mismatch -- `request_schema`).
+    assert exc.value.details == {"field": "values", "violated_declaration": "request_schema"}
 
 
 def test_every_advertised_resource_limit_has_a_deterministic_boundary():
@@ -1065,6 +1075,24 @@ def test_in_operator_type_checks_each_element():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+def test_in_operator_rejects_an_empty_list():
+    """WP-2e closure audit M-3 (`{scratchpad}/audit-wp2e-2.md` R-2,
+    ruling `{scratchpad}/rulings-r3-r7-flip.md` addendum 2): an empty `in`
+    list is refused at the shared choke point -- `violated_declaration:
+    request_schema`, `field: where/<i>/value` -- the in-memory side is
+    brought into line with the Postgres plug's own pre-existing rejection
+    (`test_postgres.py::test_in_operator_rejects_an_empty_list` pins the
+    identical shape against the real Postgres plug)."""
+    cell = _cell()
+    _create_entity(cell, "ints")
+    _add_field(cell, "ints", "i", "integer")
+    cell.transact("ints", [{"operation": "insert", "values": {"i": 1}}], LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("ints", select=["i"], where=[Predicate("i", "in", [])], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+
 def test_create_index_and_unique_conflict_on_insert_and_update():
     cell = _cell()
     _create_entity(cell, "accounts")
@@ -1446,7 +1474,13 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed():
         # review.md): `field` is now the request-internal path through the
         # choke point's shared `field_name` argument, not the bare entity
         # field name -- the single insert here is always index 0.
-        assert exc.value.details == {"field": "operations/0/values/n"}
+        # Contract 1.7.0 (D-3, WP-2e): out-of-range is a `field_type`
+        # violation -- `declared_type`/`observed_type` both "integer" (the
+        # JSON type matches; only the magnitude does not).
+        assert exc.value.details == {
+            "field": "operations/0/values/n", "violated_declaration": "field_type",
+            "declared_type": "integer", "observed_type": "integer",
+        }
         rendered = repr(exc.value)
         assert str(bad) not in rendered
     # The boundary values themselves are valid.
@@ -1474,12 +1508,28 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
     for name, field_type in (("s", "string"), ("o", "object"), ("a", "array"), ("u", None)):
         _add_field(cell, "docs", name, field_type)
     bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+    # Contract 1.7.0 (D-3, WP-2e): a typed field's NUL-byte refusal is a
+    # `field_type` violation (same error code/disclosure shape as the type
+    # check itself, `_check_type`'s own docstring) -- `declared_type`/
+    # `observed_type` both name the field's own type. The untyped field
+    # ("u", `field_type=None`) has no declared type to violate, so its
+    # `violated_declaration` is `request_schema` instead (WP-2e rework,
+    # audit-wp2e.md D-1 = (A)/ruling L-1: every choke-point site, typed or
+    # not, now carries `violated_declaration` -- there is no bare-`field`
+    # exception left).
+    declared_types = {"s": "string", "o": "object", "a": "array"}
     for field_name, bad_value in bad_values.items():
         with pytest.raises(FoundationError) as exc:
             cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         # Monitor ruling M-3/D: request-internal path, not a bare field name.
-        assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+        if field_name in declared_types:
+            assert exc.value.details == {
+                "field": f"operations/0/values/{field_name}", "violated_declaration": "field_type",
+                "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
+            }
+        else:
+            assert exc.value.details == {"field": f"operations/0/values/{field_name}", "violated_declaration": "request_schema"}
         assert "\x00" not in repr(exc.value)
     # Untyped field: NUL nested inside a dict/list value too.
     with pytest.raises(FoundationError) as exc:
@@ -1614,7 +1664,16 @@ def test_eq_and_ne_reject_a_null_predicate_value():
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "eq", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
-    assert exc.value.details == {"field": "tag"}
+    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1), closure audit
+    # R-4/R-5 (`{scratchpad}/audit-wp2e-2.md`, ruling M-2/M-4): a null
+    # value on an operator that only accepts a value (eq/ne) is a
+    # `nullable` violation -- D-3 (4) requires BOTH `declared_type` (the
+    # field's own declared type -- "json" here, `tag` is untyped/JSONB-
+    # equivalent) and `observed_type` (the JSON type actually supplied,
+    # `null`). `field` is the request-internal PATH to this predicate's
+    # own value (`where/<i>/value`), never the bare column name `tag`
+    # (R-5: `"tag"` is not a key anywhere in the request body).
+    assert exc.value.details == {"field": "where/0/value", "violated_declaration": "nullable", "declared_type": "json", "observed_type": "null"}
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "ne", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"

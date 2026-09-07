@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, replace
 from typing import Any, Callable
 
-from .errors import fail
+from .errors import fail, violation
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ class ResourceLimits:
     def check(self, kind: str, actual: int) -> None:
         bound = self.as_dict().get(kind)
         if bound is None:
-            fail("VALIDATION_FAILED", "Unknown resource class.", details={"field": kind})
+            fail("VALIDATION_FAILED", "Unknown resource class.", details=violation("budget", field=kind))
         if actual < 0 or actual > bound:
             fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": kind, "limit_class": kind, "limit": bound})
 
@@ -72,7 +72,7 @@ class ResourceLimits:
             if isinstance(item, (dict, list, tuple, set)):
                 marker = id(item)
                 if marker in seen:
-                    fail("VALIDATION_FAILED", "Cyclic request structures are not supported.")
+                    fail("VALIDATION_FAILED", "Cyclic request structures are not supported.", details=violation("request_schema"))
                 seen.add(marker)
             if isinstance(item, dict):
                 total += 2
@@ -92,7 +92,7 @@ class ResourceLimits:
             elif item is None or isinstance(item, (bool, int, float)):
                 total += 8
             else:
-                fail("VALIDATION_FAILED", "Request contains an unsupported value type.")
+                fail("VALIDATION_FAILED", "Request contains an unsupported value type.", details=violation("request_schema"))
             if total > bound:
                 fail("LIMIT_EXCEEDED", "Request exceeds the configured resource limit.", status=413, details={"resource": "request_bytes", "limit_class": "request_bytes", "limit": bound})
 
@@ -109,7 +109,7 @@ class ResourceLimits:
                 continue
             marker = id(item)
             if marker in seen:
-                fail("VALIDATION_FAILED", "Cyclic request structures are not supported.")
+                fail("VALIDATION_FAILED", "Cyclic request structures are not supported.", details=violation("request_schema"))
             seen.add(marker)
             next_depth = current + 1
             if next_depth > self.operation_depth:
