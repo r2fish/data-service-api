@@ -384,3 +384,52 @@ class StorageBackend:
         """Release any held connections/resources. A no-op is
         acceptable for a backend with nothing to release."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
+    # rulings-r5-r6.md I-1): idempotency record storage. `PostgresBackend`
+    # keeps these in an application-scoped side table (`_mdb_idempotency`,
+    # per-application upgrade 0010); `SQLiteBackend` keeps them in a
+    # private, process-local dict (this backend IS the process -- R-a).
+    # `ApplicationCell` is the sole caller: it looks these up (`idempotency_
+    # get`/`idempotency_reap_expired`/`idempotency_count`) BEFORE it ever
+    # calls `begin()`/a schema-mutating method, and writes exactly one
+    # (`record_idempotency`) as the LAST thing before its own commit point
+    # -- mirroring `audit_hook.pre_commit()`'s own "last thing before
+    # commit" placement, so a failed attempt (anything that keeps this
+    # backend's own transaction from committing) leaves no record.
+    # ------------------------------------------------------------------
+
+    def idempotency_get(self, key):
+        """Returns `{"digest": str, "response_json": str}` for `key`, or
+        `None` if this Application has no (unexpired) record for it.
+        Callers reap expired records first (`idempotency_reap_expired`),
+        so a non-`None` result here is always still within its own
+        retention window."""
+        raise NotImplementedError
+
+    def idempotency_reap_expired(self, now_ms, retention_ms):
+        """Deletes every record whose own `created_at_ms` is older than
+        `retention_ms` relative to `now_ms` -- lazy reclamation only, no
+        background thread/timer anywhere (design D-5: "an implementation
+        may delete elapsed records lazily")."""
+        raise NotImplementedError
+
+    def idempotency_count(self):
+        """Number of records THIS Application currently retains (after
+        the caller's own `idempotency_reap_expired` call) -- compared
+        against `FoundationConfig.idempotency_entries` at the lookup
+        stage, before execution."""
+        raise NotImplementedError
+
+    def record_idempotency(self, key, digest, response_json, now_ms):
+        """Writes (or replaces) one record, over the SAME connection/
+        transaction this backend is currently mid-commit on -- called by
+        `ApplicationCell.transact` immediately before `self.commit()`.
+        A backend method that manages its OWN internal transaction
+        (`create_collection`/`add_field`/`alter_field_constraints`) takes
+        an `idempotency_record` tuple instead (see each method's own
+        docstring) and writes it itself, at the identical "last thing
+        before commit" point, over whichever connection that DDL already
+        runs on."""
+        raise NotImplementedError

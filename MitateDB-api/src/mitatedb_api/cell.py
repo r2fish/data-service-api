@@ -33,7 +33,7 @@ from .audit_dispatch import AuditRouter
 from .auth import Principal, Role
 from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .backend_sqlite import SQLiteBackend
-from .config import FoundationConfig
+from .config import FoundationConfig, narrow_limits_by_budget
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
                      PreconditionFailedError, ResourceLimitError, ValidationError)
@@ -100,7 +100,22 @@ _CONTRACT_MUTATION_VOCABULARY = {"insert", "update", "upsert", "delete"}
 # precondition, in particular) execute as if that semantic were honored,
 # when it was never even inspected. Contract `versioning.unknown_capability`:
 # "The service returns CAPABILITY_UNSUPPORTED without executing a fallback."
-_TRANSACT_INSERT_KEYS = {"type", "collection", "values"}
+# Phase 9 WP-3c (design D-5, I-1/I-3; 監督裁定集約 rulings-r5-r6.md I-1):
+# `idempotency_key` is now a real, recognized key on every operation type
+# -- the port's own `fold_batch_idempotency_key` (`conformance-tests/
+# adapter.py`) folds ONE batch-wide key onto EVERY operation dict before
+# ever calling `ApplicationCell.transact` (never this method's own
+# `idempotency_key=` keyword, which exists for a caller -- `http.py::
+# post_mutate`/`post_cross_entity_mutate` -- that already has the SINGLE
+# request-level value in hand and need not repeat it onto every item).
+# `transact()` itself derives its own `idempotency_key` from the FIRST
+# operation that carries one whenever its own keyword argument is `None`
+# (see its own docstring) -- this key set's only job is to keep that
+# per-operation carrier from being rejected as an unrecognized field by
+# the excess-key checks below; `_plan_operation` never reads it into any
+# execution payload (every branch extracts fields by explicit name, never
+# `**operation`).
+_TRANSACT_INSERT_KEYS = {"type", "collection", "values", "idempotency_key"}
 
 # P3-D2 (WP-1.5): same "reject an unread capability-shaped key before
 # execution" reasoning as `_TRANSACT_INSERT_KEYS` above, for the two
@@ -127,8 +142,8 @@ _TRANSACT_INSERT_KEYS = {"type", "collection", "values"}
 # real capability gap on `update`/`delete` here exactly as they already
 # are on `insert` above (this peer implements no revision-precondition/
 # uniqueness concept anywhere).
-_TRANSACT_UPDATE_KEYS = {"type", "collection", "values", "filters"}
-_TRANSACT_DELETE_KEYS = {"type", "collection", "values", "filters", "destructive", "confirm"}
+_TRANSACT_UPDATE_KEYS = {"type", "collection", "values", "filters", "idempotency_key"}
+_TRANSACT_DELETE_KEYS = {"type", "collection", "values", "filters", "destructive", "confirm", "idempotency_key"}
 
 # Foundation field-type vocabulary. This is a shared, backend-independent
 # VOCABULARY (which declared type names this API accepts at all) -- the
@@ -411,6 +426,47 @@ def compute_plan_token(request: dict[str, Any], schema_revision: int) -> str:
     as the contract requires."""
     digest = hashlib.sha256(normalize_request_for_plan(request)).hexdigest()
     return f"{digest}.{schema_revision}"
+
+
+def normalize_request_for_idempotency(request: dict[str, Any]) -> bytes:
+    """Phase 9 WP-3c (design D-5, 追補 2 S-a; 監督裁定集約 rulings-r5-
+    r6.md I-2): canonical JSON bytes of `request` for the idempotency
+    digest -- the SAME normalization rule `normalize_request_for_plan`
+    above uses (keys in lexicographic order, no insignificant whitespace,
+    non-ASCII left unescaped, encoded UTF-8), over the SAME kind of
+    contract-level request object (as the caller received it, never a
+    resolved/backfilled value) -- but excluding THREE keys, not two:
+    `plan`, `dry_run`, AND `idempotency_key` itself (contract `structured_
+    operations.idempotency.record`: "The digest is taken over the request
+    object ... excluding idempotency_key itself, plan and dry_run").
+    Every other key -- `budget`/`transaction`/`confirmation` on a
+    mutation, `field_types`/`field_constraints` on a schema operation --
+    is part of what a resend must match, identically to `normalize_
+    request_for_plan`'s own "every other field ... commits" rule.
+
+    Deliberately NOT sharing a body with `normalize_request_for_plan`
+    (裁定 I-2: "本文を共有せず、除外 key の違いだけの同型に保つ") --
+    the two functions differ in exactly one respect (which keys are
+    excluded), pinned isomorphic to each other's own shape, never
+    factored into one shared helper with a parameterized exclusion set
+    (that would itself be a THIRD function neither `normalize_request_
+    for_plan` nor this one actually is, and the peer-symmetry isomorphism
+    test only pins same-named helpers, never an internal factoring
+    choice)."""
+    filtered = {key: value for key, value in request.items() if key not in ("plan", "dry_run", "idempotency_key")}
+    return json.dumps(filtered, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def idempotency_digest(request: dict[str, Any]) -> str:
+    """Phase 9 WP-3c (design D-5, 追補 2 S-a): the sha256 hex digest of
+    `normalize_request_for_idempotency(request)` -- UNLIKE `compute_plan_
+    token`, this carries no schema-revision component at all (an
+    idempotency record's own validity is governed purely by `idempotency_
+    retention_ms`, never by a schema change in between -- the contract
+    text names no revision dependency for a resend's own digest match,
+    unlike `structured_operations.dry_run.plan`'s explicit "and the
+    current schema state" clause)."""
+    return hashlib.sha256(normalize_request_for_idempotency(request)).hexdigest()
 
 
 def check_plan_precondition(presented_plan, expected_token):
@@ -775,7 +831,7 @@ class ApplicationCell:
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
 
     @contextmanager
-    def _limit_gate(self, principal, request=None, *, request_id=None):
+    def _limit_gate(self, principal, request=None, *, request_id=None, effective_limits=None):
         """Phase 8 WP-1a rework 1 (裁定 5, 監督裁定 2026-09-06; design D-1
         "順序"/"実装の形"): the single choke every application-plane
         operation below (`insert`/`read`/`update`/`delete`/`transact`,
@@ -803,13 +859,31 @@ class ApplicationCell:
         for the measured, pre-rework gap this closes.)
 
         Yields the computed wall-clock `deadline` (`time.monotonic()`
-        seconds) for the caller to hand to `self._backend`."""
-        self.__limit_holder.acquire_rate(principal.credential_id, self.config.max_requests_per_minute)
-        with self.__limit_holder.concurrency_slot(self.config.max_concurrency):
+        seconds) for the caller to hand to `self._backend`.
+
+        `effective_limits` (Phase 9 WP-3d, design D-6, 監督裁定集約
+        rulings-r5-r6.md B-2/B-3): the ONE bound this gate itself ever
+        reads a request `budget` through -- `None` (every pre-WP-3d
+        caller) keeps reading `self.config` directly, unchanged; a caller
+        that has already computed `effective_limits = narrow_limits_by_
+        budget(self.config, budget, endpoint_kind)` (`config.py`) passes
+        it here instead, so `max_execution_ms` -- the ONLY field of it
+        this gate itself consults -- narrows to the smaller of the
+        deployed and budgeted value. Every OTHER field this gate reads
+        (`max_requests_per_minute`/`max_concurrency`/`max_request_bytes`/
+        `max_operation_depth`) is never budgetable (D-6's own three-class
+        table), so `effective_limits` always carries the SAME deployed
+        value as `self.config` for those -- reading it uniformly here,
+        rather than cherry-picking only `max_execution_ms`, is harmless
+        and keeps this gate from needing to know which fields budget can
+        touch."""
+        limits = effective_limits if effective_limits is not None else self.config
+        self.__limit_holder.acquire_rate(principal.credential_id, limits.max_requests_per_minute)
+        with self.__limit_holder.concurrency_slot(limits.max_concurrency):
             if request is not None:
-                _measure_request_bytes(request, self.config.max_request_bytes)
-                _check_operation_depth(request, self.config.max_operation_depth)
-            deadline = time.monotonic() + self.config.max_execution_ms / 1000
+                _measure_request_bytes(request, limits.max_request_bytes)
+                _check_operation_depth(request, limits.max_operation_depth)
+            deadline = time.monotonic() + limits.max_execution_ms / 1000
             yield deadline
 
     def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
@@ -855,6 +929,48 @@ class ApplicationCell:
             target_kind="collection", target_id=target_id,
         )
 
+    def _idempotency_check(self, idempotency_key, digest_request):
+        """Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
+        rulings-r5-r6.md I-3/I-4/I-6/I-8): the shared lookup/write-prep
+        choke every idempotency-key-carrying entry point (`transact`,
+        `create_collection`, `add_field`, `alter_field`) calls at the
+        SAME logical point -- after every bound check, before target
+        existence/confirmation/precondition/execution. Callers are
+        responsible for the `not dry_run` guard themselves (I-7: never
+        called at all for a dry run) and for what `digest_request` itself
+        contains (this method has no per-operation knowledge of it).
+
+        Returns `(replay_response, digest, now_ms)`. `replay_response`
+        is not `None` when a retained record already answers this exact
+        (key, digest) pair -- the caller must return it VERBATIM,
+        executing nothing further (I-8: the whole recorded response
+        object). Otherwise it is `None`, and `(digest, now_ms)` are what
+        the caller must eventually pass to its own backend write
+        (`record_idempotency`, or a DDL method's own `idempotency_record`
+        tuple) at ITS OWN commit point -- this method never writes
+        anything itself; a lookup alone must never create a record (I-1:
+        a record exists only once the request it names has committed).
+
+        Raises `errors.ConflictError` (I-4) for a same-key, different-
+        digest resend, and `errors.ResourceLimitError` (I-6,
+        `limit_class="idempotency_entries"`) when this Application is at
+        capacity even after reclaiming elapsed records -- both BEFORE
+        anything the caller would go on to execute."""
+        digest = idempotency_digest(digest_request)
+        now_ms = int(time.time() * 1000)
+        self._backend.idempotency_reap_expired(now_ms, self.config.idempotency_retention_ms)
+        existing = self._backend.idempotency_get(idempotency_key)
+        if existing is not None:
+            if existing["digest"] != digest:
+                raise ConflictError(
+                    "idempotency_key was already used with a different request",
+                    details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
+                )
+            return json.loads(existing["response_json"]), digest, now_ms
+        if self._backend.idempotency_count() >= self.config.idempotency_entries:
+            raise ResourceLimitError("idempotency record capacity exceeded", limit_class="idempotency_entries")
+        return None, digest, now_ms
+
     def _identifier(self, value, label="identifier"):
         """The one place BOTH stages of identifier validation are always
         applied together (R-3): the shared syntax allowlist
@@ -869,7 +985,8 @@ class ApplicationCell:
 
     def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
                           field_types=None, field_constraints=None, dry_run=False, plan=None,
-                          digest_extra=None, operation="create_entity"):
+                          digest_extra=None, operation="create_entity", idempotency_key=None,
+                          effective_limits=None):
         """Phase 6 WP-3 (design D-3): `field_types`, when given, is a
         `{field_name: contract_type}` map (the 7-word contract vocabulary,
         `field_types.CONTRACT_TYPES`) -- the declared type this call
@@ -906,7 +1023,7 @@ class ApplicationCell:
         # constraints` -- decoupled on purpose, not the SAME dict reused
         # for two different jobs.
         request = {"name": name, "fields": fields}
-        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
             name = self._identifier(name, "collection")
             if not isinstance(fields, dict) or not fields:
                 raise ValidationError("fields must be a non-empty object")
@@ -976,6 +1093,45 @@ class ApplicationCell:
                     )
             resolved_constraints = _resolve_field_constraints(
                 validated_fields, declared_types, field_constraints, max_enum_members=self.config.max_enum_members)
+            # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c rework,
+            # I-13): hoisted above the plan-precondition block below so
+            # the idempotency choke immediately following can reuse the
+            # SAME object -- `operation`/`entity`/`fields`/`field_types`/
+            # `field_constraints`/`digest_extra` exactly as before this
+            # hoist (unchanged construction, see the plan-precondition
+            # block's own historical comment below for the full per-key
+            # rationale), plus `idempotency_key` itself when the caller
+            # presented one (I-13: included here so `compute_plan_token`
+            # -- which excludes only `plan`/`dry_run` -- commits to it
+            # too). Built whenever EITHER an idempotency digest or a plan
+            # token will need it.
+            needs_digest_request = dry_run or plan is not None or idempotency_key is not None
+            digest_request: dict[str, Any] | None = None
+            if needs_digest_request:
+                digest_request = {"operation": operation, "entity": name, "fields": list(fields)}
+                if field_types is not None:
+                    digest_request["field_types"] = dict(field_types)
+                if field_constraints is not None:
+                    digest_request["field_constraints"] = field_constraints
+                if digest_extra:
+                    digest_request.update(digest_extra)
+                if idempotency_key is not None:
+                    digest_request["idempotency_key"] = idempotency_key
+            idempotency_response_digest = None
+            idempotency_now_ms = None
+            if idempotency_key is not None and not dry_run:
+                # Phase 9 WP-3c (design D-5, I-3/I-7): checked here --
+                # after every VALIDATION_FAILED/LIMIT_EXCEEDED refusal
+                # above, before the plan precondition and before anything
+                # is created below (`create_collection` has no separate
+                # target-existence stage of its own, D-3's `ConflictError`
+                # for an already-existing name surfaces from the backend
+                # call itself, at execution -- this lookup runs before
+                # THAT too).
+                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                    idempotency_key, digest_request)
+                if replay is not None:
+                    return replay
             # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
             # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
             # refusal above (this operation has no confirmation/target-
@@ -1003,72 +1159,16 @@ class ApplicationCell:
                 # `RLock`, safe to re-enter from the SAME thread, so this
                 # was never a deadlock, only a pointless second acquire).
                 current_revision = self._schema_revision_uncounted()
-                # `digest_request` (rework, 監督裁定 G-1): unlike `request`
-                # above (`_limit_gate`'s own sizing object, unchanged from
-                # before this WP), this is the CONTRACT-level request
-                # object -- `operation` (this method is reached only
-                # through `create_entity`'s own contract operation name;
-                # `create_collection` itself names no `SchemaOperationRequest.
-                # operation` of its own), `fields` (the ARRAY of names the
-                # caller presented -- `dict.keys()` preserves the caller's
-                # own insertion order, matching a JSON array's own
-                # significant element order, never sorted the way object
-                # KEYS are by `normalize_request_for_plan`), and `field_
-                # types`/`field_constraints` taken RAW from this method's
-                # own arguments -- NEVER `declared_types`/`resolved_
-                # constraints` (the backfilled-with-defaults registry
-                # values `_backend.create_collection` below is given): a
-                # request that omitted `field_constraints` and a request
-                # that named the SAME defaults explicitly must NOT collide
-                # on one token (WP-3b review M-2, reproduced against the
-                # pre-rework digest: a `field_constraints`-omitting dry
-                # run's `plan` was accepted on an apply that spelled out
-                # `nullable: true` explicitly). A key is present here only
-                # when the caller's own argument was not `None` -- an
-                # omitted optional stays ABSENT from the digest, never
-                # backfilled to its own resolved value (G-1's own "解決・
-                # 正規化・既定値補完をせずに").
-                #
-                # `operation` (WP-3b closure, H-4): this method's own
-                # keyword-only PARAMETER (default `"create_entity"`,
-                # `create_collection`'s own signature above) -- never a
-                # local `operation = "create_entity"` `Assign` statement
-                # (the pre-closure shape). `test_audit_query.py`'s own
-                # generalized P4-D16 v3 scanner's completeness proof (`U ==
-                # D | N`) collects a literal from EVERY `Assign` whose
-                # target is a variable literally named `operation`,
-                # regardless of how safely it is later forwarded -- a
-                # function *parameter*'s own default value is a different
-                # AST shape entirely (`ast.arguments`, never `ast.Assign`)
-                # that scanner never visits at all, so expressing the
-                # SAME fallback there instead needs no `_NON_AUDIT_
-                # OPERATION_LITERALS` exclusion-list entry (WP-3b review
-                # C-1: the previous `Assign`-shaped version needed exactly
-                # one). `http.py::post_schema`'s `create_entity` branch
-                # overrides this default with `operation=schema_operation`
-                # -- the client's own request-received value (H-4: "digest
-                # の operation 値は要求から受け取った文字列(変数)を使い");
-                # every in-process caller that does not (this signature's
-                # own default, and every existing direct/`ApplicationDeveloper`
-                # caller) gets the identical `"create_entity"` this method
-                # has always meant, unchanged in VALUE, only in shape.
-                digest_request = {"operation": operation, "entity": name, "fields": list(fields)}
-                if field_types is not None:
-                    digest_request["field_types"] = dict(field_types)
-                if field_constraints is not None:
-                    digest_request["field_constraints"] = field_constraints
-                # `digest_extra` (WP-3b closure, H-3 (b)): `destructive`/
-                # `confirmation`/`revision`/`index`/`unique` are real
-                # `SchemaOperationRequest` properties this method never
-                # reads (they carry no `create_entity` meaning today) but
-                # the contract still requires the token to commit to them
-                # ("Every other field ... is part of what the token
-                # commits to") -- `http.py::post_schema` forwards whichever
-                # of the 5 the request actually presented, unread and
-                # unvalidated beyond `_check_object_shape`'s own shape
-                # check; merged in verbatim, never inspected here either.
-                if digest_extra:
-                    digest_request.update(digest_extra)
+                # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                # rework): built ABOVE, before this method's own
+                # idempotency choke -- see that hoisted block's own
+                # comment for the full per-key rationale (`operation`/
+                # `entity`/`fields`/`field_types`/`field_constraints`/
+                # `digest_extra`/`idempotency_key`, unchanged from the
+                # pre-hoist version this replaces). `compute_plan_token`
+                # excludes only `plan`/`dry_run`, so an `idempotency_key`
+                # this object carries (I-13) is part of what THIS token
+                # commits to too.
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): every schema operation is
@@ -1081,11 +1181,15 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="create_collection",
                 target_kind="collection", target_id=name, request_id=request_id,
             )
+            idempotency_record = (
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                if idempotency_key is not None and not dry_run else None
+            )
             with self._lock:
                 revision, descriptor = self._backend.create_collection(
                     name, validated_fields, field_types=declared_types,
                     field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
-                    dry_run=dry_run)
+                    dry_run=dry_run, idempotency_record=idempotency_record)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="create_collection")
@@ -1095,7 +1199,8 @@ class ApplicationCell:
         return result
 
     def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None,
-                      field_constraints=None, dry_run=False, plan=None, digest_extra=None):
+                      field_constraints=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
+                      effective_limits=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -1143,10 +1248,12 @@ class ApplicationCell:
         # its own default too).
         return self.create_collection(
             principal, name, fields, request_id=request_id, field_types=field_types,
-            field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra)
+            field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra,
+            idempotency_key=idempotency_key, effective_limits=effective_limits)
 
     def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None,
-                  enum=None, nullable=None, dry_run=False, plan=None, digest_extra=None):
+                  enum=None, nullable=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
+                  effective_limits=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -1198,12 +1305,50 @@ class ApplicationCell:
         # too; this one does not, matching this method's pre-WP-3b
         # `_limit_gate` sizing exactly).
         request = {"collection": collection, "field": field, "field_type": field_type}
-        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
             collection = self._identifier(collection, "collection")
             field = self._identifier(field, "field")
             if field_type not in _FIELD_TYPE_VOCABULARY:
                 raise ValidationError("unsupported field type")
             declared_type = contract_type if contract_type is not None else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
+            # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure H-3
+            # (a); Phase 9 WP-3c rework, I-13): hoisted above `field_
+            # domains` below (this method's own target-existence check) so
+            # the idempotency choke immediately following can consult it
+            # -- see this method's own plan-precondition block (further
+            # below) for the full per-key construction rationale
+            # (unchanged by this hoist), plus `idempotency_key` itself
+            # (I-13).
+            needs_digest_request = dry_run or plan is not None or idempotency_key is not None
+            digest_request: dict[str, Any] | None = None
+            if needs_digest_request:
+                # `operation` -- see `create_collection`'s own identical
+                # comment (module-level H-4) for why this is a qualifying
+                # local `name_assign` forwarded by NAME, never a raw
+                # literal inside the `Dict` itself (`test_audit_query.py`'s
+                # own P4-D16 v3 scanner).
+                operation = "add_field"
+                digest_request = {"operation": operation, "entity": collection, "field": field}
+                if contract_type is not None:
+                    digest_request["field_type"] = contract_type
+                if enum is not None:
+                    digest_request["enum"] = list(enum)
+                if nullable is not None:
+                    digest_request["nullable"] = nullable
+                if digest_extra:
+                    digest_request.update(digest_extra)
+                if idempotency_key is not None:
+                    digest_request["idempotency_key"] = idempotency_key
+            idempotency_response_digest = None
+            idempotency_now_ms = None
+            if idempotency_key is not None and not dry_run:
+                # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                # `field_domains` immediately below -- this method's own
+                # target-existence check.
+                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                    idempotency_key, digest_request)
+                if replay is not None:
+                    return replay
             # Q1-D11-consistent shape bound (same reasoning as `create_
             # collection`'s own field-count check above): the total column
             # count this collection would carry AFTER this call mirrors the
@@ -1235,48 +1380,15 @@ class ApplicationCell:
                 # see `create_collection`'s own identical comment above.
                 current_revision = self._schema_revision_uncounted()
                 # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure
-                # H-3 (a)): NEVER `request` above (`_limit_gate`'s own
-                # sizing object, unchanged from before this WP) --
-                # `request["field_type"]` is this FOUNDATION's own internal
-                # storage vocabulary (`text`/`json`/...), not the
-                # contract's 7-word `field_type` vocabulary; `_CONTRACT_
-                # FIELD_TYPE_TO_MITATEDB` (`http.py`) folds `object`/
-                # `array`/`json` onto the SAME foundation `json`, so
-                # digesting the foundation value would let a `field_type:
-                # "object"` dry run's `plan` be replayed on a `field_type:
-                # "json"` apply (WP-3b review M-1, reproduced: the apply
-                # then committed `json`, not the `object` the dry run's
-                # own `descriptor` had previewed). `declared_type`
-                # (computed above) is NOT used here either, though: it is
-                # the RESOLVED contract-level value -- `contract_type` when
-                # given, otherwise BACKFILLED from `field_type`'s own
-                # foundation vocabulary -- so an omitting request and one
-                # explicitly spelling out that same backfilled default
-                # (e.g. `field_type: "json"`) would collide on one token
-                # (H-3 (a), reproduced: `audit_probe_wp3b.py` P-B). `field_
-                # type` in the digest therefore comes straight from
-                # `contract_type` -- this method's own RAW argument, `None`
-                # when the caller never supplied one (`http.py::post_
-                # schema`'s `add_field` branch now forwards `field_type_
-                # raw` here, not its own backfilled local `field_type`) --
-                # present in the digest only when not `None`, exactly like
-                # every other optional key on this object.
-                # `operation` -- see `create_collection`'s own identical
-                # comment for why this is a qualifying local `name_assign`
-                # forwarded by NAME, never a raw literal inside the `Dict`
-                # itself (`test_audit_query.py`'s own P4-D16 v3 scanner).
-                operation = "add_field"
-                digest_request = {"operation": operation, "entity": collection, "field": field}
-                if contract_type is not None:
-                    digest_request["field_type"] = contract_type
-                if enum is not None:
-                    digest_request["enum"] = list(enum)
-                if nullable is not None:
-                    digest_request["nullable"] = nullable
-                # `digest_extra` (WP-3b closure, H-3 (b)) -- see `create_
-                # collection`'s own identical comment above.
-                if digest_extra:
-                    digest_request.update(digest_extra)
+                # H-3 (a); Phase 9 WP-3c rework): built ABOVE, before this
+                # method's own idempotency choke -- see that hoisted
+                # block's own comment for the full per-key rationale
+                # (`field_type` sourced from `contract_type`, the RAW
+                # argument, never the resolved `declared_type` -- H-3 (a),
+                # unchanged by this hoist). `compute_plan_token` excludes
+                # only `plan`/`dry_run`, so an `idempotency_key` this
+                # object carries (I-13) is part of what THIS token commits
+                # to too.
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): same unconditional fail-closed
@@ -1286,12 +1398,16 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="add_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
+            idempotency_record = (
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                if idempotency_key is not None and not dry_run else None
+            )
             with self._lock:
                 # ConflictError if `field` already exists
                 revision, descriptor = self._backend.add_field(
                     collection, field, field_type, contract_type=declared_type,
                     enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
-                    dry_run=dry_run)
+                    dry_run=dry_run, idempotency_record=idempotency_record)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="add_field")
@@ -1312,7 +1428,8 @@ class ApplicationCell:
         return result
 
     def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
-                    request_id=None, dry_run=False, plan=None, digest_extra=None):
+                    request_id=None, dry_run=False, plan=None, digest_extra=None, idempotency_key=None,
+                    effective_limits=None):
         """Phase 9 WP-3a (design docs/design/
         PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)/
         (6)): redeclares `field`'s own `enum`/`nullable` constraints.
@@ -1364,7 +1481,7 @@ class ApplicationCell:
         request = {"collection": collection, "field": field, "nullable": nullable, "field_type": field_type}
         if enum is not UNCHANGED:
             request["enum"] = enum
-        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
             if field_type is not None:
                 raise ValidationError(
                     "alter_field does not redeclare a field's own type",
@@ -1390,6 +1507,41 @@ class ApplicationCell:
                 )
             collection = self._identifier(collection, "collection")
             field = self._identifier(field, "field")
+            # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c rework,
+            # I-13): hoisted above `field_domains` below (this method's
+            # own target-existence check) so the idempotency choke
+            # immediately following can consult it -- see this method's
+            # own plan-precondition block (further below) for the full
+            # per-key construction rationale (unchanged by this hoist),
+            # plus `idempotency_key` itself (I-13).
+            needs_digest_request = dry_run or plan is not None or idempotency_key is not None
+            digest_request: dict[str, Any] | None = None
+            if needs_digest_request:
+                # `operation` -- see `create_collection`'s own identical
+                # comment (module-level H-4) for why this is a qualifying
+                # local `name_assign` forwarded by NAME, never a raw
+                # literal inside the `Dict` itself (`test_audit_query.py`'s
+                # own P4-D16 v3 scanner).
+                operation = "alter_field"
+                digest_request = {"operation": operation, "entity": collection, "field": field}
+                if nullable is not None:
+                    digest_request["nullable"] = nullable
+                if enum is not UNCHANGED:
+                    digest_request["enum"] = enum
+                if digest_extra:
+                    digest_request.update(digest_extra)
+                if idempotency_key is not None:
+                    digest_request["idempotency_key"] = idempotency_key
+            idempotency_response_digest = None
+            idempotency_now_ms = None
+            if idempotency_key is not None and not dry_run:
+                # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                # `field_domains` immediately below -- this method's own
+                # target-existence check.
+                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                    idempotency_key, digest_request)
+                if replay is not None:
+                    return replay
             available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if field not in available:
                 # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
@@ -1440,33 +1592,15 @@ class ApplicationCell:
                 # Minor m-2 (review): no separate `with self._lock:` --
                 # see `create_collection`'s own identical comment above.
                 current_revision = self._schema_revision_uncounted()
-                # `digest_request` (rework, 監督裁定 G-1): NEVER `request`
-                # above (`_limit_gate`'s own sizing object, unchanged from
-                # before this WP) -- `request` unconditionally carries
-                # `field_type`/`nullable` even when the caller omitted
-                # them (`None` either way), which would make an omitting
-                # request and an explicit-`null` one indistinguishable
-                # from a request-shape standpoint, contrary to G-1's own
-                # "省略された optional は key ごと無し". `field_type` is
-                # ALSO never reached at this point carrying a real value
-                # at all (the `field_type is not None` check above always
-                # refuses first) -- so it is never a real, digestible
-                # declaration for `alter_field` and is left out entirely,
-                # not included as a `None`/omitted placeholder either way.
-                # `operation` -- see `create_collection`'s own identical
-                # comment for why this is a qualifying local `name_assign`
-                # forwarded by NAME, never a raw literal inside the `Dict`
-                # itself (`test_audit_query.py`'s own P4-D16 v3 scanner).
-                operation = "alter_field"
-                digest_request = {"operation": operation, "entity": collection, "field": field}
-                if nullable is not None:
-                    digest_request["nullable"] = nullable
-                if enum is not UNCHANGED:
-                    digest_request["enum"] = enum
-                # `digest_extra` (WP-3b closure, H-3 (b)) -- see `create_
-                # collection`'s own identical comment above.
-                if digest_extra:
-                    digest_request.update(digest_extra)
+                # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                # rework): built ABOVE, before this method's own
+                # idempotency choke -- see that hoisted block's own
+                # comment for the full per-key rationale (`field_type`
+                # never included -- the `field_type is not None` check
+                # above always refuses first, unchanged by this hoist).
+                # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                # an `idempotency_key` this object carries (I-13) is part
+                # of what THIS token commits to too.
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): same unconditional fail-closed
@@ -1476,6 +1610,10 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="alter_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
+            idempotency_record = (
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                if idempotency_key is not None and not dry_run else None
+            )
             with self._lock:
                 # ConflictError (existing rows violate the new constraints)
                 # or NotFoundError propagate from here unchanged -- the
@@ -1484,7 +1622,7 @@ class ApplicationCell:
                 # the registry write/revision bump/commit are skipped).
                 revision, descriptor = self._backend.alter_field_constraints(
                     collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline,
-                    dry_run=dry_run)
+                    dry_run=dry_run, idempotency_record=idempotency_record)
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="alter_field")
@@ -1642,17 +1780,24 @@ class ApplicationCell:
         return result
 
     def read(self, principal, collection, fields=None, filters=None,
-             order_by=None, limit=None, *, request_id=None):
+             order_by=None, limit=None, *, request_id=None, effective_limits=None):
         self._require_data(principal, request_id=request_id)
+        # Phase 9 WP-3d (design D-6, B-2/B-6): `effective_limits` is the
+        # ONE narrowing point `result_items` reads through -- the check
+        # below is unchanged in SHAPE (still driven by the REQUESTED
+        # `limit` value, never the row count actually returned, L9-11)
+        # other than reading `limits.max_result_rows` instead of `self.
+        # config.max_result_rows` directly.
+        limits = effective_limits if effective_limits is not None else self.config
         request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by, "limit": limit}
-        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
             collection = self._identifier(collection, "collection")
             selected = self._select_fields(collection, fields)
             bound_filters = self._bind_filters(collection, filters)
             order = self._bind_order_by(collection, order_by)
             if limit is None:
-                limit = self.config.max_result_rows
-            if not isinstance(limit, int) or limit <= 0 or limit > self.config.max_result_rows:
+                limit = limits.max_result_rows
+            if not isinstance(limit, int) or limit <= 0 or limit > limits.max_result_rows:
                 raise ResourceLimitError("result limit exceeded", limit_class="result_items")
             with self._lock:
                 rows = self._backend.read(collection, selected, bound_filters, order, limit, deadline=deadline)
@@ -1954,7 +2099,7 @@ class ApplicationCell:
         return names
 
     def transact(self, principal, operations, *, request_id=None, dry_run=False, plan=None, budget=None,
-                transaction=None, entity=None, digest_operations=None):
+                transaction=None, entity=None, digest_operations=None, idempotency_key=None, effective_limits=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
         same batch -- converging this entry point's real behavior onto
@@ -2002,14 +2147,89 @@ class ApplicationCell:
         fails validation).
         """
         self._require_data(principal, request_id=request_id)
+        # Phase 9 WP-3c (design D-5, I-1/I-3): `idempotency_key` has two
+        # entry points into this method -- this KEYWORD (`http.py::
+        # post_mutate`/`post_cross_entity_mutate` already hold the single
+        # request-level `MutationRequest.idempotency_key`/`ScopedMutation
+        # Request.idempotency_key` value and pass it here directly), or
+        # folded onto EVERY operation dict (the port's own `fold_batch_
+        # idempotency_key`, `conformance-tests/adapter.py` -- every
+        # in-process caller reaches this method this way, never via the
+        # keyword). When the keyword is `None`, the first operation
+        # carrying a non-`None` `idempotency_key` supplies it -- the
+        # adapter's own fold already guarantees every operation in one
+        # batch carries the IDENTICAL value (or none at all), so reading
+        # just the first is sufficient; `_TRANSACT_INSERT_KEYS`/`_UPDATE_
+        # KEYS`/`_DELETE_KEYS` above all list this key so it is never
+        # rejected as an unread capability-shaped field, and `_plan_
+        # operation` never reads it into any execution payload (every
+        # branch extracts fields by explicit name, never `**operation`).
+        if idempotency_key is None and isinstance(operations, list):
+            for op in operations:
+                if isinstance(op, dict) and op.get("idempotency_key") is not None:
+                    idempotency_key = op["idempotency_key"]
+                    break
+        # Phase 9 WP-3d (design D-6, B-2): the ONE point that reads
+        # `effective_limits` instead of `self.config` for the two COUNT-
+        # valued checks below (`batch_items`/`batch_entities`) -- callers
+        # that never presented a `budget` pass `effective_limits=None`,
+        # which resolves to `self.config` unchanged (identity-shaped
+        # narrowing, matching `_limit_gate`'s own identical fallback).
+        limits = effective_limits if effective_limits is not None else self.config
         request = {"operations": operations}
-        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+        with self._limit_gate(principal, request, request_id=request_id, effective_limits=effective_limits) as deadline:
             if not isinstance(operations, list) or not operations:
                 raise ValidationError("operations must be a non-empty list")
-            if len(operations) > self.config.max_batch_items:
+            if len(operations) > limits.max_batch_items:
                 raise ResourceLimitError("batch limit exceeded", limit_class="batch_items")
-            if len(self._distinct_batch_entities(operations)) > self.config.max_batch_entities:
+            if len(self._distinct_batch_entities(operations)) > limits.max_batch_entities:
                 raise ResourceLimitError("batch entity limit exceeded", limit_class="batch_entities")
+
+            # Phase 9 WP-3c (design D-5, 追補 2 S-b; 監督裁定集約
+            # rulings-r5-r6.md I-3): the idempotency lookup/write-prep
+            # choke -- built and consulted HERE, after every bound check
+            # above (rate/concurrency/request_bytes/operation_depth/
+            # shape/budget) and BEFORE pass 1 below (`_plan_operation`,
+            # this method's own target-existence/confirmation stage).
+            # `digest_request` is built whenever EITHER an idempotency
+            # digest OR a plan token will need it -- unified into one
+            # object (I-13: `idempotency_key`, when the caller presented
+            # one, is included in THIS object, so `compute_plan_token`
+            # below -- which excludes only `plan`/`dry_run` -- commits to
+            # it too; `idempotency_digest` excludes it, alongside `plan`/
+            # `dry_run`, per its own 3-key rule).
+            needs_digest_request = dry_run or plan is not None or idempotency_key is not None
+            digest_request: dict[str, Any] | None = None
+            if needs_digest_request:
+                digest_request = {
+                    "operations": (
+                        [dict(op) for op in digest_operations] if digest_operations is not None
+                        else [_reconstruct_digest_operation(op["type"], op) for op in operations]
+                    ),
+                }
+                if entity is not None:
+                    digest_request["entity"] = entity
+                if budget:
+                    digest_request["budget"] = budget
+                if transaction is not None:
+                    digest_request["transaction"] = transaction
+                if idempotency_key is not None:
+                    digest_request["idempotency_key"] = idempotency_key
+            idempotency_response_digest = None
+            now_ms = None
+            if idempotency_key is not None and not dry_run:
+                # I-7: a dry run never records or consults an idempotency
+                # record, regardless of whether `idempotency_key` was
+                # presented -- the `not dry_run` guard above is this
+                # method's only such check.
+                replay, idempotency_response_digest, now_ms = self._idempotency_check(idempotency_key, digest_request)
+                if replay is not None:
+                    # I-3/I-8: answered from the record, before target
+                    # existence/confirmation/precondition/execution are
+                    # ever reached -- the exact `results` object this
+                    # method itself returned when the original request
+                    # committed.
+                    return replay
 
             # Pass 1: validate every operation, across every entity, before
             # any execution begins (P35-D9/P35-D10 above). Nothing below this
@@ -2061,67 +2281,15 @@ class ApplicationCell:
                 # Minor m-2 (review): no separate `with self._lock:` --
                 # see `create_collection`'s own identical comment above.
                 current_revision = self._schema_revision_uncounted()
-                # `digest_request` (WP-3b closure, H-1/H-2): `_limit_gate`'s
-                # own sizing object (`request` above, `{"operations":
-                # operations}`) stays unchanged -- the digest's own object
-                # is built SEPARATELY, and no longer reuses `operations`
-                # (this peer's INTERNAL execution-item vocabulary: `type`/
-                # `collection`/`filters`/`confirm`) directly. WP-3b review
-                # A-3 found that object digesting three real bugs: (i) key
-                # names not the contract's own (`type`/`filters`/`confirm`
-                # vs `Mutation`'s `operation`/`where`/`confirmation`), (ii)
-                # no `entity` at all (H-1: an entity substitution between a
-                # dry run and its apply must fail closed), (iii) an omitted
-                # `values` and an explicit `values: {}` colliding on one
-                # token (the SAME defect class M-2 already closed for
-                # schema `field_constraints`). `digest_operations` --
-                # supplied by `http.py::post_mutate`/`post_cross_entity_
-                # mutate`, built straight from the validated wire body via
-                # `_mutation_digest_item` -- is the fix for a caller that
-                # HAS the contract-shaped request available; a caller that
-                # does not (every current in-process port caller) falls
-                # back to `_reconstruct_digest_operation` per item (module
-                # level above; see its own docstring for the residual,
-                # scope-bounded HTTP/in-process byte-identity gap this
-                # leaves). `entity` (H-1): the single-entity `Mutation`
-                # request's own URL path segment, hoisted to this object's
-                # TOP level by `http.py::post_mutate` (never present for
-                # `post_cross_entity_mutate`, whose `ScopedMutation` items
-                # already carry their own `entity` -- see `_reconstruct_
-                # digest_operation`'s own docstring for why the in-process
-                # fallback places it per-operation unconditionally instead
-                # of trying to tell the two callers apart). `budget`/
-                # `transaction` carried exactly as before this closure
-                # (M-4/G-1, unchanged reasoning) -- `MutationRequest.
-                # transaction`/`.budget` are part of what the token commits
-                # to, not `operations` alone. `idempotency_key` is still
-                # deliberately NOT threaded onto this parameter list --
-                # unlike `budget`, this peer's own idempotency protocol
-                # (port `fold_batch_idempotency_key`) folds it onto EACH
-                # per-item dict, not this method's own request-unit
-                # keywords, and `_TRANSACT_*_KEYS` refuses that key
-                # unconditionally today (`idempotency: unavailable`); WP-3c
-                # is the one that gives it a real, request-unit shape to
-                # digest. `ApplicationRuntime.transact` itself still gates
-                # `budget` unconditionally before ever reaching here
-                # (`request_budget: unavailable`, WP-3d) -- this parameter
-                # exists so the digest MECHANISM already commits to
-                # `budget`/`transaction` correctly (design D-4 (7): "every
-                # other field ... is part of what the token commits to"),
-                # provable now directly against this method, without
-                # waiting on WP-3d's own gate removal.
-                digest_request: dict[str, Any] = {
-                    "operations": (
-                        [dict(op) for op in digest_operations] if digest_operations is not None
-                        else [_reconstruct_digest_operation(op["type"], op) for op in operations]
-                    )
-                }
-                if entity is not None:
-                    digest_request["entity"] = entity
-                if budget:
-                    digest_request["budget"] = budget
-                if transaction is not None:
-                    digest_request["transaction"] = transaction
+                # `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
+                # rework, I-13): built ONCE, above (before pass 1), not
+                # here -- see this method's own idempotency-lookup block
+                # for the full construction rationale (entity/budget/
+                # transaction/idempotency_key handling unchanged from the
+                # pre-WP-3c version this replaces). Reused verbatim here:
+                # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                # an `idempotency_key` this object carries (I-13) is part
+                # of what THIS token commits to too.
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             hook = None
@@ -2183,6 +2351,22 @@ class ApplicationCell:
                         if destructive and hook is not None:
                             hook.pre_commit()
                             hook_fired = True
+                        # Phase 9 WP-3c (design D-5, I-1): the idempotency
+                        # record is written as the LAST thing before this
+                        # backend's own commit -- a failure anywhere above
+                        # (including the execution loop itself) never
+                        # reaches this line, so a failed attempt leaves no
+                        # record (the `except Exception` below rolls the
+                        # whole transaction back, this write included, on
+                        # the PostgreSQL backend; the SQLite/in-memory
+                        # backend never applies it either, since this
+                        # statement itself never ran). `idempotency_
+                        # response_digest`/`idempotency_key` are only both
+                        # non-`None` when this method's own earlier lookup
+                        # block found no matching record to replay.
+                        if idempotency_key is not None:
+                            self._backend.record_idempotency(
+                                idempotency_key, idempotency_response_digest, json.dumps(results), now_ms)
                         self._backend.commit()
                 except Exception as exc:
                     # Independent review B-2 (WP-2 follow-up -- the
@@ -2734,9 +2918,15 @@ class ApplicationRuntime:
 
     def read(self, collection, fields=None, filters=None, order_by=None, limit=None, *, request_id=None, budget=None):
         self.__authorize(request_id=request_id)
-        if budget is not None:
-            _deny_provisional_field("budget")
-        return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit, request_id=request_id)
+        # Phase 9 WP-3d (design D-6, B-4): `request_budget` is `enabled`
+        # as of this SAME commit (`__build_capabilities_document` below)
+        # -- the present-denial gate is removed; `narrow_limits_by_budget`
+        # itself is what refuses an invalid `budget` now (`endpoint_kind=
+        # "query"`), at this request's own validation stage, before
+        # `ApplicationCell.read`'s own target-existence check.
+        effective_limits = narrow_limits_by_budget(self.__cell.config, budget, "query")
+        return self.__cell.read(self.__principal, collection, fields, filters, order_by, limit,
+                                request_id=request_id, effective_limits=effective_limits)
 
     def catalog(self, *, request_id=None):
         self.__authorize(request_id=request_id)
@@ -2752,15 +2942,20 @@ class ApplicationRuntime:
                                   destructive=destructive, confirm=confirm, request_id=request_id)
 
     def transact(self, operations, *, request_id=None, dry_run=False, plan=None, budget=None, transaction=None,
-                entity=None, digest_operations=None):
+                entity=None, digest_operations=None, idempotency_key=None):
         self.__authorize(request_id=request_id)
         # Phase 9 WP-3b (design D-1 (4), P-3): `dry_run`/`plan` gate
         # removed -- `dry_run` flips to `enabled` in this SAME commit
-        # (`__build_capabilities_document` below). `budget` stays gated
-        # (WP-3d): `request_budget` is unchanged, still `unavailable`.
-        # `transaction` (rework, M-4/G-1) is NOT gated -- unlike `budget`
-        # it names no still-`unavailable` capability of its own (this
-        # peer's own `http.py::post_mutate` already accepts and validates
+        # (`__build_capabilities_document` below). Phase 9 WP-3c/WP-3d:
+        # `idempotency_key`/`budget` are UNGATED as of this SAME commit
+        # too -- both `idempotency`/`request_budget` flip to `enabled`
+        # below. `narrow_limits_by_budget` (`endpoint_kind="mutate"`,
+        # shared by the single-entity and cross-entity callers alike,
+        # both of which route through this one method) is what refuses
+        # an invalid `budget` now, at this request's own validation
+        # stage. `transaction` (rework, M-4/G-1) is NOT gated -- unlike
+        # `budget` it names no capability of its own (this peer's own
+        # `http.py::post_mutate` already accepts and validates
         # `MutationRequest.transaction` today, refusing anything but
         # `"atomic"` before this method is ever reached); it is forwarded
         # so `ApplicationCell.transact`'s own digest can commit to it
@@ -2771,10 +2966,11 @@ class ApplicationRuntime:
         # own identical-purpose comment for the full reasoning. Neither
         # names a capability this peer gates; both are pure digest-
         # construction inputs.
-        if budget is not None:
-            _deny_provisional_field("budget")
+        effective_limits = narrow_limits_by_budget(self.__cell.config, budget, "mutate")
         return self.__cell.transact(self.__principal, operations, request_id=request_id, dry_run=dry_run, plan=plan,
-                                    transaction=transaction, entity=entity, digest_operations=digest_operations)
+                                    budget=budget, transaction=transaction, entity=entity,
+                                    digest_operations=digest_operations, idempotency_key=idempotency_key,
+                                    effective_limits=effective_limits)
 
     def capabilities(self, *, request_id=None):
         """Minimal capability/discovery document, per this session's own
@@ -2851,7 +3047,18 @@ class ApplicationRuntime:
                 "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field"] if is_developer else [], "unsupported": ["create_index", "drop_index", "drop_entity", "jobs"]},
                 "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                 "best_effort_transactions": {"status": "unavailable"},
-                "idempotency": {"status": "unavailable"},
+                # Phase 9 WP-3c (design D-5, 追補 2 S-f; 監督裁定集約
+                # rulings-r5-r6.md I-10/I-12): flipped to `enabled` --
+                # `transact` (single-entity and cross-entity),
+                # `create_entity`/`add_field`/`alter_field` all record
+                # and honor `idempotency_key` for real as of this SAME
+                # commit, and the corresponding `http.py`/`cell.py`
+                # present-denial gates are removed in it too (I-12: same
+                # commit as this flip, C-05 `_CAPABILITY_CONDITIONED`
+                # requires `limits.idempotency_entries`/`idempotency_
+                # retention_ms` to be declared alongside it -- see
+                # `limits`/`limit_enforcement` below, same commit).
+                "idempotency": {"status": "enabled"},
                 "revision_preconditions": {"status": "unavailable"},
                 "row_addressability": {"status": "unavailable"},
                 # P35 WP-2 (R-5, design docs/design/PHASE35_CROSS_ENTITY_
@@ -2921,7 +3128,14 @@ class ApplicationRuntime:
                 # the corresponding `http.py` gate rows are removed, in
                 # this SAME commit (D-1 (4)).
                 "dry_run": {"status": "enabled"},
-                "request_budget": {"status": "unavailable"},
+                # Phase 9 WP-3d (design D-6, B-4): flipped to `enabled` --
+                # `read`/`transact`/`create_entity`/`add_field`/
+                # `alter_field` all narrow their own effective bound by a
+                # request-presented `budget` for real as of this SAME
+                # commit (`config.narrow_limits_by_budget`), and the
+                # corresponding `http.py` present-denial gate rows are
+                # removed in it too.
+                "request_budget": {"status": "enabled"},
             },
             **_surfaces_document_fragment(config),
             "limits": {
@@ -2963,6 +3177,13 @@ class ApplicationRuntime:
                 # `_resolve_field_constraints`/`add_field`/`alter_field`
                 # above (D-1 (4)).
                 "enum_members": config.max_enum_members,
+                # Phase 9 WP-3c (design D-5, 追補 2 S-f; 監督裁定集約
+                # rulings-r5-r6.md I-10): the two `idempotency` limit
+                # classes -- declared in the SAME commit as the
+                # `idempotency` capability flip above (C-05 V1 (e)'s own
+                # `_CAPABILITY_CONDITIONED` requirement).
+                "idempotency_entries": config.idempotency_entries,
+                "idempotency_retention_ms": config.idempotency_retention_ms,
             },
             "limit_enforcement": {
                 "batch_items": "enforced",
@@ -3065,6 +3286,22 @@ class ApplicationRuntime:
                 # surfaces (in-process and HTTP alike route through the
                 # same `cell.py` methods).
                 "enum_members": "enforced",
+                # Phase 9 WP-3c (design D-5, I-10): `_idempotency_check`
+                # (`cell.py`) genuinely refuses a new record with
+                # `LIMIT_EXCEEDED`/`idempotency_entries` once this
+                # Application's own retained-record count (after
+                # reclaiming elapsed ones) meets the deployed bound --
+                # deterministically `enforced`, same as every other
+                # COUNT-valued class above. `idempotency_retention_ms` is
+                # a wall-clock DURATION, not a count -- like `execution_
+                # ms`, it cannot be driven to a deterministic N/N+1
+                # boundary within a test's own bounded run time (non
+                # vacuity note, work order §2 WP-3c: "retention の期限切れ
+                # 検査は行わない"), so it is declared `reference_wall_
+                # clock`, matching `execution_ms`'s own identical
+                # reasoning above.
+                "idempotency_entries": "enforced",
+                "idempotency_retention_ms": "reference_wall_clock",
             },
             # `CredentialStore.assert_active` (auth.py) is invoked by
             # `__authorize` above on every single session operation, with
@@ -3094,19 +3331,18 @@ class ApplicationDeveloper(ApplicationRuntime):
         # WP-3b: `dry_run`/`plan` no longer gate either -- `dry_run` is
         # `enabled` as of THIS commit, same commit as `cell.py::
         # ApplicationCell.create_entity`'s own real dry_run/plan
-        # behavior. `budget`/`idempotency_key` are UNCHANGED -- their own
-        # capabilities (`request_budget`/`idempotency`) stay `unavailable`
-        # until WP-3d/WP-3c.
-        for provisional_field, provisional_value in (
-            ("budget", budget), ("idempotency_key", idempotency_key),
-        ):
-            if provisional_value is not None:
-                _deny_provisional_field(provisional_field)
+        # behavior. Phase 9 WP-3c/WP-3d: `idempotency_key`/`budget` are
+        # UNGATED as of THIS commit too -- both `idempotency`/`request_
+        # budget` flip to `enabled` below. `narrow_limits_by_budget`
+        # (`endpoint_kind="schema"`) is what refuses an invalid `budget`
+        # now, at this request's own validation stage.
+        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-
         # construction pass-through, unexamined here.
         return self._ApplicationRuntime__cell.create_entity(
             self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types,
-            field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra)
+            field_constraints=field_constraints, dry_run=dry_run, plan=plan, digest_extra=digest_extra,
+            idempotency_key=idempotency_key, effective_limits=effective_limits)
 
     def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None,
                   enum=None, nullable=None, dry_run=False, plan=None, budget=None, idempotency_key=None,
@@ -3115,18 +3351,17 @@ class ApplicationDeveloper(ApplicationRuntime):
         # Phase 9 WP-3a: `enum`/`nullable` no longer gate -- see
         # `create_entity`'s own identical comment immediately above.
         # Phase 9 WP-3b: `dry_run`/`plan` no longer gate either -- same
-        # reasoning as `create_entity`'s own identical comment.
-        for provisional_field, provisional_value in (
-            ("budget", budget), ("idempotency_key", idempotency_key),
-        ):
-            if provisional_value is not None:
-                _deny_provisional_field(provisional_field)
+        # reasoning as `create_entity`'s own identical comment. Phase 9
+        # WP-3c/WP-3d: `idempotency_key`/`budget` ungated too, same
+        # reasoning.
+        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
         # pass-through, unexamined here.
         return self._ApplicationRuntime__cell.add_field(
             self._ApplicationRuntime__principal, collection, field, field_type,
             request_id=request_id, contract_type=contract_type, enum=enum, nullable=nullable,
-            dry_run=dry_run, plan=plan, digest_extra=digest_extra)
+            dry_run=dry_run, plan=plan, digest_extra=digest_extra,
+            idempotency_key=idempotency_key, effective_limits=effective_limits)
 
     def alter_field(self, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
                     request_id=None, dry_run=False, plan=None, budget=None, idempotency_key=None,
@@ -3138,10 +3373,9 @@ class ApplicationDeveloper(ApplicationRuntime):
         leading positional arguments immediately above -- the port's own
         `schema_operation_with_result` calls this as `session.alter_field
         (entity, field, **kwargs)`, `entity` being that method's own name
-        for the same value. `budget`/`idempotency_key` stay gated exactly
-        like `create_entity`/`add_field` above -- `alter_field` becoming
-        real this commit does not itself unlock any OTHER still-
-        `unavailable` capability. `dry_run`/`plan` no longer gate (Phase
+        for the same value. Phase 9 WP-3c/WP-3d: `idempotency_key`/
+        `budget` are ungated as of this commit, exactly like `create_
+        entity`/`add_field` above. `dry_run`/`plan` no longer gate (Phase
         9 WP-3b, same commit as `dry_run` flipping to `enabled`).
 
         WP-3a rework 2 (2026-09-07 -- real, measured bug, not a ruling
@@ -3168,14 +3402,11 @@ class ApplicationDeveloper(ApplicationRuntime):
         is" now simply omits the keyword (the default IS `UNCHANGED`);
         `enum=None` explicitly still means "clear", unchanged."""
         self._ApplicationRuntime__authorize(request_id=request_id)
-        for provisional_field, provisional_value in (
-            ("budget", budget), ("idempotency_key", idempotency_key),
-        ):
-            if provisional_value is not None:
-                _deny_provisional_field(provisional_field)
+        effective_limits = narrow_limits_by_budget(self._ApplicationRuntime__cell.config, budget, "schema")
         # `digest_extra` (WP-3b closure, H-3 (b)): pure digest-construction
         # pass-through, unexamined here.
         return self._ApplicationRuntime__cell.alter_field(
             self._ApplicationRuntime__principal, collection, field,
             enum=enum, nullable=nullable, field_type=field_type, request_id=request_id,
-            dry_run=dry_run, plan=plan, digest_extra=digest_extra)
+            dry_run=dry_run, plan=plan, digest_extra=digest_extra,
+            idempotency_key=idempotency_key, effective_limits=effective_limits)

@@ -1,6 +1,6 @@
 """Finite, deployment-configurable resource bounds."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from typing import Optional
 
@@ -88,6 +88,20 @@ class FoundationConfig:
     # `max_*` field above (a deployment-configurable number, not a final
     # public-contract one).
     max_enum_members: int = 64
+    # Phase 9 WP-3c (design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5, 追補 2
+    # S-f; 監督裁定集約 rulings-r5-r6.md I-10): the two `idempotency`
+    # limit classes -- `idempotency_entries` bounds how many retained
+    # records this Application may hold at once (checked, after lazily
+    # reclaiming elapsed ones, at the lookup stage, before execution);
+    # `idempotency_retention_ms` bounds how long a record answers a
+    # resend before it is treated as absent. Same deployment-configurable-
+    # default convention as every other `max_*`/count field above --
+    # `example_profile` in the contract's own non-normative reference is
+    # `10000`/`86400000` (`spec/data-service-api.v1.json` `limits.
+    # example_profile`), and this deployment default matches it verbatim.
+    idempotency_entries: int = 10_000
+    idempotency_retention_ms: int = 86_400_000
     # WP-5 (design v1.2 R-7): "control_plane は WP-5 の flip まで両
     # composition とも unavailable のまま。flip は...単一コミットで行う".
     # Defaults `"unavailable"` so an operator who does not explicitly opt
@@ -173,6 +187,11 @@ class FoundationConfig:
             # as every field above -- an unset env var keeps the dataclass
             # default (64).
             "max_enum_members": "MITATEDB_MAX_ENUM_MEMBERS",
+            # Phase 9 WP-3c (design §5 U-1 = (β) sibling convention): same
+            # env-var pattern as every field above -- an unset env var
+            # keeps the dataclass default.
+            "idempotency_entries": "MITATEDB_IDEMPOTENCY_ENTRIES",
+            "idempotency_retention_ms": "MITATEDB_IDEMPOTENCY_RETENTION_MS",
         }
         parsed = {}
         for field, name in names.items():
@@ -241,3 +260,133 @@ class FoundationConfig:
             # this is the same finite byte bound `capabilities().limits`
             # publishes as `request_bytes` (WP-5 Q1-D7(B)).
             raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
+
+
+# Phase 9 WP-3d (design D-6, 追補 R-g; 監督裁定集約 rulings-r5-r6.md B-1/
+# B-2/B-5): contract class name -> the `FoundationConfig` field it
+# narrows. Only the three budgetable classes (`limits.request_budget`:
+# "Three classes are budgetable in this version: result_items,
+# execution_ms and batch_items") have an entry -- every other
+# `limits.classes` member is never budgetable and is refused by
+# `_BUDGET_APPLICABLE_CLASSES` below before this map is ever consulted.
+_BUDGET_CLASS_TO_FIELD = {
+    "result_items": "max_result_rows",
+    "execution_ms": "max_execution_ms",
+    "batch_items": "max_batch_items",
+}
+
+# Design D-6 (2)'s own apply table: which of the three budgetable classes
+# has meaning on which endpoint kind. `query` never accepts `batch_items`
+# (nothing to batch); `mutate`/`cross_entity` never accept `result_items`
+# (D-6: "result_items is not budgetable on a mutation ... this version
+# does not give one request a way to narrow how many rows its own
+# mutation may affect", L9-11); `schema` accepts only `execution_ms`
+# (there is no `result_items`/`batch_items` dimension to a single schema
+# operation). `mutate` and `cross_entity` share one entry -- both route
+# through the identical `ApplicationCell.transact` apply table (裁定
+# B-1's own single row for both).
+_BUDGET_APPLICABLE_CLASSES = {
+    "query": frozenset({"result_items", "execution_ms"}),
+    "mutate": frozenset({"execution_ms", "batch_items"}),
+    "cross_entity": frozenset({"execution_ms", "batch_items"}),
+    "schema": frozenset({"execution_ms"}),
+}
+
+
+def narrow_limits_by_budget(deployed: "FoundationConfig", budget, endpoint_kind: str) -> "FoundationConfig":
+    """Phase 9 WP-3d (design D-6, 追補 R-g/S-l; 監督裁定集約 rulings-r5-
+    r6.md B-1/B-2/B-5): the ONE point that turns a request's own optional
+    `budget` object into the `effective_limits` every existing check
+    point (`ApplicationCell._limit_gate`'s own deadline, `transact`'s own
+    `batch_items` check, `read`'s own `result_items` check) reads instead
+    of `self.config` directly -- no check point is individually rewritten
+    to know about `budget` (B-2: "検査点を個別に書き換えない"). `budget is
+    None` (the overwhelming common case -- every pre-WP-3d caller) returns
+    `deployed` UNCHANGED (identity-shaped narrowing), so a caller that
+    never presents a budget sees exactly the deployed profile it always
+    did (completion condition 2, the positive control).
+
+    Validity (checked HERE, at the request's own validation stage, before
+    target existence / destructive confirmation / precondition -- design
+    D-6: "a budget is checked where this contract's own request shape is
+    checked"): a `budget` key naming a class `endpoint_kind` does not
+    accept, or carrying a value that is not a positive `int`, or carrying
+    a value ABOVE `deployed`'s own declared bound for that class, is
+    refused with `errors.ValidationError` (`VALIDATION_FAILED`),
+    `details.violated_declaration: "budget"`, `details.field:
+    "budget/<class>"` -- `declared_type`/`observed_type` are added ONLY
+    for the non-integer case (design D-3's own rule: those two keys are
+    "required where violated_declaration is field_type or nullable" and
+    every other required-4-key code; `budget` is not one of the three
+    codes D-3 (4) names, so this function follows the narrower, explicit
+    contract text instead: "it is not ignored" -- and never manufactures
+    `declared_type`/`observed_type` for an out-of-range-but-integer or an
+    inapplicable-class violation, matching WP-3a's own `field_constraints`
+    precedent for a shape violation that is not about a value's type).
+    `budget` never RAISES a bound (a `budget.<class>` above the deployed
+    value is refused outright, never silently clamped down to the
+    deployed value) -- only the SMALLER of the two, per class, is ever
+    adopted (design D-6: "the bound in force ... is the smaller of the
+    deployment's declared value ... and the requested value").
+
+    Every class `budget` does not name keeps `deployed`'s own value --
+    this is a NARROWING, never a second, independent declaration."""
+    if not budget:
+        return deployed
+    if not isinstance(budget, dict):
+        raise ValidationError(
+            "budget must be an object", details={"violated_declaration": "budget", "field": "budget"})
+    applicable = _BUDGET_APPLICABLE_CLASSES.get(endpoint_kind, frozenset())
+    narrowed: dict[str, int] = {}
+    for cls, value in budget.items():
+        if cls not in applicable:
+            raise ValidationError(
+                f"budget/{cls} does not apply to this endpoint",
+                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
+            )
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValidationError(
+                f"budget/{cls} must be an integer of at least 1",
+                details={
+                    "violated_declaration": "budget", "field": f"budget/{cls}",
+                    "declared_type": "integer",
+                    "observed_type": "boolean" if isinstance(value, bool) else _JSON_TYPE_NAME(value),
+                },
+            )
+        if value < 1:
+            raise ValidationError(
+                f"budget/{cls} must be an integer of at least 1",
+                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
+            )
+        field = _BUDGET_CLASS_TO_FIELD[cls]
+        deployed_value = getattr(deployed, field)
+        if value > deployed_value:
+            raise ValidationError(
+                f"budget/{cls} exceeds this deployment's own declared value",
+                details={"violated_declaration": "budget", "field": f"budget/{cls}"},
+            )
+        narrowed[field] = min(value, deployed_value)
+    if not narrowed:
+        return deployed
+    return replace(deployed, **narrowed)
+
+
+def _JSON_TYPE_NAME(value) -> str:
+    """Contract `errors.details_vocabulary.VALIDATION_FAILED.observed_
+    type`'s own vocabulary: "the JSON type of the value actually received
+    (string, integer, number, boolean, object, array or null)". Only
+    reached from `narrow_limits_by_budget` above for a non-integer
+    `budget/<class>` value -- `bool` is handled by its own caller (JSON
+    `true`/`false` is contract type `boolean`, never `integer`, even
+    though Python's `bool` is an `int` subclass)."""
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "integer"

@@ -383,12 +383,33 @@ _FIELD_TYPES_TABLE = "_mdb_field_types"
 # runtime connection, at cell-open time.
 _PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
 
-# m-1 (independent review correction, extended Q4 phase WP-4): the full
-# set of this package's own bookkeeping table names `schema_count()`
-# excludes from its `application`-level accounting -- a plain tuple, not a
-# `frozenset`, so the SQL `NOT IN (%s, %s, %s)` parameter list below stays
-# in a fixed, readable order matching this declaration.
-_BOOKKEEPING_TABLES = (_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPGRADES_TABLE)
+# Phase 9 WP-3c (design D-5, 追補 2 S-a; 監督裁定集約 rulings-r5-r6.md
+# I-1): the per-application idempotency-record side table -- provisioned
+# by `migrations/0003_provision_application.sql` for a new application,
+# retrofitted onto an existing one by `migrations/0010_idempotency_
+# records_upgrade.sql`. UNLIKE `_SCHEMA_REVISION_TABLE`/`_FIELD_TYPES_
+# TABLE` (developer-connection only) and LIKE `_PLATFORM_UPGRADES_TABLE`
+# (runtime holds a real grant), this table is written from BOTH
+# connections: `ApplicationCell.transact`'s own batch path writes it over
+# `self._runtime` (the same connection the batch's own DML already runs
+# on, so the record lands in the SAME transaction, I-1), while `create_
+# collection`/`add_field`/`alter_field_constraints`'s own `idempotency_
+# record` parameter writes it over `self._developer` (the same connection
+# their own DDL already runs on) -- created AFTER `ALTER DEFAULT
+# PRIVILEGES FOR ROLE developer_role` in `0003` (and granted explicitly in
+# `0010`, for an existing application whose ledger predates this table),
+# so the runtime role holds full DML (`SELECT`/`INSERT`/`UPDATE`/
+# `DELETE`), not the read-only `SELECT` `_PLATFORM_UPGRADES_TABLE` grants
+# it.
+_IDEMPOTENCY_TABLE = "_mdb_idempotency"
+
+# m-1 (independent review correction, extended Q4 phase WP-4; Phase 9
+# WP-3c adds `_IDEMPOTENCY_TABLE`): the full set of this package's own
+# bookkeeping table names `schema_count()` excludes from its
+# `application`-level accounting -- a plain tuple, not a `frozenset`, so
+# the SQL `NOT IN (%s, %s, %s, %s)` parameter list below stays in a
+# fixed, readable order matching this declaration.
+_BOOKKEEPING_TABLES = (_SCHEMA_REVISION_TABLE, _FIELD_TYPES_TABLE, _PLATFORM_UPGRADES_TABLE, _IDEMPOTENCY_TABLE)
 
 
 def _execute(cursor, statement, params=()):
@@ -497,7 +518,7 @@ class PostgresBackend:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
                     "SELECT count(*) FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s)"
+                    "WHERE table_schema = 'public' AND table_name NOT IN (%s, %s, %s, %s)"
                 ), list(_BOOKKEEPING_TABLES))
                 count = cur.fetchone()[0]
         except psycopg.Error as exc:
@@ -779,7 +800,7 @@ class PostgresBackend:
 
     @_guard_pending_platform_upgrades
     def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None,
-                                deadline=None, dry_run=False):
+                                deadline=None, dry_run=False, idempotency_record=None):
         """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, F-6, 監督裁定
         S-g): see `backend.StorageBackend.alter_field_constraints`'s own
         contract. Unlike `create_collection`/`add_field` above (whose own
@@ -881,12 +902,38 @@ class PostgresBackend:
                 # UPDATE above is already visible here (read-your-own-
                 # writes); a dry run's is not, since nothing was written.
                 existing_types, existing_constraints = self._field_types_and_constraints_locked(cur, collection)
+            # Phase 9 WP-3c rework (design D-5, I-1/I-8): built here,
+            # BEFORE the commit/rollback branch below, from `new_enum`/
+            # `new_nullable` (already resolved above) and `existing_
+            # types`/`existing_constraints` (already read back, real,
+            # inside the SAME transaction) -- reused for both this
+            # method's own idempotency write below and its final `return`
+            # further down, never a second, independently constructed
+            # copy.
+            new_field_constraints = {"nullable": new_nullable}
+            if new_enum is not None:
+                new_field_constraints["enum"] = list(new_enum)
+            descriptor = {
+                "entity": collection,
+                "fields": sorted(existing_types),
+                "field_types": existing_types,
+                "field_constraints": {**existing_constraints, field: new_field_constraints},
+            }
             if dry_run:
                 self._developer.rollback()
             else:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
+                # Phase 9 WP-3c (design D-5, I-1/I-8): `new_revision` was
+                # already read back for real, inside this SAME
+                # transaction, above.
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                    })
+                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
@@ -908,15 +955,8 @@ class PostgresBackend:
         except Exception:
             self._developer.rollback()
             raise
-        new_field_constraints = {"nullable": new_nullable}
-        if new_enum is not None:
-            new_field_constraints["enum"] = list(new_enum)
-        descriptor = {
-            "entity": collection,
-            "fields": sorted(existing_types),
-            "field_types": existing_types,
-            "field_constraints": {**existing_constraints, field: new_field_constraints},
-        }
+        # `descriptor` was already built above (Phase 9 WP-3c rework),
+        # before the commit/rollback branch -- reused verbatim here.
         return new_revision, descriptor
 
     @_guard_pending_platform_upgrades
@@ -942,7 +982,7 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     @_guard_pending_platform_upgrades
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          deadline=None, dry_run=False):
+                          deadline=None, dry_run=False, idempotency_record=None):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -1021,6 +1061,29 @@ class PostgresBackend:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
+                # Phase 9 WP-3c (design D-5, I-1/I-8): the idempotency
+                # record is written as the LAST statement before this
+                # backend's own commit -- same connection, same
+                # transaction as the DDL above, exactly like `audit_hook.
+                # pre_commit()` immediately above it. `new_revision` was
+                # already read back for real, inside this SAME
+                # transaction, above -- unlike `backend_sqlite.
+                # SQLiteBackend`'s own in-process counterpart, nothing
+                # here is a prediction. The stored response mirrors this
+                # method's own final `return` below verbatim (same
+                # `name`/`fields`/`field_types`/`resolved_constraints`
+                # locals), so a later replay is byte-identical to what an
+                # uncached call would have returned.
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(new_revision),
+                        "descriptor": {
+                            "entity": name, "fields": sorted(fields), "field_types": dict(field_types),
+                            "field_constraints": {f: dict(c) for f, c in resolved_constraints.items()},
+                        },
+                    })
+                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
@@ -1053,7 +1116,7 @@ class PostgresBackend:
 
     @_guard_pending_platform_upgrades
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, deadline=None, dry_run=False):
+                  audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
@@ -1132,12 +1195,32 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
                           .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
                 new_revision = cur.fetchone()[0]
+            # Phase 9 WP-3c rework (design D-5, I-1/I-8): built here,
+            # BEFORE the commit/rollback branch below -- see `alter_field_
+            # constraints`'s own identical rework comment above.
+            new_field_constraints = {"nullable": resolved_nullable}
+            if enum is not None:
+                new_field_constraints["enum"] = list(enum)
+            descriptor = {
+                "entity": collection,
+                "fields": sorted(set(existing_types) | {field}),
+                "field_types": {**existing_types, field: contract_type},
+                "field_constraints": {**existing_constraints, field: new_field_constraints},
+            }
             if dry_run:
                 self._developer.rollback()
             else:
                 if audit_hook is not None:
                     audit_hook.pre_commit()
                     hook_fired = True
+                # Phase 9 WP-3c (design D-5, I-1/I-8): see `create_
+                # collection`'s own identical comment above.
+                if idempotency_record is not None:
+                    key, digest, now_ms = idempotency_record
+                    response_json = json.dumps({
+                        "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                    })
+                    self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
         except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
             self._developer.rollback()
@@ -1159,15 +1242,6 @@ class PostgresBackend:
         except Exception:
             self._developer.rollback()
             raise
-        new_field_constraints = {"nullable": resolved_nullable}
-        if enum is not None:
-            new_field_constraints["enum"] = list(enum)
-        descriptor = {
-            "entity": collection,
-            "fields": sorted(set(existing_types) | {field}),
-            "field_types": {**existing_types, field: contract_type},
-            "field_constraints": {**existing_constraints, field: new_field_constraints},
-        }
         return new_revision, descriptor
 
     # ------------------------------------------------------------------
@@ -1537,3 +1611,86 @@ class PostgresBackend:
 
     def rollback(self):
         self._runtime.rollback()
+
+    # ------------------------------------------------------------------
+    # Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
+    # rulings-r5-r6.md I-1): idempotency records, `public._mdb_idempotency`
+    # (per-application upgrade 0010). Lookup/reap/count always run over
+    # `self._runtime` -- a plain, small, self-committing read/delete, same
+    # connection `ApplicationCell.transact`'s own batch runs on, and
+    # independent of whichever connection the eventual WRITE lands on
+    # (`record_idempotency` below, `self._runtime`; `create_collection`/
+    # `add_field`/`alter_field_constraints`'s own `idempotency_record`
+    # parameter, `self._developer`, via `_write_idempotency_row`).
+    # ------------------------------------------------------------------
+
+    def _write_idempotency_row(self, conn, key, digest, response_json, now_ms):
+        """Writes (or replaces) one record over `conn`'s OWN currently
+        open transaction -- never commits/rolls back itself; the caller
+        (either `record_idempotency` below, right before `self._runtime.
+        commit()`, or a DDL method's own pre-commit point, right before
+        `self._developer.commit()`) owns that. `ON CONFLICT ... DO UPDATE`
+        (not a bare `INSERT`) so a stale, not-yet-reaped row for this
+        exact key (a benign race -- the caller already confirmed no
+        ACTIVE record exists before reaching this point) is replaced
+        rather than raising `UniqueViolation`."""
+        statement = sql.SQL(
+            "INSERT INTO {} (key, digest, response_json, created_at_ms) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET digest = EXCLUDED.digest, "
+            "response_json = EXCLUDED.response_json, created_at_ms = EXCLUDED.created_at_ms"
+        ).format(sql.Identifier(_IDEMPOTENCY_TABLE))
+        with conn.cursor() as cur:
+            _execute(cur, statement, [key, digest, response_json, now_ms])
+
+    @_guard_pending_platform_upgrades
+    def idempotency_get(self, key):
+        try:
+            with self._runtime.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT digest, response_json FROM {} WHERE key = %s")
+                          .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [key])
+                row = cur.fetchone()
+        except psycopg.Error as exc:
+            self._runtime.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._runtime.commit()
+        if row is None:
+            return None
+        digest, response_json = row
+        return {"digest": digest, "response_json": response_json}
+
+    @_guard_pending_platform_upgrades
+    def idempotency_reap_expired(self, now_ms, retention_ms):
+        try:
+            with self._runtime.cursor() as cur:
+                _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
+                          .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [now_ms, retention_ms])
+        except psycopg.Error as exc:
+            self._runtime.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._runtime.commit()
+
+    @_guard_pending_platform_upgrades
+    def idempotency_count(self):
+        try:
+            with self._runtime.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(_IDEMPOTENCY_TABLE)))
+                (count,) = cur.fetchone()
+        except psycopg.Error as exc:
+            self._runtime.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._runtime.commit()
+        return count
+
+    @_guard_pending_platform_upgrades
+    def record_idempotency(self, key, digest, response_json, now_ms):
+        """`ApplicationCell.transact`'s own single-batch write path --
+        called directly, immediately before `self._runtime.commit()`
+        (the SAME connection/transaction the batch's own `..._in_
+        transaction` DML calls already ran on, I-1); a failed batch never
+        reaches this line (the caller's own execution loop raises first,
+        never calling this method), so this write and the batch's own
+        commit share the identical fate."""
+        self._write_idempotency_row(self._runtime, key, digest, response_json, now_ms)
