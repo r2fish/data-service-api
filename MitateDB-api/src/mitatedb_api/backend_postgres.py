@@ -563,7 +563,7 @@ class PostgresBackend:
         `create_collection`'s own registry-write below) degrades to
         `"string"`, never a crash.
         """
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -623,7 +623,7 @@ class PostgresBackend:
         point (`cell.py::_prepare_values`/`_bind_filters`) both read.
         Existence-checked the same way `field_domains` is (an entity with
         no columns at all cannot exist on this backend)."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -709,7 +709,7 @@ class PostgresBackend:
         source of truth `GET /v1/catalog` and the cell-layer choke point
         (`cell.py::_prepare_values`, never `_bind_filters`) both read.
         Existence-checked the same way `field_types` is."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -761,7 +761,7 @@ class PostgresBackend:
         the sole caller -- every other reader of `field_types`/`field_
         constraints` keeps calling one of those two on their own,
         unchanged. Existence-checked the same way both are."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         try:
             with self._developer.cursor() as cur:
                 _execute(cur, sql.SQL(
@@ -829,7 +829,7 @@ class PostgresBackend:
         and PostgreSQL grants a table's owner every privilege on it,
         `SELECT` included, with no separate `GRANT` required (F-6,
         `migrations/0003_provision_application.sql`)."""
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         validate_identifier(field, "field")
         timeout_ms = self._timeout_ms(deadline)
         hook_fired = False
@@ -1132,7 +1132,7 @@ class PostgresBackend:
     @_guard_pending_platform_upgrades
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
                   audit_hook=None, deadline=None, dry_run=False, idempotency_record=None):
-        validate_identifier(collection, "collection")
+        validate_identifier(collection, "entity")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
             sql.Identifier(collection), sql.Identifier(field), _TYPE_SQL[field_type]

@@ -164,7 +164,7 @@ class SQLiteBackend:
         # matching this backend's own pre-existing, unchanged external
         # behavior (WP-1 P3 round 2 instruction #1: "SQLite側の外部挙動は
         # 不変に保つこと").
-        name = validate_identifier(collection, "collection")
+        name = validate_identifier(collection, "entity")
         try:
             rows = self._db.execute("PRAGMA table_info(" + quote_identifier(name) + ")").fetchall()
         except sqlite3.DatabaseError:

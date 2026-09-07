@@ -1110,11 +1110,19 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         # THIS SAME `declarations.surfaces` first. `declarations` is
         # already this function's own live value (`read_platform_
         # declarations` above), so `config` is built from it here too --
-        # never a second, independently-drifting env read.
+        # never a second, independently-drifting env read. `config` is
+        # used ONLY to build the probe cell `_contract_170_capabilities_
+        # document` calls its real `capabilities()` method through --
+        # WP-3e rework T3 (ruling `{scratchpad}/rulings-r3-r7-flip.md`
+        # L-2/M-7): `check_contract_170_declarations` itself no longer
+        # takes `config` at all, and reads the `limits` block from the
+        # SERVED capabilities document it returns, never from `config`
+        # directly (that direct-`getattr` form was the dead-check flaw
+        # this rework removes -- see `platform_declarations.py`'s own
+        # comment above `check_contract_170_declarations`).
         config = FoundationConfig.from_env(data_base_url=declarations.surfaces.data_base_url)
         platform_declarations.check_contract_170_declarations(
             _contract_170_capabilities_document(config),
-            config,
             applied_by_application,
             platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )

@@ -334,6 +334,37 @@ def sessions_for(cell: ApplicationCell, app_id: str):
     return developer, runtime
 
 
+# ---------------------------------------------------------------------------
+# WP-3e rework T3 (N-1, ruling `{scratchpad}/rulings-r3-r7-flip.md`):
+# `backend_postgres.py`/`backend_sqlite.py`'s OWN internal `validate_
+# identifier(collection, ...)` calls -- the backends' own cell-mirroring
+# checks (WP-3e T2, git log "identifier / predicate fields are request
+# paths") -- now pass `"entity"`, the SAME contract-vocabulary word `cell.
+# py::ApplicationCell._identifier`'s own call sites already pass for this
+# exact position (`identifiers.py::validate_identifier`'s own docstring:
+# "`field` is `label` itself...cell.py's own call sites...stop passing a
+# generic, position-blind literal like the pre-rework bare `"collection"`
+# "), never the stale bare `"collection"` literal these two backend files
+# alone still carried. `ApplicationCell._identifier` already validates
+# every collection name (as `"entity"`) BEFORE either backend method below
+# is ever reached through the normal cell-mediated path, so this test
+# reaches the backend's OWN check directly (a raw `PostgresBackend.field_
+# types(...)` call, bypassing `ApplicationCell` entirely) -- proving the
+# label even though ordinary traffic can never actually trigger it (N-1:
+# "到達性が無くても契約語に揃える").
+# ---------------------------------------------------------------------------
+
+
+def test_postgres_backend_identifier_violation_label_is_entity_not_collection(app_a) -> None:
+    backend = PostgresBackend(runtime_dsn=app_a.runtime_dsn, developer_dsn=app_a.developer_dsn)
+    try:
+        with pytest.raises(ValidationError) as ctx:
+            backend.field_types("not a valid identifier!")
+        assert ctx.value.details["field"] == "entity"
+    finally:
+        backend.close()
+
+
 # --- same-semantics tests (both backends, R-3's own regression claim) -----
 
 

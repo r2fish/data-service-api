@@ -25,7 +25,7 @@ import re
 
 import pytest
 
-from mitatedb_api import ControlPlane, FoundationConfig, MitateDataService, Role
+from mitatedb_api import ControlPlane, MitateDataService, Role
 from mitatedb_api.errors import CapabilityError, ConflictError, ValidationError
 
 # design D-3 (2): a request-internal path is '/'-separated with no leading
@@ -482,18 +482,33 @@ def test_flip_target_capabilities_are_all_enabled(service):
 # ---------------------------------------------------------------------------
 
 
+#: WP-3e rework T3 (ruling `{scratchpad}/rulings-r3-r7-flip.md` L-2/M-7):
+#: `check_contract_170_declarations` no longer takes a `config` argument
+#: at all -- it reads BOTH the capability-enabled half AND the limit-value
+#: half from the served `capabilities_document` alone, mirroring
+#: `__build_capabilities_document`'s (`cell.py`) real, already-normalized
+#: `limits` block (`"enum_members"`/`"idempotency_entries"`/
+#: `"idempotency_retention_ms"`, this peer's own `max_*` `FoundationConfig`
+#: attribute names already resolved at document-build time). This helper
+#: builds that same healthy shape once so every test below only overrides
+#: the ONE field it means to break.
+def _healthy_document():
+    return {
+        "capabilities": {
+            "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
+            "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
+        },
+        "limits": {"enum_members": 64, "idempotency_entries": 10_000, "idempotency_retention_ms": 86_400_000},
+    }
+
+
 def test_check_contract_170_declarations_accepts_a_healthy_state():
     from mitatedb_api import platform_declarations
     from mitatedb_api.platform_upgrades import PLATFORM_UPGRADE_NUMBERS
 
-    document = {"capabilities": {
-        "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
-        "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
-    }}
-    config = FoundationConfig(
-        max_enum_members=64, idempotency_entries=10_000, idempotency_retention_ms=86_400_000)
+    document = _healthy_document()
     platform_declarations.check_contract_170_declarations(
-        document, config, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
+        document, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
 
 
 @pytest.mark.parametrize("capability_name", ["constraint_declarations", "dry_run", "idempotency", "request_budget"])
@@ -502,41 +517,28 @@ def test_check_contract_170_declarations_rejects_a_capability_not_enabled(capabi
     from mitatedb_api.errors import ValidationError as _Unused  # noqa: F401
     from mitatedb_api.platform_upgrades import PLATFORM_UPGRADE_NUMBERS
 
-    document = {"capabilities": {
-        "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
-        "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
-    }}
+    document = _healthy_document()
     document["capabilities"][capability_name] = {"status": "unavailable"}
-    config = FoundationConfig(
-        max_enum_members=64, idempotency_entries=10_000, idempotency_retention_ms=86_400_000)
     with pytest.raises(platform_declarations.PlatformDeclarationError) as ctx:
         platform_declarations.check_contract_170_declarations(
-            document, config, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
+            document, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
     assert ctx.value.code == "F-14"
 
 
-@pytest.mark.parametrize("field_name,attr_name", [
-    ("enum_members", "max_enum_members"), ("idempotency_entries", "idempotency_entries"),
-    ("idempotency_retention_ms", "idempotency_retention_ms"),
-])
-def test_check_contract_170_declarations_rejects_a_non_positive_limit(field_name, attr_name):
+@pytest.mark.parametrize("field_name", ["enum_members", "idempotency_entries", "idempotency_retention_ms"])
+def test_check_contract_170_declarations_rejects_a_non_positive_limit(field_name):
     from mitatedb_api import platform_declarations
     from mitatedb_api.platform_upgrades import PLATFORM_UPGRADE_NUMBERS
 
-    document = {"capabilities": {
-        "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
-        "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
-    }}
-    config = FoundationConfig(
-        max_enum_members=64, idempotency_entries=10_000, idempotency_retention_ms=86_400_000)
-    # `FoundationConfig` is `@dataclass(frozen=True)` -- `object.__setattr__`
-    # is the standard bypass for building an otherwise-invalid probe value
-    # (a real deployment would never hold `0` here; `check_contract_170_
-    # declarations` is exactly the check that must catch it if one did).
-    object.__setattr__(config, attr_name, 0)
+    document = _healthy_document()
+    # A real deployment would never serve `0` here; `check_contract_170_
+    # declarations` is exactly the check that must catch it if one did --
+    # against the SERVED document, never a freshly-built `FoundationConfig`
+    # this test would otherwise have to bypass `frozen=True` to break.
+    document["limits"][field_name] = 0
     with pytest.raises(platform_declarations.PlatformDeclarationError) as ctx:
         platform_declarations.check_contract_170_declarations(
-            document, config, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
+            document, {"app_a": PLATFORM_UPGRADE_NUMBERS}, PLATFORM_UPGRADE_NUMBERS)
     assert ctx.value.code == "F-14"
 
 
@@ -544,15 +546,10 @@ def test_check_contract_170_declarations_rejects_a_missing_application_upgrade()
     from mitatedb_api import platform_declarations
     from mitatedb_api.platform_upgrades import PLATFORM_UPGRADE_NUMBERS
 
-    document = {"capabilities": {
-        "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
-        "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
-    }}
-    config = FoundationConfig(
-        max_enum_members=64, idempotency_entries=10_000, idempotency_retention_ms=86_400_000)
+    document = _healthy_document()
     with pytest.raises(platform_declarations.PlatformDeclarationError) as ctx:
         platform_declarations.check_contract_170_declarations(
-            document, config, {"app_a": frozenset()}, PLATFORM_UPGRADE_NUMBERS)
+            document, {"app_a": frozenset()}, PLATFORM_UPGRADE_NUMBERS)
     assert ctx.value.code == "F-14"
 
 
@@ -560,15 +557,10 @@ def test_check_contract_170_declarations_treats_a_missing_ledger_as_every_number
     from mitatedb_api import platform_declarations
     from mitatedb_api.platform_upgrades import PLATFORM_UPGRADE_NUMBERS
 
-    document = {"capabilities": {
-        "constraint_declarations": {"status": "enabled"}, "dry_run": {"status": "enabled"},
-        "idempotency": {"status": "enabled"}, "request_budget": {"status": "enabled"},
-    }}
-    config = FoundationConfig(
-        max_enum_members=64, idempotency_entries=10_000, idempotency_retention_ms=86_400_000)
+    document = _healthy_document()
     with pytest.raises(platform_declarations.PlatformDeclarationError) as ctx:
         platform_declarations.check_contract_170_declarations(
-            document, config, {"app_a": None}, PLATFORM_UPGRADE_NUMBERS)
+            document, {"app_a": None}, PLATFORM_UPGRADE_NUMBERS)
     assert ctx.value.code == "F-14"
 
 
@@ -576,6 +568,33 @@ def test_verify_declarations_exit_code_table_has_f14():
     from mitatedb_api.ops import _VERIFY_DECLARATIONS_EXIT_CODES
 
     assert _VERIFY_DECLARATIONS_EXIT_CODES["F-14"] == 13
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework T3 (N-1, ruling `{scratchpad}/rulings-r3-r7-flip.md`):
+# `backend_sqlite.py`'s own internal `validate_identifier(collection, ...)`
+# call (the backend's own cell-mirroring check) now passes `"entity"`, the
+# SAME contract-vocabulary word `cell.py::ApplicationCell._identifier`'s
+# own call sites already pass for this exact position -- never the stale
+# bare `"collection"` literal this file alone still carried before this
+# rework. `ApplicationCell._identifier` already validates every collection
+# name (as `"entity"`) BEFORE `SQLiteBackend.field_domains` is ever reached
+# through the normal cell-mediated path, so this test reaches the
+# backend's OWN check directly (a bare `SQLiteBackend()`, bypassing
+# `ApplicationCell` entirely) -- proving the label even though ordinary
+# traffic can never actually trigger it (N-1: "到達性が無くても契約語に
+# 揃える"). Mirrors `test_postgres.py::test_postgres_backend_identifier_
+# violation_label_is_entity_not_collection`'s own PostgreSQL-side sibling.
+# ---------------------------------------------------------------------------
+
+
+def test_sqlite_backend_identifier_violation_label_is_entity_not_collection():
+    from mitatedb_api.backend_sqlite import SQLiteBackend
+
+    backend = SQLiteBackend()
+    with pytest.raises(ValidationError) as ctx:
+        backend.field_domains("not a valid identifier!")
+    assert ctx.value.details["field"] == "entity"
 
 
 # ---------------------------------------------------------------------------
