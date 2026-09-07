@@ -954,11 +954,24 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         if "field_constraints" in operation:
             if "fields" not in operation:
                 # Mirrors `field_types`'s identical "sent without fields"
-                # check above.
-                fail("VALIDATION_FAILED", "field_constraints requires fields.")
+                # check above. Monitor ruling N-2 (rulings-r2-closure.md,
+                # WP-2a closure): `field` names the request-internal key
+                # this whole clause hangs off, mirrors the adjacent
+                # per-entry branches below which already load this key.
+                fail(
+                    "VALIDATION_FAILED",
+                    "field_constraints requires fields.",
+                    details={"field": "field_constraints", "violated_declaration": "request_schema"},
+                )
             raw_field_constraints = operation["field_constraints"]
             if not isinstance(raw_field_constraints, dict):
-                fail("VALIDATION_FAILED", "field_constraints must be an object.")
+                # Monitor ruling N-2 (rulings-r2-closure.md): same key,
+                # same reason as the "requires fields" branch above.
+                fail(
+                    "VALIDATION_FAILED",
+                    "field_constraints must be an object.",
+                    details={"field": "field_constraints", "violated_declaration": "request_schema"},
+                )
             parsed_constraints: dict[str, FieldConstraints] = {}
             for declared_field, spec in raw_field_constraints.items():
                 if declared_field not in fields:
@@ -1071,6 +1084,21 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # `apply_schema` (addendum R-b/R-c, D-2 (3)) -- see `ConstraintPatch`.
         field_name = validate_identifier(operation.get("field", ""))
         _reject_reserved_field(field_name)
+        if "nullable" not in operation and "enum" not in operation:
+            # Monitor ruling N-1 (rulings-r2-closure.md, contract
+            # corrigendum 3, verbatim): "An alter_field carrying neither
+            # enum nor nullable declares nothing and is refused with
+            # VALIDATION_FAILED; it does not advance the schema
+            # revision." `field` names the operation itself (D-3 (2)) --
+            # the missing declaration is not any one field's key, it is
+            # the whole `alter_field` object carrying nothing to apply.
+            # Rejected here (bind time, before any backend/revision
+            # access) so neither backend ever sees this operation.
+            fail(
+                "VALIDATION_FAILED",
+                "alter_field must declare enum or nullable.",
+                details={"field": "operation", "violated_declaration": "constraint_declaration"},
+            )
         nullable_omitted = "nullable" not in operation
         nullable_value = True
         if not nullable_omitted:

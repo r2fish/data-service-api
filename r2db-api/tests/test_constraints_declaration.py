@@ -228,6 +228,27 @@ def test_memory_alter_field_with_field_type_is_refused_unsupported_field() -> No
     assert exc.value.details == {"field": "field_type", "violated_declaration": "unsupported_field"}
 
 
+def test_memory_alter_field_with_neither_enum_nor_nullable_is_refused_and_does_not_advance_revision() -> None:
+    """Ruling N-1 (rulings-r2-closure.md, WP-2a closure): an `alter_field`
+    carrying neither `enum` nor `nullable` declares nothing -- refused
+    `VALIDATION_FAILED` / `violated_declaration: constraint_declaration` /
+    `field: "operation"` (the missing declaration is not any one field's
+    key, it is the whole operation), and the schema revision does not
+    advance (mirrors completion condition 7's own "changes nothing"
+    pattern: rows, catalog AND revision all asserted unchanged)."""
+    cell = _memory_cell_with_enum_and_nullable()
+    before_rows = [dict(r) for r in cell.entities["widgets"]]
+    before_catalog = cell.catalog()
+    before_revision = cell.schema_revision
+    with pytest.raises(FoundationError) as exc:
+        cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status"}, developer=True, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"field": "operation", "violated_declaration": "constraint_declaration"}
+    assert cell.entities["widgets"] == before_rows
+    assert cell.catalog() == before_catalog
+    assert cell.schema_revision == before_revision
+
+
 def test_memory_enum_members_limit_refuses_before_anything_is_created() -> None:
     """Completion condition 11: an `enum` over the deployed `enum_
     members` bound is refused with `LIMIT_EXCEEDED`/`limit_class:
@@ -463,6 +484,32 @@ def test_pg_alter_field_with_field_type_is_refused_unsupported_field(app_a: type
             cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status", "field_type": "string"}, developer=True, limits=LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         assert exc.value.details == {"field": "field_type", "violated_declaration": "unsupported_field"}
+    finally:
+        cell.close()
+
+
+def test_pg_alter_field_with_neither_enum_nor_nullable_is_refused_and_does_not_advance_revision(app_a: types.SimpleNamespace) -> None:
+    """Ruling N-1, `PostgresCell`."""
+    cell = make_cell(app_a)
+    try:
+        _pg_cell_with_enum_and_nullable(cell)
+        cell.transact("widgets", [{"operation": "insert", "values": {"label": "x", "status": "draft"}}], LIMITS)
+        before_rows = cell.query("widgets", select=["id", "label", "status"], where=[], page_size=10, limits=LIMITS).items
+        before_catalog = cell.catalog()
+        with cell._developer.connection() as conn:
+            with conn.transaction():
+                before_revision = cell._read_schema_revision(conn)
+        with pytest.raises(FoundationError) as exc:
+            cell.apply_schema({"operation": "alter_field", "entity": "widgets", "field": "status"}, developer=True, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"field": "operation", "violated_declaration": "constraint_declaration"}
+        after_rows = cell.query("widgets", select=["id", "label", "status"], where=[], page_size=10, limits=LIMITS).items
+        assert after_rows == before_rows
+        assert cell.catalog() == before_catalog
+        with cell._developer.connection() as conn:
+            with conn.transaction():
+                after_revision = cell._read_schema_revision(conn)
+        assert after_revision == before_revision
     finally:
         cell.close()
 
@@ -948,6 +995,40 @@ def test_pg_field_constraints_unknown_key_is_request_schema(app_a: types.SimpleN
         cell.close()
 
 
+def test_memory_field_constraints_request_schema_violations_carry_details() -> None:
+    """Ruling N-2 (rulings-r2-closure.md, WP-2a closure audit): the two
+    `field_constraints`-shape rejections one level UP from the per-entry
+    branches above -- `field_constraints` sent without `fields`, and a
+    `field_constraints` that is not an object -- both carry the SAME D-3
+    four-key form the adjacent per-entry branches already carry:
+    `violated_declaration: request_schema`, `field: "field_constraints"`.
+    Before this ruling both denials reached the client with `details ==
+    {}` (audit WP-2a closure §7 D-1)."""
+    cell = ApplicationCell(application_id="app-n2")
+
+    # Case 1: `field_constraints` present, `fields` entirely absent.
+    with pytest.raises(FoundationError) as exc_no_fields:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "w1", "field_constraints": {"status": {"enum": ["a"]}}},
+            developer=True,
+            limits=LIMITS,
+        )
+    assert exc_no_fields.value.code == "VALIDATION_FAILED"
+    assert exc_no_fields.value.details == {"field": "field_constraints", "violated_declaration": "request_schema"}
+    assert "w1" not in cell.entities
+
+    # Case 2: `field_constraints` present but not an object.
+    with pytest.raises(FoundationError) as exc_not_object:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "w2", "fields": ["status"], "field_constraints": "nope"},
+            developer=True,
+            limits=LIMITS,
+        )
+    assert exc_not_object.value.code == "VALIDATION_FAILED"
+    assert exc_not_object.value.details == {"field": "field_constraints", "violated_declaration": "request_schema"}
+    assert "w2" not in cell.entities
+
+
 # ---- M-5 gap 1: the `nullable` branch of alter_field's own CONFLICT -----
 
 
@@ -1253,6 +1334,80 @@ async def test_http_constraint_declarations_enforced_end_to_end() -> None:
             json={"operations": [{"operation": "insert", "values": {"status": "draft"}}]},
         )
         assert ok_response.status_code == 200, ok_response.text
+
+
+# ---- N-1: alter_field declaring neither enum nor nullable ---------------
+# (rulings-r2-closure.md, WP-2a closure): the in-memory/`PostgresCell`
+# pair above already covers this at the backend boundary; these two cover
+# the two remaining entry points named by the ruling -- the real ASGI/
+# HTTP boundary, and `DataService.schema` called in-process (mirrors
+# `tests/test_http.py`'s own HTTP/in-process pair for the WP-1 provisional
+# gate). Both assert the SAME two things: the denial's details, and that
+# nothing changed (no catalog/`field_constraints` mutation, which is the
+# only revision-observable surface either entry point exposes publicly).
+
+
+@pytest.mark.anyio
+async def test_http_alter_field_with_neither_enum_nor_nullable_is_refused() -> None:
+    """Ruling N-1, real ASGI/HTTP boundary."""
+    credentials = CredentialStore(pepper="n1-http-test-pepper")
+    with credentials.unit_of_work() as work:
+        credentials.add("cred-a", "app-a", "runtime", "secret-a", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("dev-a", "app-a", "developer", "dev-secret-a", work=work)
+    service = DataService(credentials)
+    control = ControlAuthority(service)
+    control.register_application("app-a", entities={})
+
+    def auth(secret: str) -> dict[str, str]:
+        return {"authorization": f"Bearer {secret}"}
+
+    transport = httpx.ASGITransport(app=create_app(service))
+    async with httpx.AsyncClient(transport=transport, base_url="http://r2db.example.invalid") as client:
+        create_response = await client.post(
+            "/v1/schema/operations",
+            headers=auth("dev-a.dev-secret-a"),
+            json={"operation": "create_entity", "entity": "n1_http", "fields": ["status"], "field_types": {"status": "string"}},
+        )
+        assert create_response.status_code == 200, create_response.text
+
+        catalog_before = (await client.get("/v1/catalog", headers=auth("cred-a.secret-a"))).json()
+
+        alter_response = await client.post(
+            "/v1/schema/operations",
+            headers=auth("dev-a.dev-secret-a"),
+            json={"operation": "alter_field", "entity": "n1_http", "field": "status"},
+        )
+        assert alter_response.status_code == 400, alter_response.text
+        body = alter_response.json()
+        assert body["code"] == "VALIDATION_FAILED"
+        assert body["details"] == {"field": "operation", "violated_declaration": "constraint_declaration"}
+
+        catalog_after = (await client.get("/v1/catalog", headers=auth("cred-a.secret-a"))).json()
+        assert catalog_after == catalog_before
+
+
+def test_alter_field_with_neither_enum_nor_nullable_is_refused_in_process(service: DataService) -> None:
+    """Ruling N-1, `DataService.schema` called in-process (bypassing
+    `r2db_api.http`'s ASGI boundary entirely) -- reuses this file's own
+    `service` fixture (completion condition 12 above), and additionally
+    asserts the underlying cell's `schema_revision` directly (unlike the
+    HTTP sibling, an in-process call CAN reach it), the strongest form of
+    "does not advance the schema revision"."""
+    developer = service.authenticate("dev-a.dev-secret-a")
+    service.schema(developer, {"operation": "create_entity", "entity": "n1_proc", "fields": ["status"], "field_types": {"status": "string"}})
+
+    cell = service._cells["app-a"]
+    before_revision = cell.schema_revision
+    catalog_before = service.catalog(developer)
+
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "alter_field", "entity": "n1_proc", "field": "status"})
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"field": "operation", "violated_declaration": "constraint_declaration"}
+
+    assert cell.schema_revision == before_revision
+    assert service.catalog(developer) == catalog_before
 
 
 # ---- m-3: same-named helper report (isomorphism pairing input) ----------
