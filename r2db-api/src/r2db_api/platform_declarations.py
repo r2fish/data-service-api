@@ -130,7 +130,7 @@ VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS = 1000
 
 
 class PlatformDeclarationError(RuntimeError):
-    """Every F-1..F-11/F-13 fail-fast condition this module raises. A
+    """Every F-1..F-11/F-13/F-14 fail-fast condition this module raises. A
     composition-root startup failure only -- never mapped to a contract
     error code, never returned over HTTP (design §3.8's own SI-10 note).
 
@@ -656,6 +656,134 @@ def check_writer_role_timeouts(
     return declared
 
 
+# Contract 1.7.0 (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work
+# order §2 WP-2e F-3, `{scratchpad}/rulings-r3-r7-flip.md` F-3, WP-2e rework
+# `{scratchpad}/audit-wp2e.md` D-2, ruling L-2 = (A)): a new `ops verify-
+# declarations` check that the contract 1.7.0 "enabled" declaration is TRUE
+# of the actual deployed state, not a second, redundant copy of `r2db_api.
+# limits.ResourceLimits.__post_init__`'s own construction-time check on a
+# `ResourceLimits` instance this check builds for itself.
+#
+# The pre-rework `check_contract_170_resource_limits` had exactly that
+# flaw (audit finding D-2): it constructed its own default `ResourceLimits
+# ()` and checked THAT instance, so (a) a broken default never reached this
+# function at all -- `ResourceLimits.__post_init__` already raises
+# `ValueError` at construction, before `_verify_declarations_checks` gets a
+# chance to catch a `PlatformDeclarationError` -- and (b) a healthy default
+# always passes. `PlatformDeclarationError(code="F-14")` could therefore
+# never actually be raised through the real `ops verify-declarations` code
+# path -- a dead check, "OK F-14" printed unconditionally with no signal
+# behind it.
+#
+# `check_contract_170_declarations` replaces it with three checks, only the
+# third of which is genuinely reachable through a real deployment's own
+# state (the other two stay useful regression guards against a future code
+# change, same honest scope `check_writer_role_timeouts` above documents
+# for its own construction-time-only conditions):
+#   (a) the SERVED capabilities document (the caller's own `capabilities()`
+#       call, never rebuilt here) actually declares `constraint_
+#       declarations`/`dry_run`/`idempotency`/`request_budget` `enabled`.
+#   (b) M-7 (`{scratchpad}/audit-wp2e-2.md` R-7): the SAME served
+#       capabilities document's own `limits` block (never a fresh
+#       `ResourceLimits()` constructed here -- that residual flaw, caught
+#       by the closure audit, was the same "unreachable through a real
+#       deployment" bug as the pre-rework function had for (a)) carries a
+#       positive `enum_members`/`idempotency_entries`/`idempotency_
+#       retention_ms`.
+#   (c) EVERY registered application's own per-application upgrade ledger
+#       (R-2/R-5, migrations `0009`/`0010`/`0011`) already carries every
+#       number this shipped version requires (`applied_upgrade_numbers_
+#       by_application`, `required_upgrade_numbers` -- the caller passes
+#       `r2db_api.platform_upgrades.PLATFORM_UPGRADE_NUMBERS`). This is the
+#       one part of F-14 a real deployment can actually fail: an
+#       application whose database has not yet run `ops upgrade-
+#       applications` makes the "enabled" declaration false for that
+#       application's own traffic, regardless of what the platform-wide
+#       capability document says -- so this fails closed per-application,
+#       not just once for the whole platform.
+def check_contract_170_declarations(
+    capabilities_document: Mapping[str, Any],
+    applied_upgrade_numbers_by_application: Mapping[str, Optional[frozenset[int]]],
+    required_upgrade_numbers: frozenset[int],
+) -> None:
+    """F-14. `capabilities_document` is the value the caller's own live
+    `capabilities()` call returned (or an equivalent already-served
+    document) -- this function never constructs one itself, for EITHER
+    half of the check. `applied_upgrade_numbers_by_application` maps every
+    registered application's slug to `platform_upgrades.read_applied_
+    upgrade_numbers`'s own return value for that application's database
+    (`None` when that application has no ledger table at all -- read as
+    "every number is pending", the same convention `platform_upgrades.
+    pending_upgrade_numbers` already uses).
+
+    WP-2e closure audit M-7 (`{scratchpad}/audit-wp2e-2.md` R-7, ruling
+    `{scratchpad}/rulings-r3-r7-flip.md` addendum 2 L-2 (a)): the limit-
+    class half used to take a separate, caller-constructed `ResourceLimits`
+    argument and read ITS attributes -- but `ResourceLimits.__post_init__`
+    already refuses to construct a value carrying a non-positive class, so
+    a caller building a throwaway `ResourceLimits()` (`ops.py`'s own
+    `cmd_verify_declarations`, before this fix) could never actually
+    surface a broken deployment through this half of F-14 either: any
+    broken value crashes the CONSTRUCTOR, before `check_contract_170_
+    declarations` is even called, with an uncaught `ValueError`, not this
+    function's own `PlatformDeclarationError`. This half now reads the
+    SAME served `capabilities_document`'s own `limits` block (`{"limits":
+    ResourceLimits.as_dict()}`, `DataService.capabilities()`'s real,
+    already-served shape) that the capability half above already reads
+    from -- checking the declaration the way an operator (or a client)
+    actually observes it, exactly like L-2 (a)'s own wording: "capability
+    document が ... limits に ... を持つこと"."""
+    capabilities = capabilities_document.get("capabilities", capabilities_document)
+    for name in _CONTRACT_170_ENABLED_CAPABILITIES:
+        entry = capabilities.get(name) if isinstance(capabilities, Mapping) else None
+        status = entry.get("status") if isinstance(entry, Mapping) else None
+        if status != "enabled":
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.capabilities().{name}.status must be 'enabled'; got {status!r}.",
+                code="F-14",
+            )
+    limits = capabilities_document.get("limits")
+    for name in _CONTRACT_170_LIMIT_CLASSES:
+        value = limits.get(name) if isinstance(limits, Mapping) else None
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.capabilities().limits.{name} must be a positive integer; got {value!r}.",
+                code="F-14",
+            )
+    missing = {
+        application_id: tuple(sorted(required_upgrade_numbers - (applied or frozenset())))
+        for application_id, applied in applied_upgrade_numbers_by_application.items()
+        if required_upgrade_numbers - (applied or frozenset())
+    }
+    if missing:
+        detail = "; ".join(f"{app}: pending={list(nums)}" for app, nums in sorted(missing.items()))
+        raise PlatformDeclarationError(
+            f"{ops_module_hint()}: the following application(s) have not applied every contract 1.7.0 "
+            f"per-application upgrade {sorted(required_upgrade_numbers)} -- {detail}. Run "
+            f"'python -m {ops_module_hint()}.ops upgrade-applications' before declaring this capability enabled.",
+            code="F-14",
+        )
+
+
+#: The `capabilities()` document keys `check_contract_170_declarations`
+#: requires `status: "enabled"` for (contract 1.7.0, D-1/D-6).
+_CONTRACT_170_ENABLED_CAPABILITIES: tuple[str, ...] = ("constraint_declarations", "dry_run", "idempotency", "request_budget")
+
+#: The `ResourceLimits` fields `check_contract_170_declarations` requires a
+#: positive integer for (contract 1.7.0, D-2 (7)/D-5).
+_CONTRACT_170_LIMIT_CLASSES: tuple[str, ...] = ("enum_members", "idempotency_entries", "idempotency_retention_ms")
+
+
+def ops_module_hint() -> str:
+    """`PEER_MODULE`, named through a function (not referenced directly by
+    `check_contract_170_declarations`'s own f-strings) so this check's
+    error-message wording stays isomorphic across peers the same way the
+    `_fN_message` builders above do (peer-IDENTICAL name, peer-SPECIFIC
+    value read from this module's own `PEER_MODULE` constant)."""
+    return PEER_MODULE
+
+
 __all__ = [
     "CONTROL_PLANE_STATUS_ENV",
     "DEFAULT_SCHEMA",
@@ -672,9 +800,11 @@ __all__ = [
     "PlatformDeclarations",
     "RoleTimeoutCatalog",
     "Surfaces",
+    "check_contract_170_declarations",
     "check_control_surface_consistency",
     "check_writer_role_timeouts",
     "derive_visibility_lag_ms",
+    "ops_module_hint",
     "read_declared_role_timeouts",
     "read_effective_timeouts_ms",
     "read_platform_declarations",

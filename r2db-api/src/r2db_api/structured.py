@@ -12,7 +12,7 @@ import re
 from typing import Any, Callable
 
 from .audit_hook import ApplicationAuditHook
-from .errors import fail
+from .errors import fail, observed_type_of, violation
 from .limits import ResourceLimits
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -45,24 +45,34 @@ _TEXT_ONLY_OPERATORS = {"contains", "matches"}
 _RESERVED_PREFIX = "_r2db"
 
 
-def validate_identifier(value: str) -> str:
+# WP-2e rework (audit-wp2e.md D-3, ruling L-3): `field` is now REQUIRED
+# (never a default) on every identifier-syntax helper below -- the exact
+# request-internal path (`errors.details_vocabulary.VALIDATION_FAILED.
+# field`'s own convention, "/"-separated from the request body root, no
+# leading "/") carrying the identifier under check, batch index included
+# wherever the caller has one (`operations/<i>/...`). A REQUIRED keyword-
+# only parameter (not a default of `None`/`"identifier"`) is deliberate:
+# it makes forgetting to supply a real path a call-site TypeError, not a
+# silently-wrong literal `"identifier"` that matches no request key (the
+# exact D-3 finding this rework closes).
+def validate_identifier(value: str, *, field: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value) or len(value) > MAX_IDENTIFIER_LENGTH:
-        fail("IDENTIFIER_INVALID", "Identifier has an unsupported format.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier has an unsupported format.", details=violation("identifier_syntax", field=field))
     return value
 
 
-def _reject_reserved_field(name: str) -> None:
+def _reject_reserved_field(name: str, *, field: str) -> None:
     if name == "id" or name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
 
 
-def _reject_reserved_prefix(name: str) -> None:
+def _reject_reserved_prefix(name: str, *, field: str) -> None:
     """Prefix-only reservation, used for entity names and (WP-2 review
     minor (d)) index names -- unlike `_reject_reserved_field`, `id` itself
     is not reserved here (an entity or index literally named `id` does not
     collide with the per-row address column)."""
     if name.startswith(_RESERVED_PREFIX):
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
 
 
 # WP-2(b) review B-2 (major, supervisor ruling 2026-09-03 -- "義務として
@@ -80,21 +90,21 @@ def _reject_reserved_prefix(name: str) -> None:
 _RESERVED_ENTITY_NAMES = frozenset({"audit_events"})
 
 
-def _reject_reserved_entity_name(name: str) -> None:
+def _reject_reserved_entity_name(name: str, *, field: str) -> None:
     if name in _RESERVED_ENTITY_NAMES:
-        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details={"field": "identifier"})
+        fail("IDENTIFIER_INVALID", "Identifier is reserved for internal use.", details=violation("identifier_syntax", field=field))
 
 
 def _mapping(value: Any, message: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        fail("VALIDATION_FAILED", message)
+        fail("VALIDATION_FAILED", message, details=violation("request_schema"))
     return value
 
 
 def parse_predicate(value: Any) -> "Predicate":
     item = _mapping(value, "Filter must be an object.")
     if not {"field", "operator"}.issubset(item) or set(item) - {"field", "operator", "value"}:
-        fail("VALIDATION_FAILED", "Filter shape is not supported.")
+        fail("VALIDATION_FAILED", "Filter shape is not supported.", details=violation("request_schema"))
     return Predicate(field=item["field"], operator=item["operator"], value=item.get("value"))
 
 
@@ -104,10 +114,23 @@ class Predicate:
     operator: str
     value: Any = None
 
-    def validate(self) -> None:
-        validate_identifier(self.field)
+    def validate(self, *, base_path: str) -> None:
+        """`base_path` (WP-2e rework, ruling L-3) is THIS predicate's own
+        request-internal position (e.g. `"where/2"`, or `"operations/0/
+        where/1"` for a mutation's own `where` -- `validate_predicates`
+        below builds it, batch index included).
+
+        Ruling N-1 (rulings-r3-r7-flip.md 追補 3): an `identifier_syntax`
+        denial's `field` must not carry the malformed identifier itself
+        (it can hold SQL fragments/control characters -- SI-10), so this
+        stops at `base_path` (the predicate object's own container
+        position, e.g. `"where/2"`), never `f"{base_path}/field"` (which
+        would still just be the literal key name "field", not the
+        identifier value -- but N-1's own container-position examples
+        (`where/0`) omit it, so this matches verbatim)."""
+        validate_identifier(self.field, field=base_path)
         if self.operator not in OPERATORS:
-            fail("VALIDATION_FAILED", "Unsupported filter operator.", details={"field": self.field})
+            fail("VALIDATION_FAILED", "Unsupported filter operator.", details=violation("capability", field=f"{base_path}/operator"))
 
 
 # --- Shared validation/planning boundary (design D-1) -----------------------
@@ -145,18 +168,27 @@ class Predicate:
 def validate_projection(select: Any, known_fields: set[str]) -> list[str]:
     """Bounded, non-empty, identifier-checked, catalog-checked field list."""
     if not isinstance(select, list) or not select or len(select) > 100:
-        fail("VALIDATION_FAILED", "A bounded non-empty projection is required.")
-    for field_name in select:
-        validate_identifier(field_name)
+        fail("VALIDATION_FAILED", "A bounded non-empty projection is required.", details=violation("request_schema", field="select"))
+    for i, field_name in enumerate(select):
+        # Ruling N-1: an identifier_syntax denial's `field` stops at the
+        # container position ("select" -- N-1's own example), never the
+        # per-index path (which is harmless on its own here, but N-1's
+        # worked examples are followed verbatim across every position).
+        validate_identifier(field_name, field="select")
     if any(field_name not in known_fields for field_name in select):
         fail("NOT_FOUND", "Field was not found.", status=404)
     return select
 
 
-def validate_predicates(where: list["Predicate"], known_fields: set[str]) -> list["Predicate"]:
-    """Operator-allowlist- and catalog-checked predicates (already parsed)."""
-    for predicate in where:
-        predicate.validate()
+def validate_predicates(where: list["Predicate"], known_fields: set[str], *, path_prefix: str = "where") -> list["Predicate"]:
+    """Operator-allowlist- and catalog-checked predicates (already parsed).
+    `path_prefix` (WP-2e rework, ruling L-3) is the request-internal path
+    to THIS `where` list itself -- `"where"` for a top-level query (the
+    default, both cells' own `query`), or `f"operations/{i}/where"` for
+    one mutation item's own `where` (`bind_mutation` below, batch index
+    included)."""
+    for i, predicate in enumerate(where):
+        predicate.validate(base_path=f"{path_prefix}/{i}")
         if predicate.field not in known_fields:
             fail("NOT_FOUND", "Field was not found.", status=404)
     return where
@@ -196,12 +228,18 @@ class BoundMutation:
     unique_key: str | None = None
 
 
-def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
+# WP-2e rework (ruling L-3): `operation_index` (REQUIRED, both call sites
+# -- `ApplicationCell._apply`/`PostgresCell._apply` -- already have a
+# batch index in scope) threads this mutation item's own `operations/<i>`
+# position into every IDENTIFIER_INVALID/CAPABILITY_UNSUPPORTED `field`
+# this function (or a function it calls) raises for a value inside this
+# ONE operation -- never a bare, position-less literal.
+def bind_mutation(operation: Any, known_fields: set[str], *, operation_index: int) -> BoundMutation:
     if not isinstance(operation, dict) or set(operation) - _MUTATION_KEYS:
-        fail("VALIDATION_FAILED", "Mutation shape is not supported.")
+        fail("VALIDATION_FAILED", "Mutation shape is not supported.", details=violation("request_schema"))
     name = operation.get("operation")
     if name not in MUTATION_OPERATIONS:
-        fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.")
+        fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.", details=violation("capability", field=f"operations/{operation_index}/operation"))
     # Contract 1.7.0 (D-5, WP-2c, ruling I-12): the present-denial that
     # used to sit here unconditionally is removed in the SAME commit as
     # `capabilities().idempotency` flipping to `enabled` -- `idempotency_
@@ -222,7 +260,7 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
         # silently never used by any backend's insert path -- the same
         # silent-ignore shape upsert's own `where` rejection closes (M-3
         # below), now closed symmetrically for insert.
-        fail("VALIDATION_FAILED", "insert does not accept a filter.")
+        fail("VALIDATION_FAILED", "insert does not accept a filter.", details=violation("unsupported_field", field="where"))
     # Whether a `where` on `upsert` is rejected (R-5, corrigendum M-3:
     # upsert's existence test is the entity's declared uniqueness key, never
     # a client-supplied predicate) needs live catalog knowledge -- an
@@ -237,11 +275,11 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
     # knows upsert is actually executable for this entity.
     raw_where = operation.get("where", [])
     if not isinstance(raw_where, list):
-        fail("VALIDATION_FAILED", "Mutation filter must be a list.")
-    where = validate_predicates([parse_predicate(item) for item in raw_where], known_fields)
+        fail("VALIDATION_FAILED", "Mutation filter must be a list.", details=violation("request_schema", field="where"))
+    where = validate_predicates([parse_predicate(item) for item in raw_where], known_fields, path_prefix=f"operations/{operation_index}/where")
     raw_values = operation.get("values", {})
     if not isinstance(raw_values, dict):
-        fail("VALIDATION_FAILED", "Mutation values must be an object.")
+        fail("VALIDATION_FAILED", "Mutation values must be an object.", details=violation("request_schema", field="values"))
     if len(raw_values) > 100:
         # Contract 1.2.0 (subordinate ruling 7(B), Q1-D8): this mirrors the
         # contract's own fixed `Mutation.values.maxProperties: 100` shape
@@ -249,9 +287,15 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
         # is `VALIDATION_FAILED` (400), never `LIMIT_EXCEEDED` (which would
         # be unable to name a `limit_class` member for this, since no such
         # class exists).
-        fail("VALIDATION_FAILED", "Mutation contains too many fields.", details={"field": "values"})
+        fail("VALIDATION_FAILED", "Mutation contains too many fields.", details=violation("request_schema", field="values"))
     for key in raw_values:
-        validate_identifier(key)
+        # Ruling N-1 (rulings-r3-r7-flip.md 追補 3): an identifier_syntax
+        # denial must not carry the malformed key itself in `field` -- it
+        # was the C-03 test_identifier_positions_reject_every_payload
+        # regression this ruling exists to close (an adversarial `values`
+        # key echoed verbatim through this f-string). Stop at the
+        # container position, `operations/<i>/values` (N-1's own example).
+        validate_identifier(key, field=f"operations/{operation_index}/values")
         if key not in known_fields:
             fail("NOT_FOUND", "Field was not found.", status=404)
     if name in {"insert", "update", "upsert"} and "id" in raw_values:
@@ -259,38 +303,38 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
         # client may read `id` (select/where/order_by) freely but can never
         # write it, on insert (it would forge an address) or update/upsert
         # (it would move an existing row's address).
-        fail("VALIDATION_FAILED", "The id field is server-assigned and cannot be supplied.", details={"field": "id"})
+        fail("VALIDATION_FAILED", "The id field is server-assigned and cannot be supplied.", details=violation("unsupported_field", field="values/id"))
     if "destructive" in operation and not isinstance(operation["destructive"], bool):
-        fail("VALIDATION_FAILED", "Destructive flag must be boolean.")
+        fail("VALIDATION_FAILED", "Destructive flag must be boolean.", details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(operation["destructive"])))
     expected_revision: str | None = None
     if "expected_revision" in operation:
         expected_revision = operation["expected_revision"]
         if not isinstance(expected_revision, str) or len(expected_revision) > MAX_EXPECTED_REVISION_LENGTH:
-            fail("VALIDATION_FAILED", "expected_revision must be a string.", details={"field": "expected_revision"})
+            fail("VALIDATION_FAILED", "expected_revision must be a string.", details=violation("request_schema", field="expected_revision", declared_type="string", observed_type=observed_type_of(expected_revision)))
         if "\x00" in expected_revision:
             # R-7 addendum (WP-3 review blocker-2): a NUL byte here would
             # otherwise reach PostgreSQL's `uuid`/`text` comparison and be
             # rejected at execution time, not deterministically here.
-            fail("VALIDATION_FAILED", "expected_revision must not contain a NUL character.", details={"field": "expected_revision"})
+            fail("VALIDATION_FAILED", "expected_revision must not contain a NUL character.", details=violation("request_schema", field="expected_revision"))
         if name == "insert":
             # R-4, contract's revision-precondition clause 6: a precondition
             # asserts an existing row's identity; insert creates one, so the
             # combination is never meaningful.
-            fail("VALIDATION_FAILED", "insert does not support a revision precondition.")
+            fail("VALIDATION_FAILED", "insert does not support a revision precondition.", details=violation("unsupported_field", field="expected_revision"))
         if name == "update" and not raw_values:
             # R-4, corrigendum M-1: the empty-`values` `update` branch below
             # does not write anything, so a precondition riding along with
             # it would be silently discarded rather than evaluated -- one
             # of the "precondition asserted, then quietly ignored" gaps this
             # foundation must not have.
-            fail("VALIDATION_FAILED", "A revision precondition requires values to apply.")
+            fail("VALIDATION_FAILED", "A revision precondition requires values to apply.", details=violation("request_schema", field="expected_revision"))
     if name in {"update", "delete"} and not where:
-        fail("VALIDATION_FAILED", "This operation requires a non-empty filter.")
+        fail("VALIDATION_FAILED", "This operation requires a non-empty filter.", details=violation("request_schema", field="where"))
     unique_key: str | None = None
     if "unique_key" in operation:
         if name != "upsert":
-            fail("VALIDATION_FAILED", "unique_key is only supported by upsert.")
-        unique_key = validate_identifier(operation["unique_key"])
+            fail("VALIDATION_FAILED", "unique_key is only supported by upsert.", details=violation("unsupported_field", field="unique_key"))
+        unique_key = validate_identifier(operation["unique_key"], field=f"operations/{operation_index}/unique_key")
     return BoundMutation(name, where, dict(raw_values), bool(operation.get("destructive")), operation.get("confirmation"), expected_revision, unique_key)
 
 
@@ -830,25 +874,25 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     if not developer:
         fail("FORBIDDEN", "Developer authority is required for schema operations.", status=403)
     if not isinstance(operation, dict):
-        fail("VALIDATION_FAILED", "Schema operation must be an object.")
+        fail("VALIDATION_FAILED", "Schema operation must be an object.", details=violation("request_schema"))
     if set(operation) - _SCHEMA_KEYS:
-        fail("VALIDATION_FAILED", "Schema operation shape is not supported.")
+        fail("VALIDATION_FAILED", "Schema operation shape is not supported.", details=violation("request_schema"))
     name = operation.get("operation")
-    entity = validate_identifier(operation.get("entity", ""))
+    entity = validate_identifier(operation.get("entity", ""), field="entity")
     # WP-2(b) fix round 2 (coordinator item C): reserved by EXACT match at
     # this ONE shared choke point -- every schema operation (create_entity/
     # add_field/drop_entity/create_index/drop_index) binds `entity` here,
     # so this single check covers all of them uniformly, matching
     # MitateDB's own `cell._identifier()` "reject at every identifier
     # position" line rather than only the `create_entity` creation path.
-    _reject_reserved_entity_name(entity)
+    _reject_reserved_entity_name(entity, field="entity")
     if "revision" in operation:
         # WP-2 review minor (e): `revision` was previously an accepted-but-
         # unused key (schema-level optimistic locking has no implementation
         # here) -- silently accepting and ignoring it is exactly the kind
         # of gap `field_type`'s own precedent below closes, so stop
         # tolerating it instead of leaving it a silent no-op.
-        fail("CAPABILITY_UNSUPPORTED", "Schema operation optimistic locking is not available.")
+        fail("CAPABILITY_UNSUPPORTED", "Schema operation optimistic locking is not available.", details=violation("capability", field="revision"))
     if name != "add_field" and "field_type" in operation:
         # R-2 (corrigendum m-1): `field_type` is accepted only by
         # `add_field`; every other operation rejects it exactly as before
@@ -867,22 +911,22 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 "alter_field does not redeclare a field's type.",
                 details={"field": "field_type", "violated_declaration": "unsupported_field"},
             )
-        fail("VALIDATION_FAILED", "field_type is only supported by add_field.")
+        fail("VALIDATION_FAILED", "field_type is only supported by add_field.", details=violation("unsupported_field", field="field_type"))
     if name != "create_entity" and "field_types" in operation:
         # Phase 6 WP-2 (design D-3(iv)): `field_types` (the per-field map)
         # is accepted only by `create_entity` -- symmetric with `field_
         # type`'s (the scalar) `add_field`-only rule immediately above.
-        fail("VALIDATION_FAILED", "field_types is only supported by create_entity.")
+        fail("VALIDATION_FAILED", "field_types is only supported by create_entity.", details=violation("unsupported_field", field="field_types"))
     if name != "create_entity" and "field_constraints" in operation:
         # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints` (the
         # per-field map) is accepted only by `create_entity` -- symmetric
         # with `field_types` immediately above.
-        fail("VALIDATION_FAILED", "field_constraints is only supported by create_entity.")
+        fail("VALIDATION_FAILED", "field_constraints is only supported by create_entity.", details=violation("unsupported_field", field="field_constraints"))
     if name not in ("add_field", "alter_field") and ("enum" in operation or "nullable" in operation):
         # Contract 1.7.0 (D-2 (1), WP-2a): the scalar `enum`/`nullable`
         # pair is accepted only by `add_field`/`alter_field` -- symmetric
         # with `field_type`'s own `add_field`-only rule above.
-        fail("VALIDATION_FAILED", "enum/nullable are only supported by add_field/alter_field.")
+        fail("VALIDATION_FAILED", "enum/nullable are only supported by add_field/alter_field.", details=violation("unsupported_field", field="enum" if "enum" in operation else "nullable"))
     if name != "create_index":
         # WP-2 review M-3: `index`/`unique` are meaningful only to
         # `create_index` (`drop_index` additionally accepts `index` as the
@@ -890,9 +934,9 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # tolerate a key this operation does not use" principle as
         # `field_type` above, applied to this pair.
         if "unique" in operation:
-            fail("VALIDATION_FAILED", "unique is only supported by create_index.")
+            fail("VALIDATION_FAILED", "unique is only supported by create_index.", details=violation("unsupported_field", field="unique"))
         if "index" in operation and name != "drop_index":
-            fail("VALIDATION_FAILED", "index is only supported by create_index/drop_index.")
+            fail("VALIDATION_FAILED", "index is only supported by create_index/drop_index.", details=violation("unsupported_field", field="index"))
     if "destructive" in operation and not isinstance(operation["destructive"], bool):
         # Review blocker B-1: symmetric with `bind_mutation`'s identical
         # check above -- a non-boolean truthy `destructive` (a string, an
@@ -902,7 +946,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # runs here, before the destructive-confirmation gate itself, per
         # contract `evaluation_order` (shape validation precedes
         # confirmation evaluation).
-        fail("VALIDATION_FAILED", "Destructive flag must be boolean.")
+        fail("VALIDATION_FAILED", "Destructive flag must be boolean.", details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(operation["destructive"])))
     fields: tuple[str, ...] = ()
     field_name: str | None = None
     field_type: str | None = None
@@ -914,14 +958,20 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
     index_fields: tuple[str, ...] = ()
     unique = False
     if name == "create_entity":
-        _reject_reserved_prefix(entity)
+        _reject_reserved_prefix(entity, field="entity")
         raw_fields = operation.get("fields", [])
         if not isinstance(raw_fields, list) or len(raw_fields) > 100:
-            fail("VALIDATION_FAILED", "Schema fields must be a bounded list.")
+            fail("VALIDATION_FAILED", "Schema fields must be a bounded list.", details=violation("request_schema", field="fields"))
         validated: list[str] = []
-        for candidate in raw_fields:
-            validate_identifier(candidate)
-            _reject_reserved_field(candidate)
+        for i, candidate in enumerate(raw_fields):
+            # Ruling N-1: identifier_syntax stops at the container
+            # position ("fields", N-1's own example) -- never the
+            # malformed candidate or its index. The reserved-name check
+            # below operates on an already syntax-valid string (N-1: "有効
+            # な識別子...予約名など はこれまでどおり path に含めてよい"), so it keeps
+            # the precise per-index path as before.
+            validate_identifier(candidate, field="fields")
+            _reject_reserved_field(candidate, field=f"fields/{i}")
             if candidate in validated:
                 fail("CONFLICT", "Field already exists.", status=409)
             validated.append(candidate)
@@ -942,15 +992,15 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             # "fields", [])` already defaulted it to `[]` for the loop
             # above.
             if "fields" not in operation:
-                fail("VALIDATION_FAILED", "field_types requires fields.")
+                fail("VALIDATION_FAILED", "field_types requires fields.", details=violation("request_schema", field="field_types"))
             raw_field_types = operation["field_types"]
             if not isinstance(raw_field_types, dict):
-                fail("VALIDATION_FAILED", "field_types must be an object.")
+                fail("VALIDATION_FAILED", "field_types must be an object.", details=violation("request_schema", field="field_types", declared_type="object", observed_type=observed_type_of(raw_field_types)))
             declared_types: dict[str, str | None] = {}
             for declared_field, declared_type in raw_field_types.items():
                 # (a) a name field_types declares that `fields` never named.
                 if declared_field not in fields:
-                    fail("VALIDATION_FAILED", "field_types names a field that is not present in fields.", details={"field": declared_field})
+                    fail("VALIDATION_FAILED", "field_types names a field that is not present in fields.", details=violation("unsupported_field", field="field_types/" + declared_field))
                 # (b) a value outside the 7-word vocabulary. `isinstance`
                 # checked FIRST (coordinator F2, 2026-09-04 review): `in`
                 # against `FIELD_TYPES` (a `set`) raises `TypeError` for an
@@ -963,7 +1013,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 # line from real HTTP input, not merely from a
                 # bind_schema_operation direct call.
                 if not isinstance(declared_type, str) or declared_type not in FIELD_TYPES:
-                    fail("VALIDATION_FAILED", "Unsupported field type.", details={"field": declared_field})
+                    fail("VALIDATION_FAILED", "Unsupported field type.", details=violation("enum", field="field_types/" + declared_field, declared_type="string"))
                 # Decision (v1.3 G11): an explicitly declared `json` is the
                 # SAME internal representation as untyped (`None`) -- see
                 # `FIELD_TYPES`'s own module-level comment above for why
@@ -1001,6 +1051,24 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 )
             parsed_constraints: dict[str, FieldConstraints] = {}
             for declared_field, spec in raw_field_constraints.items():
+                # Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4,
+                # 版フリップ監査差し戻し): a `field_constraints` KEY that is
+                # itself an identifier-syntax violation must not be echoed
+                # into `field` (SI-10 -- the key can carry SQL fragments/
+                # control characters, exactly the `values`-key regression
+                # N-1 closed) -- checked FIRST, stopping at the container
+                # position ("field_constraints", N-1's own container-
+                # position convention -- `_reject_reserved_field`/
+                # `_reject_reserved_prefix`-style reservation checks are
+                # deliberately NOT run here, unlike `fields`'s own loop
+                # above: `field_constraints` never creates a field by
+                # itself, so a reserved-shaped key here is caught by the
+                # "not present in fields" branch below instead, same as
+                # any other key `fields` never declared). A syntactically
+                # VALID identifier that simply is not in `fields` still
+                # falls through to that branch unchanged (N-1: "有効な識別子
+                # ...予約名など はこれまでどおり path に含めてよい").
+                validate_identifier(declared_field, field="field_constraints")
                 if declared_field not in fields:
                     # Monitor ruling m-1 (rulings-wp2a-review.md, contract
                     # corrigendum, verbatim list of `constraint_declaration`
@@ -1053,8 +1121,8 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 parsed_constraints[declared_field] = FieldConstraints(enum=enum_tuple, nullable=raw_nullable)
             field_constraints = parsed_constraints
     elif name == "add_field":
-        field_name = validate_identifier(operation.get("field", ""))
-        _reject_reserved_field(field_name)
+        field_name = validate_identifier(operation.get("field", ""), field="field")
+        _reject_reserved_field(field_name, field="field")
         if "field_type" in operation:
             field_type = operation["field_type"]
             # Coordinator F2: same isinstance-first guard as create_entity's
@@ -1063,7 +1131,7 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
             # same fix, per the review's own instruction not to leave a new
             # vocabulary/peer asymmetry by fixing only one of the two.
             if not isinstance(field_type, str) or field_type not in FIELD_TYPES:
-                fail("VALIDATION_FAILED", "Unsupported field type.", details={"field": field_name})
+                fail("VALIDATION_FAILED", "Unsupported field type.", details=violation("enum", field="field_type", declared_type="string"))
             if field_type == "json":
                 # Decision (v1.3 G11): same json->None translation as
                 # create_entity's `field_types` values above.
@@ -1109,8 +1177,8 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # the `enum_members` bound, and the omitted/clear/value COMPOSITION
         # against the field's existing constraints are all deferred to
         # `apply_schema` (addendum R-b/R-c, D-2 (3)) -- see `ConstraintPatch`.
-        field_name = validate_identifier(operation.get("field", ""))
-        _reject_reserved_field(field_name)
+        field_name = validate_identifier(operation.get("field", ""), field="field")
+        _reject_reserved_field(field_name, field="field")
         if "nullable" not in operation and "enum" not in operation:
             # Monitor ruling N-1 (rulings-r2-closure.md, contract
             # corrigendum 3, verbatim): "An alter_field carrying neither
@@ -1161,39 +1229,42 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
         # would make that composition ambiguous to invert -- rejected
         # outright (corrigendum m-2), as is a composed name over the
         # identifier length limit.
-        index_name = validate_identifier(operation.get("index", ""))
-        _reject_reserved_prefix(index_name)
+        index_name = validate_identifier(operation.get("index", ""), field="index")
+        _reject_reserved_prefix(index_name, field="index")
         if "__" in index_name:
-            fail("VALIDATION_FAILED", "Index name must not contain a double underscore.")
+            fail("VALIDATION_FAILED", "Index name must not contain a double underscore.", details=violation("request_schema", field="index"))
         composed_length = len(entity.encode("utf-8")) + 2 + len(index_name.encode("utf-8"))
         if composed_length > MAX_IDENTIFIER_LENGTH:
-            fail("VALIDATION_FAILED", "The composed index name exceeds the identifier length limit.")
+            fail("VALIDATION_FAILED", "The composed index name exceeds the identifier length limit.", details=violation("request_schema", field="index"))
         raw_fields = operation.get("fields", [])
         if not isinstance(raw_fields, list) or not (1 <= len(raw_fields) <= MAX_INDEX_FIELDS):
-            fail("VALIDATION_FAILED", "Index fields must list between 1 and 16 fields.")
+            fail("VALIDATION_FAILED", "Index fields must list between 1 and 16 fields.", details=violation("request_schema", field="fields"))
         validated = []
-        for candidate in raw_fields:
-            validate_identifier(candidate)
+        for i, candidate in enumerate(raw_fields):
+            # Ruling N-1: container position ("fields"), not the
+            # per-index path -- same reasoning as create_entity's fields
+            # loop above.
+            validate_identifier(candidate, field="fields")
             if candidate == "id":
                 # WP-2 review M-5: `id` is the address, not a domain
                 # uniqueness declaration (§2) -- allowing it here would let
                 # a peer publish a `unique_keys` entry upsert can never
                 # actually use (values.id is always rejected, R-3), which
                 # would also make C-17's positive control unsatisfiable.
-                fail("VALIDATION_FAILED", "Address fields cannot be declared as a uniqueness key.", details={"field": "id"})
+                fail("VALIDATION_FAILED", "Address fields cannot be declared as a uniqueness key.", details=violation("unsupported_field", field="fields"))
             if candidate in validated:
-                fail("VALIDATION_FAILED", "Index fields must not repeat.")
+                fail("VALIDATION_FAILED", "Index fields must not repeat.", details=violation("request_schema", field="fields"))
             validated.append(candidate)
         index_fields = tuple(validated)
         raw_unique = operation.get("unique", False)
         if not isinstance(raw_unique, bool):
-            fail("VALIDATION_FAILED", "Unique flag must be boolean.")
+            fail("VALIDATION_FAILED", "Unique flag must be boolean.", details=violation("request_schema", field="unique", declared_type="boolean", observed_type=observed_type_of(raw_unique)))
         unique = raw_unique
     elif name == "drop_index":
-        index_name = validate_identifier(operation.get("index", ""))
-        _reject_reserved_prefix(index_name)
+        index_name = validate_identifier(operation.get("index", ""), field="index")
+        _reject_reserved_prefix(index_name, field="index")
     elif name != "drop_entity":
-        fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.")
+        fail("CAPABILITY_UNSUPPORTED", "Schema operation is not supported by this foundation.", details=violation("capability", field="operation"))
     return BoundSchemaOperation(
         name, entity, field_name, fields, bool(operation.get("destructive")), operation.get("confirmation"), field_type, index_name, index_fields, unique,
         field_types=field_types, field_constraints=field_constraints, constraints=constraints, constraint_patch=constraint_patch,
@@ -1284,6 +1355,17 @@ class MutationOutcome:
     # "監査行にkeyを載せない" -- the ONLY audit trail a resend has is the
     # original execution's own event, correlated through `request_id`).
     replayed: bool = False
+    # Contract 1.7.0 (D-7, WP-2e): the `request_id` `MutationResult`
+    # carries (`service.py`'s own `DataService.mutate_result` is a pure
+    # passthrough of this field). For a genuine execution (real commit or
+    # `dry_run`), this is THIS call's own `request_id` -- the same value
+    # the audit event `_mutate_outcome` writes carries. For a REPLAY
+    # (`replayed=True`), this is the ORIGINAL execution's own `request_id`,
+    # read back from the idempotency record's payload (D-7 (3): "a
+    # response returned from an idempotency record ... the original
+    # execution's own, not a new one") -- never this resend's own `rid`,
+    # which is used only for the resend's OWN, separate audit event.
+    request_id: str | None = None
 
 
 # --- value type validation (R-7) -------------------------------------------
@@ -1365,7 +1447,7 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
         return
     if field_type is None:
         if _contains_nul(value):
-            fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+            fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details=violation("request_schema", field=field_name))
         # Monitor ruling B-1 (rulings-wp2a-review.md): an untyped/JSONB-
         # equivalent field can NEVER declare an `enum` at all (`validate_
         # enum_declaration`'s own `_ENUM_ELIGIBLE_TYPES` gate above already
@@ -1378,7 +1460,18 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
     if field_type == "integer":
         ok = isinstance(value, int) and not isinstance(value, bool)
         if ok and not (_INT64_MIN <= value <= _INT64_MAX):
-            fail("VALIDATION_FAILED", "Value is out of range for the field's declared type.", details={"field": field_name})
+            # Contract 1.7.0 (D-3, WP-2e): out-of-range is a `field_type`
+            # violation like any other -- the value's JSON type matches
+            # (`observed_type` == `declared_type` == "integer"), but the
+            # field's own declared type does not admit this value's
+            # magnitude. `errors.details_vocabulary` has no separate word
+            # for "domain"/"range"; this choke point's own docstring
+            # already treats range/NUL-byte violations as the same error
+            # code/disclosure shape as the type check itself.
+            fail(
+                "VALIDATION_FAILED", "Value is out of range for the field's declared type.",
+                details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+            )
     elif field_type == "number":
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     elif field_type == "boolean":
@@ -1392,9 +1485,19 @@ def _check_type(value: Any, field_type: str | None, field_name: str, *, constrai
     else:  # pragma: no cover - field_type is always one of FIELD_TYPES or None
         ok = True
     if not ok:
-        fail("VALIDATION_FAILED", "Value does not match the field's declared type.", details={"field": field_name})
+        # Contract 1.7.0 (D-3, WP-2e): the plain JSON-type mismatch --
+        # `violated_declaration: field_type`, both `declared_type` (the
+        # field's own declared type) and `observed_type` (the JSON type of
+        # the value actually received) required (D-3 (4)'s first branch).
+        fail(
+            "VALIDATION_FAILED", "Value does not match the field's declared type.",
+            details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+        )
     if field_type in ("string", "object", "array") and _contains_nul(value):
-        fail("VALIDATION_FAILED", "Value must not contain a NUL character.", details={"field": field_name})
+        fail(
+            "VALIDATION_FAILED", "Value must not contain a NUL character.",
+            details=violation("field_type", field=field_name, declared_type=_declared_type_label(field_type), observed_type=observed_type_of(value)),
+        )
     # Contract 1.7.0 (D-2, WP-2a): checked LAST, only once `value` has
     # already passed the basic type/domain/NUL checks above -- a value of
     # the WRONG type is `violated_declaration: field_type` (the existing,
@@ -1421,26 +1524,36 @@ def _validate_wildcard_pattern(pattern: str, field_name: str) -> None:
     """
     trailing_backslashes = len(pattern) - len(pattern.rstrip("\\"))
     if trailing_backslashes % 2 == 1:
-        fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.", details={"field": field_name})
+        fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.", details=violation("request_schema", field=field_name))
 
 
-def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, str | None]) -> None:
+def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, str | None], *, path_prefix: str = "where") -> None:
     """Type-check every predicate's value up front, independent of which
     rows (if any) it will end up matching (R-7, corrigendum M-9: type
     validation happens before target-row search/precondition resolution --
-    see the call sites in `ApplicationCell.query`/`_apply`)."""
-    for predicate in where:
+    see the call sites in `ApplicationCell.query`/`_apply`).
+
+    `path_prefix` (WP-2e rework, rulings R-5/M-4): the identical request-
+    internal path `validate_predicates` places this same `where` list at
+    (`"where"` for a top-level query, `f"operations/{i}/where"` for a
+    mutation's own `where`) -- every VALUE-position denial below names
+    `<path_prefix>/<i>/value` (or `.../value/<j>` for one `in` element),
+    never the bare field name (`predicate.field` names a column, not a
+    request-internal path -- `errors.details_vocabulary`'s `field` is
+    defined as the latter only)."""
+    for i, predicate in enumerate(where):
+        base_path = f"{path_prefix}/{i}/value"
         if predicate.operator in _TEXT_ONLY_OPERATORS:
             # Q-2: the operator's own value type is fixed (string), never
             # the target column's declared type -- a typed non-string
             # column is still matched via its text representation, so the
             # column's own declared type is irrelevant to this check.
             if not isinstance(predicate.value, str):
-                fail("VALIDATION_FAILED", "This operator's value must be a string.", details={"field": predicate.field})
+                fail("VALIDATION_FAILED", "This operator's value must be a string.", details=violation("field_type", field=base_path, declared_type="string", observed_type=observed_type_of(predicate.value)))
             if _contains_nul(predicate.value):
-                fail("VALIDATION_FAILED", "This operator's value must not contain a NUL character.", details={"field": predicate.field})
+                fail("VALIDATION_FAILED", "This operator's value must not contain a NUL character.", details=violation("request_schema", field=base_path))
             if predicate.operator == "matches":
-                _validate_wildcard_pattern(predicate.value, predicate.field)
+                _validate_wildcard_pattern(predicate.value, base_path)
             continue
         if predicate.operator in ("eq", "ne") and predicate.value is None:
             # WP-3 confirmation review N-3: `= NULL`/`<> NULL` is always
@@ -1448,14 +1561,24 @@ def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, s
             # never what a caller means. `is_null` exists precisely for
             # this comparison; refusing here is more diagnostic to an AI
             # agent client than quietly returning an empty result forever.
-            fail("VALIDATION_FAILED", "eq/ne do not accept a null value; use is_null instead.", details={"field": predicate.field})
+            # R-4: `nullable` requires BOTH `declared_type` and
+            # `observed_type` (D-3 (4)'s first branch, contract text
+            # `declared_type` is "required where violated_declaration is
+            # field_type or nullable").
+            fail("VALIDATION_FAILED", "eq/ne do not accept a null value; use is_null instead.", details=violation("nullable", field=base_path, declared_type=_declared_type_label(field_types.get(predicate.field)), observed_type="null"))
         declared_type = field_types.get(predicate.field)
         if predicate.operator == "in":
-            if isinstance(predicate.value, list):
-                for item in predicate.value:
-                    _check_type(item, declared_type, predicate.field)
+            # M-3 (rulings addendum 2): an empty (or non-list) `in` value
+            # is refused here, at the shared choke point -- both cells now
+            # agree (the in-memory side used to accept it silently; the
+            # Postgres side's own bare `fail()` this mirrors is replaced
+            # by this same call, R-2).
+            if not isinstance(predicate.value, list) or not predicate.value:
+                fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field=base_path))
+            for j, item in enumerate(predicate.value):
+                _check_type(item, declared_type, f"{base_path}/{j}")
         elif predicate.operator != "is_null":
-            _check_type(predicate.value, declared_type, predicate.field)
+            _check_type(predicate.value, declared_type, base_path)
 
 
 # --- page size (contract `Page.size`) ---------------------------------------
@@ -1474,7 +1597,7 @@ def validate_page_size(page_size: int, limits: ResourceLimits) -> None:
     if page_size <= 0:
         fail("LIMIT_EXCEEDED", "Page size must be positive.", status=413, details={"resource": "result_items", "limit_class": "result_items", "limit": limits.result_items})
     if page_size > MAX_PAGE_SIZE:
-        fail("VALIDATION_FAILED", "Page size exceeds the contract maximum.", details={"limit": MAX_PAGE_SIZE})
+        fail("VALIDATION_FAILED", "Page size exceeds the contract maximum.", details=violation("budget", field="page_size"))
 
 
 # --- order_by / cursor pagination (R-6) ------------------------------------
@@ -1493,23 +1616,27 @@ def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, 
     spec: list[tuple[str, str]] = []
     if order_by is not None:
         if not isinstance(order_by, list) or len(order_by) > MAX_ORDER_BY_FIELDS:
-            fail("VALIDATION_FAILED", "order_by must be a bounded list.")
+            fail("VALIDATION_FAILED", "order_by must be a bounded list.", details=violation("request_schema", field="order_by"))
         seen_fields: set[str] = set()
-        for item in order_by:
+        for i, item in enumerate(order_by):
             if not isinstance(item, dict) or "field" not in item or set(item) - {"field", "direction"}:
-                fail("VALIDATION_FAILED", "order_by entry shape is not supported.")
-            field_name = validate_identifier(item["field"])
+                fail("VALIDATION_FAILED", "order_by entry shape is not supported.", details=violation("request_schema", field="order_by"))
+            # Ruling N-1: container position (the order_by entry itself,
+            # "order_by/<i>" -- N-1's own example), not "order_by/<i>/field"
+            # (which would only be the literal key name "field", but N-1's
+            # worked examples are followed verbatim).
+            field_name = validate_identifier(item["field"], field=f"order_by/{i}")
             if field_name not in known_fields:
                 fail("NOT_FOUND", "Field was not found.", status=404)
             if field_name in seen_fields:
                 # WP-2 review minor (b): a field named twice is always
                 # either redundant or self-contradictory (opposite
                 # directions) -- reject rather than silently keep only one.
-                fail("VALIDATION_FAILED", "order_by must not repeat a field.")
+                fail("VALIDATION_FAILED", "order_by must not repeat a field.", details=violation("request_schema", field="order_by"))
             seen_fields.add(field_name)
             direction = item.get("direction", "asc")
             if direction not in ("asc", "desc"):
-                fail("VALIDATION_FAILED", "order_by direction must be asc or desc.")
+                fail("VALIDATION_FAILED", "order_by direction must be asc or desc.", details=violation("enum", field="order_by/direction", declared_type="string"))
             spec.append((field_name, direction))
     if not any(field_name == "id" for field_name, _ in spec):
         # R-6: deterministic ordering requires a total order; `id` is the
@@ -1577,24 +1704,24 @@ def _encode_cursor(offset: int, shape: str) -> str:
 
 def _decode_cursor(cursor: Any, expected_shape: str) -> int:
     if not isinstance(cursor, str) or not cursor:
-        fail("VALIDATION_FAILED", "Cursor is not valid.")
+        fail("VALIDATION_FAILED", "Cursor is not valid.", details=violation("request_schema", field="cursor"))
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
         payload = json.loads(raw)
     except Exception:
-        fail("VALIDATION_FAILED", "Cursor could not be decoded.")
+        fail("VALIDATION_FAILED", "Cursor could not be decoded.", details=violation("request_schema", field="cursor"))
     if not isinstance(payload, dict) or set(payload) != {"o", "q"}:
-        fail("VALIDATION_FAILED", "Cursor shape is not supported.")
+        fail("VALIDATION_FAILED", "Cursor shape is not supported.", details=violation("request_schema", field="cursor"))
     offset = payload["o"]
     shape = payload["q"]
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset > MAX_CURSOR_OFFSET:
-        fail("VALIDATION_FAILED", "Cursor offset is out of range.")
+        fail("VALIDATION_FAILED", "Cursor offset is out of range.", details=violation("request_schema", field="cursor"))
     if not isinstance(shape, str) or shape != expected_shape:
         # R-6, corrigendum m-3: a cursor minted for a different query shape
         # (different select/where/order_by/size) never silently pages
         # through the wrong result set -- it fails loudly instead.
-        fail("VALIDATION_FAILED", "Cursor does not match the current query shape.")
+        fail("VALIDATION_FAILED", "Cursor does not match the current query shape.", details=violation("request_schema", field="cursor"))
     return offset
 
 
@@ -1746,6 +1873,25 @@ class _IdempotencyRecord:
     expires_at: float
 
 
+def _idempotency_record_has_request_id(payload: dict[str, Any]) -> bool:
+    """Ruling L-6/M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2,
+    WP-2e closure audit R-1): a record written before the 1.7.0 flip
+    carries no `request_id` in its payload -- contract `versioning.
+    version_binding`'s 1.7.0 condition (4) requires a replay to return
+    "the original result... including the original request_id", which a
+    request_id-less record cannot honour. Such a record is treated as
+    though it were never found at all (never a fallback to the RESEND's
+    own request_id, which would silently forge a value the original
+    execution never produced) -- the resend falls through to a genuine
+    new execution, whose result (including a freshly generated request_
+    id) overwrites this same key's record (`_idempotency_store`'s plain
+    dict assignment, `PostgresCell`'s row `UPSERT`, already do this).
+    Both cells check this BEFORE the digest comparison: a stale, request_
+    id-less record with a MISMATCHED digest must not become a spurious
+    `CONFLICT` either -- it is simply not there."""
+    return isinstance(payload.get("request_id"), str)
+
+
 @dataclass(frozen=True)
 class SchemaOutcome:
     """Contract 1.7.0 (D-4, WP-2b): `apply_schema`'s return shape -- the
@@ -1782,6 +1928,11 @@ class SchemaOutcome:
     # Contract 1.7.0 (D-5 (1)(viii), ruling I-3/I-8, WP-2c): see
     # `MutationOutcome.replayed`'s identical comment.
     replayed: bool = False
+    # Contract 1.7.0 (D-7, WP-2e): see `MutationOutcome.request_id`'s
+    # identical comment -- this call's own `request_id` for a genuine
+    # execution (real commit or `dry_run`), the ORIGINAL execution's own
+    # (read back from the idempotency record) for a replay.
+    request_id: str | None = None
 
 
 @dataclass
@@ -1829,17 +1980,17 @@ class ApplicationCell:
 
     def __post_init__(self) -> None:
         for entity, rows in list(self.entities.items()):
-            validate_identifier(entity)
+            validate_identifier(entity, field=f"entities/{entity}")
             if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-                fail("VALIDATION_FAILED", "Entity rows must be a list of objects.")
+                fail("VALIDATION_FAILED", "Entity rows must be a list of objects.", details=violation("request_schema", field="entities/" + entity))
             user_fields: set[str] = set()
             for row in rows:
                 if "id" in row:
-                    fail("VALIDATION_FAILED", "The id field is server-assigned and cannot be supplied.", details={"field": "id"})
+                    fail("VALIDATION_FAILED", "The id field is server-assigned and cannot be supplied.", details=violation("unsupported_field", field="entities/" + entity + "/id"))
                 user_fields.update(row.keys())
             for name in user_fields:
-                validate_identifier(name)
-                _reject_reserved_field(name)
+                validate_identifier(name, field=f"entities/{entity}/{name}")
+                _reject_reserved_field(name, field=f"entities/{entity}/{name}")
             declared = self.schema.setdefault(entity, {})
             for name in user_fields:
                 declared.setdefault(name, None)
@@ -1901,14 +2052,14 @@ class ApplicationCell:
     ) -> QueryOutcome:
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
+        validate_identifier(entity, field="entity")
         # WP-2(b) fix round 2 (coordinator item C): reserved at every
         # identifier position, not only at creation time -- a query
         # against `entity="audit_events"` is refused as reserved, never
         # merely NOT_FOUND (no real entity of that name can ever exist,
         # since create_entity already refuses it, but the refusal reason
         # should say so directly rather than via a generic 404).
-        _reject_reserved_entity_name(entity)
+        _reject_reserved_entity_name(entity, field="entity")
         validate_page_size(page_size, limits)
         if entity not in self.entities:
             fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1932,7 +2083,17 @@ class ApplicationCell:
         try:
             rows = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in where)]
         except (TypeError, ValueError):
-            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
+            # M-2 (`{scratchpad}/audit-wp2e-2.md` R-3): `field_type`
+            # (this catch's pre-M-2 `violated_declaration`) requires BOTH
+            # `declared_type`/`observed_type` -- neither is attributable
+            # here (`lt`/`lte`/`gt`/`gte` against an UNTYPED field is
+            # never type-checked up front, module docstring's own
+            # documented divergence; a raise here can come from ANY
+            # predicate against ANY matching row, not one statically
+            # knowable field/type pair). `request_schema` (like the
+            # sibling empty/non-list `in` catch a few lines above)
+            # correctly needs no type pair.
+            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
         rows = _sort_rows(rows, order_spec)
         shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
         offset = 0
@@ -2008,6 +2169,7 @@ class ApplicationCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         `dry_run` walks every gate a real request would (no early-out
@@ -2042,10 +2204,10 @@ class ApplicationCell:
         """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
-        validate_identifier(entity)
-        _reject_reserved_entity_name(entity)  # WP-2(b) fix round 2, item C
+        validate_identifier(entity, field="entity")
+        _reject_reserved_entity_name(entity, field="entity")  # WP-2(b) fix round 2, item C
         if not operations:
-            fail("VALIDATION_FAILED", "At least one mutation is required.")
+            fail("VALIDATION_FAILED", "At least one mutation is required.", details=violation("request_schema", field="operations"))
         limits.check("batch_items", len(operations))
         # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the
         # idempotency lookup sits HERE -- after every bound this method's
@@ -2063,7 +2225,10 @@ class ApplicationCell:
             idempotency_digest_value = idempotency_digest(plan_request)
             idempotency_now = clock() if clock is not None else 0.0
             record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
-            if record is not None:
+            # L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a
+            # usable replay source -- treated as absent, checked before
+            # the digest comparison below.
+            if record is not None and _idempotency_record_has_request_id(record.payload):
                 if record.digest != idempotency_digest_value:
                     fail(
                         "CONFLICT", "This idempotency key was already used with a different request.", status=409,
@@ -2076,6 +2241,11 @@ class ApplicationCell:
                 return MutationOutcome(
                     affected=payload["affected"], assigned_addresses=payload["assigned_addresses"],
                     destructive=False, committed=True, plan=None, replayed=True,
+                    # Contract 1.7.0 (D-7 (3), WP-2e): the ORIGINAL
+                    # execution's own `request_id` -- read back from the
+                    # record's own payload (guaranteed present, M-6: no
+                    # fallback to this resend's own request_id).
+                    request_id=payload["request_id"],
                 )
             # Ruling I-6/D-5 (5): capacity is checked BEFORE this request
             # executes anything -- reclaiming elapsed records first.
@@ -2145,7 +2315,7 @@ class ApplicationCell:
                 self.entities[entity] = before
                 return MutationOutcome(
                     affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
-                    committed=False, plan=expected_plan,
+                    committed=False, plan=expected_plan, request_id=request_id,
                 )
             # Phase 4 (design D-2/D-10): the pre-commit hook is the LAST
             # thing this method does before its own commit point (here:
@@ -2172,10 +2342,14 @@ class ApplicationCell:
             if idempotency_key is not None and idempotency_digest_value is not None:
                 self._idempotency_store(
                     idempotency_key, digest=idempotency_digest_value, kind="mutation",
-                    payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                    # Contract 1.7.0 (D-7 (3), WP-2e): `request_id` rides
+                    # in the same payload the replay branch above reads
+                    # back from -- so a future replay returns THIS
+                    # execution's own `request_id`, not a fresh one.
+                    payload={"affected": affected, "assigned_addresses": assigned_addresses, "request_id": request_id},
                     now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
                 )
-            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True)
+            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True, request_id=request_id)
         except Exception:
             self.entities[entity] = before
             raise
@@ -2183,7 +2357,7 @@ class ApplicationCell:
     def _apply(self, entity: str, operation: dict[str, Any], operation_index: int) -> tuple[int, dict[str, Any] | None, bool]:
         field_types = self.schema.get(entity, {})
         known_fields = set(field_types.keys())
-        bound = bind_mutation(operation, known_fields)
+        bound = bind_mutation(operation, known_fields, operation_index=operation_index)
         # Contract 1.7.0 (D-2 (4), WP-2a): the registry's own entry for
         # this entity -- addendum 2 S-k's 6 write call sites (3 here, 3 in
         # `postgres.py`) all pass THIS through to `_check_type`; the 2
@@ -2228,7 +2402,7 @@ class ApplicationCell:
         # type (predicate values, and for `update` the write values too)
         # before resolving a precondition or searching for target rows at
         # all, symmetric with the `insert` branch above.
-        _validate_predicate_types(bound.where, field_types)
+        _validate_predicate_types(bound.where, field_types, path_prefix=f"operations/{operation_index}/where")
         if bound.operation == "update":
             for key, value in bound.values.items():
                 _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
@@ -2236,7 +2410,17 @@ class ApplicationCell:
         try:
             matches = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in bound.where)]
         except (TypeError, ValueError):
-            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.")
+            # M-2 (`{scratchpad}/audit-wp2e-2.md` R-3): `field_type`
+            # (this catch's pre-M-2 `violated_declaration`) requires BOTH
+            # `declared_type`/`observed_type` -- neither is attributable
+            # here (`lt`/`lte`/`gt`/`gte` against an UNTYPED field is
+            # never type-checked up front, module docstring's own
+            # documented divergence; a raise here can come from ANY
+            # predicate against ANY matching row, not one statically
+            # knowable field/type pair). `request_schema` (like the
+            # sibling empty/non-list `in` catch a few lines above)
+            # correctly needs no type pair.
+            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
 
         if bound.operation == "delete":
             # m-5: destructive confirmation is checked before any
@@ -2287,7 +2471,7 @@ class ApplicationCell:
         if not declared:
             # R-5 / §0.5 Q-1 (adjudicated 案B): an entity declaring no
             # uniqueness key at all has no existence test upsert could use.
-            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.")
+            fail("CAPABILITY_UNSUPPORTED", "Upsert requires a declared domain uniqueness key.", details=violation("capability", field="operation"))
         if bound.unique_key is not None:
             # Q-1 案B: an explicit `unique_key` always names the deciding
             # key by catalog name, whether the entity has one declared key
@@ -2299,13 +2483,13 @@ class ApplicationCell:
         elif len(declared) == 1:
             key_name = next(iter(declared))
         else:
-            fail("VALIDATION_FAILED", "unique_key is required when an entity declares more than one uniqueness key.")
+            fail("VALIDATION_FAILED", "unique_key is required when an entity declares more than one uniqueness key.", details=violation("request_schema", field="unique_key"))
         if bound.where:
-            fail("VALIDATION_FAILED", "Upsert does not accept a filter; its existence test is the entity's declared uniqueness key.")
+            fail("VALIDATION_FAILED", "Upsert does not accept a filter; its existence test is the entity's declared uniqueness key.", details=violation("unsupported_field", field="where"))
         key_fields = declared[key_name]["fields"]
         for key_field in key_fields:
             if bound.values.get(key_field) is None:
-                fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details={"field": key_field})
+                fail("VALIDATION_FAILED", "Upsert values must include every uniqueness key field.", details=violation("request_schema", field="values/" + key_field))
         # R-7, corrigendum M-9: type-check before searching for an existing
         # row (symmetric with insert/update above).
         for key, value in bound.values.items():
@@ -2408,6 +2592,7 @@ class ApplicationCell:
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above,
@@ -2441,7 +2626,10 @@ class ApplicationCell:
             idempotency_digest_value = idempotency_digest(plan_request)
             idempotency_now = clock() if clock is not None else 0.0
             record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
-            if record is not None:
+            # L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a
+            # usable replay source -- treated as absent, checked before
+            # the digest comparison below.
+            if record is not None and _idempotency_record_has_request_id(record.payload):
                 if record.digest != idempotency_digest_value:
                     fail(
                         "CONFLICT", "This idempotency key was already used with a different request.", status=409,
@@ -2454,6 +2642,9 @@ class ApplicationCell:
                 payload = record.payload
                 return SchemaOutcome(
                     committed=True, revision=payload["revision"], descriptor=None, plan=None, replayed=True,
+                    # M-6: the ORIGINAL execution's own `request_id`, no
+                    # fallback to this resend's own (guaranteed present).
+                    request_id=payload["request_id"],
                 )
             self._idempotency_reserve(limits, now=idempotency_now)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like
@@ -2731,7 +2922,7 @@ class ApplicationCell:
             # (4): `service.py` never builds one for a dry_run).
             descriptor = self._describe_entity(bound.entity) if bound.entity in self.entities else None
             _restore_before_snapshot()
-            return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan)
+            return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan, request_id=request_id)
         # Phase 4 (design D-2, item 2): every schema operation is
         # fail-closed class, unconditionally (unlike `transact`, there is
         # no non-destructive schema operation) -- the pre-commit hook is
@@ -2756,7 +2947,10 @@ class ApplicationCell:
         if idempotency_key is not None and idempotency_digest_value is not None:
             self._idempotency_store(
                 idempotency_key, digest=idempotency_digest_value, kind="schema",
-                payload={"revision": self.schema_revision},
+                # Contract 1.7.0 (D-7 (3), WP-2e): see `transact`'s
+                # identical comment -- `request_id` rides in the payload a
+                # future replay reads back.
+                payload={"revision": self.schema_revision, "request_id": request_id},
                 now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
             )
         # Review round F-8: always `SchemaOutcome`, plan or no plan --
@@ -2764,7 +2958,7 @@ class ApplicationCell:
         # declaration.py`'s many `cell.apply_schema(...)` call sites among
         # them) now reads `.revision` off the result instead of comparing
         # the result itself to an `int`.
-        return SchemaOutcome(committed=True, revision=self.schema_revision)
+        return SchemaOutcome(committed=True, revision=self.schema_revision, request_id=request_id)
 
 
 # Contract 1.1.0 (CCR-13, §0.5 Q-2): `matches`'s wildcard grammar is
@@ -2796,7 +2990,7 @@ def _wildcard_pattern(pattern: str) -> "re.Pattern[str]":
                 # implementation must not silently accept something the
                 # deployed backend (PostgreSQL's own `LIKE` grammar) cannot
                 # reliably execute.
-                fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.")
+                fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.", details=violation("request_schema"))
             continue
         if ch == "%":
             out.append(".*")

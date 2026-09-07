@@ -83,6 +83,8 @@ class StorageBackend(Protocol):
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> MutationOutcome:
         """Apply a batch of mutation operations as one atomic unit (D-5:
         one request maps to one transaction) and return the affected row
@@ -133,6 +135,8 @@ class StorageBackend(Protocol):
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        request_id: str | None = None,
     ) -> SchemaOutcome:
         """Apply one schema-changing operation and return a `SchemaOutcome`
         (`.committed`/`.revision`/`.descriptor`/`.plan`). `developer` is

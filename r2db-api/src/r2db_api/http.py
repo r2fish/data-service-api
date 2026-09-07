@@ -28,7 +28,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import AuthContext
-from .errors import FoundationError, fail
+from .errors import FoundationError, fail, observed_type_of, violation
 from .service import DataService
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -73,7 +73,28 @@ _SCHEMAS = _CONTRACT["schemas"]
 _DEFINITIONS = _CONTRACT["definitions"]
 
 
-def _check_object_shape(value: Any, schema: dict[str, Any], *, label: str) -> dict[str, Any]:
+def _schema_property_type_name(schema: dict[str, Any], key: str) -> str | None:
+    """The `declared_type` word (D-3 (2): field-type vocabulary, or the
+    JSON type this contract's own request schema names) for a `schema`'s
+    `properties[key].type` -- a bare string (`"string"`) or a `[type,
+    "null"]` pair (this contract's own optional-property convention). Falls
+    back to `None` (key omitted from the resulting `details`) when the
+    property schema names no single JSON type -- WP-2e never guesses.
+    """
+    prop = schema.get("properties", {}).get(key)
+    if not isinstance(prop, dict):
+        return None
+    raw = prop.get("type")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        non_null = [t for t in raw if t != "null"]
+        if len(non_null) == 1 and isinstance(non_null[0], str):
+            return non_null[0]
+    return None
+
+
+def _check_object_shape(value: Any, schema: dict[str, Any], *, label: str, own_path: str | None = None) -> dict[str, Any]:
     """Reject unknown top-level fields and missing required fields per `schema`.
 
     This is the boundary that guarantees a client-supplied `application_id`,
@@ -84,16 +105,76 @@ def _check_object_shape(value: Any, schema: dict[str, Any], *, label: str) -> di
     means they are not even valid input. Deep validation of nested
     values (predicates, mutations, identifiers, operators) is intentionally
     left to `structured.py`, which already owns it.
+
+    Contract 1.7.0 (D-3, WP-2e): every denial here is `violated_
+    declaration: request_schema` (`errors.details_vocabulary`) -- `own_path`
+    is this VALUE's own request-internal path (`None` for the request body
+    itself; `"page"` for the nested `QueryRequest.page` object) and a
+    child key's own path is `own_path + "/" + key"` (or bare `key` at the
+    top level). `field` is carried only when the violation is attributable
+    to exactly ONE position (D-3 (4)): a lone unknown field, a lone missing
+    required field, or `value` itself failing the object check. `declared_
+    type`/`observed_type` are carried only for a VALUE-type violation
+    (`value` itself is not an object, or a required field is entirely
+    absent) -- never for an unknown-field denial (D-3 (4): the contract's
+    request schema names no type for a field it does not know).
     """
     if not isinstance(value, dict):
-        fail("VALIDATION_FAILED", f"{label} must be an object.")
+        fail(
+            "VALIDATION_FAILED", f"{label} must be an object.",
+            details=violation("request_schema", field=own_path, declared_type="object", observed_type=observed_type_of(value)),
+        )
     allowed = set(schema.get("properties", {}))
     extra = set(value) - allowed
     if extra:
-        fail("VALIDATION_FAILED", f"{label} contains unsupported fields.", details={"fields": sorted(extra)})
+        sole = next(iter(extra)) if len(extra) == 1 else None
+        field = (f"{own_path}/{sole}" if own_path else sole) if sole is not None else None
+        fail("VALIDATION_FAILED", f"{label} contains unsupported fields.", details=violation("request_schema", field=field))
     missing = set(schema.get("required", [])) - set(value)
     if missing:
-        fail("VALIDATION_FAILED", f"{label} is missing required fields.", details={"fields": sorted(missing)})
+        sole = next(iter(missing)) if len(missing) == 1 else None
+        if sole is not None:
+            field = f"{own_path}/{sole}" if own_path else sole
+            fail(
+                "VALIDATION_FAILED", f"{label} is missing required fields.",
+                details=violation("request_schema", field=field, declared_type=_schema_property_type_name(schema, sole), observed_type="absent"),
+            )
+        fail("VALIDATION_FAILED", f"{label} is missing required fields.", details=violation("request_schema"))
+    # WP-2e rework (audit-wp2e.md I-4, ruling L-4/V-6 (iii)): leg (iii) --
+    # a property that IS present (so neither the unknown-field nor the
+    # missing-field leg above ever sees it) but whose VALUE's JSON type
+    # does not match `schema`'s own declared type for it. Before this leg
+    # existed, a request like `{"where": "not-a-list"}` fell all the way
+    # through to `service.py`'s own bare `fail("VALIDATION_FAILED", ...,
+    # details={})` (the exact I-4 finding) -- this leg now catches it here
+    # instead, with the full 4-key form. `_schema_property_type_name`
+    # already strips this contract's own `[type, "null"]` optional-
+    # property convention down to the single non-null word for `declared_
+    # type`'s own value; the type-membership check below instead compares
+    # against the FULL raw type list (`null` included when the property
+    # allows it) so an explicit `null` on an optional property is never
+    # mistaken for a type violation.
+    for key, raw_value in value.items():
+        if key not in allowed:
+            continue  # unknown key -- already rejected by the leg above
+        prop = schema.get("properties", {}).get(key)
+        raw_type = prop.get("type") if isinstance(prop, dict) else None
+        if isinstance(raw_type, str):
+            allowed_types = {raw_type}
+        elif isinstance(raw_type, list):
+            allowed_types = {t for t in raw_type if isinstance(t, str)}
+        else:
+            allowed_types = None
+        if not allowed_types:
+            continue  # property names no single JSON type -- never guessed (WP-2e)
+        observed_type = observed_type_of(raw_value)
+        if observed_type in allowed_types:
+            continue
+        field = f"{own_path}/{key}" if own_path else key
+        fail(
+            "VALIDATION_FAILED", f"{label} has a field of the wrong type.",
+            details=violation("request_schema", field=field, declared_type=_schema_property_type_name(schema, key), observed_type=observed_type),
+        )
     return value
 
 
@@ -276,10 +357,10 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
     try:
         payload = await request.json()
     except json.JSONDecodeError:
-        fail("VALIDATION_FAILED", "Request body must be valid JSON.")
+        fail("VALIDATION_FAILED", "Request body must be valid JSON.", details=violation("request_schema"))
         raise  # unreachable; fail() always raises
     if not isinstance(payload, dict):
-        fail("VALIDATION_FAILED", "Request body must be a JSON object.")
+        fail("VALIDATION_FAILED", "Request body must be a JSON object.", details=violation("request_schema"))
     return payload
 
 
@@ -310,7 +391,7 @@ async def post_query(request: Request) -> Response:
     kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
     page = body.get("page")
     if page is not None:
-        _check_object_shape(page, _DEFINITIONS["Page"], label="page")
+        _check_object_shape(page, _DEFINITIONS["Page"], label="page", own_path="page")
         if "size" in page:
             kwargs["page_size"] = page["size"]
         if "cursor" in page:
@@ -320,8 +401,14 @@ async def post_query(request: Request) -> Response:
     # `query_page`, which narrows the deployed bound by it.
     result = service.query_page(context, entity, request_id=_request_id(request), budget=body.get("budget"), **kwargs)
     # CCR-13 WP-5: `revisions` (index-aligned with `items`) now reaches the
-    # response -- `revision_preconditions` is declared `enabled`.
-    return JSONResponse({"items": result.items, "next_page": result.next_page, "revisions": result.revisions}, status_code=200)
+    # response -- `revision_preconditions` is declared `enabled`. Contract
+    # 1.7.0 (D-7, WP-2e): `request_id` -- `result.request_id`, the SAME
+    # value `query_page` handed `_query_outcome` for its own audit event;
+    # this layer never re-derives it.
+    return JSONResponse(
+        {"items": result.items, "next_page": result.next_page, "revisions": result.revisions, "request_id": result.request_id},
+        status_code=200,
+    )
 
 
 @_endpoint
@@ -344,7 +431,7 @@ async def post_mutate(request: Request) -> Response:
     if "transaction" in body:
         transaction = body["transaction"]
         if transaction not in {"atomic", "best_effort"}:
-            fail("VALIDATION_FAILED", "Transaction mode is not supported.")
+            fail("VALIDATION_FAILED", "Transaction mode is not supported.", details=violation("request_schema", field="transaction"))
         mutate_kwargs["transaction"] = transaction
     # Contract 1.7.0 (D-4/D-5/D-6, WP-2b/WP-2c/WP-2d): `dry_run`/`plan`/
     # `budget`/`idempotency_key` are all real as of this commit
@@ -377,7 +464,11 @@ async def post_mutate(request: Request) -> Response:
     # `result.assigned_addresses` is `None` exactly then -- matching the
     # contract's "does not carry" wording and `descriptor`/`plan`'s own
     # present-only-when-settled treatment.
-    response: dict[str, Any] = {"committed": result.committed, "affected": result.affected}
+    # Contract 1.7.0 (D-7, WP-2e): `request_id` -- `result.request_id`,
+    # already the ORIGINAL execution's own value on an idempotency replay
+    # (`MutationResult.request_id`'s own comment) -- this layer never
+    # regenerates it.
+    response: dict[str, Any] = {"committed": result.committed, "affected": result.affected, "request_id": result.request_id}
     if result.assigned_addresses is not None:
         response["assigned_addresses"] = result.assigned_addresses
     if result.plan is not None:
@@ -407,7 +498,9 @@ async def post_schema(request: Request) -> Response:
     # dry-run response, D-4 (3); a real response's shape stays unchanged
     # besides `committed`, which is unconditionally `True` for a real
     # apply that reaches this point).
-    response: dict[str, Any] = {"committed": outcome.committed, "revision": str(outcome.revision)}
+    # Contract 1.7.0 (D-7, WP-2e): `request_id` -- `outcome.request_id`,
+    # already the ORIGINAL execution's own value on an idempotency replay.
+    response: dict[str, Any] = {"committed": outcome.committed, "revision": str(outcome.revision), "request_id": outcome.request_id}
     if outcome.descriptor is not None:
         response["descriptor"] = outcome.descriptor
     if outcome.plan is not None:

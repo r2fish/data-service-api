@@ -1451,6 +1451,36 @@ def test_in_operator_type_checks_each_element_on_a_typed_column(app_a: types.Sim
         cell.close()
 
 
+def test_in_operator_rejects_an_empty_list(app_a: types.SimpleNamespace) -> None:
+    """WP-2e closure audit M-3 (`{scratchpad}/audit-wp2e-2.md` R-2,
+    ruling `{scratchpad}/rulings-r3-r7-flip.md` addendum 2): an empty `in`
+    list is refused at the shared choke point (`structured._validate_
+    predicate_types`, both cells call it) BEFORE any SQL is built --
+    `violated_declaration: request_schema`, `field: where/<i>/value` --
+    identical to the in-memory plug's own `test_foundation.py::test_in_
+    operator_rejects_an_empty_list`. `postgres.py`'s own local `in`-branch
+    fallback in `_predicate_sql` (M-1: kept only as an unreachable
+    defensive backstop, never the site that actually answers this
+    request) is proven unreached by this test's own passing: if it WERE
+    reached instead, it would answer with the SAME code/details shape
+    (both use `violation("request_schema", field="where")`, this choke-
+    point's own per-index path just narrower), so this test alone cannot
+    distinguish the two layers -- `test_l1_details_vocabulary_ast_scan.py`
+    already pins per-file/line details vocabulary compliance for that
+    fallback separately."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "emptyin", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "emptyin", "field": "i", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact("emptyin", [{"operation": "insert", "values": {"i": 1}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("emptyin", select=["i"], where=[P("i", "in", [])], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+    finally:
+        cell.close()
+
+
 def test_eq_and_ne_reject_a_null_predicate_value(app_a: types.SimpleNamespace) -> None:
     """WP-3 confirmation review N-3: shared-boundary parity with
     `ApplicationCell` -- `= NULL`/`<> NULL` is refused rather than executed
@@ -2272,8 +2302,13 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed(app_a: typ
                 cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
             # Monitor ruling M-3/D (rulings-wp2a-review.md): request-
-            # internal path, not a bare field name.
-            assert exc.value.details == {"field": "operations/0/values/n"}
+            # internal path, not a bare field name. Contract 1.7.0 (D-3,
+            # WP-2e): out-of-range is a `field_type` violation --
+            # `declared_type`/`observed_type` both "integer".
+            assert exc.value.details == {
+                "field": "operations/0/values/n", "violated_declaration": "field_type",
+                "declared_type": "integer", "observed_type": "integer",
+            }
         cell.transact("readings", [{"operation": "insert", "values": {"n": 2**63 - 1}}, {"operation": "insert", "values": {"n": -(2**63)}}], LIMITS)
         rows = {row["n"] for row in cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items}
         assert rows == {2**63 - 1, -(2**63)}
@@ -2291,12 +2326,25 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: t
         for name, field_type in (("s", "string"), ("o", "object"), ("a", "array")):
             cell.apply_schema({"operation": "add_field", "entity": "docs", "field": name, "field_type": field_type}, developer=True, limits=LIMITS)
         bad_values = {"s": "has\x00nul", "o": {"k": "has\x00nul"}, "a": ["has\x00nul"], "u": "has\x00nul"}
+        # Contract 1.7.0 (D-3, WP-2e): see `test_foundation.py`'s identical
+        # comment -- a typed field's NUL-byte refusal is `field_type`
+        # (`declared_type`/`observed_type` both the field's own type); the
+        # untyped field ("u") has `violated_declaration: request_schema`
+        # instead (WP-2e rework, audit-wp2e.md D-1 = (A)/ruling L-1: every
+        # choke-point site now carries `violated_declaration`).
+        declared_types = {"s": "string", "o": "object", "a": "array"}
         for field_name, bad_value in bad_values.items():
             with pytest.raises(FoundationError) as exc:
                 cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
             # Monitor ruling M-3/D: request-internal path.
-            assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
+            if field_name in declared_types:
+                assert exc.value.details == {
+                    "field": f"operations/0/values/{field_name}", "violated_declaration": "field_type",
+                    "declared_type": declared_types[field_name], "observed_type": declared_types[field_name],
+                }
+            else:
+                assert exc.value.details == {"field": f"operations/0/values/{field_name}", "violated_declaration": "request_schema"}
         assert cell.query("docs", select=["u"], where=[], page_size=10, limits=LIMITS).items == []
     finally:
         cell.close()
@@ -2357,6 +2405,15 @@ def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_fai
     `VALIDATION_FAILED` mapping this test is for: it must never surface as
     `SERVICE_UNAVAILABLE` (a false "retry" signal to an AI agent client),
     and must never leak the value itself into the error.
+
+    WP-2e rework (audit-wp2e.md I-6, ruling L-1 / D-1 = (A)): this is also
+    the completion-condition-6 pin (moved here from `test_denial_details_
+    and_request_id.py`) that `errors.details_vocabulary.layer_rule`'s
+    backend-layer exemption never carries `violated_declaration` -- unlike
+    every choke-point / request-shape site (D-1 = (A) applies the 4-key
+    rule to all 76 of those), `PostgresCell._fail_client_value`'s generic
+    catch cannot attribute a whole-statement `DataError` to one declared
+    field, so it stays a bare `VALIDATION_FAILED` with no `details` at all.
     """
     cell = make_cell(app_a)
     try:
@@ -2367,6 +2424,7 @@ def test_postgres_data_error_from_an_out_of_range_number_value_is_validation_fai
             cell.transact("readings", [{"operation": "insert", "values": {"n": huge}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         assert exc.value.status == 400
+        assert "violated_declaration" not in exc.value.details, exc.value.details
         rendered = repr(exc.value)
         assert str(huge)[:20] not in rendered
         # No side effect.
@@ -2407,12 +2465,20 @@ def test_object_and_array_field_types_use_domains_and_are_distinguishable(app_a:
             cell.transact("typed", [{"operation": "insert", "values": {"o": [1, 2]}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
         # Monitor ruling M-3/D (rulings-wp2a-review.md): request-internal
-        # path, not a bare field name.
-        assert exc.value.details == {"field": "operations/0/values/o"}
+        # path, not a bare field name. Contract 1.7.0 (D-3, WP-2e):
+        # `field_type` -- `declared_type` the field's own declared type,
+        # `observed_type` the JSON type of the value actually received.
+        assert exc.value.details == {
+            "field": "operations/0/values/o", "violated_declaration": "field_type",
+            "declared_type": "object", "observed_type": "array",
+        }
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "insert", "values": {"a": {"k": 1}}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": "operations/0/values/a"}
+        assert exc.value.details == {
+            "field": "operations/0/values/a", "violated_declaration": "field_type",
+            "declared_type": "array", "observed_type": "object",
+        }
         # Same rejection on update.
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"o": [1]}}], LIMITS)

@@ -14,7 +14,7 @@ from .audit import ApplicationAuditSink, AuditEvent, AuditSink
 from .audit_hook import ApplicationAuditHook
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
-from .errors import FoundationError, fail
+from .errors import FoundationError, fail, observed_type_of, violation
 from .limits import ResourceLimits, narrow_limits_by_budget
 from .structured import ApplicationCell, fold_operation_idempotency_keys, parse_predicate
 from .topology import AuthorityTopology
@@ -156,6 +156,11 @@ class QueryPage:
     items: list[dict[str, Any]]
     next_page: str | None
     revisions: list[str]
+    # Contract 1.7.0 (D-7, WP-2e): the same `request_id` this query's own
+    # audit event (`_query_outcome`'s `_event` call) carries -- generated
+    # once, in `query_page` itself, before `_query_outcome` runs, so both
+    # this field and that audit event see the identical value.
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,11 @@ class MutationResult:
     assigned_addresses: list[dict[str, Any]] | None
     committed: bool = True
     plan: str | None = None
+    # Contract 1.7.0 (D-7, WP-2e): `outcome.request_id` -- this execution's
+    # own value for a real commit/dry_run, or the ORIGINAL execution's own
+    # value for an idempotency replay (`MutationOutcome.request_id`'s own
+    # comment). Never regenerated here.
+    request_id: str | None = None
 
 
 class _PreCommitHook:
@@ -919,7 +929,17 @@ class DataService:
                 # ships every 1.6.0 behavioral obligation this host owns
                 # (locator-form credentials, `surfaces`, `field_types`) --
                 # the flip is never ahead of the behavior it declares.
-                "contract_version": "1.6.0",
+                #
+                # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/
+                # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+                # D-1 (5)): the SAME commit as this host's own R-3
+                # (`errors.details_vocabulary` 4-key details) and R-7
+                # (`request_id` on every successful result) implementation
+                # -- the two 1.7.0 UNCONDITIONAL obligations -- never ahead
+                # of the behavior it declares (D-1 (7)'s xfail(strict=True)
+                # version gate is exactly what would catch that ordering
+                # mistake).
+                "contract_version": "1.7.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -1059,21 +1079,28 @@ class DataService:
         applicable-but-invalid or inapplicable `budget` is refused
         `VALIDATION_FAILED` before target existence.
         """
-        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id, budget=budget)
-        return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []))
+        # Contract 1.7.0 (D-7, WP-2e): resolved HERE, once, so the SAME
+        # value both reaches `QueryPage.request_id` below and is the one
+        # `_query_outcome` uses for its own audit event -- the generation
+        # point for the request/response pair a caller sees, never
+        # re-derived a second time for the response body (Q-1: "HTTP 層は
+        # 再生成しない" generalizes to "no layer re-derives it").
+        rid = request_id or str(uuid.uuid4())
+        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=rid, budget=budget)
+        return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []), request_id=rid)
 
     def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None):
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
-                    fail("VALIDATION_FAILED", "Projection and page size have invalid types.")
+                    fail("VALIDATION_FAILED", "Projection and page size have invalid types.", details=violation("request_schema"))
                 if where is not None and not isinstance(where, list):
-                    fail("VALIDATION_FAILED", "Filter must be a list.")
+                    fail("VALIDATION_FAILED", "Filter must be a list.", details=violation("request_schema", field="where", declared_type="array", observed_type=observed_type_of(where)))
                 if order_by is not None and not isinstance(order_by, list):
-                    fail("VALIDATION_FAILED", "order_by must be a list.")
+                    fail("VALIDATION_FAILED", "order_by must be a list.", details=violation("request_schema", field="order_by", declared_type="array", observed_type=observed_type_of(order_by)))
                 if cursor is not None and not isinstance(cursor, str):
-                    fail("VALIDATION_FAILED", "Cursor must be a string.")
+                    fail("VALIDATION_FAILED", "Cursor must be a string.", details=violation("request_schema", field="cursor", declared_type="string", observed_type=observed_type_of(cursor)))
                 request = {"entity": entity, "select": select, "where": where or [], "page_size": page_size, "order_by": order_by or [], "cursor": cursor}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
@@ -1125,6 +1152,13 @@ class DataService:
         """
         outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget, idempotency_key=idempotency_key)
         return MutationResult(
+            # Contract 1.7.0 (D-7 (3), WP-2e): `outcome.request_id` -- THIS
+            # execution's own value for a real commit/dry_run, or the
+            # ORIGINAL execution's own value for an idempotency replay
+            # (`MutationOutcome.request_id`'s own comment) -- never the
+            # resend's own `rid` (which `_mutate_outcome` below already
+            # used for the resend's own, separate audit event).
+            request_id=outcome.request_id,
             affected=outcome.affected,
             # D-4 (3)/A-9: a dry-run mutation result never carries
             # `assigned_addresses` -- the addresses a real execution would
@@ -1156,9 +1190,9 @@ class DataService:
                 # though both behave identically otherwise.
                 resolved_transaction = transaction if transaction is not None else "atomic"
                 if resolved_transaction != "atomic":
-                    fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.")
+                    fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.", details=violation("capability", field="transaction"))
                 if not isinstance(operations, list):
-                    fail("VALIDATION_FAILED", "Mutations must be a list.")
+                    fail("VALIDATION_FAILED", "Mutations must be a list.", details=violation("request_schema", field="operations"))
                 # Ruling I-12/port v1.11 compatibility: an HTTP-originated
                 # call always supplies `idempotency_key` directly (the
                 # contract-level `MutationRequest.idempotency_key`); the
@@ -1229,6 +1263,7 @@ class DataService:
                 outcome = self._cells[canonical.application_id].transact(
                     entity, operations, effective_limits, deadline=deadline, clock=self._clock, audit_hook=hook,
                     dry_run=dry_run, plan=plan, plan_request=plan_request, idempotency_key=effective_idempotency_key,
+                    request_id=rid,
                 )
                 # D-4 (4)/U-2 = (A): a dry_run that reached this point
                 # reached the "would succeed" decision -- no audit event
@@ -1295,7 +1330,7 @@ class DataService:
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
-                    fail("VALIDATION_FAILED", "Schema operation must be an object.")
+                    fail("VALIDATION_FAILED", "Schema operation must be an object.", details=violation("request_schema"))
                 # Authority is checked before touching request content at
                 # all, so a non-developer credential gets FORBIDDEN/403 for
                 # any schema operation, before any shape/capability
@@ -1331,7 +1366,7 @@ class DataService:
                 outcome = self._cells[canonical.application_id].apply_schema(
                     operation, developer=canonical.role == "developer", limits=effective_limits, deadline=deadline,
                     clock=self._clock, audit_hook=hook, dry_run=dry_run, plan=plan, plan_request=plan_request,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=idempotency_key, request_id=rid,
                 )
                 # D-4 (4)/U-2 = (A): no audit event at all for a dry_run
                 # that reached this point (the "would succeed" decision).
@@ -1395,7 +1430,13 @@ class DataService:
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context):
-                fail("CAPABILITY_UNSUPPORTED", message)
+                # D-3 (4): the request AS A WHOLE is what is unsupported
+                # here (this foundation has no execution path for the
+                # endpoint at all) -- `field` is omitted, matching
+                # `errors.details_vocabulary.CAPABILITY_UNSUPPORTED`'s own
+                # "omitted where the request as a whole is what is
+                # unsupported" clause.
+                fail("CAPABILITY_UNSUPPORTED", message, details=violation("capability"))
         except FoundationError as exc:
             self._event(context, operation=operation, outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
@@ -1598,7 +1639,7 @@ class ControlAuthority:
     def set_application_enabled(self, application_id: str, enabled: bool) -> None:
         try:
             if not isinstance(enabled, bool):
-                fail("VALIDATION_FAILED", "Application enabled state must be boolean.")
+                fail("VALIDATION_FAILED", "Application enabled state must be boolean.", details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)))
             self._service._set_application_disabled(application_id, not enabled)
             self._control_event(operation="enable_application" if enabled else "disable_application", outcome="allow", target=application_id, event_class="application_lifecycle")
         except FoundationError as exc:
@@ -1685,7 +1726,7 @@ class ControlAuthority:
     def set_authorization_state_available(self, available: bool) -> None:
         try:
             if not isinstance(available, bool):
-                fail("VALIDATION_FAILED", "Authorization state availability must be boolean.")
+                fail("VALIDATION_FAILED", "Authorization state availability must be boolean.", details=violation("request_schema", field="available", declared_type="boolean", observed_type=observed_type_of(available)))
             self._service._credentials.available = available
             self._control_event(operation="set_authorization_state_available", outcome="allow", target="authorization", event_class="control_state")
         except FoundationError as exc:

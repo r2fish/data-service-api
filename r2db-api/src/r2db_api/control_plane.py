@@ -74,7 +74,7 @@ from .audit_query import (
     encode_cursor,
 )
 from .auth import AuthContext, ControlAuthContext, ControlCredentialStore, CredentialStore, _InMemoryWork, compose_bearer_locator
-from .errors import FoundationError, fail
+from .errors import FoundationError, fail, observed_type_of, violation
 from .limits import ControlPlaneLimits
 from .service import ControlAuthority
 from .structured import revoke_last_control_credential_confirmation_phrase
@@ -722,7 +722,13 @@ class ControlPlaneService:
             # deployment; the 1.4.0 obligations that are conditional on
             # `audit_query` being provided stay conditional per version_
             # binding's own text).
-            "contract_version": "1.6.0",
+            #
+            # Flipped to 1.7.0 in phase 9 WP-2e (design docs/design/
+            # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1
+            # (5)): the SAME commit as `service.py`'s own data-plane flip
+            # (C-19's control-plane/data-plane match assert) -- never ahead
+            # of the R-3/R-7 behavior this data-plane host now implements.
+            "contract_version": "1.7.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -875,7 +881,14 @@ class ControlPlaneService:
         # only avoids deriving an operation name from a value that was never
         # validated as meaningful in the first place.
         if not isinstance(enabled, bool):
-            fail("VALIDATION_FAILED", "enabled must be a boolean.")
+            # O-1 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4): contract
+            # 1.7.0's `errors.details_vocabulary` unconditional obligation
+            # (a) covers "every denial", not only the data-plane query/
+            # mutate/schema surface -- this control-plane request field
+            # gets the same 4-key `violation(...)` shape a data-plane
+            # `bind_mutation`'s own `destructive` boolean-shape check
+            # (structured.py) already carries.
+            fail("VALIDATION_FAILED", "enabled must be a boolean.", details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)))
         operation = "enable_application" if enabled else "disable_application"
         self._authorize_role(context, operation=operation, request_id=request_id, target_id=application_id if isinstance(application_id, str) else None)
         self._gate_must_rotate(context, operation=operation, request_id=request_id)
@@ -901,7 +914,9 @@ class ControlPlaneService:
         # this check before the (5) capability refusal below can reject it
         # specifically as a capability question, not a shape one.
         if role not in _ALL_ISSUABLE_ROLES:
-            fail("VALIDATION_FAILED", "role must be one of runtime, developer, control.")
+            # O-1: request-schema shape violation on CredentialIssueRequest's
+            # own `role` field.
+            fail("VALIDATION_FAILED", "role must be one of runtime, developer, control.", details=violation("request_schema", field="role", declared_type="string", observed_type=observed_type_of(role)))
         self._validate_application_id(application_id)
         # (5) capability denial -- BEFORE target resolution/limit/freeze (§8
         # M-1, §2 evaluation-order ruling; Phase 3.5 §1-E/M-8 extends the
@@ -988,7 +1003,16 @@ class ControlPlaneService:
             fail("NOT_FOUND", "Credential was not found.", status=404)
         _enabled, revoked = state
         if revoked:
-            fail("VALIDATION_FAILED", "A revoked credential cannot be rotated.")
+            # O-1: none of the 11 `violated_declaration_vocabulary` words
+            # describes a resource-STATE refusal precisely (this is not a
+            # request-shape/identifier-syntax/deployment-capability
+            # question -- the request itself is well-formed and the
+            # operation exists) -- `unsupported_field` ("a field this
+            # version gives no meaning to") is the closest fit: once
+            # revoked, `credential_id` names a target `rotate_credential`
+            # no longer gives any meaning to. Judgment call, flagged for
+            # supervisor confirmation rather than silently assumed.
+            fail("VALIDATION_FAILED", "A revoked credential cannot be rotated.", details=violation("unsupported_field", field="credential_id"))
         new_secret = _new_secret()
 
         # Phase 6 WP-2 (design D-1(c), item 1): same raw-to-store/composed-
@@ -1048,9 +1072,9 @@ class ControlPlaneService:
         # is even reached, exactly per contract `evaluation_order` (shape
         # validation precedes confirmation evaluation).
         if destructive is not None and not isinstance(destructive, bool):
-            fail("VALIDATION_FAILED", "destructive must be boolean.")
+            fail("VALIDATION_FAILED", "destructive must be boolean.", details=violation("request_schema", field="destructive", declared_type="boolean", observed_type=observed_type_of(destructive)))
         if confirmation is not None and not isinstance(confirmation, str):
-            fail("VALIDATION_FAILED", "confirmation must be a string.")
+            fail("VALIDATION_FAILED", "confirmation must be a string.", details=violation("request_schema", field="confirmation", declared_type="string", observed_type=observed_type_of(confirmation)))
         kind, state = self._locate_credential(credential_id)
         if kind is None:
             fail("NOT_FOUND", "Credential was not found.", status=404)
@@ -1115,7 +1139,7 @@ class ControlPlaneService:
         # same reasoning (an operation-name-selecting field must be
         # validated before it selects one).
         if not isinstance(enabled, bool):
-            fail("VALIDATION_FAILED", "enabled must be a boolean.")
+            fail("VALIDATION_FAILED", "enabled must be a boolean.", details=violation("request_schema", field="enabled", declared_type="boolean", observed_type=observed_type_of(enabled)))
         operation = "enable_credential" if enabled else "disable_credential"
         self._authorize_role(context, operation=operation, request_id=request_id, target_id=credential_id if isinstance(credential_id, str) else None)
         self._gate_must_rotate(context, operation=operation, request_id=request_id)
@@ -1153,7 +1177,11 @@ class ControlPlaneService:
         if self._audit_reader is None:
             self._deny_audit_capability_unsupported(context, request_id=request_id)
         if not isinstance(request, dict):
-            fail("VALIDATION_FAILED", "AuditQueryRequest must be an object.")
+            # O-1: the request as a whole is what is malformed (mirrors
+            # `structured.py`'s own bare `violation("request_schema")` for
+            # a whole-body shape violation, e.g. `bind_mutation`'s
+            # "Mutation shape is not supported.") -- no single `field`.
+            fail("VALIDATION_FAILED", "AuditQueryRequest must be an object.", details=violation("request_schema"))
         event_classes = self._validate_audit_event_classes(request.get("event_classes"))
         after = self._validate_audit_after(request.get("after"))
         limit = self._validate_audit_limit(request.get("limit"))
@@ -1167,25 +1195,36 @@ class ControlPlaneService:
         if value is None:
             return None
         if not isinstance(value, list) or len(value) > _MAX_AUDIT_QUERY_EVENT_CLASSES or not all(isinstance(item, str) for item in value):
-            fail("VALIDATION_FAILED", f"event_classes must be an array of at most {_MAX_AUDIT_QUERY_EVENT_CLASSES} strings.")
+            # O-1: a bounded-list shape violation, mirrors `structured.py`'s
+            # own `validate_projection`'s identical "bounded non-empty
+            # list" check (`violation("request_schema", field="select")`,
+            # no type pair -- the violation may be item-type, or length,
+            # not necessarily the top-level value's own JSON type).
+            fail("VALIDATION_FAILED", f"event_classes must be an array of at most {_MAX_AUDIT_QUERY_EVENT_CLASSES} strings.", details=violation("request_schema", field="event_classes"))
         return value
 
     def _validate_audit_after(self, value: Any) -> tuple[Any, str, str] | None:
         if value is None:
             return None
         if not isinstance(value, str):
-            fail("VALIDATION_FAILED", "after must be a string.")
+            fail("VALIDATION_FAILED", "after must be a string.", details=violation("request_schema", field="after", declared_type="string", observed_type=observed_type_of(value)))
         try:
             return decode_cursor(value)
         except ValueError:
-            fail("VALIDATION_FAILED", "after is not a valid opaque cursor.")
+            # O-1: a well-formed string (the isinstance check above already
+            # passed) that fails to decode as an opaque cursor -- a shape
+            # defect in the cursor's own encoding, not a JSON-type
+            # mismatch, so no type pair (mirrors `field_constraints entry
+            # shape is not supported.` above, which is the same "right
+            # JSON type, wrong internal shape" case).
+            fail("VALIDATION_FAILED", "after is not a valid opaque cursor.", details=violation("request_schema", field="after"))
             raise  # unreachable; fail() always raises
 
     def _validate_audit_limit(self, value: Any) -> int:
         if value is None:
             return self._audit_default_limit
         if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > self._audit_max_limit:
-            fail("VALIDATION_FAILED", f"limit must be an integer between 1 and {self._audit_max_limit}.")
+            fail("VALIDATION_FAILED", f"limit must be an integer between 1 and {self._audit_max_limit}.", details=violation("request_schema", field="limit", declared_type="integer", observed_type=observed_type_of(value)))
         return value
 
     def _shape_audit_query_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -1245,6 +1284,12 @@ class ControlPlaneService:
             message="Audit evidence query is not available on this deployment.",
             event_class="capability_denial", operation="audit_query", target_kind="control_credential",
             actor_id=context.credential_id, actor_type="control_credential", role=context.role, request_id=request_id,
+            # O-1: the `audit_query` capability as a whole is unavailable
+            # on this deployment -- no single request field is what is
+            # unsupported, so `field` stays omitted (CAPABILITY_UNSUPPORTED.
+            # field: "omitted where the request as a whole is what is
+            # unsupported").
+            extra_details=violation("capability"),
         )
 
     # =====================================================================
@@ -1253,7 +1298,13 @@ class ControlPlaneService:
 
     def _validate_application_id(self, application_id: Any) -> None:
         if not isinstance(application_id, str) or not _APPLICATION_ID_PATTERN.fullmatch(application_id):
-            fail("VALIDATION_FAILED", "application_id must match ^[a-z][a-z0-9_]{0,32}$.")
+            # O-1: a fixed request-schema pattern (not an `identifier_
+            # syntax` position -- `application_id` is not one of the
+            # data-plane entity/field identifiers `IDENTIFIER_INVALID`
+            # covers; this control-plane `application_id` shape is its own
+            # `CredentialIssueRequest`/`ApplicationRegistrationRequest`
+            # field, so it stays `VALIDATION_FAILED`/`request_schema`).
+            fail("VALIDATION_FAILED", "application_id must match ^[a-z][a-z0-9_]{0,32}$.", details=violation("request_schema", field="application_id"))
 
     def _locate_credential(self, credential_id: Any) -> tuple[str | None, tuple[bool, bool] | None]:
         """Dual-store resolution (design §2: "探索はidでなく両ストア照会とし、
@@ -1447,7 +1498,13 @@ class ControlPlaneService:
             event_class="capability_denial", operation="issue_credential", target_kind="credential", role=context.role,
             actor_id=context.credential_id, actor_type="control_credential", request_id=request_id,
             application_id=application_id if isinstance(application_id, str) else None,
-            extra_details={"futility": _FUTILITY_DECLARATION},
+            # O-1: `futility` (R-11's own deterrence declaration) is a
+            # DIFFERENT vocabulary from `errors.details_vocabulary` -- both
+            # coexist in the same `details` dict without conflict, so the
+            # 4-key form is added alongside it rather than replacing it.
+            # `field="role"`: `CredentialIssueRequest.role` is the request
+            # field naming the unsupported value (`role=control`).
+            extra_details={"futility": _FUTILITY_DECLARATION, "violated_declaration": "capability", "field": "role"},
         )
 
     def _deny_issuance_frozen(self, context: ControlAuthContext, application_id: str, *, request_id: str) -> None:

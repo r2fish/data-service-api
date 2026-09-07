@@ -561,8 +561,15 @@ async def test_mutate_happy_path_commits(client):
     )
     assert response.status_code == 200
     # CCR-13 WP-5b: `assigned_addresses` now reaches the response -- the
-    # seeded row is id=1, so this insert resolves to id=2.
-    assert response.json() == {"committed": True, "affected": 1, "assigned_addresses": [{"address": {"id": 2}}]}
+    # seeded row is id=1, so this insert resolves to id=2. Contract 1.7.0
+    # (D-7, WP-2e): `request_id` now reaches every successful response too
+    # -- popped here (its own value is opaque/per-request, covered by
+    # `tests/test_denial_details_and_request_id.py`) so this test keeps
+    # pinning the REST of the shape by equality.
+    body = response.json()
+    request_id = body.pop("request_id", None)
+    assert request_id, "a successful MutationResult must carry request_id (D-7)"
+    assert body == {"committed": True, "affected": 1, "assigned_addresses": [{"address": {"id": 2}}]}
 
 
 async def test_mutate_assigned_addresses_are_insert_only_in_operation_order(client):
