@@ -3257,3 +3257,7 @@ a subsequent write outside the old enum) replaces that test module's own
 prior disclosed-gap comment. Additive only: every pre-addendum call site
 (passing a `Sequence`, or omitting `enum`) keeps its exact prior
 byte-for-byte request shape.
+
+### 23.5 追補 (2026-09-07): `attempt_mutation_with_result` gains `destructive`/`confirmation`
+
+`test_c22_dry_run_and_plan.py`'s own `_confirm_probe` presents a destructive `delete` through `attempt_mutation_with_result(..., destructive=True, dry_run=...)`, but §23.1 left that method without the pair -- added now as keyword-only `destructive: bool = False, confirmation: Any = None`, following the identical `VALID_CONFIRMATION` protocol `delete`/`drop_entity`/`schema_operation_with_result`/`BatchOperation` already use, in all 4 registered plugs; byte-compatible for every pre-addendum caller that omits both.

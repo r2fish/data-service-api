@@ -2141,6 +2141,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         where_value: Any,
         expected_revision: str | None = None,
         unique_key: str | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
@@ -2148,12 +2150,31 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields, carried through `_mutate`'s own
         # `extra_body` exactly as `attempt_batch_with_addresses` already
-        # carries `idempotency_key`.
+        # carries `idempotency_key`. port v1.13 追補: `destructive`/
+        # `confirmation` follow the IDENTICAL `VALID_CONFIRMATION`
+        # declare-and-echo protocol `attempt_batch_with_result`'s own
+        # per-operation loop already applies to `BatchOperation.
+        # destructive`/`.confirmation` below -- needed for C-22's `_confirm_
+        # probe`.
         assert isinstance(session, _Session)
         item = self._attempt_mutation_item(
             entity, operation, values=values, where_field=where_field, where_value=where_value,
             expected_revision=expected_revision, unique_key=unique_key,
         )
+        if destructive:
+            item["destructive"] = True
+        if confirmation is not None:
+            if confirmation is VALID_CONFIRMATION:
+                probe_item = dict(item)
+                probe_item["destructive"] = True
+
+                def probe(_probe_item=probe_item) -> None:
+                    self._mutate(session, entity, [dict(_probe_item)])
+
+                peer_confirm = self._resolve_confirmation(confirmation, probe=probe, legacy_token="DELETE")
+                item["confirmation"] = peer_confirm
+            else:
+                item["confirmation"] = confirmation
         extra_body: dict[str, Any] = {}
         if dry_run:
             extra_body["dry_run"] = True

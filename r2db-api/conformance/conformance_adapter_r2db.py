@@ -1382,6 +1382,8 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         where_value: Any,
         expected_revision: str | None = None,
         unique_key: str | None = None,
+        destructive: bool = False,
+        confirmation: Any = None,
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
@@ -1390,10 +1392,17 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         request-unit keywords on `DataService.mutate_result`, exactly like
         the existing `transaction`/`request_id` keywords there -- never
         placed on the operation-item dict (that dict is per-OPERATION;
-        these three are per-REQUEST, D-4(1)/D-6(1))."""
+        these three are per-REQUEST, D-4(1)/D-6(1)). port v1.13 追補:
+        `destructive`/`confirmation` are carried through `_build_mutation_
+        item` exactly as `attempt_batch_with_result` already carries
+        `BatchOperation.destructive`/`.confirmation` -- the SAME
+        `VALID_CONFIRMATION` declare-and-echo protocol `delete` above uses,
+        needed for C-22's `_confirm_probe` (destructive delete under
+        dry_run)."""
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
             expected_revision=expected_revision, unique_key=unique_key,
+            destructive=destructive, confirmation=confirmation, session=session, entity=entity,
         )
         kwargs: dict[str, Any] = {}
         if dry_run:
