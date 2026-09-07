@@ -25,18 +25,27 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 
-#: Contract 1.7.0 `errors.details_vocabulary` applies to the DATA-plane
-#: query/mutate/schema request surface (D-1/D-3) -- these are the full
-#: choke-point / request-shape layer for that surface. `control_plane.py`/
-#: `auth.py`/`credential_store.py`/`ops.py` also call `fail()` with these
-#: 3 codes, but for the CONTROL-plane credential/application-management
-#: surface, which `errors.details_vocabulary` (D-1/D-3, scoped to query/
-#: mutate/schema requests) never covers -- out of this scan's scope by the
-#: same boundary the audit's own 76-site count already drew, not an
-#: omission. `postgres.py` is the backend storage layer UNDERNEATH the
-#: data-plane surface (`layer_rule`'s defence-in-depth exemption) --
-#: included in the scan below via the allowlist, never silently skipped.
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py")
+#: Contract 1.7.0 `errors.details_vocabulary`'s unconditional obligation
+#: (a) (`versioning.version_binding`'s own 1.7.0 paragraph) covers "every
+#: denial" this peer answers with VALIDATION_FAILED/IDENTIFIER_INVALID/
+#: CAPABILITY_UNSUPPORTED -- not only the data-plane query/mutate/schema
+#: request surface. WP-2e rework closure audit (版フリップ監査, ruling
+#: `{scratchpad}/rulings-r3-r7-flip.md` 追補4 O-1): the CONTROL-plane
+#: credential/application-management surface (`control_plane.py`'s own
+#: `fail()`/`_deny(code=..., extra_details=...)` call sites, plus
+#: `control_http.py`/`audit_query.py`, which call neither directly but
+#: are scanned too so a future direct call site there is not silently
+#: missed) is now in scope -- the earlier "out of this scan's scope by
+#: the same boundary the audit's own 76-site count already drew" posture
+#: this comment previously stated was itself the D-1 gap O-1 closes.
+#: `auth.py`/`credential_store.py`/`ops.py` (also named in the pre-O-1
+#: version of this comment) remain OUT of scope -- O-1's own audit did
+#: not enumerate them, and this WP does not extend the scan there
+#: (disclosed as unaddressed, not silently included by inference).
+#: `postgres.py` is the backend storage layer UNDERNEATH the data-plane
+#: surface (`layer_rule`'s defence-in-depth exemption) -- included in
+#: the scan below via the allowlist, never silently skipped.
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -88,7 +97,26 @@ def _fail_call_sites(path: Path) -> list[tuple[int, str, bool]]:
     AST-based (never regex/`grep`) so a multi-line call, an f-string
     message, or a code constant built via string concatenation is still
     found -- the audit's own explicit reason for rejecting a `grep`-based
-    count."""
+    count.
+
+    O-1 (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md` 追補4):
+    also matches `self._deny(code=<CODE literal>, ..., extra_details=...)`
+    -- `control_plane.py`'s own R-6/R-11 durable-denial helper, which
+    raises through `fail(code, message, ..., details=details)` internally
+    but with `code`/`details` both DYNAMIC (a local variable, never a
+    literal at that inner call site) -- the bare `fail`-name match above
+    can never see a `_deny`-mediated denial at all, which would silently
+    exempt every one of `_deny`'s own callers from this scan. `code=`/
+    `extra_details=` are matched the same way `fail`'s own first
+    positional arg / `details=` keyword are: a literal string in
+    `_VOCAB_CODES`, and `_has_violated_declaration` run over whatever
+    `extra_details` is (a `violation(...)` call, or a dict literal that
+    spells `violated_declaration` out directly -- `_deny` itself merges
+    `extra_details` into its own `{"audited": ..., "attribution": ...}`
+    base dict via `dict.update`, so a caller's own `extra_details` value
+    is exactly the fragment this scan needs to inspect, never the whole
+    merged dict `_deny` builds at runtime, which this static scan never
+    sees)."""
     tree = ast.parse(path.read_text(), filename=str(path))
     sites: list[tuple[int, str, bool]] = []
     for node in ast.walk(tree):
@@ -96,14 +124,20 @@ def _fail_call_sites(path: Path) -> list[tuple[int, str, bool]]:
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
-        if name != "fail" or not node.args:
-            continue
-        first = node.args[0]
-        if not (isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value in _VOCAB_CODES):
-            continue
-        details_kw = next((kw for kw in node.keywords if kw.arg == "details"), None)
-        has_details = details_kw is not None and _has_violated_declaration(details_kw.value)
-        sites.append((node.lineno, first.value, has_details))
+        if name == "fail" and node.args:
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value in _VOCAB_CODES):
+                continue
+            details_kw = next((kw for kw in node.keywords if kw.arg == "details"), None)
+            has_details = details_kw is not None and _has_violated_declaration(details_kw.value)
+            sites.append((node.lineno, first.value, has_details))
+        elif name == "_deny":
+            code_kw = next((kw for kw in node.keywords if kw.arg == "code"), None)
+            if code_kw is None or not (isinstance(code_kw.value, ast.Constant) and isinstance(code_kw.value.value, str) and code_kw.value.value in _VOCAB_CODES):
+                continue
+            extra_kw = next((kw for kw in node.keywords if kw.arg == "extra_details"), None)
+            has_details = extra_kw is not None and _has_violated_declaration(extra_kw.value)
+            sites.append((node.lineno, code_kw.value.value, has_details))
     return sites
 
 
@@ -277,6 +311,28 @@ def test_ast_full_count_matches_the_audit_site_count():
     counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py")}
     assert counts == {"structured.py": 93, "service.py": 10, "limits.py": 5, "http.py": 8}, counts
     assert sum(counts.values()) >= 76, counts
+
+
+def test_control_plane_scan_is_not_vacuous():
+    """O-1's own non-空振り pin, mirroring the data-plane pin just above:
+    `control_plane.py` carries 12 direct `fail(...)` sites (all 12 now
+    4-key, per this scan's own 0-count test) PLUS 2 `_deny(code=...)`
+    sites (`_deny_audit_capability_unsupported`/`_deny_role_control`,
+    both CAPABILITY_UNSUPPORTED) that the bare `fail`-name match alone
+    would never see -- 14 total. `control_http.py`/`audit_query.py`
+    genuinely carry 0 (neither calls `fail`/`_deny` with a literal
+    vocabulary code at all -- `control_http.py` delegates its own request-
+    shape checks to `http.py`'s shared `_check_object_shape`, already
+    counted in that file's own pin above; `audit_query.py`'s `decode_
+    cursor` raises a bare `ValueError` that `control_plane.py`'s own
+    `_validate_audit_after` translates, already counted there) -- pinned
+    at 0 rather than omitted, so a scanner that silently matched nothing
+    at all in `control_plane.py` either (a real bug: `fail`/`_deny`
+    typo'd, or the wrong node type checked) would NOT be indistinguishable
+    from the genuine 0 these two files have; `control_plane.py`'s own
+    non-zero 14 is what proves the scanner actually visited real code."""
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("control_plane.py", "control_http.py", "audit_query.py")}
+    assert counts == {"control_plane.py": 14, "control_http.py": 0, "audit_query.py": 0}, counts
 
 
 def test_allowlist_entries_match_real_bare_call_sites():

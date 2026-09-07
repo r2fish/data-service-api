@@ -1051,6 +1051,24 @@ def bind_schema_operation(operation: Any, *, developer: bool) -> BoundSchemaOper
                 )
             parsed_constraints: dict[str, FieldConstraints] = {}
             for declared_field, spec in raw_field_constraints.items():
+                # Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4,
+                # 版フリップ監査差し戻し): a `field_constraints` KEY that is
+                # itself an identifier-syntax violation must not be echoed
+                # into `field` (SI-10 -- the key can carry SQL fragments/
+                # control characters, exactly the `values`-key regression
+                # N-1 closed) -- checked FIRST, stopping at the container
+                # position ("field_constraints", N-1's own container-
+                # position convention -- `_reject_reserved_field`/
+                # `_reject_reserved_prefix`-style reservation checks are
+                # deliberately NOT run here, unlike `fields`'s own loop
+                # above: `field_constraints` never creates a field by
+                # itself, so a reserved-shaped key here is caught by the
+                # "not present in fields" branch below instead, same as
+                # any other key `fields` never declared). A syntactically
+                # VALID identifier that simply is not in `fields` still
+                # falls through to that branch unchanged (N-1: "有効な識別子
+                # ...予約名など はこれまでどおり path に含めてよい").
+                validate_identifier(declared_field, field="field_constraints")
                 if declared_field not in fields:
                     # Monitor ruling m-1 (rulings-wp2a-review.md, contract
                     # corrigendum, verbatim list of `constraint_declaration`

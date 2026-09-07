@@ -182,6 +182,22 @@ _PROBES: list[tuple[str, "object", "object"]] = [
         None,
         lambda s, r, d, m: s.mutate(r, "notes", [{"operation": "insert", "values": {m: "x"}}]),
     ),
+    # Ruling O-3 (`{scratchpad}/rulings-r3-r7-flip.md` 追補4, 版フリップ監査
+    # 差し戻し): the marker used AS a `field_constraints` dict KEY itself --
+    # the audit found this exact site still echoed the malformed key
+    # verbatim into `field` (`field_constraints/<key>`, `violated_
+    # declaration: constraint_declaration`) even after N-1's `values`-key
+    # fix, because it never ran `validate_identifier` at all before
+    # building that path. `field` must now be the container position
+    # `field_constraints` only, never containing the marker's own text --
+    # the generic scan below already asserts this (marker not present in
+    # ANY of the 4 keys), so this probe is this file's own direct exercise
+    # of that assertion for the bug O-3 fixed.
+    (
+        "IDENTIFIER_INVALID field_constraints key syntax (marker used AS the key itself)",
+        None,
+        lambda s, r, d, m: s.schema(d, {"operation": "create_entity", "entity": "o3probe", "fields": ["a"], "field_constraints": {m: {"nullable": False}}}),
+    ),
     (
         "CAPABILITY_UNSUPPORTED mutation operation not supported (choke point, field = operations/<i>/operation)",
         None,

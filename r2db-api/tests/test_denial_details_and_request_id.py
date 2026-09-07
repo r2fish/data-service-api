@@ -621,15 +621,16 @@ def test_verify_declarations_exit_code_table_has_f14():
 
 
 def test_contract_170_capabilities_document_declares_every_required_capability_enabled():
-    """WP-2e rework (ruling L-2): `ops._contract_170_capabilities_document`
-    is the REAL `DataService.capabilities()` output for a throwaway
-    in-memory application -- not a hand-written stand-in -- so this pins
-    that the production code path actually satisfies F-14's own
-    requirement, catching a future regression in `service.py` the same
-    gate operators already run would catch. M-7: this document's own
-    `limits` block (not a separate `ResourceLimits()`) is what the limit-
-    class half of the check below now reads too."""
-    document = r2db_ops._contract_170_capabilities_document()
+    """WP-2e rework (ruling L-2): `ops._served_capabilities_document`
+    (O-7 prep rename, ruling addendum4 O-7 -- previously `_contract_170_
+    capabilities_document`) is the REAL `DataService.capabilities()`
+    output for a throwaway in-memory application -- not a hand-written
+    stand-in -- so this pins that the production code path actually
+    satisfies F-14's own requirement, catching a future regression in
+    `service.py` the same gate operators already run would catch. M-7:
+    this document's own `limits` block (not a separate `ResourceLimits()`)
+    is what the limit-class half of the check below now reads too."""
+    document = r2db_ops._served_capabilities_document()
     platform_declarations.check_contract_170_declarations(
         document, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
     )  # must not raise

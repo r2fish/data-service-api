@@ -36,19 +36,29 @@ def fail(code: str, message: str, *, status: int = 400, details: dict[str, Any] 
 # --------------------------------------------------------------------------
 
 
-def violation(
-    violated_declaration: str,
-    *,
-    field: str | None = None,
-    declared_type: str | None = None,
-    observed_type: str | None = None,
-) -> dict[str, Any]:
+def violation(violated_declaration, *, field=None, declared_type=None, observed_type=None):
     """Build a `details` dict using exactly the 4 keys `errors.
     details_vocabulary` names for `VALIDATION_FAILED`/`IDENTIFIER_INVALID`/
     `CAPABILITY_UNSUPPORTED` -- omitting any key whose value is `None`
     rather than carrying it as an explicit null (the required-key rules,
-    D-3 (4), are stated as key ABSENCE/PRESENCE, not as a null value)."""
-    details: dict[str, Any] = {"violated_declaration": violated_declaration}
+    D-3 (4), are stated as key ABSENCE/PRESENCE, not as a null value).
+
+    O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): this signature/body is deliberately UN-annotated, unlike the
+    rest of this `from __future__ import annotations` module -- MitateDB-
+    api's own same-named `violation`/`observed_type_of` (`mitatedb_api/
+    errors.py`) carry no type annotations at all (that module does not
+    import `from __future__ import annotations`), and the peer-symmetry
+    isomorphism test's own `_normalize` (`tests/test_audit_query.py`)
+    does not fold annotation text away -- an annotated signature here
+    would normalize to a DIFFERENT string than the sibling's un-annotated
+    one and never pin isomorphic, even though the two bodies agree in
+    every way that matters. r2db's own shape is the anchor both peers'
+    text is meant to converge on (O-7: "どちらに寄せるかは r2db 形を基準にし");
+    MitateDB's own body already matches this one once its docstring is
+    stripped (`_normalize`'s own first step) -- the isomorphism table row
+    addition itself is pair-closing work, not done here."""
+    details = {"violated_declaration": violated_declaration}
     if field is not None:
         details["field"] = field
     if declared_type is not None:
@@ -58,7 +68,7 @@ def violation(
     return details
 
 
-def observed_type_of(value: Any) -> str:
+def observed_type_of(value):
     """The `errors.details_vocabulary` `observed_type` vocabulary word for
     a JSON-decoded Python value -- `string`/`integer`/`number`/`boolean`/
     `object`/`array`/`null`. `bool` is checked before `int` (a Python

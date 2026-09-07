@@ -1435,7 +1435,7 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     try:
         applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
         platform_declarations.check_contract_170_declarations(
-            _contract_170_capabilities_document(),
+            _served_capabilities_document(),
             applied_by_application,
             platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
@@ -1449,8 +1449,23 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
     return 0
 
 
-def _contract_170_capabilities_document() -> dict[str, Any]:
-    """The REAL `DataService.capabilities()` document for a throwaway,
+def _served_capabilities_document() -> dict[str, Any]:
+    """O-7 prep (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    追補4): extracted out of `_verify_declarations_checks` under this
+    SAME name on both peers, so that function's own body -- one of the
+    isomorphism-pinned symbols -- calls this helper with no arguments and
+    carries no peer-specific complexity of its own (MitateDB's own
+    equivalent, unlike this one, first has to build a `FoundationConfig`
+    from `declarations.surfaces` before it can construct its own probe
+    cell -- that peer-specific difference now lives entirely INSIDE this
+    helper's own body on each peer, never inside `_verify_declarations_
+    checks`'s). Previously named `_contract_170_capabilities_document`
+    (still the name mirrored 1:1 on MitateDB-api before this rework); the
+    isomorphism table row addition itself is pair-closing work, not done
+    here (O-7's own instruction: "同型性表への行追加は監督の pair-closing で
+    行う").
+
+    The REAL `DataService.capabilities()` document for a throwaway,
     entirely in-memory application/credential -- never a second, hand-
     written copy of what `service.py` is expected to declare (WP-2e
     rework, audit-wp2e.md D-2, ruling L-2 = (A)): this exercises the SAME
