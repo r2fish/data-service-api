@@ -580,7 +580,7 @@ gh repo view <GITHUB_OWNER>/<REPO_NAME> --json visibility
 | 2 hash 参照の一括更新 | 監督 | 2026-09-08 | 成功 (`tools/rewrite_hash_refs.py --check / --apply / --verify`、44 ファイル 718 件) | `--verify` の未一致 = 0 / 非一意 = 0 (allowed 19 = UUID 断片・sha256 digest・合成 id) |
 | 3 delete + 再作成 + push | 依頼者 (delete + 再作成、r2fish、Web UI、sudo mode 経由) / 監督 (push) | 2026-09-08 | 成功: 同名リポジトリを delete → private・初期化なしで再作成 (`isEmpty=true` を確認) → gate clone から `git push --all` (28 branch、tag 0) | ref 名の集合が一致 (はい) — 削除前の 28 ref と一致、default branch = main |
 | 4 再作成後の remote からの履歴スキャン | 監督 | 2026-09-08 | 成功 | 掛けたクローン = 再作成後の remote からの新規 clone (`gh repo clone`、HEAD `a15f03a`) / `total_flagged` = 0 (482 commit、ツリー 0、identity 1 種、`rewrite_hash_refs.py --verify` 残存 0) |
-| 5 clone・worktree の作り直し | | | | 作り直した対象 = |
+| 5 clone・worktree の作り直し | 監督 (作業機) / 運用者 (VPS) | 2026-09-08 (作業機) | 作業機: linked worktree 17 本を `git worktree remove --force` + `prune` で除去、共有 checkout を再作成後の `origin/main` に `reset --hard`、旧 local branch を削除して 27 本を再追跡、`reflog expire` + `gc --prune=now` で旧 object を除去 (旧 hash は到達不能・object 不在を確認、ローカル履歴走査 0 件)。scratch の書換前後 clone・置換規則・mailmap は削除、commit-map と ref 一覧は運用者記録へ保存 | 作り直した対象 = 共有 checkout 1 + worktree 17 (VPS 側は `git archive` 配布のため `.git` 無し — 次回配布時に新履歴から取り直す) |
 | 6 credential の revoke + 再発行 | | | | 2 件とも revoke + 再発行 (rotate ではない) |
 | 6.5 R7 の人手確認 | | | | 確認した語数 = / ヒット総数 = |
 | 7 visibility の切替 | | | | |
