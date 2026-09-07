@@ -132,6 +132,53 @@ def test_schema_plan_digest_covers_constraint_and_destructive_fields() -> None:
     assert compute_plan_token({**destructive_base, "confirmation": "drop something-else"}, 1) != destructive_token
 
 
+def test_mutation_plan_digest_uses_contract_item_shape_and_no_default_for_values() -> None:
+    """H-2 (`{scratchpad}/rulings-r4.md` addendum 2): each element of
+    `operations` is digested in the contract `Mutation`/`ScopedMutation`
+    key shape -- `operation`/`values`/`where`/`expected_revision`/
+    `destructive`/`confirmation` -- exactly as received, never this
+    peer's own internal item shape (`type`/`filters`/`confirm`), and
+    `values` is never defaulted: an operation item that OMITS `values`
+    digests differently from one that carries `values: {}` explicitly."""
+    omitted = {"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}]}]}
+    empty = {"operations": [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {}}]}
+    assert compute_plan_token(omitted, 1) != compute_plan_token(empty, 1)
+    # Contract key names survive verbatim in the normalized bytes -- proof
+    # this is the `Mutation` shape, not a peer-internal translation of it.
+    normalized = normalize_request_for_plan({"operations": [{"operation": "insert", "values": {"a": 1}, "expected_revision": "5"}]})
+    assert b'"operation"' in normalized
+    assert b'"values"' in normalized
+    assert b'"expected_revision"' in normalized
+
+
+def test_schema_plan_digest_distinguishes_omitted_field_type_from_explicit_json() -> None:
+    """H-3 (`{scratchpad}/rulings-r4.md` addendum 2): the schema digest
+    never fills in `field_type`'s own default -- an `add_field` request
+    that OMITS `field_type` (falls back to the `json` type at apply time,
+    per the contract's own `field_types` description) digests differently
+    from one that spells `field_type: "json"` explicitly, even though both
+    apply identically."""
+    base = {"operation": "add_field", "entity": "widgets", "field": "extra"}
+    omitted_token = compute_plan_token(base, 1)
+    explicit_json_token = compute_plan_token({**base, "field_type": "json"}, 1)
+    assert omitted_token != explicit_json_token
+
+
+def test_schema_plan_digest_covers_keys_this_operation_never_reads() -> None:
+    """H-3: a key this peer's `apply_schema` never reads for a given
+    operation (`index`/`unique`/`revision` on `add_field`, `destructive`/
+    `confirmation` on a non-destructive operation) still changes the
+    digest -- the digest commits to the request object AS RECEIVED, never
+    to only the subset of keys this operation happens to consume."""
+    base = {"operation": "add_field", "entity": "widgets", "field": "extra", "field_type": "string"}
+    token = compute_plan_token(base, 1)
+    assert compute_plan_token({**base, "index": "some_index"}, 1) != token
+    assert compute_plan_token({**base, "unique": True}, 1) != token
+    assert compute_plan_token({**base, "revision": "42"}, 1) != token
+    assert compute_plan_token({**base, "destructive": True}, 1) != token
+    assert compute_plan_token({**base, "confirmation": "whatever"}, 1) != token
+
+
 # ===========================================================================
 # Section 2: `ApplicationCell.transact` -- mutation-side dry_run/plan.
 # ===========================================================================
@@ -703,6 +750,49 @@ def test_service_mutate_result_real_response_carries_no_plan() -> None:
     result = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "x"}}])
     assert result.committed is True
     assert result.plan is None
+
+
+def test_service_mutate_plan_from_one_entity_is_rejected_for_a_different_entity() -> None:
+    """H-1 (`{scratchpad}/rulings-r4.md` addendum 2): the plan digest
+    commits to the request's own target entity -- `mutate`'s own URL path
+    segment, not a `MutationRequest` body field. A plan taken from entity
+    A's dry_run, presented against a DIFFERENT entity B's real apply
+    (identical `operations`/`transaction`, identical schema_revision --
+    `widgets` is created BEFORE the dry_run below, so no schema change
+    lands between the two calls), is refused PRECONDITION_FAILED
+    fail-closed, never silently honored as if it were entity B's own
+    plan."""
+    service, _control = build_service()
+    developer = developer_context(service)
+    service.schema(developer, {"operation": "create_entity", "entity": "widgets", "fields": ["body"]})
+    runtime = runtime_context(service)
+    operations = [{"operation": "insert", "values": {"body": "x"}}]
+    plan_for_notes = service.mutate_result(runtime, "notes", operations, dry_run=True).plan
+    assert plan_for_notes is not None
+    with pytest.raises(FoundationError) as exc:
+        service.mutate_result(runtime, "widgets", operations, plan=plan_for_notes)
+    assert exc.value.code == "PRECONDITION_FAILED"
+    assert exc.value.details == {"violated_declaration": "plan"}
+    assert service.query(runtime, "widgets", select=["id"]) == []
+
+
+def test_service_schema_plan_from_one_entity_is_rejected_for_a_different_entity() -> None:
+    """H-1 schema-side sibling: `SchemaOperationRequest.entity` is already
+    a required contract-level body field on this peer (this peer's own
+    `/v1/schema/operations` route carries no `{entity}` URL segment at
+    all), so it was already part of the plan digest object before this WP
+    -- fixed here as a fixation test (not a behaviour change here, unlike
+    the mutate-side test above, where `entity` is a path segment that is
+    NOT a `MutationRequest` body field and genuinely needed adding)."""
+    service, _control = build_service()
+    developer = developer_context(service)
+    service.schema(developer, {"operation": "create_entity", "entity": "widgets", "fields": ["body"]})
+    dry = service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "extra", "dry_run": True})
+    assert dry.plan is not None
+    with pytest.raises(FoundationError) as exc:
+        service.schema(developer, {"operation": "add_field", "entity": "widgets", "field": "extra", "plan": dry.plan})
+    assert exc.value.code == "PRECONDITION_FAILED"
+    assert exc.value.details == {"violated_declaration": "plan"}
 
 
 def test_service_schema_always_returns_schema_outcome() -> None:

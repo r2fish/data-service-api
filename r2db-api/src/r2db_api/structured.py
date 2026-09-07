@@ -1855,8 +1855,11 @@ class ApplicationCell:
         commit vs rollback; it never branches mid-loop (D-4 (2): a
         mid-loop branch would make "reaches the same decision" false).
         `plan_request`, when given, is the contract-level request object
-        `service.py` assembled (`operations`/`transaction`/`budget`,
-        never `plan`/`dry_run` themselves) -- `expected_plan` below is
+        `service.py` assembled (`entity`/`operations`/`transaction`/
+        `budget`, never `plan`/`dry_run` themselves -- H-1, `{scratchpad}/
+        rulings-r4.md` addendum 2: `entity` is this request's own target,
+        the URL path segment, at the object's own top level) --
+        `expected_plan` below is
         computed from it together with THIS entity's Application's own
         `schema_revision`, read once, before the loop runs (mutations
         never advance it, so reading it before or after is the identical

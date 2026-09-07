@@ -1160,15 +1160,23 @@ class DataService:
                 deadline = self._clock() + self.limits.execution_ms / 1000
                 # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level
                 # request object a `plan` commits to -- `operations`/
-                # `transaction`/`budget`, never `entity` (`MutationRequest`
-                # has no `entity` property at all; it is a URL path
-                # segment, not a body field) and never `dry_run`/`plan`
-                # themselves (S-a's own exclusion pair, applied again
-                # defensively inside `normalize_request_for_plan`).
+                # `transaction`/`budget`, plus this request's own target
+                # `entity` (H-1, `{scratchpad}/rulings-r4.md` addendum 2:
+                # "computed from the request itself" includes the request's
+                # URL path segment, not only its body -- `MutationRequest`
+                # itself has no `entity` property, but the plan digest is
+                # not scoped to `MutationRequest` alone). Placed at the
+                # object's own top level so a plan captured for one entity's
+                # dry_run, presented against a DIFFERENT entity's apply
+                # (identical `operations`/`transaction`/`budget`, identical
+                # schema_revision), fails PRECONDITION_FAILED fail-closed,
+                # rather than being silently honored. `dry_run`/`plan`
+                # themselves are excluded (S-a's own exclusion pair, applied
+                # again defensively inside `normalize_request_for_plan`).
                 # G-1: `transaction` is included only when the caller's own
                 # request object actually carried the key (see above) --
                 # never the resolved/defaulted value.
-                plan_request: dict[str, Any] = {"operations": operations}
+                plan_request: dict[str, Any] = {"entity": entity, "operations": operations}
                 if transaction is not None:
                     plan_request["transaction"] = transaction
                 if budget is not None:
