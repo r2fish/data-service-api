@@ -2464,6 +2464,7 @@ class ConformanceAdapter(ABC):
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
+        transaction: str | None = None,
     ) -> Mapping[str, Any]:
         """`attempt_mutation`'s exact request shape, extended with the
         contract's own request-level `dry_run`/`plan`/`budget` (port v1.13,
@@ -2506,6 +2507,22 @@ class ConformanceAdapter(ABC):
         this operation, never interpreted by this adapter. Each defaults to
         its own byte-compatible absence (`False`/`None`/`None`), identical
         to omitting it from the request entirely.
+
+        `transaction` (port v1.13 追補 2, C-22 leg (10)'s own digest-scope
+        proof) carries the contract's PRE-EXISTING `MutationRequest.
+        transaction` key (`"atomic"`/`"best_effort"`, spec/data-service-
+        api.v1.json) through unedited, exactly like `plan`/`budget` above --
+        never validated or defaulted by this adapter. Defaults to `None`
+        (omit the key entirely, byte-compatible with every pre-existing
+        caller that never names this keyword). Chosen for C-22's plan-
+        digest-scope leg specifically because, unlike `budget`
+        (`request_budget`-gated) or `dry_run`/`plan` themselves,
+        `transaction` is not behind any declare-first capability gate --
+        every registered peer's `MutationRequest` schema carries it
+        unconditionally, so a plan taken without it, re-presented WITH it
+        (even the same `"atomic"` value the peer already defaults to), is
+        the one always-available way to prove the plan's digest is not
+        `operations`-only without depending on what any one peer declares.
 
         Returns a `Mapping` with:
           - `affected`: `int`.

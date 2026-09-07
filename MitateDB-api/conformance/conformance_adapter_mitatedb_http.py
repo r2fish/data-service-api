@@ -2146,6 +2146,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
+        transaction: str | None = None,
     ) -> Mapping[str, Any]:
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields, carried through `_mutate`'s own
@@ -2155,7 +2156,12 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # declare-and-echo protocol `attempt_batch_with_result`'s own
         # per-operation loop already applies to `BatchOperation.
         # destructive`/`.confirmation` below -- needed for C-22's `_confirm_
-        # probe`.
+        # probe`. port v1.13 追補 2 (C-22 leg (10)): `transaction` is
+        # `MutationRequest`'s own PRE-EXISTING top-level key, carried
+        # through `extra_body` the same way, defaulting to `None`
+        # (omitted, `http.py::post_mutate`'s own `body.get("transaction",
+        # "atomic")` default then applies exactly as every pre-addendum
+        # caller already gets).
         assert isinstance(session, _Session)
         item = self._attempt_mutation_item(
             entity, operation, values=values, where_field=where_field, where_value=where_value,
@@ -2182,6 +2188,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             extra_body["plan"] = plan
         if budget:
             extra_body["budget"] = dict(budget)
+        if transaction is not None:
+            extra_body["transaction"] = transaction
         result = self._mutate(session, entity, [item], extra_body=extra_body or None)
         return {
             "affected": result["affected"],

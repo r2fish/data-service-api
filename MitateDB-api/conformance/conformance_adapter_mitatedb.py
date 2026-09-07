@@ -1916,6 +1916,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         dry_run: bool = False,
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
+        transaction: str | None = None,
     ) -> Mapping[str, Any]:
         """port v1.13 (design D-4/D-6): always routed through `session.
         transact()` (the same real atomic dispatcher `attempt_batch_with_
@@ -1929,7 +1930,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         and-echo protocol `attempt_batch_with_result`'s own per-operation
         loop already applies to `BatchOperation.destructive`/`.confirmation`
         below -- needed for C-22's `_confirm_probe` (destructive delete
-        under dry_run)."""
+        under dry_run). port v1.13 追補 2 (C-22 leg (10)): `transaction`
+        carries the contract's PRE-EXISTING `MutationRequest.transaction`
+        key through to `transact()` the SAME way `dry_run`/`plan`/`budget`
+        already are -- written for this peer's own real eventual entry
+        point (mirrors this class's `create_entity_with_declared_types`/
+        `add_field_with_declared_type` convention: real shape, not a
+        stub), defaulting to `None` (omitted, byte-compatible with every
+        pre-addendum caller)."""
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
         item: dict[str, Any] = {"type": operation, "collection": entity, "values": dict(values or {})}
         if expected_revision is not None:
@@ -1966,6 +1974,8 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             kwargs["plan"] = plan
         if budget:
             kwargs["budget"] = dict(budget)
+        if transaction is not None:
+            kwargs["transaction"] = transaction
 
         def op() -> Sequence[Any]:
             return session.transact([item], **kwargs)
