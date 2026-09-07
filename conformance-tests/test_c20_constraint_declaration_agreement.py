@@ -61,6 +61,19 @@ commit is not observable from this common suite -- (6) below only observes
 between a separate scan and a separate DDL transaction. That race is
 peer-local territory (design D-2 実装の形 4, disclosed there for WP-3a).
 
+**Design v1.5 補正 (監督裁定 A, `{scratchpad}/rulings-wp3a-review.md`)**: the
+`enabled`/`partial`/`planned` branch also covers `alter_field`'s corrected
+`enum` semantics -- an `alter_field` that OMITS `enum` leaves the field's
+existing `enum` untouched (leg (8) below). **Disclosed scope limit (`enum:
+null` leg NOT added)**: `alter_field enum: null` clearing the field's enum
+is the OTHER half of that same correction, and is NOT tested here --
+`conformance-tests/adapter.py`'s `schema_operation_with_result(..., enum:
+Sequence[Any] | None = None)` collapses "omit the key" and "send an
+explicit JSON null" onto the same Python `None`, so this port cannot
+currently make that call carry a literal `enum: null` on the wire without
+a tri-state sentinel addition (out of this WP's file scope). See the
+comment at leg (9) below for the full disclosure.
+
 **Overlaps C-17** (same declaration-agreement posture, a different
 declaration: C-17 fixes mutation-class/addressability/uniqueness, this row
 fixes field-level value constraints).
@@ -90,6 +103,44 @@ def _catalog_row(iso: ConformanceAdapter, developer, entity: str) -> dict:
     return {row["entity"]: row for row in catalog["entities"]}[entity]
 
 
+def _revision_of(result: dict) -> str:
+    """The response `revision` of a real, successful `schema_operation_
+    with_result` call. `SchemaOperationResult.revision` (spec/data-
+    service-api.v1.json `schemas.SchemaOperationResult`) is `required`
+    and always present on a real response -- unlike `EntityDescriptor`,
+    which carries no `revision` property at all (`definitions.
+    EntityDescriptor`, `additionalProperties: false`), and unlike
+    `CatalogDocument`, which carries no document-level revision either.
+    A catalog row's `.get("revision")` is therefore always `None`; this
+    helper is the ONLY contract-defined way to observe a real revision
+    value."""
+    revision = result.get("revision")
+    assert revision is not None, f"schema_operation_with_result carries no 'revision' -- {result!r}"
+    return revision
+
+
+def _revision_advanced_by_one(before: str, after: str) -> bool:
+    """True when `after` is exactly one real commit ahead of `before`.
+
+    Both currently-registered peers keep their schema revision as a
+    monotonic integer counter incremented by exactly one per committed
+    schema operation (`r2db-api/src/r2db_api/structured.py:1583`
+    `self.schema_revision += 1`; `MitateDB-api/src/mitatedb_api/
+    backend_sqlite.py:207`/`:250` `self._schema_revision += 1`; the
+    Postgres backends mirror this via `_bump_revision`/`_bump_schema_
+    revision`), and `SchemaOperationResult.revision` reports that
+    counter stringified (`schema_operation_with_result`'s own
+    docstring, `conformance-tests/adapter.py`). Comparing
+    `int(after) == int(before) + 1` catches a CONFLICT-refused (or
+    CAPABILITY_UNSUPPORTED-refused) `alter_field` that silently also
+    bumps the counter -- exactly the mutation design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md's C-20 (6)
+    row guards against (monotone S-g) -- as a delta of 2 rather than 1,
+    when exactly one real, harmless schema commit is known to separate
+    `before` and `after`."""
+    return int(after) == int(before) + 1
+
+
 def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isolated) -> None:
     iso = isolated
     status = _status(adapter)
@@ -101,7 +152,8 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         with pytest.raises(ConformanceDenial) as ei:
             iso.schema_operation_with_result(
                 developer, entity, "create_entity",
-                fields=["status"], field_constraints={"status": {"enum": ["a", "b"], "nullable": False}},
+                fields=["status"], field_types={"status": "string"},
+                field_constraints={"status": {"enum": ["a", "b"], "nullable": False}},
             )
         assert ei.value.code == "CAPABILITY_UNSUPPORTED", (
             f"{adapter.name}: constraint_declarations is 'unavailable', but a create_entity carrying "
@@ -115,7 +167,9 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         plain_entity = fresh_identifier("c20u2")
         iso.create_entity(developer, plain_entity, {"label": "text"})
         with pytest.raises(ConformanceDenial) as ei2:
-            iso.schema_operation_with_result(developer, plain_entity, "add_field", field="tag", enum=["x", "y"])
+            iso.schema_operation_with_result(
+                developer, plain_entity, "add_field", field="tag", field_type="string", enum=["x", "y"],
+            )
         assert ei2.value.code == "CAPABILITY_UNSUPPORTED", (
             f"{adapter.name}: add_field carrying 'enum' was refused with {ei2.value.code!r} instead of "
             "CAPABILITY_UNSUPPORTED while constraint_declarations is unavailable"
@@ -133,8 +187,33 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         # declarations` is declared) -- `SurfaceAbsent` is accepted here
         # exactly like the upsert leg below accepts it for `create_unique_
         # index`, never silently swallowed for any OTHER exception.
+        # C-20 test defect fix (subordinate ruling, WP-3a's first real
+        # 'enabled' run): `row.get("revision")` read a key `EntityDescriptor`
+        # does not define (see `_revision_of`'s docstring above), so the
+        # comparison below always held vacuously (`None == None`) rather
+        # than asserting anything. It is dropped here rather than patched:
+        # this branch's own refusal is `SurfaceAbsent`/`CAPABILITY_
+        # UNSUPPORTED` BEFORE execution, and on this port revision every
+        # currently-registered schema-mutation call this branch could use
+        # as an independent "real revision" probe is itself unusable --
+        # `alter_field` is the very primitive under refusal here (`Surface
+        # Absent` on a peer with no real entry point at all), and `add_
+        # field`/`create_entity`'s own in-process response does not carry
+        # a revision on every currently-registered adapter either
+        # (`MitateDB-api/src/mitatedb_api/cell.py`'s `add_field`/`create_
+        # collection` return nothing; only the HTTP surface's `post_schema`
+        # computes one post-hoc via `_post_schema_revision`). Design docs/
+        # design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+        # §6.2's own `unavailable`-branch assert list (D-2) does not
+        # require a revision check here -- only "refused before execution,
+        # zero side effects" -- so the `field_constraints`-unchanged
+        # assert below (a real, working check) already carries that
+        # requirement for this leg; the revision-unchanged assert design
+        # adds is specific to (6) in the `enforced` branch below, where
+        # `alter_field` is a genuine, executing primitive whose own
+        # response revision this suite can and does rely on.
+        row = _catalog_row(iso, developer, plain_entity)
         constraints_before = row.get("field_constraints")
-        revision_before_alter = row.get("revision")
         try:
             iso.schema_operation_with_result(developer, plain_entity, "alter_field", field="label", nullable=False)
         except SurfaceAbsent:
@@ -148,9 +227,6 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
             assert row_after_alter.get("field_constraints") == constraints_before, (
                 f"{adapter.name}: a refused alter_field must not change the catalog's field_constraints"
             )
-            assert row_after_alter.get("revision") == revision_before_alter, (
-                f"{adapter.name}: a refused alter_field must not advance the schema revision"
-            )
         else:
             pytest.fail(
                 f"{adapter.name}: alter_field carrying 'nullable' succeeded while constraint_declarations is "
@@ -163,6 +239,7 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         iso.schema_operation_with_result(
             developer, entity, "create_entity",
             fields=[enum_field, nonnull_field, "label"],
+            field_types={enum_field: "string", nonnull_field: "string"},
             field_constraints={enum_field: {"enum": ["a", "b"]}, nonnull_field: {"nullable": False}},
         )
 
@@ -355,15 +432,40 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         # enum value ("b") that the narrower alter_field below excludes,
         # so the conflict is genuine (the earlier rows above only ever
         # carry "a").
+        #
+        # C-20 test defect fix (subordinate ruling, WP-3a's first real
+        # 'enabled' run): `row.get("revision")` read a key `EntityDescriptor`
+        # does not define, and `CatalogDocument` carries no document-level
+        # revision either (see `_revision_of`'s docstring above) -- every
+        # comparison below against a catalog row's `.get("revision")` was
+        # always `None == None`, asserting nothing. `add_field`'s own
+        # in-process response does not reliably carry a revision on every
+        # currently-registered adapter either (see the comment on the
+        # `unavailable` branch above -- `MitateDB-api`'s in-process
+        # `add_field`/`create_entity` return nothing; only its HTTP
+        # surface computes one post-hoc). `alter_field` itself -- the
+        # PRIMITIVE actually under test here, and the one this suite
+        # already requires to carry a real `revision` on success (the
+        # pre-existing assert right below) -- brackets the refusal
+        # instead: a harmless, always-non-conflicting `alter_field`
+        # (`nullable: true` on `"label"`, already that field's own
+        # default, so no existing row can possibly violate it) gives a
+        # real baseline revision BEFORE the CONFLICT attempt, and the
+        # FINAL successful, non-conflicting `alter_field` below gives the
+        # "after" value. Exactly one real commit (that final `alter_
+        # field`) must separate them -- proving the CONFLICT-refused
+        # `alter_field` in between committed none.
         conflict_marker = fresh_identifier("c20conflict")
         iso.attempt_mutation(
             runtime, entity, "insert",
             values={enum_field: "b", nonnull_field: "ok", "label": conflict_marker},
             where_field=None, where_value=None,
         )
+        revision_before = _revision_of(
+            iso.schema_operation_with_result(developer, entity, "alter_field", field="label", nullable=True)
+        )
         row = _catalog_row(iso, developer, entity)
         constraints = row.get("field_constraints")
-        revision_before = row.get("revision")
         count_before = iso.count(runtime, entity)
         with pytest.raises(ConformanceDenial) as ei_alter:
             iso.schema_operation_with_result(developer, entity, "alter_field", field=enum_field, enum=["a"])
@@ -380,27 +482,66 @@ def test_c20_constraint_declaration_agreement(adapter: ConformanceAdapter, isola
         assert row_after_conflict.get("field_constraints") == constraints, (
             f"{adapter.name}: a refused alter_field must not change the catalog's field_constraints"
         )
-        assert row_after_conflict.get("revision") == revision_before, (
-            f"{adapter.name}: a refused alter_field must not advance the schema revision -- before="
-            f"{revision_before!r}, after={row_after_conflict.get('revision')!r}"
-        )
         assert iso.count(runtime, entity) == count_before, f"{adapter.name}: a refused alter_field changed row count"
 
         result = iso.schema_operation_with_result(
             developer, entity, "alter_field", field=enum_field, enum=["a", "b", "z"],
         )
-        assert isinstance(result, dict) and result.get("revision") is not None, (
+        revision_final = result.get("revision")
+        assert isinstance(result, dict) and revision_final is not None, (
             f"{adapter.name}: a successful alter_field's result carries no 'revision' -- {result!r}"
         )
-        row_final = _catalog_row(iso, developer, entity)
-        assert row_final.get("revision") != revision_before, (
-            f"{adapter.name}: a successful, non-conflicting alter_field did not advance the schema revision "
-            f"(before={revision_before!r}, after={row_final.get('revision')!r})"
+        assert _revision_advanced_by_one(revision_before, revision_final), (
+            f"{adapter.name}: exactly one real schema commit (this final, non-conflicting alter_field) must "
+            f"separate the pre-CONFLICT baseline and this result -- observed before={revision_before!r}, "
+            f"after={revision_final!r}; a delta other than +1 means the CONFLICT-refused alter_field above "
+            "also advanced the revision"
         )
+        row_final = _catalog_row(iso, developer, entity)
         assert row_final.get("field_constraints", {}).get(enum_field, {}).get("enum") == ["a", "b", "z"], (
             f"{adapter.name}: the successful alter_field's new enum did not round-trip -- "
             f"{row_final.get('field_constraints')!r}"
         )
+
+        # (8) design v1.5 補正 (監督裁定 A, {scratchpad}/rulings-wp3a-
+        # review.md): "a constraint the request omits is left as it is".
+        # An `alter_field` that names only `nullable` (re-asserting the
+        # field's own CURRENT value, `True` -- already established above
+        # -- so no existing row can violate it and no CONFLICT risk is
+        # introduced) omits `enum` entirely; the field's enum from the
+        # (6)/(7) alter_field just above (`["a", "b", "z"]`) must be left
+        # untouched.
+        result_omit = iso.schema_operation_with_result(
+            developer, entity, "alter_field", field=enum_field, nullable=True,
+        )
+        assert isinstance(result_omit, dict) and result_omit.get("revision") is not None, (
+            f"{adapter.name}: an alter_field omitting 'enum' carries no 'revision' -- {result_omit!r}"
+        )
+        row_after_omit = _catalog_row(iso, developer, entity)
+        assert row_after_omit.get("field_constraints", {}).get(enum_field, {}).get("enum") == ["a", "b", "z"], (
+            f"{adapter.name}: an alter_field that omits 'enum' must leave the field's existing enum "
+            f"untouched -- {row_after_omit.get('field_constraints')!r}"
+        )
+
+        # (9) design v1.5 補正 (同上): "enum: null clears the field's
+        # enum" -- an explicit JSON `null`, distinct from omitting the
+        # key (leg (8) just above). NOT ADDED HERE (disclosed scope
+        # limit, see this module's docstring): `conformance-tests/
+        # adapter.py`'s `schema_operation_with_result(..., enum: Sequence
+        # [Any] | None = None)` collapses "omit the key" and "send an
+        # explicit null" onto the same Python `None` -- its body
+        # construction is `if enum is not None: body["enum"] = list(
+        # enum)`, so there is no way to make this call carry a literal
+        # `enum: null` on the wire without adding a tri-state sentinel to
+        # the port (the same shape `VALID_CONFIRMATION` already uses for
+        # `confirmation`). That port change is out of this WP's file
+        # scope (`conformance-tests/adapter.py` is not one of the files
+        # this WP may touch); adding a leg that calls `enum=None` here
+        # would be indistinguishable from leg (8) and would silently
+        # assert nothing new (C-20's own non-vacuity requirement, this
+        # module's docstring). Left as an explicit gap for the supervisor
+        # to close (a small port addition, or an explicit scope grant),
+        # not silently worked around.
         observed_branch = "enforced"
 
     expected_branch = _expected_branch_for_status(status)

@@ -1,11 +1,12 @@
 # フェーズ9 実施設計: 契約 1.7.0「宣言と検証」
 
-- 版数: **v1.4 (2026-09-07)**。**改版履歴**:
+- 版数: **v1.5 (2026-09-07)**。**改版履歴**:
   - **v1.0 (2026-09-07)** — 起草初稿。設計レビュー 1 回目の対象となる版である。
   - **v1.1 (2026-09-07)** — 設計レビュー 1 回目 (Blocker 4 / Major 9 / Minor 10) を全件反映、§5 U-1〜U-8 を依頼者裁定の委任に基づき監督が確定。**設計レビュー 2 回目の対象となる版**である。
   - **v1.2 (2026-09-07)** — 設計レビュー 2 回目 (Blocker 4 / Major 9 / Minor 13) を全件反映 (監督裁定 S-a〜S-n)。U-3 / U-4 の確定文を訂正後の本文に差し替え。
   - **v1.3 (2026-09-07)** — 作業指示書起草者の疑義 4 件に対する監督裁定 T-1〜T-4 を反映、§6.1 表の整形。
   - **v1.4 (2026-09-07)**: WP-1a レビュー M-4 / L-6 の監督裁定 — endpoint_fields_note の新設と requires_capability の意味の確定、実装起草 2 値の確定記録 (#30〜#32)。
+  - **v1.5 (2026-09-07)**: WP-3a レビュー A — alter_field の enum 解除の表現 (enum: null) を契約に補正。
 - 位置づけ: **監督が確定した枠 (2026-09-07) の実施設計**であり、**2 回の設計レビューを経て確定した設計 (v1.3) であって、作業指示書の正本である。** 計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` (v1.2) の §5「フェーズ9」節・§4 (P-1〜P-9)・§7・§8 (R-2〜R-8 / R-10)・§9 が**正本**であり、本書 §1.1 / §2.1 はそれを**逐語で転記**する (再導出しない)。§3 の D-1〜D-9 と §4 の A-1〜A-10 は**監督確定**である。**§5 の U-1〜U-8 は、依頼者裁定 (2026-09-07) が判断を監督に委任したことに基づき、設計レビュー 1 回目の反映時に監督が確定した (v1.1)。U-3 / U-4 の確定文は v1.2 で監督の訂正後の本文に差し替えた (枝の確定は不変)。** **作業指示書の起草中に生じた疑義 4 件は監督裁定 T-1〜T-4 として v1.3 に反映した** (§3 D-4 の実装の形 / §5 U-8 #29 / §6.2 / §6.3 / §6.4 / §6.6 / §8 / §8.1 / §9)。 **§3 D-10 は v1.1 で撤回した** (レビュー 1 B1。前提事実の誤り)。WP 分割は §8 に素案のみを置き、作業指示書 (`docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md`) は別途起こす。構成・粒度・文体はフェーズ8 設計文書 (`docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` v1.3) を踏襲する。
 - テーマ: **「エージェントの 1 周 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) が、宣言だけで閉じており、その宣言がすべて検査されている」状態にすること。**
 - 前提となる main: **`523753c`** (= フェーズ8 完了の `ef7bd57` に WP-9 リハーサルのコミット群を重ねたもの)。作業 branch **`phase9-contract-170`**、worktree はフェーズ8 と同じ運用 (`.claude/worktrees/` 配下、WP ごとに分ける。§8)。
@@ -275,7 +276,9 @@
 
 **`schemas.SchemaOperationRequest.properties.operation` (`alter_field` の意味づけ、`structured_operations` 側に置く場合も同文)**:
 
-> `alter_field` redeclares the constraints of one existing field: it sets, replaces or clears that field's `enum`, and switches its `nullable`. It does not redeclare that field's type -- an `alter_field` carrying `field_type` fails `VALIDATION_FAILED` -- because converting values already stored under one type into another is not defined by this version. Before it changes anything, an `alter_field` verifies every existing row of the entity against the constraints it would establish, within the same transaction as the change itself; where even one row would violate them, the whole operation is refused with `CONFLICT` and nothing is changed. The denial names the field and which declaration it would violate, and never the offending values, nor how many rows there are. A committed `alter_field` advances the entity's schema revision.
+> `alter_field` redeclares the constraints of one existing field: it sets, replaces or clears that field's `enum`, and switches its `nullable`. It does not redeclare that field's type -- an `alter_field` carrying `field_type` fails `VALIDATION_FAILED` -- because converting values already stored under one type into another is not defined by this version. Before it changes anything, an `alter_field` verifies every existing row of the entity against the constraints it would establish, within the same transaction as the change itself; where even one row would violate them, the whole operation is refused with `CONFLICT` and nothing is changed. The denial names the field and which declaration it would violate, and never the offending values, nor how many rows there are. A committed `alter_field` advances the entity's schema revision. A constraint the request omits is left as it is; enum: null clears the field's enum, and on add_field enum: null means the same as omitting it.
+
+**v1.5 補正 (2026-09-07。監督裁定 A、`{scratchpad}/rulings-wp3a-review.md`)**: 上記契約文案の末尾に 1 文を足した。**この文により `schemas.SchemaOperationRequest.properties.enum` の型は `["array", "null"]` になる** (array 側は従来どおり `minItems: 1`)。**`enum` を省略した `alter_field` はその field の既存 `enum` を変えず、`enum: null` を明示した `alter_field` はその `enum` を解除する。`add_field` では `enum: null` は省略と同じ意味である** (`add_field` にはまだ解除すべき既存 `enum` が無いため)。`nullable` はこの補正の対象外 (boolean は 3 状態を必要としない)。
 
 **`definitions.EntityDescriptor.properties.field_constraints.description`**:
 
@@ -1151,7 +1154,7 @@
 | # | json_path | 出所 | 状態 |
 |---|---|---|---|
 | 1 | `schemas.SchemaOperationRequest.properties.field_constraints.description` | D-2 | 新規。単一案 |
-| 2 | `structured_operations.alter_field` (または `SchemaOperationRequest.operation` の説明に併記) | D-2 | 新規。単一案。**置き場所 (独立節か既存節への併記か) は設計の裁量として作業指示書で確定する** |
+| 2 | `structured_operations.alter_field` (または `SchemaOperationRequest.operation` の説明に併記) | D-2 | 新規。単一案。**置き場所 (独立節か既存節への併記か) は設計の裁量として作業指示書で確定する。** **v1.5 補正 (監督裁定 A): 末尾に「enum: null が enum を解除し、省略は現状維持、add_field の enum: null は省略と同義」の 1 文を追加。同じ補正で `SchemaOperationRequest.properties.enum` の型が `["array", "null"]` になる (§3 D-2 v1.5 補正を参照)** |
 | 3 | `definitions.EntityDescriptor.properties.field_constraints.description` | D-2 | 新規。単一案 |
 | 4 | `limits.enum_members` + `limits.classes` への 1 語追加 + `limits.example_profile` への `enum_members: 64` | D-2 / U-1 | **確定 (U-1 = (β))。** 文案は §3 D-2 の当該ブロック |
 | 5 | `errors.details_vocabulary.VALIDATION_FAILED` | D-3 | 新規。単一案 |
