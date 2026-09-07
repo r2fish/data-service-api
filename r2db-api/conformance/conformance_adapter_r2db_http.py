@@ -870,7 +870,7 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     # own (full) leg to drive `declared_entries` distinct-key inserts
     # plus one overflow over HTTP too (`ResourceLimits.check` is
     # backend-independent, `service.py`).
-    idempotency_entries=5,
+    idempotency_entries=20,
     idempotency_retention_ms=60_000,
 )
 

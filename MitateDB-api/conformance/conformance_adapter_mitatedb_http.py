@@ -1660,7 +1660,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # surface`) -- `test_c23_idempotency_semantics.py`'s own
             # (full) leg drives `declared_entries` distinct-key inserts
             # plus one overflow over HTTP too.
-            idempotency_entries=5,
+            idempotency_entries=20,
             idempotency_retention_ms=60_000,
         )
 
