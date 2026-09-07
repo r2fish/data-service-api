@@ -263,7 +263,7 @@ class SQLiteBackend:
                 # uncached call would have (I-8) -- never a second,
                 # independently-drifting construction.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     predicted_revision = self._schema_revision + 1
                     response_json = json.dumps({
                         "committed": True, "revision": str(predicted_revision),
@@ -271,6 +271,7 @@ class SQLiteBackend:
                             "entity": name, "fields": sorted(fields), "field_types": dict(resolved),
                             "field_constraints": {f: dict(v) for f, v in resolved_constraints.items()},
                         },
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
@@ -367,7 +368,7 @@ class SQLiteBackend:
                 # _declared_constraints` BEFORE this call's own registry
                 # write (which lands after this `try` block, on success).
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     predicted_revision = self._schema_revision + 1
                     existing_types_before = dict(self._declared_types.get(collection, {}))
                     existing_constraints_before = {
@@ -384,6 +385,7 @@ class SQLiteBackend:
                             "field_types": {**existing_types_before, field: contract_type},
                             "field_constraints": {**existing_constraints_before, field: dict(declared)},
                         },
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,
@@ -597,9 +599,10 @@ class SQLiteBackend:
                 # is ALREADY the post-bump value at this point (bumped two
                 # lines above, before this `try`) -- no "+1" needed.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(self._schema_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._idempotency[key] = {
                         "digest": digest, "response_json": response_json, "created_at_ms": now_ms,

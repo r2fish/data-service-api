@@ -300,7 +300,7 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 4 WP-3(b): contract_version flip lands in the same commit as
     # the audit_query bundle it accompanies (design §5, P4-D4). Phase 5
     # WP-3: re-flipped to 1.5.0 (design D-1, subordinate ruling 10 item 1).
-    assert document["contract_version"] == "1.6.0"
+    assert document["contract_version"] == "1.7.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 
@@ -1093,7 +1093,12 @@ def test_cross_entity_mutation_commits_across_two_real_entities(app_a_stack):
         ]},
     )
     assert response.status_code == 200, response.text
-    assert response.json() == {"committed": True, "affected": 2}
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): the response also
+    # carries `request_id` now -- checked for presence, then popped
+    # before the exact-shape assert below.
+    body = response.json()
+    assert body.pop("request_id")
+    assert body == {"committed": True, "affected": 2}
     # No `assigned_addresses` key at all (design M-6) -- not merely empty.
     assert "assigned_addresses" not in response.json()
 
@@ -1533,7 +1538,11 @@ def test_cross_entity_mutation_delete_declare_and_echo_per_entity_wrong_entity_p
         ]},
     )
     assert committed.status_code == 200, committed.text
-    assert committed.json() == {"committed": True, "affected": 2}
+    # Phase 9 WP-3e (design D-7 (2)/(3), Q-1/Q-2): see the identical
+    # comment above this test's own sibling assertion.
+    committed_body = committed.json()
+    assert committed_body.pop("request_id")
+    assert committed_body == {"committed": True, "affected": 2}
 
 
 # ---------------------------------------------------------------------------

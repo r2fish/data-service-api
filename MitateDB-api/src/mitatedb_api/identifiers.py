@@ -25,9 +25,31 @@ def validate_identifier(value, label="identifier"):
     also call the active backend's own ``check_reserved`` (see
     ``cell.ApplicationCell._identifier``, the single place both checks are
     always applied together for every identifier this foundation accepts).
-    """
+
+    Phase 9 WP-3e (design D-3 (6), work order completion condition 3'):
+    this peer never emits the common contract's `IDENTIFIER_INVALID` code
+    at all (L9-2a, unchanged by this WP) -- every identifier syntax
+    violation this function raises stays `VALIDATION_FAILED`, but now
+    carries the SAME `violated_declaration: "identifier_syntax"` word
+    `IDENTIFIER_INVALID` would have carried on r2db-api. `field` is
+    `label` itself -- this call's own caller already names the position
+    the identifier occupies (`"collection"`/`"field"`/`"application_id"`,
+    the bare, request-relative words `cell.py::ApplicationCell._identifier`
+    already passes at every call site) rather than a synthesized generic
+    literal -- a deliberate, disclosed difference from r2db-api's own
+    choice for `IDENTIFIER_INVALID` (`structured.validate_identifier`,
+    which always carries the fixed literal `field="identifier"`
+    regardless of context): both are conformant (the design fixes only
+    the closed vocabulary and the path-format rule, not which specific
+    position string a peer chooses), but this peer's choice keeps the
+    per-call-site position information r2db-api's own simplification
+    discards. Reported in the WP-3e completion report as a two-sided
+    disclosure (両論)."""
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
-        raise ValidationError("invalid " + label)
+        raise ValidationError(
+            "invalid " + label,
+            details={"violated_declaration": "identifier_syntax", "field": label},
+        )
     return value
 
 

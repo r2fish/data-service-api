@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
 import time
+import uuid
 from threading import Lock, RLock
 from typing import Any
 
@@ -36,7 +37,8 @@ from .backend_sqlite import SQLiteBackend
 from .config import FoundationConfig, narrow_limits_by_budget
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
-                     PreconditionFailedError, ResourceLimitError, ValidationError)
+                     PreconditionFailedError, ResourceLimitError, ValidationError,
+                     observed_type_of, violation)
 from .field_types import (
     FOUNDATION_TYPE_TO_CONTRACT_TYPE,
     _ConstraintDeclarationError,
@@ -1124,6 +1126,11 @@ class ApplicationCell:
         this method follows it exactly, with `create_collection` itself
         as the schema operation each `dry_run`/`plan` behavior applies
         to."""
+        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        # anything else -- the audit events below and this method's
+        # own returned `SchemaOperationResult.request_id` (added to
+        # `result` further below) both read this SAME resolved value.
+        request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         # Phase 9 WP-3b: unchanged from before this WP -- `_limit_gate`'s
         # own `request_bytes`/`operation_depth` measurement stays exactly
@@ -1137,7 +1144,17 @@ class ApplicationCell:
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="schema") as deadline:
             name = self._identifier(name, "collection")
             if not isinstance(fields, dict) or not fields:
-                raise ValidationError("fields must be a non-empty object")
+                # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape
+                # violation about the `fields` key's own type/presence --
+                # `declared_type`/`observed_type` are omitted (this is
+                # not "a violation about the type of a VALUE this
+                # request writes", D-3 (4)'s own request_schema branch
+                # wording -- the same reasoning `field_constraints must
+                # be an object`, immediately below, already applies).
+                raise ValidationError(
+                    "fields must be a non-empty object",
+                    details={"violated_declaration": "request_schema", "field": "fields"},
+                )
             if len(fields) > self.config.max_fields:
                 # Q1-D11 (design v1.5 §7, supersedes the WP-5 body's own
                 # `query_complexity` tagging): this bounds how many columns a
@@ -1246,6 +1263,25 @@ class ApplicationCell:
                     # own durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="create_collection", target_id=name, request_id=request_id)
+                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
+                    # LIMITATION): the stored `response_json` this replay
+                    # was built from (`backend_sqlite.py`/`backend_
+                    # postgres.py`'s own `create_collection`) predates
+                    # this WP and does not itself carry `request_id` --
+                    # unlike `transact()`'s own mutation-level replay
+                    # (whose envelope this WP folds `request_id` into
+                    # BEFORE it is ever persisted), so this schema-level
+                    # replay cannot correlate to the ORIGINAL execution's
+                    # own id (full Q-4 fidelity for this one code path is
+                    # out of this WP's scope -- backend response-
+                    # construction changes were judged too invasive for a
+                    # property C-25's own test file does not exercise,
+                    # which probes only mutation-level replay). `setdefault`
+                    # still satisfies Q-2 (every successful response
+                    # carries SOME request_id) using THIS request's own
+                    # resolved value as a safe fallback, never a crash.
+                    if isinstance(replay, dict):
+                        replay.setdefault("request_id", request_id)
                     return replay
             # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
             # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
@@ -1296,8 +1332,15 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="create_collection",
                 target_kind="collection", target_id=name, request_id=request_id,
             )
+            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+            # the 4th tuple element -- the backend's own `response_json`
+            # construction (`backend_sqlite.py`/`backend_postgres.py`)
+            # persists it alongside `committed`/`revision`/`descriptor`,
+            # so a later replay's `json.loads(...)` carries the ORIGINAL
+            # execution's own request_id, never a fresh one (matching
+            # `transact()`'s own identical mutation-level guarantee).
             idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
                 if idempotency_key is not None and not dry_run else None
             )
             with self._lock:
@@ -1308,7 +1351,7 @@ class ApplicationCell:
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="create_collection")
-        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor, "request_id": request_id}
         if dry_run:
             result["plan"] = expected_token
         return result
@@ -1412,6 +1455,11 @@ class ApplicationCell:
         set inside `if dry_run:` below, never on the real-call path;
         there is nothing left to preview once a real call has already
         committed)."""
+        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        # anything else -- the audit events below and this method's
+        # own returned `SchemaOperationResult.request_id` (added to
+        # `result` further below) both read this SAME resolved value.
+        request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         # Phase 9 WP-3b: unchanged from before this WP -- see `create_
         # collection`'s own identical comment for why `_limit_gate`'s
@@ -1467,6 +1515,14 @@ class ApplicationCell:
                     # durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="add_field", target_id=collection, request_id=request_id)
+                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
+                    # LIMITATION): mirrors `create_collection`'s own
+                    # identical `setdefault` fallback above -- see that
+                    # comment for the full reasoning (the stored response
+                    # this replay is built from does not itself carry
+                    # `request_id`).
+                    if isinstance(replay, dict):
+                        replay.setdefault("request_id", request_id)
                     return replay
             # Q1-D11-consistent shape bound (same reasoning as `create_
             # collection`'s own field-count check above): the total column
@@ -1480,7 +1536,22 @@ class ApplicationCell:
             if len(current) >= self.config.max_fields:
                 raise ValidationError("field limit exceeded")
             if nullable is not None and not isinstance(nullable, bool):
-                raise ValidationError("nullable must be a boolean")
+                # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
+                # identical `add_field` site, `structured.py`): a
+                # non-boolean `nullable` on `add_field` is the
+                # declaration itself being invalid (`constraint_
+                # declaration`, not a `request_schema` shape defect --
+                # `nullable` IS a recognized top-level key here) --
+                # `declared_type` is this field's own resolved type
+                # (known here, unlike `alter_field` below).
+                raise ValidationError(
+                    "nullable must be a boolean",
+                    details={
+                        "violated_declaration": "constraint_declaration",
+                        "field": "nullable",
+                        "declared_type": declared_type,
+                    },
+                )
             validated_enum = None
             if enum is not None:
                 validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
@@ -1517,8 +1588,15 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="add_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
+            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+            # the 4th tuple element -- the backend's own `response_json`
+            # construction (`backend_sqlite.py`/`backend_postgres.py`)
+            # persists it alongside `committed`/`revision`/`descriptor`,
+            # so a later replay's `json.loads(...)` carries the ORIGINAL
+            # execution's own request_id, never a fresh one (matching
+            # `transact()`'s own identical mutation-level guarantee).
             idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
                 if idempotency_key is not None and not dry_run else None
             )
             with self._lock:
@@ -1541,7 +1619,7 @@ class ApplicationCell:
         # response `revision` via a SEPARATE `_post_schema_revision()`
         # readback rather than this method's own return value). Phase 9
         # WP-3b: `descriptor`/`committed`/`plan` (dry_run only) added.
-        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor, "request_id": request_id}
         if dry_run:
             result["plan"] = expected_token
         return result
@@ -1596,6 +1674,11 @@ class ApplicationCell:
         constraints`), never a separate pre-flight scan in a different
         transaction from the one that commits the change (design D-2
         実装の形 4, F-6, 監督裁定 S-g)."""
+        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, before
+        # anything else -- the audit events below and this method's
+        # own returned `SchemaOperationResult.request_id` (added to
+        # `result` further below) both read this SAME resolved value.
+        request_id = request_id or uuid.uuid4().hex
         self._require_developer(principal, request_id=request_id)
         request = {"collection": collection, "field": field, "nullable": nullable, "field_type": field_type}
         if enum is not UNCHANGED:
@@ -1664,6 +1747,14 @@ class ApplicationCell:
                     # durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="alter_field", target_id=collection, request_id=request_id)
+                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
+                    # LIMITATION): mirrors `create_collection`'s own
+                    # identical `setdefault` fallback above -- see that
+                    # comment for the full reasoning (the stored response
+                    # this replay is built from does not itself carry
+                    # `request_id`).
+                    if isinstance(replay, dict):
+                        replay.setdefault("request_id", request_id)
                     return replay
             available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if field not in available:
@@ -1733,8 +1824,15 @@ class ApplicationCell:
                 principal, event_class="schema_change", operation="alter_field",
                 target_kind="collection", target_id=collection, request_id=request_id,
             )
+            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+            # the 4th tuple element -- the backend's own `response_json`
+            # construction (`backend_sqlite.py`/`backend_postgres.py`)
+            # persists it alongside `committed`/`revision`/`descriptor`,
+            # so a later replay's `json.loads(...)` carries the ORIGINAL
+            # execution's own request_id, never a fresh one (matching
+            # `transact()`'s own identical mutation-level guarantee).
             idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms)
+                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
                 if idempotency_key is not None and not dry_run else None
             )
             with self._lock:
@@ -1749,7 +1847,7 @@ class ApplicationCell:
         if not dry_run:
             self.__record("schema_change", self.application_id,
                           principal.credential_id, detail="alter_field")
-        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor}
+        result = {"committed": not dry_run, "revision": str(revision), "descriptor": descriptor, "request_id": request_id}
         if dry_run:
             result["plan"] = expected_token
         return result
@@ -1904,6 +2002,14 @@ class ApplicationCell:
 
     def read(self, principal, collection, fields=None, filters=None,
              order_by=None, limit=None, *, request_id=None, budget=None):
+        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved here, once, so the
+        # audit event below and this call's own caller (who already holds
+        # the SAME value when it is `http.py`'s own per-request id, and
+        # generates a fresh one itself otherwise -- `read()` has no
+        # return-shape room of its own to echo a self-generated value
+        # back through, unlike `transact()`/the schema methods below,
+        # whose dict/list-shaped returns do) always agree.
+        request_id = request_id or uuid.uuid4().hex
         self._require_data(principal, request_id=request_id)
         request = {"collection": collection, "fields": fields, "filters": filters, "order_by": order_by, "limit": limit}
         with self._gate(principal, request, request_id=request_id, budget=budget, endpoint_kind="query") as deadline:
@@ -1962,7 +2068,16 @@ class ApplicationCell:
         `_validate_delete_confirmation`.
         """
         if not isinstance(filters, list) or not filters:
-            raise ValidationError("update requires non-empty filters")
+            # Phase 9 WP-3e (design D-3 (2)): `filters`'s own request-
+            # relative path is `path_prefix`'s own sibling -- `"filters"`
+            # for a direct `update()` call (`path_prefix == "values"`),
+            # `"operations/<i>/filters"` for one batch item (`path_prefix
+            # == "operations/<i>/values"`).
+            filters_path = (path_prefix.rsplit("/", 1)[0] + "/filters") if "/" in path_prefix else "filters"
+            raise ValidationError(
+                "update requires non-empty filters",
+                details={"violated_declaration": "request_schema", "field": filters_path},
+            )
         collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
         if not fields:
             raise ValidationError("values must be non-empty")
@@ -2024,9 +2139,28 @@ class ApplicationCell:
         call site and is no longer true of the current one.
         """
         if not isinstance(destructive, bool):
-            raise ValidationError("destructive must be a boolean")
+            # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape type
+            # violation about this operation's own top-level `destructive`
+            # key. `field` is the bare key name -- this function has no
+            # `path_prefix` parameter (unlike `_validate_update` above),
+            # so a batch-embedded delete's own `operations/<i>/` prefix
+            # is not available here; disclosed as a known limitation
+            # (report).
+            raise ValidationError(
+                "destructive must be a boolean",
+                details={
+                    "violated_declaration": "request_schema", "field": "destructive",
+                    "declared_type": "boolean", "observed_type": observed_type_of(destructive),
+                },
+            )
         if confirm is not None and not isinstance(confirm, str):
-            raise ValidationError("confirm must be a string")
+            raise ValidationError(
+                "confirm must be a string",
+                details={
+                    "violated_declaration": "request_schema", "field": "confirm",
+                    "declared_type": "string", "observed_type": observed_type_of(confirm),
+                },
+            )
         # B-3 (WP-0/WP-5): identifier + filter-shape validation (which,
         # via `_bind_filters`'s own `field_domains` call, also performs the
         # contract's own "target-existence checks" step) must complete
@@ -2036,7 +2170,10 @@ class ApplicationCell:
         # settled before confirmation validity is evaluated.
         collection = self._identifier(collection, "collection")
         if not isinstance(filters, list) or not filters:
-            raise ValidationError("delete requires non-empty filters")
+            raise ValidationError(
+                "delete requires non-empty filters",
+                details={"violated_declaration": "request_schema", "field": "filters"},
+            )
         bound_filters = self._bind_filters(collection, filters, limits=limits)
         schema_revision = self._backend.schema_revision()
         phrase = _delete_confirmation_phrase(collection, filters, schema_revision)
@@ -2135,7 +2272,19 @@ class ApplicationCell:
         REQUEST, and only this method's own caller, `transact()`'s pass-1
         loop, knows which list position `operation` came from)."""
         if not isinstance(operation, dict):
-            raise ValidationError("unsupported transaction operation")
+            # Phase 9 WP-3e (design D-3 (2)/(4)): a request-shape
+            # violation about this one batch item's own top-level type
+            # -- `field` is this operation's own request-relative
+            # position (`operations/<index>`, D-3 (2)); `declared_type`/
+            # `observed_type` are included (this IS a violation about
+            # the type of a value: the operation object itself).
+            raise ValidationError(
+                "unsupported transaction operation",
+                details={
+                    "violated_declaration": "request_schema", "field": f"operations/{index}",
+                    "declared_type": "object", "observed_type": observed_type_of(operation),
+                },
+            )
         op_type = operation.get("type")
         if op_type == "insert":
             if set(operation) - _TRANSACT_INSERT_KEYS:
@@ -2144,9 +2293,18 @@ class ApplicationCell:
                 # a malformed request -- same reasoning as the
                 # `update`/`delete` branches below, and the `upsert`
                 # branch further down, which refuse this way for the
-                # operation *type* itself.
+                # operation *type* itself. Phase 9 WP-3e (design D-3
+                # (2)): `field` names this batch item's own position --
+                # omitted (not the specific extra key) when more than one
+                # extra key rode along (V-6's "複数なら field を省く"
+                # rule, mirrored from the request-shape layer below).
+                extra = sorted(set(operation) - _TRANSACT_INSERT_KEYS)
                 raise CapabilityError(
-                    "transact does not support additional fields on operation type 'insert'"
+                    "transact does not support additional fields on operation type 'insert'",
+                    details=violation(
+                        "capability",
+                        field=f"operations/{index}/{extra[0]}" if len(extra) == 1 else None,
+                    ),
                 )
             # Phase 9 WP-3a (design D-2 (3), file:line `cell.py:1034-1046`
             # in the design's own pre-WP line numbering): the insert-only
@@ -2165,8 +2323,13 @@ class ApplicationCell:
             return ("insert", (collection, fields, params))
         if op_type == "update":
             if set(operation) - _TRANSACT_UPDATE_KEYS:
+                extra = sorted(set(operation) - _TRANSACT_UPDATE_KEYS)
                 raise CapabilityError(
-                    "transact does not support additional fields on operation type 'update'"
+                    "transact does not support additional fields on operation type 'update'",
+                    details=violation(
+                        "capability",
+                        field=f"operations/{index}/{extra[0]}" if len(extra) == 1 else None,
+                    ),
                 )
             collection, fields, values_params, bound_filters = self._validate_update(
                 operation.get("collection"), operation.get("values"), operation.get("filters"),
@@ -2174,8 +2337,13 @@ class ApplicationCell:
             return ("update", (collection, fields, values_params, bound_filters))
         if op_type == "delete":
             if set(operation) - _TRANSACT_DELETE_KEYS:
+                extra = sorted(set(operation) - _TRANSACT_DELETE_KEYS)
                 raise CapabilityError(
-                    "transact does not support additional fields on operation type 'delete'"
+                    "transact does not support additional fields on operation type 'delete'",
+                    details=violation(
+                        "capability",
+                        field=f"operations/{index}/{extra[0]}" if len(extra) == 1 else None,
+                    ),
                 )
             collection, bound_filters = self._validate_delete_confirmation(
                 operation.get("collection"), operation.get("filters"),
@@ -2188,8 +2356,22 @@ class ApplicationCell:
             # `capability_status.rules` ("optional target operations ...
             # must fail with CAPABILITY_UNSUPPORTED"), this is a
             # capability gap, not a malformed request.
-            raise CapabilityError(f"transact does not support operation type {op_type!r}")
-        raise ValidationError("unsupported transaction operation")
+            raise CapabilityError(
+                f"transact does not support operation type {op_type!r}",
+                details=violation("capability", field=f"operations/{index}/type"),
+            )
+        # Phase 9 WP-3e (design D-3 (2)/(4)): `op_type` is neither a
+        # supported operation nor a recognized-but-unimplemented member
+        # of the contract's own mutation vocabulary (`_CONTRACT_MUTATION_
+        # VOCABULARY`) -- this is a value outside the request schema's
+        # own `type` enum entirely, `request_schema`, not `capability`
+        # (design distinguishes "this deployment does not provide a real
+        # contract member" -- capability -- from "this is not a member of
+        # the contract's vocabulary at all" -- request_schema).
+        raise ValidationError(
+            "unsupported transaction operation",
+            details={"violated_declaration": "request_schema", "field": f"operations/{index}/type"},
+        )
 
     @staticmethod
     def _distinct_batch_entities(operations):
@@ -2275,6 +2457,14 @@ class ApplicationCell:
         `..._in_transaction`/`begin` calls happen when a later operation
         fails validation).
         """
+        # Phase 9 WP-3e (design D-7 (3), Q-1): resolved ONCE, here, before
+        # anything else -- every audit event this method emits below
+        # already takes `request_id=request_id` (unchanged), and the
+        # commit-path envelope folded into `results[-1]` (below) echoes
+        # this SAME resolved value, so the response `MutationResult.
+        # request_id` a caller reads back is provably the one this
+        # request's own audit evidence carries too.
+        request_id = request_id or uuid.uuid4().hex
         self._require_data(principal, request_id=request_id)
         # Phase 9 WP-3c (design D-5, I-1/I-3): `idempotency_key` has two
         # entry points into this method -- this KEYWORD (`http.py::
@@ -2316,7 +2506,10 @@ class ApplicationCell:
             # unchanged (identity-shaped narrowing).
             limits = narrow_limits_by_budget(self.config, budget, "mutate")
             if not isinstance(operations, list) or not operations:
-                raise ValidationError("operations must be a non-empty list")
+                raise ValidationError(
+                    "operations must be a non-empty list",
+                    details={"violated_declaration": "request_schema", "field": "operations"},
+                )
             if len(operations) > limits.max_batch_items:
                 raise ResourceLimitError("batch limit exceeded", limit_class="batch_items")
             if len(self._distinct_batch_entities(operations)) > limits.max_batch_entities:
@@ -2495,6 +2688,33 @@ class ApplicationCell:
                         if destructive and hook is not None:
                             hook.pre_commit()
                             hook_fired = True
+                        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-4):
+                        # `request_id` is folded INTO the last operation's
+                        # own per-item result dict, IN PLACE -- never
+                        # appended as a new trailing list entry (unlike
+                        # the dry-run envelope further below), because
+                        # `len(results)` is load-bearing elsewhere: the
+                        # in-process port's pre-v1.13 `attempt_batch_
+                        # with_addresses` (`conformance/conformance_
+                        # adapter_mitatedb.py`) computes `affected` as
+                        # `len(session.transact(items))` directly, with no
+                        # `dry_run` keyword of its own at all -- appending
+                        # a length-changing entry there would silently
+                        # inflate every real batch's own `affected` count
+                        # by one. Mutating the LAST item's dict merely
+                        # ADDS a key alongside whatever it already carries
+                        # (`rowid`/`updated`/`deleted`) -- `results[-1]`
+                        # is exactly what `_mutation_result_to_mapping`'s
+                        # own `envelope = results[-1] if ... else {}`
+                        # (the port v1.13 `_with_result` family's shared
+                        # helper) already reads, and it is what
+                        # `record_idempotency` below persists, so a later
+                        # replay's own `json.loads(...)` of the stored
+                        # response carries this SAME request_id (Q-4:
+                        # "replay を返す要求は元実行の request_id を返
+                        # す") rather than a fresh one.
+                        if results and isinstance(results[-1], dict):
+                            results[-1] = {**results[-1], "request_id": request_id}
                         # Phase 9 WP-3c (design D-5, I-1): the idempotency
                         # record is written as the LAST thing before this
                         # backend's own commit -- a failure anywhere above
@@ -2642,7 +2862,10 @@ class ApplicationCell:
         if requested is None:
             return list(available)
         if not isinstance(requested, list) or not requested:
-            raise ValidationError("fields must be a non-empty list")
+            raise ValidationError(
+                "fields must be a non-empty list",
+                details={"violated_declaration": "request_schema", "field": "select"},
+            )
         if len(requested) > self.config.max_fields:
             # Q1-D11 (design v1.5 §7): read-projection width is a shape
             # bound on the request's own `fields` list, mirroring contract
@@ -2652,7 +2875,13 @@ class ApplicationCell:
         for field in requested:
             field = self._identifier(field, "field")
             if field not in available:
-                raise ValidationError("unknown field")
+                # Phase 9 WP-3e (design D-3 (2)/(4)): mirrors `_prepare_
+                # values`'s identical "this entity has no field by this
+                # name" `request_schema` treatment above.
+                raise ValidationError(
+                    "unknown field",
+                    details={"violated_declaration": "request_schema", "field": f"select/{field}"},
+                )
             result.append(field)
         return result
 
@@ -2799,7 +3028,14 @@ class ApplicationCell:
         else:
             declared_types, declared_constraints = self._backend.field_types_and_constraints(collection)
         if not isinstance(values, dict) or not values:
-            raise ValidationError("values must be a non-empty object")
+            # Phase 9 WP-3e (design D-3 (2)/(4)): `field` is `path_
+            # prefix` itself (the whole `values` object's own request
+            # position) -- this is a violation about `values`'s own
+            # type/emptiness, not about one field inside it.
+            raise ValidationError(
+                "values must be a non-empty object",
+                details={"violated_declaration": "request_schema", "field": path_prefix},
+            )
         if len(values) > self.config.max_fields:
             # Q1-D11 (design v1.5 §7): write-payload width (insert/update/
             # transact-insert) mirrors contract `Mutation.values.
@@ -2810,7 +3046,19 @@ class ApplicationCell:
         for field, value in values.items():
             field = self._identifier(field, "field")
             if field not in available:
-                raise ValidationError("unknown field")
+                # Phase 9 WP-3e (design D-3 (2)/(4), V-6): this entity
+                # has no field by this name -- an unrecognized-field
+                # `request_schema` violation, the exact shape C-21's own
+                # `ei_schema` probe (an insert naming a field the entity
+                # never declared) exercises. `declared_type`/`observed_
+                # type` are omitted (D-3 (4): "未知フィールドのときは載
+                # せない" -- this contract's own request schema has no
+                # type opinion about a field name it does not recognize
+                # for this entity).
+                raise ValidationError(
+                    "unknown field",
+                    details={"violated_declaration": "request_schema", "field": f"{path_prefix}/{field}"},
+                )
             fields.append(field)
             declared_type = declared_types.get(field)
             try:
@@ -2845,6 +3093,25 @@ class ApplicationCell:
             params.append(self._backend.encode_value(
                 self._normalize_value_for_storage(value, declared_type), domain=available[field]))
         return collection, fields, params
+
+    @staticmethod
+    def _check_predicate_value(value, declared_type, field_name):
+        """Phase 9 WP-3e (design D-3 (2)): `field_types.check_declared_
+        value` (the SAME choke point `_prepare_values`'s write side uses,
+        `constraints=None` here -- D-2 (2): "query の predicate 値は
+        enum を検査しない") has no request-path context of its own; this
+        wrapper attaches the predicate's own `field` (the value's request
+        position IS the filter's own field name -- there is no `values/`-
+        style container to nest it under, unlike a write) the same way
+        `_prepare_values`'s own `except ValidationError` clause does for
+        the write side."""
+        try:
+            check_declared_value(value, declared_type)
+        except ValidationError as exc:
+            details = getattr(exc, "details", None)
+            if isinstance(details, dict) and "field" not in details:
+                details["field"] = field_name
+            raise
 
     def _bind_filters(self, collection, filters, limits=None):
         """`limits` (Phase 9 WP-3cd closure, 監督裁定集約 rulings-r5-r6.md
@@ -2883,18 +3150,29 @@ class ApplicationCell:
                 # field-existence check below (a refusal this
                 # unconditional must not depend on whether the named field
                 # happens to exist).
-                raise CapabilityError(f"{item.operator} is not supported by this foundation")
+                raise CapabilityError(
+                    f"{item.operator} is not supported by this foundation",
+                    details=violation("capability", field=field),
+                )
             if field not in available:
-                raise ValidationError("invalid filter")
+                # Phase 9 WP-3e (design D-3 (2)/(4), V-6): mirrors
+                # `_prepare_values`'s identical "this entity has no field
+                # by this name" treatment -- a predicate naming a field
+                # the entity does not have.
+                raise ValidationError(
+                    "invalid filter", details=violation("request_schema", field=field),
+                )
             if item.operator not in SQL_OPERATOR_TOKENS:
                 # A genuinely unrecognized operator string, outside the
                 # common contract's vocabulary entirely (every contract
                 # member this peer does not implement is handled by the
                 # `_UNSUPPORTED_CONTRACT_OPERATORS` branch above instead).
-                raise ValidationError("invalid filter")
+                raise ValidationError("invalid filter", details=violation("request_schema", field=field))
             if item.operator == "in":
                 if not isinstance(item.value, list) or not item.value:
-                    raise ValidationError("in filter requires values")
+                    raise ValidationError(
+                        "in filter requires values", details=violation("request_schema", field=field),
+                    )
                 if len(item.value) > limits.max_batch_items:
                     # Reuses `config.max_batch_items` itself (not a
                     # separate `max_filter_terms`-style bound). K-3: reads
@@ -2913,7 +3191,7 @@ class ApplicationCell:
                 domain = available[field]
                 declared_type = declared_types.get(field)
                 for v in item.value:
-                    check_declared_value(v, declared_type)
+                    self._check_predicate_value(v, declared_type, field)
                 encoded = [
                     self._backend.encode_value(self._normalize_value_for_storage(v, declared_type), domain=domain)
                     for v in item.value
@@ -2921,7 +3199,7 @@ class ApplicationCell:
                 bound.append(Filter(field, "in", encoded))
             else:
                 declared_type = declared_types.get(field)
-                check_declared_value(item.value, declared_type)
+                self._check_predicate_value(item.value, declared_type, field)
                 encoded = self._backend.encode_value(
                     self._normalize_value_for_storage(item.value, declared_type), domain=available[field])
                 bound.append(Filter(field, item.operator, encoded))
@@ -3033,18 +3311,30 @@ def _deny_provisional_field(field_name):
     """Contract 1.7.0 provisional gate (design docs/design/
     PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1 (3); work
     order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
-    in-process counterpart of `http.py::_deny_provisional_field` -- this
-    peer's own `constraint_declarations` capability flipped to `enabled`
-    in this same WP-3a commit (`ApplicationRuntime.capabilities()`
-    below), so only `dry_run`/`request_budget` (still `unavailable`,
-    WP-3b/WP-3d) remain gated here; any in-process caller passing one of
-    THOSE keyword-only fields is refused before anything executes,
-    exactly like the HTTP path. `details` is set on the raised instance
-    rather than via a new `CapabilityError.__init__` parameter, so this
-    does not preempt WP-3e's own planned `details` rollout (D-3 (5))."""
-    err = CapabilityError(f"{field_name} is not supported by this peer")
-    err.details = {"violated_declaration": "capability", "field": field_name}
-    raise err
+    in-process counterpart of `http.py::_deny_provisional_field`. Every
+    1.7.0 capability this gate ever covered (`constraint_declarations`
+    WP-3a, `dry_run` WP-3b, `idempotency` WP-3c, `request_budget` WP-3d)
+    is `enabled` as of this WP -- both this function's own module-level
+    caller list (`ApplicationRuntime`/`ApplicationDeveloper`'s own
+    keyword-only-field gates below) and `http.py`'s equivalent are now
+    empty tuples, so this function currently has no reachable call site
+    at all. Left in place (never deleted) as the standing mechanism the
+    NEXT provisional capability this contract adds would reuse -- deleting
+    live, documented, zero-risk dead code would satisfy no completion
+    condition, only look like it did (mirrors r2db-api's own stale-
+    literal precedent, `structured.py`'s own `SCHEMA_OPERATIONS`
+    constant).
+
+    Phase 9 WP-3e (design D-3 (5), V-7): `details` is now passed through
+    `CapabilityError.__init__` itself -- the attribute-assignment escape
+    hatch this function's own pre-WP-3e docstring described (`err.details
+    = {...}` after construction) is gone; this is the isomorphic
+    counterpart of `http.py::_deny_provisional_field`'s identical
+    change."""
+    raise CapabilityError(
+        f"{field_name} is not supported by this peer",
+        details={"violated_declaration": "capability", "field": field_name},
+    )
 
 
 class ApplicationRuntime:
@@ -3207,7 +3497,25 @@ class ApplicationRuntime:
             # capability's own flip immediately below (declaration and
             # real behaviour land together, unconditionally -- every
             # deployment of this data-plane host declares 1.6.0 now).
-            "contract_version": "1.6.0",
+            #
+            # Phase 9 WP-3e (design D-1 (5)/(7), F-1): flipped to 1.7.0 --
+            # SAME commit as this WP's own R-3 (`errors.details_
+            # vocabulary`'s 4-key form on every VALIDATION_FAILED/
+            # CAPABILITY_UNSUPPORTED this peer emits) and R-7
+            # (`request_id` on every successful `QueryResult`/
+            # `MutationResult`/`SchemaOperationResult`) implementation --
+            # the two 1.7.0 UNCONDITIONAL obligations (`versioning.
+            # version_binding`'s own "(a)"/"(b)" pair). D-1 (7): a peer
+            # must never flip its own declared `contract_version` ahead
+            # of the real behavior it claims -- C-21/C-25's own version-
+            # gated `xfail(strict=True)` is the machine-enforced form of
+            # that rule (this WP's own report measures both sides of it:
+            # the pre-flip state with R-3/R-7 behavior already wired in
+            # but this literal still `1.6.0`, C-21/C-25 XPASS(strict) RED
+            # on this peer's 2 plugs; this flip landing in the SAME
+            # commit as R-3/R-7 is what makes that measurement moot in
+            # the delivered state).
+            "contract_version": "1.7.0",
             "capabilities": {
                 "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
                 "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

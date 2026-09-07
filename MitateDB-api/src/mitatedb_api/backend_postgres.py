@@ -929,9 +929,10 @@ class PostgresBackend:
                 # already read back for real, inside this SAME
                 # transaction, above.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
@@ -1075,13 +1076,14 @@ class PostgresBackend:
                 # locals), so a later replay is byte-identical to what an
                 # uncached call would have returned.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision),
                         "descriptor": {
                             "entity": name, "fields": sorted(fields), "field_types": dict(field_types),
                             "field_constraints": {f: dict(c) for f, c in resolved_constraints.items()},
                         },
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()
@@ -1216,9 +1218,10 @@ class PostgresBackend:
                 # Phase 9 WP-3c (design D-5, I-1/I-8): see `create_
                 # collection`'s own identical comment above.
                 if idempotency_record is not None:
-                    key, digest, now_ms = idempotency_record
+                    key, digest, now_ms, req_id = idempotency_record
                     response_json = json.dumps({
                         "committed": True, "revision": str(new_revision), "descriptor": descriptor,
+                        "request_id": req_id,
                     })
                     self._write_idempotency_row(self._developer, key, digest, response_json, now_ms)
                 self._developer.commit()

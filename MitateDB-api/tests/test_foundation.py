@@ -165,6 +165,9 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(len(results), 3)
         self.assertIn("rowid", results[0])
         self.assertEqual(results[1], {"updated": 1})
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST item's own
+        # result dict now also carries `request_id`.
+        self.assertTrue(results[2].pop("request_id"))
         self.assertEqual(results[2], {"deleted": 1})
         rows = {row["rank"]: row["title"] for row in self.runtime.read("widgets")}
         self.assertEqual(rows, {1: "renamed", 3: "brand-new"})
@@ -280,6 +283,9 @@ class FoundationTests(unittest.TestCase):
             {"type": "delete", "collection": "widgets", "filters": [Filter("rank", "eq", 1)],
              "destructive": True, "confirm": phrase},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST (here,
+        # only) item's own result dict now also carries `request_id`.
+        self.assertTrue(result[-1].pop("request_id"))
         self.assertEqual(result, [{"deleted": 1}])
         events_after_commit = self.control.audit.snapshot()[before:]
         destructive_events = [e for e in events_after_commit if e.event_type == "destructive_data_operation"]
@@ -359,6 +365,9 @@ class FoundationTests(unittest.TestCase):
             {"type": "delete", "collection": "widgets", "values": {},
              "filters": [Filter("title", "eq", "keep-me")], "destructive": True, "confirm": phrase},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST (here,
+        # only) item's own result dict now also carries `request_id`.
+        self.assertTrue(result[-1].pop("request_id"))
         self.assertEqual(result, [{"deleted": 1}])
         self.assertEqual(self.runtime.read("widgets"), [])
 
@@ -571,6 +580,9 @@ class FoundationTests(unittest.TestCase):
             {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
              "destructive": True, "confirm": phrase_b},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST item's own
+        # result dict now also carries `request_id`.
+        self.assertTrue(result[-1].pop("request_id"))
         self.assertEqual(result, [{"deleted": 1}, {"deleted": 1}])
         self.assertEqual(self.runtime.read("phrase_a"), [])
         self.assertEqual(self.runtime.read("phrase_b"), [])

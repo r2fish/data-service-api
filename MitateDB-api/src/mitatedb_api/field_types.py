@@ -206,9 +206,33 @@ def check_declared_value(value: Any, declared_type: "str | None", *, constraints
     elif declared_type == "array":
         ok = isinstance(value, list)
     else:
+        # Unreachable in practice: `declared_type` reaching this point is
+        # always a member of `CONTRACT_TYPES` (the registry never holds
+        # anything else, `_FIELD_TYPE_VOCABULARY`/`CONTRACT_TYPES` are
+        # validated at schema-operation time) -- kept as a plain,
+        # details-free `ValidationError` (no `violated_declaration` word
+        # in the 11-word vocabulary names an unrecognized REGISTRY entry,
+        # as opposed to a value the request itself sent), never a
+        # `pragma: no cover` removal, matching this module's own
+        # pre-existing defensive style.
         raise ValidationError(f"unknown declared field type {declared_type!r}")
     if not ok:
-        raise ValidationError(f"value does not match the declared field type {declared_type!r}")
+        # Phase 9 WP-3e (design D-3 (2)/(4), V-1/V-2): the primary
+        # `field_type` choke point -- `violated_declaration: "field_type"`
+        # requires BOTH `declared_type` and `observed_type` (the 3-branch
+        # rule's first branch). `cell.py::_prepare_values`'s own catch
+        # clause (design D-3 (2)) fills in `details["field"]` with this
+        # value's own request-relative path once it re-raises -- this
+        # choke point itself has no path context (`check_declared_value`'s
+        # own fixed 3-argument signature, D-2 (3)).
+        raise ValidationError(
+            f"value does not match the declared field type {declared_type!r}",
+            details={
+                "violated_declaration": "field_type",
+                "declared_type": declared_type,
+                "observed_type": json_type_name(value),
+            },
+        )
     if constraints is not None:
         allowed = constraints.get("enum")
         if allowed is not None and value not in allowed:

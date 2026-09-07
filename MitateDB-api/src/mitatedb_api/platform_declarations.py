@@ -644,6 +644,109 @@ def check_writer_role_timeouts(
     return declared
 
 
+# Contract 1.7.0 (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1/D-6/D-5, work
+# order §2 WP-3e F-3, `{scratchpad}/rulings-r3-r7-flip.md` F-3): pinned
+# isomorphic to r2db-api's own `check_contract_170_declarations` (same
+# name, same 3-part check, `_ISOMORPHIC_TARGETS` -- task brief: "F-14
+# (check_contract_170_resource_limits / ops_module_hint) と exit code の
+# 表"). Never a second, redundant construction of a fresh `FoundationConfig
+# ()`/capabilities document for itself (the SAME flaw r2db-api's own
+# pre-rework version had, audit finding D-2/L-2 -- a broken default would
+# raise at construction, before this function is ever reached, and a
+# healthy default always passes, making the check dead): both `config`
+# and `capabilities_document` are the CALLER's own already-live values.
+#   (a) the served capabilities document actually declares `constraint_
+#       declarations`/`dry_run`/`idempotency`/`request_budget` `enabled`.
+#   (b) `config` (the caller's own deployed `FoundationConfig`, never a
+#       fresh default constructed here) carries a positive `max_enum_
+#       members`/`idempotency_entries`/`idempotency_retention_ms` (`_
+#       CONTRACT_170_LIMIT_ATTRIBUTES` below maps each contract-vocabulary
+#       limit-class NAME to this peer's own `FoundationConfig` attribute
+#       name -- `enum_members` is `max_enum_members` here, matching this
+#       peer's own `max_*` naming convention; `idempotency_entries`/
+#       `idempotency_retention_ms` need no rename).
+#   (c) EVERY registered application's own per-application upgrade ledger
+#       (migrations `0009`/`0010`, `platform_upgrades.PLATFORM_UPGRADE_
+#       NUMBERS`) already carries every number this shipped version
+#       requires -- the one part of F-14 a real deployment can actually
+#       fail (an application whose database has not yet run `ops
+#       upgrade-applications` makes the "enabled" declaration false for
+#       that application's own traffic).
+def check_contract_170_declarations(
+    capabilities_document: "Mapping[str, Any]",
+    config: "Any",
+    applied_upgrade_numbers_by_application: "Mapping[str, Optional[frozenset[int]]]",
+    required_upgrade_numbers: "frozenset[int]",
+) -> None:
+    """F-14. `capabilities_document` is the value the caller's own live
+    `ApplicationRuntime.capabilities()` call returned (or an equivalent
+    already-served document) -- this function never constructs one
+    itself. `config` is the caller's own deployed `FoundationConfig` --
+    likewise never rebuilt here. `applied_upgrade_numbers_by_application`
+    maps every registered application's slug to `platform_upgrades.read_
+    applied_upgrade_numbers`'s own return value for that application's
+    database (`None` when that application has no ledger table at all --
+    read as "every number is pending", the same convention `platform_
+    upgrades.pending_upgrade_numbers` already uses)."""
+    capabilities = capabilities_document.get("capabilities", capabilities_document)
+    for name in _CONTRACT_170_ENABLED_CAPABILITIES:
+        entry = capabilities.get(name) if isinstance(capabilities, Mapping) else None
+        status = entry.get("status") if isinstance(entry, Mapping) else None
+        if status != "enabled":
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.capabilities().{name}.status must be 'enabled'; got {status!r}.",
+                code="F-14",
+            )
+    for class_name, attr_name in _CONTRACT_170_LIMIT_ATTRIBUTES.items():
+        value = getattr(config, attr_name, None)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise PlatformDeclarationError(
+                f"{ops_module_hint()}.config.FoundationConfig.{attr_name} (limit class {class_name!r}) must be a "
+                f"positive integer; got {value!r}.",
+                code="F-14",
+            )
+    missing = {
+        application_id: tuple(sorted(required_upgrade_numbers - (applied or frozenset())))
+        for application_id, applied in applied_upgrade_numbers_by_application.items()
+        if required_upgrade_numbers - (applied or frozenset())
+    }
+    if missing:
+        detail = "; ".join(f"{app}: pending={list(nums)}" for app, nums in sorted(missing.items()))
+        raise PlatformDeclarationError(
+            f"{ops_module_hint()}: the following application(s) have not applied every contract 1.7.0 "
+            f"per-application upgrade {sorted(required_upgrade_numbers)} -- {detail}. Run "
+            f"'python -m {ops_module_hint()}.ops upgrade-applications' before declaring this capability enabled.",
+            code="F-14",
+        )
+
+
+#: The `capabilities()` document keys `check_contract_170_declarations`
+#: requires `status: "enabled"` for (contract 1.7.0, D-1/D-6).
+_CONTRACT_170_ENABLED_CAPABILITIES: tuple = ("constraint_declarations", "dry_run", "idempotency", "request_budget")
+
+#: The contract's own `limits.classes` NAME -> this peer's own
+#: `FoundationConfig` attribute name, for every limit class `check_
+#: contract_170_declarations` requires a positive integer for (contract
+#: 1.7.0, D-2 (7)/D-5). `enum_members` is `max_enum_members` here (this
+#: peer's own `max_*` naming convention, `config.py`); the idempotency
+#: pair needs no rename.
+_CONTRACT_170_LIMIT_ATTRIBUTES: dict = {
+    "enum_members": "max_enum_members",
+    "idempotency_entries": "idempotency_entries",
+    "idempotency_retention_ms": "idempotency_retention_ms",
+}
+
+
+def ops_module_hint() -> str:
+    """`PEER_MODULE`, named through a function (not referenced directly by
+    `check_contract_170_declarations`'s own f-strings) so this check's
+    error-message wording stays isomorphic across peers the same way the
+    `_fN_message` builders above do (peer-IDENTICAL name, peer-SPECIFIC
+    value read from this module's own `PEER_MODULE` constant)."""
+    return PEER_MODULE
+
+
 __all__ = [
     "CONTROL_PLANE_STATUS_ENV",
     "DEFAULT_SCHEMA",

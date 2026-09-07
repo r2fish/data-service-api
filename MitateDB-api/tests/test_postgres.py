@@ -380,6 +380,9 @@ def test_transact_only_executes_insert_and_rolls_back_the_whole_batch_on_failure
         from mitatedb_api.errors import CapabilityError
         updated = runtime.transact([{"type": "update", "collection": "notes", "values": {"title": "x"},
                                      "filters": [Filter("title", "eq", "first")]}])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST (here,
+        # only) item's own result dict now also carries `request_id`.
+        assert updated[-1].pop("request_id")
         assert updated == [{"updated": 0}]  # "first" was rolled back above; nothing to match
         # `upsert` alone remains a real capability gap -- no execution path
         # for it exists anywhere on this peer, batched or not.
@@ -419,6 +422,13 @@ def test_transact_executes_mixed_insert_update_delete_atomically(app_a) -> None:
         assert len(results) == 3
         assert "rowid" in results[0]
         assert results[1] == {"updated": 1}
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): the LAST item's own
+        # result dict now also carries `request_id` (folded in, in place,
+        # by `cell.py::ApplicationCell.transact`, never a new trailing
+        # list entry -- see that method's own comment for why) -- checked
+        # for presence, then popped before the exact-shape assert below,
+        # which stays a precise pin of the REST of the shape.
+        assert results[2].pop("request_id")
         assert results[2] == {"deleted": 1}
         rows = {row["rank"]: row["title"] for row in runtime.read("widgets")}
         assert rows == {1: "renamed", 3: "brand-new"}
@@ -570,6 +580,10 @@ def test_transact_batch_delete_accepts_an_empty_values_key(app_a) -> None:
             {"type": "delete", "collection": "widgets", "values": {},
              "filters": [Filter("title", "eq", "keep-me")], "destructive": True, "confirm": phrase},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): see the identical
+        # comment above this test's own sibling assertion for why the
+        # LAST item's own dict now also carries `request_id`.
+        assert result[-1].pop("request_id")
         assert result == [{"deleted": 1}]
         assert runtime.read("widgets") == []
     finally:
@@ -769,6 +783,10 @@ def test_transact_cross_entity_delete_wrong_entity_phrase_is_refused(app_a) -> N
             {"type": "delete", "collection": "phrase_b", "filters": [Filter("title", "eq", "keep-me")],
              "destructive": True, "confirm": phrase_b},
         ])
+        # Phase 9 WP-3e (design D-7 (3)/(4), Q-1/Q-2): see the identical
+        # comment above this test's own sibling assertion for why the
+        # LAST item's own dict now also carries `request_id`.
+        assert result[-1].pop("request_id")
         assert result == [{"deleted": 1}, {"deleted": 1}]
         assert runtime.read("phrase_a") == []
         assert runtime.read("phrase_b") == []

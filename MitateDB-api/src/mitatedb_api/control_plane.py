@@ -1400,7 +1400,13 @@ class ControlPlaneService:
             # flipped to 1.6.0 -- same commit as `surfaces` (already
             # present, WP-3 D-2) and the composed-bearer issue/rotate
             # responses (`control_http.py::_with_composed_secret`).
-            "contract_version": "1.6.0",
+            #
+            # Phase 9 WP-3e (design D-1 (5)/(7), F-1): flipped to 1.7.0 --
+            # the SAME commit as the data-plane document's own identical
+            # flip (`cell.py::ApplicationRuntime.capabilities`) -- C-19's
+            # own data/control `contract_version` agreement assert is
+            # what this pairing keeps green.
+            "contract_version": "1.7.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

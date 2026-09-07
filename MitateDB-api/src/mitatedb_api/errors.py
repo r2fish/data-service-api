@@ -42,22 +42,34 @@ class AuthorizationError(FoundationError):
 
 class ValidationError(FoundationError):
     """Phase 9 WP-3a (design docs/design/
-    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3 (5)):
-    `details` is OPTIONAL here (`None` by default) -- this WP gives the
-    D-3 `details` shape only to the denials it newly introduces (an
-    `enum`/`nullable` violation at the value-validation choke point, an
-    `alter_field` naming `field_type`, an unrecognized `field_constraints`
-    entry key, a `field_constraints` sent without `fields`, a non-boolean
-    `nullable` on `field_constraints` or `alter_field`, and an
-    `alter_field`/`add_field` naming a field the entity does not have),
-    never retrofitting it onto any of this class's other pre-existing
-    call sites (that full rollout is WP-3e's own, separate task, D-3
-    実装の形 3). `getattr(exc, "details",
-    None)` (`http.py::_problem_for_exception`'s existing convention)
-    already tolerates an instance with no `details` attribute at all --
-    passing `details=None` here deliberately leaves that attribute UNSET
-    (not set to `{}`), so an untouched call site's own error shape is
-    byte-for-byte unchanged by this addition."""
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3 (5))
+    gave this class an OPTIONAL `details` constructor parameter, used
+    only at the sites that WP newly introduced. Phase 9 WP-3e (design
+    D-3 実装の形 3, V-7) is the full rollout across every choke-point/
+    request-shape call site this peer raises `ValidationError` from
+    (`cell.py`/`field_types.py`/`http.py`/`identifiers.py`) -- `details`
+    stays OPTIONAL (`None` by default) here because a great many of this
+    class's 132 call sites (`errors.details_vocabulary.layer_rule`'s own
+    backend-layer defence-in-depth, and every violation this contract's
+    11-word `violated_declaration` vocabulary has no word for, e.g. a
+    cyclic request structure) never carried and still never carry
+    `details` at all -- there is no vocabulary word to assign them, and
+    D-3 (5) reserves the 4-key shape for the layer that reads the
+    declaration, not for every possible refusal. `getattr(exc, "details",
+    None)` (`http.py::_problem_for_exception`'s existing convention,
+    unchanged by this WP) already tolerates an instance with no `details`
+    attribute at all -- passing `details=None` here deliberately leaves
+    that attribute UNSET (not set to `{}`), so a call site this WP did
+    not touch keeps its pre-existing error shape byte-for-byte.
+
+    WP-3e (V-7) removes the LAST escape hatch this class' own history
+    left behind: setting `.details` directly on an already-constructed
+    instance, rather than through this parameter (the two `_deny_
+    provisional_field` call sites in `cell.py`/`http.py` were the only
+    remaining users of that pattern, both now passing `details=` here
+    instead -- there is no other place in this package's own source that
+    ever assigned `.details` on a raised `FoundationError` outside a
+    constructor)."""
 
     def __init__(self, message, *, details=None):
         super().__init__(message)
@@ -260,4 +272,85 @@ class CapabilityError(FoundationError):
     the contract's vocabulary entirely (an unrecognized operation/operator
     name, a malformed shape). An HTTP adapter or conformance plug maps this
     to the common contract's ``CAPABILITY_UNSUPPORTED`` error code.
+
+    Phase 9 WP-3e (design D-3 (5), V-7): `details` is an OPTIONAL
+    constructor parameter here too, the same shape `ValidationError`
+    above carries (`{"violated_declaration": "capability", "field":
+    ...}` -- `errors.details_vocabulary.CAPABILITY_UNSUPPORTED`'s own
+    2-key required form, `field` present only where the unsupported
+    operation/field occupies a determinate request position). Before
+    this WP this class had no `__init__` override at all (14 call sites,
+    0 of them carrying `details`) -- the two that DID attach `details`
+    (`cell.py`/`http.py`'s own `_deny_provisional_field`) did so by
+    setting `.details` on the raised instance directly, the same escape
+    hatch `ValidationError`'s own docstring describes removing; both now
+    pass `details=` here instead.
     """
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        if details is not None:
+            self.details = dict(details)
+
+
+# --------------------------------------------------------------------------
+# Phase 9 WP-3e (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3, V-1/V-2/V-4):
+# `errors.details_vocabulary`'s 4-key form (`violated_declaration`/`field`/
+# `declared_type`/`observed_type`) is built at every choke-point/request-
+# shape-layer call site through these two helpers, never assembled ad hoc
+# at each site -- so the "omit the key rather than carry a null
+# placeholder" rule (D-3 (4)) can never drift between call sites. Named
+# and shaped to match r2db-api's own `r2db_api.errors.violation`/
+# `observed_type_of` (task brief: "r2db 側の同じ WP の実装と報告を参照し、
+# 同型に揃える") -- independent implementations, no code shared between
+# peers (CLAUDE.md/R-2's own closing paragraph), but the two helper NAMES
+# are pinned by the peer-symmetry isomorphism test. Backend-layer defence-
+# in-depth call sites (D-3 (5), `errors.details_vocabulary.layer_rule`) do
+# not use these helpers and pass no `details` at all (or a details dict
+# outside this vocabulary, e.g. `ResourceLimitError.limit_class`).
+# --------------------------------------------------------------------------
+
+
+def violation(violated_declaration, *, field=None, declared_type=None, observed_type=None):
+    """Build a `details` dict using exactly the 4 keys `errors.
+    details_vocabulary` names for `VALIDATION_FAILED`/`IDENTIFIER_INVALID`
+    (this peer never emits that code, L9-2a -- kept general anyway, since
+    the vocabulary itself is shared across all 3 codes)/
+    `CAPABILITY_UNSUPPORTED` -- omitting any key whose value is `None`
+    rather than carrying it as an explicit null (the required-key rules,
+    D-3 (4), are stated as key ABSENCE/PRESENCE, not as a null value)."""
+    details = {"violated_declaration": violated_declaration}
+    if field is not None:
+        details["field"] = field
+    if declared_type is not None:
+        details["declared_type"] = declared_type
+    if observed_type is not None:
+        details["observed_type"] = observed_type
+    return details
+
+
+def observed_type_of(value):
+    """The `errors.details_vocabulary` `observed_type` vocabulary word for
+    a JSON-decoded Python value -- `string`/`integer`/`number`/`boolean`/
+    `object`/`array`/`null`. `bool` is checked before `int` (a Python
+    `bool` is an `int` subclass, the same ordering `field_types.
+    check_declared_value`/`json_type_name` already use); a request that
+    omits a value entirely is `"absent"`, named explicitly at each such
+    call site rather than through this function (there is no absent
+    *value* to inspect)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"  # pragma: no cover - unreachable for JSON-decoded input

@@ -566,15 +566,20 @@ def test_http_mutation_item_always_carries_a_values_key_matching_the_in_process_
     `request_object`s depending on which plug presented it -- a plan taken
     on one plug could never validate on the other (design D-4 (7): "HTTP
     層から来ても in-process port から来ても同じ object になる")."""
+    # Phase 9 WP-3e (design D-3 (2)): `_mutation_item` now takes a
+    # keyword-only `index` (this batch item's own position, threaded
+    # into `_check_object_shape`'s own `own_path` for a request_schema
+    # denial's `details.field`) -- `index=0` here since these are each
+    # unit-level, single-item calls.
     delete_without_values = _mutation_item("entity_x", {"operation": "delete", "where": [
         {"field": "id", "operator": "eq", "value": 1},
-    ]})
+    ]}, index=0)
     assert delete_without_values["values"] == {}, delete_without_values
     assert "values" in delete_without_values
 
     # And an insert that DOES carry values still passes them through
     # untouched -- this rework only changes the omitted case.
-    insert_with_values = _mutation_item("entity_x", {"operation": "insert", "values": {"label": "x"}})
+    insert_with_values = _mutation_item("entity_x", {"operation": "insert", "values": {"label": "x"}}, index=0)
     assert insert_with_values["values"] == {"label": "x"}
 
 
