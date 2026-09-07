@@ -569,7 +569,16 @@ MAX_INDEX_FIELDS = 16
 # "fixed" to look complete -- updating it would not satisfy any completion
 # condition, only look like it did.
 SCHEMA_OPERATIONS = {"create_entity", "add_field", "drop_entity", "create_index", "drop_index"}
-_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable"}
+# Contract 1.7.0 (D-4, WP-2b): `dry_run`/`plan` join this allowlist --
+# `SchemaOperationRequest` is the single flat operation object itself (no
+# separate wrapper level unlike `MutationRequest`'s `operations` array), so
+# these two request-level fields arrive as ordinary keys on `operation`
+# here. `budget`/`idempotency_key` (contract 1.7.0 too) stay OUT of this
+# set -- they remain unconditionally rejected by `service.py`'s own
+# `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` gate until WP-2d/WP-2c flip
+# their own capabilities, mirroring WP-2a's identical removal of `field_
+# constraints`/`enum`/`nullable` from that same gate in its own commit.
+_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable", "dry_run", "plan"}
 
 
 @dataclass(frozen=True)
@@ -1236,6 +1245,18 @@ class MutationOutcome:
     # enqueue it on the bounded buffer (D-10: at most one durable row per
     # operation).
     destructive: bool = False
+    # Contract 1.7.0 (D-4, WP-2b): `committed` is `False` only for a
+    # `dry_run` that reached the "would succeed" decision (rolled back at
+    # `transact`'s own single tx-exit point, never a mid-loop branch) --
+    # `True` for every real apply, exactly what `MutationResult.committed`
+    # (contract) reports. `plan` is the deterministic token this batch's
+    # own tx-exit point computed (D-4 (7)/S-a) -- present whenever a
+    # caller supplied `plan_request` to `transact`, `None` otherwise
+    # (`DataService.mutate_result` only ever surfaces it on a `dry_run`
+    # response, D-4 (3): a real response echoes `None`, keeping its shape
+    # byte-identical to pre-1.7.0 besides `committed`).
+    committed: bool = True
+    plan: str | None = None
 
 
 # --- value type validation (R-7) -------------------------------------------
@@ -1550,6 +1571,98 @@ def _decode_cursor(cursor: Any, expected_shape: str) -> int:
     return offset
 
 
+# --- contract 1.7.0 dry_run/plan (D-4, WP-2b) --------------------------------
+#
+# Peer symmetry (work order §2 WP-2b "同型性テストの対象"): MitateDB-api
+# places its own same-named, same-signature pair in `field_types.py`
+# (the module its own D-2 constraint helpers already live in) -- no code
+# is shared between the two peers (依頼者裁定 2026-09-03 案(a)); only the
+# two names/signatures/behaviour are pinned isomorphic.
+
+
+def normalize_request_for_plan(request: dict[str, Any]) -> bytes:
+    """Contract 1.7.0 (D-4 (7), addendum 2 S-a): the canonical byte
+    encoding a `plan` (and, per D-5 (1)(i), an `idempotency_key`'s own
+    digest) commits to -- `request`'s keys in lexicographic order, no
+    insignificant whitespace, non-ASCII left unescaped, encoded UTF-8.
+    `request` is the contract-level request object as THIS peer's own
+    `SchemaOperationRequest`/`MutationRequest` schema names it -- `plan`
+    and `dry_run` themselves are excluded here defensively (S-a's own
+    exclusion pair; every real caller already omits them before building
+    the dict this function receives, `service.py`'s own `plan_request`/
+    `apply_schema`'s `plan_request`), never a raw HTTP body (`service.py`
+    assembles the same object whether a request arrived over HTTP or an
+    in-process port, D-4 (7)'s own "同じ object になる" requirement).
+    Mirrors `_shape_hash`'s identical `json.dumps(..., sort_keys=True)` +
+    `hashlib.sha256` recipe immediately above, applied to a different
+    payload shape.
+    """
+    filtered = {key: value for key, value in request.items() if key not in ("plan", "dry_run")}
+    return json.dumps(filtered, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def compute_plan_token(request: dict[str, Any], schema_revision: int) -> str:
+    """Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a, U-4 = (A)): `plan` --
+    an opaque but deterministic token computed from `normalize_request_
+    for_plan(request)` together with the Application's own schema
+    revision (`SchemaOperationResult.revision`'s identical per-application
+    monotonic counter, D-4 (7); never an entity-scoped value, since
+    neither peer keeps one). Holds no server-side state: two calls with
+    the identical `request` (modulo `plan`/`dry_run`) and the identical
+    `schema_revision` always return the identical token; either input
+    changing changes it. `maxLength: 256` (`schemas.MutationRequest.
+    properties.plan`) comfortably bounds this -- a 64-hex-digit sha256
+    plus a decimal revision separated by one character.
+
+    Review round F-7 (`{scratchpad}/rulings-r4.md`): the format is
+    FIXED as `"<sha256hex>.<schema_revision>"`, identically on both
+    peers -- `revision` is not treated as secret (it is the exact value
+    `SchemaOperationResult.revision` already reports back to any
+    developer credential, and this token is never presented to a runtime
+    credential's own schema-blind view). The contract's "opaque" means
+    only that a client is expected to compare tokens for equality, never
+    to parse or construct one -- it does not require the revision
+    component to be hidden.
+    """
+    digest = hashlib.sha256(normalize_request_for_plan(request)).hexdigest()
+    return f"{digest}.{schema_revision}"
+
+
+@dataclass(frozen=True)
+class SchemaOutcome:
+    """Contract 1.7.0 (D-4, WP-2b): `apply_schema`'s return shape -- the
+    schema-side sibling of `MutationOutcome` above, reporting `committed`/
+    `descriptor`/`plan` alongside `revision`. Returned uniformly, whether
+    or not the request carried `dry_run`/`plan` (review round F-8,
+    `{scratchpad}/rulings-r4.md`) -- every pre-1.7.0 caller of `apply_
+    schema`/`DataService.schema` now reads `outcome.revision` in place of
+    what used to be a bare `int`.
+
+    `committed`: `False` only for a `dry_run` that reached the "would
+    succeed" decision (rolled back at `apply_schema`'s own single
+    tx-exit point); `True` for every real apply.
+    `revision`: the schema revision this result reports -- the CURRENT
+    (pre-apply) value for a dry run (D-4 (3), addendum 2 S-j: "not the
+    revision the operation would establish"), the newly-established value
+    for a committed real apply (identical to the pre-1.7.0 bare `int`).
+    `descriptor`: the target entity's own descriptor -- as it would read
+    afterwards, for a dry run that leaves the entity in place; `None` for
+    a dry-run `drop_entity` (nothing to describe afterwards) and for
+    every real (non-dry-run) apply (contract `SchemaOperationResult.
+    descriptor` is optional either way; a real apply's response keeps its
+    pre-1.7.0 shape besides `committed`, D-4 (3)'s own asymmetry with
+    `assigned_addresses`).
+    `plan`: the deterministic token this operation's own tx-exit point
+    computed -- `None` unless `plan_request` was given to `apply_schema`;
+    `DataService.schema` only ever surfaces it on a `dry_run` response.
+    """
+
+    committed: bool
+    revision: int
+    descriptor: dict[str, Any] | None = None
+    plan: str | None = None
+
+
 @dataclass
 class ApplicationCell:
     application_id: str
@@ -1675,49 +1788,93 @@ class ApplicationCell:
         next_cursor = _encode_cursor(offset + page_size, shape) if has_more else None
         return QueryOutcome(items=items, revisions=revisions, has_more=has_more, next_cursor=next_cursor)
 
-    def catalog(self) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for name in sorted(self.entities):
-            fields = sorted(self.schema.get(name, {}).keys())
-            unique_keys = [
-                {"name": index_name, "fields": list(info["fields"])}
-                for index_name, info in sorted(self.indexes.get(name, {}).items())
-                if info["unique"]
-            ]
-            # Phase 6 WP-2 (design D-3(iii)): every name in `fields` maps to
-            # its real type, drawn from the same 7-word vocabulary --
-            # `self.schema[name]`'s internal `None` (untyped) reports as
-            # `json`, decision (ii)'s own default, never left un-translated.
-            declared_field_types = self.schema.get(name, {})
-            # Contract 1.7.0 (D-2 (1), WP-2a): total over `fields` --
-            # `nullable` always present, `enum` only for a field the
-            # registry (`self.field_constraints`) actually carries a row
-            # for. Read from the registry itself, never re-derived from
-            # any physical/stored value (D-2 (4): "catalog は...宣言
-            # registry から報告する").
-            declared_constraints = self.field_constraints.get(name, {})
-            field_constraints_out: dict[str, Any] = {}
-            for field_name in fields:
-                constraints = declared_constraints.get(field_name, FieldConstraints())
-                entry: dict[str, Any] = {"nullable": constraints.nullable}
-                if constraints.enum is not None:
-                    entry["enum"] = list(constraints.enum)
-                field_constraints_out[field_name] = entry
-            result.append(
-                {
-                    "entity": name,
-                    "fields": fields,
-                    "field_types": {field_name: declared_field_types.get(field_name) or "json" for field_name in fields},
-                    "field_constraints": field_constraints_out,
-                    "mutation_class": "mutable",
-                    "address_fields": ["id"],
-                    "address_reuse": "never",
-                    "unique_keys": unique_keys,
-                }
-            )
-        return result
+    def _describe_entity(self, name: str) -> dict[str, Any]:
+        """One entity's `EntityDescriptor` (contract shape) -- factored out
+        of `catalog()` below (WP-2b) so `apply_schema`'s own `dry_run`
+        response can build the identical descriptor for the ONE entity a
+        schema operation targets (D-4 (3): "schema なら変更後の
+        EntityDescriptor を descriptor に載せる"), without duplicating this
+        construction logic a second time."""
+        fields = sorted(self.schema.get(name, {}).keys())
+        unique_keys = [
+            {"name": index_name, "fields": list(info["fields"])}
+            for index_name, info in sorted(self.indexes.get(name, {}).items())
+            if info["unique"]
+        ]
+        # Phase 6 WP-2 (design D-3(iii)): every name in `fields` maps to
+        # its real type, drawn from the same 7-word vocabulary --
+        # `self.schema[name]`'s internal `None` (untyped) reports as
+        # `json`, decision (ii)'s own default, never left un-translated.
+        declared_field_types = self.schema.get(name, {})
+        # Contract 1.7.0 (D-2 (1), WP-2a): total over `fields` --
+        # `nullable` always present, `enum` only for a field the
+        # registry (`self.field_constraints`) actually carries a row
+        # for. Read from the registry itself, never re-derived from
+        # any physical/stored value (D-2 (4): "catalog は...宣言
+        # registry から報告する").
+        declared_constraints = self.field_constraints.get(name, {})
+        field_constraints_out: dict[str, Any] = {}
+        for field_name in fields:
+            constraints = declared_constraints.get(field_name, FieldConstraints())
+            entry: dict[str, Any] = {"nullable": constraints.nullable}
+            if constraints.enum is not None:
+                entry["enum"] = list(constraints.enum)
+            field_constraints_out[field_name] = entry
+        return {
+            "entity": name,
+            "fields": fields,
+            "field_types": {field_name: declared_field_types.get(field_name) or "json" for field_name in fields},
+            "field_constraints": field_constraints_out,
+            "mutation_class": "mutable",
+            "address_fields": ["id"],
+            "address_reuse": "never",
+            "unique_keys": unique_keys,
+        }
 
-    def transact(self, entity: str, operations: list[dict[str, Any]], limits: ResourceLimits, *, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> MutationOutcome:
+    def catalog(self) -> list[dict[str, Any]]:
+        return [self._describe_entity(name) for name in sorted(self.entities)]
+
+    def transact(
+        self,
+        entity: str,
+        operations: list[dict[str, Any]],
+        limits: ResourceLimits,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+    ) -> MutationOutcome:
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        `dry_run` walks every gate a real request would (no early-out
+        anywhere above or inside this method) and this method's own
+        SINGLE tx-exit point -- after the per-operation loop below, before
+        this method's own commit point -- decides plan validity, then
+        commit vs rollback; it never branches mid-loop (D-4 (2): a
+        mid-loop branch would make "reaches the same decision" false).
+        `plan_request`, when given, is the contract-level request object
+        `service.py` assembled (`operations`/`transaction`/`budget`,
+        never `plan`/`dry_run` themselves) -- `expected_plan` below is
+        computed from it together with THIS entity's Application's own
+        `schema_revision`, read once, before the loop runs (mutations
+        never advance it, so reading it before or after is the identical
+        value; D-4 (7): the plan commits to the revision "as it stood
+        when the request was decided", not a value the loop could still
+        change). A caller-supplied `plan` that no longer matches is a
+        precondition failure (D-4 (2): evaluated after confirmation --
+        every confirmation check inside `_apply` below already raised, if
+        it was going to, before this point is ever reached -- and before
+        this method's own commit).
+
+        Review round F-5 (`{scratchpad}/rulings-r4.md`): `service.py`
+        builds `plan_request` unconditionally for every mutation, so the
+        digest below is only computed when it is actually consumed --
+        `dry_run`'s own response, or a caller-presented `plan` to verify
+        -- never for the ordinary apply that carries neither. A plain
+        apply pays no `json.dumps`/`sha256` cost it never uses.
+        """
         if deadline is not None and clock is not None:
             limits.check_deadline(deadline, clock)
         validate_identifier(entity)
@@ -1727,6 +1884,11 @@ class ApplicationCell:
         limits.check("batch_items", len(operations))
         if entity not in self.entities:
             fail("NOT_FOUND", "Entity was not found.", status=404)
+        expected_plan = (
+            compute_plan_token(plan_request, self.schema_revision)
+            if plan_request is not None and (dry_run or plan is not None)
+            else None
+        )
         before = deepcopy(self.entities[entity])
         try:
             affected = 0
@@ -1763,6 +1925,30 @@ class ApplicationCell:
                 limits.check("result_items", affected)
             if deadline is not None and clock is not None:
                 limits.check_deadline(deadline, clock)
+            # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit
+            # point -- plan validity, then commit vs rollback. Reached
+            # only once every operation above has tentatively succeeded
+            # (every confirmation/precondition/value/limit refusal inside
+            # the loop already raised and is handled by the `except
+            # Exception` below, restoring `before` -- this point is never
+            # reached for those).
+            if plan is not None and plan != expected_plan:
+                fail(
+                    "PRECONDITION_FAILED", "The plan no longer matches this request or the Application's schema.",
+                    status=412, details={"violated_declaration": "plan"},
+                )
+            if dry_run:
+                # D-4 (4)/(6): rollback (never the audit hook -- `service.
+                # py` never builds one for a dry_run in the first place,
+                # so `audit_hook` is always `None` here) -- the identical
+                # single-exit restore the `except Exception` clause below
+                # uses for every OTHER refusal, just reached by a
+                # successful decision instead of a raised one.
+                self.entities[entity] = before
+                return MutationOutcome(
+                    affected=affected, assigned_addresses=assigned_addresses, destructive=destructive,
+                    committed=False, plan=expected_plan,
+                )
             # Phase 4 (design D-2/D-10): the pre-commit hook is the LAST
             # thing this method does before its own commit point (here:
             # returning normally -- this in-memory backend has no separate
@@ -1774,7 +1960,7 @@ class ApplicationCell:
             # (fail-closed by construction, no special-casing needed).
             if destructive and audit_hook is not None:
                 audit_hook.pre_commit()
-            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive)
+            return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True)
         except Exception:
             self.entities[entity] = before
             raise
@@ -1994,7 +2180,33 @@ class ApplicationCell:
             seen.add(key)
         return False
 
-    def apply_schema(self, operation: dict[str, Any], *, developer: bool, limits: ResourceLimits, deadline: float | None = None, clock: Callable[[], float] | None = None, audit_hook: ApplicationAuditHook | None = None) -> int:
+    def apply_schema(
+        self,
+        operation: dict[str, Any],
+        *,
+        developer: bool,
+        limits: ResourceLimits,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+    ) -> "SchemaOutcome":
+        """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        identical single tx-exit-point discipline to `transact` above,
+        adapted to this method's own pre-existing `before_*`-snapshot
+        restore machinery (5 pieces of state, not one `deepcopy`d dict).
+        Always returns `SchemaOutcome` -- review round F-8 (`{scratchpad}/
+        rulings-r4.md`): a bare `int` for one request and a `SchemaOutcome`
+        for the structurally identical request differing only in whether
+        it happened to carry `plan` was two shapes for the same call, not
+        a backward-compatibility rule. `DataService.schema` (`service.py`)
+        is a pure passthrough of this return value and therefore now
+        always returns `SchemaOutcome` too -- its own pre-1.7.0-shaped
+        direct callers read `.revision` off it instead of comparing the
+        result itself to an `int`.
+        """
         bound = bind_schema_operation(operation, developer=developer)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like
         # entities/fields already did (SI-08: an index is a real resource,
@@ -2028,6 +2240,28 @@ class ApplicationCell:
         before_next_id = dict(self._next_id)
         before_field_constraints = deepcopy(self.field_constraints)
         before_revision = self.schema_revision
+        # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j, WP-2b): computed
+        # against `before_revision` -- the revision "as it stood when the
+        # request was decided" (D-4 (7)), never a value the branch below
+        # could still establish -- so a dry run's own reported `revision`
+        # (S-j) and a real apply's `plan` verification agree on the SAME
+        # pre-operation state. Review round F-5: only computed when
+        # `dry_run`'s own response or a caller-presented `plan` actually
+        # consumes it -- an ordinary schema apply pays no digest cost.
+        expected_plan = (
+            compute_plan_token(plan_request, before_revision)
+            if plan_request is not None and (dry_run or plan is not None)
+            else None
+        )
+
+        def _restore_before_snapshot() -> None:
+            self.entities = before_entities
+            self.schema = before_schema
+            self.indexes = before_indexes
+            self._next_id = before_next_id
+            self.field_constraints = before_field_constraints
+            self.schema_revision = before_revision
+
         if bound.operation == "create_entity":
             if bound.entity in self.entities:
                 fail("CONFLICT", "Entity already exists.", status=409)
@@ -2220,13 +2454,36 @@ class ApplicationCell:
             try:
                 limits.check_deadline(deadline, clock)
             except Exception:
-                self.entities = before_entities
-                self.schema = before_schema
-                self.indexes = before_indexes
-                self._next_id = before_next_id
-                self.field_constraints = before_field_constraints
-                self.schema_revision = before_revision
+                _restore_before_snapshot()
                 raise
+        # Contract 1.7.0 (D-4 (2)/(4), WP-2b): the single tx-exit point --
+        # plan validity, then commit vs rollback. Reached only once the
+        # operation branch above has already tentatively succeeded (a
+        # `require_destructive_confirmation` failure inside the
+        # `drop_entity`/`drop_index` branches above already raised, and is
+        # handled below, before this point is ever reached for it -- D-4
+        # (2)'s own "confirmation の後、execution の前" ordering, and the
+        # reason an unconfirmed `drop_entity` carrying a stale `plan` is
+        # refused DESTRUCTIVE_CONFIRMATION_REQUIRED, never PRECONDITION_
+        # FAILED).
+        if plan is not None and plan != expected_plan:
+            _restore_before_snapshot()
+            fail(
+                "PRECONDITION_FAILED", "The plan no longer matches this request or the Application's schema.",
+                status=412, details={"violated_declaration": "plan"},
+            )
+        if dry_run:
+            # D-4 (3)/(4): `descriptor` is the target entity's own
+            # descriptor as it would read afterwards -- `None` for a
+            # dry-run `drop_entity` (the entity no longer exists in the
+            # tentative state at this point) -- built BEFORE restoring.
+            # `revision` (S-j) is `before_revision`, never `schema_
+            # revision + 1` (never reached here: this branch returns
+            # before that increment). No audit hook call either way (D-4
+            # (4): `service.py` never builds one for a dry_run).
+            descriptor = self._describe_entity(bound.entity) if bound.entity in self.entities else None
+            _restore_before_snapshot()
+            return SchemaOutcome(committed=False, revision=before_revision, descriptor=descriptor, plan=expected_plan)
         # Phase 4 (design D-2, item 2): every schema operation is
         # fail-closed class, unconditionally (unlike `transact`, there is
         # no non-destructive schema operation) -- the pre-commit hook is
@@ -2240,15 +2497,15 @@ class ApplicationCell:
             try:
                 audit_hook.pre_commit()
             except Exception:
-                self.entities = before_entities
-                self.schema = before_schema
-                self.indexes = before_indexes
-                self._next_id = before_next_id
-                self.field_constraints = before_field_constraints
-                self.schema_revision = before_revision
+                _restore_before_snapshot()
                 raise
         self.schema_revision += 1
-        return self.schema_revision
+        # Review round F-8: always `SchemaOutcome`, plan or no plan --
+        # every pre-1.7.0 direct caller of this method (`test_constraints_
+        # declaration.py`'s many `cell.apply_schema(...)` call sites among
+        # them) now reads `.revision` off the result instead of comparing
+        # the result itself to an `int`.
+        return SchemaOutcome(committed=True, revision=self.schema_revision)
 
 
 # Contract 1.1.0 (CCR-13, §0.5 Q-2): `matches`'s wildcard grammar is

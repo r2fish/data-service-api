@@ -76,7 +76,7 @@ def test_runtime_developer_separation_and_structured_validation(service):
         service.schema(runtime, {"operation": "create_entity", "entity": "new_entity"})
     assert exc.value.code == "FORBIDDEN"
     developer = service.authenticate("dev-a.dev-secret-a")
-    assert service.schema(developer, {"operation": "create_entity", "entity": "new_entity"}) == 1
+    assert service.schema(developer, {"operation": "create_entity", "entity": "new_entity"}).revision == 1
     with pytest.raises(FoundationError):
         service.query(runtime, "notes;drop", select=["id"])
 
@@ -134,7 +134,7 @@ def test_runtime_unknown_entity_and_failed_mutation_leave_no_ghost(service):
 
 def test_developer_schema_catalog_controls_fields(service):
     developer = service.authenticate("dev-a.dev-secret-a")
-    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"}) == 1
+    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"}).revision == 1
     runtime = service.authenticate("cred-a.secret-a")
     with pytest.raises(FoundationError) as field_error:
         service.mutate(runtime, "notes", [{"operation": "insert", "values": {"unlisted": "x"}}])
@@ -1069,7 +1069,7 @@ def test_create_index_and_unique_conflict_on_insert_and_update():
     cell = _cell()
     _create_entity(cell, "accounts")
     _add_field(cell, "accounts", "email")
-    revision = cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+    revision = cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS).revision
     assert isinstance(revision, int)
     entity = cell.catalog()[0]
     assert entity["unique_keys"] == [{"name": "by_email", "fields": ["email"]}]
@@ -2119,7 +2119,7 @@ def test_service_mutate_upsert_without_a_declared_key_is_still_capability_unsupp
 def test_service_schema_create_index_and_drop_index_execute(service):
     developer = service.authenticate("dev-a.dev-secret-a")
     service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "tag"})
-    revision = service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True})
+    revision = service.schema(developer, {"operation": "create_index", "entity": "notes", "index": "by_tag", "fields": ["tag"], "unique": True}).revision
     assert isinstance(revision, int)
     runtime = service.authenticate("cred-a.secret-a")
     assert service.catalog(runtime)["entities"][0]["unique_keys"] == [{"name": "by_tag", "fields": ["tag"]}]
@@ -2143,7 +2143,7 @@ def test_service_non_developer_create_index_is_forbidden(service):
 
 def test_service_schema_field_type_executes(service):
     developer = service.authenticate("dev-a.dev-secret-a")
-    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"}) == 1
+    assert service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "n", "field_type": "integer"}).revision == 1
     runtime = service.authenticate("cred-a.secret-a")
     service.mutate(runtime, "notes", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"n": 5}}])
     assert service.query(runtime, "notes", select=["n"]) == [{"n": 5}]

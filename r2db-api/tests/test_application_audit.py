@@ -1441,7 +1441,7 @@ def test_schema_operation_is_service_unavailable_when_the_durable_sink_fails() -
     # instead raise CONFLICT). Exactly one durable row exists afterwards --
     # from this SECOND, successful call; the first, faulted attempt left
     # nothing durable behind.
-    assert service.schema(dev, {"operation": "create_entity", "entity": "widgets"}) == 1
+    assert service.schema(dev, {"operation": "create_entity", "entity": "widgets"}).revision == 1
     events = durable_events(durable)
     assert len(events) == 1
     assert events[0]["operation"] == "schema" and events[0]["outcome"] == "allow"
@@ -2888,7 +2888,7 @@ def test_alert_insert_failure_is_sticky_with_exponential_backoff_and_does_not_bl
     # A genuinely unrelated fail-closed operation still succeeds while the
     # alert is pending (§9.2 property 7's own spirit, extended to the
     # alert path specifically -- an alert failure must never block traffic).
-    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_alert_test"})
+    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_alert_test"}).revision
     assert revision >= 1
 
     # Before the backoff interval elapses, a retry is not even attempted.
@@ -2930,7 +2930,7 @@ def test_buffer_row_failure_does_not_block_a_fail_closed_operation() -> None:
 
     # A fail-closed operation (schema, unconditionally fail-closed) still
     # succeeds -- it does not go through append_many at all.
-    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_buffer_test"})
+    revision = service.schema(dev, {"operation": "create_entity", "entity": "widgets_buffer_test"}).revision
     assert revision >= 1
     schema_rows = [e for e in durable_events(inner) if e["operation"] == "schema" and e["outcome"] == "allow"]
     assert len(schema_rows) == 1

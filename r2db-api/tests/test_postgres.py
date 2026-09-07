@@ -1055,8 +1055,8 @@ def test_catalog_reflects_entities_and_excludes_internal_bookkeeping_table(app_a
 def test_schema_revision_increments_and_create_entity_conflict(app_a: types.SimpleNamespace) -> None:
     cell = make_cell(app_a)
     try:
-        first = cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
-        second = cell.apply_schema({"operation": "add_field", "entity": "widgets", "field": "name"}, developer=True, limits=LIMITS)
+        first = cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS).revision
+        second = cell.apply_schema({"operation": "add_field", "entity": "widgets", "field": "name"}, developer=True, limits=LIMITS).revision
         assert second == first + 1
         with pytest.raises(FoundationError) as exc:
             cell.apply_schema({"operation": "create_entity", "entity": "widgets", "fields": []}, developer=True, limits=LIMITS)
@@ -1502,7 +1502,7 @@ def test_create_index_and_unique_conflict_on_insert_and_update(app_a: types.Simp
     cell = make_cell(app_a)
     try:
         cell.apply_schema({"operation": "create_entity", "entity": "accounts", "fields": ["email"]}, developer=True, limits=LIMITS)
-        revision = cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS)
+        revision = cell.apply_schema({"operation": "create_index", "entity": "accounts", "index": "by_email", "fields": ["email"], "unique": True}, developer=True, limits=LIMITS).revision
         assert isinstance(revision, int)
         assert cell.catalog()[0]["unique_keys"] == [{"name": "by_email", "fields": ["email"]}]
 

@@ -24,10 +24,11 @@ from typing import Any, Callable, Protocol, runtime_checkable
 
 from .audit_hook import ApplicationAuditHook
 from .limits import ResourceLimits
-from .structured import ApplicationCell, MutationOutcome, Predicate, QueryOutcome
+from .structured import ApplicationCell, MutationOutcome, Predicate, QueryOutcome, SchemaOutcome
 
-# `QueryOutcome`/`MutationOutcome` (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md
-# §3) are defined in `structured.py` -- the module that already owns the
+# `QueryOutcome`/`MutationOutcome`/`SchemaOutcome` (CCR-13, docs/design/
+# R2DB_CCR13_STORAGE_V1.md §3; `SchemaOutcome` added by contract 1.7.0 D-4,
+# WP-2b) are defined in `structured.py` -- the module that already owns the
 # shared validation/planning boundary and is where `ApplicationCell` actually
 # constructs them -- and re-exported here so this module remains the single
 # place that names the full `StorageBackend` call surface, inputs and
@@ -79,6 +80,9 @@ class StorageBackend(Protocol):
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
         audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
     ) -> MutationOutcome:
         """Apply a batch of mutation operations as one atomic unit (D-5:
         one request maps to one transaction) and return the affected row
@@ -98,6 +102,22 @@ class StorageBackend(Protocol):
         recorded (D-10: at most one durable row per operation). See
         `audit_hook.py` for the full call contract (`pre_commit`/`commit_
         failed`, rollback-on-raise, error-row rule).
+
+        `dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b): a
+        backend decides commit vs. rollback at a SINGLE tx-exit point,
+        after every operation in the batch has tentatively succeeded, not
+        mid-batch -- `dry_run` walks every gate a real request would (no
+        early-out) and then rolls back instead of committing, leaving no
+        externally visible state change (no row, no revision, and no
+        audit event: `audit_hook` is never called at all for a `dry_run`
+        -- not merely built and left uncalled -- so `caller` must pass
+        `audit_hook=None` itself whenever `dry_run` is true). `plan`,
+        when given, is verified against a token this same tx-exit point
+        recomputes from `plan_request` (the contract-level request object,
+        never a raw body) and the Application's own current schema
+        revision; a mismatch is `PRECONDITION_FAILED`. A caller presenting
+        neither `dry_run` nor `plan` sees behaviour identical to before
+        this version.
         """
         ...
 
@@ -110,11 +130,15 @@ class StorageBackend(Protocol):
         deadline: float | None = None,
         clock: Callable[[], float] | None = None,
         audit_hook: ApplicationAuditHook | None = None,
-    ) -> int:
-        """Apply one schema-changing operation and return the new schema
-        revision. `developer` is the caller's already-authenticated
-        authority (SI-03); a backend must reject when it is False even if
-        every other input is well-formed.
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+    ) -> SchemaOutcome:
+        """Apply one schema-changing operation and return a `SchemaOutcome`
+        (`.committed`/`.revision`/`.descriptor`/`.plan`). `developer` is
+        the caller's already-authenticated authority (SI-03); a backend
+        must reject when it is False even if every other input is
+        well-formed.
 
         Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2): every schema
         operation is fail-closed class (D-2's normative rule, item 2 --
@@ -122,6 +146,22 @@ class StorageBackend(Protocol):
         `audit_hook`, when given, is always called as the last thing this
         method does before its own commit point. See `audit_hook.py` for
         the full call contract.
+
+        `dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
+        identical single-tx-exit-point discipline to `transact` above --
+        `dry_run` rolls back instead of committing (`schema_revision` is
+        never advanced, `audit_hook` is never called), and `.revision` on
+        a `dry_run` outcome is the revision as it stood when the request
+        was decided, never the value the operation would establish
+        (addendum 2 S-j; `.descriptor` reports the entity as it WOULD
+        read afterwards). `plan` is verified the same way `transact`
+        verifies it. Every caller returns `SchemaOutcome` uniformly --
+        review round F-8 (`{scratchpad}/rulings-r4.md`): a bare `int`
+        return, conditioned on whether the SAME request happened to carry
+        a `plan`, is not this protocol's shape; `DataService.schema`'s own
+        pre-1.7.0-compatible bare-`int` surface is that method's choice
+        about ITS OWN return value, built from `.revision`, not a shape
+        this backend boundary itself carries.
         """
         ...
 

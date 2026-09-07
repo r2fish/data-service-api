@@ -161,10 +161,7 @@ class QueryPage:
 @dataclass(frozen=True)
 class MutationResult:
     """`DataService.mutate_result`'s own return shape, matching
-    `spec/data-service-api.v1.json`'s `MutationResult` minus `committed`
-    (added by `http.post_mutate` itself, which is always `True` for a
-    response that reaches this point at all -- an atomic batch that failed
-    partway through never returns anything, it raises). Mirrors the
+    `spec/data-service-api.v1.json`'s `MutationResult`. Mirrors the
     `query`/`query_page` split (WP-4): `mutate` below stays byte-for-byte
     backward compatible (a bare `int`, the affected count) for every
     existing caller (`tests/test_foundation.py`, the in-process conformance
@@ -173,10 +170,30 @@ class MutationResult:
     never present on any element here (contract: only the cross-entity
     endpoint's own elements name their entity; this is the per-entity
     endpoint's shape).
+
+    `committed`/`plan` (contract 1.7.0, D-4, WP-2b): before WP-2b, every
+    caller reaching this point had necessarily committed (an atomic batch
+    that failed partway through never returns anything, it raises), so
+    `http.post_mutate` hardcoded `committed: True` itself and this
+    dataclass carried no such field at all. `committed` now reports the
+    real decision (`False` only for a `dry_run` that reached the "would
+    succeed" decision); `plan` carries the deterministic token computed
+    for it -- `DataService.mutate_result` only ever sets `plan` on a
+    `dry_run` response (`None` for a real commit, D-4 (3): a real
+    response's shape stays otherwise unchanged from before this version).
+
+    `assigned_addresses` (review round F-6, `{scratchpad}/rulings-r4.md`):
+    `None` exactly on a `dry_run` response -- `http.post_mutate` omits the
+    key itself then, rather than carrying an empty list, matching the
+    contract's "does not carry" wording. A real commit always gets a list
+    (possibly empty, when the batch assigned no address), unchanged from
+    before this version.
     """
 
     affected: int
-    assigned_addresses: list[dict[str, Any]]
+    assigned_addresses: list[dict[str, Any]] | None
+    committed: bool = True
+    plan: str | None = None
 
 
 class _PreCommitHook:
@@ -949,11 +966,17 @@ class DataService:
                     # `field_constraints`/`enum`/`nullable`/`alter_field`
                     # are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_
                     # FIELDS` (removed in this same commit) and are now
-                    # enforced (`structured.py`/`postgres.py`). WP-2b
-                    # (`dry_run`) and WP-2d (`request_budget`) each flip
-                    # their own entry the same way, in their own commit.
+                    # enforced (`structured.py`/`postgres.py`).
                     "constraint_declarations": {"status": "enabled"},
-                    "dry_run": {"status": "unavailable"},
+                    # WP-2b: `dry_run` is `enabled` -- `dry_run`/`plan` are
+                    # no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`
+                    # (schema side) and `mutate_result`/`_mutate_outcome`
+                    # (mutation side) no longer refuse them outright, in
+                    # this same commit as `structured.py`/`postgres.py`'s
+                    # own real dry_run/plan enforcement (D-4). WP-2d
+                    # (`request_budget`) flips its own entry the same way,
+                    # in its own commit.
+                    "dry_run": {"status": "enabled"},
                     "request_budget": {"status": "unavailable"},
                 },
                 "limits": self.limits.as_dict(),
@@ -1067,25 +1090,50 @@ class DataService:
         `http.post_mutate` instead of `mutate` above, mirroring the
         `query`/`query_page` split (WP-4/WP-5).
 
-        `dry_run`/`plan`/`budget` (contract 1.7.0): provisional gate only
-        (docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9))
-        -- this foundation declares `dry_run` and `request_budget`
-        `unavailable`, so any caller-supplied value for these is refused
-        outright. WP-2b (`dry_run`/`plan`) and WP-2d (`budget`) give these
-        parameters real semantics in the same commit each flips its own
-        capability to `enabled`.
+        `dry_run`/`plan` (contract 1.7.0, D-4, WP-2b): real, given full
+        effect below -- `capabilities().dry_run` is `enabled` as of this
+        commit. `budget` (R-6) remains provisional -- `request_budget`
+        stays `unavailable` until WP-2d, and this capability gate fires
+        on a bare `budget` unconditionally, `plan` or no `plan`
+        (supervisor ruling F-1, `{scratchpad}/rulings-r4.md`: D-4 (2)/
+        addendum 2 S-l place `budget` validity in the request's own
+        validation stage -- the same stage as shape/capability, before
+        target-existence -- and `destructive_confirmation.evaluation_
+        order` puts precondition evaluation, where `plan` is checked,
+        AFTER that stage, never before it. A request carrying `budget`
+        with `plan` attached is therefore refused here, at the
+        capability gate, before `plan` is ever examined -- exactly like
+        the query-side `_query_outcome` gate above, which this mirrors).
+        This closes the review-round window (WP-2b F-1) in which a
+        client could read a schema revision off a plain dry run's own
+        `plan` token, recompute a `plan` for a `budget`-carrying body by
+        the contract's own published digest rule, and have `budget`
+        silently accepted-and-ignored on the resulting apply --
+        `request_budget: unavailable` staying true requires this gate to
+        run first.
         """
-        if dry_run or plan is not None or budget is not None:
-            field = "dry_run" if dry_run else ("plan" if plan is not None else "budget")
+        if budget is not None:
             fail(
                 "CAPABILITY_UNSUPPORTED",
-                "dry_run/plan/budget are not supported by this foundation.",
-                details={"violated_declaration": "capability", "field": field},
+                "budget is not supported by this foundation.",
+                details={"violated_declaration": "capability", "field": "budget"},
             )
-        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id)
-        return MutationResult(affected=outcome.affected, assigned_addresses=list(outcome.assigned_addresses or []))
+        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget)
+        return MutationResult(
+            affected=outcome.affected,
+            # D-4 (3)/A-9: a dry-run mutation result never carries
+            # `assigned_addresses` -- the addresses a real execution would
+            # assign are not settled (an insert may still have tentatively
+            # consumed real id-sequence values, F-15, but this response
+            # never reports them). Review round F-6: `None`, not `[]` --
+            # `http.post_mutate` omits the key itself on `None`, matching
+            # the contract's "does not carry" wording.
+            assigned_addresses=None if dry_run else list(outcome.assigned_addresses or []),
+            committed=outcome.committed,
+            plan=outcome.plan if dry_run else None,
+        )
 
-    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str, request_id: str | None):
+    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None):
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
@@ -1097,21 +1145,44 @@ class DataService:
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
                 deadline = self._clock() + self.limits.execution_ms / 1000
-                # Phase 4 (design D-2/D-10): the hook is only ever USED by
-                # the backend when this batch turns out to pass through the
-                # confirmation choke (a confirmed `delete`) -- building it
-                # unconditionally here is cheap (no I/O happens until/unless
-                # `pre_commit()` is actually called) and keeps this call
-                # site identical regardless of what the batch turns out to
-                # contain, matching `schema`'s own unconditional hook below.
-                hook = self._make_audit_hook(canonical, event_class="data_operation", operation="mutate", target_kind="entity", request_id=rid)
-                outcome = self._cells[canonical.application_id].transact(entity, operations, self.limits, deadline=deadline, clock=self._clock, audit_hook=hook)
+                # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level
+                # request object a `plan` commits to -- `operations`/
+                # `transaction`/`budget`, never `entity` (`MutationRequest`
+                # has no `entity` property at all; it is a URL path
+                # segment, not a body field) and never `dry_run`/`plan`
+                # themselves (S-a's own exclusion pair, applied again
+                # defensively inside `normalize_request_for_plan`).
+                plan_request: dict[str, Any] = {"operations": operations, "transaction": transaction}
+                if budget is not None:
+                    plan_request["budget"] = budget
+                # Phase 4 (design D-2/D-10), extended by D-4 (4)/U-2 = (A)
+                # (WP-2b): the hook is only ever USED by the backend when
+                # this batch turns out to pass through the confirmation
+                # choke (a confirmed `delete`) -- building it unconditionally
+                # here is cheap (no I/O happens until/unless `pre_commit()`
+                # is actually called) and keeps this call site identical
+                # regardless of what the batch turns out to contain,
+                # matching `schema`'s own unconditional hook below. A
+                # `dry_run`, though, never gets one AT ALL -- not merely
+                # one that is never called -- so no audit line can ever be
+                # written for it, by construction (U-2 = (A): "監査行を一切
+                # 書かない", not "書くが呼ばない").
+                hook = None if dry_run else self._make_audit_hook(canonical, event_class="data_operation", operation="mutate", target_kind="entity", request_id=rid)
+                outcome = self._cells[canonical.application_id].transact(
+                    entity, operations, self.limits, deadline=deadline, clock=self._clock, audit_hook=hook,
+                    dry_run=dry_run, plan=plan, plan_request=plan_request,
+                )
+                # D-4 (4)/U-2 = (A): a dry_run that reached this point
+                # reached the "would succeed" decision -- no audit event
+                # (buffer-class OR the legacy in-memory sink `_event`
+                # itself unconditionally appends to) is written for it.
                 # D-10: `outcome.destructive` reports whether the backend's
                 # pre-commit hook already durably recorded this batch --
                 # `already_durable` tells `_event` to skip the buffer-class
                 # enqueue in that case (at most one durable row per
                 # operation).
-                self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
+                if not dry_run:
+                    self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
@@ -1123,13 +1194,25 @@ class DataService:
     # through unrejected would be a P-3 violation (declaring `unavailable`
     # while quietly accepting the field). WP-2a already removed `field_
     # constraints`/`enum`/`nullable` from this tuple (`constraint_
-    # declarations` is `enabled`, `alter_field` is enforced). WP-2b
-    # (`dry_run`/`plan`), WP-2c (`idempotency_key`) and WP-2d (`budget`)
-    # each remove their own name from what remains, in the same commit
-    # that flips the corresponding capability to `enabled`.
-    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("dry_run", "plan", "budget", "idempotency_key")
+    # declarations` is `enabled`, `alter_field` is enforced). WP-2b removes
+    # `dry_run`/`plan` in this same commit (`dry_run` is now `enabled`).
+    # WP-2c (`idempotency_key`) and WP-2d (`budget`) each remove their own
+    # remaining name in their own commit, the same way.
+    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("budget", "idempotency_key")
 
-    def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> int:
+    def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> "SchemaOutcome":
+        """Always returns `SchemaOutcome` (`.committed`/`.revision`/
+        `.descriptor`/`.plan`, contract 1.7.0, D-4, WP-2b) -- a pure
+        passthrough of `ApplicationCell.apply_schema`/`PostgresCell.
+        apply_schema`'s own return, which review round F-8
+        (`{scratchpad}/rulings-r4.md`) unified to one shape regardless of
+        whether `operation` carries `dry_run`/`plan`. Every pre-1.7.0
+        direct caller of this method (`tests/test_foundation.py`,
+        `tests/test_constraints_declaration.py`) reads `.revision` off
+        the result; the in-process conformance adapter's own `hasattr(
+        result, "revision")` branch already handles a non-`int` result
+        unchanged (it never assumed `int`).
+        """
         rid = request_id or str(uuid.uuid4())
         if isinstance(operation, dict):
             for provisional_field in self._PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS:
@@ -1139,6 +1222,14 @@ class DataService:
                         f"{provisional_field} is not supported by this foundation.",
                         details={"violated_declaration": "capability", "field": provisional_field},
                     )
+        # Contract 1.7.0 (D-4, WP-2b): `SchemaOperationRequest` is the
+        # single flat operation object itself (no separate `operations`
+        # wrapper the way `MutationRequest` has) -- `dry_run`/`plan` are
+        # simply keys already present on `operation`, read here (before
+        # `_slot`, matching the provisional-gate check just above) so the
+        # audit-hook/dispatch decisions below can already act on them.
+        dry_run = bool(isinstance(operation, dict) and operation.get("dry_run", False))
+        plan = operation.get("plan") if isinstance(operation, dict) else None
         try:
             with self._slot(context) as canonical:
                 if not isinstance(operation, dict):
@@ -1146,19 +1237,37 @@ class DataService:
                 # Authority is checked before touching request content at
                 # all, so a non-developer credential gets FORBIDDEN/403 for
                 # any schema operation, before any shape/capability
-                # question is even considered.
+                # question is even considered. Unaffected by `dry_run`
+                # (D-4 (2): a dry run walks the SAME gates a real request
+                # does, no early-out).
                 if canonical.role != "developer":
                     fail("FORBIDDEN", "Developer authority is required for schema operations.", status=403)
                 self.limits.check_request(operation)
                 self.limits.check_depth(operation)
                 deadline = self._clock() + self.limits.execution_ms / 1000
+                # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level
+                # request object a `plan` commits to -- `operation` itself
+                # already IS that object (`SchemaOperationRequest`'s own
+                # flat shape), minus `plan`/`dry_run` (S-a's exclusion
+                # pair, applied again defensively inside `normalize_
+                # request_for_plan`).
+                plan_request = {key: value for key, value in operation.items() if key not in ("plan", "dry_run")}
                 # Phase 4 (design D-2, item 2): unconditionally fail-closed
                 # -- every schema operation, not only a confirmed destructive
-                # one (unlike `mutate` above).
-                hook = self._make_audit_hook(canonical, event_class="privilege_sensitive", operation="schema", target_kind="entity", request_id=rid)
-                revision = self._cells[canonical.application_id].apply_schema(operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline, clock=self._clock, audit_hook=hook)
-                self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
-                return revision
+                # one (unlike `mutate` above). Extended by D-4 (4)/U-2 = (A)
+                # (WP-2b): a `dry_run` never gets a hook AT ALL -- not
+                # merely one that is never called -- so no audit line can
+                # ever be written for it, by construction.
+                hook = None if dry_run else self._make_audit_hook(canonical, event_class="privilege_sensitive", operation="schema", target_kind="entity", request_id=rid)
+                outcome = self._cells[canonical.application_id].apply_schema(
+                    operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline,
+                    clock=self._clock, audit_hook=hook, dry_run=dry_run, plan=plan, plan_request=plan_request,
+                )
+                # D-4 (4)/U-2 = (A): no audit event at all for a dry_run
+                # that reached this point (the "would succeed" decision).
+                if not dry_run:
+                    self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
+                return outcome
         except FoundationError as exc:
             self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
             raise
