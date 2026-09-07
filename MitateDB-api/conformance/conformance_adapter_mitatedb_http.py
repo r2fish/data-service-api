@@ -1893,20 +1893,39 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def count(self, session: object, entity: str) -> int:
         assert isinstance(session, _Session)
-        # No catalog to discover field names from (`application_catalog:
-        # unavailable`, and `GET /v1/catalog` itself is a real,
-        # present `CAPABILITY_UNSUPPORTED` denial on this composition --
-        # see `catalog_document` below). Every entity this adapter's own
-        # `create_entity` builds always carries the base `id` column
-        # (P3-D1's own default), so `id` is always a safe, minimal
-        # `select` for counting rows.
+        # Supervisor ruling B (WP-3a review, {scratchpad}/rulings-wp3a-
+        # review.md): this used to hardcode `select=["id"]`, on the
+        # assumption every entity carries the base `id` column this
+        # adapter's own pre-existing `create_entity_with_declared_types`
+        # always supplies (P3-D1's own default) -- and on the stale claim
+        # that `application_catalog` is `unavailable` here. Neither holds
+        # any more: `application_catalog` is `enabled` unconditionally on
+        # this composition (`MitateDB-api/src/mitatedb_api/cell.py:1769`),
+        # `GET /v1/catalog` is real and mounted (see `catalog_document`
+        # below), and port v1.13's `schema_operation_with_result` (D-2)
+        # lets a caller `create_entity` with an arbitrary `fields` list
+        # that omits `id` entirely -- counting such an entity by
+        # selecting a column it does not have would fail. This mirrors
+        # `conformance_adapter_r2db_http.py`'s own `count()` (same
+        # GENERAL shape, independent implementation, design principle 1):
+        # read the entity's own field list from the real catalog and
+        # select those, rather than assuming any specific field name
+        # exists.
+        document = self._send("GET", "/v1/catalog", session)
+        fields: list[str] | None = None
+        for item in document["entities"]:
+            if item["entity"] == entity:
+                fields = item["fields"]
+                break
+        if not fields:
+            return 0
         # No `page.size` override: the server's own configured
         # `result_items` default bound (500, `config.FoundationConfig.
         # max_result_rows`) already comfortably covers this suite's own
         # small fixtures, and requesting MORE than that bound would itself
         # trigger a real `LIMIT_EXCEEDED` -- this method counts rows, it
         # does not need to probe the limit.
-        result = self._query(session, entity, select=["id"])
+        result = self._query(session, entity, select=list(fields))
         return len(result["items"])
 
     def entities(self, session: object) -> set[str]:
