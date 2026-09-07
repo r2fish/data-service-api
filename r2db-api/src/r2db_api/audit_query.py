@@ -163,6 +163,28 @@ DECLARED_AUDIT_TARGET_KINDS = frozenset(
     }
 )
 
+# Ruling J-4 (WP-2cd audit N-5, contract 1.7.0 D-5 (1)(v)): the `outcome`
+# vocabulary this peer's real source ever emits on an `AuditEvent` -- unlike
+# `event_class`/`operation`/`target_kind` above, this is NOT itself a
+# contract-declared capability field (`query_operation_vocabulary`/`query_
+# target_kind_vocabulary` name only those three; `outcome` has no `.audit_
+# query.outcomes` counterpart in `spec/data-service-api.v1.json`), so this
+# constant is a peer-local pin only -- never published through
+# `capabilities()`. "allow"/"deny" are the pre-Phase-4 pair; "error" is
+# D-2's own durable commit-failure row (`_PreCommitHook.commit_failed`/
+# `postgres.py`'s own `except psycopg.Error` clauses); "replayed" (WP-2cd,
+# ruling J-4) is the newest member -- a resend answered from an idempotency
+# record, which must never be indistinguishable from "no evidence at all"
+# for a destructive operation (SI-14). `r2db-api/tests/test_idempotency_
+# records.py::test_declared_audit_outcomes_include_replayed` fixes this
+# set, via the SAME generalized AST scanner (`_field_literal_union`) the
+# 3 constants above already use, against every real `outcome=` literal in
+# `src/r2db_api/` -- no separate N (non-durable exclusion) set is needed
+# here: every outcome word this package ever emits reaches a durable or
+# legacy sink by construction (there is no non-durable-only `outcome=` call
+# site the way `operation`/`target_kind` each have a few).
+DECLARED_AUDIT_OUTCOMES = frozenset({"allow", "deny", "error", "replayed"})
+
 # D-3 (P4-D3, confirmed value) -- the denial-coalescing window. Declared in
 # `capabilities().audit_query.coalescing_window_ms` (control_plane.py) so a
 # consumer can interpret a `count`-bearing coalesced row's own time span
@@ -312,6 +334,7 @@ __all__ = [
     "DECLARED_AUDIT_EVENT_CLASSES",
     "DECLARED_AUDIT_OPERATIONS",
     "DECLARED_AUDIT_TARGET_KINDS",
+    "DECLARED_AUDIT_OUTCOMES",
     "DECLARED_COALESCING_WINDOW_MS",
     "AuditQueryReader",
     "InMemoryAuditQueryStore",

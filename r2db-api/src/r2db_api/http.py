@@ -315,10 +315,9 @@ async def post_query(request: Request) -> Response:
             kwargs["page_size"] = page["size"]
         if "cursor" in page:
             kwargs["cursor"] = page["cursor"]
-    # Contract 1.7.0 provisional gate (D-1 (3)): `budget` is schema-accepted
-    # but not yet capability-enabled -- passed through so `query_page`'s own
-    # gate (service.py) rejects it with CAPABILITY_UNSUPPORTED, rather than
-    # `_check_object_shape` silently letting it through unread.
+    # Contract 1.7.0 (D-6, WP-2d): `budget` is real as of this commit
+    # (`capabilities().request_budget` is `enabled`) -- passed through to
+    # `query_page`, which narrows the deployed bound by it.
     result = service.query_page(context, entity, request_id=_request_id(request), budget=body.get("budget"), **kwargs)
     # CCR-13 WP-5: `revisions` (index-aligned with `items`) now reaches the
     # response -- `revision_preconditions` is declared `enabled`.
@@ -332,12 +331,6 @@ async def post_mutate(request: Request) -> Response:
     entity = request.path_params["entity"]
     body = await _read_json_object(request)
     _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
-    if "idempotency_key" in body:
-        fail(
-            "CAPABILITY_UNSUPPORTED",
-            "Idempotency keys are not supported by this foundation.",
-            details={"violated_declaration": "capability", "field": "idempotency_key"},
-        )
     # G-1 (`{scratchpad}/rulings-r4.md` addendum): a `plan`'s digest
     # commits to the request object exactly as received -- a body that
     # omits `transaction` must digest differently from one that spells
@@ -353,13 +346,11 @@ async def post_mutate(request: Request) -> Response:
         if transaction not in {"atomic", "best_effort"}:
             fail("VALIDATION_FAILED", "Transaction mode is not supported.")
         mutate_kwargs["transaction"] = transaction
-    # Contract 1.7.0 (D-4, WP-2b): `dry_run`/`plan` are real as of this
-    # commit (`capabilities().dry_run` is `enabled`) -- passed through to
-    # `mutate_result`, which now gives them full effect. `budget` (R-6)
-    # remains a provisional gate (D-1 (3)) until WP-2d -- passed through
-    # so `mutate_result`'s own gate (service.py) rejects a bare `budget`
-    # with CAPABILITY_UNSUPPORTED, rather than `_check_object_shape`
-    # silently letting it through unread.
+    # Contract 1.7.0 (D-4/D-5/D-6, WP-2b/WP-2c/WP-2d): `dry_run`/`plan`/
+    # `budget`/`idempotency_key` are all real as of this commit
+    # (`capabilities().dry_run`/`.request_budget`/`.idempotency` are all
+    # `enabled`) -- passed through to `mutate_result`, which gives each
+    # its full effect.
     result = service.mutate_result(
         context,
         entity,
@@ -368,6 +359,7 @@ async def post_mutate(request: Request) -> Response:
         dry_run=body.get("dry_run", False),
         plan=body.get("plan"),
         budget=body.get("budget"),
+        idempotency_key=body.get("idempotency_key"),
         **mutate_kwargs,
     )
     # CCR-13 WP-5: `assigned_addresses` now reaches the response, in

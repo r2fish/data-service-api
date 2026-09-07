@@ -15,8 +15,8 @@ from .audit_hook import ApplicationAuditHook
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
 from .errors import FoundationError, fail
-from .limits import ResourceLimits
-from .structured import ApplicationCell, parse_predicate
+from .limits import ResourceLimits, narrow_limits_by_budget
+from .structured import ApplicationCell, fold_operation_idempotency_keys, parse_predicate
 from .topology import AuthorityTopology
 
 _logger = logging.getLogger(__name__)
@@ -936,7 +936,18 @@ class DataService:
                     "schema_operations": {"status": "partial", "operations": schema_ops, "unsupported": ["jobs"]},
                     "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                     "best_effort_transactions": {"status": "unavailable"},
-                    "idempotency": {"status": "unavailable"},
+                    # WP-2c (contract 1.7.0, D-5, ruling I-10/I-12): `enabled`
+                    # -- the same commit that removes the `idempotency_key`
+                    # provisional gate (`schema()`'s `_PROVISIONAL_UNSUPPORTED_
+                    # SCHEMA_FIELDS`/`http.py`'s `post_mutate`) and gives it
+                    # real record-and-replay effect (`structured.py`/
+                    # `postgres.py`). `limits.idempotency_entries`/
+                    # `idempotency_retention_ms` reach `capabilities()`'s
+                    # `limits`/`limit_enforcement` documents automatically,
+                    # through `ResourceLimits.as_dict()` below (ruling I-10/
+                    # S-f -- C-05 V1 (e)'s `_CAPABILITY_CONDITIONED` requires
+                    # both the moment this flips).
+                    "idempotency": {"status": "enabled"},
                     "revision_preconditions": {"status": "enabled"},
                     "row_addressability": {"status": "enabled"},
                     # `cross_entity_mutation` needs the new `POST /v1/data/
@@ -977,10 +988,27 @@ class DataService:
                     # (`request_budget`) flips its own entry the same way,
                     # in its own commit.
                     "dry_run": {"status": "enabled"},
-                    "request_budget": {"status": "unavailable"},
+                    # WP-2d (contract 1.7.0, D-6, ruling B-4): `enabled` --
+                    # the same commit that removes every `budget` provisional
+                    # gate (`_query_outcome`/`mutate_result`/`schema()`'s
+                    # `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS`) and gives it
+                    # real narrowing effect via `narrow_limits_by_budget`
+                    # (`limits.py`).
+                    "request_budget": {"status": "enabled"},
                 },
                 "limits": self.limits.as_dict(),
-                "limit_enforcement": {name: "reference_wall_clock" if name == "execution_ms" else "enforced" for name in self.limits.as_dict()},
+                # Ruling J-3 (WP-2cd audit N-3): `idempotency_retention_ms`
+                # joins `execution_ms` in the `reference_wall_clock` set --
+                # both are wall-clock DURATIONS a deployment cannot drive to
+                # a deterministic N/N+1 boundary within a bounded test run
+                # (unlike every COUNT-valued class here, `idempotency_
+                # entries` included, which genuinely IS `enforced`: a
+                # record's own retention window is checked lazily, against
+                # real elapsed time, not a request-counted budget).
+                "limit_enforcement": {
+                    name: "reference_wall_clock" if name in ("execution_ms", "idempotency_retention_ms") else "enforced"
+                    for name in self.limits.as_dict()
+                },
                 # `_check()` (called by `_slot()` above) re-validates
                 # credential/application authorization state on every
                 # single application-plane operation; there is no cache, so
@@ -1023,32 +1051,19 @@ class DataService:
         both cells provision is `mutable`, so a query response always
         carries revisions (R-4).
 
-        `budget` (contract 1.7.0, `QueryRequest.budget`): provisional gate
-        only (docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1
-        (9)) -- this foundation declares `request_budget` `unavailable`, so
-        any caller-supplied `budget` is refused outright rather than
-        silently accepted-and-ignored, matching this method's own existing
-        `idempotency_key`-style present-denial precedent
-        (`http.py:post_mutate`). WP-2d gives this parameter real narrowing
-        semantics in the same commit it flips `request_budget` to `enabled`.
+        `budget` (contract 1.7.0, `QueryRequest.budget`, WP-2d): real,
+        given full effect by `_query_outcome` below via `limits.
+        narrow_limits_by_budget` -- `capabilities().request_budget` is
+        `enabled` as of this commit. `result_items`/`execution_ms` are the
+        two classes a query's own `budget` may narrow (D-6 (2)); an
+        applicable-but-invalid or inapplicable `budget` is refused
+        `VALIDATION_FAILED` before target existence.
         """
         outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id, budget=budget)
         return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []))
 
     def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None):
         rid = request_id or str(uuid.uuid4())
-        if budget is not None:
-            # Provisional gate (contract 1.7.0 D-1 (3)): `request_budget` is
-            # declared `unavailable` (service.py's `capabilities()`) -- this
-            # fires before the rate/concurrency slot is entered, mirroring
-            # the existing `idempotency_key` present-denial's unaudited,
-            # pre-slot placement (`http.py:post_mutate`) rather than the
-            # slot-scoped `VALIDATION_FAILED`s below.
-            fail(
-                "CAPABILITY_UNSUPPORTED",
-                "Request budgets are not supported by this foundation.",
-                details={"violated_declaration": "capability", "field": "budget"},
-            )
         try:
             with self._slot(context) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
@@ -1062,10 +1077,19 @@ class DataService:
                 request = {"entity": entity, "select": select, "where": where or [], "page_size": page_size, "order_by": order_by or [], "cursor": cursor}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
+                # Contract 1.7.0 (D-6, addendum 2 S-l, ruling B-2/B-3,
+                # WP-2d): `request_budget` is `enabled` -- `budget` validity
+                # (applicable class / integer >= 1 / not above the deployed
+                # bound) is checked here, at request-shape time, before
+                # target existence -- the SAME single point every endpoint
+                # uses (`limits.narrow_limits_by_budget`) to turn `budget`
+                # into the "effective limits" every existing check point
+                # below reads, without any of them being rewritten.
+                effective_limits = narrow_limits_by_budget(self.limits, budget, "query")
                 predicates = [parse_predicate(item) for item in (where or [])]
-                deadline = self._clock() + self.limits.execution_ms / 1000
+                deadline = self._clock() + effective_limits.execution_ms / 1000
                 outcome = self._cells[canonical.application_id].query(
-                    entity, select=select, where=predicates, page_size=page_size, order_by=order_by, cursor=cursor, limits=self.limits, deadline=deadline, clock=self._clock
+                    entity, select=select, where=predicates, page_size=page_size, order_by=order_by, cursor=cursor, limits=effective_limits, deadline=deadline, clock=self._clock
                 )
                 # Phase 4 (design D-2 §7.3): `query` never passes through
                 # the confirmation choke -- always buffer-class.
@@ -1084,7 +1108,7 @@ class DataService:
         """
         return self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id).affected
 
-    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None) -> "MutationResult":
+    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None) -> "MutationResult":
         """The HTTP-facing shape (`{affected, assigned_addresses}`,
         `spec/data-service-api.v1.json`'s `MutationResult`) -- used by
         `http.post_mutate` instead of `mutate` above, mirroring the
@@ -1092,33 +1116,14 @@ class DataService:
 
         `dry_run`/`plan` (contract 1.7.0, D-4, WP-2b): real, given full
         effect below -- `capabilities().dry_run` is `enabled` as of this
-        commit. `budget` (R-6) remains provisional -- `request_budget`
-        stays `unavailable` until WP-2d, and this capability gate fires
-        on a bare `budget` unconditionally, `plan` or no `plan`
-        (supervisor ruling F-1, `{scratchpad}/rulings-r4.md`: D-4 (2)/
-        addendum 2 S-l place `budget` validity in the request's own
-        validation stage -- the same stage as shape/capability, before
-        target-existence -- and `destructive_confirmation.evaluation_
-        order` puts precondition evaluation, where `plan` is checked,
-        AFTER that stage, never before it. A request carrying `budget`
-        with `plan` attached is therefore refused here, at the
-        capability gate, before `plan` is ever examined -- exactly like
-        the query-side `_query_outcome` gate above, which this mirrors).
-        This closes the review-round window (WP-2b F-1) in which a
-        client could read a schema revision off a plain dry run's own
-        `plan` token, recompute a `plan` for a `budget`-carrying body by
-        the contract's own published digest rule, and have `budget`
-        silently accepted-and-ignored on the resulting apply --
-        `request_budget: unavailable` staying true requires this gate to
-        run first.
+        commit. `budget` (contract 1.7.0, D-6, WP-2d) and `idempotency_
+        key` (contract 1.7.0, D-5, WP-2c) are likewise real as of this
+        commit -- `capabilities().request_budget`/`.idempotency` are both
+        `enabled`; `_mutate_outcome` below validates/narrows `budget` and
+        consults/records `idempotency_key` at exactly the request stages
+        `narrow_limits_by_budget`'s/`transact`'s own comments describe.
         """
-        if budget is not None:
-            fail(
-                "CAPABILITY_UNSUPPORTED",
-                "budget is not supported by this foundation.",
-                details={"violated_declaration": "capability", "field": "budget"},
-            )
-        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget)
+        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget, idempotency_key=idempotency_key)
         return MutationResult(
             affected=outcome.affected,
             # D-4 (3)/A-9: a dry-run mutation result never carries
@@ -1133,7 +1138,7 @@ class DataService:
             plan=outcome.plan if dry_run else None,
         )
 
-    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None):
+    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None):
         rid = request_id or str(uuid.uuid4())
         try:
             with self._slot(context) as canonical:
@@ -1154,10 +1159,26 @@ class DataService:
                     fail("CAPABILITY_UNSUPPORTED", "This foundation exposes atomic transactions only.")
                 if not isinstance(operations, list):
                     fail("VALIDATION_FAILED", "Mutations must be a list.")
+                # Ruling I-12/port v1.11 compatibility: an HTTP-originated
+                # call always supplies `idempotency_key` directly (the
+                # contract-level `MutationRequest.idempotency_key`); the
+                # in-process port instead carries a request's single,
+                # uniform key duplicated onto every operation item (this
+                # peer's own internal, non-HTTP mutation-item shape,
+                # `conformance/conformance_adapter_r2db.py`'s `_build_
+                # mutation_item`) -- folded here ONLY when the explicit
+                # parameter is absent, never overriding it.
+                effective_idempotency_key = idempotency_key if idempotency_key is not None else fold_operation_idempotency_keys(operations)
                 request = {"entity": entity, "operations": operations}
                 self.limits.check_request(request)
                 self.limits.check_depth(request)
-                deadline = self._clock() + self.limits.execution_ms / 1000
+                # Contract 1.7.0 (D-6, addendum 2 S-l, ruling B-2/B-3,
+                # WP-2d): see `_query_outcome`'s identical comment -- the
+                # SAME single point (`narrow_limits_by_budget`) every
+                # endpoint uses, checked here at request-shape time,
+                # before target-existence.
+                effective_limits = narrow_limits_by_budget(self.limits, budget, "mutate")
+                deadline = self._clock() + effective_limits.execution_ms / 1000
                 # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level
                 # request object a `plan` commits to -- `operations`/
                 # `transaction`/`budget`, plus this request's own target
@@ -1181,6 +1202,17 @@ class DataService:
                     plan_request["transaction"] = transaction
                 if budget is not None:
                     plan_request["budget"] = budget
+                # Ruling I-13 (`{scratchpad}/rulings-wp2a-review.md` audit
+                # N-3): `idempotency_key` is INCLUDED in the plan digest
+                # (only `plan`/`dry_run` are excluded there, `normalize_
+                # request_for_plan`'s own 2-key exclusion) even though it
+                # is excluded from its OWN digest (`normalize_request_for_
+                # idempotency`'s 3-key exclusion, `idempotency_digest`
+                # below) -- a `plan` token captured with one key (or none)
+                # must not verify against a request presenting a different
+                # one.
+                if effective_idempotency_key is not None:
+                    plan_request["idempotency_key"] = effective_idempotency_key
                 # Phase 4 (design D-2/D-10), extended by D-4 (4)/U-2 = (A)
                 # (WP-2b): the hook is only ever USED by the backend when
                 # this batch turns out to pass through the confirmation
@@ -1195,8 +1227,8 @@ class DataService:
                 # 書かない", not "書くが呼ばない").
                 hook = None if dry_run else self._make_audit_hook(canonical, event_class="data_operation", operation="mutate", target_kind="entity", request_id=rid)
                 outcome = self._cells[canonical.application_id].transact(
-                    entity, operations, self.limits, deadline=deadline, clock=self._clock, audit_hook=hook,
-                    dry_run=dry_run, plan=plan, plan_request=plan_request,
+                    entity, operations, effective_limits, deadline=deadline, clock=self._clock, audit_hook=hook,
+                    dry_run=dry_run, plan=plan, plan_request=plan_request, idempotency_key=effective_idempotency_key,
                 )
                 # D-4 (4)/U-2 = (A): a dry_run that reached this point
                 # reached the "would succeed" decision -- no audit event
@@ -1206,25 +1238,31 @@ class DataService:
                 # pre-commit hook already durably recorded this batch --
                 # `already_durable` tells `_event` to skip the buffer-class
                 # enqueue in that case (at most one durable row per
-                # operation).
+                # operation). Contract 1.7.0 (D-5 (1)(v), ruling I-11/J-4,
+                # WP-2c/WP-2cd): `outcome.replayed` -- a resend answered
+                # from an idempotency record still earns its OWN audit line
+                # (SI-14, WP-2cd audit N-5: a destructive resend must never
+                # return `committed: true` while leaving zero evidence of
+                # its own that this Application was touched at time T) --
+                # `outcome="replayed"`, never `"allow"`, keeps a resend
+                # distinguishable from a genuine new execution in the audit
+                # trail itself; it carries THIS resend's own `request_id`
+                # (never the original), and, like every event this method
+                # emits, never the `idempotency_key` value (I-11). Always
+                # `already_durable=False`: a replay never invokes the
+                # pre-commit hook (nothing below the idempotency lookup
+                # executed), so no durable row has already been written for
+                # THIS event the way a genuinely destructive fresh commit's
+                # hook already wrote one for its own.
                 if not dry_run:
-                    self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
+                    if outcome.replayed:
+                        self._event(canonical, operation="mutate", outcome="replayed", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=False)
+                    else:
+                        self._event(canonical, operation="mutate", outcome="allow", target_kind="entity", event_class="data_operation", request_id=rid, already_durable=outcome.destructive)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
-
-    # Contract 1.7.0 provisional gate (D-1 (3), work order §2 WP-1 (9)):
-    # every one of these fields is schema-accepted (the packaged contract
-    # copy is already 1.7.0) but not yet capability-enabled -- passing one
-    # through unrejected would be a P-3 violation (declaring `unavailable`
-    # while quietly accepting the field). WP-2a already removed `field_
-    # constraints`/`enum`/`nullable` from this tuple (`constraint_
-    # declarations` is `enabled`, `alter_field` is enforced). WP-2b removes
-    # `dry_run`/`plan` in this same commit (`dry_run` is now `enabled`).
-    # WP-2c (`idempotency_key`) and WP-2d (`budget`) each remove their own
-    # remaining name in their own commit, the same way.
-    _PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS = ("budget", "idempotency_key")
 
     def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> "SchemaOutcome":
         """Always returns `SchemaOutcome` (`.committed`/`.revision`/
@@ -1238,22 +1276,20 @@ class DataService:
         the result; the in-process conformance adapter's own `hasattr(
         result, "revision")` branch already handles a non-`int` result
         unchanged (it never assumed `int`).
+
+        `budget`/`idempotency_key` (contract 1.7.0, D-6/D-5, WP-2d/WP-2c):
+        both real as of this commit -- the provisional gate that used to
+        reject either field outright (`_PROVISIONAL_UNSUPPORTED_SCHEMA_
+        FIELDS`) is removed in this same commit as `capabilities().
+        request_budget`/`.idempotency` both flipping to `enabled` (P-3).
         """
         rid = request_id or str(uuid.uuid4())
-        if isinstance(operation, dict):
-            for provisional_field in self._PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS:
-                if provisional_field in operation:
-                    fail(
-                        "CAPABILITY_UNSUPPORTED",
-                        f"{provisional_field} is not supported by this foundation.",
-                        details={"violated_declaration": "capability", "field": provisional_field},
-                    )
         # Contract 1.7.0 (D-4, WP-2b): `SchemaOperationRequest` is the
         # single flat operation object itself (no separate `operations`
         # wrapper the way `MutationRequest` has) -- `dry_run`/`plan` are
         # simply keys already present on `operation`, read here (before
-        # `_slot`, matching the provisional-gate check just above) so the
-        # audit-hook/dispatch decisions below can already act on them.
+        # `_slot`) so the audit-hook/dispatch decisions below can already
+        # act on them.
         dry_run = bool(isinstance(operation, dict) and operation.get("dry_run", False))
         plan = operation.get("plan") if isinstance(operation, dict) else None
         try:
@@ -1270,14 +1306,21 @@ class DataService:
                     fail("FORBIDDEN", "Developer authority is required for schema operations.", status=403)
                 self.limits.check_request(operation)
                 self.limits.check_depth(operation)
-                deadline = self._clock() + self.limits.execution_ms / 1000
+                # Contract 1.7.0 (D-6, addendum 2 S-l, ruling B-2/B-3,
+                # WP-2d): see `_query_outcome`'s identical comment.
+                effective_limits = narrow_limits_by_budget(self.limits, operation.get("budget"), "schema")
+                deadline = self._clock() + effective_limits.execution_ms / 1000
                 # Contract 1.7.0 (D-4 (7)/S-a, WP-2b): the contract-level
                 # request object a `plan` commits to -- `operation` itself
                 # already IS that object (`SchemaOperationRequest`'s own
                 # flat shape), minus `plan`/`dry_run` (S-a's exclusion
                 # pair, applied again defensively inside `normalize_
-                # request_for_plan`).
+                # request_for_plan`). Ruling I-13: `idempotency_key`, when
+                # present, stays IN this object (only `plan`/`dry_run` are
+                # excluded here) -- `idempotency_digest` below applies its
+                # own, separate 3-key exclusion.
                 plan_request = {key: value for key, value in operation.items() if key not in ("plan", "dry_run")}
+                idempotency_key = operation.get("idempotency_key")
                 # Phase 4 (design D-2, item 2): unconditionally fail-closed
                 # -- every schema operation, not only a confirmed destructive
                 # one (unlike `mutate` above). Extended by D-4 (4)/U-2 = (A)
@@ -1286,13 +1329,26 @@ class DataService:
                 # ever be written for it, by construction.
                 hook = None if dry_run else self._make_audit_hook(canonical, event_class="privilege_sensitive", operation="schema", target_kind="entity", request_id=rid)
                 outcome = self._cells[canonical.application_id].apply_schema(
-                    operation, developer=canonical.role == "developer", limits=self.limits, deadline=deadline,
+                    operation, developer=canonical.role == "developer", limits=effective_limits, deadline=deadline,
                     clock=self._clock, audit_hook=hook, dry_run=dry_run, plan=plan, plan_request=plan_request,
+                    idempotency_key=idempotency_key,
                 )
                 # D-4 (4)/U-2 = (A): no audit event at all for a dry_run
                 # that reached this point (the "would succeed" decision).
+                # Ruling I-11/J-4 (D-5 (1)(v), WP-2c/WP-2cd): a replay
+                # (`outcome.replayed`) still earns its own `outcome=
+                # "replayed"` line -- see `_mutate_outcome`'s identical
+                # comment (a resent `drop_entity` must not return
+                # `committed: true` with zero evidence of its own). Unlike
+                # a genuine schema commit (`already_durable=True` -- the
+                # pre-commit hook already wrote the durable row
+                # synchronously), a replay never invoked that hook at all,
+                # so `already_durable=False` here.
                 if not dry_run:
-                    self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
+                    if outcome.replayed:
+                        self._event(canonical, operation="schema", outcome="replayed", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=False)
+                    else:
+                        self._event(canonical, operation="schema", outcome="allow", target_kind="entity", event_class="privilege_sensitive", request_id=rid, already_durable=True)
                 return outcome
         except FoundationError as exc:
             self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
