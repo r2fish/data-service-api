@@ -1,8 +1,8 @@
 {
   "implementation": "r2db_foundation",
   "status": "partial",
-  "enabled": ["structured_query", "atomic_mutation", "application_catalog", "revision_preconditions", "row_addressability", "ordering", "cursor_pagination", "schema.create_entity", "schema.add_field", "schema.create_index", "schema.drop_index", "schema.drop_entity"],
-  "unavailable": ["best_effort_transactions", "idempotency", "audit_query", "cross_entity_mutation", "control_plane", "schema.alter_field", "schema.jobs", "constraint_declarations", "dry_run", "request_budget"],
+  "enabled": ["structured_query", "atomic_mutation", "application_catalog", "revision_preconditions", "row_addressability", "ordering", "cursor_pagination", "schema.create_entity", "schema.add_field", "schema.alter_field", "schema.create_index", "schema.drop_index", "schema.drop_entity", "constraint_declarations"],
+  "unavailable": ["best_effort_transactions", "idempotency", "audit_query", "cross_entity_mutation", "control_plane", "schema.jobs", "dry_run", "request_budget"],
   "limit_enforcement": {
     "request_bytes": "enforced",
     "batch_items": "enforced",
@@ -12,6 +12,7 @@
     "concurrency": "enforced",
     "requests_per_minute": "enforced",
     "schema_objects": "enforced",
-    "operation_depth": "enforced"
+    "operation_depth": "enforced",
+    "enum_members": "enforced"
   }
 }

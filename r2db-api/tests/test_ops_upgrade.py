@@ -16,7 +16,7 @@ substitute registry.
 Synthetic (`tmp_path`) per-application upgrade scripts, never `0009`
 itself, are used wherever a test needs a NUMBER this shipped package does
 not actually know about (design completion condition 14's own "パッケージ
-定数が{9, 10}(合成)"): `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` is
+定数が{9, 9999}(合成)"): `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` is
 monkeypatched to include that synthetic number, and `R2DB_MIGRATIONS_DIR`
 (ops.py's own test-only escape hatch, mirroring `R2DB_PLATFORM_SCHEMA`)
 points `_migrations_dir()` at a throwaway directory holding just that one
@@ -244,16 +244,18 @@ def disable_application(platform: types.SimpleNamespace, slug: str) -> None:
 def test_upgrade_applications_dry_run_pending_is_a_set_difference(
     ops_env: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """台帳が `{9}` (通常の `0003` provisioning) でパッケージ定数が
-    `{9, 10}` (合成) のとき、pending は `{10}` になる (集合差)。"""
+    """台帳が `{9, 10}` (通常の `0003` provisioning -- Phase 9 WP-2a で
+    `10` も加わった) でパッケージ定数が `{9, 9999}` (合成) のとき、
+    pending は `{9999}` になる (集合差 -- 台帳に無い `10` は available
+    側に無いので pending 計算に現れない)。"""
     app = provision_app(ops_env, "upga")
     try:
-        assert _ledger_numbers(app.developer_dsn) == frozenset({9})
-        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 10}))
+        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10})
+        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
         rc = ops.main(["upgrade-applications", "--application", "upga", "--dry-run"])
         out = capsys.readouterr().out
         assert rc == 4
-        assert "pending=[10]" in out
+        assert "pending=[9999]" in out
     finally:
         deprovision_app(ops_env, "upga")
 
@@ -261,19 +263,23 @@ def test_upgrade_applications_dry_run_pending_is_a_set_difference(
 def test_upgrade_applications_pending_detects_a_hole_not_just_the_max(
     ops_env: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """台帳が `{10}` で `9` が欠けている状態でも `9` が pending として出る
-    こと (v1.0 の「台帳の最大番号より大きい」方式では検出できない穴)。"""
+    """台帳が `{9999}` で `9` が欠けている状態でも `9` が pending として出る
+    こと (v1.0 の「台帳の最大番号より大きい」方式では検出できない穴)。
+    Phase 9 WP-2a で通常の provisioning が台帳に `10` も足すようになった
+    ので、この test 専用の isolation として `10` も明示的に削除する
+    (この test が固定したいのは「台帳がちょうど `{9999}` のときの穴検出」
+    そのもの)。"""
     app = provision_app(ops_env, "upgb")
     try:
         with psycopg.connect(app.developer_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number = 9")
+                cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number IN (9, 10)")
                 cur.execute(
-                    "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name) VALUES (10, 'synthetic')"
+                    "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name) VALUES (9999, 'synthetic')"
                 )
             conn.commit()
-        assert _ledger_numbers(app.developer_dsn) == frozenset({10})
-        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 10}))
+        assert _ledger_numbers(app.developer_dsn) == frozenset({9999})
+        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
         rc = ops.main(["upgrade-applications", "--application", "upgb", "--dry-run"])
         out = capsys.readouterr().out
         assert rc == 4
@@ -288,8 +294,8 @@ def test_upgrade_applications_pending_detects_a_hole_not_just_the_max(
 
 
 @pytest.fixture
-def synthetic_script_10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A synthetic per-application upgrade script for number `10` --
+def synthetic_script_9999(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A synthetic per-application upgrade script for number `9999` --
     conforms to design D-3(c)/§8.1 (ledger `INSERT ... ON CONFLICT` in one
     statement, atomic `BEGIN...COMMIT`, no `\\q`) -- that deliberately
     FAILS for exactly one application (`app_slug = 'failapp'`, a plain SQL
@@ -297,7 +303,7 @@ def synthetic_script_10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     boolean parsing) so a single `ops upgrade-applications` invocation can
     exercise "one DB fails, the OTHER is still processed and succeeds" in
     one real run (design D-4(c))."""
-    script = tmp_path / "0010_synthetic_upgrade.sql"
+    script = tmp_path / "9999_synthetic_upgrade.sql"
     script.write_text(
         "\\set ON_ERROR_STOP on\n"
         "SELECT database_name, runtime_role, developer_role FROM " + "REGISTRY_SCHEMA" + ".applications "
@@ -312,21 +318,21 @@ def synthetic_script_10(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
         "    applied_at timestamptz NOT NULL DEFAULT now()\n"
         ");\n"
         "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name)\n"
-        "    VALUES (10, '0010_synthetic_upgrade.sql') ON CONFLICT (upgrade_number) DO NOTHING;\n"
+        "    VALUES (9999, '9999_synthetic_upgrade.sql') ON CONFLICT (upgrade_number) DO NOTHING;\n"
         "COMMIT;\n"
         "REVOKE :\"developer_role\" FROM CURRENT_USER;\n"
     )
     monkeypatch.setenv("R2DB_MIGRATIONS_DIR", str(tmp_path))
-    monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 10}))
+    monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
     return script
 
 
 def test_upgrade_applications_one_failure_does_not_stop_the_others(
-    ops_env: types.SimpleNamespace, synthetic_script_10: Path, capsys: pytest.CaptureFixture
+    ops_env: types.SimpleNamespace, synthetic_script_9999: Path, capsys: pytest.CaptureFixture
 ) -> None:
     # `REGISTRY_SCHEMA` placeholder above must name THIS run's real schema
     # -- fixed up here since the fixture itself has no access to `platform`.
-    synthetic_script_10.write_text(synthetic_script_10.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
+    synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     good = provision_app(ops_env, "goodapp")
     bad = provision_app(ops_env, "failapp")
     try:
@@ -334,8 +340,8 @@ def test_upgrade_applications_one_failure_does_not_stop_the_others(
         out = capsys.readouterr().out
         assert rc == 3
         assert "goodapp" in out and "failapp" in out
-        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10}), "the OTHER application must still be upgraded"
-        assert _ledger_numbers(bad.developer_dsn) == frozenset({9}), "the failed application's ledger must not gain a row for 10"
+        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 9999}), "the OTHER application must still be upgraded"
+        assert _ledger_numbers(bad.developer_dsn) == frozenset({9, 10}), "the failed application's ledger must not gain a row for 9999"
         # 完了条件 16: REVOKE cleanup line for the failed application only.
         assert f"REVOKE {bad.developer_role} FROM {ops_env.control_role};" in out
         assert f"REVOKE {good.developer_role} FROM {ops_env.control_role};" not in out
@@ -345,15 +351,15 @@ def test_upgrade_applications_one_failure_does_not_stop_the_others(
 
 
 def test_upgrade_applications_is_idempotent(ops_env: types.SimpleNamespace) -> None:
-    """完了条件 15: 2 回目の実行で何も起きず 0 で終わる (`0009` は既に台
-    帳付きで provision されているので、追加手順なしに冪等)。"""
+    """完了条件 15: 2 回目の実行で何も起きず 0 で終わる (`0009`/`0010` は
+    既に台帳付きで provision されているので、追加手順なしに冪等)。"""
     app = provision_app(ops_env, "idemapp")
     try:
         assert ops.main(["upgrade-applications", "--application", "idemapp"]) == 0
         before = _ledger_numbers(app.developer_dsn)
         assert ops.main(["upgrade-applications", "--application", "idemapp"]) == 0
         after = _ledger_numbers(app.developer_dsn)
-        assert before == after == frozenset({9})
+        assert before == after == frozenset({9, 10})
     finally:
         deprovision_app(ops_env, "idemapp")
 
@@ -379,16 +385,16 @@ def test_upgrade_applications_exit_codes(ops_env: types.SimpleNamespace, monkeyp
         assert exc.value.code == 2
         monkeypatch.setenv("R2DB_CONTROL_DSN", ops_env.control_dsn)
         # 4 -- dry-run, something pending.
-        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 10}))
+        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
         assert ops.main(["upgrade-applications", "--application", "exitapp", "--dry-run"]) == 4
     finally:
         deprovision_app(ops_env, "exitapp")
 
 
 def test_upgrade_applications_exit_code_3_on_failure(
-    ops_env: types.SimpleNamespace, synthetic_script_10: Path
+    ops_env: types.SimpleNamespace, synthetic_script_9999: Path
 ) -> None:
-    synthetic_script_10.write_text(synthetic_script_10.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
+    synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     bad = provision_app(ops_env, "failapp")
     try:
         assert ops.main(["upgrade-applications", "--application", "failapp"]) == 3
@@ -429,14 +435,14 @@ def test_upgrade_status_reports_applied_pending_and_database_name(
         out = capsys.readouterr().out
         assert rc == 0
         assert "database_name=" in out and app.database in out
-        assert "applied=[9]" in out
+        assert "applied=[9, 10]" in out
         assert "pending=[]" in out
 
-        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 10}))
+        monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
         rc = ops.main(["upgrade-status", "--application", "statusapp"])
         out = capsys.readouterr().out
         assert rc == 4
-        assert "pending=[10]" in out
+        assert "pending=[9999]" in out
     finally:
         deprovision_app(ops_env, "statusapp")
 
@@ -455,7 +461,7 @@ def test_upgrade_status_reports_applied_empty_for_an_application_with_no_ledger(
         out = capsys.readouterr().out
         assert rc == 4
         assert "applied=[]" in out
-        assert "pending=[9]" in out
+        assert "pending=[9, 10]" in out
     finally:
         deprovision_app(ops_env, "noledgerapp")
 
@@ -563,7 +569,7 @@ def test_upgrade_status_reports_a_never_provisioned_application_as_pending_every
     out = out_buf.getvalue()
     assert rc == 4
     assert "database_name=None" in out
-    assert "pending=[9]" in out
+    assert "pending=[9, 10]" in out
 
 
 def test_upgrade_applications_a_never_provisioned_application_named_explicitly_is_a_failure(
@@ -631,23 +637,23 @@ def test_upgrade_applications_enabled_does_not_affect_target_selection(
             conn.commit()
         rc = ops.main(["upgrade-applications"])
         assert rc == 0, "the disabled application must still be upgraded by the default (no --application) run"
-        assert _ledger_numbers(app.developer_dsn) == frozenset({9})
+        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10})
     finally:
         deprovision_app(ops_env, "enabledapp")
 
 
 def test_upgrade_applications_failure_output_includes_the_psql_stderr_tail(
-    ops_env: types.SimpleNamespace, synthetic_script_10: Path, capsys: pytest.CaptureFixture,
+    ops_env: types.SimpleNamespace, synthetic_script_9999: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     """M-3 (supervisor ruling 2026-09-05, review): a failed `psql`
     invocation's own stderr is the ONLY place the actual PostgreSQL error
     text lives -- before this fix `_run_upgrade_script`'s own
     `CompletedProcess` was discarded except for `.returncode`. Reuses
-    `synthetic_script_10`'s own deliberate `SELECT CASE WHEN :'app_slug'
+    `synthetic_script_9999`'s own deliberate `SELECT CASE WHEN :'app_slug'
     = 'failapp' THEN 1/0 ELSE 1 END;` division-by-zero failure -- its own
     real `psql` stderr names PostgreSQL's own `division_by_zero` error
     text, which must now appear in this application's own output block."""
-    synthetic_script_10.write_text(synthetic_script_10.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
+    synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     provision_app(ops_env, "failapp")
     try:
         rc = ops.main(["upgrade-applications", "--application", "failapp"])
@@ -667,34 +673,34 @@ def test_upgrade_applications_failure_output_includes_the_psql_stderr_tail(
 
 
 def test_upgrade_applications_tally_line_counts_one_of_each_outcome(
-    ops_env: types.SimpleNamespace, synthetic_script_10: Path, capsys: pytest.CaptureFixture,
+    ops_env: types.SimpleNamespace, synthetic_script_9999: Path, capsys: pytest.CaptureFixture,
 ) -> None:
     """U-1: pins the trailing tally line's own COUNTING rule, not merely
     its string template -- 3 applications, one of each outcome, in a
     single bulk (no `--application`) run, must read exactly `1 succeeded,
     1 failed, 1 skipped (applied)`.
 
-    `goodagg` has `10` pending and applies it for the first time in THIS
+    `goodagg` has `9999` pending and applies it for the first time in THIS
     run (succeeded, 適用を実行して成功した). `failapp` is `synthetic_
-    script_10`'s own hardcoded failing application slug -- `10` is
-    attempted and fails (failed). `skipagg` already has `10` applied, via
+    script_9999`'s own hardcoded failing application slug -- `9999` is
+    attempted and fails (failed). `skipagg` already has `9999` applied, via
     its OWN prior, individually-targeted run before this test's own bulk
     invocation -- this run's own `to_apply` is empty for it, so it
     applies nothing at all (未適用なし、既に記録済み -> skipped, never a
     success, since nothing was actually run)."""
-    synthetic_script_10.write_text(synthetic_script_10.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
+    synthetic_script_9999.write_text(synthetic_script_9999.read_text().replace("REGISTRY_SCHEMA", ops_env.schema))
     good = provision_app(ops_env, "goodagg")
     provision_app(ops_env, "failapp")
     skip = provision_app(ops_env, "skipagg")
     try:
         assert ops.main(["upgrade-applications", "--application", "skipagg"]) == 0
-        assert _ledger_numbers(skip.developer_dsn) == frozenset({9, 10})
+        assert _ledger_numbers(skip.developer_dsn) == frozenset({9, 10, 9999})
 
         rc = ops.main(["upgrade-applications"])
         out = capsys.readouterr().out
         assert rc == 3
         assert "1 succeeded, 1 failed, 1 skipped (applied)" in out
-        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10})
+        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 9999})
     finally:
         deprovision_app(ops_env, "goodagg")
         deprovision_app(ops_env, "failapp")

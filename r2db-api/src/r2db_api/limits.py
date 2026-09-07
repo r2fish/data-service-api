@@ -18,6 +18,14 @@ class ResourceLimits:
     requests_per_minute: int = 600
     schema_objects: int = 1_000
     operation_depth: int = 8
+    # Contract 1.7.0 (D-2 (7), §5 U-1 = (β), WP-2a): field-level `enum`
+    # declaration cardinality -- how many members one field's declared
+    # `enum` may carry. Default matches `limits.example_profile.
+    # enum_members` in `spec/data-service-api.v1.json` verbatim, the same
+    # convention every other field above already follows. Enforced through
+    # the SAME generic `check()`/`as_dict()` machinery below -- no special-
+    # cased method needed, exactly like every other COUNT-valued class.
+    enum_members: int = 64
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():

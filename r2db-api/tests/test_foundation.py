@@ -242,15 +242,40 @@ def test_catalog_returns_shaped_document_scoped_to_application(service):
     # Phase 6 WP-2 (design D-3(iii)): `field_types` is now a real key on
     # every entity descriptor -- `body` was created with no declared type,
     # so it reports `json` (decision (ii)'s default); `id` is always
-    # `integer` (server-assigned address).
+    # `integer` (server-assigned address). Contract 1.7.0 (D-2 (1), WP-2a):
+    # `field_constraints` is now a real key too -- total over `fields`,
+    # `nullable: true` and no `enum` for every field here (nothing was
+    # ever declared).
     assert document == {
         "application_scope": "app-a",
-        "entities": [{"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+        "entities": [
+            {
+                "entity": "notes",
+                "fields": ["body", "id"],
+                "field_types": {"body": "json", "id": "integer"},
+                "field_constraints": {"body": {"nullable": True}, "id": {"nullable": True}},
+                "mutation_class": "mutable",
+                "address_fields": ["id"],
+                "address_reuse": "never",
+                "unique_keys": [],
+            }
+        ],
     }
     other = service.authenticate("cred-b.secret-b")
     assert service.catalog(other) == {
         "application_scope": "app-b",
-        "entities": [{"entity": "notes", "fields": ["body", "id"], "field_types": {"body": "json", "id": "integer"}, "mutation_class": "mutable", "address_fields": ["id"], "address_reuse": "never", "unique_keys": []}],
+        "entities": [
+            {
+                "entity": "notes",
+                "fields": ["body", "id"],
+                "field_types": {"body": "json", "id": "integer"},
+                "field_constraints": {"body": {"nullable": True}, "id": {"nullable": True}},
+                "mutation_class": "mutable",
+                "address_fields": ["id"],
+                "address_reuse": "never",
+                "unique_keys": [],
+            }
+        ],
     }
 
 
@@ -806,12 +831,15 @@ def test_application_cell_catalog_returns_the_full_entity_descriptor_shape():
     cell = _cell({"notes": [{"body": "a"}]})
     # Phase 6 WP-2 (design D-3(iii)): `field_types` added -- `body` was
     # created with no declared type, so it reports `json` (decision (ii)'s
-    # default); `id` is always `integer`.
+    # default); `id` is always `integer`. Contract 1.7.0 (D-2 (1), WP-2a):
+    # `field_constraints` added too -- total, `nullable: true` and no
+    # `enum` for both fields here (nothing was ever declared).
     assert cell.catalog() == [
         {
             "entity": "notes",
             "fields": ["body", "id"],
             "field_types": {"body": "json", "id": "integer"},
+            "field_constraints": {"body": {"nullable": True}, "id": {"nullable": True}},
             "mutation_class": "mutable",
             "address_fields": ["id"],
             "address_reuse": "never",
@@ -1414,7 +1442,11 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed():
         with pytest.raises(FoundationError) as exc:
             cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": "n"}
+        # Contract 1.7.0 (D-2 (3), monitor ruling M-3/D, rulings-wp2a-
+        # review.md): `field` is now the request-internal path through the
+        # choke point's shared `field_name` argument, not the bare entity
+        # field name -- the single insert here is always index 0.
+        assert exc.value.details == {"field": "operations/0/values/n"}
         rendered = repr(exc.value)
         assert str(bad) not in rendered
     # The boundary values themselves are valid.
@@ -1446,7 +1478,8 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
         with pytest.raises(FoundationError) as exc:
             cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": field_name}
+        # Monitor ruling M-3/D: request-internal path, not a bare field name.
+        assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
         assert "\x00" not in repr(exc.value)
     # Untyped field: NUL nested inside a dict/list value too.
     with pytest.raises(FoundationError) as exc:

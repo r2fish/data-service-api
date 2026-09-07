@@ -666,7 +666,7 @@ _REVISION_TABLE = "_r2db_schema_revision"  # provisioned by
 # `0003`/`0009` now also provision unconditionally into every application
 # database -- excluded below for the identical reason, so `_real_table_
 # names`' own "nothing but what THIS test created" assertions stay true.
-_BOOKKEEPING_TABLES = (_REVISION_TABLE, "_r2db_platform_upgrades")
+_BOOKKEEPING_TABLES = (_REVISION_TABLE, "_r2db_platform_upgrades", "_r2db_field_constraints")
 
 
 def _real_table_names(dsn: str, schema: str) -> set[str]:
@@ -1032,6 +1032,9 @@ def test_catalog_reflects_entities_and_excludes_internal_bookkeeping_table(app_a
                 "entity": "widgets",
                 "fields": ["id", "name", "qty"],
                 "field_types": {"id": "integer", "name": "json", "qty": "json"},
+                # Contract 1.7.0 (D-2 (1), WP-2a): `field_constraints`,
+                # total, `nullable: true` and no `enum` (nothing declared).
+                "field_constraints": {"id": {"nullable": True}, "name": {"nullable": True}, "qty": {"nullable": True}},
                 "mutation_class": "mutable",
                 "address_fields": ["id"],
                 "address_reuse": "never",
@@ -2266,7 +2269,9 @@ def test_integer_field_value_out_of_bigint_range_is_validation_failed(app_a: typ
             with pytest.raises(FoundationError) as exc:
                 cell.transact("readings", [{"operation": "insert", "values": {"n": bad}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
-            assert exc.value.details == {"field": "n"}
+            # Monitor ruling M-3/D (rulings-wp2a-review.md): request-
+            # internal path, not a bare field name.
+            assert exc.value.details == {"field": "operations/0/values/n"}
         cell.transact("readings", [{"operation": "insert", "values": {"n": 2**63 - 1}}, {"operation": "insert", "values": {"n": -(2**63)}}], LIMITS)
         rows = {row["n"] for row in cell.query("readings", select=["n"], where=[], page_size=10, limits=LIMITS).items}
         assert rows == {2**63 - 1, -(2**63)}
@@ -2288,7 +2293,8 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values(app_a: t
             with pytest.raises(FoundationError) as exc:
                 cell.transact("docs", [{"operation": "insert", "values": {field_name: bad_value}}], LIMITS)
             assert exc.value.code == "VALIDATION_FAILED"
-            assert exc.value.details == {"field": field_name}
+            # Monitor ruling M-3/D: request-internal path.
+            assert exc.value.details == {"field": f"operations/0/values/{field_name}"}
         assert cell.query("docs", select=["u"], where=[], page_size=10, limits=LIMITS).items == []
     finally:
         cell.close()
@@ -2398,11 +2404,13 @@ def test_object_and_array_field_types_use_domains_and_are_distinguishable(app_a:
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "insert", "values": {"o": [1, 2]}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": "o"}
+        # Monitor ruling M-3/D (rulings-wp2a-review.md): request-internal
+        # path, not a bare field name.
+        assert exc.value.details == {"field": "operations/0/values/o"}
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "insert", "values": {"a": {"k": 1}}}], LIMITS)
         assert exc.value.code == "VALIDATION_FAILED"
-        assert exc.value.details == {"field": "a"}
+        assert exc.value.details == {"field": "operations/0/values/a"}
         # Same rejection on update.
         with pytest.raises(FoundationError) as exc:
             cell.transact("typed", [{"operation": "update", "where": [{"field": "id", "operator": "eq", "value": 1}], "values": {"o": [1]}}], LIMITS)
@@ -3065,11 +3073,19 @@ def _rewrite_0009(prefix: str, tmp_path: Path) -> Path:
     return out
 
 
+def _rewrite_0010(prefix: str, tmp_path: Path) -> Path:
+    text = (MIGRATIONS_DIR / "0010_field_constraints_upgrade.sql").read_text().replace("r2dbsvc", prefix)
+    out = tmp_path / "0010_field_constraints_upgrade.sql"
+    out.write_text(text)
+    return out
+
+
 def test_template_seeds_the_ledger_with_the_current_platform_upgrade_numbers(app_a: types.SimpleNamespace) -> None:
     """完了条件 1/5: `0003` テンプレートで新規 provision した application の
     台帳が、パッケージ定数 `platform_upgrades.PLATFORM_UPGRADE_NUMBERS`
-    (現状 `{9}`) と一致すること。"""
-    assert _ledger_numbers(app_a.developer_dsn) == platform_upgrades.PLATFORM_UPGRADE_NUMBERS == frozenset({9})
+    (Phase 9 WP-2a で `10` (field-constraints side table) が加わり
+    `{9, 10}`) と一致すること。"""
+    assert _ledger_numbers(app_a.developer_dsn) == platform_upgrades.PLATFORM_UPGRADE_NUMBERS == frozenset({9, 10})
 
 
 def test_0009_has_no_skip_path() -> None:
@@ -3146,7 +3162,7 @@ def test_runtime_role_can_select_but_not_write_the_ledger(app_a: types.SimpleNam
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades")
-            assert cur.fetchall() == [(9,)]
+            assert cur.fetchall() == [(9,), (10,)]
         for statement in (
             "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name) VALUES (99, 'x')",
             "UPDATE public._r2db_platform_upgrades SET script_name = 'y' WHERE upgrade_number = 9",
@@ -3170,7 +3186,7 @@ def test_provision_role_can_read_the_ledger_after_the_script_ends(app_a: types.S
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades")
-            assert cur.fetchall() == [(9,)]
+            assert cur.fetchall() == [(9,), (10,)]
     finally:
         conn.close()
 
@@ -3206,15 +3222,17 @@ def test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application(
     platform: types.SimpleNamespace, tmp_path: Path
 ) -> None:
     """完了条件 9: `_r2db_missing_rls` が、テンプレート経由の新規 DB と
-    `0009` 適用済みの既存 DB の両方で空のままであること (設計 D-3(e)(ii):
-    テンプレートと per-app script の両方で `CREATE OR REPLACE VIEW` が
-    要る)。「既存 DB」は、台帳表はある (`0003` 適用時と同じ) がその
-    `_r2db_missing_rls` の定義だけが WP-3 以前の (台帳名を除外しない)
-    版で固まっている状態を、ビューだけを古い定義へ戻すことで模する --
-    台帳表を丸ごと落とすと「台帳が無いので比較対象も無い」形になり、この
-    条件の非空振り (テンプレートと per-app script の両方が要ること) を
-    実測できない。"""
-    script = _rewrite_0009(platform.prefix, tmp_path)
+    `0009`+`0010` 適用済みの既存 DB の両方で空のままであること (設計
+    D-3(e)(ii)、Phase 9 WP-2a: テンプレートと両方の per-app upgrade
+    script が `CREATE OR REPLACE VIEW` を要る)。「既存 DB」は、両方の
+    bookkeeping table はある (`0003` 適用時と同じ) がその `_r2db_missing_
+    rls` の定義だけが WP-3 以前の (どちらの table 名も除外しない) 版で
+    固まっている状態を、ビューだけを古い定義へ戻すことで模する -- table
+    を丸ごと落とすと「比較対象も無い」形になり、この条件の非空振り (両方
+    の per-app upgrade script が要ること、`0009` 単独では `_r2db_field_
+    constraints` を除外し切れないこと) を実測できない。"""
+    script_0009 = _rewrite_0009(platform.prefix, tmp_path)
+    script_0010 = _rewrite_0010(platform.prefix, tmp_path)
     with provisioned_apps(platform, ["missrlsnew", "missrlsold"]) as apps:
         new_app, legacy_app = apps
 
@@ -3227,24 +3245,40 @@ def test_missing_rls_view_stays_empty_on_both_a_new_and_an_upgraded_application(
             conn.close()
 
         # Simulate "provisioned before WP-3": only the VIEW is reverted to
-        # its pre-WP-3 definition (the ledger table itself, seeded by the
-        # now-updated `0003`, is left in place -- unaffected by this
-        # revert, and still has no RLS, design D-3(a)). With the OLD view
-        # in place, the ledger table (RLS disabled) now shows up as a
-        # false-positive offender -- exactly the drift `0009`'s own
-        # `CREATE OR REPLACE VIEW` must correct.
+        # its pre-WP-3 definition (the ledger table AND -- Phase 9 WP-2a --
+        # the field-constraints side table, both seeded/created by the
+        # now-updated `0003`, are left in place -- unaffected by this
+        # revert, and neither has RLS, design D-3(a)/D-2(4)). With the OLD
+        # view in place, both bookkeeping tables now show up as false-
+        # positive offenders -- exactly the drift `0009`'s own `CREATE OR
+        # REPLACE VIEW` must correct.
         conn = psycopg.connect(legacy_app.developer_dsn, autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(_PRE_WP3_MISSING_RLS_VIEW)
                 cur.execute("SELECT table_name FROM public._r2db_missing_rls")
-                assert cur.fetchall() == [("_r2db_platform_upgrades",)], (
-                    "test setup sanity check: the pre-WP-3 view must see the ledger table as an offender"
+                assert sorted(row[0] for row in cur.fetchall()) == ["_r2db_field_constraints", "_r2db_platform_upgrades"], (
+                    "test setup sanity check: the pre-WP-3 view must see both bookkeeping tables as offenders"
                 )
         finally:
             conn.close()
 
-        _run_psql(platform.control_dsn, script, {"app_slug": legacy_app.slug})
+        # `0009` alone re-installs the view but only excludes the ledger
+        # table (unmodified by this WP) -- `_r2db_field_constraints`
+        # remains a false-positive offender until `0010` also runs
+        # (non-vacuity: neither script alone is sufficient).
+        _run_psql(platform.control_dsn, script_0009, {"app_slug": legacy_app.slug})
+        conn = psycopg.connect(legacy_app.developer_dsn, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_name FROM public._r2db_missing_rls")
+                assert [row[0] for row in cur.fetchall()] == ["_r2db_field_constraints"], (
+                    "0009 alone must still see the field-constraints table as an offender"
+                )
+        finally:
+            conn.close()
+
+        _run_psql(platform.control_dsn, script_0010, {"app_slug": legacy_app.slug})
         conn = psycopg.connect(legacy_app.developer_dsn, autocommit=True)
         try:
             with conn.cursor() as cur:
