@@ -102,7 +102,6 @@ from .credential_store import (
     validate_control_pepper_separation,
 )
 from .errors import FoundationError, fail
-from .limits import ResourceLimits
 from .platform_declarations import (
     MIGRATION_NUMBER,
     PEER_MODULE,
@@ -1425,17 +1424,18 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
 
     # Contract 1.7.0 (work order §2 WP-2e F-3, `{scratchpad}/
     # rulings-r3-r7-flip.md` F-3; WP-2e rework `{scratchpad}/
-    # audit-wp2e.md` D-2, ruling L-2 = (A)): the "enabled" declaration
-    # checked against the actual deployed state -- the served capabilities
-    # document, this process' own `ResourceLimits`, AND (the one part that
-    # can genuinely fail against a real deployment) every registered
-    # application's own per-application upgrade ledger (R-2/R-5). Run
-    # unconditionally like the writer-role check just above.
+    # audit-wp2e.md` D-2, ruling L-2 = (A); closure audit M-7, `{scratchpad}
+    # /audit-wp2e-2.md` R-7): the "enabled" declaration checked against the
+    # actual deployed state -- the served capabilities document (its
+    # `capabilities` AND `limits` blocks alike, never a separately
+    # constructed `ResourceLimits`), AND (the one part that can genuinely
+    # fail against a real deployment) every registered application's own
+    # per-application upgrade ledger (R-2/R-5). Run unconditionally like
+    # the writer-role check just above.
     try:
         applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
         platform_declarations.check_contract_170_declarations(
             _contract_170_capabilities_document(),
-            ResourceLimits(),
             applied_by_application,
             platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )

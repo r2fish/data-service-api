@@ -16,17 +16,26 @@ carrying/`observed_type`-carrying sites went completely undetected.
 
 This file drives a wide, diverse set of real denial paths (structured.py/
 service.py/http.py/limits.py choke-point and request-shape sites,
-IDENTIFIER_INVALID and CAPABILITY_UNSUPPORTED included, adapted from
-`{scratchpad}/aud2e_probe.py`'s own 19 in-scope-fixed cases) and asserts,
-over EVERY resulting `details` dict's 4 keys, that none of them ever
-carries (a) the row VALUE the probe supplied (a distinctive per-probe
-marker, used ONLY as a data value, never as an identifier -- V-9's own
-"an adversarial identifier may legitimately be echoed back as a request-
-internal PATH, since that is a position, not a value" carve-out means a
-marker used AS an identifier is expected to appear in `field` and is not
-a leak; this file's own markers are therefore never used as identifiers),
-(b) a SQL fragment, (c) a DSN fragment, (d) an internal reserved name/
-schema/table name, (e) a stack-trace fragment."""
+IDENTIFIER_INVALID and CAPABILITY_UNSUPPORTED included -- M-5, `{scratchpad}
+/audit-wp2e-2.md` R-6 -- adapted from `{scratchpad}/aud2e_probe.py`'s own
+19 in-scope-fixed cases) and asserts, over EVERY resulting `details`
+dict's 4 keys, that none of them ever carries (a) the row VALUE the probe
+supplied (a distinctive per-probe marker), (b) a SQL fragment, (c) a DSN
+fragment, (d) an internal reserved name/schema/table name, (e) a stack-
+trace fragment, (f) a value outside `observed_type`'s own fixed
+vocabulary (M-5: a Python type name such as `str`/`int` would leak
+exactly this way). V-9's own "an adversarial identifier may legitimately
+be echoed back as a request-internal PATH, since that is a position, not
+a value" carve-out means a marker used as the identifier being validated
+is NOT itself a leak if the resulting `field` is a FIXED path constant
+independent of that identifier's own text (`"entity"`, `"field"`,
+`"operations/0/operation"`, an `<n>`-indexed `"order_by/<i>/field"`/
+`"select/<i>"`) -- several probes below do exactly this (the marker IS
+the invalid identifier) precisely because it stays unambiguous: only a
+probe whose `field` path is BUILT FROM the identifier's own text (a
+mutation `values` dict KEY, e.g., which becomes `operations/<i>/values/
+<key>`) would blur that line, so no probe here uses a marker as one of
+those key-shaped identifiers."""
 from __future__ import annotations
 
 import re
@@ -117,11 +126,64 @@ _PROBES: list[tuple[str, "object", "object"]] = [
         None,
         lambda s, r, d, m: s.mutate(r, "notes", [{"operation": "insert", "values": {"body": m}}], transaction="best_effort"),
     ),
+    # M-5 (`{scratchpad}/audit-wp2e-2.md` R-6, ruling addendum 2): the
+    # audit found `_PROBES` never once fired IDENTIFIER_INVALID (fully
+    # absent) or exercised a CAPABILITY_UNSUPPORTED site whose `field`
+    # names a request position -- the 5 probes below close that. Every
+    # `field` these produce is a FIXED path constant ("entity"/"field"/
+    # "operations/0/operation") independent of the marker's own value, so
+    # -- unlike a values-KEY or where-field probe, where the marker would
+    # legitimately become part of the path itself (V-9's carve-out) --
+    # the marker appearing in `field` here is unambiguously a leak, never
+    # an allowed echo. The marker's own hyphens (`si10-marker-N-...`)
+    # already violate `IDENTIFIER`'s `[A-Za-z0-9_]` grammar, so it can be
+    # used directly as the invalid identifier itself without any extra
+    # corruption.
+    (
+        "IDENTIFIER_INVALID entity name syntax",
+        None,
+        lambda s, r, d, m: s.query(r, m, select=["id"]),
+    ),
+    (
+        "IDENTIFIER_INVALID select field syntax",
+        None,
+        lambda s, r, d, m: s.query(r, "notes", select=[m]),
+    ),
+    (
+        "IDENTIFIER_INVALID order_by field syntax",
+        None,
+        lambda s, r, d, m: s.query(r, "notes", select=["id"], order_by=[{"field": m}]),
+    ),
+    (
+        "IDENTIFIER_INVALID add_field name syntax (reserved-prefix-shaped, request-shape)",
+        None,
+        lambda s, r, d, m: s.schema(d, {"operation": "add_field", "entity": "notes", "field": m, "field_type": "string"}),
+    ),
+    (
+        "CAPABILITY_UNSUPPORTED mutation operation not supported (choke point, field = operations/<i>/operation)",
+        None,
+        lambda s, r, d, m: s.mutate(r, "notes", [{"operation": "replace", "values": {"body": m}}]),
+    ),
+    (
+        "CAPABILITY_UNSUPPORTED upsert with no declared uniqueness key (choke point, field = operation)",
+        None,
+        lambda s, r, d, m: s.mutate(r, "notes", [{"operation": "upsert", "values": {"body": m}}]),
+    ),
 ]
 
 
+#: M-5: the contract's own `observed_type` vocabulary (`errors.
+#: observed_type_of`'s docstring) -- a value from OUTSIDE this set (a
+#: Python type name such as `str`/`int`/`list`/`dict`, which is exactly
+#: what `type(value).__name__` or a bare `str(type(value))` would leak)
+#: is a distinct kind of disclosure the earlier 4 fragment categories
+#: cannot catch on their own (none of them are substrings of a Python
+#: type name), named explicitly by ruling L-5/M-5.
+_OBSERVED_TYPE_VOCAB = {"string", "integer", "number", "boolean", "object", "array", "null", "absent"}
+
+
 def test_si10_scan_finds_no_leaked_value_sql_dsn_internal_name_or_stack_trace():
-    observed = 0
+    observed_by_code: dict[str, int] = {code: 0 for code in _DENIAL_CODES}
     leaks: list[str] = []
     for i, (name, setup, probe) in enumerate(_PROBES):
         marker = f"si10-marker-{i}-do-not-leak-3f9a7c2e"
@@ -133,7 +195,7 @@ def test_si10_scan_finds_no_leaked_value_sql_dsn_internal_name_or_stack_trace():
         except FoundationError as exc:
             if exc.code not in _DENIAL_CODES:
                 continue
-            observed += 1
+            observed_by_code[exc.code] += 1
             for key in ("violated_declaration", "field", "declared_type", "observed_type"):
                 value = exc.details.get(key)
                 if value is None:
@@ -153,9 +215,16 @@ def test_si10_scan_finds_no_leaked_value_sql_dsn_internal_name_or_stack_trace():
                 for frag in _STACK_TRACE_FRAGMENTS:
                     if frag in haystack:
                         leaks.append(f"{name}: {key}={value!r} carries a stack-trace fragment ({frag!r})")
+                if key == "observed_type" and value not in _OBSERVED_TYPE_VOCAB:
+                    leaks.append(f"{name}: {key}={value!r} is outside the observed_type vocabulary (Python type-name leak)")
         except Exception as exc:  # pragma: no cover - a probe construction bug, not a leak finding
             pytest.fail(f"probe {name!r} raised an unexpected exception (probe itself is broken, not a leak): {exc!r}")
-    assert observed >= 1, "scan observed 0 denials -- vacuous, fix the probe set before trusting this test"
+    # M-5: strengthened from a single `observed >= 1` vacuum floor to one
+    # per vocabulary CODE -- the pre-M-5 floor was satisfied entirely by
+    # VALIDATION_FAILED probes while IDENTIFIER_INVALID/CAPABILITY_
+    # UNSUPPORTED were never observed at all (the audit's own finding).
+    for code, count in observed_by_code.items():
+        assert count >= 1, f"scan observed 0 denials of {code} -- vacuous for this code, fix the probe set before trusting this test"
     assert leaks == [], "\n".join(leaks)
 
 

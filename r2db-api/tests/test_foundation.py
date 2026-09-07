@@ -1075,6 +1075,24 @@ def test_in_operator_type_checks_each_element():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+def test_in_operator_rejects_an_empty_list():
+    """WP-2e closure audit M-3 (`{scratchpad}/audit-wp2e-2.md` R-2,
+    ruling `{scratchpad}/rulings-r3-r7-flip.md` addendum 2): an empty `in`
+    list is refused at the shared choke point -- `violated_declaration:
+    request_schema`, `field: where/<i>/value` -- the in-memory side is
+    brought into line with the Postgres plug's own pre-existing rejection
+    (`test_postgres.py::test_in_operator_rejects_an_empty_list` pins the
+    identical shape against the real Postgres plug)."""
+    cell = _cell()
+    _create_entity(cell, "ints")
+    _add_field(cell, "ints", "i", "integer")
+    cell.transact("ints", [{"operation": "insert", "values": {"i": 1}}], LIMITS)
+    with pytest.raises(FoundationError) as exc:
+        cell.query("ints", select=["i"], where=[Predicate("i", "in", [])], page_size=10, limits=LIMITS)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+
 def test_create_index_and_unique_conflict_on_insert_and_update():
     cell = _cell()
     _create_entity(cell, "accounts")
@@ -1646,12 +1664,16 @@ def test_eq_and_ne_reject_a_null_predicate_value():
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "eq", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"
-    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1): a null value on an
-    # operator that only accepts a value (eq/ne) is a `nullable` violation
-    # -- `observed_type` is the JSON type actually supplied (`null`);
-    # `declared_type` is omitted (the violation is about the operator/value
-    # combination, not the field's own declared nullability).
-    assert exc.value.details == {"field": "tag", "violated_declaration": "nullable", "observed_type": "null"}
+    # WP-2e rework (audit-wp2e.md D-1 = (A), ruling L-1), closure audit
+    # R-4/R-5 (`{scratchpad}/audit-wp2e-2.md`, ruling M-2/M-4): a null
+    # value on an operator that only accepts a value (eq/ne) is a
+    # `nullable` violation -- D-3 (4) requires BOTH `declared_type` (the
+    # field's own declared type -- "json" here, `tag` is untyped/JSONB-
+    # equivalent) and `observed_type` (the JSON type actually supplied,
+    # `null`). `field` is the request-internal PATH to this predicate's
+    # own value (`where/<i>/value`), never the bare column name `tag`
+    # (R-5: `"tag"` is not a key anywhere in the request body).
+    assert exc.value.details == {"field": "where/0/value", "violated_declaration": "nullable", "declared_type": "json", "observed_type": "null"}
     with pytest.raises(FoundationError) as exc:
         cell.query("items", select=["tag"], where=[Predicate("tag", "ne", None)], page_size=10, limits=LIMITS)
     assert exc.value.code == "VALIDATION_FAILED"

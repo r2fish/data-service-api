@@ -347,19 +347,24 @@ def test_idempotency_replay_returns_the_original_request_id(service, runtime):
     assert first.affected == second.affected == 1  # replay, not a second insert
 
 
-def test_idempotency_replay_of_a_pre_1_7_0_record_falls_back_to_the_resend_own_request_id(service, runtime):
-    """WP-2e rework (audit-wp2e.md I-1, ruling L-6): a record written by a
-    pre-contract-1.7.0 build never had a `request_id` in its stored
-    payload at all -- `payload.get("request_id")` on such a record is
-    `None`, and the contract's `MutationResult.request_id` is `"type":
-    "string"` (null not permitted). Q-4's own rule ("replay は元実行の
-    request_id") governs only when the ORIGINAL execution's value IS on
-    record; a record with none is treated as having none, and the resend's
-    OWN `request_id` is used instead -- never a `None` reaching the
-    response. Simulates the pre-1.7.0 record shape directly (§3-B probe
-    procedure) by deleting `request_id` from the stored payload after a
-    normal insert-and-record, exactly what a record written before this
-    contract version would already look like on disk/in-memory."""
+def test_idempotency_replay_of_a_pre_1_7_0_record_is_treated_as_absent_and_re_executes(service, runtime):
+    """WP-2e closure audit R-1 (`{scratchpad}/audit-wp2e-2.md`, ruling
+    `{scratchpad}/rulings-r3-r7-flip.md` addendum 2 M-6, superseding the
+    pre-rework "falls back to the resend's own request_id while still
+    replaying" version of this test, which the closure audit found fixes
+    a behaviour L-6 explicitly forbids): a record written by a pre-
+    contract-1.7.0 build never had a `request_id` in its stored payload at
+    all. L-6's own rule -- "request_id を持たない記録 ... は『無い』もの
+    として扱う (再送は新規実行)" -- governs: such a record is treated as
+    though the lookup found NOTHING, not as a replay source needing a
+    fallback value. The resend therefore genuinely RE-EXECUTES (a second,
+    real insert -- proven here by a different `assigned_addresses` id, not
+    merely a different `request_id`), and its result OVERWRITES the same
+    key's record. Simulates the pre-1.7.0 record shape directly (§3-B
+    probe procedure) by deleting `request_id` from the stored payload
+    after a normal insert-and-record, exactly what a record written
+    before this contract version would already look like on disk/in-
+    memory."""
     key = "wp2e-idem-key-pre-1-7-0"
     first = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "pre170"}}], idempotency_key=key)
     assert first.request_id
@@ -369,8 +374,38 @@ def test_idempotency_replay_of_a_pre_1_7_0_record_falls_back_to_the_resend_own_r
     assert "request_id" not in record.payload  # simulated pre-1.7.0 record shape
     second = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "pre170"}}], idempotency_key=key)
     assert second.request_id is not None
-    assert second.request_id != first.request_id  # the record had none recorded -- this resend's own value is used
-    assert second.affected == first.affected == 1  # still a replay, not a second insert
+    assert second.request_id != first.request_id  # the record had none recorded -- treated as absent, a fresh request_id is generated
+    assert second.affected == 1
+    # M-6: a REAL second insert, not a replay of the first's own recorded
+    # result -- a distinct row address is the decisive proof (a replay
+    # would echo `first.assigned_addresses` verbatim).
+    assert second.assigned_addresses != first.assigned_addresses
+    assert second.assigned_addresses[0]["address"]["id"] != first.assigned_addresses[0]["address"]["id"]
+    # M-6 point 3: the new execution's result OVERWRITES the same key's
+    # record -- a request_id-less record is not left behind forever.
+    overwritten = cell._idempotency[key]
+    assert overwritten.payload["request_id"] == second.request_id
+
+
+def test_idempotency_resend_of_a_request_id_less_record_with_a_different_digest_re_executes_rather_than_conflicting(service, runtime):
+    """M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2, R-1 point 2):
+    a request_id-less record is excluded from the digest comparison
+    entirely -- checked BEFORE it, not after -- so a resend under the SAME
+    key but a DIFFERENT request body must NOT raise `CONFLICT` (the
+    record it would conflict against is treated as not there at all); it
+    re-executes exactly like the matching-digest case above."""
+    key = "wp2e-idem-key-pre-1-7-0-digest-mismatch"
+    first = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "original"}}], idempotency_key=key)
+    cell = service._cells[runtime.application_id]
+    record = cell._idempotency[key]
+    del record.payload["request_id"]
+    # A DIFFERENT body -> a different idempotency digest than the record
+    # (still) carries -- would be CONFLICT if the record were honoured.
+    second = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "different-body-should-not-conflict"}}], idempotency_key=key)
+    assert second.request_id is not None
+    assert second.request_id != first.request_id
+    assert second.affected == 1
+    assert second.assigned_addresses[0]["address"]["id"] != first.assigned_addresses[0]["address"]["id"]
 
 
 def test_dry_run_response_carries_request_id(service, runtime):
@@ -464,24 +499,32 @@ def test_contract_version_is_1_7_0_on_data_plane(service, runtime):
 # therefore never actually observe a broken one; `PlatformDeclarationError
 # (code="F-14")` could never be raised through the real `ops verify-
 # declarations` path, only through a synthetic direct call). The new
-# function takes the caller's own served capabilities document and
-# deployed `ResourceLimits` as arguments (never builds either itself), and
-# additionally checks EVERY registered application's own per-application
-# upgrade ledger against `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` --
-# the one part of F-14 a real deployment can actually fail. That ledger
-# check needs a real PostgreSQL connection per application and is
-# therefore exercised in `test_ops_upgrade.py` (`test_verify_declarations_
-# f14_fails_when_an_application_has_not_applied_every_upgrade`), not here.
+# function takes the caller's own served capabilities document (its
+# `limits` block included -- closure audit M-7, `{scratchpad}/
+# audit-wp2e-2.md` R-7: the limit-class half used to take a SEPARATE,
+# freshly-constructed `ResourceLimits` argument, which had the identical
+# "always passes or crashes before this function is even called" flaw the
+# capability half's own pre-rework version had; both halves now read the
+# SAME served document, never build anything themselves), and additionally
+# checks EVERY registered application's own per-application upgrade ledger
+# against `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` -- the one part of
+# F-14 a real deployment can actually fail. That ledger check needs a real
+# PostgreSQL connection per application and is therefore exercised in
+# `test_ops_upgrade.py` (`test_verify_declarations_f14_fails_when_an_
+# application_has_not_applied_every_upgrade`), not here.
 # ---------------------------------------------------------------------------
 
 
 def _ok_capabilities_document():
-    return {"capabilities": {name: {"status": "enabled"} for name in platform_declarations._CONTRACT_170_ENABLED_CAPABILITIES}}
+    return {
+        "capabilities": {name: {"status": "enabled"} for name in platform_declarations._CONTRACT_170_ENABLED_CAPABILITIES},
+        "limits": ResourceLimits().as_dict(),
+    }
 
 
 def test_verify_declarations_accepts_the_shipped_default_state():
     platform_declarations.check_contract_170_declarations(
-        _ok_capabilities_document(), ResourceLimits(), {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+        _ok_capabilities_document(), {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
     )  # must not raise; {} = no registered applications to check
 
 
@@ -491,7 +534,7 @@ def test_verify_declarations_rejects_a_capability_not_declared_enabled(capabilit
     document["capabilities"][capability_name] = {"status": "unavailable"}
     with pytest.raises(platform_declarations.PlatformDeclarationError) as exc:
         platform_declarations.check_contract_170_declarations(
-            document, ResourceLimits(), {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+            document, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
     assert exc.value.code == "F-14"
     assert capability_name in str(exc.value)
@@ -499,22 +542,36 @@ def test_verify_declarations_rejects_a_capability_not_declared_enabled(capabilit
 
 @pytest.mark.parametrize("field_name", ["enum_members", "idempotency_entries", "idempotency_retention_ms"])
 def test_verify_declarations_rejects_a_non_positive_new_limit(field_name):
-    """`ResourceLimits.__post_init__` (`r2db_api/limits.py:48-51`) already
-    refuses to CONSTRUCT an instance carrying a non-positive value for any
-    class, including these three -- so this can never observe one through
-    a real `ResourceLimits` object in this process. Exercised here against
-    a minimal duck-typed stand-in (only `getattr(limits, name)` is read,
-    `check_contract_170_declarations` never asserts `isinstance(limits,
-    ResourceLimits)`) so the CHECK FUNCTION's own logic is still under
-    real, falsifiable test -- this is the honest scope of what this half
-    of F-14 can catch: a REGRESSION in a caller that stops going through
-    `ResourceLimits.__post_init__` at all, not a live `ResourceLimits`
-    instance in today's process."""
-    import types
-    bad = types.SimpleNamespace(**{**ResourceLimits().as_dict(), field_name: 0})
+    """M-7 (`{scratchpad}/audit-wp2e-2.md` R-7): this half now reads the
+    SAME served `capabilities_document`'s own `limits` block the
+    capability half above already reads from -- so, unlike the pre-M-7
+    duck-typed-`ResourceLimits`-stand-in version of this test (a live
+    `ResourceLimits` object can never carry a non-positive value at all,
+    `__post_init__` refuses to construct one), a broken value can be
+    exercised directly, through the document itself, exactly the shape a
+    real (corrupted/regressed) served document would take."""
+    document = _ok_capabilities_document()
+    document["limits"][field_name] = 0
     with pytest.raises(platform_declarations.PlatformDeclarationError) as exc:
         platform_declarations.check_contract_170_declarations(
-            _ok_capabilities_document(), bad, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+            document, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+        )
+    assert exc.value.code == "F-14"
+    assert field_name in str(exc.value)
+
+
+def test_verify_declarations_rejects_a_missing_limits_block():
+    """M-7: a served document with no `limits` block at all (a regressed
+    `capabilities()` that stopped including it) fails the SAME way a
+    non-positive value does -- `capabilities_document.get("limits")`
+    yields `None`, which is not a `Mapping`, so every one of the 3 classes
+    is reported missing rather than this function raising `AttributeError`
+    on a `None.get(...)`."""
+    document = _ok_capabilities_document()
+    del document["limits"]
+    with pytest.raises(platform_declarations.PlatformDeclarationError) as exc:
+        platform_declarations.check_contract_170_declarations(
+            document, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
     assert exc.value.code == "F-14"
 
@@ -528,7 +585,7 @@ def test_verify_declarations_rejects_an_application_missing_a_required_upgrade()
     incomplete = frozenset(platform_upgrades.PLATFORM_UPGRADE_NUMBERS - {min(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)})
     with pytest.raises(platform_declarations.PlatformDeclarationError) as exc:
         platform_declarations.check_contract_170_declarations(
-            _ok_capabilities_document(), ResourceLimits(),
+            _ok_capabilities_document(),
             {"complete-app": platform_upgrades.PLATFORM_UPGRADE_NUMBERS, "lagging-app": incomplete},
             platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
@@ -544,7 +601,7 @@ def test_verify_declarations_treats_a_missing_ledger_as_every_number_pending():
     numbers` already uses, not a separate silent-pass special case."""
     with pytest.raises(platform_declarations.PlatformDeclarationError) as exc:
         platform_declarations.check_contract_170_declarations(
-            _ok_capabilities_document(), ResourceLimits(), {"unprovisioned-app": None}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+            _ok_capabilities_document(), {"unprovisioned-app": None}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
         )
     assert exc.value.code == "F-14"
     assert "unprovisioned-app" in str(exc.value)
@@ -562,8 +619,51 @@ def test_contract_170_capabilities_document_declares_every_required_capability_e
     in-memory application -- not a hand-written stand-in -- so this pins
     that the production code path actually satisfies F-14's own
     requirement, catching a future regression in `service.py` the same
-    gate operators already run would catch."""
+    gate operators already run would catch. M-7: this document's own
+    `limits` block (not a separate `ResourceLimits()`) is what the limit-
+    class half of the check below now reads too."""
     document = r2db_ops._contract_170_capabilities_document()
     platform_declarations.check_contract_170_declarations(
-        document, ResourceLimits(), {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
+        document, {}, platform_upgrades.PLATFORM_UPGRADE_NUMBERS,
     )  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# WP-2e closure audit R-5/M-4 (`{scratchpad}/audit-wp2e-2.md`, ruling
+# `{scratchpad}/rulings-r3-r7-flip.md` addendum 2): a predicate-VALUE
+# denial's `field` is the request-internal PATH to that value
+# (`where/<i>/value`, `operations/<i>/where/<j>/value`) -- never the bare
+# column name (`predicate.field`, e.g. `"body"`), which is not a key
+# anywhere in the request body at all.
+# ---------------------------------------------------------------------------
+
+
+def test_query_predicate_value_type_violation_names_the_request_internal_path(service, developer, runtime):
+    service.schema(developer, {"operation": "create_entity", "entity": "typed", "fields": ["n"], "field_types": {"n": "integer"}})
+    service.mutate(runtime, "typed", [{"operation": "insert", "values": {"n": 1}}])
+    with pytest.raises(FoundationError) as exc:
+        # `contains` requires a string value -- a `field_type` violation
+        # against the OPERATOR's own fixed value type, independent of the
+        # target column's declared type.
+        service.query(runtime, "typed", select=["id"], where=[{"field": "n", "operator": "contains", "value": 5}])
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {
+        "violated_declaration": "field_type", "field": "where/0/value",
+        "declared_type": "string", "observed_type": "integer",
+    }
+
+
+def test_mutation_where_predicate_value_type_violation_names_the_batch_indexed_path(service, runtime):
+    with pytest.raises(FoundationError) as exc:
+        service.mutate(runtime, "notes", [{
+            "operation": "update", "values": {"body": "x"},
+            "where": [{"field": "body", "operator": "eq", "value": "a"}, {"field": "body", "operator": "contains", "value": 5}],
+        }])
+    assert exc.value.code == "VALIDATION_FAILED"
+    # index 1 (the SECOND where entry) is the offending one -- R-5's own
+    # batch-index-aware path, mirroring `bind_mutation`'s `operations/<i>/
+    # where` prefix (WP-2e rework, ruling L-3).
+    assert exc.value.details == {
+        "violated_declaration": "field_type", "field": "operations/0/where/1/value",
+        "declared_type": "string", "observed_type": "integer",
+    }

@@ -684,9 +684,13 @@ def check_writer_role_timeouts(
 #   (a) the SERVED capabilities document (the caller's own `capabilities()`
 #       call, never rebuilt here) actually declares `constraint_
 #       declarations`/`dry_run`/`idempotency`/`request_budget` `enabled`.
-#   (b) `limits` (the caller's own deployed `ResourceLimits`, never a fresh
-#       default constructed here) carries a positive `enum_members`/
-#       `idempotency_entries`/`idempotency_retention_ms`.
+#   (b) M-7 (`{scratchpad}/audit-wp2e-2.md` R-7): the SAME served
+#       capabilities document's own `limits` block (never a fresh
+#       `ResourceLimits()` constructed here -- that residual flaw, caught
+#       by the closure audit, was the same "unreachable through a real
+#       deployment" bug as the pre-rework function had for (a)) carries a
+#       positive `enum_members`/`idempotency_entries`/`idempotency_
+#       retention_ms`.
 #   (c) EVERY registered application's own per-application upgrade ledger
 #       (R-2/R-5, migrations `0009`/`0010`/`0011`) already carries every
 #       number this shipped version requires (`applied_upgrade_numbers_
@@ -700,20 +704,36 @@ def check_writer_role_timeouts(
 #       not just once for the whole platform.
 def check_contract_170_declarations(
     capabilities_document: Mapping[str, Any],
-    limits: "ResourceLimits",
     applied_upgrade_numbers_by_application: Mapping[str, Optional[frozenset[int]]],
     required_upgrade_numbers: frozenset[int],
 ) -> None:
     """F-14. `capabilities_document` is the value the caller's own live
     `capabilities()` call returned (or an equivalent already-served
-    document) -- this function never constructs one itself. `limits` is
-    the caller's own deployed `ResourceLimits` -- likewise never rebuilt
-    here. `applied_upgrade_numbers_by_application` maps every registered
-    application's slug to `platform_upgrades.read_applied_upgrade_numbers`'s
-    own return value for that application's database (`None` when that
-    application has no ledger table at all -- read as "every number is
-    pending", the same convention `platform_upgrades.pending_upgrade_
-    numbers` already uses)."""
+    document) -- this function never constructs one itself, for EITHER
+    half of the check. `applied_upgrade_numbers_by_application` maps every
+    registered application's slug to `platform_upgrades.read_applied_
+    upgrade_numbers`'s own return value for that application's database
+    (`None` when that application has no ledger table at all -- read as
+    "every number is pending", the same convention `platform_upgrades.
+    pending_upgrade_numbers` already uses).
+
+    WP-2e closure audit M-7 (`{scratchpad}/audit-wp2e-2.md` R-7, ruling
+    `{scratchpad}/rulings-r3-r7-flip.md` addendum 2 L-2 (a)): the limit-
+    class half used to take a separate, caller-constructed `ResourceLimits`
+    argument and read ITS attributes -- but `ResourceLimits.__post_init__`
+    already refuses to construct a value carrying a non-positive class, so
+    a caller building a throwaway `ResourceLimits()` (`ops.py`'s own
+    `cmd_verify_declarations`, before this fix) could never actually
+    surface a broken deployment through this half of F-14 either: any
+    broken value crashes the CONSTRUCTOR, before `check_contract_170_
+    declarations` is even called, with an uncaught `ValueError`, not this
+    function's own `PlatformDeclarationError`. This half now reads the
+    SAME served `capabilities_document`'s own `limits` block (`{"limits":
+    ResourceLimits.as_dict()}`, `DataService.capabilities()`'s real,
+    already-served shape) that the capability half above already reads
+    from -- checking the declaration the way an operator (or a client)
+    actually observes it, exactly like L-2 (a)'s own wording: "capability
+    document が ... limits に ... を持つこと"."""
     capabilities = capabilities_document.get("capabilities", capabilities_document)
     for name in _CONTRACT_170_ENABLED_CAPABILITIES:
         entry = capabilities.get(name) if isinstance(capabilities, Mapping) else None
@@ -723,11 +743,12 @@ def check_contract_170_declarations(
                 f"{ops_module_hint()}.capabilities().{name}.status must be 'enabled'; got {status!r}.",
                 code="F-14",
             )
+    limits = capabilities_document.get("limits")
     for name in _CONTRACT_170_LIMIT_CLASSES:
-        value = getattr(limits, name, None)
+        value = limits.get(name) if isinstance(limits, Mapping) else None
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise PlatformDeclarationError(
-                f"{ops_module_hint()}.limits.ResourceLimits.{name} must be a positive integer; got {value!r}.",
+                f"{ops_module_hint()}.capabilities().limits.{name} must be a positive integer; got {value!r}.",
                 code="F-14",
             )
     missing = {

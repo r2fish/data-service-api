@@ -1481,23 +1481,33 @@ def _validate_wildcard_pattern(pattern: str, field_name: str) -> None:
         fail("VALIDATION_FAILED", "matches pattern must not end with an unescaped backslash.", details=violation("request_schema", field=field_name))
 
 
-def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, str | None]) -> None:
+def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, str | None], *, path_prefix: str = "where") -> None:
     """Type-check every predicate's value up front, independent of which
     rows (if any) it will end up matching (R-7, corrigendum M-9: type
     validation happens before target-row search/precondition resolution --
-    see the call sites in `ApplicationCell.query`/`_apply`)."""
-    for predicate in where:
+    see the call sites in `ApplicationCell.query`/`_apply`).
+
+    `path_prefix` (WP-2e rework, rulings R-5/M-4): the identical request-
+    internal path `validate_predicates` places this same `where` list at
+    (`"where"` for a top-level query, `f"operations/{i}/where"` for a
+    mutation's own `where`) -- every VALUE-position denial below names
+    `<path_prefix>/<i>/value` (or `.../value/<j>` for one `in` element),
+    never the bare field name (`predicate.field` names a column, not a
+    request-internal path -- `errors.details_vocabulary`'s `field` is
+    defined as the latter only)."""
+    for i, predicate in enumerate(where):
+        base_path = f"{path_prefix}/{i}/value"
         if predicate.operator in _TEXT_ONLY_OPERATORS:
             # Q-2: the operator's own value type is fixed (string), never
             # the target column's declared type -- a typed non-string
             # column is still matched via its text representation, so the
             # column's own declared type is irrelevant to this check.
             if not isinstance(predicate.value, str):
-                fail("VALIDATION_FAILED", "This operator's value must be a string.", details=violation("field_type", field=predicate.field, declared_type="string", observed_type=observed_type_of(predicate.value)))
+                fail("VALIDATION_FAILED", "This operator's value must be a string.", details=violation("field_type", field=base_path, declared_type="string", observed_type=observed_type_of(predicate.value)))
             if _contains_nul(predicate.value):
-                fail("VALIDATION_FAILED", "This operator's value must not contain a NUL character.", details=violation("request_schema", field=predicate.field))
+                fail("VALIDATION_FAILED", "This operator's value must not contain a NUL character.", details=violation("request_schema", field=base_path))
             if predicate.operator == "matches":
-                _validate_wildcard_pattern(predicate.value, predicate.field)
+                _validate_wildcard_pattern(predicate.value, base_path)
             continue
         if predicate.operator in ("eq", "ne") and predicate.value is None:
             # WP-3 confirmation review N-3: `= NULL`/`<> NULL` is always
@@ -1505,14 +1515,24 @@ def _validate_predicate_types(where: list["Predicate"], field_types: dict[str, s
             # never what a caller means. `is_null` exists precisely for
             # this comparison; refusing here is more diagnostic to an AI
             # agent client than quietly returning an empty result forever.
-            fail("VALIDATION_FAILED", "eq/ne do not accept a null value; use is_null instead.", details=violation("nullable", field=predicate.field, observed_type="null"))
+            # R-4: `nullable` requires BOTH `declared_type` and
+            # `observed_type` (D-3 (4)'s first branch, contract text
+            # `declared_type` is "required where violated_declaration is
+            # field_type or nullable").
+            fail("VALIDATION_FAILED", "eq/ne do not accept a null value; use is_null instead.", details=violation("nullable", field=base_path, declared_type=_declared_type_label(field_types.get(predicate.field)), observed_type="null"))
         declared_type = field_types.get(predicate.field)
         if predicate.operator == "in":
-            if isinstance(predicate.value, list):
-                for item in predicate.value:
-                    _check_type(item, declared_type, predicate.field)
+            # M-3 (rulings addendum 2): an empty (or non-list) `in` value
+            # is refused here, at the shared choke point -- both cells now
+            # agree (the in-memory side used to accept it silently; the
+            # Postgres side's own bare `fail()` this mirrors is replaced
+            # by this same call, R-2).
+            if not isinstance(predicate.value, list) or not predicate.value:
+                fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field=base_path))
+            for j, item in enumerate(predicate.value):
+                _check_type(item, declared_type, f"{base_path}/{j}")
         elif predicate.operator != "is_null":
-            _check_type(predicate.value, declared_type, predicate.field)
+            _check_type(predicate.value, declared_type, base_path)
 
 
 # --- page size (contract `Page.size`) ---------------------------------------
@@ -1803,6 +1823,25 @@ class _IdempotencyRecord:
     expires_at: float
 
 
+def _idempotency_record_has_request_id(payload: dict[str, Any]) -> bool:
+    """Ruling L-6/M-6 (`{scratchpad}/rulings-r3-r7-flip.md` addendum 2,
+    WP-2e closure audit R-1): a record written before the 1.7.0 flip
+    carries no `request_id` in its payload -- contract `versioning.
+    version_binding`'s 1.7.0 condition (4) requires a replay to return
+    "the original result... including the original request_id", which a
+    request_id-less record cannot honour. Such a record is treated as
+    though it were never found at all (never a fallback to the RESEND's
+    own request_id, which would silently forge a value the original
+    execution never produced) -- the resend falls through to a genuine
+    new execution, whose result (including a freshly generated request_
+    id) overwrites this same key's record (`_idempotency_store`'s plain
+    dict assignment, `PostgresCell`'s row `UPSERT`, already do this).
+    Both cells check this BEFORE the digest comparison: a stale, request_
+    id-less record with a MISMATCHED digest must not become a spurious
+    `CONFLICT` either -- it is simply not there."""
+    return isinstance(payload.get("request_id"), str)
+
+
 @dataclass(frozen=True)
 class SchemaOutcome:
     """Contract 1.7.0 (D-4, WP-2b): `apply_schema`'s return shape -- the
@@ -1994,7 +2033,17 @@ class ApplicationCell:
         try:
             rows = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in where)]
         except (TypeError, ValueError):
-            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("field_type", field="where"))
+            # M-2 (`{scratchpad}/audit-wp2e-2.md` R-3): `field_type`
+            # (this catch's pre-M-2 `violated_declaration`) requires BOTH
+            # `declared_type`/`observed_type` -- neither is attributable
+            # here (`lt`/`lte`/`gt`/`gte` against an UNTYPED field is
+            # never type-checked up front, module docstring's own
+            # documented divergence; a raise here can come from ANY
+            # predicate against ANY matching row, not one statically
+            # knowable field/type pair). `request_schema` (like the
+            # sibling empty/non-list `in` catch a few lines above)
+            # correctly needs no type pair.
+            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
         rows = _sort_rows(rows, order_spec)
         shape = _shape_hash(self.application_id, entity, select, where, order_spec, page_size)
         offset = 0
@@ -2126,7 +2175,10 @@ class ApplicationCell:
             idempotency_digest_value = idempotency_digest(plan_request)
             idempotency_now = clock() if clock is not None else 0.0
             record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
-            if record is not None:
+            # L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a
+            # usable replay source -- treated as absent, checked before
+            # the digest comparison below.
+            if record is not None and _idempotency_record_has_request_id(record.payload):
                 if record.digest != idempotency_digest_value:
                     fail(
                         "CONFLICT", "This idempotency key was already used with a different request.", status=409,
@@ -2140,9 +2192,10 @@ class ApplicationCell:
                     affected=payload["affected"], assigned_addresses=payload["assigned_addresses"],
                     destructive=False, committed=True, plan=None, replayed=True,
                     # Contract 1.7.0 (D-7 (3), WP-2e): the ORIGINAL
-                    # execution's own `request_id`, not this resend's own
-                    # -- read back from the record's own payload.
-                    request_id=payload.get("request_id") or request_id,
+                    # execution's own `request_id` -- read back from the
+                    # record's own payload (guaranteed present, M-6: no
+                    # fallback to this resend's own request_id).
+                    request_id=payload["request_id"],
                 )
             # Ruling I-6/D-5 (5): capacity is checked BEFORE this request
             # executes anything -- reclaiming elapsed records first.
@@ -2299,7 +2352,7 @@ class ApplicationCell:
         # type (predicate values, and for `update` the write values too)
         # before resolving a precondition or searching for target rows at
         # all, symmetric with the `insert` branch above.
-        _validate_predicate_types(bound.where, field_types)
+        _validate_predicate_types(bound.where, field_types, path_prefix=f"operations/{operation_index}/where")
         if bound.operation == "update":
             for key, value in bound.values.items():
                 _check_type(value, field_types.get(key), values_path + key, constraints=entity_constraints.get(key))
@@ -2307,7 +2360,17 @@ class ApplicationCell:
         try:
             matches = [row for row in self.entities[entity] if all(_matches(row, p, field_types) for p in bound.where)]
         except (TypeError, ValueError):
-            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("field_type", field="where"))
+            # M-2 (`{scratchpad}/audit-wp2e-2.md` R-3): `field_type`
+            # (this catch's pre-M-2 `violated_declaration`) requires BOTH
+            # `declared_type`/`observed_type` -- neither is attributable
+            # here (`lt`/`lte`/`gt`/`gte` against an UNTYPED field is
+            # never type-checked up front, module docstring's own
+            # documented divergence; a raise here can come from ANY
+            # predicate against ANY matching row, not one statically
+            # knowable field/type pair). `request_schema` (like the
+            # sibling empty/non-list `in` catch a few lines above)
+            # correctly needs no type pair.
+            fail("VALIDATION_FAILED", "Filter value is incompatible with the selected operator.", details=violation("request_schema", field="where"))
 
         if bound.operation == "delete":
             # m-5: destructive confirmation is checked before any
@@ -2513,7 +2576,10 @@ class ApplicationCell:
             idempotency_digest_value = idempotency_digest(plan_request)
             idempotency_now = clock() if clock is not None else 0.0
             record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
-            if record is not None:
+            # L-6/M-6: a record with no `request_id` (pre-1.7.0) is not a
+            # usable replay source -- treated as absent, checked before
+            # the digest comparison below.
+            if record is not None and _idempotency_record_has_request_id(record.payload):
                 if record.digest != idempotency_digest_value:
                     fail(
                         "CONFLICT", "This idempotency key was already used with a different request.", status=409,
@@ -2526,7 +2592,9 @@ class ApplicationCell:
                 payload = record.payload
                 return SchemaOutcome(
                     committed=True, revision=payload["revision"], descriptor=None, plan=None, replayed=True,
-                    request_id=payload.get("request_id") or request_id,
+                    # M-6: the ORIGINAL execution's own `request_id`, no
+                    # fallback to this resend's own (guaranteed present).
+                    request_id=payload["request_id"],
                 )
             self._idempotency_reserve(limits, now=idempotency_now)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like

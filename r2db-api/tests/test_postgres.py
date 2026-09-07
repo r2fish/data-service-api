@@ -1451,6 +1451,36 @@ def test_in_operator_type_checks_each_element_on_a_typed_column(app_a: types.Sim
         cell.close()
 
 
+def test_in_operator_rejects_an_empty_list(app_a: types.SimpleNamespace) -> None:
+    """WP-2e closure audit M-3 (`{scratchpad}/audit-wp2e-2.md` R-2,
+    ruling `{scratchpad}/rulings-r3-r7-flip.md` addendum 2): an empty `in`
+    list is refused at the shared choke point (`structured._validate_
+    predicate_types`, both cells call it) BEFORE any SQL is built --
+    `violated_declaration: request_schema`, `field: where/<i>/value` --
+    identical to the in-memory plug's own `test_foundation.py::test_in_
+    operator_rejects_an_empty_list`. `postgres.py`'s own local `in`-branch
+    fallback in `_predicate_sql` (M-1: kept only as an unreachable
+    defensive backstop, never the site that actually answers this
+    request) is proven unreached by this test's own passing: if it WERE
+    reached instead, it would answer with the SAME code/details shape
+    (both use `violation("request_schema", field="where")`, this choke-
+    point's own per-index path just narrower), so this test alone cannot
+    distinguish the two layers -- `test_l1_details_vocabulary_ast_scan.py`
+    already pins per-file/line details vocabulary compliance for that
+    fallback separately."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema({"operation": "create_entity", "entity": "emptyin", "fields": []}, developer=True, limits=LIMITS)
+        cell.apply_schema({"operation": "add_field", "entity": "emptyin", "field": "i", "field_type": "integer"}, developer=True, limits=LIMITS)
+        cell.transact("emptyin", [{"operation": "insert", "values": {"i": 1}}], LIMITS)
+        with pytest.raises(FoundationError) as exc:
+            cell.query("emptyin", select=["i"], where=[P("i", "in", [])], page_size=10, limits=LIMITS)
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+    finally:
+        cell.close()
+
+
 def test_eq_and_ne_reject_a_null_predicate_value(app_a: types.SimpleNamespace) -> None:
     """WP-3 confirmation review N-3: shared-boundary parity with
     `ApplicationCell` -- `= NULL`/`<> NULL` is refused rather than executed
