@@ -2169,7 +2169,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_93_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2458,10 +2458,40 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # normalization, no peer-local rework needed.
     ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_plan"),
     ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "compute_plan_token"),
+    # Phase 9 R-5/R-6 pair-closing commit (design docs/design/PHASE9_
+    # CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5, 追補 2 S-a /
+    # D-6, 追補 R-g; 監督裁定集約 {scratchpad}/rulings-r5-r6.md I-2/I-10/
+    # B-1..B-6; work order §2 WP-2c/WP-3c 完了条件 13(iii) 相当、WP-2d/
+    # WP-3d 同型性テストの対象): WP-2c's own `structured.normalize_
+    # request_for_idempotency`/`idempotency_digest` and WP-3c's own
+    # `cell.normalize_request_for_idempotency`/`idempotency_digest` --
+    # verified normalize-and-diff equal (`_isomorphic_symbol_source` +
+    # `_normalize`, both sides) before adding: both bodies already
+    # matched byte-for-byte after normalization, no peer-local rework
+    # needed (same precedent as R-4's `normalize_request_for_plan`/
+    # `compute_plan_token` pair immediately above). WP-2d's own `limits.
+    # narrow_limits_by_budget` and WP-3d's own `config.narrow_limits_by_
+    # budget` needed real convergence first, done in THIS commit: `_budget_
+    # denied`/`_BUDGET_CLASS_TO_FIELD` (new, both sides) absorb the two
+    # peers' own exception vocabulary (`fail()` / `errors.ValidationError`)
+    # and dataclass-field-naming difference (`ResourceLimits`'s fields
+    # already equal the budget class names; `FoundationConfig`'s do not)
+    # OUTSIDE the pinned body -- `_normalize` above is widened the same way
+    # the package-name substitution already works, folding both peers' own
+    # `ResourceLimits`/`FoundationConfig` class names together -- and the
+    # one remaining real behavioural gap (`budget == {}` reconstructing a
+    # freshly-equal-but-not-identical object on this peer, versus returning
+    # the SAME already-deployed object unchanged on MitateDB-api) is fixed
+    # here (`if not budget:`, matching MitateDB's own established
+    # behaviour) so both peers now return `deployed` itself, unchanged, for
+    # BOTH `None` and `{}`.
+    ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_idempotency"),
+    ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "idempotency_digest"),
+    ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "narrow_limits_by_budget"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_93_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2515,7 +2545,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_93_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2647,8 +2677,11 @@ def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
         ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "enum_member_matches_type"),
         ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_plan"),
         ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "compute_plan_token"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_idempotency"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "idempotency_digest"),
+        ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "narrow_limits_by_budget"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 90
+    assert len(_ISOMORPHIC_TARGETS) == 93
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -2805,6 +2838,15 @@ def _normalize(source: str) -> str:
     so a REAL difference elsewhere in the text is still caught)."""
     text = _strip_leading_docstring(source)
     text = text.replace("r2db_api", "<PEER_PACKAGE>").replace("mitatedb_api", "<PEER_PACKAGE>")
+    # Phase 9 R-5/R-6 pair-closing commit: the same "both known spellings,
+    # symmetrically, on either side" technique the package-name line above
+    # already uses, extended to the two peers' own deployment-limits
+    # dataclass names (`FoundationConfig` here, `ResourceLimits` on
+    # r2db-api) -- `narrow_limits_by_budget`'s own pinned signature names
+    # its `deployed`/return type as this peer's own class, the sibling's
+    # row names ITS own class, and neither name is peer-name-free the way
+    # every pre-existing pinned symbol's signature happened to be.
+    text = text.replace("ResourceLimits", "<PEER_TYPE>").replace("FoundationConfig", "<PEER_TYPE>")
     text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n\s*\n+", "\n", text)
     return text.strip()

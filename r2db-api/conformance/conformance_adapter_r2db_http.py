@@ -863,6 +863,15 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     # can exercise the bound with a handful of members instead of the
     # production default's 64.
     enum_members=5,
+    # Contract 1.7.0 (D-5 (5)/S-f, WP-2c, 裁定 J-7 / rulings-r5-r6.md 追補
+    # 2): same value/rationale as the in-process plug's own identical
+    # constant (`conformance_adapter_r2db.py::_ISOLATED_APPLICATION_
+    # LIMITS`) -- small enough for `test_c23_idempotency_semantics.py`'s
+    # own (full) leg to drive `declared_entries` distinct-key inserts
+    # plus one overflow over HTTP too (`ResourceLimits.check` is
+    # backend-independent, `service.py`).
+    idempotency_entries=20,
+    idempotency_retention_ms=60_000,
 )
 
 
@@ -1352,6 +1361,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         select: list[Any],
         where: list[dict[str, Any]] | None = None,
         page_size: int | None = None,
+        cursor: str | None = None,
         extra_body: Mapping[str, Any] | None = None,
         extra_header_pairs: Sequence[tuple[str, str]] = (),
         params: Mapping[str, Any] | None = None,
@@ -1359,8 +1369,22 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         body: dict[str, Any] = {"select": select}
         if where is not None:
             body["where"] = where
-        if page_size is not None:
-            body["page"] = {"size": page_size}
+        # `cursor` (WP-1 correction, sup8): added alongside the
+        # pre-existing `page_size`-only shape so `count()`'s own
+        # `next_page`-following fallback (see that method) can request a
+        # specific page WITHOUT paying for a separate `extra_body={"page":
+        # ...}` merge that would silently clobber `page.size` (`body.
+        # update(extra_body)` below replaces the whole `page` key, not a
+        # per-field merge) -- both fields land in the SAME `page` object
+        # the wire body (`QueryRequest.page`, `spec/data-service-
+        # api.v1.json`) already carries.
+        if page_size is not None or cursor is not None:
+            page: dict[str, Any] = {}
+            if page_size is not None:
+                page["size"] = page_size
+            if cursor is not None:
+                page["cursor"] = cursor
+            body["page"] = page
         # port v1.13 (design docs/design/
         # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-6):
         # `budget` is a QueryRequest top-level field -- carried the same way
@@ -2504,8 +2528,38 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 break
         if not fields:
             return 0
-        result = self._query_request(session, entity, select=list(fields), page_size=1000)
-        return len(result["items"])
+        # WP-1 correction (sup8, C-23 http full-store leg diagnosis): a
+        # single `page_size=1000` request assumed the matched-row count
+        # always stays within whatever `result_items` bound THIS
+        # deployment declares -- true everywhere else this method is
+        # called, but not on the isolated HTTP surface's own C-23 (full)
+        # leg (`test_c23_idempotency_semantics.py`), which deliberately
+        # inserts this deployment's declared `idempotency_entries`
+        # (isolated profile: 20) distinct rows into a fresh entity -- more
+        # than the SAME isolated profile's own small `result_items` (5).
+        # `ResourceLimits.check("result_items", ...)` (`postgres.py::
+        # query`, `min(len(rows), page_size)`) bounds a SINGLE page's
+        # returned item count, not the query's total match count -- a real
+        # HTTP client pages through `next_page` to enumerate more matches
+        # than `result_items` allows per page, exactly what this now does
+        # on that denial, instead of assuming one page always suffices.
+        try:
+            result = self._query_request(session, entity, select=list(fields), page_size=1000)
+            return len(result["items"])
+        except ConformanceDenial as exc:
+            if exc.details.get("limit_class") != "result_items":
+                raise
+            bound = exc.details.get("limit")
+            if not isinstance(bound, int) or bound <= 0:
+                raise
+        total = 0
+        cursor: str | None = None
+        while True:
+            result = self._query_request(session, entity, select=list(fields), page_size=bound, cursor=cursor)
+            total += len(result["items"])
+            cursor = result.get("next_page")
+            if not cursor:
+                return total
 
     def entities(self, session: object) -> set[str]:
         assert isinstance(session, _Session)
@@ -2743,6 +2797,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields -- carried through `_mutate_
@@ -2757,7 +2812,12 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # EXISTING top-level key -- carried through `extra_body` the same
         # way, defaulting to `None` (omitted, `http.py::post_mutate`'s own
         # `body.get("transaction", "atomic")` default then applies exactly
-        # as every pre-addendum caller already gets).
+        # as every pre-addendum caller already gets). WP-1 addendum (C-25
+        # (4)): `idempotency_key` is a `MutationRequest` top-level field on
+        # this peer too (`additionalProperties: false` on the per-
+        # operation `Mutation` shape has no slot for it) -- carried through
+        # `extra_body` the same way `attempt_batch_with_addresses` already
+        # does with its own folded value, never per-item.
         assert isinstance(session, _Session)
         item = self._build_mutation_item(
             operation, values=values, where_field=where_field, where_value=where_value,
@@ -2773,6 +2833,8 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             extra_body["budget"] = dict(budget)
         if transaction is not None:
             extra_body["transaction"] = transaction
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
         result = self._mutate_request(session, entity, [item], extra_body=extra_body or None)
         return {
             "affected": result["affected"],

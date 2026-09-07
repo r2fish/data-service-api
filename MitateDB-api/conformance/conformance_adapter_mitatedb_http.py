@@ -632,8 +632,16 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
     release = threading.Event()
     errors: list[BaseException] = []
 
-    def _stalled_limit_gate(principal, request=None, *, request_id=None):
-        inner = original_gate(principal, request, request_id=request_id)
+    # `*args, **kwargs`, forwarded verbatim to `original_gate` -- see
+    # `conformance_adapter_mitatedb.py`'s own identical-named function for
+    # the full rationale (`ApplicationCell._limit_gate` has already grown
+    # one new keyword since this monkeypatch was first written,
+    # `effective_limits`, and a hardcoded signature here would drop it
+    # silently or break on any future one). The stall point's own
+    # placement is unchanged; only the argument plumbing is now
+    # signature-agnostic.
+    def _stalled_limit_gate(*args, **kwargs):
+        inner = original_gate(*args, **kwargs)
         return _StalledGateContextManager(inner, entered, release)
 
     cell_obj._limit_gate = _stalled_limit_gate  # noqa: SLF001
@@ -1645,6 +1653,15 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # (`conformance_adapter_mitatedb.py::isolated_application_
             # surface`).
             max_enum_members=5,
+            # Phase 9 WP-3c (design D-5, 追補 2 S-f; 監督裁定集約
+            # rulings-r5-r6.md I-10, 裁定 J-7): same value/rationale as the
+            # in-process plug's own isolated profile immediately above
+            # (`conformance_adapter_mitatedb.py::isolated_application_
+            # surface`) -- `test_c23_idempotency_semantics.py`'s own
+            # (full) leg drives `declared_entries` distinct-key inserts
+            # plus one overflow over HTTP too.
+            idempotency_entries=20,
+            idempotency_retention_ms=60_000,
         )
 
         def _cell_factory(application_id: str) -> ApplicationCell:
@@ -2147,6 +2164,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         # port v1.13 (design D-4/D-6): `dry_run`/`plan`/`budget` are
         # MutationRequest top-level fields, carried through `_mutate`'s own
@@ -2161,7 +2179,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # through `extra_body` the same way, defaulting to `None`
         # (omitted, `http.py::post_mutate`'s own `body.get("transaction",
         # "atomic")` default then applies exactly as every pre-addendum
-        # caller already gets).
+        # caller already gets). WP-1 addendum (C-25 (4)): `idempotency_key`
+        # is carried through `extra_body` the same way -- a `MutationRequest`
+        # top-level field on this peer too, never per-item.
         assert isinstance(session, _Session)
         item = self._attempt_mutation_item(
             entity, operation, values=values, where_field=where_field, where_value=where_value,
@@ -2190,6 +2210,8 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             extra_body["budget"] = dict(budget)
         if transaction is not None:
             extra_body["transaction"] = transaction
+        if idempotency_key is not None:
+            extra_body["idempotency_key"] = idempotency_key
         result = self._mutate(session, entity, [item], extra_body=extra_body or None)
         return {
             "affected": result["affected"],
