@@ -47,10 +47,10 @@ SQL_OPERATOR_TOKENS = {
 # `cell.ApplicationCell.alter_field`'s identical one), distinguishing "the
 # request omitted `enum`" (leave the field's current `enum` exactly as it
 # is) from an explicit `enum: null` ("clear the field's `enum`" -- the
-# ONLY way the contract's own `SchemaOperationRequest.enum` -- `["array",
-# "null"]` after the supervisor's own separate contract correction -- can
-# express "no enum" on an operation that must also be able to mean "leave
-# it alone"). A plain `None` default cannot carry this third state: Python
+# ONLY way the contract's own `SchemaOperationRequest.enum` -- already
+# `["array", "null"]` in the packaged contract copy -- can express "no
+# enum" on an operation that must also be able to mean "leave it alone").
+# A plain `None` default cannot carry this third state: Python
 # collapses "the caller didn't pass this keyword at all" and "the caller
 # passed `None`" into the identical value the callee sees. A bare `enum`
 # (a non-empty `list`) means set/replace, exactly as before this rework.

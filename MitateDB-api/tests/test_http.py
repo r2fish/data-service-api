@@ -555,6 +555,45 @@ def test_create_entity_then_add_field_object_and_array_round_trip(app_a_stack):
     assert items[0]["payload_arr"] == nested_array
 
 
+def test_add_field_with_no_field_type_defaults_to_json(app_a_stack):
+    """WP-3a rework 3 (real, measured bug): `SchemaOperationRequest.
+    field_type` is optional at the JSON-schema level (only `operation`/
+    `entity` are globally `required`), and contract `field_types`'s own
+    description states the general rule this peer's `create_entity`
+    branch already honors for `fields`/`field_types`: "A field created
+    without a declared type has type json ... this names an existing
+    default rather than introducing a new one." `add_field`'s own
+    singular `field_type` is that identical rule for the one field it
+    adds. This peer used to answer every field_type-omitting `add_field`
+    with a bare `VALIDATION_FAILED` ("add_field requires field and a
+    supported field_type") instead of defaulting to `json` -- a real
+    divergence from `r2db-api` (which keeps its own pre-existing JSONB
+    default) and from this peer's OWN in-process surface, the exact gap
+    `conformance-tests/test_c20_constraint_declaration_agreement.py`'s
+    `MitateDB-api-http` plug surfaced (a declaration-invalid `enum` on
+    such a field_type-omitting `add_field` was refused for the WRONG
+    reason -- missing `field_type`, not the invalid `enum` -- so the
+    denial carried none of `constraint_declaration`'s own `details`)."""
+    entity = "http_add_field_no_field_type_entity"
+    _create_entity(app_a_stack, entity, fields=["label"])
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "add_field", "entity": entity, "field": "extra"},
+    )
+    assert response.status_code == 200, response.text
+    catalog = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
+    row = {e["entity"]: e for e in catalog["entities"]}[entity]
+    assert row["field_types"]["extra"] == "json", row
+
+    # A present-but-unsupported field_type is still refused, unchanged.
+    bad_response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "add_field", "entity": entity, "field": "bad", "field_type": "not_a_type"},
+    )
+    assert bad_response.status_code == 400
+    assert bad_response.json()["code"] == "VALIDATION_FAILED"
+
+
 def test_schema_operation_result_revision_is_a_real_advancing_counter(app_a_stack):
     """m-2 (independent review): `SchemaOperationResult.revision` must be
     this peer's own real schema-revision counter, not a fixed placeholder
@@ -756,6 +795,54 @@ def test_unimplemented_schema_operations_are_present_denials(app_a_stack, operat
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
+def test_create_entity_field_constraints_http_round_trip_and_enum_enforcement(app_a_stack):
+    """WP-3a closure (監督裁定 2026-09-07, audit `wp3a-closure` §2 G2 /
+    m-2): the ONE full HTTP-path positive test for `field_constraints`
+    this repository was missing -- `create_entity` with `field_types` +
+    `field_constraints` (`enum` and `nullable` both declared on the same
+    field), `GET /v1/catalog` reporting `field_constraints` back, an
+    enum-violating insert refused with `VALIDATION_FAILED` and the D-3
+    `details` shape, and an in-set insert succeeding with `200`. Mirrors
+    `test_constraints_declaration.py`'s own in-process completion-
+    condition tests, but through the real ASGI `HttpService` this file's
+    other tests already drive (`app_a_stack`), not the direct
+    `ApplicationDeveloper`/`ApplicationRuntime` API."""
+    entity = "http_field_constraints_entity"
+    create_response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={
+            "operation": "create_entity", "entity": entity, "fields": ["status"],
+            "field_types": {"status": "string"},
+            "field_constraints": {"status": {"enum": ["a", "b"], "nullable": False}},
+        },
+    )
+    assert create_response.status_code == 200, create_response.text
+
+    catalog = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
+    row = {e["entity"]: e for e in catalog["entities"]}[entity]
+    assert row["field_constraints"]["status"] == {"enum": ["a", "b"], "nullable": False}, row
+
+    violation_response = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"status": "z"}}]},
+    )
+    assert violation_response.status_code == 400, violation_response.text
+    violation_body = violation_response.json()
+    assert violation_body["code"] == "VALIDATION_FAILED", violation_body
+    details = violation_body["details"]
+    assert details.get("violated_declaration") == "enum", details
+    assert details.get("field") == "operations/0/values/status", details
+    assert details.get("declared_type") == "string", details
+    assert "observed_type" not in details, details
+
+    ok_response = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"status": "a"}}]},
+    )
+    assert ok_response.status_code == 200, ok_response.text
+    assert ok_response.json()["affected"] == 1
+
+
 def test_alter_field_real_http_round_trip(app_a_stack):
     """Phase 9 WP-3a (design D-2 (5)/(6)): `alter_field` over HTTP is a
     real, executed operation as of this commit -- enforces the redeclared
@@ -780,6 +867,35 @@ def test_alter_field_real_http_round_trip(app_a_stack):
     assert field_type_response.status_code == 400
     assert field_type_response.json()["code"] == "VALIDATION_FAILED"
     assert field_type_response.json()["details"].get("violated_declaration") == "unsupported_field"
+
+
+def test_alter_field_with_neither_enum_nor_nullable_is_refused_over_http(app_a_stack):
+    """監督裁定 N-1 (2026-09-07, wp3a-closure2): an `alter_field` request
+    carrying neither `enum` nor `nullable` declares nothing -- refused
+    with `VALIDATION_FAILED` over the real HTTP dispatch path, and the
+    schema revision does not advance (pinned here by observing that a
+    SUBSEQUENT, unrelated schema operation still advances the revision by
+    exactly one step from where it stood before the refused call, not
+    two)."""
+    entity = "http_alter_field_neither_target"
+    create_response = _create_entity(app_a_stack, entity, fields=["status"], field_types={"status": "string"})
+    revision_before = int(create_response.json()["revision"])
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "alter_field", "entity": entity, "field": "status"},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "VALIDATION_FAILED", body
+    assert body["details"].get("violated_declaration") == "constraint_declaration", body
+    assert body["details"].get("field") == "operation", body
+
+    schema_response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "add_field", "entity": entity, "field": "unrelated_probe"},
+    )
+    revision_after = int(schema_response.json()["revision"])
+    assert revision_after == revision_before + 1, "the refused alter_field must not itself have advanced the revision"
 
 
 def test_runtime_credential_forbidden_from_schema_operations(app_a_stack):

@@ -1065,6 +1065,16 @@ class PostgresBackend:
                 # Phase 6 WP-3 (design D-3): same-transaction registry
                 # write as `create_collection` above.
                 _execute(cur, field_types_statement, [collection, field, contract_type, enum_json, resolved_nullable])
+                # WP-3a rework 3 (real, measured bug -- SchemaOperationResult.
+                # revision is `required` unconditionally, `contract/data-
+                # service-api.v1.json`'s own `schemas.SchemaOperationResult.
+                # required`): same same-transaction readback `alter_field_
+                # constraints` above already performs -- this method used to
+                # bump the counter but never read it back, so the caller had
+                # no revision to report at all.
+                _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
+                          .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
+                new_revision = cur.fetchone()[0]
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True
@@ -1089,6 +1099,7 @@ class PostgresBackend:
         except Exception:
             self._developer.rollback()
             raise
+        return new_revision
 
     # ------------------------------------------------------------------
     # values (R-2/B-1 value-domain gate) -- see the module-level

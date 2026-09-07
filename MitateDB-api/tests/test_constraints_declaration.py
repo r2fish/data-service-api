@@ -100,6 +100,16 @@ def test_enum_violation_on_update_carries_d3_details(sessions) -> None:
 
 
 def test_enum_positive_control_all_three_write_routes(sessions) -> None:
+    """Completion condition 2's "3 経路" (the positive control read
+    against 3 write routes each accepting an in-set value) does NOT
+    include `upsert`: MitateDB has no `upsert` at all -- both
+    `atomic_mutation` and `cross_entity_mutation` declare it
+    `unsupported` (`unsupported: ["upsert"]`) -- so there is no fourth
+    write route to observe an upsert-that-resolves-to-insert against. The
+    3 routes actually exercised below are insert / update / transact
+    insert (`transact()`'s own insert branch, `_plan_operation`, the
+    SECOND real insert entry point alongside `insert()` itself, design
+    D-2 (3))."""
     dev, runtime = sessions
     entity = _make_entity(dev)
     runtime.insert(entity, {"status": "a", "req": "ok", "label": "p1"})
@@ -240,6 +250,26 @@ def test_add_field_nullable_false_on_empty_entity_succeeds(sessions) -> None:
     assert excinfo.value.details.get("violated_declaration") == "nullable"
 
 
+def test_add_field_success_result_carries_a_revision(sessions) -> None:
+    """WP-3a rework 3 (real, measured bug): contract `schemas.
+    SchemaOperationResult.required` includes `revision` unconditionally --
+    not only for `alter_field`, whose own in-process result already
+    carried one (`test_alter_field_success_advances_revision_and_round_
+    trips` below). A successful `add_field` used to return nothing at all
+    (`cell.ApplicationCell.add_field` had no `return` statement, even
+    though the backend beneath it already bumped the schema revision) --
+    an in-process caller's own `add_field` result could never report one,
+    the exact gap `conformance-tests/test_c20_constraint_declaration_
+    agreement.py`'s `MitateDB-api` (in-process) plug surfaced."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    revision_before = dev.schema_revision()
+    result = dev.add_field(entity, "extra", "text", contract_type="string")
+    assert result.get("revision") is not None, result
+    assert dev.schema_revision() != revision_before
+    assert result.get("revision") == str(dev.schema_revision())
+
+
 def test_postgres_add_field_nullable_false_on_entity_with_rows_conflicts(app_pg) -> None:
     """Real-PostgreSQL counterpart -- also pins that the existing-row
     scan runs inside the SAME transaction as the (never-executed) DDL:
@@ -283,6 +313,26 @@ def test_postgres_add_field_nullable_false_on_empty_entity_succeeds(app_pg) -> N
         dev.add_field(entity, "score", "text", contract_type="string", nullable=False)
         row = {r["entity"]: r for r in dev.catalog()}[entity]
         assert row["field_constraints"]["score"] == {"nullable": False}, row
+    finally:
+        backend.close()
+
+
+def test_postgres_add_field_success_result_carries_a_revision(app_pg) -> None:
+    """Real-PostgreSQL counterpart of `test_add_field_success_result_
+    carries_a_revision` above -- pins `backend_postgres.PostgresBackend.
+    add_field`'s own same-transaction revision readback (it used to bump
+    `_SCHEMA_REVISION_TABLE` via `_bump_schema_revision` but never read
+    the new value back, so this method returned nothing at all)."""
+    backend = PostgresBackend(runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn)
+    try:
+        cell = ApplicationCell(app_pg.app_id, FoundationConfig(), backend=backend)
+        dev, runtime = _sessions_for(cell, app_pg.app_id)
+        entity = _make_entity(dev, "addfieldwidgetsrevision")
+        revision_before = dev.schema_revision()
+        result = dev.add_field(entity, "extra", "text", contract_type="string")
+        assert result.get("revision") is not None, result
+        assert dev.schema_revision() != revision_before
+        assert result.get("revision") == str(dev.schema_revision())
     finally:
         backend.close()
 
@@ -597,9 +647,159 @@ def test_create_entity_field_constraints_naming_a_field_not_in_fields_is_refused
 
 
 def test_create_entity_field_constraints_without_fields_is_refused(sessions) -> None:
+    """WP-3a closure (監督裁定 2026-09-07, audit `wp3a-closure` §3 G3): a
+    `field_constraints` sent without `fields` is a missing-key
+    request-shape violation -- `field` names the request's own top-level
+    `field_constraints` key (design D-3 (2)); no `declared_type`/
+    `observed_type` (D-3 (3): not a violation about a value's own
+    type)."""
     dev, runtime = sessions
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as excinfo:
         dev.create_entity("nofields", fields=None, field_constraints={"id": {"nullable": False}})
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "request_schema", details
+    assert details.get("field") == "field_constraints", details
+    assert "declared_type" not in details, details
+    assert "observed_type" not in details, details
+    assert "nofields" not in {r["entity"] for r in dev.catalog()}, "a rejected create_entity must create nothing"
+
+
+def test_field_constraints_nullable_not_a_boolean_is_refused(sessions) -> None:
+    """WP-3a closure (監督裁定 2026-09-07, audit §3 G3): a `field_
+    constraints.<field>.nullable` that is not a boolean IS a violation
+    about a value's own type -- `declared_type`/`observed_type` are
+    included (D-3 (3)), unlike the missing-`fields` case above."""
+    dev, runtime = sessions
+    with pytest.raises(ValidationError) as excinfo:
+        dev.create_entity(
+            "fcbadnullable", fields={"status": "text"}, field_types={"status": "string"},
+            field_constraints={"status": {"nullable": "yes"}},
+        )
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "request_schema", details
+    assert details.get("field") == "field_constraints/status/nullable", details
+    assert details.get("declared_type") == "boolean", details
+    assert details.get("observed_type") == "string", details
+    assert "fcbadnullable" not in {r["entity"] for r in dev.catalog()}, "a rejected field_constraints must create nothing"
+
+
+def test_alter_field_nullable_not_a_boolean_is_refused(sessions) -> None:
+    """WP-3a closure (監督裁定 2026-09-07, audit §3 G3): `alter_field`'s
+    own top-level `nullable`, when not a boolean, is the same kind of
+    value-type violation as `field_constraints.nullable` above --
+    `field` echoes the request's own top-level `nullable` key."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    with pytest.raises(ValidationError) as excinfo:
+        dev.alter_field(entity, "status", nullable="yes")
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "request_schema", details
+    assert details.get("field") == "nullable", details
+    assert details.get("declared_type") == "boolean", details
+    assert details.get("observed_type") == "string", details
+    row = {r["entity"]: r for r in dev.catalog()}[entity]
+    assert row["field_constraints"]["status"]["nullable"] is True, "a rejected alter_field must change nothing"
+
+
+def test_alter_field_unknown_field_is_constraint_declaration(sessions) -> None:
+    """WP-3a closure (監督裁定 2026-09-07, audit §3 G3): `alter_field`
+    naming a field the entity does not have is `constraint_declaration`
+    ("a declaration naming a field the request does not create") --
+    `field` echoes the request's own top-level `field` key; no
+    `declared_type`/`observed_type` (not a violation about a value's own
+    type)."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    with pytest.raises(ValidationError) as excinfo:
+        dev.alter_field(entity, "not_a_real_field", nullable=False)
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "constraint_declaration", details
+    assert details.get("field") == "field", details
+    assert "declared_type" not in details, details
+    assert "observed_type" not in details, details
+
+
+def test_alter_field_with_neither_enum_nor_nullable_is_refused_and_does_not_advance_revision(sessions) -> None:
+    """監督裁定 N-1 (2026-09-07, wp3a-closure2): an `alter_field` carrying
+    neither `enum` nor `nullable` declares nothing -- refused with
+    `VALIDATION_FAILED` before the schema is touched at all, so the
+    schema revision does not advance and the field's own constraints are
+    unchanged. `field` is `"operation"` (the whole operation is
+    defective, not any single top-level key)."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    revision_before = dev.schema_revision()
+    catalog_before = {r["entity"]: r for r in dev.catalog()}[entity]["field_constraints"]
+    with pytest.raises(ValidationError) as excinfo:
+        dev.alter_field(entity, "status")
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "constraint_declaration", details
+    assert details.get("field") == "operation", details
+    assert "declared_type" not in details, details
+    assert "observed_type" not in details, details
+    assert dev.schema_revision() == revision_before
+    catalog_after = {r["entity"]: r for r in dev.catalog()}[entity]["field_constraints"]
+    assert catalog_after == catalog_before
+
+
+def test_alter_field_with_neither_enum_nor_nullable_wins_over_unknown_collection(sessions) -> None:
+    """N-1's own refusal runs before any collection/field lookup -- a
+    request naming a collection that does not exist at all still answers
+    `VALIDATION_FAILED(constraint_declaration/operation)`, never
+    `NOT_FOUND`, when it also declares neither `enum` nor `nullable`: the
+    request is defective on its own terms regardless of what it names."""
+    dev, runtime = sessions
+    with pytest.raises(ValidationError) as excinfo:
+        dev.alter_field("no_such_entity_at_all", "status")
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "constraint_declaration", details
+    assert details.get("field") == "operation", details
+
+
+def test_postgres_alter_field_with_neither_enum_nor_nullable_is_refused(app_pg) -> None:
+    """Real-PostgreSQL counterpart of `test_alter_field_with_neither_
+    enum_nor_nullable_is_refused_and_does_not_advance_revision` above --
+    the refusal happens entirely inside `cell.ApplicationCell.alter_
+    field`, before either backend is ever called, so it applies
+    identically to both backends; this pins that it is not accidentally
+    bypassed for the real Postgres backend specifically."""
+    backend = PostgresBackend(runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn)
+    try:
+        cell = ApplicationCell(app_pg.app_id, FoundationConfig(), backend=backend)
+        dev, runtime = _sessions_for(cell, app_pg.app_id)
+        entity = _make_entity(dev, "pgalterneitherwidgets")
+        revision_before = dev.schema_revision()
+        catalog_before = {r["entity"]: r for r in dev.catalog()}[entity]["field_constraints"]
+        with pytest.raises(ValidationError) as excinfo:
+            dev.alter_field(entity, "status")
+        details = excinfo.value.details
+        assert details.get("violated_declaration") == "constraint_declaration", details
+        assert details.get("field") == "operation", details
+        assert dev.schema_revision() == revision_before
+        catalog_after = {r["entity"]: r for r in dev.catalog()}[entity]["field_constraints"]
+        assert catalog_after == catalog_before
+    finally:
+        backend.close()
+
+
+def test_create_entity_field_constraints_not_an_object_is_refused(sessions) -> None:
+    """監督裁定 N-2 (2026-09-07, wp3a-closure2): `field_constraints` that
+    is not an object (here, a list) is a `request_schema` violation
+    naming the top-level `field_constraints` key -- no `declared_type`/
+    `observed_type` (this position is a container the request declares,
+    not a value checked against a field's own declared type)."""
+    dev, runtime = sessions
+    with pytest.raises(ValidationError) as excinfo:
+        dev.create_entity(
+            "fcnotobject", fields={"status": "text"}, field_types={"status": "string"},
+            field_constraints=["status"],
+        )
+    details = excinfo.value.details
+    assert details.get("violated_declaration") == "request_schema", details
+    assert details.get("field") == "field_constraints", details
+    assert "declared_type" not in details, details
+    assert "observed_type" not in details, details
+    assert "fcnotobject" not in {r["entity"] for r in dev.catalog()}, "a rejected create_entity must create nothing"
 
 
 # --- WP-3a rework 2, m-1 (監督裁定, 2026-09-07): a malformed enum

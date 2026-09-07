@@ -36,7 +36,12 @@ from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
                      ResourceLimitError, ValidationError)
-from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE, check_declared_value, validate_enum_declaration
+from .field_types import (
+    FOUNDATION_TYPE_TO_CONTRACT_TYPE,
+    check_declared_value,
+    json_type_name,
+    validate_enum_declaration,
+)
 from .identifiers import validate_identifier
 from .surfaces import build_surfaces
 
@@ -200,7 +205,20 @@ def _resolve_field_constraints(fields, declared_types, field_constraints, *, max
             )
         nullable = declared.get("nullable", True)
         if not isinstance(nullable, bool):
-            raise ValidationError("field_constraints.nullable must be a boolean")
+            # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): D-3 details
+            # for a request-shape violation about a VALUE's own type --
+            # `field` is the request-relative path (design D-3 (2)),
+            # `declared_type`/`observed_type` included per D-3 (3)'s
+            # value-type-violation branch.
+            raise ValidationError(
+                "field_constraints.nullable must be a boolean",
+                details={
+                    "violated_declaration": "request_schema",
+                    "field": f"field_constraints/{field}/nullable",
+                    "declared_type": "boolean",
+                    "observed_type": json_type_name(nullable),
+                },
+            )
         entry = {"nullable": nullable}
         enum_values = declared.get("enum")
         if enum_values is not None:
@@ -732,7 +750,27 @@ class ApplicationCell:
             # (7)'s own contract text for `enum_members`).
             if field_constraints is not None:
                 if not isinstance(field_constraints, dict):
-                    raise ValidationError("field_constraints must be an object")
+                    # 監督裁定 N-2 (2026-09-07, wp3a-closure2): a
+                    # non-object `field_constraints` is a request-shape
+                    # violation about the top-level `field_constraints`
+                    # key's own type -- the same `request_schema` shape
+                    # `create_entity`'s sibling "field_constraints without
+                    # fields" refusal already carries (below), so both
+                    # `field_constraints` defects report the identical
+                    # `details` vocabulary. `declared_type`/`observed_type`
+                    # are omitted here (unlike the per-field `nullable`
+                    # value-type violations above) because this D-3 (3)
+                    # branch is reserved for a violation about the type of
+                    # a VALUE, and `field_constraints` at this position is
+                    # a container the request declares, not a value being
+                    # checked against a field's own declared type.
+                    raise ValidationError(
+                        "field_constraints must be an object",
+                        details={
+                            "violated_declaration": "request_schema",
+                            "field": "field_constraints",
+                        },
+                    )
                 unknown = set(field_constraints) - set(validated_fields)
                 if unknown:
                     # WP-3a rework 2 (監督裁定 m-1, 2026-09-07): "a
@@ -793,7 +831,17 @@ class ApplicationCell:
         is not.
         """
         if field_constraints is not None and fields is None:
-            raise ValidationError("field_constraints requires fields to be present")
+            # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): D-3 details
+            # -- this is a missing-key request-shape violation, not one
+            # about a value's own type, so `declared_type`/`observed_type`
+            # are omitted per D-3 (3).
+            raise ValidationError(
+                "field_constraints requires fields to be present",
+                details={
+                    "violated_declaration": "request_schema",
+                    "field": "field_constraints",
+                },
+            )
         if fields is None:
             fields = {"id": "integer"}
         return self.create_collection(
@@ -858,11 +906,22 @@ class ApplicationCell:
             )
             with self._lock:
                 # ConflictError if `field` already exists
-                self._backend.add_field(
+                revision = self._backend.add_field(
                     collection, field, field_type, contract_type=declared_type,
                     enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
+        # WP-3a rework 3 (real, measured bug -- contract `schemas.
+        # SchemaOperationResult.required` includes `revision`
+        # unconditionally, not only for `alter_field`): both backends'
+        # `add_field` now return the bumped schema revision (an `int`,
+        # same shape `alter_field_constraints` already returns) -- this
+        # call used to return nothing at all, so an in-process caller's
+        # `add_field` result could never report one (the HTTP surface's
+        # `post_schema` happened to mask this, since it computes its own
+        # response `revision` via a SEPARATE `_post_schema_revision()`
+        # readback rather than this method's own return value).
+        return {"revision": str(revision)}
 
     def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None, request_id=None):
         """Phase 9 WP-3a (design docs/design/
@@ -922,13 +981,58 @@ class ApplicationCell:
                     "alter_field does not redeclare a field's own type",
                     details={"violated_declaration": "unsupported_field", "field": "field_type"},
                 )
+            if enum is UNCHANGED and nullable is None:
+                # 監督裁定 N-1 (2026-09-07, wp3a-closure2): an alter_field
+                # carrying neither enum nor nullable declares nothing --
+                # refused with VALIDATION_FAILED before the schema is
+                # touched (no collection/field lookup above this line, so
+                # this always wins over NOT_FOUND for a nonexistent
+                # collection too: the request is defective on its own
+                # terms regardless of what it names). `field` is
+                # "operation" (design D-3 (2)'s request-relative path):
+                # the missing declaration is a defect of the operation as
+                # a whole, not of any single top-level key.
+                raise ValidationError(
+                    "alter_field must redeclare enum and/or nullable",
+                    details={
+                        "violated_declaration": "constraint_declaration",
+                        "field": "operation",
+                    },
+                )
             collection = self._identifier(collection, "collection")
             field = self._identifier(field, "field")
             available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if field not in available:
-                raise ValidationError("unknown field")
+                # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
+                # request NAMES a field the entity does not have -- a
+                # constraint-declaration violation (`errors.details_
+                # vocabulary.violated_declaration_vocabulary`'s own
+                # `constraint_declaration` word: "a declaration naming a
+                # field the request does not create"), not a request-
+                # shape one; `field` echoes the request's own top-level
+                # `field` key (design D-3 (2)), never a type pair (D-3
+                # (3): this is not a violation about a value's own type).
+                raise ValidationError(
+                    "unknown field",
+                    details={
+                        "violated_declaration": "constraint_declaration",
+                        "field": "field",
+                    },
+                )
             if nullable is not None and not isinstance(nullable, bool):
-                raise ValidationError("nullable must be a boolean")
+                # D-3 details for a request-shape violation about a
+                # VALUE's own type: `field` is the request-relative
+                # top-level key, `declared_type`/`observed_type` included
+                # per D-3 (3)'s value-type-violation branch.
+                raise ValidationError(
+                    "nullable must be a boolean",
+                    details={
+                        "violated_declaration": "request_schema",
+                        "field": "nullable",
+                        "declared_type": "boolean",
+                        "observed_type": json_type_name(nullable),
+                    },
+                )
             if enum is UNCHANGED or enum is None:
                 validated_enum = enum  # UNCHANGED, or None (clears)
             else:

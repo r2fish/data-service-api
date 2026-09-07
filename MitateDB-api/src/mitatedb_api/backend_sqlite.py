@@ -306,6 +306,15 @@ class SQLiteBackend:
         if enum is not None:
             declared["enum"] = list(enum)
         self._declared_constraints.setdefault(collection, {})[field] = declared
+        # WP-3a rework 3 (real, measured bug -- SchemaOperationResult.
+        # revision is `required` unconditionally, `contract/data-service-
+        # api.v1.json`'s own `schemas.SchemaOperationResult.required`;
+        # `alter_field_constraints` below already returns the bumped
+        # revision, but this method used to return nothing at all, so the
+        # in-process caller's own successful `add_field` result could
+        # never report one -- see `cell.ApplicationCell.add_field`'s own
+        # comment at its call site for the full chain this closes).
+        return self._schema_revision
 
     def field_types(self, collection):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.

@@ -44,11 +44,15 @@ class ValidationError(FoundationError):
     """Phase 9 WP-3a (design docs/design/
     PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3 (5)):
     `details` is OPTIONAL here (`None` by default) -- this WP gives the
-    D-3 four-key `details` shape only to the denials it newly introduces
-    (an `enum`/`nullable` violation at the value-validation choke point,
-    an `alter_field` naming `field_type`), never retrofitting it onto any
-    of this class's 105 pre-existing call sites (that full rollout is
-    WP-3e's own, separate task, D-3 実装の形 3). `getattr(exc, "details",
+    D-3 `details` shape only to the denials it newly introduces (an
+    `enum`/`nullable` violation at the value-validation choke point, an
+    `alter_field` naming `field_type`, an unrecognized `field_constraints`
+    entry key, a `field_constraints` sent without `fields`, a non-boolean
+    `nullable` on `field_constraints` or `alter_field`, and an
+    `alter_field`/`add_field` naming a field the entity does not have),
+    never retrofitting it onto any of this class's other pre-existing
+    call sites (that full rollout is WP-3e's own, separate task, D-3
+    実装の形 3). `getattr(exc, "details",
     None)` (`http.py::_problem_for_exception`'s existing convention)
     already tolerates an instance with no `details` attribute at all --
     passing `details=None` here deliberately leaves that attribute UNSET

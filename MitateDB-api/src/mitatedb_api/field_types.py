@@ -73,6 +73,37 @@ FOUNDATION_TYPE_TO_CONTRACT_TYPE = {
 _ENUM_ELIGIBLE_TYPES = ("string", "integer", "number", "boolean")
 
 
+def json_type_name(value: Any) -> str:
+    """WP-3a closure (監督裁定 2026-09-07, audit `wp3a-closure` §3 G3):
+    names the JSON type of an already-decoded request value, using the
+    identical vocabulary word `CONTRACT_TYPES` already uses for each type
+    except `null` (JSON has no `field_type` member for it, since no field
+    can be DECLARED that type -- but a request VALUE can still observe
+    it, e.g. `field_constraints.<field>.nullable: null`). Used only to
+    fill a D-3 `details.observed_type` for a request-shape violation
+    that IS about a value's own type (contract `errors.details_vocabulary`
+    D-3 (3): declared_type/observed_type are included only for "a
+    violation about the type of a value", never for a missing key or an
+    unrecognized field name). `bool` is checked before `int` -- the same
+    ordering `check_declared_value`/`enum_member_matches_type` already
+    use, since `isinstance(True, int)` is `True` in Python."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return "unknown"  # pragma: no cover -- unreachable: upstream JSON decoding never produces any other type
+
+
 def enum_member_matches_type(value: Any, declared_type: str) -> bool:
     """WP-3a rework 2 (監督裁定 m-3, 2026-09-07 -- helper name shared
     with r2db-api's own isomorphism-tested counterpart): the scalar
@@ -206,7 +237,8 @@ def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> 
     wraps every call site and attaches the actual `details` shape (`{"
     violated_declaration": "constraint_declaration", "field": <path>,
     "declared_type": declared_type}` -- errors.details_vocabulary's own
-    11th vocabulary word, contract correction pending) there instead.
+    11th vocabulary word, already part of the published contract) there
+    instead.
     """
     if declared_type not in _ENUM_ELIGIBLE_TYPES:
         raise ValidationError(

@@ -985,9 +985,33 @@ async def post_schema(request: Request) -> Response:
 
     if schema_operation == "add_field":
         field = body.get("field")
-        field_type = body.get("field_type")
-        if not isinstance(field, str) or field_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
-            raise ValidationError("add_field requires field and a supported field_type")
+        if not isinstance(field, str):
+            raise ValidationError("add_field requires field")
+        field_type_raw = body.get("field_type")
+        # WP-3a rework 3 (real, measured bug): `SchemaOperationRequest.
+        # field_type` is NOT globally `required` (only `operation`/`entity`
+        # are, `contract/data-service-api.v1.json`'s own `schemas.
+        # SchemaOperationRequest.required`), and contract `field_types`'s
+        # own description states the general rule this peer's
+        # `create_entity` branch above already honors for `fields`/`field_
+        # types`: "A field created without a declared type has type json
+        # -- this names an existing default rather than introducing a new
+        # one." `add_field`'s own singular `field_type` is that identical
+        # rule applied to the one field it adds -- an omitted `field_type`
+        # must default to `json`, not be refused. This peer used to refuse
+        # every field_type-omitting `add_field` with a bare, details-less
+        # `VALIDATION_FAILED` ("field and a supported field_type"), a real
+        # divergence from `r2db-api` (`postgres.py`'s own comment: "`add_
+        # field` with no `field_type` ... keep[s] the pre-CCR-13 default,
+        # JSONB") and from this peer's OWN in-process surface (`cell.py::
+        # ApplicationDeveloper.add_field`'s `field_type` keyword already
+        # accepts `None`-derived `"json"` via the conformance port's own
+        # `foundation_type = ... if field_type is not None else "json"`
+        # translation). A field_type that IS present and outside the
+        # 7-word vocabulary is still refused, unchanged.
+        if field_type_raw is not None and field_type_raw not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
+            raise ValidationError("field_type is not a supported field_type")
+        field_type = field_type_raw if field_type_raw is not None else "json"
         # Phase 9 WP-3a (design D-2 (1)): `enum`/`nullable` passed through
         # verbatim -- `cell.py::ApplicationCell.add_field` does the real
         # validation, same reasoning as `create_entity`'s own identical
@@ -1021,14 +1045,10 @@ async def post_schema(request: Request) -> Response:
         # as the `UNCHANGED` sentinel (leaves the field's `enum` as it
         # is) while a present `"enum": null` reaches it as a real `None`
         # (clears it) -- the contract's own `SchemaOperationRequest.enum`
-        # widens to `["array", "null"]` under a separate, supervisor-side
-        # contract correction (this WP's own packaged contract copy is
-        # untouched); until that correction lands, `_check_object_shape`
-        # above rejects a literal `"enum": null` at the shape layer
-        # before this line is ever reached for it (packaged copy: array
-        # only) -- this line is already correct for the post-correction
-        # contract and needs no further change once that correction
-        # lands.
+        # is already `["array", "null"]` in this WP's own packaged
+        # contract copy, so `_check_object_shape` above lets a literal
+        # `"enum": null` through the shape layer, reaching this line as
+        # the real `None` that means "clear it".
         result = session.alter_field(
             entity, field, enum=body.get("enum", UNCHANGED), nullable=body.get("nullable"),
             field_type=body.get("field_type"), request_id=_request_id(request))
