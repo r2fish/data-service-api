@@ -250,7 +250,7 @@ def test_upgrade_applications_dry_run_pending_is_a_set_difference(
     側に無いので pending 計算に現れない)。"""
     app = provision_app(ops_env, "upga")
     try:
-        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10})
+        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10, 11})
         monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
         rc = ops.main(["upgrade-applications", "--application", "upga", "--dry-run"])
         out = capsys.readouterr().out
@@ -265,15 +265,15 @@ def test_upgrade_applications_pending_detects_a_hole_not_just_the_max(
 ) -> None:
     """台帳が `{9999}` で `9` が欠けている状態でも `9` が pending として出る
     こと (v1.0 の「台帳の最大番号より大きい」方式では検出できない穴)。
-    Phase 9 WP-2a で通常の provisioning が台帳に `10` も足すようになった
-    ので、この test 専用の isolation として `10` も明示的に削除する
-    (この test が固定したいのは「台帳がちょうど `{9999}` のときの穴検出」
-    そのもの)。"""
+    Phase 9 WP-2a/WP-2c で通常の provisioning が台帳に `10`/`11` も足すよ
+    うになったので、この test 専用の isolation として両方とも明示的に削除
+    する (この test が固定したいのは「台帳がちょうど `{9999}` のときの穴
+    検出」そのもの)。"""
     app = provision_app(ops_env, "upgb")
     try:
         with psycopg.connect(app.developer_dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number IN (9, 10)")
+                cur.execute("DELETE FROM public._r2db_platform_upgrades WHERE upgrade_number IN (9, 10, 11)")
                 cur.execute(
                     "INSERT INTO public._r2db_platform_upgrades (upgrade_number, script_name) VALUES (9999, 'synthetic')"
                 )
@@ -340,8 +340,8 @@ def test_upgrade_applications_one_failure_does_not_stop_the_others(
         out = capsys.readouterr().out
         assert rc == 3
         assert "goodapp" in out and "failapp" in out
-        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 9999}), "the OTHER application must still be upgraded"
-        assert _ledger_numbers(bad.developer_dsn) == frozenset({9, 10}), "the failed application's ledger must not gain a row for 9999"
+        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 11, 9999}), "the OTHER application must still be upgraded"
+        assert _ledger_numbers(bad.developer_dsn) == frozenset({9, 10, 11}), "the failed application's ledger must not gain a row for 9999"
         # 完了条件 16: REVOKE cleanup line for the failed application only.
         assert f"REVOKE {bad.developer_role} FROM {ops_env.control_role};" in out
         assert f"REVOKE {good.developer_role} FROM {ops_env.control_role};" not in out
@@ -359,7 +359,7 @@ def test_upgrade_applications_is_idempotent(ops_env: types.SimpleNamespace) -> N
         before = _ledger_numbers(app.developer_dsn)
         assert ops.main(["upgrade-applications", "--application", "idemapp"]) == 0
         after = _ledger_numbers(app.developer_dsn)
-        assert before == after == frozenset({9, 10})
+        assert before == after == frozenset({9, 10, 11})
     finally:
         deprovision_app(ops_env, "idemapp")
 
@@ -435,7 +435,7 @@ def test_upgrade_status_reports_applied_pending_and_database_name(
         out = capsys.readouterr().out
         assert rc == 0
         assert "database_name=" in out and app.database in out
-        assert "applied=[9, 10]" in out
+        assert "applied=[9, 10, 11]" in out
         assert "pending=[]" in out
 
         monkeypatch.setattr(platform_upgrades, "PLATFORM_UPGRADE_NUMBERS", frozenset({9, 9999}))
@@ -461,7 +461,7 @@ def test_upgrade_status_reports_applied_empty_for_an_application_with_no_ledger(
         out = capsys.readouterr().out
         assert rc == 4
         assert "applied=[]" in out
-        assert "pending=[9, 10]" in out
+        assert "pending=[9, 10, 11]" in out
     finally:
         deprovision_app(ops_env, "noledgerapp")
 
@@ -569,7 +569,7 @@ def test_upgrade_status_reports_a_never_provisioned_application_as_pending_every
     out = out_buf.getvalue()
     assert rc == 4
     assert "database_name=None" in out
-    assert "pending=[9, 10]" in out
+    assert "pending=[9, 10, 11]" in out
 
 
 def test_upgrade_applications_a_never_provisioned_application_named_explicitly_is_a_failure(
@@ -637,7 +637,7 @@ def test_upgrade_applications_enabled_does_not_affect_target_selection(
             conn.commit()
         rc = ops.main(["upgrade-applications"])
         assert rc == 0, "the disabled application must still be upgraded by the default (no --application) run"
-        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10})
+        assert _ledger_numbers(app.developer_dsn) == frozenset({9, 10, 11})
     finally:
         deprovision_app(ops_env, "enabledapp")
 
@@ -694,13 +694,13 @@ def test_upgrade_applications_tally_line_counts_one_of_each_outcome(
     skip = provision_app(ops_env, "skipagg")
     try:
         assert ops.main(["upgrade-applications", "--application", "skipagg"]) == 0
-        assert _ledger_numbers(skip.developer_dsn) == frozenset({9, 10, 9999})
+        assert _ledger_numbers(skip.developer_dsn) == frozenset({9, 10, 11, 9999})
 
         rc = ops.main(["upgrade-applications"])
         out = capsys.readouterr().out
         assert rc == 3
         assert "1 succeeded, 1 failed, 1 skipped (applied)" in out
-        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 9999})
+        assert _ledger_numbers(good.developer_dsn) == frozenset({9, 10, 11, 9999})
     finally:
         deprovision_app(ops_env, "goodagg")
         deprovision_app(ops_env, "failapp")

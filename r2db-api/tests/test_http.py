@@ -585,15 +585,13 @@ async def test_mutate_assigned_addresses_are_insert_only_in_operation_order(clie
     assert body["assigned_addresses"] == [{"address": {"id": 2}}, {"address": {"id": 3}}]
 
 
-async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported(client):
-    response = await client.post(
-        "/v1/data/notes/mutations",
-        headers=_auth("cred-a.secret-a"),
-        json={"operations": [{"operation": "insert", "values": {"id": 5}}], "idempotency_key": "abc"},
-    )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
-
+async def test_mutate_best_effort_is_capability_unsupported(client):
+    """`idempotency_key` used to be gated here too (WP-1 snapshot) -- WP-2c
+    (contract 1.7.0, D-5) removed that gate in the same commit as flipping
+    `capabilities().idempotency` to `enabled`; its own real, positive HTTP-
+    boundary coverage lives in `tests/test_idempotency_records.py`.
+    `best_effort_transactions` is untouched by this phase and stays
+    `unavailable`."""
     response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("cred-a.secret-a"),
@@ -603,26 +601,24 @@ async def test_mutate_idempotency_key_and_best_effort_are_capability_unsupported
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
 
 
-async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(client):
-    """Phase 9 WP-1 (contract 1.7.0, design D-1 (3); work order docs/
-    work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9),
-    completion condition 24): the packaged contract copy is already 1.7.0
-    (schema-accepts `dry_run`/`plan`/`budget`/`SchemaOperationRequest.
-    idempotency_key`), and this foundation still declares `request_
-    budget` `unavailable` -- every one of the remaining gated fields must
-    be refused with `CAPABILITY_UNSUPPORTED` before anything executes,
-    with NO side effect (no row created, no catalog change, no schema
-    revision advance), exactly like the existing `idempotency_key` gate
-    above.
-
-    WP-2a already removed `field_constraints`/`enum`/`nullable` from this
-    gate (`constraint_declarations` is `enabled`, enforced) -- their own
-    positive/negative coverage lives in `tests/test_constraints_
-    declaration.py` and `conformance-tests/test_c20_constraint_
-    declaration_agreement.py` now, not here. WP-2b removes `dry_run`/
-    `plan` the same way (`dry_run` is `enabled`, enforced) -- their own
-    coverage lives in `tests/test_dry_run_and_plan.py` and `conformance-
-    tests/test_c22_dry_run_and_plan.py` now.
+async def test_contract_1_7_0_provisional_gate_has_closed_for_budget_and_idempotency_key(client):
+    """Phase 9 WP-1 (contract 1.7.0, design D-1 (3)) shipped the packaged
+    contract copy already at 1.7.0 with a provisional gate rejecting
+    `dry_run`/`plan`/`budget`/`SchemaOperationRequest.idempotency_key`
+    outright, before any of the four capabilities those fields govern was
+    real. WP-2a closed it for `field_constraints`/`enum`/`nullable`
+    (`constraint_declarations`), WP-2b for `dry_run`/`plan` (`dry_run`),
+    and WP-2c/WP-2d (this commit) close the LAST two remaining names --
+    `idempotency_key` (`idempotency`) and `budget` (`request_budget`).
+    There is no provisional gate left for r2db to observe at the HTTP
+    boundary; this test instead pins the CLOSURE itself -- every one of
+    the 6 originally-gated fields now reaches real handling over HTTP,
+    across all three endpoints, with no leftover `CAPABILITY_UNSUPPORTED`
+    anywhere. Full positive/negative behavioural coverage for `budget`/
+    `idempotency_key` lives in `tests/test_budget_narrowing.py`/`tests/
+    test_idempotency_records.py`; this test's own scope is the HTTP
+    boundary reaching real service code for all three endpoints, not
+    those fields' own semantics.
     """
     # --- query: budget ---
     query_response = await client.post(
@@ -630,120 +626,95 @@ async def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_executi
         headers=_auth("cred-a.secret-a"),
         json={"select": ["id"], "budget": {"result_items": 1}},
     )
-    assert query_response.status_code == 400
-    assert query_response.json()["code"] == "CAPABILITY_UNSUPPORTED"
-    assert query_response.json()["details"]["violated_declaration"] == "capability"
-    assert query_response.json()["details"]["field"] == "budget"
+    assert query_response.status_code == 200
+    assert "items" in query_response.json()
 
-    # --- mutate: budget alone, with no accompanying plan (no side effect:
-    # nothing inserted). `dry_run`/`plan` are no longer gated (WP-2b) --
-    # `budget` itself stays gated UNCONDITIONALLY, `plan` or no `plan`
-    # (review round F-1, `{scratchpad}/rulings-r4.md`: `request_budget`
-    # validity is a request-validation-stage question, the same stage as
-    # this capability gate, and strictly BEFORE `plan`'s own precondition
-    # stage -- `destructive_confirmation.evaluation_order` never lets a
-    # later stage's success excuse an earlier one). `test_dry_run_and_
-    # plan.py` covers the budget+plan combination directly.
-    response = await client.post(
+    # --- mutate: budget, real narrowing effect over HTTP (a real row is
+    # created -- this is no longer refused before execution). ---
+    mutate_response = await client.post(
         "/v1/data/notes/mutations",
         headers=_auth("cred-a.secret-a"),
-        json={"operations": [{"operation": "insert", "values": {"body": "gate-budget"}}], "budget": {"batch_items": 1}},
+        json={"operations": [{"operation": "insert", "values": {"body": "budget-closure"}}], "budget": {"batch_items": 1}},
     )
-    assert response.status_code == 400
-    assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
-    assert response.json()["details"]["violated_declaration"] == "capability"
-    assert response.json()["details"]["field"] == "budget"
+    assert mutate_response.status_code == 200
+    assert mutate_response.json()["committed"] is True
+    assert mutate_response.json()["affected"] == 1
 
-    # No side effect: the gated mutate attempt above created no row.
-    catalog_after_mutate_gate = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
-    query_after_mutate_gate = await client.post(
-        "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "where": [{"field": "body", "operator": "matches", "value": "gate-%"}]}
+    # --- mutate: idempotency_key, real record-and-replay effect over
+    # HTTP. ---
+    idem_body = {"operations": [{"operation": "insert", "values": {"body": "idem-closure"}}], "idempotency_key": "http-closure-key"}
+    first = await client.post("/v1/data/notes/mutations", headers=_auth("cred-a.secret-a"), json=idem_body)
+    assert first.status_code == 200
+    second = await client.post("/v1/data/notes/mutations", headers=_auth("cred-a.secret-a"), json=dict(idem_body))
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    catalog_after = await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))
+    query_after = await client.post(
+        "/v1/data/notes/query", headers=_auth("cred-a.secret-a"), json={"select": ["id"], "where": [{"field": "body", "operator": "eq", "value": "idem-closure"}]}
     )
-    assert catalog_after_mutate_gate.status_code == 200
-    assert query_after_mutate_gate.json()["items"] == []
+    assert catalog_after.status_code == 200
+    assert len(query_after.json()["items"]) == 1, "the replay must not have inserted a second row"
 
-    # --- schema: budget / idempotency_key (field_constraints / enum /
-    # nullable are enforced now, WP-2a; dry_run / plan are enforced now,
-    # WP-2b -- none of the 6 are gated here any more) ---
-    schema_gate_cases = [
-        {"operation": "add_field", "entity": "notes", "field": "gated_budget_field", "budget": {"execution_ms": 1}},
-        {"operation": "add_field", "entity": "notes", "field": "gated_idempotency_field", "idempotency_key": "abc"},
+    # --- schema: budget / idempotency_key ---
+    schema_cases = [
+        {"operation": "add_field", "entity": "notes", "field": "budget_closure_field", "budget": {"execution_ms": 1000}},
+        {"operation": "add_field", "entity": "notes", "field": "idempotency_closure_field", "idempotency_key": "http-schema-closure-key"},
     ]
-    schema_revision_before = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
-    for case in schema_gate_cases:
+    for case in schema_cases:
         response = await client.post("/v1/schema/operations", headers=_auth("dev-a.dev-secret-a"), json=case)
-        provisional_fields = {"budget", "idempotency_key"}
-        expected_field = next(k for k in case if k in provisional_fields)
-        assert response.status_code == 400, case
-        assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", case
-        assert response.json()["details"]["violated_declaration"] == "capability", case
-        assert response.json()["details"]["field"] == expected_field, case
-    # No side effect: field additions above never landed.
+        assert response.status_code == 200, (case, response.json())
+        assert response.json()["committed"] is True
     schema_revision_after = (await client.get("/v1/catalog", headers=_auth("cred-a.secret-a"))).json()
-    assert schema_revision_after == schema_revision_before
     notes_fields_after = next(e["fields"] for e in schema_revision_after["entities"] if e["entity"] == "notes")
-    for gated_field in ("gated_budget_field", "gated_idempotency_field"):
-        assert gated_field not in notes_fields_after
+    for real_field in ("budget_closure_field", "idempotency_closure_field"):
+        assert real_field in notes_fields_after
 
 
-def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process():
-    """WP-1a rework item 6: `DataService.schema` is called directly
-    in-process (bypassing `r2db_api.http`'s ASGI boundary entirely) --
-    confirms the gate lives in `service.py` itself, raising
-    `FoundationError(code="CAPABILITY_UNSUPPORTED", details={
-    "violated_declaration": "capability", "field": <name>})`, with no
-    side effect. `budget={}` (empty dict) specifically exercises that
-    `DataService.schema`'s own gate (`_PROVISIONAL_UNSUPPORTED_SCHEMA_
-    FIELDS`) checks key MEMBERSHIP (`provisional_field in operation`),
-    not the value's truthiness -- an empty dict is falsy but its key must
-    still gate (this is the same class of bug the sibling `MitateDB-api`
-    peer's `cell.py::ApplicationDeveloper.create_entity` had before this
-    rework, WP-1a code review item 5; r2db's own gate never had it, this
-    test pins that it stays that way). WP-2a already removed `field_
-    constraints`/`enum`/`nullable` from this gate -- their own coverage
-    lives in `tests/test_constraints_declaration.py` now. WP-2b removes
-    `plan`/`dry_run` the same way -- a bare `plan` (no accompanying real
-    request to check it against) now reaches `PRECONDITION_FAILED`
-    instead, since `plan` no longer gates on capability at all; its own
-    coverage lives in `tests/test_dry_run_and_plan.py`."""
+def test_contract_1_7_0_provisional_gate_has_closed_for_budget_and_idempotency_key_in_process():
+    """WP-1a rework item 6's own gate (`DataService.schema`, in-process --
+    bypassing `r2db_api.http`'s ASGI boundary entirely) used to reject
+    `budget`/`idempotency_key` unconditionally, including the empty/falsy
+    forms `budget={}`/`idempotency_key=""` (WP-1a code review item 5's own
+    key-membership-not-truthiness pin). WP-2c/WP-2d remove that gate for
+    both names in this commit (`_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` no
+    longer names either) -- an empty `budget` (no class narrowed) and an
+    empty-string `idempotency_key` (a valid, if unwise, client-chosen key)
+    both now reach real handling and commit successfully, mirroring WP-2a/
+    WP-2b's identical closure for `field_constraints`/`enum`/`nullable`/
+    `dry_run`/`plan`."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
 
-    catalog_before = service.catalog(developer)
+    outcome_a = service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_budget_field", "budget": {}})
+    assert outcome_a.committed is True
 
-    with pytest.raises(FoundationError) as excinfo:
-        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field", "budget": {}})
-    assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "budget"}
+    outcome_b = service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_idempotency_field", "idempotency_key": ""})
+    assert outcome_b.committed is True
 
-    with pytest.raises(FoundationError) as excinfo:
-        service.schema(developer, {"operation": "add_field", "entity": "notes", "field": "in_process_gated_field", "idempotency_key": ""})
-    assert excinfo.value.code == "CAPABILITY_UNSUPPORTED"
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
-
-    # No side effect: none of the gated schema attempts above landed.
     catalog_after = service.catalog(developer)
-    assert catalog_after == catalog_before
-    assert "in_process_gated_field" not in next(e["fields"] for e in catalog_after["entities"] if e["entity"] == "notes")
+    notes_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == "notes")
+    assert "in_process_budget_field" in notes_fields_after
+    assert "in_process_idempotency_field" in notes_fields_after
 
 
-def test_contract_1_7_0_new_capabilities_are_declared_unavailable():
+def test_contract_1_7_0_new_capabilities_are_all_declared_enabled():
     """Completion condition 25 (peer-local half): the 3 new capabilities
     were ALL declared `unavailable` in the SAME commit as the provisional
     gate (P-3) -- the common-suite half of this (defined ⊆ declared, all
     14 names present) is `conformance-tests/test_c11_document_
-    conformance.py` (裁定 T-4). WP-2a flipped `constraint_declarations`
-    to `enabled` in its own commit (its own gate/behavior/declaration
-    together, per D-1 (4)); WP-2b flips `dry_run` the same way --
-    `request_budget` remains `unavailable` until its own capability WP
-    lands."""
+    conformance.py` (裁定 T-4). WP-2a flipped `constraint_declarations` to
+    `enabled` in its own commit (its own gate/behavior/declaration
+    together, per D-1 (4)); WP-2b flipped `dry_run` the same way; WP-2c/
+    WP-2d (this commit) flip the last two -- `idempotency`/`request_
+    budget` -- closing out every one of the 3 new capabilities this phase
+    introduced."""
     service, _control = _build_service()
     developer = service.authenticate("dev-a.dev-secret-a")
     capabilities = service.capabilities(developer)["capabilities"]
     assert capabilities["constraint_declarations"]["status"] == "enabled"
     assert capabilities["dry_run"]["status"] == "enabled"
-    assert "request_budget" in capabilities
-    assert capabilities["request_budget"]["status"] == "unavailable"
+    assert capabilities["idempotency"]["status"] == "enabled"
+    assert capabilities["request_budget"]["status"] == "enabled"
 
 
 # --------------------------------------------------------------------------

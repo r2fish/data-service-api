@@ -816,34 +816,42 @@ def test_service_schema_always_returns_schema_outcome() -> None:
 
 
 def test_service_budget_only_bare_gate_is_unaffected_by_wp_2b() -> None:
-    """A bare `budget` with no `plan` is refused `CAPABILITY_UNSUPPORTED`
-    (`request_budget` stays `unavailable` until WP-2d) -- unaffected by
-    this WP either way."""
+    """A bare `budget` with no `plan` was refused `CAPABILITY_UNSUPPORTED`
+    while `request_budget` stayed `unavailable` (WP-2b's own snapshot) --
+    WP-2d (contract 1.7.0, D-6) flips that capability to `enabled` in the
+    same commit as removing this gate, so the identical request now
+    succeeds with `budget` given real, narrowing effect (`limits.
+    narrow_limits_by_budget`, exercised in full by `tests/test_budget_
+    narrowing.py`; this test only pins that the OLD gate no longer fires
+    here)."""
     service, _control = build_service()
     runtime = runtime_context(service)
-    with pytest.raises(FoundationError) as exc:
-        service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "x"}}], budget={"batch_items": 1})
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    assert exc.value.details == {"violated_declaration": "capability", "field": "budget"}
+    result = service.mutate_result(runtime, "notes", [{"operation": "insert", "values": {"body": "x"}}], budget={"batch_items": 1})
+    assert result.committed is True
+    assert result.affected == 1
 
 
-def test_service_budget_with_plan_is_still_capability_gated() -> None:
+def test_service_budget_with_plan_is_now_validated_before_precondition_not_gated() -> None:
     """Review round F-1 (`{scratchpad}/rulings-r4.md`, supervisor ruling
-    -- `request_budget` stays `unavailable` regardless of `plan`): the
-    round-1 implementation gated `budget` only `if budget is not None and
-    plan is None`, so a `budget`-carrying request that ALSO presented a
-    `plan` skipped this gate entirely and fell through to precondition
-    checking -- and because `plan`'s digest rule (`structured_operations.
-    dry_run.plan`) is published in the contract and the token's own
-    format (`"<sha256hex>.<schema_revision>"`, review F-7) discloses the
-    revision it was computed against in plaintext, a client could read
-    the current revision off any plain dry run's own `plan`, recompute a
-    matching digest for a `budget`-carrying body by the same published
-    rule, and have `budget` silently accepted-and-ignored on the
-    resulting apply (a P-3 violation: `request_budget: unavailable`
-    stops being true). This pins the fix: `budget` is refused at the
-    capability gate REGARDLESS of `plan`, and precondition evaluation
-    (where `plan` would otherwise be checked) is never reached."""
+    -- `request_budget` stayed `unavailable` regardless of `plan` while
+    WP-2b shipped): the round-1 implementation gated `budget` only `if
+    budget is not None and plan is None`, so a `budget`-carrying request
+    that ALSO presented a `plan` skipped that gate entirely and fell
+    through to precondition checking -- and because `plan`'s digest rule
+    (`structured_operations.dry_run.plan`) is published in the contract
+    and the token's own format (`"<sha256hex>.<schema_revision>"`, review
+    F-7) discloses the revision it was computed against in plaintext, a
+    client could read the current revision off any plain dry run's own
+    `plan`, recompute a matching digest for a `budget`-carrying body by
+    the same published rule, and have `budget` silently accepted-and-
+    ignored on the resulting apply (a P-3 violation, while `request_
+    budget: unavailable` was still the declared truth). WP-2d closes that
+    window not by keeping the gate, but by making `budget` real AND
+    validating it at request-shape time -- BEFORE precondition/`plan`
+    evaluation (addendum 2 S-l, `narrow_limits_by_budget`'s own docstring)
+    -- so this exact scenario (a `budget` above the deployed bound,
+    presented alongside a real, valid `plan`) is refused `VALIDATION_
+    FAILED` for the `budget`, never silently honoring `plan` first."""
     service, _control = build_service()
     developer = developer_context(service)
     runtime = runtime_context(service)
@@ -856,12 +864,12 @@ def test_service_budget_with_plan_is_still_capability_gated() -> None:
     with pytest.raises(FoundationError) as exc:
         service.mutate_result(
             runtime, "notes", [{"operation": "insert", "values": {"body": "probe"}}],
-            plan=dry.plan, budget={"batch_items": 1},
+            plan=dry.plan, budget={"batch_items": LIMITS.batch_items + 1},
         )
-    assert exc.value.code == "CAPABILITY_UNSUPPORTED"
-    assert exc.value.details == {"violated_declaration": "capability", "field": "budget"}
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.details == {"violated_declaration": "budget", "field": "budget/batch_items"}
 
-    # No side effect: the gated attempt above never reached execution.
+    # No side effect: the refused attempt above never reached execution.
     catalog = service.catalog(developer)
     rows = service.query(runtime, "notes", select=["id"], where=[{"field": "body", "operator": "eq", "value": "probe"}], page_size=10)
     assert rows == []

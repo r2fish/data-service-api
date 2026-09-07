@@ -202,8 +202,21 @@ def bind_mutation(operation: Any, known_fields: set[str]) -> BoundMutation:
     name = operation.get("operation")
     if name not in MUTATION_OPERATIONS:
         fail("CAPABILITY_UNSUPPORTED", "Mutation operation is not supported.")
-    if "idempotency_key" in operation:
-        fail("CAPABILITY_UNSUPPORTED", "Idempotency semantics are not enabled by this foundation.")
+    # Contract 1.7.0 (D-5, WP-2c, ruling I-12): the present-denial that
+    # used to sit here unconditionally is removed in the SAME commit as
+    # `capabilities().idempotency` flipping to `enabled` -- `idempotency_
+    # key` is not itself a `Mutation` (per-operation) property the common
+    # contract defines (`definitions.Mutation.properties` has no such
+    # key; it is `MutationRequest.properties.idempotency_key`, a REQUEST-
+    # level field only `service.py`'s own `mutate_result`/`_mutate_
+    # outcome` ever reads). `_MUTATION_KEYS` keeps recognizing it here
+    # ONLY so this peer's own internal (non-HTTP) mutation-item shape
+    # (`conformance/conformance_adapter_r2db.py`'s `_build_mutation_item`,
+    # port v1.11) -- which carries a request's single, uniform key
+    # duplicated onto every operation item, there being no separate top-
+    # level parameter on this shape before this commit -- keeps binding
+    # without error; `_mutate_outcome` below is what actually folds and
+    # USES it (`_fold_operation_idempotency_keys`), not this function.
     if name == "insert" and "where" in operation:
         # WP-2 review M-4: `insert`'s `where` was previously parsed and then
         # silently never used by any backend's insert path -- the same
@@ -573,12 +586,17 @@ SCHEMA_OPERATIONS = {"create_entity", "add_field", "drop_entity", "create_index"
 # `SchemaOperationRequest` is the single flat operation object itself (no
 # separate wrapper level unlike `MutationRequest`'s `operations` array), so
 # these two request-level fields arrive as ordinary keys on `operation`
-# here. `budget`/`idempotency_key` (contract 1.7.0 too) stay OUT of this
-# set -- they remain unconditionally rejected by `service.py`'s own
-# `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` gate until WP-2d/WP-2c flip
-# their own capabilities, mirroring WP-2a's identical removal of `field_
-# constraints`/`enum`/`nullable` from that same gate in its own commit.
-_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable", "dry_run", "plan"}
+# here. Contract 1.7.0 (D-5/D-6, WP-2c/WP-2d): `idempotency_key`/`budget`
+# join this allowlist too, in their own commits -- `service.py`'s own
+# `schema()` reads both directly off `operation` (`operation.get("budget")`/
+# `operation.get("idempotency_key")`) BEFORE this function ever runs, but
+# the SAME `operation` dict, budget/key still attached, is what `apply_
+# schema` then passes to THIS function -- omitting them here would reject
+# every schema request that carries either with a generic "shape is not
+# supported" `VALIDATION_FAILED`, never reaching the real `budget`/
+# `idempotency_key` handling at all. Mirrors WP-2a's identical addition of
+# `field_constraints`/`enum`/`nullable` to this same set in its own commit.
+_SCHEMA_KEYS = {"operation", "entity", "field", "fields", "field_types", "destructive", "confirmation", "revision", "index", "unique", "field_type", "field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key"}
 
 
 @dataclass(frozen=True)
@@ -1257,6 +1275,15 @@ class MutationOutcome:
     # byte-identical to pre-1.7.0 besides `committed`).
     committed: bool = True
     plan: str | None = None
+    # Contract 1.7.0 (D-5 (1)(viii), ruling I-3/I-8, WP-2c): `True` only
+    # for a result answered from a retained idempotency record -- nothing
+    # below `transact`'s own idempotency lookup (target existence,
+    # confirmation, precondition, execution) ran to produce it. `service.
+    # py` reads this to skip writing a NEW audit event for the replay (a
+    # resend never earns a second audit row of its own, D-5 (1)(v):
+    # "監査行にkeyを載せない" -- the ONLY audit trail a resend has is the
+    # original execution's own event, correlated through `request_id`).
+    replayed: bool = False
 
 
 # --- value type validation (R-7) -------------------------------------------
@@ -1628,6 +1655,97 @@ def compute_plan_token(request: dict[str, Any], schema_revision: int) -> str:
     return f"{digest}.{schema_revision}"
 
 
+# --- contract 1.7.0 idempotency (D-5, WP-2c) ---------------------------------
+#
+# Peer symmetry (work order §2 WP-2c "同型性テストの対象"): MitateDB-api
+# places its own same-named, same-signature pair alongside `normalize_
+# request_for_plan`/`compute_plan_token` -- no code is shared between the
+# two peers (依頼者裁定 2026-09-03 案(a)); only the two names/signatures/
+# behaviour are pinned isomorphic (`_ISOMORPHIC_TARGETS` row added by the
+# supervisor's pair-closing commit, ruling T-2 -- not by this WP).
+
+
+def normalize_request_for_idempotency(request: dict[str, Any]) -> bytes:
+    """Contract 1.7.0 (D-5 (1)(i), addendum 2 S-a, ruling I-2): the
+    canonical byte encoding an `idempotency_key`'s own digest commits to --
+    IDENTICAL recipe to `normalize_request_for_plan` above (same key
+    ordering / separator / `ensure_ascii=False` / UTF-8 rules), but a
+    DIFFERENT exclusion set: `plan`, `dry_run` AND `idempotency_key`
+    itself (three keys, not two) -- ruling I-2/I-13: `idempotency_key` is
+    excluded from ITS OWN digest (a resend is identified by the key, not
+    re-hashed into what it must match) but stays IN `normalize_request_
+    for_plan`'s digest, so a `plan` token captured with one `idempotency_
+    key` (or none) does not verify against a request presenting a
+    different one. Deliberately not sharing a body with `normalize_
+    request_for_plan` (work order §2 WP-2c: "本文を共有せず、除外key の
+    違いだけの同型に保つ") -- the two are pinned isomorphic by name/
+    signature/behaviour only, per the peer-symmetry convention above.
+    """
+    filtered = {key: value for key, value in request.items() if key not in ("plan", "dry_run", "idempotency_key")}
+    return json.dumps(filtered, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def fold_operation_idempotency_keys(operations: list[dict[str, Any]]) -> str | None:
+    """Ruling I-12/adapter port v1.11 compatibility: this peer's internal
+    (non-HTTP) mutation-item shape carries a request-level `idempotency_
+    key` duplicated onto EVERY operation item (`conformance/conformance_
+    adapter_r2db.py`'s `_build_mutation_item`/`fold_batch_idempotency_
+    key` -- the port's own "全 item 同一 key か全 item 無し" rule, D-5
+    §6.1 (v)). `service.py`'s `_mutate_outcome` calls this ONLY when its
+    own explicit `idempotency_key` parameter is `None` (an HTTP-originated
+    call always supplies that parameter directly and never reaches here --
+    `MutationRequest.idempotency_key` is a request-level contract field,
+    never a per-operation one, `definitions.Mutation.properties` has no
+    such key). Mirrors the adapter's own uniform-or-absent rule: every
+    item sharing the identical key folds to that key; no item carrying one
+    folds to `None`; anything else (a mix, or differing values) is a
+    malformed request this peer refuses to guess about.
+    """
+    present_count = sum(1 for op in operations if isinstance(op, dict) and "idempotency_key" in op)
+    if present_count == 0:
+        return None
+    keys = {op.get("idempotency_key") for op in operations if isinstance(op, dict) and "idempotency_key" in op}
+    if len(keys) > 1 or present_count != len(operations):
+        fail(
+            "VALIDATION_FAILED", "idempotency_key must be identical across every operation in a batch, or absent from all of them.",
+            details={"violated_declaration": "request_schema", "field": "operations"},
+        )
+    return next(iter(keys))
+
+
+def idempotency_digest(request: dict[str, Any]) -> str:
+    """Contract 1.7.0 (D-5 (1)(i), addendum 2 S-a): the sha256 hex digest
+    `structured_operations.idempotency.record` describes -- "computed
+    exactly as `structured_operations.dry_run.plan` describes" over
+    `normalize_request_for_idempotency(request)`'s own filtered byte
+    encoding. A resend's digest is compared against a retained record's
+    stored digest for equality (`ApplicationCell`/`PostgresCell`'s own
+    idempotency lookup): equal -> replay; unequal -> `CONFLICT`.
+    """
+    return hashlib.sha256(normalize_request_for_idempotency(request)).hexdigest()
+
+
+@dataclass(frozen=True)
+class _IdempotencyRecord:
+    """One retained idempotency record -- `ApplicationCell`'s own
+    process-internal store (ruling I-1: "in-memory 参照 cell はプロセス内
+    dict"; `PostgresCell`'s Postgres-backend counterpart is the
+    `public._r2db_idempotency` side table, migration `0011_idempotency_
+    records_upgrade.sql`, same shape realized as a row).
+
+    `payload` carries exactly what a replay needs to reconstruct the
+    ORIGINAL `MutationOutcome`/`SchemaOutcome` verbatim (ruling I-8: "記録
+    した応答 object 全体... をそのまま返す") -- never re-derived from
+    current state. `kind` distinguishes the two payload shapes ("mutation":
+    `affected`/`assigned_addresses`; "schema": `revision`/`descriptor`).
+    """
+
+    digest: str
+    kind: str
+    payload: dict[str, Any]
+    expires_at: float
+
+
 @dataclass(frozen=True)
 class SchemaOutcome:
     """Contract 1.7.0 (D-4, WP-2b): `apply_schema`'s return shape -- the
@@ -1661,6 +1779,9 @@ class SchemaOutcome:
     revision: int
     descriptor: dict[str, Any] | None = None
     plan: str | None = None
+    # Contract 1.7.0 (D-5 (1)(viii), ruling I-3/I-8, WP-2c): see
+    # `MutationOutcome.replayed`'s identical comment.
+    replayed: bool = False
 
 
 @dataclass
@@ -1696,6 +1817,15 @@ class ApplicationCell:
     # restore this on a failed drop_entity, since DDL itself is
     # transactional even though sequence consumption is not).
     _next_id: dict[str, int] = field(default_factory=dict, repr=False)
+    # Contract 1.7.0 (D-5 (6), U-3 = (A), ruling I-1, WP-2c): the in-memory
+    # backend's own idempotency record store -- "プロセス内 dict" (never a
+    # side table; `PostgresCell`'s Postgres-backend counterpart is the
+    # `public._r2db_idempotency` side table). Application-scoped by
+    # construction: this dict lives on ONE `ApplicationCell` instance
+    # (`DataService._cells[application_id]`), so a lookup here is already
+    # scoped to the Application regardless of which credential's request
+    # reaches it (ruling I-5) -- no separate scoping code is needed.
+    _idempotency: dict[str, "_IdempotencyRecord"] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         for entity, rows in list(self.entities.items()):
@@ -1722,6 +1852,37 @@ class ApplicationCell:
             # like any client-issued insert would.
             for seed in seed_rows:
                 self._insert_row(entity, dict(seed))
+
+    # ---- idempotency (contract 1.7.0 D-5, WP-2c) --------------------------
+
+    def _idempotency_reclaim(self, *, now: float) -> None:
+        """Ruling I-6: an elapsed record is "treated as absent"; deletion
+        may be lazy. This is the lazy reclaim -- called from both the
+        lookup and the capacity-reservation paths below, never from a
+        background thread or timer (禁止事項 5: "背景スレッド・定期ジョブ
+        を置かない")."""
+        expired = [key for key, record in self._idempotency.items() if record.expires_at <= now]
+        for key in expired:
+            del self._idempotency[key]
+
+    def _idempotency_lookup(self, key: str, *, now: float) -> "_IdempotencyRecord | None":
+        self._idempotency_reclaim(now=now)
+        return self._idempotency.get(key)
+
+    def _idempotency_reserve(self, limits: ResourceLimits, *, now: float) -> None:
+        """Ruling I-6/D-5 (5): the full-table refusal -- reclaim elapsed
+        records first, THEN check capacity, BEFORE this request executes
+        anything (this is called from `transact`/`apply_schema` before
+        target existence, never after a tentative write). Reuses the
+        SAME generic `ResourceLimits.check()` every other COUNT-valued
+        class already uses, so the `LIMIT_EXCEEDED`/`limit_class` shape is
+        identical to every other resource-exhaustion refusal in this
+        codebase, not a bespoke one."""
+        self._idempotency_reclaim(now=now)
+        limits.check("idempotency_entries", len(self._idempotency) + 1)
+
+    def _idempotency_store(self, key: str, *, digest: str, kind: str, payload: dict[str, Any], now: float, retention_ms: int) -> None:
+        self._idempotency[key] = _IdempotencyRecord(digest=digest, kind=kind, payload=payload, expires_at=now + retention_ms / 1000)
 
     # ---- query -----------------------------------------------------------
 
@@ -1846,6 +2007,7 @@ class ApplicationCell:
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         `dry_run` walks every gate a real request would (no early-out
@@ -1885,6 +2047,39 @@ class ApplicationCell:
         if not operations:
             fail("VALIDATION_FAILED", "At least one mutation is required.")
         limits.check("batch_items", len(operations))
+        # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3, WP-2c): the
+        # idempotency lookup sits HERE -- after every bound this method's
+        # own caller (`service.py`) and the batch-size bound just above
+        # have already checked, before the entity-existence check right
+        # below (this contract's own `target-existence` stage, the first
+        # of `destructive_confirmation.evaluation_order`'s four). A
+        # `dry_run` never consults or writes a record at all (ruling I-7 /
+        # D-4): the guard below is `idempotency_key is not None and not
+        # dry_run`, never merely `idempotency_key is not None`.
+        idempotency_digest_value: str | None = None
+        idempotency_now: float = 0.0
+        if idempotency_key is not None and not dry_run:
+            assert plan_request is not None  # service.py always builds this
+            idempotency_digest_value = idempotency_digest(plan_request)
+            idempotency_now = clock() if clock is not None else 0.0
+            record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
+            if record is not None:
+                if record.digest != idempotency_digest_value:
+                    fail(
+                        "CONFLICT", "This idempotency key was already used with a different request.", status=409,
+                        details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
+                    )
+                # Ruling I-3/I-8: answered from the record -- target
+                # existence, confirmation, precondition and execution
+                # (everything below this point) never run for a replay.
+                payload = record.payload
+                return MutationOutcome(
+                    affected=payload["affected"], assigned_addresses=payload["assigned_addresses"],
+                    destructive=False, committed=True, plan=None, replayed=True,
+                )
+            # Ruling I-6/D-5 (5): capacity is checked BEFORE this request
+            # executes anything -- reclaiming elapsed records first.
+            self._idempotency_reserve(limits, now=idempotency_now)
         if entity not in self.entities:
             fail("NOT_FOUND", "Entity was not found.", status=404)
         expected_plan = (
@@ -1963,6 +2158,23 @@ class ApplicationCell:
             # (fail-closed by construction, no special-casing needed).
             if destructive and audit_hook is not None:
                 audit_hook.pre_commit()
+            # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded
+            # in the SAME critical section as the commit above -- this
+            # in-memory backend has no separate transaction boundary
+            # (`ApplicationCell` serves one operation at a time), so
+            # "same tx" here means: written only once every operation in
+            # the loop above has already tentatively succeeded, at the
+            # identical point the real commit is decided, never before.
+            # If anything below this point still raised, the `except
+            # Exception` clause restores `before` -- but no code below
+            # this comment can raise (`_idempotency_store` never fails),
+            # so a written record and a committed batch are inseparable.
+            if idempotency_key is not None and idempotency_digest_value is not None:
+                self._idempotency_store(
+                    idempotency_key, digest=idempotency_digest_value, kind="mutation",
+                    payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                    now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
+                )
             return MutationOutcome(affected=affected, assigned_addresses=assigned_addresses, destructive=destructive, committed=True)
         except Exception:
             self.entities[entity] = before
@@ -2195,6 +2407,7 @@ class ApplicationCell:
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above,
@@ -2211,6 +2424,38 @@ class ApplicationCell:
         result itself to an `int`.
         """
         bound = bind_schema_operation(operation, developer=developer)
+        # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling I-3, WP-2c):
+        # the idempotency lookup sits HERE -- as early as possible after
+        # binding the request's own shape, before ANY operation-specific
+        # accounting or target-dependent computation (including the
+        # `schema_objects` projection just below, which for `drop_entity`/
+        # `add_field`/etc. reads `bound.entity`'s CURRENT state -- reading
+        # it for an entity a replay's own key already dropped would
+        # compute nonsense, not merely skip a check the design allows
+        # skipping). `dry_run` never consults or writes a record (ruling
+        # I-7/D-4).
+        idempotency_digest_value: str | None = None
+        idempotency_now: float = 0.0
+        if idempotency_key is not None and not dry_run:
+            assert plan_request is not None  # service.py always builds this
+            idempotency_digest_value = idempotency_digest(plan_request)
+            idempotency_now = clock() if clock is not None else 0.0
+            record = self._idempotency_lookup(idempotency_key, now=idempotency_now)
+            if record is not None:
+                if record.digest != idempotency_digest_value:
+                    fail(
+                        "CONFLICT", "This idempotency key was already used with a different request.", status=409,
+                        details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
+                    )
+                # Ruling I-3/I-8/I-9: applies to schema operations too --
+                # a resent `drop_entity` answers from the record even
+                # though the entity, and any confirmation phrase computed
+                # against it, are both long gone.
+                payload = record.payload
+                return SchemaOutcome(
+                    committed=True, revision=payload["revision"], descriptor=None, plan=None, replayed=True,
+                )
+            self._idempotency_reserve(limits, now=idempotency_now)
         # WP-2 review M-2: indexes count toward `schema_objects` too, like
         # entities/fields already did (SI-08: an index is a real resource,
         # and every write against a uniquely-indexed entity pays a
@@ -2503,6 +2748,17 @@ class ApplicationCell:
                 _restore_before_snapshot()
                 raise
         self.schema_revision += 1
+        # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c): recorded in
+        # the same critical section as the commit just above, mirroring
+        # `transact`'s identical comment -- nothing below this point can
+        # raise, so a written record and a committed operation are
+        # inseparable.
+        if idempotency_key is not None and idempotency_digest_value is not None:
+            self._idempotency_store(
+                idempotency_key, digest=idempotency_digest_value, kind="schema",
+                payload={"revision": self.schema_revision},
+                now=idempotency_now, retention_ms=limits.idempotency_retention_ms,
+            )
         # Review round F-8: always `SchemaOutcome`, plan or no plan --
         # every pre-1.7.0 direct caller of this method (`test_constraints_
         # declaration.py`'s many `cell.apply_schema(...)` call sites among

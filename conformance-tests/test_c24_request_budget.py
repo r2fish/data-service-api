@@ -113,7 +113,7 @@ def test_c24_request_budget(adapter: ConformanceAdapter, isolated) -> None:
 
         # (3) over-deployment budget -> VALIDATION_FAILED, never silently
         # clamped to the deployed value.
-        deployed_execution_ms = document.get("limits", {}).get("execution_ms")
+        deployed_execution_ms = iso.capability_document().get("limits", {}).get("execution_ms")
         assert isinstance(deployed_execution_ms, int), (
             f"{adapter.name}: capability_document()['limits']['execution_ms'] is not an int -- {document.get('limits')!r}"
         )
@@ -143,8 +143,17 @@ def test_c24_request_budget(adapter: ConformanceAdapter, isolated) -> None:
 
         # positive control: result_items DOES apply to query -- accepted,
         # never refused as inapplicable (disclosed: not driven at its own
-        # N/N+1 boundary here, module docstring).
-        accepted = iso.query_with_budget(runtime, entity, ["label"], None, None, budget={"result_items": 50})
+        # N/N+1 boundary here, module docstring). Declaration-based, not a
+        # fixed value: this deployment's own declared `result_items` bound
+        # (never a hardcoded literal, which a narrow isolation profile can
+        # sit below).
+        declared_result_items = iso.capability_document().get("limits", {}).get("result_items")
+        assert isinstance(declared_result_items, int), (
+            f"{adapter.name}: capability_document()['limits']['result_items'] is not an int -- {document.get('limits')!r}"
+        )
+        accepted = iso.query_with_budget(
+            runtime, entity, ["label"], None, None, budget={"result_items": declared_result_items},
+        )
         assert isinstance(accepted, dict) and "items" in accepted, (
             f"{adapter.name}: a query carrying an in-bound budget.result_items was refused -- {accepted!r}"
         )

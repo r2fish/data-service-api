@@ -26,6 +26,24 @@ class ResourceLimits:
     # the SAME generic `check()`/`as_dict()` machinery below -- no special-
     # cased method needed, exactly like every other COUNT-valued class.
     enum_members: int = 64
+    # Contract 1.7.0 (D-5 (5)/S-f, WP-2c): Application-scoped idempotency
+    # record bounds -- `idempotency_entries` (how many live, unexpired
+    # records one Application may hold at once) and `idempotency_retention_
+    # ms` (how long a record stays live after it is written). Defaults
+    # match `limits.example_profile.idempotency_entries`/`.idempotency_
+    # retention_ms` verbatim (`spec/data-service-api.v1.json`, 10000 /
+    # 86400000). `idempotency_entries` is enforced through the SAME generic
+    # `check()` machinery every other COUNT-valued class already uses
+    # (`ApplicationCell`/`PostgresCell`'s own idempotency reservation calls
+    # `limits.check("idempotency_entries", ...)`, ruling I-6); `idempotency_
+    # retention_ms` is a duration, read directly (never through `check()`)
+    # wherever a record's own expiry is computed. Declaring both in this
+    # same commit as `capabilities().idempotency` flipping to `enabled` is
+    # what C-05 V1 (e) (`_CAPABILITY_CONDITIONED`) requires -- both keys
+    # automatically reach `capabilities()`'s `limits`/`limit_enforcement`
+    # documents through `as_dict()` below, with no separate wiring needed.
+    idempotency_entries: int = 10_000
+    idempotency_retention_ms: int = 86_400_000
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -98,6 +116,118 @@ class ResourceLimits:
                 fail("LIMIT_EXCEEDED", "Operation nesting exceeds the configured limit.", status=413, details={"resource": "operation_depth", "limit_class": "operation_depth", "limit": self.operation_depth})
             children = item.values() if isinstance(item, dict) else item
             stack.extend((child, next_depth) for child in children)
+
+
+# Contract 1.7.0 (D-6 (2), addendum R-g, WP-2d): the applicability table --
+# which `budget` classes carry meaning on which endpoint. `mutate`/`cross_
+# entity_mutate` share the identical pair (D-6's own v1.1 revision, review
+# round M3/supervisor ruling R-g: `result_items` bounds a QUERY's returned
+# rows, never a mutation's own `affected` count -- this version gives no
+# request a way to narrow that). r2db has no executable `cross_entity_
+# mutate` path (`capabilities().cross_entity_mutation` is `unavailable`,
+# `http.py:post_cross_entity_mutate` is a stub), so only "query"/"mutate"/
+# "schema" are ever passed as `endpoint_kind` in practice -- the fourth key
+# is carried here anyway so this table stays the complete D-6 (2) table,
+# not a peer-narrowed subset a future cross-entity WP would have to widen.
+_BUDGET_APPLICABLE_CLASSES: dict[str, frozenset[str]] = {
+    "query": frozenset({"result_items", "execution_ms"}),
+    "mutate": frozenset({"execution_ms", "batch_items"}),
+    "cross_entity_mutate": frozenset({"execution_ms", "batch_items"}),
+    "schema": frozenset({"execution_ms"}),
+}
+
+
+def _json_type_name(value: Any) -> str:
+    """Ruling J-2/contract `errors.details_vocabulary.VALIDATION_FAILED.
+    observed_type`'s own vocabulary: "the JSON type of the value actually
+    received (string, integer, number, boolean, object, array or null)".
+    Only reached from `narrow_limits_by_budget` below, for a `budget/
+    <class>` value that failed the `isinstance(int) and not bool` test --
+    `bool` is handled by its own caller (JSON `true`/`false` is contract
+    type `boolean`, never `integer`, even though Python's `bool` is an
+    `int` subclass), so this function itself never needs to special-case
+    it. Mirrors MitateDB's identical `_JSON_TYPE_NAME` (`config.py`) --
+    same 7-way mapping, this peer's own naming convention (lowercase,
+    leading underscore) rather than a verbatim port of the name."""
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "integer"
+
+
+def narrow_limits_by_budget(deployed: ResourceLimits, budget: dict[str, Any] | None, endpoint_kind: str) -> ResourceLimits:
+    """Contract 1.7.0 (D-6, addendum 2 S-l, work order §2 WP-2d, ruling
+    B-2/B-5): the SINGLE point that turns one request's own `budget` into
+    the "effective limits" every existing check point downstream reads --
+    `ApplicationCell`/`PostgresCell`'s `query`/`transact`/`apply_schema`
+    already take a `limits: ResourceLimits` argument and call `.check(...)`
+    on it; this function's caller (`service.py`) passes ITS return value in
+    place of the deployed `self.limits` at exactly one call site per
+    endpoint, rather than any downstream check point being rewritten to
+    know about `budget` at all. This is what makes "a check point budget
+    forgot to narrow" structurally impossible, not merely tested against
+    (D-6 (2)'s own "検査点を個別に書き換えない").
+
+    Validates in the same pass (addendum 2 S-l: budget validity is checked
+    at request-shape time, before target existence/confirmation/
+    precondition): a class `budget` names that `endpoint_kind` has no
+    meaning for, a value that is not a plain positive int, or a value
+    above `deployed`'s own declared bound for that class, is refused with
+    `VALIDATION_FAILED`/`violated_declaration: budget`/`field: budget/
+    <class>` -- never silently clamped or ignored. `budget is None` (the
+    ordinary, unbudgeted request) returns `deployed` itself unchanged --
+    no new object, no validation cost paid.
+    """
+    if budget is None:
+        return deployed
+    if not isinstance(budget, dict):
+        fail("VALIDATION_FAILED", "budget must be an object.", details={"violated_declaration": "budget", "field": "budget"})
+    applicable = _BUDGET_APPLICABLE_CLASSES.get(endpoint_kind, frozenset())
+    deployed_values = deployed.as_dict()
+    narrowed_values = dict(deployed_values)
+    for class_name, requested in budget.items():
+        if class_name not in applicable:
+            fail(
+                "VALIDATION_FAILED", "budget names a resource class that does not apply to this endpoint.",
+                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
+            )
+        # Ruling J-2 (WP-2cd audit N-2, monitor's (α)): the non-integer leg
+        # is split from the `< 1` leg so ONLY the former carries `declared_
+        # type`/`observed_type` -- ruling B-1's own parenthetical ("declared_
+        # type / observed_type は非整数のときのみ") read literally, and now
+        # matching MitateDB's identical 2-branch shape (`config.py`'s own
+        # `narrow_limits_by_budget`) so the SAME rejection returns the SAME
+        # `details` shape on both peers.
+        if not isinstance(requested, int) or isinstance(requested, bool):
+            fail(
+                "VALIDATION_FAILED", "budget values must be integers of at least 1.",
+                details={
+                    "violated_declaration": "budget", "field": f"budget/{class_name}",
+                    "declared_type": "integer", "observed_type": _json_type_name(requested),
+                },
+            )
+        if requested < 1:
+            fail(
+                "VALIDATION_FAILED", "budget values must be integers of at least 1.",
+                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
+            )
+        if requested > deployed_values[class_name]:
+            fail(
+                "VALIDATION_FAILED", "budget exceeds this deployment's own declared value for this resource class.",
+                details={"violated_declaration": "budget", "field": f"budget/{class_name}"},
+            )
+        # P-5/D-6 (3): downward-only -- `min` never `max` (C-24 variant 1).
+        narrowed_values[class_name] = min(deployed_values[class_name], requested)
+    return ResourceLimits(**narrowed_values)
 
 
 @dataclass(frozen=True)
