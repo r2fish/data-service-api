@@ -1174,12 +1174,16 @@ def test_rotate_semantics_revoked_refused_disabled_allowed(kind, platform):
         assert rotated["credential_id"] == issued["credential_id"]
         assert rotated["secret"] != issued["secret"]
 
-        # revoked -> rotate refused.
+        # revoked -> rotate refused. O-8 (版フリップ監査, ruling
+        # `{scratchpad}/rulings-r3-r7-flip.md` 追補4): a state conflict
+        # (target contradicts the requested operation), not a
+        # VALIDATION_FAILED shoehorned into the 11-word vocabulary.
         issued2 = h.service.issue_credential(secret, app_id, "runtime")
         h.service.revoke_credential(secret, issued2["credential_id"])
         with pytest.raises(FoundationError) as exc:
             h.service.rotate_credential(secret, issued2["credential_id"])
-        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.code == "CONFLICT"
+        assert exc.value.status == 409
     finally:
         h.cleanup()
 

@@ -315,24 +315,28 @@ def test_ast_full_count_matches_the_audit_site_count():
 
 def test_control_plane_scan_is_not_vacuous():
     """O-1's own non-空振り pin, mirroring the data-plane pin just above:
-    `control_plane.py` carries 12 direct `fail(...)` sites (all 12 now
-    4-key, per this scan's own 0-count test) PLUS 2 `_deny(code=...)`
-    sites (`_deny_audit_capability_unsupported`/`_deny_role_control`,
-    both CAPABILITY_UNSUPPORTED) that the bare `fail`-name match alone
-    would never see -- 14 total. `control_http.py`/`audit_query.py`
-    genuinely carry 0 (neither calls `fail`/`_deny` with a literal
-    vocabulary code at all -- `control_http.py` delegates its own request-
-    shape checks to `http.py`'s shared `_check_object_shape`, already
-    counted in that file's own pin above; `audit_query.py`'s `decode_
-    cursor` raises a bare `ValueError` that `control_plane.py`'s own
-    `_validate_audit_after` translates, already counted there) -- pinned
-    at 0 rather than omitted, so a scanner that silently matched nothing
-    at all in `control_plane.py` either (a real bug: `fail`/`_deny`
-    typo'd, or the wrong node type checked) would NOT be indistinguishable
-    from the genuine 0 these two files have; `control_plane.py`'s own
-    non-zero 14 is what proves the scanner actually visited real code."""
+    `control_plane.py` carries 11 direct `fail(...)` sites (all 11 now
+    4-key, per this scan's own 0-count test -- O-8 pair-closing dropped
+    the count from 12: `rotate_credential`'s revoked-credential refusal
+    now raises `fail("CONFLICT", ...)`, a code outside `_VOCAB_CODES`
+    entirely, not a `VALIDATION_FAILED` this scan tracks) PLUS 2 `_deny(
+    code=...)` sites (`_deny_audit_capability_unsupported`/`_deny_role_
+    control`, both CAPABILITY_UNSUPPORTED) that the bare `fail`-name
+    match alone would never see -- 13 total. `control_http.py`/`audit_
+    query.py` genuinely carry 0 (neither calls `fail`/`_deny` with a
+    literal vocabulary code at all -- `control_http.py` delegates its own
+    request-shape checks to `http.py`'s shared `_check_object_shape`,
+    already counted in that file's own pin above; `audit_query.py`'s
+    `decode_cursor` raises a bare `ValueError` that `control_plane.py`'s
+    own `_validate_audit_after` translates, already counted there) --
+    pinned at 0 rather than omitted, so a scanner that silently matched
+    nothing at all in `control_plane.py` either (a real bug: `fail`/
+    `_deny` typo'd, or the wrong node type checked) would NOT be
+    indistinguishable from the genuine 0 these two files have;
+    `control_plane.py`'s own non-zero 13 is what proves the scanner
+    actually visited real code."""
     counts = {module: len(_fail_call_sites(SRC / module)) for module in ("control_plane.py", "control_http.py", "audit_query.py")}
-    assert counts == {"control_plane.py": 14, "control_http.py": 0, "audit_query.py": 0}, counts
+    assert counts == {"control_plane.py": 13, "control_http.py": 0, "audit_query.py": 0}, counts
 
 
 def test_allowlist_entries_match_real_bare_call_sites():

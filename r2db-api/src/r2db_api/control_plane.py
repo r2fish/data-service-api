@@ -1003,16 +1003,19 @@ class ControlPlaneService:
             fail("NOT_FOUND", "Credential was not found.", status=404)
         _enabled, revoked = state
         if revoked:
-            # O-1: none of the 11 `violated_declaration_vocabulary` words
-            # describes a resource-STATE refusal precisely (this is not a
-            # request-shape/identifier-syntax/deployment-capability
-            # question -- the request itself is well-formed and the
-            # operation exists) -- `unsupported_field` ("a field this
-            # version gives no meaning to") is the closest fit: once
-            # revoked, `credential_id` names a target `rotate_credential`
-            # no longer gives any meaning to. Judgment call, flagged for
-            # supervisor confirmation rather than silently assumed.
-            fail("VALIDATION_FAILED", "A revoked credential cannot be rotated.", details=violation("unsupported_field", field="credential_id"))
+            # O-8 (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+            # 追補4): "対象の状態が操作と矛盾する" refusal (a revoked
+            # credential cannot be rotated) is a resource-STATE conflict,
+            # not a request-shape/identifier-syntax/deployment-capability
+            # question the 11-word `violated_declaration_vocabulary` was
+            # built to describe -- CONFLICT (status 409), the code this
+            # module already uses for every other "target state
+            # contradicts the requested operation" refusal (already-
+            # revoked/already-exists/concurrently-modified above), not a
+            # forced fit into VALIDATION_FAILED's own vocabulary. `details`
+            # is optional for CONFLICT (O-8); `field: credential_id` is
+            # kept here since one IS attributable.
+            fail("CONFLICT", "A revoked credential cannot be rotated.", status=409, details={"field": "credential_id"})
         new_secret = _new_secret()
 
         # Phase 6 WP-2 (design D-1(c), item 1): same raw-to-store/composed-

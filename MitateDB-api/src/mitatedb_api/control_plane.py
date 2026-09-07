@@ -1664,7 +1664,17 @@ class ControlPlaneService:
         if kind is None:
             raise NotFoundError("credential was not found")
         if state[1]:  # revoked
-            raise ValidationError("a revoked credential cannot be rotated")
+            # O-8 (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+            # 追補4): "対象の状態が操作と矛盾する" refusal (a revoked
+            # credential cannot be rotated) is a resource-STATE conflict,
+            # not a request-shape/identifier-syntax/deployment-capability
+            # question the 11-word `violated_declaration_vocabulary` was
+            # built to describe -- ConflictError (CONFLICT, status 409),
+            # matching r2db-api's own same-site fix; not a forced fit into
+            # ValidationError's own vocabulary. `details` is optional for
+            # CONFLICT (O-8); `field: credential_id` is kept since one IS
+            # attributable.
+            raise ConflictError("a revoked credential cannot be rotated", details={"field": "credential_id"})
         new_secret = _new_secret()
 
         if kind == "application":
