@@ -85,6 +85,7 @@ if "adapter" not in sys.modules:
         sys.path.insert(0, _conformance_tests)
 
 from adapter import (  # noqa: E402
+    ENUM_CLEAR,
     UNCLASSIFIED,
     VALID_CONFIRMATION,
     BatchOperation,
@@ -103,6 +104,7 @@ from adapter import (  # noqa: E402
     fresh_identifier,
     resolve_valid_confirmation,
 )
+from adapter import _EnumClear  # noqa: E402  -- type-hint only, mirrors ConformanceAdapter's own signature
 
 from mitatedb_api.application_audit import PostgresApplicationAuditSink  # noqa: E402
 from mitatedb_api.audit_dispatch import AuditRouter  # noqa: E402
@@ -2007,7 +2009,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         fields: Sequence[str] | None = None,
         field_types: Mapping[str, str] | None = None,
         field_constraints: Mapping[str, Mapping[str, Any]] | None = None,
-        enum: Sequence[Any] | None = None,
+        enum: Sequence[Any] | _EnumClear | None = None,
         nullable: bool | None = None,
         destructive: bool = False,
         confirmation: Any = None,
@@ -2021,7 +2023,10 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # single `/v1/schema/operations` dispatcher `_schema` already uses.
         # `destructive`/`confirmation` follow the identical VALID_
         # CONFIRMATION sentinel protocol `attempt_batch_with_addresses`
-        # above uses for a batch-embedded delete.
+        # above uses for a batch-embedded delete. `enum` is tri-state (port
+        # v1.13 追補, `adapter.ENUM_CLEAR`): omitted -> no `enum` key on
+        # the wire; `ENUM_CLEAR` -> a literal JSON `enum: null`; a
+        # `Sequence` -> `enum: [...]`, unchanged from before this addendum.
         assert isinstance(session, _Session)
         body: dict[str, Any] = {"operation": operation, "entity": entity}
         if field is not None:
@@ -2034,7 +2039,9 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             body["field_types"] = dict(field_types)
         if field_constraints:
             body["field_constraints"] = {k: dict(v) for k, v in field_constraints.items()}
-        if enum is not None:
+        if enum is ENUM_CLEAR:
+            body["enum"] = None
+        elif enum is not None:
             body["enum"] = list(enum)
         if nullable is not None:
             body["nullable"] = nullable
