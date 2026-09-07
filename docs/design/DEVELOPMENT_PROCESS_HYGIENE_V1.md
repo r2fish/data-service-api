@@ -1,6 +1,6 @@
 # 開発プロセス衛生 v1: 現行運用条件の単一正本 / 文書 ID 参照検査 / 作業指示書の manifest 化
 
-- 版数: **v1.4 (2026-09-07、コードレビューの裁定を D-2 に追記)**。v1.3 以前からの変更は **§9 改版履歴**にある
+- 版数: **v1.5 (2026-09-07、D-4 を追加し D-2 の CI 上の位置を訂正)**。v1.4 以前からの変更は **§9 改版履歴**にある
 - 位置づけ: **監督が確定した枠 (2026-09-07) の実施設計**である。本書は**開発プロセスの文書と道具**だけを対象とし、**共通契約・spec・Security Invariants・conformance-tests・両 peer のコードには一切触れない**。契約版数は **1.6.0 のまま**であり、フェーズ9 (契約 1.7.0) とは**別線**である
 - 応える G (計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §0): **G-3** (信頼性 = 運用条件と証拠の参照が腐らないこと)。**G-2** には副次的に応える — 公開リポジトリとして「何が現行の規律か」が 1 冊で読めることは、外部から見た監査可能性の一部である
 - テーマ: **「着手時に読むべき運用条件が 1 冊に集まっており、文書間の ID 参照が機械的に検査され、作業指示書が設計の複製ではなく発注の manifest である」状態にすること**
@@ -106,6 +106,10 @@
 **訂正註という慣行そのものは正しい。** 本文を書き換えずに註で直す形 (フェーズ6 §11 L6-18 の流儀) は履歴を保存する。**問題は註が要る頻度と、原因 6 件の性質にある** — いずれも「設計の逐語を作業指示書へ写した結果、実装構造と食い違った」ものである。代表例は `docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md:1154` (本文 §2 WP-1b が書いた `hold_in_flight` のラップ対象が実装では成立しないことの記録) である。**設計に書かれていれば設計側の 1 箇所で直る誤りが、写された結果 2 箇所に増えた。**
 
 **(3) 抽出の実測。** フェーズ9 作業指示書の WP-1 節 **44.7 KB** から「実装担当が発注を実行するために必要な情報だけ」— 目的 / 読むべき正本の節番号 / 触るファイル / 触らないファイル / 完了条件 30 件 / 完了条件↔変異の対応表 / 検証コマンド — を抽出すると **6.4 KB (14.3%)** になる。**残る 85.7% は設計文書に正本がある内容の再説明である。**
+
+### 1.4 CI が文書だけの push でも conformance を回している
+
+**GitHub Actions が 2026-09-07 に無料枠超過で停止した。** 9 月の run は **120 回**であり、その相当数は**文書 (`.md`) だけの push** に対するものである。ところが現行の `.github/workflows/ci.yml` は push のたびに conformance を **3.11 / 3.12 の 2 job** (各**約 9 分**、PostgreSQL 16 コンテナの起動を含む) 回すので、**振る舞いが 1 バイトも変わらない変更に対して実 PostgreSQL のゲートを 2 本走らせている**。計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 8 は変更クラスを「**触れるファイルの集合だけで機械的に決まる**」と定めており、**この判定は機械化できる** — 決めていないのは「CI がその判定を使うかどうか」だけである。**証拠を減らすのではなく、証拠を必要としない変更で証拠を作らないことが問題である** (クラスは必要な証拠の量を決める仕組みであり、省略のための仕組みではない。同 §9 の 8)。
 
 ---
 
@@ -222,6 +226,8 @@
 
 **位置**: **CI の両 job で pytest の前段** — **`Check COLLECTION_FLOOR` step の直後、`Run the common conformance gate` step の前**に置く (step 名で指す。行番号は改版で動く)。**依存導入 (`Install …`) の後**であることが要件である。**および pre-commit** (`pass_filenames: false`、標準ライブラリのみ) — **U-3 参照**。
 
+**【訂正 v1.5 (2026-09-07、監督の枠 D-4。上の文は原文として残す)】CI 上の位置を「conformance の両 job で pytest の前段」から「常時実行の独立 job `doc-refs`」に改める。** 同 job は ubuntu 上で checkout の後に `python3 tools/check_doc_refs.py` を 1 本走らせるだけであり、**`change-class` job の結果に依存しない (`needs` / `if` を持たない)**。**理由**: D-4 により **Class A (文書のみ) の push では conformance の 2 job が回らない**が、**本検査が最も要るのは文書だけの push である** — 参照を腐らせるのは文書の変更だからである。conformance job の中に置いたままだと、**検査が要る push でだけ検査が消える**。**pre-commit への配置 (U-3 = (A)) は変更しない。**
+
 #### 根拠
 
 - §1.2 (1): 全域一意族の宙に浮いた参照は現時点で **0 件**である。**固定すべきは現状の健全さの維持であり、検査の初期状態は緑である** (`COLLECTION_FLOOR` と同じ性質)。
@@ -281,6 +287,65 @@
 
 ---
 
+### D-4 CI は変更クラスで conformance の要否を決める
+
+#### 決定
+
+**変更クラスの機械判定を `tools/change_class.py` に置き、CI はその出力で conformance の要否を決める。** 狙いは **「Class A (文書のみ) の push では conformance を回さず、公開ゲート系の軽い検査だけ回す」**ことである。**判定できないときは全部回す** (安全側)。
+
+**(1) 判定 script `tools/change_class.py`** (**標準ライブラリのみ**。§2.2 の 5)。**変更パスの一覧** (引数、または stdin の 1 行 1 パス) を受け、計画文書 §9 の 8 の表を**パス規則**として適用し、**push 全体のクラス (各ファイルの最重クラス)** を出力する。
+
+**パス規則** (**重い順に評価し、最初に一致した規則がそのファイルのクラスである**):
+
+| クラス | パス規則 |
+|---|---|
+| **D** | `security/` 配下、`CLAUDE.md`、`docs/security/public-repository-policy.md`、`tools/public_value_scan.py` |
+| **C** | `spec/` 配下、`conformance-tests/` 配下、**契約 JSON の 3 複製** (`spec/` の正本と両 peer の packaged copy。**実装担当が `git ls-files` で実パスを確定し、script 内の定数に書く**) |
+| **A** | 上のどれにも当たらず、**拡張子が `.md`** (パスのどの階層でもよい) |
+| **B** | **それ以外すべて** |
+
+**出力**:
+
+- 1 行目 `class=<A|B|C|D>`
+- 2 行目 `conformance_required=<true|false>` — **`false` になるのは A のときだけである**
+- 以降、`<class> <path>` を 1 行ずつ (**安定ソート**)
+- **入力が空なら `class=unknown` / `conformance_required=true`** (空 push を安全側に倒す)
+
+**(2) テスト `tools/tests/test_change_class.py`。** 置き場は既存の `tools/tests/` と同じであり、**root pytest セッションの収集対象に入らない** (`COLLECTION_FLOOR` 不変)。**完了条件と変異は 1 対 1 であり、対応表は作業指示書 WP-4 に置く。**
+
+**(3) CI 配線 `.github/workflows/ci.yml`**:
+
+- **新 job `change-class`** (ubuntu、`actions/checkout` は `fetch-depth: 0`)。`github.event.before` と `github.sha` から `git diff --name-only` を取り、script に渡す。**`before` が全 0 (新規 branch)、`git merge-base --is-ancestor <before> <sha>` が偽 (force push)、または event が `workflow_dispatch` のときは `class=unknown` / `conformance_required=true` とする。** 結果は **job outputs** と **job summary** (クラスとファイル一覧) に書く。
+- **`conformance`**: `needs: change-class`、`if: needs.change-class.outputs.conformance_required == 'true'`。**`tally-consistency`**: `needs: [change-class, conformance]`、**同じ `if`** (3.11 の集計行を正本とする規約は不変であり、job が回るときの条件だけが変わる)。
+- **`Check document ID references` step を conformance job から外し、常時実行の独立 job `doc-refs` へ移す** (D-2 の訂正 v1.5)。
+- **`scanner` / `deploy-assets-lint` は変更しない。`concurrency` も変更しない。** ファイル冒頭コメントに D-4 への参照を 1 段落足す。
+
+**(4) 検証はローカルで行う。** **課金停止のため GitHub 側で run を取れない。** 実施形 (実コミット範囲に対する `change-class` job のシェル断片の実行、ci.yml の構造確認、`tools/tests`、`check_doc_refs.py` と pre-commit) は**作業指示書 WP-4** に置く。
+
+#### 根拠
+
+- **§1.4**: 無料枠の停止と、文書だけの push に対する 2 job × 約 9 分。
+- **計画文書 §9 の 8** が「**触れるファイルの集合だけで機械的に決まる肯定列挙**」と定めた — **機械実装が可能なのはこの定めがあるからである**。クラスの定義そのものは動かさない (roadmap の表は触らない)。
+- **§2.2 の 5** (`tools/` の流儀): 標準ライブラリのみ、**非 0 終了は「入力の誤り」にのみ使う** — 「判定不能」は非 0 ではなく `unknown` で表し、**`unknown` は conformance を回す側に倒れる**。「読めないものを clean と報告しない」の同型である。
+- **公開ゲート系 (`scanner` / `deploy-assets-lint` / `doc-refs`) は Class A の push でこそ要る**ので、常時実行のまま残す。
+
+#### 開示事項
+
+- **パス規則は人の分類の下限であり、置き換えではない。** 計画文書 §9 の 8 の C / D には**内容で決まる項目**がある — **登録済み同型 helper の本体** (C)、**`_ISOMORPHIC_TARGETS` 集合の増減** (D)、**catalog 宣言値** (C) — これらは**パスからは検出できない**。したがって**作業指示書の「変更クラス」欄 (人の分類) が正本であり続ける**。**CI が使うのは「A か否か」だけである。**
+- **判定できないときは `unknown` = 全部回す。** 新規 branch の初回 push (`before` が全 0)、force push (`before` が `sha` の祖先でない)、`workflow_dispatch`、および空の入力がこれに当たる。
+- **script は自分の判定を根拠に赤を出さない。** 非 0 終了は入力の誤り (存在しない引数形など) にのみ使う。
+- **ローカル用途**: `git diff --name-only origin/main...HEAD | ./.venv/bin/python tools/change_class.py` (3 点 = merge base からの差分。2 点 diff は並行して main に入った他作業のコミットを含み、クラスが重い側に寄る — WP-4 実装時の実測) で、**コミットメッセージに書くクラスを機械的に得られる**。
+- **3.12 job は据え置きである** (却下 (2))。
+
+#### 却下した代替案
+
+| # | 案 | 却下の理由 |
+|---|---|---|
+| **(1)** | **workflow 全体に `paths-ignore` を置く** | **公開ゲート系の検査まで止まる** — `scanner`・`deploy-assets-lint`・`doc-refs` は Class A の push でこそ要る。止めてよいのは conformance だけである |
+| **(2)** | **branch への push では 3.12 job を省く** | **3.11 / 3.12 の両方必須は依頼者裁定 2026-09-05 である。** 変えるなら別の裁定が要る。**今回は入れない** |
+
+---
+
 ## 4. 却下した代替案
 
 | # | 案 | 却下の理由 |
@@ -300,6 +365,8 @@
 **以下は両論のまま残す。「推奨」は監督の推奨であり、確定ではない。**
 
 **依頼者裁定 (2026-09-07、逐語): 「全て監督推奨 (A) で進めてください」** — これにより **U-1 (A)、U-3 (A)、U-4 (A)、U-5 (A) が確定**した (U-2 は §5 U-2 のとおり監督裁定で解消済み)。以下の両論は履歴として残す (R-14)。再審議しない。
+
+**【追記 2026-09-07 (コードレビュー R-1 / R-8 の裁定)】** (i) `change-class` job の diff は **`git diff --name-only --no-renames`** である。rename 検出が有効だと移動先パスだけが出力され、`security/` の文書を `docs/` へ動かす push (Class D) が Class A と判定されて conformance が飛ぶ (レビューの scratch repo 実測)。(ii) `conformance` / `tally-consistency` の `if` は成功依存 (`always()` / `!cancelled()` を使わない) なので、`change-class` 自体が失敗した push では下流が skip される。GitHub は required check の skip を成功扱いにするため、**将来 branch protection を設定するときは `change-class` と `doc-refs` を required に含める** (現状は PR を経ない運用で、workflow 全体が赤になるので実害は無い)。
 
 ### U-1 ローカル族 (D / U / WP / M / 裸 R) の扱い
 
@@ -342,6 +409,7 @@
 - **`conformance-tests/` は変更なし。** **既存の C-NN の集合を増やさない** (`conformance-tests/CONDITIONS.md` の C 族に行を足さない)。**`COLLECTION_FLOOR` は不変**である — 新設テストは `tools/tests/` に置き、root pytest セッションの収集対象に**入らない**。
 - **Security Invariants は変更なし。** 新しい SI を足さない。**CLAUDE.md「Security Invariants are not a feature gate」との関係**: 本作業に「新たに検証可能にすべき安全性質」は無い — **開発文書の整合は安全性質ではなく証拠の性質であり**、参照が腐っても API の振る舞いは変わらない。したがって「applicable invariant が示せない新機能」には当たらない。
 - **公開ゲート**: 新設文書と新設 script は `tools/public_value_scan.py` の対象である。**同 script は `git ls-files` ベースで未追跡ファイルを走査しない** ため、新設ファイルは**明示引数で走査する** (`HANDOVER_20260907_FABLE.md:164`)。
+- **CI の証拠 (D-4)**: **`conformance-tests/` は不変である。** **Class A (文書のみ) の push では CI が conformance の証拠を持たない** — 回るのは公開ゲート系 (`scanner` / `deploy-assets-lint` / `doc-refs`) だけである。**「3.11 job の集計行が正本である」という規約 (`docs/work-orders/OPERATING_CONDITIONS.md` §3) は不変**であり、**その証拠は Class B 以上の push と完了ゲート (§9 の 5 の root suite 単独実行) で得る。**
 - **契約**: 1.6.0 のまま**バイト不変**である。
 
 ---
@@ -419,6 +487,7 @@
 1. **U-1 / U-3 / U-4 / U-5 は依頼者判断待ちである** (§5)。**U-2 は監督裁定 2026-09-07 と実測で解消した** — 実施形は §3 D-2 である。
 2. **「CLAUDE.md の VPS 正本記述 vs 配備実態」は矛盾なしで決着した** (D-1 の裁定 4。起草担当の原文照合 2026-09-07)。`OPERATING_CONDITIONS.md` §5 には**註**として結論を残す (「未裁定」ではない)。
 3. **孤児定義 (定義されたが参照されない ID) は D-2 の対象外である** (§3 D-2 開示事項)。
+4. **D-4 (WP-4) を計画文書 §8 に新規行として起票するか、R-15 の範囲として扱うかは監督の判断である。** **本書は新規 ID を確定させない** — §7 の逐語案と計画文書 §8 の既存行には触れない。 **【決着 2026-09-07 (監督裁定)】R-15 の範囲とする。計画文書 v1.4 の R-15 行に追記済み。§9 の 11 も v1.4 で訂正注 (常時実行の独立 job) を得た。**
 
 ---
 
@@ -426,6 +495,7 @@
 
 | 版 | 日付 | 変更 | 根拠 |
 |---|---|---|---|
+| **v1.5** | 2026-09-07 | **§3 に D-4 (CI は変更クラスで conformance の要否を決める) を追加した** — `tools/change_class.py` のパス規則と出力、`change-class` job と `conformance` / `tally-consistency` の `needs` / `if`、`doc-refs` job への分離、却下 2 件 (`paths-ignore`、3.12 job の省略)。**§1 に 1.4 (2026-09-07 の Actions 停止。無料枠超過、9 月の run 120 回、conformance は 2 job × 約 9 分) を追加**。**§3 D-2 に訂正 v1.5** — `check_doc_refs.py` の CI 上の位置を「conformance の両 job で pytest の前段」から「常時実行の独立 job `doc-refs`」に改めた (Class A の push で conformance が回らなくても本検査は要るため。原文は残す)。**§6 に CI の証拠の条を追加** (Class A の push は conformance の証拠を持たない。3.11 集計行が正本である規約は不変)。**§8 の未解決点に 4 を追加** (D-4 の計画文書への起票の要否は監督の判断)。**§7 の逐語案・§4 の表・計画文書は触っていない** | 監督の枠 (2026-09-07、D-4)、計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 8 |
 | **v1.4** | 2026-09-07 | WP-2 コードレビュー (Opus) の裁定を §3 D-2 と §4 に追記した: 走査対象が読めないときも非 0 (R-D)、太字定義はスパンが ID で始まるものに限る (R-F)、SI 見出しは任意階層 (R-K、実装側の改善を採用)、L 族の行範囲表記の偽陰性を開示 (R-G)。テスト検出力の指摘 (R-A / R-B / R-C) は実装側で変異対応テストを追加 | WP-2 コードレビュー 2026-09-07 (監督保管)、監督裁定 2026-09-07 (改稿 2) |
 | **v1.3** | 2026-09-07 | §3 D-2 のトークン文法を「族ごとの採番規約の桁」に訂正した (SI / C / CCR = `\d{2}`、G / P / R / L = `\d{1,2}`、接尾辞 `[a-z]?` は維持)。原因は WP-2 の実 repo 走査で判明した文書ローカルの `C-1`〜`C-5` (R2DB_SERVICE_LAYER_ARCHITECTURE.md §5.3) との衝突 29 件。§4 の「桁数を固定しない」は原文を残し訂正注を付けた。作業指示書 §4 に訂正註 1 | WP-2 実装報告 2026-09-07 (監督保管)、監督裁定 2026-09-07 |
 | **v1.2** | 2026-09-07 | §5 に依頼者裁定を逐語で記録した — 「全て監督推奨 (A) で進めてください」により U-1 (A)・U-3 (A)・U-4 (A)・U-5 (A) が確定。本文の他の箇所は変更していない。以後 WP-3 → WP-2 の順で実施する | 依頼者裁定 2026-09-07 (逐語、監督保管) |

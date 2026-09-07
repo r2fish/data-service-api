@@ -22,6 +22,18 @@
 # would stay at Postgres's default of 100 and the gate's `-n 5` concurrent
 # adapters would exhaust connections. `docker run` passes `-c
 # max_connections=300` directly as a command argument to `postgres:16`.
+#
+# Change-class gating (design docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md
+# D-4): the `change-class` job below classifies this push's changed paths
+# with `tools/change_class.py` (roadmap docs/design/ROADMAP_POST_PHASE7_V1.md
+# section 9 item 8's A/B/C/D table, applied as a path-only floor) and the
+# `conformance` / `tally-consistency` jobs run only when that classification
+# is not Class A (docs-only) -- a push it cannot classify (an empty diff, an
+# unreachable `before`, or `workflow_dispatch`) is always treated as
+# conformance-required, never skipped. `scanner` and `deploy-assets-lint` are
+# unaffected and always run, and the document-ID-reference check now lives in
+# its own always-run `doc-refs` job rather than as a step inside `conformance`
+# (previously duplicated once per Python-version matrix entry).
 name: CI
 
 # Least-privilege default token scope (no job needs to write anything).
@@ -60,8 +72,60 @@ env:
   MITATEDB_TEST_ADMIN_DSN: "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=ci-only-ephemeral-not-a-real-secret"
 
 jobs:
+  change-class:
+    name: change class (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-4)
+    runs-on: ubuntu-latest
+    outputs:
+      class: ${{ steps.classify.outputs.class }}
+      conformance_required: ${{ steps.classify.outputs.conformance_required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is required: the classification below diffs
+          # against `github.event.before`, which can be arbitrarily far
+          # back on a branch with a long history.
+          fetch-depth: 0
+
+      - name: Classify this push's changed paths
+        id: classify
+        run: |
+          BEFORE="${{ github.event.before }}"
+          SHA="${{ github.sha }}"
+          ZERO="0000000000000000000000000000000000000000"
+
+          # Safe-side default (design D-4): a push this job cannot get a
+          # real diff for is never treated as "nothing changed" -- it is
+          # `unknown`/conformance-required, exactly like tools/change_class.py's
+          # own empty-input behavior. Three cases are undiffable here:
+          #   - `workflow_dispatch` carries no `before`/`sha` push pair at all;
+          #   - `before` is all-zero (a brand-new branch's first push);
+          #   - `before` is not an ancestor of `sha` (a force push that
+          #     rewrote history out from under the branch).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$BEFORE" = "$ZERO" ] || ! git merge-base --is-ancestor "$BEFORE" "$SHA"; then
+            RESULT="$(printf '' | python3 tools/change_class.py)"
+          else
+            RESULT="$(git diff --name-only --no-renames "$BEFORE" "$SHA" | python3 tools/change_class.py)"
+          fi
+
+          echo "$RESULT"
+
+          CLASS="$(echo "$RESULT" | grep '^class=' | cut -d= -f2)"
+          REQUIRED="$(echo "$RESULT" | grep '^conformance_required=' | cut -d= -f2)"
+          echo "class=$CLASS" >> "$GITHUB_OUTPUT"
+          echo "conformance_required=$REQUIRED" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Change class: $CLASS (conformance_required=$REQUIRED)"
+            echo ""
+            echo '```'
+            echo "$RESULT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   conformance:
     name: conformance (Python ${{ matrix.python-version }})
+    needs: change-class
+    if: needs.change-class.outputs.conformance_required == 'true'
     runs-on: ubuntu-latest
     # Phase 8 WP-1 review finding 3: a broken hold_in_flight premise hangs
     # rather than fails; bound the whole job so the hang surfaces as red.
@@ -105,9 +169,6 @@ jobs:
 
       - name: Check COLLECTION_FLOOR (R-9, evidence-loss detection -- design PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-3)
         run: python3 tools/check_collection_floor.py
-
-      - name: Check document ID references (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-2)
-        run: python3 tools/check_doc_refs.py
 
       - name: Run the common conformance gate
         run: |
@@ -219,7 +280,8 @@ jobs:
     # the 3.12 job's "required" status additionally depend on reproducing
     # that exact tally -- a mismatch fails this job, which is required.
     name: 3.11 tally is authoritative -- 3.12 must reproduce it
-    needs: conformance
+    needs: [change-class, conformance]
+    if: needs.change-class.outputs.conformance_required == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -249,6 +311,19 @@ jobs:
               sys.exit(1)
           print("3.11 and 3.12 tallies match:", {k: authoritative[k] for k in keys})
           PYEOF
+
+  doc-refs:
+    # Always runs, independent of change-class -- this is exactly the check
+    # a Class A (docs-only) push needs (design DEVELOPMENT_PROCESS_HYGIENE_V1.md
+    # D-4). Previously a step inside `conformance` (duplicated once per
+    # Python-version matrix entry, and skipped along with the rest of that
+    # job whenever conformance is not required).
+    name: doc-refs (document ID reference check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check document ID references (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-2)
+        run: python3 tools/check_doc_refs.py
 
   scanner:
     name: public-value scan (tree mode)
