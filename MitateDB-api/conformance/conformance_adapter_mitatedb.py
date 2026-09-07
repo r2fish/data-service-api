@@ -2440,11 +2440,30 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     ) -> Mapping[str, Any]:
         """port v1.13 (design D-6): `budget` is a QueryRequest top-level
         keyword on `session.read()`, exactly like `limit` (port v1.12)
-        already is there."""
+        already is there.
+
+        C-25 (design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_
+        VERIFICATION_V1.md D-7, supervisor ruling on the query path):
+        `ApplicationCell.read()` itself is a bare `list[dict]` with no slot
+        a `request_id` could ever occupy, so this peer's own runtime gains
+        a second, additive entry point -- `session.read_with_result(...)`
+        (WP-3e), same arguments as `read()`, returning a contract-shaped
+        `{"items": [...], "next_page": ..., "request_id": ...}` dict --
+        instead of `read()` growing that shape itself. Detected via
+        `hasattr`, the same capability-detection convention this file
+        already uses for `create_collection`/`add_field`/`create_entity`/
+        `alter_field`/`drop_entity`: while WP-3e has not landed on a given
+        checkout, the session has no `read_with_result` attribute at all
+        and this falls straight through to the pre-existing `read()` path
+        below, where `request_id` stays `None` -- never fabricated on the
+        peer's behalf (M-1 convention)."""
         filters = [Filter(field, "eq", value)] if field is not None else None
         kwargs: dict[str, Any] = {}
         if budget:
             kwargs["budget"] = dict(budget)
+        if hasattr(session, "read_with_result"):
+            result = self._call(lambda: session.read_with_result(entity, fields=list(select), filters=filters, **kwargs))
+            return {"items": list(result.get("items", [])), "revisions": result.get("revisions"), "request_id": result.get("request_id")}
         result = self._call(lambda: session.read(entity, fields=list(select), filters=filters, **kwargs))
         if isinstance(result, Mapping):
             # Structurally has a place for `revisions`/`request_id` --
