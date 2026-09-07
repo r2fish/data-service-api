@@ -728,9 +728,19 @@ async def post_query(request: Request) -> Response:
 
 def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     _check_object_shape(raw, _DEFINITIONS["Mutation"], label="mutation operation")
-    item: dict[str, Any] = {"type": raw["operation"], "collection": entity}
-    if "values" in raw:
-        item["values"] = raw["values"]
+    # Phase 9 WP-3b rework (M-6/G-1): `values` is now ALWAYS present
+    # (`raw.get("values") or {}`, never conditional on `"values" in raw`)
+    # -- the in-process port's own `attempt_mutation_with_result`/
+    # `attempt_batch_with_result` (`conformance/conformance_adapter_
+    # mitatedb.py`) build EVERY item with `"values": dict(values or {})`
+    # unconditionally; the two plugs must build the identical `request_
+    # object` for `cell.py::normalize_request_for_plan` to digest
+    # (design D-4 (7): "HTTP 層から来ても in-process port から来ても同じ
+    # object になる") -- a `delete`/`where`-only `update` used to digest
+    # to a DIFFERENT object on this plug (`{}` key absent) than on the
+    # in-process plug (`{"values": {}}`), so a plan taken on one plug
+    # could never validate on the other (WP-3b review M-6).
+    item: dict[str, Any] = {"type": raw["operation"], "collection": entity, "values": dict(raw.get("values") or {})}
     if "where" in raw:
         item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
     if "expected_revision" in raw:
@@ -747,16 +757,29 @@ def _mutation_item(entity: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _mutation_outcome(items: list[dict[str, Any]], results: list[Any]) -> tuple[int, bool, str | None]:
+def _mutation_outcome(items: list[dict[str, Any]], results: list[Any], *,
+                      dry_run: bool = False) -> tuple[int, bool, str | None]:
     """Phase 9 WP-3b: shared by `post_mutate`/`post_cross_entity_mutate`
     -- `affected` exactly as both computed it before this WP (`zip`
     truncates to `len(items)`, so this is unaffected by `cell.py::
     ApplicationCell.transact`'s own dry-run envelope, appended -- when
     present -- one entry PAST the last real per-item result). `committed`/
     `plan` are read off that trailing envelope (a dict `transact()` itself
-    never returns for a real, non-dry-run request, design D-4 (4):
-    `committed` then defaults to `True`, unchanged from this peer's own
-    pre-WP-3b hardcoded response literal)."""
+    never returns for a real, non-dry-run request, design D-4 (4)).
+
+    Rework (Minor m-4, review): `committed`'s own default is `not
+    dry_run` -- matching the in-process port's own identical `envelope.
+    get("committed", not dry_run)` (`conformance/conformance_adapter_
+    mitatedb.py::_mutation_result_to_mapping`) -- rather than the
+    previous unconditional `True`. `transact()` always appends the
+    envelope for a dry run (so `envelope.get("committed", ...)` finds a
+    real `False` there in practice either way) and never for a real
+    call, where `results[-1]` is instead a real per-item result dict
+    (e.g. `{"deleted": n}`) that happens to carry no `committed` key --
+    this default is only ever consulted in that second case, and `dry_run`
+    is always `False` there too, so the two defaults agree in every
+    reachable case today; aligning them removes a latent trap for
+    whichever future change makes them diverge."""
     affected = 0
     for item, result in zip(items, results):
         if item["type"] == "insert":
@@ -764,7 +787,7 @@ def _mutation_outcome(items: list[dict[str, Any]], results: list[Any]) -> tuple[
         elif isinstance(result, dict):
             affected += result.get("updated", result.get("deleted", 0))
     envelope = results[-1] if results and isinstance(results[-1], dict) else {}
-    return affected, envelope.get("committed", True), envelope.get("plan")
+    return affected, envelope.get("committed", not dry_run), envelope.get("plan")
 
 
 @_endpoint
@@ -782,7 +805,22 @@ async def post_mutate(request: Request) -> Response:
     if "idempotency_key" in body:
         _deny_provisional_field("idempotency_key")
     _deny_first_provisional_field(body, _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS)
-    transaction = body.get("transaction", "atomic")
+    # `transaction_raw` (rework, G-1): the digest must commit to the
+    # request AS PRESENTED -- an omitted `transaction` and one explicitly
+    # spelling out the deployed default (`"atomic"`) are two DIFFERENT
+    # requests (contract `structured_operations.dry_run.plan`: "a real
+    # request differing from the dry run in any of them is a different
+    # request"), so `session.transact` below is given the RAW,
+    # unbackfilled value -- `None` when the client omitted the key --
+    # never this method's own resolved `transaction` (backfilled to
+    # `"atomic"` purely for THIS validation step, unchanged from before
+    # this rework). C-22 (10)'s own MitateDB-api-http leg is what caught
+    # this: presenting a dry run's plan back with `transaction: "atomic"`
+    # newly ADDED must be refused, and it silently was not while `session.
+    # transact` received the backfilled value on BOTH the dry run and the
+    # apply alike (both always "atomic", so nothing ever differed).
+    transaction_raw = body.get("transaction")
+    transaction = transaction_raw if transaction_raw is not None else "atomic"
     if transaction == "best_effort":
         # `best_effort_transactions: unavailable` (cell.py's own
         # declaration, unchanged) -- `transact()` has no partial-result
@@ -804,8 +842,16 @@ async def post_mutate(request: Request) -> Response:
     results = session.transact(
         items, request_id=_request_id(request),
         dry_run=body.get("dry_run", False), plan=body.get("plan"),
+        # Phase 9 WP-3b rework (M-4/G-1): `transaction_raw` (NOT the
+        # backfilled `transaction` above) now reaches `session.transact`
+        # -- `None` when the request omitted the key, `"atomic"` only
+        # when the request actually named it -- so the digest commits to
+        # what the request presented, not this endpoint's own resolved
+        # default. `post_cross_entity_mutate` below has no `transaction`
+        # field on `ScopedMutationRequest` at all, so it never passes one.
+        transaction=transaction_raw,
     )
-    affected, committed, plan_token = _mutation_outcome(items, results)
+    affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
     if plan_token is not None:
         response["plan"] = plan_token
@@ -826,9 +872,9 @@ def _scoped_mutation_item(raw: Mapping[str, Any]) -> dict[str, Any]:
     it with `CAPABILITY_UNSUPPORTED`, not a second copy of that refusal
     at this layer."""
     _check_object_shape(raw, _DEFINITIONS["ScopedMutation"], label="cross-entity mutation operation")
-    item: dict[str, Any] = {"type": raw["operation"], "collection": raw["entity"]}
-    if "values" in raw:
-        item["values"] = raw["values"]
+    # Phase 9 WP-3b rework (M-6/G-1): same reasoning as `_mutation_item`'s
+    # own identical comment -- `values` always present.
+    item: dict[str, Any] = {"type": raw["operation"], "collection": raw["entity"], "values": dict(raw.get("values") or {})}
     if "where" in raw:
         item["filters"] = [_predicate_to_filter(w) for w in raw["where"]]
     if "expected_revision" in raw:
@@ -882,7 +928,7 @@ async def post_cross_entity_mutate(request: Request) -> Response:
         items, request_id=_request_id(request),
         dry_run=body.get("dry_run", False), plan=body.get("plan"),
     )
-    affected, committed, plan_token = _mutation_outcome(items, results)
+    affected, committed, plan_token = _mutation_outcome(items, results, dry_run=body.get("dry_run", False))
     response: dict[str, Any] = {"committed": committed, "affected": affected}
     if plan_token is not None:
         response["plan"] = plan_token
@@ -1033,8 +1079,25 @@ async def post_schema(request: Request) -> Response:
         # before this call even returns, so a SEPARATE post-call read
         # here would race a concurrent writer and could report a revision
         # this dry run's own `plan` was never computed against.
+        # Phase 9 WP-3b rework (M-2/G-1): `field_types=` below is the RAW,
+        # PARTIAL declaration the caller actually presented (`field_types_
+        # map`, only the names `field_types_raw` itself named -- `None`
+        # when the request omitted `field_types` entirely), never `
+        # contract_field_types` (the TOTAL, `json`-backfilled map decision
+        # (ii) above builds so `fields`'s own foundation-type choice below
+        # has a value for every name). `cell.py::ApplicationCell.create_
+        # collection` backfills the SAME missing names to `json` on its
+        # own (via `FOUNDATION_TYPE_TO_CONTRACT_TYPE`, deriving it from
+        # the foundation type `fields` already carries for that name) --
+        # so the entity this call creates is byte-identical either way;
+        # only the `plan` DIGEST changes, from committing to the resolved
+        # total map (WP-3b review M-2: a request omitting `field_types`
+        # and one explicitly spelling out the same defaults used to
+        # collide on one token) to committing to what the request itself
+        # named.
         result = session.create_entity(
-            entity, fields, field_types=contract_field_types, field_constraints=field_constraints,
+            entity, fields, field_types=(field_types_map if field_types_raw is not None else None),
+            field_constraints=field_constraints,
             dry_run=body.get("dry_run", False), plan=body.get("plan"),
             request_id=_request_id(request))
         response: dict[str, Any] = {"committed": result["committed"], "revision": result["revision"]}

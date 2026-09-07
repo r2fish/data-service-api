@@ -1017,6 +1017,85 @@ def test_create_entity_defaults_to_a_base_id_field_when_fields_omitted(app_a) ->
         close_cell(cell)
 
 
+# --- Phase 9 WP-3b rework (G-5(d)/review §3 m-6(4)): the `dry_run` branch
+# of `PostgresBackend.create_collection`/`.alter_field_constraints` -- C-22
+# (the HTTP+PostgreSQL plug) only ever drives `add_field`/`transact`'s own
+# dry_run branch through this backend; NO test, peer-local or conformance,
+# had exercised these other two before this rework. ---
+
+
+def test_create_collection_dry_run_rolls_back_ddl_and_registry_writes_on_postgres_backend(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        dry = developer.create_entity(
+            "pgbackend_dry_things", fields={"label": "text"}, field_types={"label": "string"}, dry_run=True,
+        )
+        assert dry["committed"] is False
+        assert "label" in dry["descriptor"]["fields"]
+        assert dry["descriptor"]["field_types"]["label"] == "string"
+        assert isinstance(dry.get("plan"), str) and dry["plan"]
+
+        # The real DDL/registry write was genuinely rolled back -- the
+        # entity does not exist for real (`NotFoundError`, not merely
+        # "empty"), and a real `create_entity` for the SAME name
+        # afterward succeeds cleanly (it would raise `ConflictError` if
+        # the dry run's own DDL had actually committed).
+        with pytest.raises(NotFoundError):
+            runtime.read("pgbackend_dry_things")
+
+        real = developer.create_entity(
+            "pgbackend_dry_things", fields={"label": "text"}, field_types={"label": "string"}, plan=dry["plan"],
+        )
+        assert real["committed"] is True
+        runtime.insert("pgbackend_dry_things", {"label": "x"})
+        assert runtime.read("pgbackend_dry_things") == [{"label": "x"}]
+    finally:
+        close_cell(cell)
+
+
+def test_alter_field_constraints_dry_run_rolls_back_the_existing_row_scan_and_registry_write_on_postgres_backend(app_a) -> None:
+    cell = make_cell(app_a)
+    developer, runtime = sessions_for(cell, app_a.app_id)
+    try:
+        developer.create_collection("pgbackend_dry_alter_things", {"label": "text"})
+        runtime.insert("pgbackend_dry_alter_things", {"label": "kept"})
+
+        dry = developer.alter_field("pgbackend_dry_alter_things", "label", nullable=False, dry_run=True)
+        assert dry["committed"] is False
+        assert dry["descriptor"]["field_constraints"]["label"]["nullable"] is False
+
+        # Real catalog is unchanged: still nullable (`_backend.
+        # alter_field_constraints`'s own existing-row scan ran for real
+        # -- there was one non-null row, so it would NOT have conflicted
+        # either way -- but the registry write and the revision bump were
+        # both rolled back).
+        catalog = {row["entity"]: row for row in developer.catalog()}
+        assert catalog["pgbackend_dry_alter_things"]["field_constraints"]["label"]["nullable"] is True
+
+        # The real (non-dry-run) alter_field for the SAME declaration
+        # still commits for real, using the SAME plan the dry run
+        # returned (the revision has not moved since -- this is the same
+        # scenario `test_plan_is_deterministic_and_valid_against_
+        # unchanged_schema` pins for a mutation, exercised here against
+        # the Postgres backend's own alter_field_constraints dry_run
+        # branch specifically).
+        real = developer.alter_field("pgbackend_dry_alter_things", "label", nullable=False, plan=dry["plan"])
+        assert real["committed"] is True
+        catalog_after = {row["entity"]: row for row in developer.catalog()}
+        assert catalog_after["pgbackend_dry_alter_things"]["field_constraints"]["label"]["nullable"] is False
+
+        # A CONFLICTING dry run (an existing NULL row) still raises
+        # `ConflictError` for real -- the existing-row scan is not
+        # skipped for a dry run, only the registry write/commit are.
+        developer.add_field("pgbackend_dry_alter_things", "optional_field", "text")
+        runtime.insert("pgbackend_dry_alter_things", {"label": "has-null-optional"})
+        with pytest.raises(ConflictError):
+            developer.alter_field("pgbackend_dry_alter_things", "optional_field", nullable=False, dry_run=True)
+    finally:
+        close_cell(cell)
+
+
 # --- B-1 (independent review, blocker): value-domain escape + connection ---
 # --- poisoning -------------------------------------------------------------
 

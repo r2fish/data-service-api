@@ -119,8 +119,15 @@ class StorageBackend:
         raise NotImplementedError
 
     def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None,
-                          dry_run=False):
-        """``fields``: ``{field_name: declared_type}`` using this
+                          deadline=None, dry_run=False):
+        """WP-3b rework (F-2): ``deadline`` -- both ``backend_sqlite.
+        SQLiteBackend`` and ``backend_postgres.PostgresBackend`` have
+        always accepted this keyword (``ApplicationCell._limit_gate``'s
+        own wall-clock deadline, ``execution_ms``); this Protocol
+        declaration previously omitted it, undocumenting a parameter
+        every real backend already required.
+
+        ``fields``: ``{field_name: declared_type}`` using this
         foundation's own vocabulary (``cell._FIELD_TYPE_VOCABULARY``).
         Raises ``errors.ConflictError`` if ``name`` already exists. Bumps
         the schema revision atomically with the DDL. Returns ``(revision,
@@ -162,7 +169,7 @@ class StorageBackend:
         raise NotImplementedError
 
     def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None,
-                  audit_hook=None, dry_run=False):
+                  audit_hook=None, deadline=None, dry_run=False):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
         Bumps the schema revision atomically with the DDL. Returns

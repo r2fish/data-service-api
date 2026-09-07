@@ -1267,6 +1267,45 @@ _NON_AUDIT_FIELD_PARAMETERS: dict[str, frozenset[str]] = {
     "target_kind": frozenset(),
 }
 
+# Phase 9 WP-3b rework (2026-09-07): this list's own PARAMETER-position
+# sibling immediately above (`_NON_AUDIT_OPERATION_PARAMETERS`) already
+# documents "`operation` is not an audit-only word" for a FUNCTION
+# PARAMETER named `operation`; this is that identical principle's VALUE-
+# LITERAL counterpart, load-bearing for `test_declared_operations_cover_
+# every_emittable_operation`'s own `U == D | N` completeness equality
+# (`_field_literal_union` below, which -- unlike the smuggling checks --
+# scans keyword-argument AND `name_assign` sites for field="operation"
+# PACKAGE-WIDE, with no notion of "this one is for an unrelated
+# vocabulary").
+#
+# `cell.py::ApplicationCell.create_collection` binds a LOCAL variable
+# literally named `operation` to the string `"create_entity"` -- the
+# CONTRACT's own `SchemaOperationRequest.operation` vocabulary word for
+# a `create_entity` request (design docs/design/PHASE9_CONTRACT_170_
+# DECLARATION_AND_VERIFICATION_V1.md D-4 (7), 監督裁定 G-1), needed
+# because the `plan` token's own digest commits to the request's own
+# `operation` field (S-a: "the request object this endpoint's own
+# request schema names"). `create_collection` itself names no `Schema
+# OperationRequest.operation` of its own -- it is reached ONLY through
+# `create_entity`'s contract operation -- so this is the one genuinely
+# NEW word this rework's own digest mechanism introduces to the
+# `operation`-named-binding universe. It is NOT an audit word: this
+# SAME method's own `_make_audit_hook(..., operation="create_collection",
+# ...)` call a few lines below uses the FOUNDATION-internal name instead
+# (unchanged by this rework) -- the digest's contract-level vocabulary
+# and the audit trail's foundation-level vocabulary are two DIFFERENT
+# words for the identical call, by design (P3-D1's own pre-existing
+# split between this peer's wire-facing and foundation-facing names).
+#
+# `add_field`/`alter_field` need NO entry here: each one's own new
+# digest `operation` binding (`operation = "add_field"` / `operation =
+# "alter_field"`) is the SAME literal that method's own pre-existing
+# `_make_audit_hook(..., operation="add_field"/"alter_field", ...)` call
+# already contributes to U -- so neither adds anything U does not
+# already contain, and the equality below stays exact without listing
+# them.
+_NON_AUDIT_OPERATION_LITERALS: frozenset[str] = frozenset({"create_entity"})
+
 
 def _field_positional_definitions(paths: list[Path], field: str) -> list[str]:
     """P4-D16 v3(c)'s own violation collector, generalized: every
@@ -1866,18 +1905,36 @@ def test_declared_event_classes_cover_every_emittable_class() -> None:
 def test_declared_operations_cover_every_emittable_operation() -> None:
     """P4-D16 v3(e) for `operation` (design D-1). Same `U == D | N`, `D & N
     == set()` equality as `event_class` above, now load-bearing (this WP
-    flips `contract_version` to 1.5.0 in the same commit)."""
+    flips `contract_version` to 1.5.0 in the same commit).
+
+    Phase 9 WP-3b rework (2026-09-07): `U` is filtered through `_NON_
+    AUDIT_OPERATION_LITERALS` FIRST -- see that constant's own docstring
+    for exactly which single word it removes and why (the plan-digest
+    mechanism's contract-level `operation` vocabulary, unrelated to this
+    audit-vocabulary completeness proof). This filtering is itself
+    pinned non-vacuous below: the exclusion set must be a REAL, non-empty
+    subset of the raw scan, or this test would silently stop meaning
+    anything the moment that literal stopped being emitted."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
     declared = set(document["capabilities"]["audit_query"]["operations"])
     assert declared == DECLARED_AUDIT_OPERATIONS
 
-    emitted = _field_literal_union(_iter_src_files(), "operation")
-    assert emitted, "the AST scanner found zero operation literals -- it is itself broken"
+    raw_emitted = _field_literal_union(_iter_src_files(), "operation")
+    assert raw_emitted, "the AST scanner found zero operation literals -- it is itself broken"
+    assert _NON_AUDIT_OPERATION_LITERALS <= raw_emitted, (
+        f"_NON_AUDIT_OPERATION_LITERALS names a word the scanner no longer finds at all -- "
+        f"{_NON_AUDIT_OPERATION_LITERALS - raw_emitted!r} -- the exclusion is stale, not filtering anything real"
+    )
+    emitted = raw_emitted - _NON_AUDIT_OPERATION_LITERALS
 
     d = DECLARED_AUDIT_OPERATIONS
     n = _NON_DURABLE_OPERATIONS
     assert not (d & n), f"declared vocabulary and non-durable exclusion set N overlap (should be disjoint): {d & n!r}"
+    assert not (d & _NON_AUDIT_OPERATION_LITERALS), (
+        f"a word in _NON_AUDIT_OPERATION_LITERALS is ALSO a declared audit operation -- it is not actually "
+        f"non-audit, the exclusion is wrong: {d & _NON_AUDIT_OPERATION_LITERALS!r}"
+    )
     assert emitted == d | n, (
         f"emittable-vs-(declared|N) mismatch: "
         f"emitted but neither declared nor in N: {emitted - (d | n)!r}; "

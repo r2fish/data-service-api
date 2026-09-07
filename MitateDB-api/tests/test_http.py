@@ -898,6 +898,143 @@ def test_alter_field_with_neither_enum_nor_nullable_is_refused_over_http(app_a_s
     assert revision_after == revision_before + 1, "the refused alter_field must not itself have advanced the revision"
 
 
+# ---------------------------------------------------------------------------
+# Phase 9 WP-3b rework (code review §3 m-6(1)/F-4): the HTTP-boundary
+# dry_run/plan tests the original WP-3b submission never added at all (it
+# only ever DELETED the pre-WP-3b gate-denial cases, `test_contract_1_7_0_
+# provisional_gate_rejects_new_fields_before_execution` above, with no
+# replacement) -- `MitateDB-api/tests/test_dry_run_and_plan.py` exercises
+# `cell.py`/`ApplicationDeveloper`/`ApplicationRuntime` directly, never
+# through `http.py`'s own request parsing (`_mutation_item`/`post_schema`'s
+# own field-by-field extraction) or its own response assembly
+# (`_mutation_outcome`, the `descriptor`/`plan` conditional keys). These
+# three are the minimum F-4 asks for: a mutation dry-run response, a schema
+# dry-run response, and a plan-mismatch refusal -- all driven through a
+# real ASGI request/response round trip.
+# ---------------------------------------------------------------------------
+
+
+def test_http_mutation_dry_run_response_shape(app_a_stack):
+    """F-4 (1/3): a mutation `dry_run` over HTTP answers `committed:
+    false`, a real `affected` count, a `plan`, and NO `assigned_addresses`
+    key at all -- and leaves no row behind. A mutation on `committed`
+    that hardcodes `True` (this endpoint's own pre-WP-3b literal) would
+    fail this test's own first assertion."""
+    entity = "http_mutation_dry_run_entity"
+    _create_entity(app_a_stack, entity, fields=["label"])
+
+    response = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "dry-row"}}], "dry_run": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is False, body
+    assert body["affected"] == 1, body
+    assert isinstance(body.get("plan"), str) and body["plan"], body
+    assert "assigned_addresses" not in body, body
+
+    rows = _post(app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert rows.json()["items"] == [], "a dry-run insert over HTTP must leave no row behind"
+
+
+def test_http_schema_dry_run_response_shape(app_a_stack):
+    """F-4 (2/3): a schema `dry_run` over HTTP answers `committed: false`,
+    a `descriptor` carrying the field the entity would have afterward, and
+    a `revision` equal to the CURRENT (pre-apply) value -- and leaves the
+    real catalog unchanged."""
+    entity = "http_schema_dry_run_entity"
+    create_response = _create_entity(app_a_stack, entity, fields=["label"])
+    revision_before = create_response.json()["revision"]
+
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "add_field", "entity": entity, "field": "new_field", "field_type": "string",
+                  "dry_run": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is False, body
+    assert body["revision"] == revision_before, "a dry-run schema op must report the PRE-apply revision"
+    assert "new_field" in body["descriptor"]["fields"], body
+    assert body["descriptor"]["field_types"]["new_field"] == "string", body
+    assert isinstance(body.get("plan"), str) and body["plan"], body
+
+    catalog = {e["entity"]: e for e in _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()["entities"]}
+    assert "new_field" not in catalog[entity]["fields"], "a dry-run add_field over HTTP left a real field behind"
+
+
+def test_http_plan_mismatch_is_412_precondition_failed(app_a_stack):
+    """F-4 (3/3): a `plan` taken for one mutation body, presented on a
+    DIFFERENT body, is refused over the real HTTP boundary with the exact
+    contract mapping -- HTTP 412, `code: PRECONDITION_FAILED`,
+    `details.violated_declaration: plan` -- and never executes."""
+    entity = "http_plan_mismatch_entity"
+    _create_entity(app_a_stack, entity, fields=["label"])
+
+    dry = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "body-a"}}], "dry_run": True},
+    )
+    plan = dry.json()["plan"]
+
+    mismatched = _post(
+        app_a_stack, f"/v1/data/{entity}/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [{"operation": "insert", "values": {"label": "body-b"}}], "plan": plan},
+    )
+    assert mismatched.status_code == 412, mismatched.text
+    body = mismatched.json()
+    assert body["code"] == "PRECONDITION_FAILED", body
+    assert body["details"] == {"violated_declaration": "plan"}, body
+
+    rows = _post(app_a_stack, f"/v1/data/{entity}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert rows.json()["items"] == [], "the plan-mismatched apply must not have executed"
+
+
+def test_cross_entity_mutation_dry_run_leaves_no_row_and_carries_a_plan(app_a_stack):
+    """G-5 (c): `POST /v1/data/mutations` (cross-entity) honors `dry_run`/
+    `plan` too -- this response shape has never been exercised by any
+    peer-local test (`ApplicationRuntime` has no separate cross-entity
+    method of its own; the distinction is entirely an HTTP-layer request-
+    shape one, `_scoped_mutation_item`)."""
+    entity_x = "http_cross_entity_dry_run_x"
+    entity_y = "http_cross_entity_dry_run_y"
+    _create_entity(app_a_stack, entity_x, fields=["label"])
+    _create_entity(app_a_stack, entity_y, fields=["label"])
+
+    response = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "insert", "entity": entity_x, "values": {"label": "x-dry"}},
+            {"operation": "insert", "entity": entity_y, "values": {"label": "y-dry"}},
+        ], "dry_run": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is False, body
+    assert body["affected"] == 2, body
+    assert isinstance(body.get("plan"), str) and body["plan"], body
+    assert "assigned_addresses" not in body, body
+
+    x_rows = _post(app_a_stack, f"/v1/data/{entity_x}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    y_rows = _post(app_a_stack, f"/v1/data/{entity_y}/query", bearer=app_a_stack.runtime_bearer, json_body={"select": ["label"]})
+    assert x_rows.json()["items"] == [], "a dry-run cross-entity insert must leave no row behind (entity x)"
+    assert y_rows.json()["items"] == [], "a dry-run cross-entity insert must leave no row behind (entity y)"
+
+    # The SAME plan, replayed as a real apply, actually commits (proves the
+    # dry run's own `plan` is honored on this endpoint, not merely accepted
+    # and discarded).
+    real = _post(
+        app_a_stack, "/v1/data/mutations", bearer=app_a_stack.runtime_bearer,
+        json_body={"operations": [
+            {"operation": "insert", "entity": entity_x, "values": {"label": "x-dry"}},
+            {"operation": "insert", "entity": entity_y, "values": {"label": "y-dry"}},
+        ], "plan": body["plan"]},
+    )
+    assert real.status_code == 200, real.text
+    assert real.json()["committed"] is True, real.json()
+
+
 def test_runtime_credential_forbidden_from_schema_operations(app_a_stack):
     response = _post(
         app_a_stack, "/v1/schema/operations", bearer=app_a_stack.runtime_bearer,

@@ -38,11 +38,12 @@ from mitatedb_api.application_audit import ApplicationAuditSink
 from mitatedb_api.audit_dispatch import AuditRouter
 from mitatedb_api.auth import Principal
 from mitatedb_api.backend_sqlite import SQLiteBackend
-from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
+from mitatedb_api.cell import (ApplicationCell, ApplicationDeveloper, ApplicationRuntime,
+                               compute_plan_token, normalize_request_for_plan)
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.errors import (AuthorizationError, DestructiveConfirmationRequired,
                                  PreconditionFailedError)
-from mitatedb_api.http import _problem_for_exception
+from mitatedb_api.http import _mutation_item, _problem_for_exception
 
 # ===========================================================================
 # Fixtures -- mirrors test_constraints_declaration.py's own WP-3a precedent.
@@ -356,6 +357,32 @@ def test_plan_digest_covers_budget_not_only_operations(sessions) -> None:
     assert cell.read(principal, entity, fields=["label"], filters=None, order_by=None, limit=None) == []
 
 
+def test_plan_digest_covers_transaction_not_only_operations(sessions) -> None:
+    """WP-3b rework (M-4/G-1): `MutationRequest.transaction` is part of
+    what the token commits to, exactly like `budget` immediately above --
+    reproduced against the pre-rework digest (`cell.py:1784`'s own
+    `request = {"operations": operations}`, never carrying `transaction`
+    at all, so this exact scenario used to commit silently). Driven
+    through `ApplicationRuntime.transact` itself (unlike `budget`,
+    `transaction` names no still-`unavailable` capability -- `http.py::
+    post_mutate` already accepts and forwards `"atomic"` today)."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+
+    dry = runtime.transact(
+        [{"type": "insert", "collection": entity, "values": {"label": "transaction-row"}}], dry_run=True,
+    )
+    plan = dry[-1]["plan"]
+
+    with pytest.raises(PreconditionFailedError) as ei:
+        runtime.transact(
+            [{"type": "insert", "collection": entity, "values": {"label": "transaction-row"}}],
+            plan=plan, transaction="atomic",
+        )
+    assert ei.value.details == {"violated_declaration": "plan"}
+    assert runtime.read(entity) == []
+
+
 # --- unit coverage for completion condition 11's own HTTP half (the
 # shared C-22 test itself is what proves the in-process/HTTP AGREEMENT,
 # run against both registered MitateDB plugs; this pins the narrower,
@@ -379,3 +406,348 @@ def test_precondition_failed_http_mapping() -> None:
     # SI-10: no row value/SQL/internal name -- the fixed, static message,
     # never `str(exc)`.
     assert payload["message"] == "The declared precondition no longer holds."
+
+
+# ===========================================================================
+# Phase 9 WP-3b rework (code review 2026-09-07, 監督裁定 G-1..G-5/F-2..F-8):
+# regression tests for the 6 return-to-sender items.
+# ===========================================================================
+
+
+# --- G-2: pin the 3 normalization rules `normalize_request_for_plan` (S-a)
+# states -- token equality can never catch a broken rule on its own (M-5:
+# `sort_keys=True` -> `False` and loosened `separators`/`ensure_ascii` both
+# survived the pre-rework suite at 860 passed), so this asserts the
+# canonical BYTES themselves against a known input. ---
+
+
+def test_normalize_request_for_plan_pins_sort_keys_no_whitespace_and_unescaped_non_ascii() -> None:
+    request = {"b": 1, "a": "café", "c": [3, 2, 1]}
+    encoded = normalize_request_for_plan(request)
+    assert encoded == b'{"a":"caf\xc3\xa9","b":1,"c":[3,2,1]}'
+    # Key-order independence: an equal mapping presented with keys in a
+    # DIFFERENT insertion order must digest identically (`sort_keys`).
+    reordered = {"c": [3, 2, 1], "a": "café", "b": 1}
+    assert normalize_request_for_plan(reordered) == encoded
+    # Every one of the 3 rules, isolated: (i) sort_keys -- a manually
+    # key-sorted `json.dumps` with the SAME separators/ensure_ascii must
+    # match exactly. (ii) no insignificant whitespace -- the default
+    # `json.dumps` separators (`", "`/`": "`) would NOT match. (iii)
+    # non-ASCII left unescaped -- `ensure_ascii=True` would emit `é`
+    # instead of the raw UTF-8 bytes for `é`, and would NOT match.
+    import json as _json
+    assert encoded == _json.dumps(request, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False).encode("utf-8")
+    assert encoded != _json.dumps(request, sort_keys=True, ensure_ascii=False).encode("utf-8"), (
+        "default (whitespace-carrying) separators must NOT match -- rule (ii) is unpinned otherwise"
+    )
+    assert encoded != _json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8"), (
+        "ensure_ascii=True (the json.dumps default) must NOT match -- rule (iii) is unpinned otherwise"
+    )
+
+
+def test_normalize_request_for_plan_excludes_only_plan_and_dry_run() -> None:
+    """G-4: the 2-key exclusion happens INSIDE the helper now, not the
+    caller -- `plan` is never askable to include its own digest, and
+    `dry_run` always differs between a dry run and the request it plans;
+    every other key (`budget`/`transaction`/`confirmation`/`idempotency_
+    key` included) is committed to."""
+    without = normalize_request_for_plan({"operations": [1], "budget": {"execution_ms": 5}})
+    with_plan_and_dry_run = normalize_request_for_plan(
+        {"operations": [1], "budget": {"execution_ms": 5}, "plan": "whatever-opaque-value", "dry_run": True},
+    )
+    assert without == with_plan_and_dry_run
+    # But a DIFFERENT `budget` (a real, non-excluded field) changes it.
+    different_budget = normalize_request_for_plan({"operations": [1], "budget": {"execution_ms": 6}})
+    assert different_budget != without
+
+
+def test_compute_plan_token_format_is_sha256_hex_dot_revision() -> None:
+    """G-3/F-7: `"<sha256hex>.<schema_revision>"` -- the dot separator,
+    not `:`."""
+    import hashlib
+    token = compute_plan_token({"a": 1}, 7)
+    digest, _, revision = token.rpartition(".")
+    assert revision == "7"
+    assert digest == hashlib.sha256(normalize_request_for_plan({"a": 1})).hexdigest()
+    assert ":" not in token
+
+
+# --- M-1 (Major): the add_field plan digest must commit to the CONTRACT-
+# level field_type, not this foundation's own internal storage vocabulary
+# (which folds object/array/json onto one physical `json` column) ---
+
+
+def test_add_field_plan_is_refused_when_the_apply_changes_only_the_contract_field_type(sessions) -> None:
+    """Reproduces WP-3b review M-1 directly: a dry run taken for
+    `field_type: "object"` must NOT validate against an apply presenting
+    `field_type: "json"` (or vice versa) -- pre-rework, both foundation-
+    mapped to the SAME internal `json` storage type and therefore digested
+    identically, so this exact apply used to be silently ACCEPTED, with
+    the entity ending up declaring `json`, not the `object` the dry run's
+    own `descriptor` had previewed."""
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+
+    dry = dev.add_field(entity, "payload", "json", contract_type="object", dry_run=True)
+    assert dry["descriptor"]["field_types"]["payload"] == "object"
+    plan = dry["plan"]
+
+    with pytest.raises(PreconditionFailedError) as ei:
+        dev.add_field(entity, "payload", "json", contract_type="json", plan=plan)
+    assert ei.value.details == {"violated_declaration": "plan"}
+
+    catalog = {row["entity"]: row for row in dev.catalog()}
+    assert "payload" not in catalog[entity]["fields"], "the mismatched apply must not have executed"
+
+    # Positive control: the IDENTICAL contract_type validates and commits.
+    real = dev.add_field(entity, "payload", "json", contract_type="object", plan=plan)
+    assert real["committed"] is True
+    catalog_after = {row["entity"]: row for row in dev.catalog()}
+    assert catalog_after[entity]["field_types"]["payload"] == "object"
+
+
+# --- M-2 (Major): the create_entity/add_field/alter_field plan digest
+# must commit to the request as presented, never a resolved/defaulted
+# value -- an omitted field_constraints and one spelling out the SAME
+# defaults explicitly must NOT collide on one token ---
+
+
+def test_create_entity_plan_is_refused_when_the_apply_adds_explicit_default_field_constraints(sessions) -> None:
+    """Reproduces WP-3b review M-2 directly: a dry run taken WITHOUT
+    `field_constraints` must NOT validate against an apply presenting the
+    SAME resolved defaults (`{"nullable": True}` for every field) as an
+    EXPLICIT `field_constraints` -- pre-rework, `create_collection`
+    digested the post-resolution `resolved_constraints` (defaults already
+    backfilled) rather than the caller's own raw argument, so an omitting
+    request and a defaults-spelling-out one were indistinguishable."""
+    dev, runtime = sessions
+    entity = "m2_regression_entity"
+
+    dry = dev.create_entity(entity, fields={"label": "text"}, field_types={"label": "string"}, dry_run=True)
+    plan = dry["plan"]
+
+    with pytest.raises(PreconditionFailedError) as ei:
+        dev.create_entity(
+            entity, fields={"label": "text"}, field_types={"label": "string"},
+            field_constraints={"label": {"nullable": True}}, plan=plan,
+        )
+    assert ei.value.details == {"violated_declaration": "plan"}
+    assert not any(row["entity"] == entity for row in dev.catalog()), "the mismatched apply must not have executed"
+
+    # Positive control: omitting field_constraints, matching the dry run
+    # exactly, validates and commits.
+    real = dev.create_entity(entity, fields={"label": "text"}, field_types={"label": "string"}, plan=plan)
+    assert real["committed"] is True
+
+
+# --- M-6 (Medium): the HTTP boundary must build the identical `values`-key
+# presence the in-process port always does (`dict(values or {})`, port
+# `attempt_mutation_with_result`), so the two plugs' plan digests agree for
+# a delete/where-only update ---
+
+
+def test_http_mutation_item_always_carries_a_values_key_matching_the_in_process_port() -> None:
+    """Reproduces WP-3b review M-6 directly, at the unit level (no ASGI
+    server needed): pre-rework, `http.py::_mutation_item` only set
+    `item["values"]` when the wire body itself carried a `values` key --
+    the in-process port's own `attempt_mutation_with_result`/`attempt_
+    batch_with_result` (`conformance/conformance_adapter_mitatedb.py`)
+    build EVERY item with `"values": dict(values or {})` UNCONDITIONALLY,
+    so a `delete`/`where`-only `update` used to digest to two DIFFERENT
+    `request_object`s depending on which plug presented it -- a plan taken
+    on one plug could never validate on the other (design D-4 (7): "HTTP
+    層から来ても in-process port から来ても同じ object になる")."""
+    delete_without_values = _mutation_item("entity_x", {"operation": "delete", "where": [
+        {"field": "id", "operator": "eq", "value": 1},
+    ]})
+    assert delete_without_values["values"] == {}, delete_without_values
+    assert "values" in delete_without_values
+
+    # And an insert that DOES carry values still passes them through
+    # untouched -- this rework only changes the omitted case.
+    insert_with_values = _mutation_item("entity_x", {"operation": "insert", "values": {"label": "x"}})
+    assert insert_with_values["values"] == {"label": "x"}
+
+
+# --- G-5(b): a schema operation's OWN plan (not only a mutation's) is
+# refused after an unrelated schema change bumps the Application's shared
+# revision counter -- peer-local coverage `transact()`'s own staleness
+# test (`test_plan_stale_after_schema_change_is_precondition_failed` above)
+# does not give: that one takes and re-presents a MUTATION plan, never a
+# SCHEMA operation's own. ---
+
+
+def test_schema_plan_stale_after_unrelated_schema_change_is_precondition_failed(sessions) -> None:
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    other_entity = _make_entity(dev, entity="dryrunwidgets_sibling")
+
+    dry = dev.add_field(entity, "late_field", "text", contract_type="string", dry_run=True)
+    plan = dry["plan"]
+
+    # A schema change on a DIFFERENT entity of the SAME Application still
+    # invalidates it (design D-4 (7): "対象 entity に無関係な entity への
+    # schema 操作も plan を失効させる" -- the revision is per-Application).
+    dev.add_field(other_entity, "unrelated", "text")
+
+    with pytest.raises(PreconditionFailedError) as ei:
+        dev.add_field(entity, "late_field", "text", contract_type="string", plan=plan)
+    assert ei.value.details == {"violated_declaration": "plan"}
+    catalog = {row["entity"]: row for row in dev.catalog()}
+    assert "late_field" not in catalog[entity]["fields"], "the stale-plan apply must not have executed"
+
+
+# --- F-3/G-5(e): a schema dry_run writes NO audit event -- durable AND
+# legacy sinks both, counted directly (§5 U-2 = (A): "dry_run が実行段階に
+# 達した場合、監査行を一切書かない"). `test_dry_run_writes_no_audit_event_
+# destructive`/`_non_destructive` above cover `transact()`'s own two audit
+# paths; neither exercises a SCHEMA operation's own audit hook
+# (`_make_audit_hook(event_class="schema_change", ...)`, `create_
+# collection`/`add_field`/`alter_field`'s own `hook = None if dry_run
+# else ...`). ---
+
+
+def test_schema_dry_run_writes_no_audit_event(sessions) -> None:
+    durable = ApplicationAuditSink()
+    router = make_router(durable)
+    cell = ApplicationCell("app_schema_audit", FoundationConfig(), backend=SQLiteBackend(), audit_router=router)
+    developer = make_developer(cell, "app_schema_audit")
+    developer.create_collection("things", {"id": "integer", "label": "text"})
+    # `create_collection` above already wrote its own durable + legacy
+    # events -- reset both counters so every assertion below is about
+    # what happens FROM this point on.
+    durable._events.clear()
+    legacy_calls: list[Any] = []
+    real_record = cell._ApplicationCell__record  # noqa: SLF001 -- the legacy 6-field-sink emit site itself
+
+    def _counting_record(*args: Any, **kwargs: Any) -> Any:
+        legacy_calls.append((args, kwargs))
+        return real_record(*args, **kwargs)
+
+    cell._ApplicationCell__record = _counting_record  # noqa: SLF001
+    try:
+        dry = developer.add_field("things", "new_field", "text", contract_type="string", dry_run=True)
+        assert dry["committed"] is False
+        assert durable._events == [], (
+            f"a schema dry run must write no DURABLE audit event -- {durable._events!r}"
+        )
+        assert legacy_calls == [], (
+            f"a schema dry run must not even ATTEMPT the legacy 6-field-sink record -- {legacy_calls!r}"
+        )
+
+        # Positive control: the IDENTICAL real (non-dry-run) add_field DOES
+        # write both -- proving the zero counts above are because of
+        # `dry_run`, not because this schema operation is inert on audit.
+        real = developer.add_field("things", "new_field", "text", contract_type="string")
+        assert real["committed"] is True
+        assert len(durable._events) == 1
+        assert durable._events[0].event_class == "schema_change", durable._events[0]
+        assert len(legacy_calls) == 1
+    finally:
+        cell._ApplicationCell__record = real_record  # noqa: SLF001
+
+
+# --- F-5: a request presenting NEITHER `plan` NOR `dry_run` makes no
+# extra digest computation and no extra schema-revision read -- measured
+# directly by call-counting `self._backend.schema_revision()` before and
+# after this rework (the design's own pre-existing comment already
+# documented the INTENT; this test is the actual round-trip-count proof
+# `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md`'s
+# own §6.2 mutation table asks for). ---
+
+
+def test_ordinary_request_without_plan_or_dry_run_makes_no_extra_schema_revision_read() -> None:
+    cell = ApplicationCell("app_roundtrip", FoundationConfig(), backend=SQLiteBackend())
+    developer = make_developer(cell, "app_roundtrip")
+    runtime = make_runtime(cell, "app_roundtrip")
+
+    calls: list[Any] = []
+    real_schema_revision = cell._backend.schema_revision  # noqa: SLF001
+
+    def _counting_schema_revision(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return real_schema_revision(*args, **kwargs)
+
+    cell._backend.schema_revision = _counting_schema_revision  # noqa: SLF001
+    try:
+        # `insert`/`transact` (no `plan`/`dry_run` path touches them at
+        # all -- neither ever calls `_schema_revision_uncounted`) make
+        # ZERO calls, an absolute (not relative) count -- there is no
+        # backend-internal revision bump for either to confound the
+        # measurement with, unlike the 3 schema operations below.
+        developer.create_collection("roundtrip_things", {"label": "text"})
+        calls.clear()
+        runtime.insert("roundtrip_things", {"label": "x"})
+        assert len(calls) == 0, f"a plain insert must make ZERO schema_revision() calls -- {calls!r}"
+
+        calls.clear()
+        runtime.transact([{"type": "insert", "collection": "roundtrip_things", "values": {"label": "y"}}])
+        assert len(calls) == 0, f"an ordinary transact (no dry_run/plan) must make ZERO extra calls -- {calls!r}"
+
+        # For `add_field`/`alter_field` (both bump the schema revision as
+        # part of their own real DDL, so their OWN baseline call count is
+        # a backend-internal implementation detail this test does not
+        # assume a fixed number for) the proof is RELATIVE: the ordinary
+        # (no `dry_run`/`plan`) call and the `dry_run=True` call for the
+        # SAME operation shape must differ by EXACTLY one -- the digest
+        # mechanism's own single `_schema_revision_uncounted()` read,
+        # neither more (an extra round trip the design's own comment
+        # claims does not happen) nor zero (which would mean the counter
+        # is not actually sensitive to what this test claims to measure).
+        calls.clear()
+        developer.add_field("roundtrip_things", "ordinary_field", "text")
+        ordinary_add_field_count = len(calls)
+
+        calls.clear()
+        developer.add_field("roundtrip_things", "dry_probe_field", "text", dry_run=True)
+        dry_add_field_count = len(calls)
+        assert dry_add_field_count == ordinary_add_field_count + 1, (
+            f"add_field(dry_run=True) must make EXACTLY one MORE schema_revision() call than an ordinary "
+            f"add_field -- ordinary={ordinary_add_field_count}, dry_run={dry_add_field_count}"
+        )
+
+        # `nullable=True` (not `False`): both `ordinary_field`/`dry_probe_
+        # field` were added AFTER the 2 rows above, which therefore carry
+        # NULL for them -- `alter_field(..., nullable=False)` would
+        # (correctly) refuse with `ConflictError` before ever reaching
+        # this test's own measurement; `nullable=True` exercises the SAME
+        # existing-row-scan/registry-write/revision-bump path with no
+        # conflict to get in the way of what this test actually measures.
+        calls.clear()
+        developer.alter_field("roundtrip_things", "ordinary_field", nullable=True)
+        ordinary_alter_field_count = len(calls)
+
+        # `"ordinary_field"` again (not `"dry_probe_field"`) -- the
+        # earlier `add_field(..., dry_run=True)` above rolled its own
+        # column back, so `"dry_probe_field"` does not really exist on
+        # this entity to `alter_field` against.
+        calls.clear()
+        developer.alter_field("roundtrip_things", "ordinary_field", nullable=True, dry_run=True)
+        dry_alter_field_count = len(calls)
+        assert dry_alter_field_count == ordinary_alter_field_count + 1, (
+            f"alter_field(dry_run=True) must make EXACTLY one MORE schema_revision() call than an ordinary "
+            f"alter_field -- ordinary={ordinary_alter_field_count}, dry_run={dry_alter_field_count}"
+        )
+    finally:
+        cell._backend.schema_revision = real_schema_revision  # noqa: SLF001
+
+
+# --- F-6: dry_run responses never carry an `assigned_addresses` key at
+# all, on every mutation entry point this peer has (not merely the one
+# `test_dry_run_insert_matches_real_affected_leaves_no_row_and_no_addresses`
+# above already covers) ---
+
+
+def test_dry_run_transact_update_and_delete_never_carry_assigned_addresses(sessions) -> None:
+    dev, runtime = sessions
+    entity = _make_entity(dev)
+    runtime.insert(entity, {"label": "seed"})
+
+    update_dry = runtime.transact(
+        [{"type": "update", "collection": entity, "values": {"label": "updated"},
+          "filters": [Filter("label", "eq", "seed")]}],
+        dry_run=True,
+    )
+    assert "assigned_addresses" not in update_dry[-1], update_dry[-1]
+    assert runtime.read(entity) == [{"label": "seed"}], "the dry-run update must not have executed"

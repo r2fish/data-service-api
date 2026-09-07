@@ -368,55 +368,65 @@ def _dataclass_default(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def normalized_request_digest(request_object):
-    """Phase 9 WP-3b (design docs/design/
-    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-4 (7),
-    追補 2 S-a): sha256 hex digest of `request_object`'s own canonical
-    JSON form -- keys in lexicographic order, no insignificant
+def normalize_request_for_plan(request):
+    """Phase 9 WP-3b rework (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-4 (7), 追補
+    2 S-a/G-1/G-4; 監督裁定 F-7 同型性項): canonical JSON bytes of
+    `request` -- keys in lexicographic order, no insignificant
     whitespace, non-ASCII left unescaped, encoded UTF-8, exactly the 3
     normalization rules `structured_operations.dry_run.plan` states.
+    Excludes `plan` and `dry_run` ITSELF (G-4: "除外 2 key を関数内で行
+    う") -- the ONLY two keys `structured_operations.dry_run.plan`
+    names as excluded ("every field of that object except `plan` itself
+    ... and `dry_run`"); every other key the caller's `request` carries
+    (including `budget`/`transaction`/`confirmation`/`idempotency_key`
+    for a mutation, `operation`/`field_type`/`field_types`/
+    `field_constraints`/`enum`/`nullable` for a schema operation) is
+    part of what the digest commits to (G-1) -- this function has no
+    per-operation knowledge of which OTHER keys `request` should or
+    should not carry; that is the caller's own responsibility (design
+    D-4 (7): "計算位置は...service/cell 層の入口").
 
-    Peer-symmetry note (同型性テストの対象, work order §2 WP-3b):
-    isomorphic to whatever helper `r2db-api`'s own WP-2b implementation
-    places for the identical rule; no code is shared between peers (R-2's
-    own closing paragraph) -- only the normalization RULE is shared, each
-    peer implements it independently.
+    Peer-symmetry note (同型性テストの対象, work order §2 WP-3b,
+    監督裁定 F-7): isomorphic to `r2db-api`'s own `normalize_request_
+    for_plan(request) -> bytes` -- same name, same signature, same
+    return type (`bytes`, not a hex string: the caller hashes it). No
+    code is shared between peers (R-2's own closing paragraph) -- only
+    the normalization RULE is shared, each peer implements it
+    independently, and this body names no peer-specific dependency (裁
+    定 G-4: "default= 引数などの peer 固有の逃げ道を本文に持たせない") --
+    the one non-JSON-native value this peer's own request objects can
+    carry (a `Filter` dataclass, nested inside a mutation's own
+    `operations` items) is converted to a plain dict BY THE CALLER
+    before it ever reaches this function (`_dataclass_default` below
+    stays only as the defensive `TypeError`-if-still-not-JSON-native
+    backstop `_canonical_where_json`'s own documented reasoning already
+    established, never a permissive `default=str`).
 
-    This function carries no per-consumer exclusion knowledge of its
-    own: `plan`/`dry_run` (a plan token's own digest) or additionally
-    `idempotency_key` (an idempotency record's own digest, WP-3c) are
-    excluded by the CALLER, which builds `request_object` without
-    them -- "the same rule, a different exclusion set" (design 追補 2
-    S-a's own words) is realized as "the same function, a different
-    caller-built object", not a parameter this function branches on.
-
-    `default=_dataclass_default` below (never a permissive `default=
-    str`, matching `_canonical_where_json`'s own documented reasoning):
-    the ONE non-JSON-native value this peer's own `transact()` request
-    objects carry is a `Filter` (`@dataclass(frozen=True)`, this
-    module), nested inside `operations` items' own `filters` lists --
-    `asdict` turns it into the SAME `{"field", "operator", "value"}`
-    shape `_canonical_where_json` already builds by hand for the
-    identical dataclass, so a `Filter` and the equivalent plain dict a
-    schema-operation request object would carry digest identically."""
-    encoded = json.dumps(dict(request_object), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    Returns `bytes` (G-4) -- the caller hashes them; this function does
+    not know or care that its result will be fed to `hashlib.sha256`."""
+    filtered = {key: value for key, value in dict(request).items() if key not in ("plan", "dry_run")}
+    encoded = json.dumps(filtered, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                          default=_dataclass_default)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return encoded.encode("utf-8")
 
 
-def compute_plan_token(request_object, schema_revision):
-    """Phase 9 WP-3b (design D-4 (7)/U-4 = (A)): the opaque-but-
-    deterministic `plan` token (contract `structured_operations.dry_run.
-    plan`) -- `request_object`'s own digest (`normalized_request_digest`,
-    already built by the caller without `plan`/`dry_run`) combined with
-    `schema_revision`, the Application's own current schema revision (the
-    SAME value `SchemaOperationResult.revision` reports; per-application,
-    not per-entity -- U-4 = (A)'s own confirmation). `:` never appears in
-    either half (a hex digest, or this peer's own stringified integer
-    counter), so the two halves never collide; nothing about this format
-    is contractually meaningful -- a client treats the whole string as
-    opaque, exactly as the contract requires."""
-    return f"{normalized_request_digest(request_object)}:{schema_revision}"
+def compute_plan_token(request, schema_revision):
+    """Phase 9 WP-3b rework (design D-4 (7)/U-4 = (A); 監督裁定 F-7/G-3):
+    the opaque-but-deterministic `plan` token (contract `structured_
+    operations.dry_run.plan`) -- the sha256 hex digest of `normalize_
+    request_for_plan(request)` combined with `schema_revision`, the
+    Application's own current schema revision (the SAME value `Schema
+    OperationResult.revision` reports; per-application, not per-entity
+    -- U-4 = (A)'s own confirmation). Format is `"<sha256hex>.<schema_
+    revision>"` (G-3: the dot separator, not `:` -- both peers use the
+    identical format) -- a hex digest never contains `.`, and `schema_
+    revision`'s own stringified form never does either, so the two
+    halves never collide; nothing about this format is contractually
+    meaningful -- a client treats the whole string as opaque, exactly
+    as the contract requires."""
+    digest = hashlib.sha256(normalize_request_for_plan(request)).hexdigest()
+    return f"{digest}.{schema_revision}"
 
 
 def check_plan_precondition(presented_plan, expected_token):
@@ -925,16 +935,57 @@ class ApplicationCell:
             # other.
             expected_token = None
             if dry_run or plan is not None:
-                with self._lock:
-                    current_revision = self._schema_revision_uncounted()
-                # `digest_request` -- unlike `request` above (`_limit_
-                # gate`'s own sizing object, unchanged from before this
-                # WP) -- also carries `field_types`/`field_constraints`:
-                # the digest commits to every field of the request that
-                # reaches this call, `_limit_gate`'s own byte estimate
-                # does not need to.
-                digest_request = {"name": name, "fields": validated_fields,
-                                  "field_types": declared_types, "field_constraints": resolved_constraints}
+                # Minor m-2 (review): no separate `with self._lock:` here
+                # -- `_schema_revision_uncounted` already acquires it (an
+                # `RLock`, safe to re-enter from the SAME thread, so this
+                # was never a deadlock, only a pointless second acquire).
+                current_revision = self._schema_revision_uncounted()
+                # `digest_request` (rework, 監督裁定 G-1): unlike `request`
+                # above (`_limit_gate`'s own sizing object, unchanged from
+                # before this WP), this is the CONTRACT-level request
+                # object -- `operation` (this method is reached only
+                # through `create_entity`'s own contract operation name;
+                # `create_collection` itself names no `SchemaOperationRequest.
+                # operation` of its own), `fields` (the ARRAY of names the
+                # caller presented -- `dict.keys()` preserves the caller's
+                # own insertion order, matching a JSON array's own
+                # significant element order, never sorted the way object
+                # KEYS are by `normalize_request_for_plan`), and `field_
+                # types`/`field_constraints` taken RAW from this method's
+                # own arguments -- NEVER `declared_types`/`resolved_
+                # constraints` (the backfilled-with-defaults registry
+                # values `_backend.create_collection` below is given): a
+                # request that omitted `field_constraints` and a request
+                # that named the SAME defaults explicitly must NOT collide
+                # on one token (WP-3b review M-2, reproduced against the
+                # pre-rework digest: a `field_constraints`-omitting dry
+                # run's `plan` was accepted on an apply that spelled out
+                # `nullable: true` explicitly). A key is present here only
+                # when the caller's own argument was not `None` -- an
+                # omitted optional stays ABSENT from the digest, never
+                # backfilled to its own resolved value (G-1's own "解決・
+                # 正規化・既定値補完をせずに").
+                #
+                # `operation` (this local, one qualifying constant
+                # `Assign`, forwarded by NAME below -- never a raw string
+                # literal INSIDE the `Dict` literal itself): `test_audit_
+                # query.py`'s own generalized P4-D16 v3 scanner treats
+                # `operation` as a tracked audit-vocabulary word ((c)/(d),
+                # `_NON_AUDIT_FIELD_PARAMETERS`) and refuses a `Dict`
+                # literal keyed `"operation"` whose VALUE is authored as a
+                # literal in that position -- literal authorship is legal
+                # only at a real keyword-call site or a qualifying
+                # `name_assign` (b''), never smuggled straight into a
+                # dict. This assignment IS that qualifying `name_assign`;
+                # `digest_request`'s own `"operation": operation` below is
+                # the safe forward the scanner's own (b'') exemption
+                # names.
+                operation = "create_entity"
+                digest_request = {"operation": operation, "entity": name, "fields": list(fields)}
+                if field_types is not None:
+                    digest_request["field_types"] = dict(field_types)
+                if field_constraints is not None:
+                    digest_request["field_constraints"] = field_constraints
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): every schema operation is
@@ -1044,8 +1095,13 @@ class ApplicationCell:
         module-level above) -- a mismatch refuses the WHOLE call with
         `errors.PreconditionFailedError` before anything is touched,
         real or dry. A dry run always returns a fresh `plan` of its own
-        (`SchemaOperationResult.plan`, optional); a real call returns
-        one only when the request presented one to be checked."""
+        (`SchemaOperationResult.plan`, optional); a real (non-dry-run)
+        call never returns one, whether or not the request itself
+        presented one to be checked (Minor m-1, review: fixed to match
+        the actual, measured behavior -- `result["plan"]` is only ever
+        set inside `if dry_run:` below, never on the real-call path;
+        there is nothing left to preview once a real call has already
+        committed)."""
         self._require_developer(principal, request_id=request_id)
         # Phase 9 WP-3b: unchanged from before this WP -- see `create_
         # collection`'s own identical comment for why `_limit_gate`'s
@@ -1087,14 +1143,36 @@ class ApplicationCell:
             # return.
             expected_token = None
             if dry_run or plan is not None:
-                with self._lock:
-                    current_revision = self._schema_revision_uncounted()
-                # `digest_request` -- see `create_collection`'s own
-                # identical comment: `_limit_gate`'s sizing object
-                # (`request`) stays unchanged from before this WP; the
-                # digest's own object additionally carries `enum`/
-                # `nullable`.
-                digest_request = dict(request)
+                # Minor m-2 (review): no separate `with self._lock:` --
+                # see `create_collection`'s own identical comment above.
+                current_revision = self._schema_revision_uncounted()
+                # `digest_request` (rework, 監督裁定 M-1/G-1): NEVER
+                # `request` above (`_limit_gate`'s own sizing object,
+                # unchanged from before this WP) -- `request["field_type"]`
+                # is this FOUNDATION's own internal storage vocabulary
+                # (`text`/`json`/...), not the contract's 7-word `field_
+                # type` vocabulary; `_CONTRACT_FIELD_TYPE_TO_MITATEDB`
+                # (`http.py`) folds `object`/`array`/`json` onto the SAME
+                # foundation `json`, so digesting the foundation value
+                # would let a `field_type: "object"` dry run's `plan` be
+                # replayed on a `field_type: "json"` apply (WP-3b review
+                # M-1, reproduced: the apply then committed `json`, not the
+                # `object` the dry run's own `descriptor` had previewed).
+                # `declared_type` (computed above) IS the contract-level
+                # value -- either the caller's own `contract_type`
+                # argument verbatim, or (no pre-1.6.0-shaped direct caller
+                # supplies one) the same backfill `create_collection`
+                # itself uses; either way it is what `EntityDescriptor.
+                # field_types` will report for this field, never a
+                # resolved/defaulted value distinct from what a real
+                # request would need to repeat to reach the same decision.
+                # `operation` -- see `create_collection`'s own identical
+                # comment for why this is a qualifying local `name_assign`
+                # forwarded by NAME, never a raw literal inside the `Dict`
+                # itself (`test_audit_query.py`'s own P4-D16 v3 scanner).
+                operation = "add_field"
+                digest_request = {"operation": operation, "entity": collection, "field": field,
+                                  "field_type": declared_type}
                 if enum is not None:
                     digest_request["enum"] = list(enum)
                 if nullable is not None:
@@ -1259,9 +1337,33 @@ class ApplicationCell:
             # check nor a fresh one to return.
             expected_token = None
             if dry_run or plan is not None:
-                with self._lock:
-                    current_revision = self._schema_revision_uncounted()
-                expected_token = compute_plan_token(request, current_revision)
+                # Minor m-2 (review): no separate `with self._lock:` --
+                # see `create_collection`'s own identical comment above.
+                current_revision = self._schema_revision_uncounted()
+                # `digest_request` (rework, 監督裁定 G-1): NEVER `request`
+                # above (`_limit_gate`'s own sizing object, unchanged from
+                # before this WP) -- `request` unconditionally carries
+                # `field_type`/`nullable` even when the caller omitted
+                # them (`None` either way), which would make an omitting
+                # request and an explicit-`null` one indistinguishable
+                # from a request-shape standpoint, contrary to G-1's own
+                # "省略された optional は key ごと無し". `field_type` is
+                # ALSO never reached at this point carrying a real value
+                # at all (the `field_type is not None` check above always
+                # refuses first) -- so it is never a real, digestible
+                # declaration for `alter_field` and is left out entirely,
+                # not included as a `None`/omitted placeholder either way.
+                # `operation` -- see `create_collection`'s own identical
+                # comment for why this is a qualifying local `name_assign`
+                # forwarded by NAME, never a raw literal inside the `Dict`
+                # itself (`test_audit_query.py`'s own P4-D16 v3 scanner).
+                operation = "alter_field"
+                digest_request = {"operation": operation, "entity": collection, "field": field}
+                if nullable is not None:
+                    digest_request["nullable"] = nullable
+                if enum is not UNCHANGED:
+                    digest_request["enum"] = enum
+                expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             # Phase 4 (design D-2 item 2): same unconditional fail-closed
             # pre-commit hook as `create_collection`/`add_field` above.
@@ -1337,15 +1439,23 @@ class ApplicationCell:
     def _schema_revision_uncounted(self):
         """Phase 8 WP-1a rework 1 (裁定 3): the actual backend read
         `schema_revision` above now wraps with `_limit_gate` -- this
-        private accessor is the UNGATED remainder, called ONLY by
-        `ApplicationRuntime._post_schema_revision` (`http.py::post_schema`'s
-        own post-op revision readback, never a client-initiated call in
-        its own right: it reports the real consequence of the
+        private accessor is the UNGATED remainder, originally called only
+        by `ApplicationRuntime._post_schema_revision` (`http.py::post_
+        schema`'s own post-op revision readback, never a client-initiated
+        call in its own right: it reports the real consequence of the
         `create_entity`/`add_field` call that ALREADY passed through the
         gate earlier in this SAME request, not a second, independent
         client request of its own). Deliberately takes no `principal` --
         callers are expected to have already authorized/gated the
-        surrounding operation; this is a pure backend read, nothing more."""
+        surrounding operation; this is a pure backend read, nothing more.
+
+        Phase 9 WP-3b rework (Minor m-2, review): also called directly by
+        `create_collection`/`add_field`/`alter_field`/`transact` above,
+        each under their OWN `self._lock` acquisition (this method's own
+        `with self._lock:` below is safe to re-enter -- `self._lock` is an
+        `RLock`, not a plain `Lock` -- so this never deadlocks), reading
+        the SAME current revision both a submitted `plan` is checked
+        against and a fresh one (`dry_run`) is computed against."""
         with self._lock:
             return self._backend.schema_revision()
 
@@ -1733,7 +1843,8 @@ class ApplicationCell:
                     names.add(name)
         return names
 
-    def transact(self, principal, operations, *, request_id=None, dry_run=False, plan=None, budget=None):
+    def transact(self, principal, operations, *, request_id=None, dry_run=False, plan=None, budget=None,
+                transaction=None):
         """P3-D2 (design v1.2 R-5, WP-1.5): `insert`/`update`/`delete` all
         execute for real here, atomically with everything else in the
         same batch -- converging this entry point's real behavior onto
@@ -1837,23 +1948,38 @@ class ApplicationCell:
             # collection`'s own identical comment explains why.
             expected_token = None
             if dry_run or plan is not None:
-                with self._lock:
-                    current_revision = self._schema_revision_uncounted()
+                # Minor m-2 (review): no separate `with self._lock:` --
+                # see `create_collection`'s own identical comment above.
+                current_revision = self._schema_revision_uncounted()
                 # `digest_request` -- see `create_collection`'s own
                 # identical comment: `_limit_gate`'s sizing object
                 # (`request`) stays unchanged; the digest's own object
-                # additionally carries `budget` when the caller supplied
-                # one. `ApplicationRuntime.transact` itself still gates
-                # `budget` unconditionally before ever reaching here
-                # (`request_budget: unavailable`, WP-3d) -- this
-                # parameter exists so the digest MECHANISM already
-                # commits to `budget` correctly (design D-4 (7): "every
-                # other field ... is part of what the token commits to"),
-                # provable now directly against this method, without
-                # waiting on WP-3d's own gate removal.
+                # additionally carries `budget`/`transaction` when the
+                # caller supplied one (M-4/G-1: `MutationRequest.
+                # transaction` is part of what the token commits to, not
+                # `operations` alone -- reproduced against the pre-rework
+                # digest, which never carried it at all). `idempotency_
+                # key` is deliberately NOT threaded onto this parameter
+                # list -- unlike `budget`, this peer's own idempotency
+                # protocol (port `fold_batch_idempotency_key`) folds it
+                # onto EACH per-item dict, not this method's own request-
+                # unit keywords, and `_TRANSACT_*_KEYS` refuses that key
+                # unconditionally today (`idempotency: unavailable`); WP-3c
+                # is the one that gives it a real, request-unit shape to
+                # digest, and this WP adds no mechanism the design/rulings
+                # do not already name. `ApplicationRuntime.transact` itself
+                # still gates `budget` unconditionally before ever
+                # reaching here (`request_budget: unavailable`, WP-3d) --
+                # this parameter exists so the digest MECHANISM already
+                # commits to `budget`/`transaction` correctly (design D-4
+                # (7): "every other field ... is part of what the token
+                # commits to"), provable now directly against this method,
+                # without waiting on WP-3d's own gate removal.
                 digest_request = dict(request)
                 if budget:
                     digest_request["budget"] = budget
+                if transaction is not None:
+                    digest_request["transaction"] = transaction
                 expected_token = compute_plan_token(digest_request, current_revision)
                 check_plan_precondition(plan, expected_token)
             hook = None
@@ -2483,15 +2609,24 @@ class ApplicationRuntime:
         return self.__cell.delete(self.__principal, collection, filters,
                                   destructive=destructive, confirm=confirm, request_id=request_id)
 
-    def transact(self, operations, *, request_id=None, dry_run=False, plan=None, budget=None):
+    def transact(self, operations, *, request_id=None, dry_run=False, plan=None, budget=None, transaction=None):
         self.__authorize(request_id=request_id)
         # Phase 9 WP-3b (design D-1 (4), P-3): `dry_run`/`plan` gate
         # removed -- `dry_run` flips to `enabled` in this SAME commit
         # (`__build_capabilities_document` below). `budget` stays gated
         # (WP-3d): `request_budget` is unchanged, still `unavailable`.
+        # `transaction` (rework, M-4/G-1) is NOT gated -- unlike `budget`
+        # it names no still-`unavailable` capability of its own (this
+        # peer's own `http.py::post_mutate` already accepts and validates
+        # `MutationRequest.transaction` today, refusing anything but
+        # `"atomic"` before this method is ever reached); it is forwarded
+        # so `ApplicationCell.transact`'s own digest can commit to it
+        # (`MutationRequest`'s contract-required 4th non-`plan`/`dry_run`
+        # field, alongside `operations`/`idempotency_key`/`budget`).
         if budget is not None:
             _deny_provisional_field("budget")
-        return self.__cell.transact(self.__principal, operations, request_id=request_id, dry_run=dry_run, plan=plan)
+        return self.__cell.transact(self.__principal, operations, request_id=request_id, dry_run=dry_run, plan=plan,
+                                    transaction=transaction)
 
     def capabilities(self, *, request_id=None):
         """Minimal capability/discovery document, per this session's own
