@@ -1,8 +1,8 @@
 {
   "implementation": "r2db_foundation",
   "status": "partial",
-  "enabled": ["structured_query", "atomic_mutation", "application_catalog", "revision_preconditions", "row_addressability", "ordering", "cursor_pagination", "schema.create_entity", "schema.add_field", "schema.alter_field", "schema.create_index", "schema.drop_index", "schema.drop_entity", "constraint_declarations", "dry_run"],
-  "unavailable": ["best_effort_transactions", "idempotency", "audit_query", "cross_entity_mutation", "control_plane", "schema.jobs", "request_budget"],
+  "enabled": ["structured_query", "atomic_mutation", "application_catalog", "revision_preconditions", "row_addressability", "ordering", "cursor_pagination", "schema.create_entity", "schema.add_field", "schema.alter_field", "schema.create_index", "schema.drop_index", "schema.drop_entity", "constraint_declarations", "dry_run", "idempotency", "request_budget"],
+  "unavailable": ["best_effort_transactions", "audit_query", "cross_entity_mutation", "control_plane", "schema.jobs"],
   "limit_enforcement": {
     "request_bytes": "enforced",
     "batch_items": "enforced",
@@ -13,6 +13,8 @@
     "requests_per_minute": "enforced",
     "schema_objects": "enforced",
     "operation_depth": "enforced",
-    "enum_members": "enforced"
+    "enum_members": "enforced",
+    "idempotency_entries": "enforced",
+    "idempotency_retention_ms": "enforced"
   }
 }

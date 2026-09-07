@@ -122,6 +122,7 @@ from .structured import (
     QueryOutcome,
     SchemaOutcome,
     compute_plan_token,
+    idempotency_digest,
     _check_type,
     _ConstraintDeclarationError,
     _decode_cursor,
@@ -166,7 +167,13 @@ _REVISION_TABLE = "_r2db_schema_revision"
 #: upgrade ledger, excluded from the application-visible catalog/RLS-
 #: coverage check the same way.
 _FIELD_CONSTRAINTS_TABLE = "_r2db_field_constraints"
-_BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE})
+#: Contract 1.7.0 (D-5 (6), U-3 = (A), WP-2c): the per-application
+#: idempotency-record side table -- a FOURTH backend bookkeeping table,
+#: excluded from the application-visible catalog/RLS-coverage check the
+#: same way the other three are (migration `0011_idempotency_records_
+#: upgrade.sql`).
+_IDEMPOTENCY_TABLE = "_r2db_idempotency"
+_BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -1143,6 +1150,77 @@ class PostgresCell:
         except psycopg.errors.UndefinedTable:
             return
 
+    # ---- idempotency (contract 1.7.0 D-5, WP-2c) --------------------------
+    #
+    # Ruling I-1/U-3 = (A): the Postgres-backend counterpart of `Application
+    # Cell`'s process-internal dict -- the `public._r2db_idempotency` side
+    # table, migration `0011_idempotency_records_upgrade.sql`, read/written
+    # inside the SAME `with conn.transaction():` block `transact`/`apply_
+    # schema` already open (D-5 (1)/(3): "同一 tx で書く"). Expiry uses
+    # PostgreSQL's own `now()`, never a client-supplied clock value -- this
+    # is a durable side table shared by concurrent requests, unlike
+    # `ApplicationCell`'s single-process dict, so the DATABASE's own notion
+    # of "now" is what a lazy reclaim compares against.
+    #
+    # Read/reclaim (`_idempotency_lookup`/`_idempotency_reserve`) mirror
+    # `_load_field_constraints`'s own graceful "table absent" handling
+    # (a nested SAVEPOINT, `UndefinedTable` treated as "no record"/"no
+    # entries") -- an application that has never run upgrade 11 has no
+    # existing records to find or count. The WRITE (`_idempotency_store`)
+    # mirrors `_write_field_constraints`'s own strict handling instead (NO
+    # nested savepoint -- `UndefinedTable` propagates to `transact`/`apply_
+    # schema`'s own `except psycopg.Error` clause, `SERVICE_UNAVAILABLE`,
+    # rolling the WHOLE batch back): a client that presented `idempotency_
+    # key` asked for a durable guarantee this deployment cannot honor
+    # without the table, and silently completing the batch without
+    # actually recording it would misrepresent `capabilities().idempotency:
+    # enabled` as true when it was not, for this one Application (P-3).
+
+    def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
+        table = sql.Identifier(_IDEMPOTENCY_TABLE)
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("SELECT request_digest, kind, response FROM public.{table} WHERE idempotency_key = {ph}").format(table=table, ph=sql.Placeholder()), [key])
+                    row = cur.fetchone()
+        except psycopg.errors.UndefinedTable:
+            return None
+        if row is None:
+            return None
+        digest, kind, payload = row
+        return digest, kind, payload
+
+    def _idempotency_reserve(self, conn: "psycopg.Connection[Any]", limits: ResourceLimits) -> None:
+        table = sql.Identifier(_IDEMPOTENCY_TABLE)
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("DELETE FROM public.{table} WHERE expires_at <= now()").format(table=table))
+                with conn.cursor() as cur:
+                    _run(cur, sql.SQL("SELECT count(*) FROM public.{table}").format(table=table))
+                    (count,) = cur.fetchone()
+        except psycopg.errors.UndefinedTable:
+            count = 0
+        # Ruling I-6/D-5 (5): checked BEFORE this request executes anything
+        # -- reusing the SAME generic `ResourceLimits.check()` every other
+        # COUNT-valued class already uses (`ApplicationCell`'s identical
+        # `_idempotency_reserve` comment).
+        limits.check("idempotency_entries", count + 1)
+
+    def _idempotency_store(self, conn: "psycopg.Connection[Any]", key: str, *, digest: str, kind: str, payload: dict[str, Any], retention_ms: int) -> None:
+        table = sql.Identifier(_IDEMPOTENCY_TABLE)
+        with conn.cursor() as cur:
+            _run(
+                cur,
+                sql.SQL(
+                    "INSERT INTO public.{table} (idempotency_key, request_digest, kind, response, expires_at) "
+                    "VALUES ({k}, {d}, {kind}, {r}, now() + ({ms} * interval '1 millisecond'))"
+                ).format(table=table, k=sql.Placeholder(), d=sql.Placeholder(), kind=sql.Placeholder(), r=sql.Placeholder(), ms=sql.Placeholder()),
+                [key, digest, kind, Jsonb(payload), retention_ms],
+            )
+
     # ---- query ---------------------------------------------------------
 
     def query(
@@ -1284,6 +1362,7 @@ class PostgresCell:
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> MutationOutcome:
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         the single tx-exit point sits right before the pre-commit hook,
@@ -1319,11 +1398,39 @@ class PostgresCell:
         # "the durable audit row committed but the data commit then failed"
         # (D-2's error-row case) apart from every other psycopg failure.
         hook_fired = False
+        idempotency_digest_value: str | None = None
         with self._runtime.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
+                    # Contract 1.7.0 (D-5 (8), addendum 2 S-b, ruling I-3,
+                    # WP-2c): the idempotency lookup -- see `Application
+                    # Cell.transact`'s identical comment for the ordering
+                    # rationale (after bounds, before target existence). A
+                    # `dry_run` never consults or writes a record (ruling
+                    # I-7/D-4).
+                    if idempotency_key is not None and not dry_run:
+                        assert plan_request is not None  # service.py always builds this
+                        idempotency_digest_value = idempotency_digest(plan_request)
+                        record = self._idempotency_lookup(conn, idempotency_key)
+                        if record is not None:
+                            stored_digest, _stored_kind, stored_payload = record
+                            if stored_digest != idempotency_digest_value:
+                                fail(
+                                    "CONFLICT", "This idempotency key was already used with a different request.", status=409,
+                                    details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
+                                )
+                            # Ruling I-3/I-8: answered from the record --
+                            # target existence, confirmation, precondition
+                            # and execution never run for a replay.
+                            return MutationOutcome(
+                                affected=stored_payload["affected"], assigned_addresses=stored_payload["assigned_addresses"],
+                                destructive=False, committed=True, plan=None, replayed=True,
+                            )
+                        # Ruling I-6/D-5 (5): capacity checked before this
+                        # request executes anything.
+                        self._idempotency_reserve(conn, limits)
                     catalog = self._load_catalog(conn)
                     if entity not in catalog:
                         fail("NOT_FOUND", "Entity was not found.", status=404)
@@ -1389,6 +1496,19 @@ class PostgresCell:
                     if destructive and audit_hook is not None:
                         audit_hook.pre_commit()
                         hook_fired = True
+                    # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c):
+                    # recorded in the SAME `with conn.transaction():`
+                    # block as the data changes above -- the LAST
+                    # statement before this block's own normal exit
+                    # (implicit COMMIT). See this class' own "idempotency"
+                    # section header comment for the strict (non-nested-
+                    # savepoint) `UndefinedTable` handling here.
+                    if idempotency_key is not None and idempotency_digest_value is not None:
+                        self._idempotency_store(
+                            conn, idempotency_key, digest=idempotency_digest_value, kind="mutation",
+                            payload={"affected": affected, "assigned_addresses": assigned_addresses},
+                            retention_ms=limits.idempotency_retention_ms,
+                        )
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:
@@ -1903,6 +2023,7 @@ class PostgresCell:
         dry_run: bool = False,
         plan: str | None = None,
         plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> "SchemaOutcome":
         """`dry_run`/`plan`/`plan_request` (contract 1.7.0, D-4, WP-2b):
         identical single tx-exit-point discipline to `transact` above --
@@ -1936,12 +2057,48 @@ class PostgresCell:
         outcome_revision: int | None = None
         outcome_descriptor: dict[str, Any] | None = None
         outcome_plan: str | None = None
+        idempotency_digest_value: str | None = None
         with self._developer.connection() as conn:
             timeout_ms = self._timeout_ms(limits, deadline, clock)
             try:
                 with conn.transaction():
                     self._set_timeouts(conn, timeout_ms)
                     catalog = self._load_catalog(conn)
+                    # Contract 1.7.0 (D-5 (8)/(9), addendum 2 S-b, ruling
+                    # I-3, WP-2c): the idempotency lookup -- as early as
+                    # possible after loading the catalog, before ANY
+                    # operation-specific accounting or target-dependent
+                    # computation (including the `schema_objects`
+                    # projection below, which for `drop_entity`/`add_
+                    # field`/etc. reads `catalog.get(bound.entity)`'s
+                    # CURRENT state -- reading it for an entity a replay's
+                    # own key already dropped would compute nonsense, not
+                    # merely skip a check the design allows skipping; see
+                    # `ApplicationCell.apply_schema`'s identical comment).
+                    # `dry_run` never consults/writes a record (ruling
+                    # I-7/D-4).
+                    if idempotency_key is not None and not dry_run:
+                        assert plan_request is not None  # service.py always builds this
+                        idempotency_digest_value = idempotency_digest(plan_request)
+                        record = self._idempotency_lookup(conn, idempotency_key)
+                        if record is not None:
+                            stored_digest, _stored_kind, stored_payload = record
+                            if stored_digest != idempotency_digest_value:
+                                fail(
+                                    "CONFLICT", "This idempotency key was already used with a different request.", status=409,
+                                    details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
+                                )
+                            # Ruling I-3/I-8/I-9: applies to schema
+                            # operations too -- a resent `drop_entity`
+                            # answers from the record even though the
+                            # entity, and any confirmation phrase computed
+                            # against it, are both long gone.
+                            return SchemaOutcome(
+                                committed=True, revision=stored_payload["revision"], descriptor=None, plan=None, replayed=True,
+                            )
+                        # Ruling I-6/D-5 (5): capacity checked before this
+                        # request executes anything.
+                        self._idempotency_reserve(conn, limits)
                     # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j,
                     # WP-2b): read ONCE, before any DDL/registry write this
                     # transaction is about to (tentatively) make -- "the
@@ -2255,6 +2412,16 @@ class PostgresCell:
                     if audit_hook is not None:
                         audit_hook.pre_commit()
                         hook_fired = True
+                    # Contract 1.7.0 (D-5 (1)(i)/(3), ruling I-1, WP-2c):
+                    # recorded in the same `with conn.transaction():` block
+                    # as the DDL/registry writes above -- see `transact`'s
+                    # identical comment.
+                    if idempotency_key is not None and idempotency_digest_value is not None:
+                        self._idempotency_store(
+                            conn, idempotency_key, digest=idempotency_digest_value, kind="schema",
+                            payload={"revision": outcome_revision},
+                            retention_ms=limits.idempotency_retention_ms,
+                        )
             except psycopg.errors.QueryCanceled:
                 fail("LIMIT_EXCEEDED", "Operation exceeds the execution budget.", status=413, details={"resource": "execution_ms", "limit_class": "execution_ms", "limit": limits.execution_ms})
             except psycopg.errors.LockNotAvailable:

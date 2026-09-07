@@ -634,9 +634,13 @@ def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
 
     Phase 9 WP-2a で `0010_field_constraints_upgrade.sql` が加わり、実測は
     `{'適合': 2, '違反': 0, '免除': 0, '対象外': 8}` に更新された (`0009`/
-    `0010` の 2 本が適合)。"""
+    `0010` の 2 本が適合)。
+
+    Phase 9 WP-2c で `0011_idempotency_records_upgrade.sql` が加わり、実測
+    は `{'適合': 3, '違反': 0, '免除': 0, '対象外': 8}` に更新された
+    (`0009`/`0010`/`0011` の 3 本が適合)。"""
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
-    assert result.tally == {"適合": 2, "違反": 0, "免除": 0, "対象外": 8}
+    assert result.tally == {"適合": 3, "違反": 0, "免除": 0, "対象外": 8}
     assert result.exempted_numbers == ALLOW_LIST_NUMBERS == frozenset()
 
 
@@ -646,10 +650,10 @@ def test_naming_convention_excludes_every_current_platform_single_shot_migration
     RE` に一致するファイルが 1 つも無い」という WP-0 時点の主張はもう成立
     しない): platform 単発 migration (`0001`-`0008`) はどれもこの命名を
     使っていないこと -- `NAME_RE` に一致するのは正当な per-application
-    upgrade script (`0009`、Phase 9 WP-2a で加わった `0010`) だけである
-    こと。"""
+    upgrade script (`0009`、Phase 9 WP-2a で加わった `0010`、WP-2c で加わっ
+    た `0011`) だけであること。"""
     matching = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if NAME_RE.match(p.name)}
-    assert matching == {"0009_platform_upgrades_ledger_upgrade.sql", "0010_field_constraints_upgrade.sql"}
+    assert matching == {"0009_platform_upgrades_ledger_upgrade.sql", "0010_field_constraints_upgrade.sql", "0011_idempotency_records_upgrade.sql"}
     platform_single_shot_migrations = (
         "0001_bootstrap_control_plane.sql",
         "0002_provisioning_functions.sql",
@@ -756,7 +760,7 @@ def test_f12_message_matches_design_section_3_8_verbatim():
     else:
         raise AssertionError("expected PlatformUpgradeError")
     assert message == (
-        "This application's storage is missing platform upgrade(s) 9, 10: the deployment must apply them "
+        "This application's storage is missing platform upgrade(s) 9, 10, 11: the deployment must apply them "
         "before this application can serve requests. Run 'python -m r2db_api.ops upgrade-applications' "
         "(its '--dry-run' shows applied and pending per application), then retry."
     )

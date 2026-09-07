@@ -566,7 +566,7 @@ def test_pg_side_table_exists_after_normal_provisioning(app_a: types.SimpleNames
             cur.execute("SELECT to_regclass('public._r2db_field_constraints')")
             assert cur.fetchone()[0] == "_r2db_field_constraints"
             cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades ORDER BY upgrade_number")
-            assert [row[0] for row in cur.fetchall()] == [9, 10]
+            assert [row[0] for row in cur.fetchall()] == [9, 10, 11]
     finally:
         conn.close()
 
@@ -667,7 +667,7 @@ def test_pg_ops_upgrade_applications_retrofits_the_side_table_and_unblocks_alter
             cur.execute("SELECT to_regclass('public._r2db_field_constraints')")
             assert cur.fetchone()[0] is not None
             cur.execute("SELECT upgrade_number FROM public._r2db_platform_upgrades ORDER BY upgrade_number")
-            assert [row[0] for row in cur.fetchall()] == [9, 10]
+            assert [row[0] for row in cur.fetchall()] == [9, 10, 11]
     finally:
         conn.close()
 
