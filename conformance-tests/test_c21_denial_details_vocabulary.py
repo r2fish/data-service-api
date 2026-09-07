@@ -39,6 +39,7 @@ UNSUPPORTED` alone.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 import pytest
@@ -96,6 +97,42 @@ def _assert_validation_failed_shape(details: Mapping[str, Any], *, adapter_name:
         assert isinstance(field, str) and not field.startswith("/"), (
             f"{adapter_name}: details.field {field!r} must be a '/'-separated request-body path with no "
             f"leading separator"
+        )
+
+
+# 監督裁定 N-4 (`{scratchpad}/rulings-r2-closure.md`): `details.field` is a
+# request-internal path -- no leading "/" -- and, where the denial is
+# attributable to one of the two shapes the ruling names, that path also
+# matches the shape: a VALUE violation (a value written by, or filtered
+# through, one mutation operation) reads `operations/<i>/values/<field>`;
+# a schema-request DECLARATION violation (the `field_constraints`/`enum`/
+# `nullable` declaration itself is invalid, `violated_declaration:
+# constraint_declaration`, or a `field_constraints` sent without `fields`,
+# `violated_declaration: request_schema`) reads `field_constraints/...`,
+# or is one of the bare words `enum`/`nullable`/`field_constraints`/
+# `operation`. `kind=None` asserts only the generic no-leading-"/" form
+# (used for denials the ruling does not name a specific shape for, e.g.
+# `IDENTIFIER_INVALID`).
+_VALUE_FIELD_RE = re.compile(r"^operations/\d+/values/")
+_SCHEMA_DECLARATION_FIELD_BARE_WORDS = frozenset({"enum", "nullable", "field_constraints", "operation"})
+
+
+def _assert_details_field_path_shape(field: Any, *, kind: "str | None", adapter_name: str) -> None:
+    if field is None:
+        return
+    assert isinstance(field, str) and not field.startswith("/"), (
+        f"{adapter_name}: details.field {field!r} must be a request-internal path with no leading '/' "
+        "(裁定 N-4)"
+    )
+    if kind == "value":
+        assert _VALUE_FIELD_RE.match(field), (
+            f"{adapter_name}: a value-violation details.field {field!r} must have the form "
+            "'operations/<i>/values/<field>' (裁定 N-4)"
+        )
+    elif kind == "schema_declaration":
+        assert field.startswith("field_constraints/") or field in _SCHEMA_DECLARATION_FIELD_BARE_WORDS, (
+            f"{adapter_name}: a schema-request declaration-violation details.field {field!r} must be "
+            "'field_constraints/...' or one of 'enum'/'nullable'/'field_constraints'/'operation' (裁定 N-4)"
         )
 
 
@@ -201,6 +238,79 @@ def test_c21_denial_details_vocabulary(adapter: ConformanceAdapter, isolated, re
     # (at least one of the 3 codes was actually observed, not merely
     # presumed).
     assert observed_codes, f"{adapter.name}: no required-vocabulary code was observed at all (non-vacuity)"
+
+    # 監督裁定 N-4 (`{scratchpad}/rulings-r2-closure.md`): (a) details.field's
+    # own path FORM is asserted on the value-violation probe already run
+    # above (`ei_type`, a field_type violation on an insert operation's
+    # own values); (b) two field_constraints-related denials -- a
+    # declaration that is itself invalid (`enum` on an untyped/`json`
+    # field, `violated_declaration: constraint_declaration`) and a
+    # `field_constraints` sent without `fields` (`violated_declaration:
+    # request_schema`) -- are added to the probe set, using port v1.13's
+    # `schema_operation_with_result` (the `alter_field` primitive's own
+    # entry point, and the only port method that can carry
+    # `field_constraints` through to `create_entity` without going
+    # through the two pre-existing, pre-v1.13 convenience methods).
+    # Deliberately placed AFTER every pre-existing probe/assert in this
+    # body (not interleaved) so the `< 1.7.0` branch's own failure --
+    # which already happens on ONE of the pre-existing vocabulary asserts
+    # above, for every peer currently registered -- fires first; a peer
+    # not yet declaring 1.7.0 is not expected to reach this leg at all.
+    #
+    # Both new probes are declare-first the same way the pre-existing
+    # unknown-field probe above is (`ei_schema`): where this deployment's
+    # own `constraint_declarations` capability is `unavailable`, a
+    # request carrying `field_constraints` is refused CAPABILITY_
+    # UNSUPPORTED before the declaration itself is ever examined (C-20's
+    # own `unavailable` branch) -- that is a DIFFERENT denial than the
+    # one this leg is probing for, and is accepted here without asserting
+    # the schema-declaration field-shape (which only applies once the
+    # declaration is actually examined).
+    _assert_details_field_path_shape(ei_type.value.details.get("field"), kind="value", adapter_name=adapter.name)
+
+    json_field = fresh_identifier("c21declfld")
+    bad_entity = fresh_identifier("c21decl")
+    with pytest.raises(ConformanceDenial) as ei_decl:
+        iso.schema_operation_with_result(
+            developer, bad_entity, "create_entity",
+            fields=[json_field], field_constraints={json_field: {"enum": ["a", "b"]}},
+        )
+    if ei_decl.value.code == "CAPABILITY_UNSUPPORTED":
+        assert ei_decl.value.details.get("violated_declaration") == "capability", ei_decl.value.details
+    else:
+        assert ei_decl.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: an enum declared on a json (type-undeclared) field in create_entity -> "
+            f"{ei_decl.value.code!r}, expected VALIDATION_FAILED or CAPABILITY_UNSUPPORTED"
+        )
+        assert ei_decl.value.details.get("violated_declaration") == "constraint_declaration", (
+            ei_decl.value.details
+        )
+        _assert_details_field_path_shape(
+            ei_decl.value.details.get("field"), kind="schema_declaration", adapter_name=adapter.name,
+        )
+        assert_details_vocabulary_values_safe(ei_decl.value.details, adapter_name=adapter.name)
+
+    nofields_entity = fresh_identifier("c21declnf")
+    with pytest.raises(ConformanceDenial) as ei_fc_nofields:
+        iso.schema_operation_with_result(
+            developer, nofields_entity, "create_entity", field_constraints={"label": {"enum": ["a", "b"]}},
+        )
+    if ei_fc_nofields.value.code == "CAPABILITY_UNSUPPORTED":
+        assert ei_fc_nofields.value.details.get("violated_declaration") == "capability", (
+            ei_fc_nofields.value.details
+        )
+    else:
+        assert ei_fc_nofields.value.code == "VALIDATION_FAILED", (
+            f"{adapter.name}: field_constraints sent without fields -> {ei_fc_nofields.value.code!r}, "
+            "expected VALIDATION_FAILED or CAPABILITY_UNSUPPORTED"
+        )
+        assert ei_fc_nofields.value.details.get("violated_declaration") == "request_schema", (
+            ei_fc_nofields.value.details
+        )
+        _assert_details_field_path_shape(
+            ei_fc_nofields.value.details.get("field"), kind="schema_declaration", adapter_name=adapter.name,
+        )
+        assert_details_vocabulary_values_safe(ei_fc_nofields.value.details, adapter_name=adapter.name)
 
     # Work order §6 訂正註 7 (supervisor ruling, post-WP-1-audit,
     # 2026-09-07): the declaration-derived `observed_branch` cross-check
