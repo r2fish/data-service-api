@@ -123,6 +123,15 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
             "0001_bootstrap_platform.sql", "0002_registry_and_functions.sql",
             "0003_provision_application.sql", "0004_deprovision_application.sql",
             "0006_declared_field_types_upgrade.sql", "0008_platform_upgrades_upgrade.sql",
+            # Phase 9 WP-3a (design docs/design/
+            # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/
+            # (4)): this rewritten `MITATEDB_MIGRATIONS_DIR` is what `ops.py`'s
+            # own `discover_upgrade_scripts` scans for every subprocess this
+            # file's own `_run_ops` launches -- omitting this file here would
+            # make `platform_upgrades.PLATFORM_UPGRADE_NUMBERS` (imported
+            # normally, not path-dependent) require number 9 that no script
+            # in this directory can ever resolve to.
+            "0009_field_constraints_upgrade.sql",
         )
     }
 
@@ -229,7 +238,8 @@ def _run_ops(platform: types.SimpleNamespace, *args: str) -> subprocess.Complete
 
 
 def test_upgrade_applications_reports_no_pending_for_freshly_provisioned_apps(platform: types.SimpleNamespace) -> None:
-    """完了条件 5 の帰結: 新規 provision (現行 0003) は既に `{6, 8}` を
+    """完了条件 5 の帰結: 新規 provision (現行 0003) は既に `{6, 8, 9}`
+    (Phase 9 WP-3a の 9 = `0009_field_constraints_upgrade.sql` を含む) を
     seed 済みなので、一括適用は何もせず終了コード 0。"""
     app = provision_app(platform, "opsclean")
     try:
@@ -246,12 +256,12 @@ def test_upgrade_applications_applies_a_pending_number_and_updates_the_ledger(pl
     app = provision_app(platform, "opspend")
     try:
         delete_ledger_row(platform.admin_dsn, app.database, 8)
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6})
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 9})
 
         result = _run_ops(platform, "upgrade-applications", "--application", "opspend")
         assert result.returncode == 0, result.stderr
-        assert "applied_after=[6, 8]" in result.stdout
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8})
+        assert "applied_after=[6, 8, 9]" in result.stdout
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8, 9})
 
         # idempotent: a second run with nothing pending does nothing.
         second = _run_ops(platform, "upgrade-applications", "--application", "opspend")
@@ -291,7 +301,7 @@ def test_upgrade_applications_visits_every_database_even_when_one_fails(platform
         assert "REVOKE" in result.stdout
 
         # the OK app was still processed despite the bad one failing.
-        assert ledger_numbers(platform.admin_dsn, ok_app.database) == frozenset({6, 8})
+        assert ledger_numbers(platform.admin_dsn, ok_app.database) == frozenset({6, 8, 9})
     finally:
         deprovision_app(platform, "opsok")
         deprovision_app(platform, "opsbad")
@@ -305,7 +315,7 @@ def test_upgrade_applications_dry_run_reports_without_applying(platform: types.S
         delete_ledger_row(platform.admin_dsn, app.database, 6)
         result = _run_ops(platform, "upgrade-applications", "--dry-run")
         assert result.returncode == 4, result.stdout + result.stderr
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({8})
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({8, 9})
     finally:
         deprovision_app(platform, "opsdry")
 
@@ -324,7 +334,7 @@ def test_upgrade_applications_script_flag_skips_already_recorded_databases(platf
     では `recorded, skipped` 扱いで成功と数える。"""
     app = provision_app(platform, "opsskip")
     try:
-        # already fully seeded ({6, 8}) -- --script 8 must be a no-op skip.
+        # already fully seeded ({6, 8, 9}) -- --script 8 must be a no-op skip.
         result = _run_ops(platform, "upgrade-applications", "--application", "opsskip", "--script", "8")
         assert result.returncode == 0, result.stdout + result.stderr
         assert "skipped (already recorded)" in result.stdout
@@ -343,11 +353,11 @@ def test_upgrade_applications_script_flag_applies_only_that_number(platform: typ
     app = provision_app(platform, "opsonly")
     try:
         delete_ledger_row(platform.admin_dsn, app.database, 8)
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6})
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 9})
 
         result = _run_ops(platform, "upgrade-applications", "--application", "opsonly", "--script", "8")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8})
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8, 9})
     finally:
         deprovision_app(platform, "opsonly")
 
@@ -355,7 +365,7 @@ def test_upgrade_applications_script_flag_applies_only_that_number(platform: typ
 def test_upgrade_applications_script_0006_skips_a_database_that_already_has_a_ledger(platform: types.SimpleNamespace) -> None:
     """完了条件 27 (design D-4(f)): `--script 0006` の危険 -- 台帳表が
     既にある DB (このテストでは現行 0003 で新規 provision した DB、台帳
-    `{6, 8}`) に `--script 6` を指定しても `0006` は実行されず
+    `{6, 8, 9}`) に `--script 6` を指定しても `0006` は実行されず
     `recorded, skipped` になり、`_mdb_field_types` に台帳表の 3 列
     (`upgrade_number`/`script_name`/`applied_at`) が混入しないこと。この
     防御は ops 側の「--script は未適用の DB にだけ当てる」だけに依存する
@@ -392,7 +402,7 @@ def test_upgrade_applications_enabled_does_not_affect_target_selection(platform:
         delete_ledger_row(platform.admin_dsn, app.database, 8)
         result = _run_ops(platform, "upgrade-applications", "--application", "opsdis")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8})
+        assert ledger_numbers(platform.admin_dsn, app.database) == frozenset({6, 8, 9})
     finally:
         deprovision_app(platform, "opsdis")
 
@@ -423,7 +433,7 @@ def test_upgrade_status_reports_applied_and_pending(platform: types.SimpleNamesp
         delete_ledger_row(platform.admin_dsn, app.database, 6)
         result = _run_ops(platform, "upgrade-status", "--application", "statusone")
         assert result.returncode == 4, result.stdout + result.stderr
-        assert "applied=[8]" in result.stdout
+        assert "applied=[8, 9]" in result.stdout
         assert "pending=[6]" in result.stdout
         assert app.database in result.stdout
     finally:
@@ -452,7 +462,7 @@ def test_upgrade_status_reports_empty_applied_for_an_application_with_no_ledger(
         result = _run_ops(platform, "upgrade-status", "--application", "statusnoled")
         assert result.returncode == 4, result.stdout + result.stderr
         assert "applied=[]" in result.stdout
-        assert "pending=[6, 8]" in result.stdout
+        assert "pending=[6, 8, 9]" in result.stdout
     finally:
         deprovision_app(platform, "statusnoled")
 
@@ -506,7 +516,7 @@ def test_upgrade_applications_missing_script_file_is_a_usage_error(platform: typ
 def test_upgrade_applications_script_number_unknown_to_the_package_is_a_usage_error(
     platform: types.SimpleNamespace,
 ) -> None:
-    """M-2(c): `PLATFORM_UPGRADE_NUMBERS` (`{6, 8}`) に無い番号を
+    """M-2(c): `PLATFORM_UPGRADE_NUMBERS` (`{6, 8, 9}`) に無い番号を
     `--script` に渡すのも (b) と同じ経路で exit 2 になること --
     「skipped (already recorded)」の偽報告(=無音の成功)であってはならない
     (review finding: この fix 以前は `_upgrade_one_application`'s own
@@ -551,7 +561,7 @@ def test_upgrade_status_reports_a_never_provisioned_application_as_pending_every
     result = _run_ops(platform, "upgrade-status", "--application", "ghoststatus")
     assert result.returncode == 4, result.stdout + result.stderr
     assert "database None" in result.stdout
-    assert "pending=[6, 8]" in result.stdout
+    assert "pending=[6, 8, 9]" in result.stdout
 
 
 def test_upgrade_applications_a_never_provisioned_application_named_explicitly_is_a_failure(
@@ -677,7 +687,7 @@ def test_upgrade_applications_tally_line_counts_one_of_each_outcome(platform: ty
     `INSERT` fails with `InsufficientPrivilege` (failed -- same real
     failure-injection technique as `test_upgrade_applications_visits_
     every_database_even_when_one_fails`). `aggskip` is left exactly as
-    `0003` provisioned it (`{6, 8}`, nothing pending at all) -- this run
+    `0003` provisioned it (`{6, 8, 9}`, nothing pending at all) -- this run
     applies nothing to it at all (未適用なし、既に記録済み -> skipped,
     never a success, since nothing was actually run)."""
     ok_app = provision_app(platform, "aggok")
@@ -698,7 +708,7 @@ def test_upgrade_applications_tally_line_counts_one_of_each_outcome(platform: ty
         result = _run_ops(platform, "upgrade-applications")
         assert result.returncode == 3, result.stdout + result.stderr
         assert "1 succeeded, 1 failed, 1 skipped (applied)" in result.stdout
-        assert ledger_numbers(platform.admin_dsn, ok_app.database) == frozenset({6, 8})
+        assert ledger_numbers(platform.admin_dsn, ok_app.database) == frozenset({6, 8, 9})
     finally:
         deprovision_app(platform, "aggok")
         deprovision_app(platform, "aggbad")

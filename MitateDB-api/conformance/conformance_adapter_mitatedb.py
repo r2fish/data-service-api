@@ -1023,6 +1023,14 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             max_concurrency=3,
             max_execution_ms=5000,
             max_operation_depth=5,
+            # Phase 9 WP-3a (design §5 U-1 = (β)): small and genuinely
+            # exercisable (`test_c05_limit_declaration_agreement.py`'s own
+            # `_MAX_EXERCISABLE_LIMIT` bound, 200) -- an `enum` this small
+            # is cheap to drive past in a V2 limit-declaration-agreement
+            # probe, matching every other small isolated-profile value
+            # above (`max_batch_entities`/`max_result_rows`/`max_filter_
+            # terms`, all 5).
+            max_enum_members=5,
         )
         fresh = MitateDBConformanceAdapter(config=small_config)
         try:
@@ -2396,6 +2404,15 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             ApplicationDeveloper.create_collection,
             ApplicationDeveloper.create_entity,
             ApplicationDeveloper.add_field,
+            # Phase 9 WP-3a (design docs/design/
+            # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2
+            # (5)): `alter_field` is a new, real public method, same commit
+            # as `constraint_declarations` flipping to `enabled` -- see
+            # this list's own module-level comment above (`tests/
+            # test_conformance_public_surface_coverage.py` pins this list
+            # to match `ApplicationDeveloper`'s real public methods
+            # mechanically).
+            ApplicationDeveloper.alter_field,
         ]
 
     def tamper_vectors(self, fixture: Fixture) -> Sequence[TamperVector]:

@@ -34,6 +34,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import Role
+from .backend import UNCHANGED
 from .cell import ApplicationDeveloper, ApplicationRuntime, Filter
 from .errors import (AuditSinkUnavailable, AuthenticationError,
                      AuthorizationError, AuthorizationStateUnavailable,
@@ -335,11 +336,14 @@ def _deny_provisional_field(field_name: str) -> None:
     order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
     `_check_object_shape` above now accepts `dry_run`/`plan`/`budget`/
     `enum`/`nullable`/`field_constraints`/`SchemaOperationRequest.
-    idempotency_key` (the packaged contract copy is already 1.7.0), but this
-    peer still declares `constraint_declarations`/`dry_run`/
-    `request_budget` `unavailable` -- accepting one of these fields and
-    silently ignoring it would be a P-3 violation (declaration says
-    `unavailable`, behavior accepts the field). `details` is set directly
+    idempotency_key` (the packaged contract copy is already 1.7.0). This
+    peer's own `constraint_declarations` capability flipped to `enabled`
+    in this same WP-3a commit (`enum`/`nullable`/`field_constraints`
+    removed from `_PROVISIONAL_UNSUPPORTED_*_FIELDS` below, same commit)
+    -- `dry_run`/`request_budget` remain `unavailable` (WP-3b/WP-3d), so
+    accepting either of THOSE and silently ignoring it would still be a
+    P-3 violation (declaration says `unavailable`, behavior accepts the
+    field). `details` is set directly
     on the raised instance (rather than a new `CapabilityError.__init__`
     parameter) so this gate does not preempt WP-3e's own planned `details`
     attribute rollout for `CapabilityError`/`ValidationError` (D-3 (5));
@@ -353,8 +357,15 @@ def _deny_provisional_field(field_name: str) -> None:
 
 _PROVISIONAL_UNSUPPORTED_MUTATION_REQUEST_FIELDS = ("dry_run", "plan", "budget")
 _PROVISIONAL_UNSUPPORTED_QUERY_REQUEST_FIELDS = ("budget",)
+# Phase 9 WP-3a (design docs/design/
+# PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-1 (4)):
+# `field_constraints`/`enum`/`nullable` removed from this gate -- same
+# commit as `constraint_declarations` flipping to `enabled` below
+# (`cell.py::ApplicationRuntime.capabilities`) and the real enforcement
+# each governs. `dry_run`/`plan`/`budget`/`idempotency_key` are UNCHANGED
+# -- their own capabilities stay `unavailable` until WP-3b/WP-3d/WP-3e.
 _PROVISIONAL_UNSUPPORTED_SCHEMA_OPERATION_REQUEST_FIELDS = (
-    "field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key",
+    "dry_run", "plan", "budget", "idempotency_key",
 )
 
 
@@ -947,7 +958,18 @@ async def post_schema(request: Request) -> Response:
         else:
             fields = None
             contract_field_types = None
-        session.create_entity(entity, fields, field_types=contract_field_types, request_id=_request_id(request))
+        # Phase 9 WP-3a (design docs/design/
+        # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)):
+        # `field_constraints` is passed through verbatim -- `cell.py::
+        # ApplicationCell.create_collection`/`.create_entity` do the real
+        # validation (partial-vs-`fields` cross-check, `enum` member/type/
+        # limit checks) and resolution to a total map; this HTTP layer
+        # does not re-validate its shape beyond `_check_object_shape`'s
+        # own top-level key check above.
+        field_constraints = body.get("field_constraints")
+        session.create_entity(
+            entity, fields, field_types=contract_field_types, field_constraints=field_constraints,
+            request_id=_request_id(request))
         # m-2 (independent review): the peer's REAL current schema-revision
         # counter (`ApplicationRuntime.schema_revision()`, the same value
         # `cell.py`'s own delete-confirmation fingerprint reads) -- never a
@@ -963,12 +985,41 @@ async def post_schema(request: Request) -> Response:
 
     if schema_operation == "add_field":
         field = body.get("field")
-        field_type = body.get("field_type")
-        if not isinstance(field, str) or field_type not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
-            raise ValidationError("add_field requires field and a supported field_type")
+        if not isinstance(field, str):
+            raise ValidationError("add_field requires field")
+        field_type_raw = body.get("field_type")
+        # WP-3a rework 3 (real, measured bug): `SchemaOperationRequest.
+        # field_type` is NOT globally `required` (only `operation`/`entity`
+        # are, `contract/data-service-api.v1.json`'s own `schemas.
+        # SchemaOperationRequest.required`), and contract `field_types`'s
+        # own description states the general rule this peer's
+        # `create_entity` branch above already honors for `fields`/`field_
+        # types`: "A field created without a declared type has type json
+        # -- this names an existing default rather than introducing a new
+        # one." `add_field`'s own singular `field_type` is that identical
+        # rule applied to the one field it adds -- an omitted `field_type`
+        # must default to `json`, not be refused. This peer used to refuse
+        # every field_type-omitting `add_field` with a bare, details-less
+        # `VALIDATION_FAILED` ("field and a supported field_type"), a real
+        # divergence from `r2db-api` (`postgres.py`'s own comment: "`add_
+        # field` with no `field_type` ... keep[s] the pre-CCR-13 default,
+        # JSONB") and from this peer's OWN in-process surface (`cell.py::
+        # ApplicationDeveloper.add_field`'s `field_type` keyword already
+        # accepts `None`-derived `"json"` via the conformance port's own
+        # `foundation_type = ... if field_type is not None else "json"`
+        # translation). A field_type that IS present and outside the
+        # 7-word vocabulary is still refused, unchanged.
+        if field_type_raw is not None and field_type_raw not in _CONTRACT_FIELD_TYPE_TO_MITATEDB:
+            raise ValidationError("field_type is not a supported field_type")
+        field_type = field_type_raw if field_type_raw is not None else "json"
+        # Phase 9 WP-3a (design D-2 (1)): `enum`/`nullable` passed through
+        # verbatim -- `cell.py::ApplicationCell.add_field` does the real
+        # validation, same reasoning as `create_entity`'s own identical
+        # comment above.
         session.add_field(
             entity, field, _CONTRACT_FIELD_TYPE_TO_MITATEDB[field_type],
-            contract_type=field_type, request_id=_request_id(request))
+            contract_type=field_type, enum=body.get("enum"), nullable=body.get("nullable"),
+            request_id=_request_id(request))
         # Phase 8 WP-1a rework 1 (裁定 3): `_post_schema_revision`, NOT
         # `schema_revision` -- this readback is not a second client
         # request (see `cell.py::ApplicationRuntime._post_schema_
@@ -977,11 +1028,37 @@ async def post_schema(request: Request) -> Response:
         # every HTTP schema operation relative to the in-process surface.
         return JSONResponse({"committed": True, "revision": str(session._post_schema_revision(request_id=_request_id(request)))}, status_code=200)  # noqa: SLF001
 
-    # C-17 present-denial form (design R-8 item 1): `alter_field`/
-    # `create_index`/`drop_index`/`drop_entity` are all real, contract-
-    # shaped requests this real dispatcher receives and refuses -- never a
-    # structural absence on this composition, since the entry point
-    # genuinely exists and executes for the two operations above.
+    if schema_operation == "alter_field":
+        # Phase 9 WP-3a (design D-2 (5)/(6)): present-denial (design R-8
+        # item 1, C-17) removed for THIS operation -- `alter_field` is now
+        # a real, executed request. `create_index`/`drop_index`/
+        # `drop_entity` still fall through to the present-denial `raise`
+        # below, unchanged by this WP.
+        field = body.get("field")
+        if not isinstance(field, str):
+            raise ValidationError("alter_field requires field")
+        # Code review §2 A / 監督裁定 A (2026-09-07): `body.get("enum",
+        # UNCHANGED)` -- NOT a plain `body.get("enum")` -- is the one
+        # place on the wire this distinction can still be made: `dict.
+        # get(key, default)` returns `default` ONLY when `key` is absent
+        # from `body`, so an omitted `enum` reaches `session.alter_field`
+        # as the `UNCHANGED` sentinel (leaves the field's `enum` as it
+        # is) while a present `"enum": null` reaches it as a real `None`
+        # (clears it) -- the contract's own `SchemaOperationRequest.enum`
+        # is already `["array", "null"]` in this WP's own packaged
+        # contract copy, so `_check_object_shape` above lets a literal
+        # `"enum": null` through the shape layer, reaching this line as
+        # the real `None` that means "clear it".
+        result = session.alter_field(
+            entity, field, enum=body.get("enum", UNCHANGED), nullable=body.get("nullable"),
+            field_type=body.get("field_type"), request_id=_request_id(request))
+        return JSONResponse({"committed": True, "revision": result["revision"]}, status_code=200)
+
+    # C-17 present-denial form (design R-8 item 1): `create_index`/
+    # `drop_index`/`drop_entity` are all real, contract-shaped requests
+    # this real dispatcher receives and refuses -- never a structural
+    # absence on this composition, since the entry point genuinely exists
+    # and executes for `create_entity`/`add_field`/`alter_field` above.
     raise CapabilityError(f"schema operation {schema_operation!r} is not supported by this peer")
 
 

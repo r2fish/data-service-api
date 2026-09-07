@@ -972,8 +972,11 @@ def test_add_field_is_declared_and_usable_on_postgres_backend(app_a) -> None:
     try:
         developer.create_collection("things", {"name": "text"})
         declared = developer.capabilities()["capabilities"]["schema_operations"]
-        assert declared["operations"] == ["create_entity", "add_field"]
+        # Phase 9 WP-3a (design D-2 (5)): `alter_field` joined `operations`
+        # in this same commit as `constraint_declarations` -> `enabled`.
+        assert declared["operations"] == ["create_entity", "add_field", "alter_field"]
         assert "add_field" not in declared["unsupported"]
+        assert "alter_field" not in declared["unsupported"]
 
         developer.add_field("things", "score", "integer")
         runtime.insert("things", {"name": "a", "score": 5})
@@ -2612,14 +2615,20 @@ def test_declared_boolean_rejects_int_zero_and_one_too(app_a) -> None:
         close_cell(cell)
 
 
-def test_catalog_reports_three_keys_and_undeclared_fields_default_to_json(app_a) -> None:
+def test_catalog_reports_four_keys_and_undeclared_fields_default_to_json(app_a) -> None:
     """`ApplicationRuntime.catalog()` (`cell.py`, `application_catalog:
     enabled` this same commit): the returned `EntityDescriptor` carries
-    exactly `entity`/`fields`/`field_types` (never `mutation_class`/
-    `address_fields`/`address_reuse`/`unique_keys` -- design §1.5 finding
-    4, `row_addressability: unavailable`), `fields` and `field_types`'
-    key set agree exactly, and a field named in `fields` but not in the
-    request's own `field_types` reports `json` (decision (ii))."""
+    exactly `entity`/`fields`/`field_types`/`field_constraints` (never
+    `mutation_class`/`address_fields`/`address_reuse`/`unique_keys` --
+    design §1.5 finding 4, `row_addressability: unavailable`), `fields`
+    and `field_types`' key set agree exactly, and a field named in
+    `fields` but not in the request's own `field_types` reports `json`
+    (decision (ii)).
+
+    Phase 9 WP-3a (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)):
+    `field_constraints` joined this same commit as `constraint_
+    declarations` flipping to `enabled` -- four keys now, not three."""
     cell = make_cell(app_a)
     try:
         developer, runtime = sessions_for(cell, app_a.app_id)
@@ -2632,9 +2641,10 @@ def test_catalog_reports_three_keys_and_undeclared_fields_default_to_json(app_a)
             "catalog_probe", fields={"typed": "integer", "untyped": "json"}, field_types={"typed": "integer"})
         entries = runtime.catalog()
         entry = next(e for e in entries if e["entity"] == "catalog_probe")
-        assert set(entry.keys()) == {"entity", "fields", "field_types"}
+        assert set(entry.keys()) == {"entity", "fields", "field_types", "field_constraints"}
         assert set(entry["fields"]) == {"typed", "untyped"}
         assert set(entry["field_types"]) == set(entry["fields"])
+        assert set(entry["field_constraints"]) == set(entry["fields"])
         assert entry["field_types"]["typed"] == "integer"
         assert entry["field_types"]["untyped"] == "json"
         # Every value in the enum is one of the contract's 7 words.
