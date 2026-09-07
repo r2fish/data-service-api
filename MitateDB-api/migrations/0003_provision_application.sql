@@ -161,10 +161,30 @@ INSERT INTO public._mdb_schema_revision (id, revision) VALUES (TRUE, 0);
 -- vocabulary `field_types.CONTRACT_TYPES` enumerates in Python -- a
 -- second, independent enforcement point (defence in depth, R-2's own
 -- precedent), not the only one.
+-- Phase 9 WP-3a (design docs/design/
+-- PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/(4)):
+-- `enum_json`/`nullable` carry this field's own contract 1.7.0
+-- `field_constraints` declaration, alongside `declared_type` in the SAME
+-- row -- never a second table (`(entity, field)` is already the natural
+-- key for "one declaration row per field", D-2 (1)/(4)'s own "宣言の正本
+-- は peer ごと・backend ごとに置く" choice for this backend). `enum_json`
+-- is a JSON-array TEXT column (`NULL` when this field declares no
+-- `enum`), the same "store structured text, decode in Python" pattern
+-- entity-table `object`/`array`/`json` columns already use elsewhere in
+-- this foundation -- not a native `jsonb` column, so this bookkeeping
+-- table's own shape stays consistent with every other TEXT-column choice
+-- already on it (`declared_type`). `nullable` defaults `TRUE` -- the
+-- contract's own default (D-2 (2): "nullable の既定は true"), so a row
+-- inserted by `0006`'s own pre-Phase-9 backfill logic (which this
+-- migration's constraint below cannot retroactively rewrite, but a NEW
+-- application provisioned by this template starts with) is never
+-- ambiguous.
 CREATE TABLE public._mdb_field_types (
     entity text NOT NULL,
     field text NOT NULL,
     declared_type text NOT NULL CHECK (declared_type IN ('string', 'integer', 'number', 'boolean', 'object', 'array', 'json')),
+    enum_json text NULL,
+    nullable boolean NOT NULL DEFAULT TRUE,
     PRIMARY KEY (entity, field)
 );
 
@@ -241,7 +261,8 @@ GRANT  SELECT ON public._mdb_platform_upgrades TO SESSION_USER;
 -- extraction and fail closed as a three-way mismatch instead).
 INSERT INTO public._mdb_platform_upgrades (upgrade_number, script_name) VALUES
     (6, '0006_declared_field_types_upgrade.sql'),
-    (8, '0008_platform_upgrades_upgrade.sql')
+    (8, '0008_platform_upgrades_upgrade.sql'),
+    (9, '0009_field_constraints_upgrade.sql')
 ON CONFLICT (upgrade_number) DO NOTHING;
 -- Q4-WP4-LEDGER-END
 

@@ -81,12 +81,13 @@ design v1.1 §7, not this WP's own containment boundary).
 """
 
 import functools
+import json
 import time
 
 import psycopg
 from psycopg import sql
 
-from .backend import SQL_OPERATOR_TOKENS
+from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
                      PlatformUpgradePending, ResourceLimitError,
                      StorageConfigurationError, ValidationError)
@@ -642,6 +643,259 @@ class PostgresBackend:
             result.setdefault(entity, {})[field] = declared_type
         return result
 
+    @staticmethod
+    def _decode_constraint_row(enum_json, nullable_value):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): `_mdb_field_types.enum_json`
+        (a JSON-array TEXT column, `NULL` when this field declares no
+        `enum`) / `.nullable` (a real `boolean` column, migration
+        0009_field_constraints_upgrade.sql) -> the same `{"nullable":
+        bool, "enum": [...]}` shape `backend_sqlite.SQLiteBackend`'s own
+        in-memory registry carries -- `"enum"` present only when
+        `enum_json` is not `NULL`."""
+        constraints = {"nullable": bool(nullable_value)}
+        if enum_json is not None:
+            constraints["enum"] = json.loads(enum_json)
+        return constraints
+
+    def _field_constraints_locked(self, cur, collection):
+        """Reads `_mdb_field_types.enum_json`/`.nullable` over an
+        ALREADY-OPEN cursor -- same sharing discipline as
+        `_field_types_locked` immediately above."""
+        _execute(cur, sql.SQL("SELECT field, enum_json, nullable FROM {} WHERE entity = %s")
+                  .format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
+        return {
+            field: self._decode_constraint_row(enum_json, nullable_value)
+            for field, enum_json, nullable_value in cur.fetchall()
+        }
+
+    @_guard_pending_platform_upgrades
+    def field_constraints(self, collection):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend.
+        StorageBackend.field_constraints`'s own contract -- the single
+        source of truth `GET /v1/catalog` and the cell-layer choke point
+        (`cell.py::_prepare_values`, never `_bind_filters`) both read.
+        Existence-checked the same way `field_types` is."""
+        validate_identifier(collection, "collection")
+        try:
+            with self._developer.cursor() as cur:
+                _execute(cur, sql.SQL(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s"
+                ), [collection])
+                (exists,) = cur.fetchone()
+                declared = self._field_constraints_locked(cur, collection) if exists else {}
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._developer.commit()
+        if not exists:
+            raise NotFoundError("collection not found")
+        return declared
+
+    def _field_types_and_constraints_locked(self, cur, collection):
+        """Code review §2 C / 監督裁定 C (2026-09-07): `field_types`'s own
+        `declared_type` and `field_constraints`'s own `enum_json`/
+        `nullable` live on the SAME `_mdb_field_types` row -- this reads
+        all three columns in the ONE query `_field_types_locked`/
+        `_field_constraints_locked` used to make as TWO independent
+        round trips against that identical row."""
+        _execute(cur, sql.SQL(
+            "SELECT field, declared_type, enum_json, nullable FROM {} WHERE entity = %s"
+        ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection])
+        types: dict = {}
+        constraints: dict = {}
+        for field, declared_type, enum_json, nullable_value in cur.fetchall():
+            types[field] = declared_type
+            constraints[field] = self._decode_constraint_row(enum_json, nullable_value)
+        return types, constraints
+
+    @_guard_pending_platform_upgrades
+    def field_types_and_constraints(self, collection):
+        """Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance
+        finding): see `backend.StorageBackend.field_types_and_
+        constraints`'s own contract -- `field_types` and `field_
+        constraints` merged into the single query `_field_types_and_
+        constraints_locked` above makes. `cell.py::_prepare_values` (and,
+        via the pair it returns, `_check_missing_required_fields`) is
+        the sole caller -- every other reader of `field_types`/`field_
+        constraints` keeps calling one of those two on their own,
+        unchanged. Existence-checked the same way both are."""
+        validate_identifier(collection, "collection")
+        try:
+            with self._developer.cursor() as cur:
+                _execute(cur, sql.SQL(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = %s"
+                ), [collection])
+                (exists,) = cur.fetchone()
+                types, constraints = self._field_types_and_constraints_locked(cur, collection) if exists else ({}, {})
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._developer.commit()
+        if not exists:
+            raise NotFoundError("collection not found")
+        return types, constraints
+
+    @_guard_pending_platform_upgrades
+    def all_field_constraints(self):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend_sqlite.
+        SQLiteBackend.all_field_constraints`'s identical docstring --
+        `GET /v1/catalog`'s sole data source for `field_constraints`."""
+        try:
+            with self._developer.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT entity, field, enum_json, nullable FROM {}")
+                          .format(sql.Identifier(_FIELD_TYPES_TABLE)))
+                rows = cur.fetchall()
+        except psycopg.errors.UndefinedTable as exc:
+            self._developer.rollback()
+            raise StorageConfigurationError(
+                "the storage backend refused this read due to a missing declared-field-type registry "
+                "(migration 0006 not applied to this application database)"
+            ) from exc
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            raise ValidationError("storage backend rejected the request") from exc
+        else:
+            self._developer.commit()
+        result: dict = {}
+        for entity, field, enum_json, nullable_value in rows:
+            result.setdefault(entity, {})[field] = self._decode_constraint_row(enum_json, nullable_value)
+        return result
+
+    @_guard_pending_platform_upgrades
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+        """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, F-6, 監督裁定
+        S-g): see `backend.StorageBackend.alter_field_constraints`'s own
+        contract. Unlike `create_collection`/`add_field` above (whose own
+        "read the live catalog, then DDL in a later transaction" shape
+        `field_domains` embodies), this method never leaves the developer
+        connection's own transaction between its existing-row SELECT and
+        its registry UPDATE -- both happen inside the SAME `with self.
+        _developer.cursor()` block, committed (or rolled back) together
+        as the LAST step of this one method. The developer connection
+        reads real APPLICATION DATA rows here (not only the catalog) --
+        safe because this application's own developer role OWNS every
+        entity table it creates (`create_collection`/`add_field` above),
+        and PostgreSQL grants a table's owner every privilege on it,
+        `SELECT` included, with no separate `GRANT` required (F-6,
+        `migrations/0003_provision_application.sql`)."""
+        validate_identifier(collection, "collection")
+        validate_identifier(field, "field")
+        timeout_ms = self._timeout_ms(deadline)
+        hook_fired = False
+        try:
+            with self._developer.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
+                _execute(cur, sql.SQL(
+                    "SELECT declared_type, enum_json, nullable FROM {} WHERE entity = %s AND field = %s"
+                ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [collection, field])
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError("field not found")
+                declared_type, current_enum_json, current_nullable = row
+                new_nullable = bool(current_nullable) if nullable is None else nullable
+                # Code review §2 A / 監督裁定 A (2026-09-07): tri-state
+                # `enum` -- `UNCHANGED` (default) keeps the field's
+                # current `enum` (decoded from the row already read
+                # above); an explicit `None` CLEARS it; any other value
+                # (an already-validated, non-empty list) SETS/REPLACES
+                # it. This is the SAME three-way rule `backend_sqlite.
+                # SQLiteBackend.alter_field_constraints` applies.
+                if enum is UNCHANGED:
+                    new_enum = json.loads(current_enum_json) if current_enum_json is not None else None
+                elif enum is not None:
+                    new_enum = list(enum)
+                else:
+                    new_enum = None
+                # Code review §2 F / 監督裁定 F (2026-09-07): locks
+                # `collection` IN SHARE MODE before scanning its existing
+                # rows, inside this SAME transaction -- SHARE MODE
+                # blocks a concurrent INSERT/UPDATE/DELETE (ROW
+                # EXCLUSIVE) on this table for the rest of this
+                # transaction while still permitting concurrent SELECTs
+                # (ACCESS SHARE), so no other session's write can land a
+                # newly-violating row in the window between this scan
+                # and this same transaction's own COMMIT below. The
+                # single-transaction placement (実装の形 4, S-g) alone
+                # only closes "registry updated while a row still went
+                # unscanned"; under READ COMMITTED (this connection's own
+                # default) it does not, by itself, close this phantom-
+                # write window -- this lock does.
+                _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE MODE").format(sql.Identifier(collection)))
+                _execute(cur, sql.SQL("SELECT {} FROM {}").format(
+                    sql.Identifier(field), sql.Identifier(collection)))
+                violation = None
+                for (value,) in cur.fetchall():
+                    if value is None:
+                        if new_nullable is False:
+                            violation = "nullable"
+                            break
+                        continue
+                    if new_enum is not None:
+                        decoded = bool(value) if declared_type == "boolean" else value
+                        if decoded not in new_enum:
+                            violation = "enum"
+                            break
+                if violation is not None:
+                    # Code review §2 D / 監督裁定 D (2026-09-07): `field`
+                    # names a POSITION IN THE REQUEST (design D-3 (2)),
+                    # not the entity field name -- see `backend_sqlite.
+                    # SQLiteBackend.alter_field_constraints`'s identical
+                    # comment for why that position is `violation` itself.
+                    raise ConflictError(
+                        "existing rows violate the constraints this alter_field would establish",
+                        details={"field": violation, "violated_declaration": violation},
+                    )
+                new_enum_json = json.dumps(new_enum) if new_enum is not None else None
+                _execute(cur, sql.SQL(
+                    "UPDATE {} SET enum_json = %s, nullable = %s WHERE entity = %s AND field = %s"
+                ).format(sql.Identifier(_FIELD_TYPES_TABLE)), [new_enum_json, new_nullable, collection, field])
+                self._bump_schema_revision(cur)
+                _execute(cur, sql.SQL("SELECT revision FROM {} WHERE id = TRUE")
+                          .format(sql.Identifier(_SCHEMA_REVISION_TABLE)))
+                new_revision = cur.fetchone()[0]
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+                hook_fired = True
+            self._developer.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            self._developer.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
+        except (NotFoundError, ConflictError):
+            self._developer.rollback()
+            raise
+        except psycopg.errors.UndefinedTable:
+            self._developer.rollback()
+            raise NotFoundError("collection not found")
+        except psycopg.Error as exc:
+            self._developer.rollback()
+            if hook_fired:
+                audit_hook.commit_failed()
+                raise AuditSinkUnavailable(
+                    "the durable audit sink recorded this operation but the data commit failed"
+                ) from exc
+            raise ValidationError("storage backend rejected the request") from exc
+        except Exception:
+            self._developer.rollback()
+            raise
+        return new_revision
+
     @_guard_pending_platform_upgrades
     def schema_revision(self):
         try:
@@ -664,7 +918,7 @@ class PostgresBackend:
     # DDL (developer connection only -- R-1)
     # ------------------------------------------------------------------
     @_guard_pending_platform_upgrades
-    def create_collection(self, name, fields, *, field_types=None, audit_hook=None, deadline=None):
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None, deadline=None):
         validate_identifier(name, "collection")
         definitions = []
         for field, field_type in fields.items():
@@ -682,8 +936,18 @@ class PostgresBackend:
         field_types = dict(field_types or {})
         for field, physical_type in fields.items():
             field_types.setdefault(field, _FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
-        field_types_statement = sql.SQL("INSERT INTO {} (entity, field, declared_type) VALUES (%s, %s, %s)") \
-            .format(sql.Identifier(_FIELD_TYPES_TABLE))
+        # Phase 9 WP-3a (design D-2 (1)/(4)): same robustness fallback for
+        # `field_constraints` -- a name in `fields` `field_constraints`
+        # (partial) omits gets `{"nullable": True}`, no `enum` (contract
+        # `SchemaOperationRequest.field_constraints.description`).
+        resolved_constraints = {}
+        for field in fields:
+            declared = dict((field_constraints or {}).get(field) or {})
+            declared.setdefault("nullable", True)
+            resolved_constraints[field] = declared
+        field_types_statement = sql.SQL(
+            "INSERT INTO {} (entity, field, declared_type, enum_json, nullable) VALUES (%s, %s, %s, %s, %s)"
+        ).format(sql.Identifier(_FIELD_TYPES_TABLE))
         # Phase 4 (design PHASE4_DURABLE_AUDIT_SINK_V1.md D-2, review M-6):
         # `commit()` moved INSIDE this `try` (it used to run in an `else:`
         # clause, OUTSIDE the try/except -- a raise from `commit()` itself
@@ -713,7 +977,10 @@ class PostgresBackend:
                 # atomic by construction (a failure/rollback below undoes
                 # both together, never one without the other).
                 for field in fields:
-                    _execute(cur, field_types_statement, [name, field, field_types[field]])
+                    constraints = resolved_constraints[field]
+                    enum_json = json.dumps(constraints["enum"]) if "enum" in constraints else None
+                    _execute(cur, field_types_statement,
+                             [name, field, field_types[field], enum_json, constraints["nullable"]])
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True
@@ -742,7 +1009,7 @@ class PostgresBackend:
             raise
 
     @_guard_pending_platform_upgrades
-    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None, deadline=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None, deadline=None):
         validate_identifier(collection, "collection")
         validate_identifier(field, "field")
         statement = sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
@@ -753,8 +1020,14 @@ class PostgresBackend:
         # `contract_type`.
         if contract_type is None:
             contract_type = _FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
-        field_types_statement = sql.SQL("INSERT INTO {} (entity, field, declared_type) VALUES (%s, %s, %s)") \
-            .format(sql.Identifier(_FIELD_TYPES_TABLE))
+        # Phase 9 WP-3a (design D-2 (1)/(4)): `nullable=None` (no explicit
+        # declaration) resolves to the contract default `True`, matching
+        # `create_collection`'s own identical fallback above.
+        resolved_nullable = True if nullable is None else nullable
+        enum_json = json.dumps(list(enum)) if enum is not None else None
+        field_types_statement = sql.SQL(
+            "INSERT INTO {} (entity, field, declared_type, enum_json, nullable) VALUES (%s, %s, %s, %s, %s)"
+        ).format(sql.Identifier(_FIELD_TYPES_TABLE))
         # Phase 4: same `commit()`-inside-`try` + pre-commit-hook structure
         # as `create_collection` above -- see that method's own comment.
         hook_fired = False
@@ -763,11 +1036,35 @@ class PostgresBackend:
             with self._developer.cursor() as cur:
                 if timeout_ms is not None:
                     self._set_timeouts(cur, timeout_ms)
+                if resolved_nullable is False:
+                    # M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors
+                    # `alter_field_constraints`'s own existing-row rule
+                    # (LOCK TABLE ... IN SHARE MODE, inside this SAME
+                    # transaction, before the scan), for a NEW field
+                    # instead of an existing one -- a NEW field declaring
+                    # `nullable: false` on an entity that already holds
+                    # rows would leave every one of them holding `null`
+                    # in it (there being no earlier value for it to have
+                    # held), so it is refused the same way. Checked
+                    # BEFORE the DDL below, so a conflicting call changes
+                    # NOTHING -- no column, no registry row, no revision
+                    # bump; this cursor's own transaction rolls back
+                    # whole (`except ... self._developer.rollback()`
+                    # below, the same as every other failure path here).
+                    _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE MODE").format(sql.Identifier(collection)))
+                    _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(collection)))
+                    (existing_rows,) = cur.fetchone()
+                    if existing_rows > 0:
+                        raise ConflictError(
+                            "add_field declaring nullable: false on an entity that already holds rows "
+                            "would leave every existing row holding null in the new field",
+                            details={"violated_declaration": "nullable", "field": "nullable"},
+                        )
                 _execute(cur, statement)
                 self._bump_schema_revision(cur)
                 # Phase 6 WP-3 (design D-3): same-transaction registry
                 # write as `create_collection` above.
-                _execute(cur, field_types_statement, [collection, field, contract_type])
+                _execute(cur, field_types_statement, [collection, field, contract_type, enum_json, resolved_nullable])
             if audit_hook is not None:
                 audit_hook.pre_commit()
                 hook_fired = True

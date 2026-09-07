@@ -131,6 +131,12 @@ DECLARED_AUDIT_EVENT_CLASSES = frozenset({
 DECLARED_AUDIT_OPERATIONS = frozenset({
     "access",
     "add_field",
+    # Phase 9 WP-3a (design docs/design/
+    # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)):
+    # `ApplicationCell.alter_field`'s own `_make_audit_hook(operation=
+    # "alter_field", ...)` -- a real, durable `schema_change`-class audit
+    # write, same commit as the capability flip.
+    "alter_field",
     "assert_active",
     "audit_buffer",
     "authenticate",

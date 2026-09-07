@@ -15,7 +15,7 @@ DATA_SERVICE_FOUNDATION.md`) -- never the production persistence topology
 import sqlite3
 import time
 
-from .backend import SQL_OPERATOR_TOKENS
+from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .errors import ConflictError, NotFoundError, ResourceLimitError, ValidationError
 from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from .identifiers import quote_identifier, validate_identifier
@@ -105,6 +105,16 @@ class SQLiteBackend:
         # physically `INTEGER`, same as a declared `integer` "0/1"
         # value).
         self._declared_types = {}
+        # Phase 9 WP-3a (design docs/design/
+        # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (4)):
+        # "SQLite backend は `_declared_types` と同じプロセス内構造に制約
+        # を持つ" -- `{collection: {field: {"nullable": bool, "enum":
+        # [...]}}}`, the SAME lazily-created, in-memory-only shape as
+        # `_declared_types` immediately above (no upgrade script: this
+        # backend is the `:memory:` process-local one, F-6). `"enum"` is
+        # present only on a field that declares one; `"nullable"` is
+        # always present (default `True`, the contract default, D-2 (2)).
+        self._declared_constraints = {}
 
     @property
     def raw_connection(self):
@@ -168,7 +178,7 @@ class SQLiteBackend:
             self._db.rollback()
         self._db.execute("BEGIN")
 
-    def create_collection(self, name, fields, *, field_types=None, audit_hook=None, deadline=None):
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None, deadline=None):
         _check_deadline(deadline)
         definitions = []
         for field, field_type in fields.items():
@@ -216,9 +226,46 @@ class SQLiteBackend:
         for field, physical_type in fields.items():
             resolved.setdefault(field, FOUNDATION_TYPE_TO_CONTRACT_TYPE[physical_type])
         self._declared_types[name] = resolved
+        # Phase 9 WP-3a (design D-2 (1)/(4)): registry write lands only on
+        # this same success path -- total over `fields`, `field_constraints`
+        # partial input backfilled to `{"nullable": True}` for any name it
+        # omits (contract `SchemaOperationRequest.field_constraints.
+        # description`: "any name in fields it omits is created with no
+        # enum and nullable: true").
+        resolved_constraints = {}
+        for field in fields:
+            declared = dict((field_constraints or {}).get(field) or {})
+            declared.setdefault("nullable", True)
+            resolved_constraints[field] = declared
+        self._declared_constraints[name] = resolved_constraints
 
-    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None, deadline=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None, deadline=None):
         _check_deadline(deadline)
+        resolved_nullable = True if nullable is None else nullable
+        if resolved_nullable is False:
+            # M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors `alter_
+            # field_constraints`'s own existing-row rule, for a NEW field
+            # instead of an existing one -- an `add_field` declaring
+            # `nullable: false` on an entity that already holds rows is
+            # refused with `CONFLICT`, because every one of those rows
+            # would hold `null` in the new field (there being no earlier
+            # value for it to have held). Checked BEFORE the DDL below
+            # (this backend has no separate tx step for it to share --
+            # see `alter_field_constraints`'s own identical comment for
+            # why no lock is needed on this single-threaded, in-process
+            # backend), so a conflicting call changes NOTHING.
+            try:
+                (existing_rows,) = self._db.execute(
+                    "SELECT count(*) FROM " + quote_identifier(collection)
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                raise NotFoundError("collection not found")
+            if existing_rows > 0:
+                raise ConflictError(
+                    "add_field declaring nullable: false on an entity that already holds rows "
+                    "would leave every existing row holding null in the new field",
+                    details={"violated_declaration": "nullable", "field": "nullable"},
+                )
         table = quote_identifier(collection)
         statement = "ALTER TABLE " + table + " ADD COLUMN " + \
             quote_identifier(field) + " " + _TYPES[field_type]
@@ -251,6 +298,14 @@ class SQLiteBackend:
         if contract_type is None:
             contract_type = FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
         self._declared_types.setdefault(collection, {})[field] = contract_type
+        # Phase 9 WP-3a (design D-2 (1)/(4)): same success-path-only
+        # registry write as `create_collection` above, for this one new
+        # field -- `nullable=None` (no explicit declaration) resolves to
+        # the contract default `True`.
+        declared = {"nullable": resolved_nullable}
+        if enum is not None:
+            declared["enum"] = list(enum)
+        self._declared_constraints.setdefault(collection, {})[field] = declared
 
     def field_types(self, collection):
         """Phase 6 WP-3 (design D-3): see `backend.StorageBackend.
@@ -269,6 +324,142 @@ class SQLiteBackend:
         every field always gets a registry row, `create_collection`'s own
         docstring)."""
         return {name: dict(types) for name, types in self._declared_types.items()}
+
+    def field_constraints(self, collection):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): see `backend.
+        StorageBackend.field_constraints`'s own contract. `field_domains`
+        is called only for its existence check, matching `field_types`
+        above."""
+        self.field_domains(collection)  # NotFoundError if `collection` does not exist
+        return {field: dict(value) for field, value in self._declared_constraints.get(collection, {}).items()}
+
+    def field_types_and_constraints(self, collection):
+        """Phase 9 WP-3a rework (code review §2 C, P-8/G-4): see
+        `backend.StorageBackend.field_types_and_constraints`'s own
+        contract. This backend has no round trip to cut -- `_declared_
+        types`/`_declared_constraints` are already two plain in-process
+        dicts -- so this exists purely to give `cell.py` the SAME method
+        name on both backends; `field_domains` is still called only once
+        here (not twice, as calling `field_types`+`field_constraints`
+        separately would)."""
+        self.field_domains(collection)  # NotFoundError if `collection` does not exist
+        return (
+            dict(self._declared_types.get(collection, {})),
+            {field: dict(value) for field, value in self._declared_constraints.get(collection, {}).items()},
+        )
+
+    def all_field_constraints(self):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): `{collection: {field:
+        {"nullable": bool, "enum": [...]}}}` for EVERY collection this
+        backend currently has -- `GET /v1/catalog`'s own sole data
+        source for `field_constraints`, matching `all_field_types`
+        above."""
+        return {
+            name: {field: dict(value) for field, value in constraints.items()}
+            for name, constraints in self._declared_constraints.items()
+        }
+
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+        """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g):
+        see `backend.StorageBackend.alter_field_constraints`'s own
+        contract. This backend has no separate DDL step for a constraint
+        change (only the registry moves) -- the existing-row scan, the
+        registry write, and the schema-revision bump all happen here, in
+        this one method, inside the SAME pseudo-tx `create_collection`/
+        `add_field` above use for DDL (`_begin_pseudo_tx`) so a raised
+        `ConflictError` (or a mid-method `AuditSinkUnavailable` from
+        `audit_hook.pre_commit()`) leaves NOTHING changed -- not even a
+        half-applied registry write -- exactly like this backend's own
+        DDL methods already guarantee for schema changes.
+
+        Code review §2 F / 監督裁定 F (2026-09-07): unlike `backend_
+        postgres.PostgresBackend`'s own implementation, this backend
+        takes no `LOCK TABLE` before its own row scan below -- this
+        whole method is one uninterruptible Python call on one private,
+        single-threaded, in-process (`:memory:`) connection (`__init__`'s
+        own module-level "PG 留意" note has no counterpart here: there is
+        no OTHER session that could ever commit a row between this
+        method's own scan and its own commit). The concurrency hole a
+        PostgreSQL `LOCK TABLE` closes simply does not exist on this
+        backend."""
+        _check_deadline(deadline)
+        if field not in self.field_domains(collection):  # NotFoundError if `collection` does not exist
+            raise NotFoundError("field not found")
+        current = dict(self._declared_constraints.get(collection, {}).get(field) or {"nullable": True})
+        new_nullable = current.get("nullable", True) if nullable is None else nullable
+        new_constraints = {"nullable": new_nullable}
+        # Code review §2 A / 監督裁定 A (2026-09-07): tri-state `enum` --
+        # `UNCHANGED` (default) keeps whatever this field's current
+        # registry entry already carries; an explicit `None` clears it
+        # (no "enum" key at all in `new_constraints`); any other value
+        # (already a validated, non-empty list, `cell.py::alter_field`'s
+        # own job) sets/replaces it.
+        if enum is UNCHANGED:
+            if "enum" in current:
+                new_constraints["enum"] = list(current["enum"])
+        elif enum is not None:
+            new_constraints["enum"] = list(enum)
+        declared_type = self._declared_types.get(collection, {}).get(field)
+        self._begin_pseudo_tx()
+        try:
+            rows = self._db.execute(
+                "SELECT " + quote_identifier(field) + " FROM " + quote_identifier(collection)
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            self._db.rollback()
+            raise NotFoundError("collection not found")
+        violation = None
+        allowed_enum = new_constraints.get("enum")
+        for row in rows:
+            value = row[0]
+            if value is None:
+                if new_nullable is False:
+                    violation = "nullable"
+                    break
+                continue
+            if allowed_enum is not None:
+                # `enum` can only ever be declared on a `string`/
+                # `integer`/`number`/`boolean` field (`field_types.
+                # validate_enum_declaration` refuses it on `object`/
+                # `array`/`json` before it ever reaches a registry) --
+                # this backend stores a declared-`boolean` value as a
+                # native SQLite `0`/`1` integer, so it alone needs
+                # decoding back before an `enum` (of real Python `bool`
+                # members) can compare against it.
+                decoded = bool(value) if declared_type == "boolean" else value
+                if decoded not in allowed_enum:
+                    violation = "enum"
+                    break
+        if violation is not None:
+            self._db.rollback()
+            # Code review §2 D / 監督裁定 D (2026-09-07): `field` names a
+            # POSITION IN THE REQUEST (design D-3 (2)), not the entity
+            # field name -- `alter_field`'s own request carries `enum`/
+            # `nullable` as its OWN top-level keys (`{"collection": ...,
+            # "field": <entity field name>, "enum": [...], "nullable":
+            # ...}`), so the position a violated `enum`/`nullable`
+            # declaration is attributable to IS that same top-level key
+            # name -- the same value as `violated_declaration` itself.
+            raise ConflictError(
+                "existing rows violate the constraints this alter_field would establish",
+                details={"field": violation, "violated_declaration": violation},
+            )
+        self._declared_constraints.setdefault(collection, {})[field] = new_constraints
+        self._schema_revision += 1
+        try:
+            if audit_hook is not None:
+                audit_hook.pre_commit()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            # Undo the in-memory registry/revision mutation above -- this
+            # backend's own registries are plain Python dicts/ints, not
+            # transactional storage, so a rollback of the SQL side alone
+            # would otherwise leave them out of step with the database.
+            self._declared_constraints[collection][field] = current
+            self._schema_revision -= 1
+            raise
+        return self._schema_revision
 
     def encode_value(self, value, domain=None):
         # `domain` is accepted only to match the shared `StorageBackend`

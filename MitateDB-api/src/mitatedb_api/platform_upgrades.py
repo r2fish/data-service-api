@@ -56,16 +56,19 @@ LEDGER_TABLE_NAME = "_mdb_platform_upgrades"
 
 #: The complete set of per-application upgrade numbers THIS package's own
 #: shipped migrations set requires every application database to carry
-#: (design D-3(f), §8: MitateDB = {6, 8} -- `0006_declared_field_types_
+#: (design D-3(f), §8: MitateDB = {6, 8, 9} -- `0006_declared_field_types_
 #: upgrade.sql` predates this WP's own ledger discipline, `0008_platform_
-#: upgrades_upgrade.sql` is this WP's own). D-3(d) regulation (d)'s
-#: three-way static check (`tests/test_platform_upgrade_ledger_scan.py::
-#: test_real_migrations_three_way_match`) holds this set, the real
-#: `migrations/*_upgrade.sql` file-number set, and `0003`'s own seed list
-#: to the SAME set mechanically -- forgetting to add a new number here
-#: when a new per-application upgrade script ships is caught by CI, not
-#: left to operator discipline (design §9.4 step 5).
-PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({6, 8})
+#: upgrades_upgrade.sql` is Q4 phase's own, `0009_field_constraints_
+#: upgrade.sql` is Phase 9 WP-3a's own (design docs/design/
+#: PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/(4)):
+#: `enum_json`/`nullable` columns on `_mdb_field_types`). D-3(d)
+#: regulation (d)'s three-way static check (`tests/test_platform_upgrade_
+#: ledger_scan.py::test_real_migrations_three_way_match`) holds this set,
+#: the real `migrations/*_upgrade.sql` file-number set, and `0003`'s own
+#: seed list to the SAME set mechanically -- forgetting to add a new
+#: number here when a new per-application upgrade script ships is caught
+#: by CI, not left to operator discipline (design §9.4 step 5).
+PLATFORM_UPGRADE_NUMBERS: frozenset[int] = frozenset({6, 8, 9})
 
 #: The `psql -v` variable name this peer's own per-application upgrade
 #: scripts (and `0003`/`0004`) take for the target application id --

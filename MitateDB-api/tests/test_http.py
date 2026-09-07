@@ -738,8 +738,14 @@ def test_declared_unavailable_endpoints_deny_uniformly_after_auth(app_a_stack, m
     assert anon.json()["code"] == "AUTH_REQUIRED"
 
 
-@pytest.mark.parametrize("operation", ["alter_field", "create_index", "drop_index", "drop_entity"])
+@pytest.mark.parametrize("operation", ["create_index", "drop_index", "drop_entity"])
 def test_unimplemented_schema_operations_are_present_denials(app_a_stack, operation):
+    """Phase 9 WP-3a (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)):
+    `alter_field` REMOVED from this parametrize set -- it is no longer a
+    present-denial, it is now a real, executed operation (same commit as
+    `constraint_declarations` flipping to `enabled`). See
+    `test_alter_field_real_http_round_trip` below for its own coverage."""
     entity = "http_unimplemented_schema_target"
     _create_entity(app_a_stack, entity)
     body = {"operation": operation, "entity": entity}
@@ -748,6 +754,32 @@ def test_unimplemented_schema_operations_are_present_denials(app_a_stack, operat
     response = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=body)
     assert response.status_code == 400
     assert response.json()["code"] == "CAPABILITY_UNSUPPORTED"
+
+
+def test_alter_field_real_http_round_trip(app_a_stack):
+    """Phase 9 WP-3a (design D-2 (5)/(6)): `alter_field` over HTTP is a
+    real, executed operation as of this commit -- enforces the redeclared
+    `enum`, and a conflicting `alter_field` (an existing row violates the
+    constraints it would establish) is refused with `CONFLICT`, changing
+    nothing."""
+    entity = "http_alter_field_target"
+    _create_entity(app_a_stack, entity, fields=["status"], field_types={"status": "string"})
+    response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "alter_field", "entity": entity, "field": "status", "enum": ["a", "b"]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["committed"] is True
+    assert body.get("revision") is not None
+
+    field_type_response = _post(
+        app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer,
+        json_body={"operation": "alter_field", "entity": entity, "field": "status", "field_type": "integer"},
+    )
+    assert field_type_response.status_code == 400
+    assert field_type_response.json()["code"] == "VALIDATION_FAILED"
+    assert field_type_response.json()["details"].get("violated_declaration") == "unsupported_field"
 
 
 def test_runtime_credential_forbidden_from_schema_operations(app_a_stack):
@@ -902,11 +934,17 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     completion condition 24): the packaged contract copy is already 1.7.0
     (schema-accepts `dry_run`/`plan`/`budget`/`enum`/`nullable`/
     `field_constraints`/`SchemaOperationRequest.idempotency_key`), but this
-    peer still declares `constraint_declarations`/`dry_run`/
-    `request_budget` `unavailable` -- every one of the 7 new fields must be
-    refused with `CAPABILITY_UNSUPPORTED` (with `details.violated_
-    declaration: capability` / `details.field`) before anything executes,
-    with no side effect."""
+    peer still declares `dry_run`/`request_budget` `unavailable` -- every
+    remaining gated field must be refused with `CAPABILITY_UNSUPPORTED`
+    (with `details.violated_declaration: capability` / `details.field`)
+    before anything executes, with no side effect.
+
+    Phase 9 WP-3a (design D-1 (4)): `field_constraints`/`enum`/`nullable`
+    REMOVED from this gate, same commit as `constraint_declarations`
+    flipping to `enabled` -- see `test_alter_field_real_http_round_trip`
+    and `MitateDB-api/tests/test_constraints_declaration.py` for their own
+    coverage of the real enforcement that replaces this gate for those
+    three fields."""
     entity = "http_gate_target"
     _create_entity(app_a_stack, entity, fields=["label"])
 
@@ -950,17 +988,16 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
     assert after_gate.status_code == 200
     assert after_gate.json()["items"] == []
 
-    # --- schema: field_constraints / enum / nullable / dry_run / plan / budget / idempotency_key ---
+    # --- schema: dry_run / plan / budget / idempotency_key (Phase 9
+    # WP-3a: field_constraints / enum / nullable removed from this list --
+    # see this function's own docstring). ---
     schema_gate_cases = [
-        {"operation": "create_entity", "entity": "gated_entity_2", "fields": ["label"], "field_constraints": {"label": {"nullable": False}}},
-        {"operation": "add_field", "entity": entity, "field": "gated_enum_field", "field_type": "string", "enum": ["a", "b"]},
-        {"operation": "add_field", "entity": entity, "field": "gated_nullable_field", "field_type": "string", "nullable": False},
         {"operation": "add_field", "entity": entity, "field": "gated_dry_run_field", "field_type": "string", "dry_run": True},
         {"operation": "add_field", "entity": entity, "field": "gated_plan_field", "field_type": "string", "plan": "deadbeef"},
         {"operation": "add_field", "entity": entity, "field": "gated_budget_field", "field_type": "string", "budget": {"execution_ms": 1}},
         {"operation": "add_field", "entity": entity, "field": "gated_idempotency_field", "field_type": "string", "idempotency_key": "abc"},
     ]
-    provisional_fields = {"field_constraints", "enum", "nullable", "dry_run", "plan", "budget", "idempotency_key"}
+    provisional_fields = {"dry_run", "plan", "budget", "idempotency_key"}
     catalog_before = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     for case in schema_gate_cases:
         response = _post(app_a_stack, "/v1/schema/operations", bearer=app_a_stack.developer_bearer, json_body=case)
@@ -969,13 +1006,11 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_before_execution(app
         assert response.json()["code"] == "CAPABILITY_UNSUPPORTED", case
         assert response.json()["details"]["violated_declaration"] == "capability", case
         assert response.json()["details"]["field"] == expected_field, case
-    # No side effect: entity/field additions above never landed.
+    # No side effect: field additions above never landed.
     catalog_after = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     assert catalog_after == catalog_before
-    entity_names_after = {e["entity"] for e in catalog_after["entities"]}
-    assert "gated_entity_2" not in entity_names_after
     target_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == entity)
-    for gated_field in ("gated_enum_field", "gated_nullable_field", "gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
+    for gated_field in ("gated_dry_run_field", "gated_plan_field", "gated_budget_field", "gated_idempotency_field"):
         assert gated_field not in target_fields_after
 
 
@@ -988,13 +1023,18 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_sta
     `http.py` entirely) -- confirming the gate lives in `cell.py` itself,
     not only at the HTTP boundary. Each case raises `CapabilityError` with
     `details == {"violated_declaration": "capability", "field": <name>}`.
-    Includes an empty-dict (`field_constraints={}`) and an empty-string
-    (`idempotency_key=""`) case specifically: `ApplicationDeveloper.
-    create_entity`'s gate used a bare truthy check before this rework
-    (WP-1a code review item 5), which silently let both values past
-    uncaught since `{}` and `"" ` are both falsy -- `add_field`'s existing
-    `is not None` check already covered them and is exercised here too,
-    for parity."""
+    Includes an empty-string (`idempotency_key=""`) case specifically:
+    `ApplicationDeveloper.create_entity`'s gate used a bare truthy check
+    before this rework (WP-1a code review item 5), which silently let it
+    past uncaught since `""` is falsy -- `add_field`'s existing `is not
+    None` check already covered it and is exercised here too, for parity.
+
+    Phase 9 WP-3a (design D-1 (4)): the `field_constraints={}`
+    (`create_entity`) and `nullable=False` (`add_field`) cases this test
+    used to carry are REMOVED -- both fields are real, enforced
+    declarations as of this commit, no longer gated; see `MitateDB-api/
+    tests/test_constraints_declaration.py` for their own in-process
+    coverage."""
     entity = "in_process_gate_target"
     _create_entity(app_a_stack, entity, fields=["label"])
 
@@ -1012,41 +1052,37 @@ def test_contract_1_7_0_provisional_gate_rejects_new_fields_in_process(app_a_sta
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "dry_run"}
 
     with pytest.raises(CapabilityError) as excinfo:
-        developer.create_entity("in_process_gated_entity", fields=["label"], field_constraints={})
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "field_constraints"}
-
-    with pytest.raises(CapabilityError) as excinfo:
-        developer.create_entity("in_process_gated_entity_2", fields=["label"], idempotency_key="")
+        developer.create_entity("in_process_gated_entity_2", fields={"label": "text"}, idempotency_key="")
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
 
     with pytest.raises(CapabilityError) as excinfo:
-        developer.add_field(entity, "in_process_gated_field", "string", nullable=False)
-    assert excinfo.value.details == {"violated_declaration": "capability", "field": "nullable"}
-
-    with pytest.raises(CapabilityError) as excinfo:
-        developer.add_field(entity, "in_process_gated_field_2", "string", idempotency_key="")
+        developer.add_field(entity, "in_process_gated_field_2", "text", idempotency_key="")
     assert excinfo.value.details == {"violated_declaration": "capability", "field": "idempotency_key"}
 
     # No side effect from any gated in-process attempt above.
     catalog_after = _get(app_a_stack, "/v1/catalog", bearer=app_a_stack.runtime_bearer).json()
     entity_names_after = {e["entity"] for e in catalog_after["entities"]}
-    assert "in_process_gated_entity" not in entity_names_after
     assert "in_process_gated_entity_2" not in entity_names_after
     target_fields_after = next(e["fields"] for e in catalog_after["entities"] if e["entity"] == entity)
-    assert "in_process_gated_field" not in target_fields_after
     assert "in_process_gated_field_2" not in target_fields_after
 
 
 def test_contract_1_7_0_new_capabilities_are_declared_unavailable(app_a_stack):
-    """Completion condition 25 (peer-local half): the 3 new capabilities are
-    declared `unavailable` in the SAME commit as the provisional gate above
-    (P-3) -- the common-suite half of this (defined ⊆ declared, all 14
-    names present) is `conformance-tests/test_c11_document_conformance.py`
-    (裁定 T-4)."""
+    """Completion condition 25 (peer-local half): the 3 new capabilities
+    were declared `unavailable` in the SAME commit as the provisional gate
+    above (P-3) -- the common-suite half of this (defined ⊆ declared, all
+    14 names present) is `conformance-tests/test_c11_document_
+    conformance.py` (裁定 T-4).
+
+    Phase 9 WP-3a (design D-1 (4)): `constraint_declarations` flips to
+    `enabled` in this SAME commit as the gate removal/real enforcement
+    above -- `dry_run`/`request_budget` stay `unavailable` until WP-3b/
+    WP-3d."""
     response = _get(app_a_stack, "/v1/capabilities", bearer=app_a_stack.developer_bearer)
     assert response.status_code == 200
     capabilities = response.json()["capabilities"]
-    for name in ("constraint_declarations", "dry_run", "request_budget"):
+    assert capabilities["constraint_declarations"]["status"] == "enabled"
+    for name in ("dry_run", "request_budget"):
         assert name in capabilities, name
         assert capabilities[name]["status"] == "unavailable", name
 

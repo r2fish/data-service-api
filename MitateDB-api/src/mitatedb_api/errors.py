@@ -41,7 +41,24 @@ class AuthorizationError(FoundationError):
 
 
 class ValidationError(FoundationError):
-    pass
+    """Phase 9 WP-3a (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-3 (5)):
+    `details` is OPTIONAL here (`None` by default) -- this WP gives the
+    D-3 four-key `details` shape only to the denials it newly introduces
+    (an `enum`/`nullable` violation at the value-validation choke point,
+    an `alter_field` naming `field_type`), never retrofitting it onto any
+    of this class's 105 pre-existing call sites (that full rollout is
+    WP-3e's own, separate task, D-3 実装の形 3). `getattr(exc, "details",
+    None)` (`http.py::_problem_for_exception`'s existing convention)
+    already tolerates an instance with no `details` attribute at all --
+    passing `details=None` here deliberately leaves that attribute UNSET
+    (not set to `{}`), so an untouched call site's own error shape is
+    byte-for-byte unchanged by this addition."""
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        if details is not None:
+            self.details = dict(details)
 
 
 class ResourceLimitError(FoundationError):
@@ -82,7 +99,19 @@ class DestructiveConfirmationRequired(FoundationError):
 
 
 class ConflictError(FoundationError):
-    pass
+    """Phase 9 WP-3a (design D-3 (5)/(6)): same optional `details` as
+    `ValidationError` above, for exactly one new caller -- a rejected
+    `alter_field` whose declared constraints an existing row would
+    violate (`backend.StorageBackend.alter_field_constraints`), which
+    carries `{"field": ..., "violated_declaration": "enum"|"nullable"}`
+    (never a row value or a row count, SI-10). Every pre-existing
+    `ConflictError` call site (a unique-index/row-write conflict) keeps
+    raising with no `details` at all."""
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        if details is not None:
+            self.details = dict(details)
 
 
 class NotFoundError(FoundationError):

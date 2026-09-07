@@ -30,13 +30,13 @@ from threading import Lock, RLock
 from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .auth import Principal, Role
-from .backend import SQL_OPERATOR_TOKENS
+from .backend import SQL_OPERATOR_TOKENS, UNCHANGED
 from .backend_sqlite import SQLiteBackend
 from .config import FoundationConfig
 from .errors import (AuditSinkUnavailable, AuthorizationError, CapabilityError,
                      ConflictError, DestructiveConfirmationRequired, NotFoundError,
                      ResourceLimitError, ValidationError)
-from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE, check_declared_value
+from .field_types import FOUNDATION_TYPE_TO_CONTRACT_TYPE, check_declared_value, validate_enum_declaration
 from .identifiers import validate_identifier
 from .surfaces import build_surfaces
 
@@ -131,6 +131,86 @@ _TRANSACT_DELETE_KEYS = {"type", "collection", "values", "filters", "destructive
 # differ (R-3: execution, including physical schema, is backend-specific;
 # only the request-level vocabulary is shared).
 _FIELD_TYPE_VOCABULARY = frozenset({"text", "integer", "real", "boolean", "json"})
+
+
+def _validate_enum_declaration_with_path(enum_values, declared_type, field_path):
+    """WP-3a rework 2 (監督裁定 m-1, 2026-09-07): wraps `field_types.
+    validate_enum_declaration` (whose own fixed two-argument signature,
+    monopolized by m-3's isomorphism-tested naming, has no way to carry a
+    request path) and attaches this WP's own `constraint_declaration`
+    `details` shape to whatever `errors.ValidationError` it raises --
+    covers all three of the "declaration is itself invalid" cases m-1
+    names: an `enum` on a field whose declared type admits none, an
+    empty or duplicated `enum`, and a member outside the field's own
+    declared type. `field_path` is the request-relative position this
+    violation is attributable to (design D-3 (2)) -- `field_constraints/
+    <field>/enum` from `create_collection`'s own `field_constraints`
+    (`_resolve_field_constraints` below), or the bare `enum` top-level
+    key from `add_field`/`alter_field` (each redeclares exactly ONE
+    field's own constraints, so there is no per-field path to build).
+    `declared_type` is always known and included (`observed_type` is
+    deliberately never set -- m-1: "型不一致と誤読される" applies here
+    too, this is a declaration defect, not a value's own type)."""
+    try:
+        return validate_enum_declaration(enum_values, declared_type)
+    except ValidationError as exc:
+        exc.details = {
+            "violated_declaration": "constraint_declaration",
+            "field": field_path,
+            "declared_type": declared_type,
+        }
+        raise
+
+
+def _resolve_field_constraints(fields, declared_types, field_constraints, *, max_enum_members):
+    """Phase 9 WP-3a (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/(2)/
+    (7)): resolves a request's PARTIAL `field_constraints` (or `None`)
+    into a TOTAL `{field: {"nullable": bool, "enum": [...]}}` map over
+    `fields` -- the same "request is partial, resolved value is total"
+    shape `create_collection`'s own `field_types` backfill already
+    performs. `enum` members are checked against each field's own
+    declared type (`field_types.validate_enum_declaration`) and counted
+    against `max_enum_members` (`limits.enum_members`, §5 U-1 = (β)) --
+    both BEFORE anything is created (design D-2 (7): "enum_members を
+    超える enum 宣言が、何も作られる前に LIMIT_EXCEEDED...で拒否される").
+    Callers have already confirmed every `field_constraints` key names a
+    real member of `fields`."""
+    resolved = {}
+    for field in fields:
+        declared = dict((field_constraints or {}).get(field) or {})
+        # Code review §2 E / 監督裁定 E (2026-09-07): contract
+        # `SchemaOperationRequest.field_constraints`'s own per-field
+        # entry is `additionalProperties: false` over exactly `enum`/
+        # `nullable` -- an unrecognized key here (a misspelling, e.g.
+        # `"enumm"`) used to be silently dropped rather than refused,
+        # the one shape this contract's own text calls out by name
+        # ("none of them is silently ignored"). `field` names the
+        # request position this violation is attributable to (design
+        # D-3 (2)): `field_constraints/<field>/<unknown key>`.
+        unknown_keys = set(declared) - {"nullable", "enum"}
+        if unknown_keys:
+            bad_key = sorted(unknown_keys)[0]
+            raise ValidationError(
+                f"field_constraints.{field} carries an unrecognized key {bad_key!r}",
+                details={
+                    "violated_declaration": "request_schema",
+                    "field": f"field_constraints/{field}/{bad_key}",
+                },
+            )
+        nullable = declared.get("nullable", True)
+        if not isinstance(nullable, bool):
+            raise ValidationError("field_constraints.nullable must be a boolean")
+        entry = {"nullable": nullable}
+        enum_values = declared.get("enum")
+        if enum_values is not None:
+            validated_enum = _validate_enum_declaration_with_path(
+                enum_values, declared_types[field], f"field_constraints/{field}/enum")
+            if len(validated_enum) > max_enum_members:
+                raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+            entry["enum"] = validated_enum
+        resolved[field] = entry
+    return resolved
 
 # Conformance-review finding (WP-5a, C-12 reverse condition): every one of
 # these three is a real member of the common contract's own filter-operator
@@ -596,7 +676,8 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
-    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None, field_types=None):
+    def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
+                          field_types=None, field_constraints=None):
         """Phase 6 WP-3 (design D-3): `field_types`, when given, is a
         `{field_name: contract_type}` map (the 7-word contract vocabulary,
         `field_types.CONTRACT_TYPES`) -- the declared type this call
@@ -607,7 +688,16 @@ class ApplicationCell:
         contract type DERIVED from the foundation type it was given
         (`field_types.FOUNDATION_TYPE_TO_CONTRACT_TYPE`) -- the same
         backfill rule `migrations/0006_...upgrade_declared_types.sql`
-        applies to pre-existing columns (design §1.5 finding 2a)."""
+        applies to pre-existing columns (design §1.5 finding 2a).
+
+        Phase 9 WP-3a (design docs/design/
+        PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)):
+        `field_constraints`, when given, is a `{field_name: {"enum": [...],
+        "nullable": bool}}` map, PARTIAL over `fields` (contract
+        `SchemaOperationRequest.field_constraints.description`: "any name
+        in fields it omits is created with no enum and nullable: true").
+        A name in `field_constraints` that is not in `fields` fails
+        `VALIDATION_FAILED` -- none of it is silently ignored."""
         self._require_developer(principal, request_id=request_id)
         request = {"name": name, "fields": fields}
         with self._limit_gate(principal, request, request_id=request_id) as deadline:
@@ -634,6 +724,32 @@ class ApplicationCell:
                     field_types.get(field) if field_types is not None and field in field_types
                     else FOUNDATION_TYPE_TO_CONTRACT_TYPE[field_type]
                 )
+            # Phase 9 WP-3a (design D-2 (1)/(2)/(7)): validated and
+            # resolved to a TOTAL map over `validated_fields` before
+            # anything is created (enum_members' own LIMIT_EXCEEDED, and
+            # every VALIDATION_FAILED this declaration itself can raise,
+            # are both pre-flight -- "何も作られる前に" -- design §3 D-2
+            # (7)'s own contract text for `enum_members`).
+            if field_constraints is not None:
+                if not isinstance(field_constraints, dict):
+                    raise ValidationError("field_constraints must be an object")
+                unknown = set(field_constraints) - set(validated_fields)
+                if unknown:
+                    # WP-3a rework 2 (監督裁定 m-1, 2026-09-07): "a
+                    # declaration naming a field the request does not
+                    # create" -- the 4th `constraint_declaration` case.
+                    # No `declared_type` (the named field is never
+                    # created by this request, so it has none).
+                    bad_field = sorted(unknown)[0]
+                    raise ValidationError(
+                        f"field_constraints names {bad_field!r}, which is not in fields",
+                        details={
+                            "violated_declaration": "constraint_declaration",
+                            "field": f"field_constraints/{bad_field}",
+                        },
+                    )
+            resolved_constraints = _resolve_field_constraints(
+                validated_fields, declared_types, field_constraints, max_enum_members=self.config.max_enum_members)
             # Phase 4 (design D-2 item 2): every schema operation is
             # unconditionally fail-closed class -- the hook's own `pre_commit()`
             # is called by `self._backend.create_collection` itself, as the
@@ -644,11 +760,12 @@ class ApplicationCell:
             )
             with self._lock:
                 self._backend.create_collection(
-                    name, validated_fields, field_types=declared_types, audit_hook=hook, deadline=deadline)
+                    name, validated_fields, field_types=declared_types,
+                    field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="create_collection")
 
-    def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None):
+    def create_entity(self, principal, name, fields=None, *, request_id=None, field_types=None, field_constraints=None):
         """Wire-shaped counterpart of `create_collection`, matching
         contract `SchemaOperationRequest`'s own OPTIONAL `fields` (P3 WP-1
         round 2 instruction #6): `SchemaOperationRequest` allows `fields`
@@ -666,12 +783,25 @@ class ApplicationCell:
         (`ValidationError`) for every existing caller (direct foundation
         use, the in-process conformance adapter, `tests/test_foundation.
         py`); nothing about its own behavior changes.
+
+        Phase 9 WP-3a (design D-2 (2), contract `SchemaOperationRequest.
+        field_constraints.description`: "a field_constraints sent without
+        fields...fails VALIDATION_FAILED"): checked against the ORIGINAL
+        `fields` argument, before the `None` -> `{"id": "integer"}`
+        substitution below -- an omitted `fields` is a real, contract-legal
+        request shape on its own, but combining it with `field_constraints`
+        is not.
         """
+        if field_constraints is not None and fields is None:
+            raise ValidationError("field_constraints requires fields to be present")
         if fields is None:
             fields = {"id": "integer"}
-        return self.create_collection(principal, name, fields, request_id=request_id, field_types=field_types)
+        return self.create_collection(
+            principal, name, fields, request_id=request_id, field_types=field_types,
+            field_constraints=field_constraints)
 
-    def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None):
+    def add_field(self, principal, collection, field, field_type, *, request_id=None, contract_type=None,
+                  enum=None, nullable=None):
         """P3-D1 (design v1.1 §0 exception, WP-1): the one capability-
         envelope addition this phase makes -- `schema_operations.add_field`,
         developer-only, on BOTH backends (declaration and implementation
@@ -687,6 +817,12 @@ class ApplicationCell:
         there). `None` (every pre-1.6.0-shaped direct caller) derives it
         from `field_type` via the same backfill rule `create_collection`
         uses.
+
+        Phase 9 WP-3a (design D-2 (1)): `enum`/`nullable`, when given,
+        are this one new field's own `field_constraints` declaration --
+        validated (`field_types.validate_enum_declaration`, `enum_members`)
+        and written to the constraint registry BEFORE anything is
+        created, same as `create_collection`'s own `field_constraints`.
         """
         self._require_developer(principal, request_id=request_id)
         request = {"collection": collection, "field": field, "field_type": field_type}
@@ -707,6 +843,13 @@ class ApplicationCell:
             current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if len(current) >= self.config.max_fields:
                 raise ValidationError("field limit exceeded")
+            if nullable is not None and not isinstance(nullable, bool):
+                raise ValidationError("nullable must be a boolean")
+            validated_enum = None
+            if enum is not None:
+                validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                if len(validated_enum) > self.config.max_enum_members:
+                    raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
             # Phase 4 (design D-2 item 2): same unconditional fail-closed
             # pre-commit hook as `create_collection` above.
             hook = self._make_audit_hook(
@@ -716,9 +859,95 @@ class ApplicationCell:
             with self._lock:
                 # ConflictError if `field` already exists
                 self._backend.add_field(
-                    collection, field, field_type, contract_type=declared_type, audit_hook=hook, deadline=deadline)
+                    collection, field, field_type, contract_type=declared_type,
+                    enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline)
         self.__record("schema_change", self.application_id,
                       principal.credential_id, detail="add_field")
+
+    def alter_field(self, principal, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None, request_id=None):
+        """Phase 9 WP-3a (design docs/design/
+        PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (5)/
+        (6)): redeclares `field`'s own `enum`/`nullable` constraints.
+        `field_type` is accepted only so `field_type is not None` can be
+        refused explicitly (contract `structured_operations.alter_field`
+        description: "an alter_field carrying field_type fails
+        VALIDATION_FAILED...because converting values already stored
+        under one type into another is not defined by this version",
+        §4 A-2) -- `alter_field` never redeclares a field's own type.
+
+        Code review §2 A / 監督裁定 A (2026-09-07): `enum` is tri-state --
+        the sentinel default `backend.UNCHANGED` (the request omitted
+        `enum` entirely) leaves the field's current `enum` exactly as it
+        is; an explicit `enum: null` (`enum=None`, distinguishable from
+        omission only because the default is the `UNCHANGED` sentinel,
+        never a plain `None`) CLEARS it; any other value (a non-empty
+        `list`) SETS/REPLACES it, exactly as before this rework. This is
+        the one new client-visible meaning `alter_field` gains here --
+        design D-2 (5)'s own "enum の設定・置換・解除" ("sets, replaces or
+        clears", contract `structured_operations.alter_field`) was, before
+        this rework, only two-thirds implemented (no client-reachable way
+        to express "解除"/"clears"). `http.py`'s own HTTP dispatch is the
+        one caller that can observe the wire distinction between an
+        omitted `enum` and an `enum: null` (`body.get("enum", UNCHANGED)`)
+        -- every direct/in-process caller expresses it the identical way,
+        by omitting the keyword or passing `enum=None` explicitly.
+
+        Code review §2 H / 監督裁定 H (2026-09-07): the `field_type`
+        rejection below now runs INSIDE `_limit_gate` (rate/concurrency/
+        request_bytes/operation_depth), at the same validation stage
+        every other `alter_field` check (identifier syntax, `nullable`'s
+        own type check, `enum` validation) already runs at -- previously
+        it ran BEFORE the gate entirely, so a request this large could
+        reach a definitive answer without ever being counted against
+        rate/concurrency or measured for `request_bytes`/`operation_
+        depth`, unlike `add_field`/`create_collection`'s own unsupported-
+        shape refusals, which have always run inside their own gates.
+
+        Refuses (`errors.ConflictError`, `CONFLICT`) in full, changing
+        NOTHING -- not even the schema revision -- if any existing row
+        would violate the constraints this call would establish; a
+        non-conflicting call advances the schema revision. The
+        existing-row scan, the registry write, and the revision bump all
+        happen inside ONE transaction on the backend (`alter_field_
+        constraints`), never a separate pre-flight scan in a different
+        transaction from the one that commits the change (design D-2
+        実装の形 4, F-6, 監督裁定 S-g)."""
+        self._require_developer(principal, request_id=request_id)
+        request = {"collection": collection, "field": field, "nullable": nullable, "field_type": field_type}
+        if enum is not UNCHANGED:
+            request["enum"] = enum
+        with self._limit_gate(principal, request, request_id=request_id) as deadline:
+            if field_type is not None:
+                raise ValidationError(
+                    "alter_field does not redeclare a field's own type",
+                    details={"violated_declaration": "unsupported_field", "field": "field_type"},
+                )
+            collection = self._identifier(collection, "collection")
+            field = self._identifier(field, "field")
+            available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+            if field not in available:
+                raise ValidationError("unknown field")
+            if nullable is not None and not isinstance(nullable, bool):
+                raise ValidationError("nullable must be a boolean")
+            if enum is UNCHANGED or enum is None:
+                validated_enum = enum  # UNCHANGED, or None (clears)
+            else:
+                declared_type = self._backend.field_types(collection).get(field)
+                validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                if len(validated_enum) > self.config.max_enum_members:
+                    raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+            hook = self._make_audit_hook(
+                principal, event_class="schema_change", operation="alter_field",
+                target_kind="collection", target_id=collection, request_id=request_id,
+            )
+            with self._lock:
+                # ConflictError (existing rows violate the new constraints)
+                # or NotFoundError propagate from here unchanged.
+                revision = self._backend.alter_field_constraints(
+                    collection, field, enum=validated_enum, nullable=nullable, audit_hook=hook, deadline=deadline)
+        self.__record("schema_change", self.application_id,
+                      principal.credential_id, detail="alter_field")
+        return {"revision": str(revision)}
 
     def schema_revision(self, principal, *, request_id=None):
         """m-2 (independent WP-3 review): the SAME monotonically-increasing
@@ -805,15 +1034,47 @@ class ApplicationCell:
         with self._limit_gate(principal, None, request_id=request_id):
             with self._lock:
                 all_types = self._backend.all_field_types()
+                all_constraints = self._backend.all_field_constraints()
         return [
-            {"entity": entity, "fields": sorted(types), "field_types": dict(types)}
+            {
+                "entity": entity, "fields": sorted(types), "field_types": dict(types),
+                # Phase 9 WP-3a (design D-2 (1), contract `EntityDescriptor.
+                # field_constraints.description`): total over `fields` --
+                # every field reports "nullable" (a field with no
+                # registry-level constraint entry, which should not occur
+                # for a field this peer itself created, still defaults to
+                # `{"nullable": True}` defensively, matching `field_types`'
+                # own `None`-tolerant precedent immediately above).
+                "field_constraints": {
+                    field: dict(all_constraints.get(entity, {}).get(field) or {"nullable": True})
+                    for field in types
+                },
+            }
             for entity, types in sorted(all_types.items())
         ]
 
     def insert(self, principal, collection, values, *, request_id=None):
         self._require_data(principal, request_id=request_id)
         with self._limit_gate(principal, {"collection": collection, "values": values}, request_id=request_id) as deadline:
-            collection, fields, params = self._prepare_values(collection, values)
+            # Phase 9 WP-3a (design D-2 (3), "検査順序は欠落検査 -> 値検査"):
+            # a `nullable: false` field this insert simply does not name is
+            # never handed to `check_declared_value` at all (that choke
+            # point only ever sees VALUES actually present) -- checked
+            # here, immediately before `_prepare_values`, on this peer's
+            # own direct single-operation insert entry point (the in-
+            # process conformance adapter's own `attempt_mutation`
+            # dispatches "insert" here, never through `_plan_operation`
+            # below -- WP-3a report discloses this second insert entry
+            # point; design D-2 (3)'s own file:line names only `_plan_
+            # operation`'s insert branch).
+            # Code review §2 C / 監督裁定 C (2026-09-07): the ONE fetch
+            # `_check_missing_required_fields` makes is reused by
+            # `_prepare_values` immediately below (`prefetched=`) --
+            # this insert makes one backend round trip for declared
+            # types/constraints, not two.
+            prefetched = self._check_missing_required_fields(collection, values, path_prefix="values")
+            collection, fields, params = self._prepare_values(
+                collection, values, path_prefix="values", prefetched=prefetched)
             with self._lock:
                 result = self._backend.insert(collection, fields, params, deadline=deadline)
         # Phase 4 (design D-4/P4-D5): buffer-class success emit -- a NEW
@@ -846,7 +1107,7 @@ class ApplicationCell:
         self._push_data_operation_event(principal, operation="query", target_id=collection, request_id=request_id)
         return rows
 
-    def _validate_update(self, collection, values, filters):
+    def _validate_update(self, collection, values, filters, *, path_prefix="values"):
         """m-1 (independent review, P3-D2 follow-up): the single choke
         BOTH `ApplicationCell.update` below AND `transact()`'s own
         batch-embedded update branch (`_plan_operation`, since P35 WP-2's
@@ -858,6 +1119,10 @@ class ApplicationCell:
         `delete` -- there is no second definition of this validation
         anywhere in this file.
 
+        `path_prefix` (code review §2 D, 監督裁定 D 2026-09-07): forwarded
+        to `_prepare_values` verbatim -- `"values"` for a direct
+        `update()` call, `"operations/<i>/values"` for one batch item.
+
         Returns `(collection, fields, values_params, bound_filters)` on
         success. Does not execute the update itself and does not touch
         `self._lock`/the backend's own transaction state -- callers own
@@ -866,7 +1131,7 @@ class ApplicationCell:
         """
         if not isinstance(filters, list) or not filters:
             raise ValidationError("update requires non-empty filters")
-        collection, fields, values_params = self._prepare_values(collection, values)
+        collection, fields, values_params = self._prepare_values(collection, values, path_prefix=path_prefix)
         if not fields:
             raise ValidationError("values must be non-empty")
         bound_filters = self._bind_filters(collection, filters)
@@ -990,7 +1255,7 @@ class ApplicationCell:
                       principal.credential_id, detail="delete_rows")
         return result
 
-    def _plan_operation(self, operation):
+    def _plan_operation(self, operation, index):
         """P35 WP-2 (R-1, design docs/design/PHASE35_CROSS_ENTITY_AND_
         CONTRACT_130_V1.md §2): builds one fully-bound, side-effect-free
         plan step for a single `transact()` operation-dict -- identical
@@ -1027,7 +1292,16 @@ class ApplicationCell:
         `_CONTRACT_MUTATION_VOCABULARY` constants are unchanged, and
         `_prepare_values`/`_validate_update`/`_validate_delete_
         confirmation` are the exact same single chokes `insert`/`update`/
-        `delete` above also use)."""
+        `delete` above also use.
+
+        `index` (code review §2 D, 監督裁定 D 2026-09-07): this
+        operation's own position in `transact()`'s `operations` list --
+        used only to build the request-relative `path_prefix`
+        (`f"operations/{index}/values"`) a `_prepare_values`/`_check_
+        missing_required_fields` violation's own `details.field` is
+        joined onto (design D-3 (2): `field` names a POSITION IN THE
+        REQUEST, and only this method's own caller, `transact()`'s pass-1
+        loop, knows which list position `operation` came from)."""
         if not isinstance(operation, dict):
             raise ValidationError("unsupported transaction operation")
         op_type = operation.get("type")
@@ -1042,7 +1316,20 @@ class ApplicationCell:
                 raise CapabilityError(
                     "transact does not support additional fields on operation type 'insert'"
                 )
-            collection, fields, params = self._prepare_values(operation["collection"], operation["values"])
+            # Phase 9 WP-3a (design D-2 (3), file:line `cell.py:1034-1046`
+            # in the design's own pre-WP line numbering): the insert-only
+            # 欠落検査, immediately before `_prepare_values` -- see `_check_
+            # missing_required_fields`'s own docstring. This is `transact`'s
+            # (and, via it, HTTP `POST /v1/data/{entity}/mutations`'s own)
+            # insert path; `ApplicationCell.insert` above is this peer's
+            # SECOND, direct single-operation insert entry point and calls
+            # the identical check itself. Code review §2 C (監督裁定 C):
+            # the SAME shared-fetch reuse `insert()` applies above.
+            path_prefix = f"operations/{index}/values"
+            prefetched = self._check_missing_required_fields(
+                operation.get("collection"), operation.get("values"), path_prefix=path_prefix)
+            collection, fields, params = self._prepare_values(
+                operation["collection"], operation["values"], path_prefix=path_prefix, prefetched=prefetched)
             return ("insert", (collection, fields, params))
         if op_type == "update":
             if set(operation) - _TRANSACT_UPDATE_KEYS:
@@ -1050,7 +1337,8 @@ class ApplicationCell:
                     "transact does not support additional fields on operation type 'update'"
                 )
             collection, fields, values_params, bound_filters = self._validate_update(
-                operation.get("collection"), operation.get("values"), operation.get("filters"))
+                operation.get("collection"), operation.get("values"), operation.get("filters"),
+                path_prefix=f"operations/{index}/values")
             return ("update", (collection, fields, values_params, bound_filters))
         if op_type == "delete":
             if set(operation) - _TRANSACT_DELETE_KEYS:
@@ -1173,9 +1461,9 @@ class ApplicationCell:
             # (coalesced) here, at the one call site with `principal` in
             # scope, mirroring `delete()`'s own identical wrapping.
             plan = []
-            for operation in operations:
+            for index, operation in enumerate(operations):
                 try:
-                    plan.append(self._plan_operation(operation))
+                    plan.append(self._plan_operation(operation, index))
                 except DestructiveConfirmationRequired:
                     collection = operation.get("collection") if isinstance(operation, dict) else None
                     self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
@@ -1413,7 +1701,59 @@ class ApplicationCell:
             bound.append((field, direction))
         return bound
 
-    def _prepare_values(self, collection, values):
+    def _check_missing_required_fields(self, collection, values, *, path_prefix="values"):
+        """Phase 9 WP-3a (design D-2 (3)): the insert-only 欠落検査 --
+        `declared_non_nullable - set(values)`. Placed BEFORE `_prepare_
+        values` at every real insert entry point (this method's own two
+        callers: `insert` above and `_plan_operation`'s "insert" branch
+        below) rather than inside the choke point itself (`field_types.
+        check_declared_value`), because a field this operation omits is
+        never handed to that choke point at all -- there is no value for
+        it to check. Silently returns (deferring to `_prepare_values`'s
+        own, pre-existing shape errors) when `collection`/`values` are
+        not even the right Python shape to look field constraints up
+        for -- this check's own job is the CONTENT of a well-shaped
+        `values` dict, not `values`' own shape.
+
+        Code review §2 D / 監督裁定 D (2026-09-07): `field` names a
+        POSITION IN THE REQUEST (design D-3 (2)), never a bare entity
+        field name -- `path_prefix` (this insert's own `values` object,
+        `"values"` for a direct `insert()`/`update()` call or
+        `"operations/<i>/values"` for one batch item, the caller's own
+        job to supply) is joined with the missing field's own name.
+
+        Code review §2 C / 監督裁定 C (2026-09-07, P-8/G-4 performance
+        finding): returns the `(declared_types, declared_constraints)`
+        pair `self._backend.field_types_and_constraints(collection)`
+        fetched along the way, on success -- `_prepare_values` (this
+        insert's own very next call) reuses that SAME pair instead of
+        re-fetching it from the backend, cutting a plain insert's own
+        backend round trips (previously: `field_types_and_constraints`'s
+        two now-merged predecessors were each fetched TWICE per insert,
+        once here and once in `_prepare_values`). Returns `None` when it
+        could not fetch one (wrong Python shape, or `collection` does not
+        exist) -- `_prepare_values` falls back to fetching its own,
+        unchanged from before this rework."""
+        if not isinstance(values, dict) or not isinstance(collection, str):
+            return None
+        try:
+            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection)
+        except NotFoundError:
+            return None
+        missing = sorted(field for field, entry in declared_constraints.items()
+                         if entry.get("nullable") is False and field not in values)
+        if missing:
+            field = missing[0]
+            raise ValidationError(
+                f"insert omits field {field!r}, which is declared nullable: false",
+                details={
+                    "violated_declaration": "nullable", "field": f"{path_prefix}/{field}",
+                    "declared_type": declared_types.get(field), "observed_type": "absent",
+                },
+            )
+        return declared_types, declared_constraints
+
+    def _prepare_values(self, collection, values, *, path_prefix="values", prefetched=None):
         collection = self._identifier(collection, "collection")
         available = self._backend.field_domains(collection)
         # Phase 6 WP-3 (design D-3, G3): the PRIMARY, backend-independent
@@ -1423,7 +1763,24 @@ class ApplicationCell:
         # above being all-`None` there). Backend domain validation stays
         # underneath this as defence-in-depth (`encode_value` itself),
         # never a substitute for it.
-        declared_types = self._backend.field_types(collection)
+        #
+        # Phase 9 WP-3a (design D-2 (3), 追補 2 S-k) rework (code review
+        # §2 C, 監督裁定 C 2026-09-07): `declared_types`/`declared_
+        # constraints` -- the write-side `enum`/`nullable` registry
+        # passed to `check_declared_value` below for every field this
+        # loop checks -- are ONE merged backend read now
+        # (`field_types_and_constraints`, `field_types`+`field_
+        # constraints`'s own single-query replacement), reused verbatim
+        # when `prefetched` (an insert's own `_check_missing_required_
+        # fields` call, immediately before this one) already fetched it
+        # for the SAME collection. `_bind_filters` below still reads
+        # `field_types` alone, the identical way it always has, and
+        # NEVER calls `field_constraints`/passes `constraints` (D-2 (2):
+        # "query の predicate 値は enum を検査しない").
+        if prefetched is not None:
+            declared_types, declared_constraints = prefetched
+        else:
+            declared_types, declared_constraints = self._backend.field_types_and_constraints(collection)
         if not isinstance(values, dict) or not values:
             raise ValidationError("values must be a non-empty object")
         if len(values) > self.config.max_fields:
@@ -1439,7 +1796,28 @@ class ApplicationCell:
                 raise ValidationError("unknown field")
             fields.append(field)
             declared_type = declared_types.get(field)
-            check_declared_value(value, declared_type)
+            try:
+                check_declared_value(value, declared_type, constraints=declared_constraints.get(field))
+            except ValidationError as exc:
+                # Phase 9 WP-3a (design D-3 (2)): `field` names "a position
+                # in the request" -- `check_declared_value` itself has no
+                # request-path context (design D-2 (3)'s own fixed new
+                # signature adds only `constraints`, never a field/path
+                # argument), so the ONE caller that DOES know which field
+                # this value belongs to adds it here. A no-op for every
+                # PRE-EXISTING `ValidationError` this choke point already
+                # raised before this WP (no `details` attribute at all --
+                # `getattr(exc, "details", None)` below returns `None`,
+                # `dict is not None` is `False`) -- this WP's own two NEW
+                # denials (`enum`/`nullable`) are the only ones that carry
+                # `details` here to enrich. Code review §2 D / 監督裁定 D
+                # (2026-09-07): the value written is `path_prefix`'s own
+                # request position joined with `field`, never the bare
+                # entity field name (design D-3 (2)).
+                details = getattr(exc, "details", None)
+                if isinstance(details, dict) and "field" not in details:
+                    details["field"] = f"{path_prefix}/{field}"
+                raise
             # B-1 (independent review round 2): `available[field]` is this
             # field's own value-domain category from the active backend's
             # live catalog (`None` on SQLite -- domain validation skipped
@@ -1620,9 +1998,11 @@ def _deny_provisional_field(field_name):
     PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §3 D-1 (3); work
     order docs/work-orders/WORK_ORDER_PHASE9_CONTRACT_170_V1.md §2 WP-1 (9)):
     in-process counterpart of `http.py::_deny_provisional_field` -- this
-    peer still declares `constraint_declarations`/`dry_run`/
-    `request_budget` `unavailable`, so any in-process caller passing one of
-    the new keyword-only fields below is refused before anything executes,
+    peer's own `constraint_declarations` capability flipped to `enabled`
+    in this same WP-3a commit (`ApplicationRuntime.capabilities()`
+    below), so only `dry_run`/`request_budget` (still `unavailable`,
+    WP-3b/WP-3d) remain gated here; any in-process caller passing one of
+    THOSE keyword-only fields is refused before anything executes,
     exactly like the HTTP path. `details` is set on the raised instance
     rather than via a new `CapabilityError.__init__` parameter, so this
     does not preempt WP-3e's own planned `details` rollout (D-3 (5))."""
@@ -1772,7 +2152,14 @@ class ApplicationRuntime:
                 # backends -- declaration and implementation land in this
                 # same commit (design v1.1 principle: "宣言と実挙動は単一
                 # コミットでしか同時に動かさない").
-                "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field"] if is_developer else [], "unsupported": ["alter_field", "create_index", "drop_index", "drop_entity", "jobs"]},
+                # Phase 9 WP-3a (design docs/design/
+                # PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
+                # D-2 (5)): `alter_field` moves from `unsupported` into
+                # `operations` -- it is now a real, developer-only,
+                # executed capability (redeclaring a field's own `enum`/
+                # `nullable`), same commit as its own implementation
+                # (P-3), matching `add_field`'s own P3-D1 precedent above.
+                "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field"] if is_developer else [], "unsupported": ["create_index", "drop_index", "drop_entity", "jobs"]},
                 "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
                 "best_effort_transactions": {"status": "unavailable"},
                 "idempotency": {"status": "unavailable"},
@@ -1829,7 +2216,14 @@ class ApplicationRuntime:
                 # (`constraint_declarations`), WP-3b (`dry_run`) and WP-3d
                 # (`request_budget`) each flip their own entry in the same
                 # commit that removes the corresponding gate above.
-                "constraint_declarations": {"status": "unavailable"},
+                #
+                # Phase 9 WP-3a: flipped to `enabled` -- `enum`/`nullable`
+                # declaration, enforcement (`field_types.check_declared_
+                # value`'s new `constraints` argument), catalog round-trip
+                # (`catalog()`'s new `field_constraints` key), and
+                # `alter_field` all land in this SAME commit as this flip
+                # (D-1 (4): "宣言と挙動は同一コミットである").
+                "constraint_declarations": {"status": "enabled"},
                 "dry_run": {"status": "unavailable"},
                 "request_budget": {"status": "unavailable"},
             },
@@ -1866,6 +2260,13 @@ class ApplicationRuntime:
                 # `enforced` entry to carry this finite value. See
                 # `limit_enforcement` below for the full empirical trace.
                 "operation_depth": config.max_operation_depth,
+                # Phase 9 WP-3a (design §5 U-1 = (β)): the one new class
+                # this WP introduces -- bounds how many members a single
+                # field's declared `enum` may carry. Same commit as the
+                # `constraint_declarations` flip and the real enforcement in
+                # `_resolve_field_constraints`/`add_field`/`alter_field`
+                # above (D-1 (4)).
+                "enum_members": config.max_enum_members,
             },
             "limit_enforcement": {
                 "batch_items": "enforced",
@@ -1962,6 +2363,12 @@ class ApplicationRuntime:
                 # decide the answer in the adapter" reason (this module's
                 # own pre-existing comment on that dispatcher).
                 "operation_depth": "enforced",
+                # Phase 9 WP-3a: `_resolve_field_constraints`/`add_field`/
+                # `alter_field` above check `enum_members` before anything
+                # is created or altered -- genuinely `enforced` on both
+                # surfaces (in-process and HTTP alike route through the
+                # same `cell.py` methods).
+                "enum_members": "enforced",
             },
             # `CredentialStore.assert_active` (auth.py) is invoked by
             # `__authorize` above on every single session operation, with
@@ -1984,24 +2391,81 @@ class ApplicationDeveloper(ApplicationRuntime):
     def create_entity(self, name, fields=None, *, request_id=None, field_types=None,
                        field_constraints=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
+        # Phase 9 WP-3a (design D-1 (4), P-3): `field_constraints` no
+        # longer gates -- `constraint_declarations` is `enabled` as of
+        # this commit, same commit as the real enforcement below. `dry_
+        # run`/`plan`/`budget`/`idempotency_key` are UNCHANGED -- their
+        # own capabilities (`dry_run`/`request_budget`) stay `unavailable`
+        # until WP-3b/WP-3d.
         for provisional_field, provisional_value in (
-            ("field_constraints", field_constraints), ("dry_run", dry_run or None),
-            ("plan", plan), ("budget", budget), ("idempotency_key", idempotency_key),
+            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
+            ("idempotency_key", idempotency_key),
         ):
             if provisional_value is not None:
                 _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.create_entity(
-            self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types)
+            self._ApplicationRuntime__principal, name, fields, request_id=request_id, field_types=field_types,
+            field_constraints=field_constraints)
 
     def add_field(self, collection, field, field_type, *, request_id=None, contract_type=None,
                   enum=None, nullable=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
         self._ApplicationRuntime__authorize(request_id=request_id)
+        # Phase 9 WP-3a: `enum`/`nullable` no longer gate -- see
+        # `create_entity`'s own identical comment immediately above.
         for provisional_field, provisional_value in (
-            ("enum", enum), ("nullable", nullable), ("dry_run", dry_run or None),
-            ("plan", plan), ("budget", budget), ("idempotency_key", idempotency_key),
+            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
+            ("idempotency_key", idempotency_key),
         ):
             if provisional_value is not None:
                 _deny_provisional_field(provisional_field)
         return self._ApplicationRuntime__cell.add_field(
             self._ApplicationRuntime__principal, collection, field, field_type,
-            request_id=request_id, contract_type=contract_type)
+            request_id=request_id, contract_type=contract_type, enum=enum, nullable=nullable)
+
+    def alter_field(self, collection, field, *, enum=UNCHANGED, nullable=None, field_type=None,
+                    request_id=None, dry_run=False, plan=None, budget=None, idempotency_key=None):
+        """Phase 9 WP-3a (design D-2 (5)/(6)): the new session-level entry
+        point for `alter_field` -- see `cell.ApplicationCell.alter_field`'s
+        own docstring for the full contract. Positional-argument order
+        (`collection`, `field`) matches `add_field`'s own identical two
+        leading positional arguments immediately above -- the port's own
+        `schema_operation_with_result` calls this as `session.alter_field
+        (entity, field, **kwargs)`, `entity` being that method's own name
+        for the same value. `dry_run`/`plan`/`budget`/`idempotency_key`
+        stay gated exactly like `create_entity`/`add_field` above --
+        `alter_field` becoming real this commit does not itself unlock any
+        OTHER still-`unavailable` capability.
+
+        WP-3a rework 2 (2026-09-07 -- real, measured bug, not a ruling
+        item on its own but the exact "in-process entry point" gap the
+        rework instructions asked to be confirmed): this method's own
+        default used to be a plain `enum=None`, NOT the `backend.
+        UNCHANGED` sentinel `ApplicationCell.alter_field` (immediately
+        above, `self._ApplicationRuntime__cell.alter_field`) itself
+        requires to distinguish "the caller omitted `enum` entirely"
+        (leave it as it is) from "the caller passed `enum=None`" (clear
+        it). Every direct in-process caller of THIS method that omits
+        `enum` -- e.g. `ApplicationDeveloper.alter_field(collection,
+        field, nullable=False)`, redeclaring only `nullable` -- used to
+        have that omission silently collapse into `enum=None` here and
+        reach the cell layer as an explicit clear, wiping the field's own
+        existing `enum` as a side effect of a call that never mentioned
+        `enum` at all (confirmed empirically: a field declaring `enum:
+        ["a", "b"]`, redeclared with `nullable=True` alone through this
+        method, lost its `enum` entirely). `http.py`'s own HTTP dispatch
+        already got this right (`body.get("enum", UNCHANGED)`,
+        `alter_field`'s own docstring on `ApplicationCell` above) -- this
+        was the ONE remaining caller that had not. Every caller of
+        `ApplicationDeveloper.alter_field` that wants "leave `enum` as it
+        is" now simply omits the keyword (the default IS `UNCHANGED`);
+        `enum=None` explicitly still means "clear", unchanged."""
+        self._ApplicationRuntime__authorize(request_id=request_id)
+        for provisional_field, provisional_value in (
+            ("dry_run", dry_run or None), ("plan", plan), ("budget", budget),
+            ("idempotency_key", idempotency_key),
+        ):
+            if provisional_value is not None:
+                _deny_provisional_field(provisional_field)
+        return self._ApplicationRuntime__cell.alter_field(
+            self._ApplicationRuntime__principal, collection, field,
+            enum=enum, nullable=nullable, field_type=field_type, request_id=request_id)

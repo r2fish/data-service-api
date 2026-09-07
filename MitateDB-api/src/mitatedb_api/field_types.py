@@ -67,7 +67,44 @@ FOUNDATION_TYPE_TO_CONTRACT_TYPE = {
 }
 
 
-def check_declared_value(value: Any, declared_type: "str | None") -> None:
+#: Declared field types an `enum` constraint may be attached to (design
+#: D-2 (2): "要素は field の宣言型...の値のみであり、object/array/json の
+#: field には宣言できない").
+_ENUM_ELIGIBLE_TYPES = ("string", "integer", "number", "boolean")
+
+
+def enum_member_matches_type(value: Any, declared_type: str) -> bool:
+    """WP-3a rework 2 (監督裁定 m-3, 2026-09-07 -- helper name shared
+    with r2db-api's own isomorphism-tested counterpart): the scalar
+    type-membership test both `check_declared_value`'s own `string`/
+    `integer`/`number`/`boolean` branches AND `validate_enum_declaration`'s
+    own per-member check need -- extracted to one place so the two never
+    drift (previously `validate_enum_declaration` called `check_declared_
+    value` itself for this, which worked but hid this test as a side
+    effect of a function whose real job is choke-point VALUE validation,
+    not enum-member type-checking in isolation).
+
+    Only meaningful for `declared_type in _ENUM_ELIGIBLE_TYPES` -- `object`/
+    `array`/`json` are handled by `check_declared_value` directly, since
+    `enum` can never be declared on them (`validate_enum_declaration`'s own
+    eligibility check refuses that before any member is ever checked).
+
+    `bool` is checked before `int` (Python's `isinstance(True, int)` is
+    `True`) so an unguarded `integer`/`number` branch never silently
+    accepts a `bool` member -- same precedent `check_declared_value`'s
+    own docstring already states."""
+    if declared_type == "string":
+        return isinstance(value, str)
+    if declared_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if declared_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if declared_type == "boolean":
+        return isinstance(value, bool)
+    raise ValidationError(f"unknown declared field type {declared_type!r}")
+
+
+def check_declared_value(value: Any, declared_type: "str | None", *, constraints: "dict | None" = None) -> None:
     """The cell-layer choke point itself (design G3): raises `errors.
     ValidationError` when `value` does not match `declared_type` (one of
     `CONTRACT_TYPES`). `declared_type` of `None` (no registry row -- must
@@ -83,6 +120,32 @@ def check_declared_value(value: Any, declared_type: "str | None") -> None:
     Python, `isinstance(True, int)` is `True`, so an unguarded `integer`/
     `number` check would silently accept a `bool` (mirrors r2db-api's own
     `structured._check_type`, independently applied here).
+
+    Phase 9 WP-3a (design docs/design/
+    PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (3),
+    keyword-only `constraints` per the design's own fixed new signature
+    for this function): `constraints`, when given, is this field's own
+    `{"nullable": bool, "enum": [...]}` declaration (the "enum" key
+    present only when one is declared) -- `None` (every caller reading a
+    query predicate, `cell.py::_bind_filters`) means this call enforces
+    type ONLY, exactly as before this WP (D-2 (3): "query の predicate
+    値は enum を検査しない"). A caller writing a value (`cell.py::
+    _prepare_values`, the ONE call site design D-2 (3)'s own table
+    marks "渡す") always passes the field's resolved constraints, `enum`
+    key included or omitted as the registry itself carries it.
+
+    A `null` value is checked against `constraints["nullable"]` BEFORE
+    the type branches below (SQL NULL passes every declared type
+    otherwise, M-5 precedent) -- `nullable: false` raises with the D-3
+    four-key shape this WP gives every denial it newly introduces
+    (`violated_declaration: nullable`, `observed_type: null`,
+    `declared_type`: this field's own declared type). A non-null value
+    is then checked against `constraints["enum"]`, when declared, AFTER
+    the type branches (an enum member is only meaningful once the value
+    is already known to be of the field's own declared type) -- raises
+    with `violated_declaration: enum`, `declared_type` only (D-3 (4):
+    "`observed_type` は載せない ... 型不一致と誤読される" -- the value's
+    own type was never what this violation is about).
     """
     if declared_type is None or declared_type == "json":
         return
@@ -91,17 +154,17 @@ def check_declared_value(value: Any, declared_type: "str | None") -> None:
     # foundation defines no NOT NULL constraint anywhere
     # (`migrations/0003_provision_application.sql`), so a value that
     # normalized to `None` must never be rejected here, for any declared
-    # type.
+    # type, UNLESS this field's own constraints declare `nullable: false`
+    # (Phase 9 WP-3a, design D-2 (2)/(3)).
     if value is None:
+        if constraints is not None and constraints.get("nullable") is False:
+            raise ValidationError(
+                f"null is not accepted by field declared type {declared_type!r} (nullable: false)",
+                details={"violated_declaration": "nullable", "declared_type": declared_type, "observed_type": "null"},
+            )
         return
-    if declared_type == "string":
-        ok = isinstance(value, str)
-    elif declared_type == "integer":
-        ok = isinstance(value, int) and not isinstance(value, bool)
-    elif declared_type == "number":
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
-    elif declared_type == "boolean":
-        ok = isinstance(value, bool)
+    if declared_type in _ENUM_ELIGIBLE_TYPES:
+        ok = enum_member_matches_type(value, declared_type)
     elif declared_type == "object":
         ok = isinstance(value, dict)
     elif declared_type == "array":
@@ -110,3 +173,55 @@ def check_declared_value(value: Any, declared_type: "str | None") -> None:
         raise ValidationError(f"unknown declared field type {declared_type!r}")
     if not ok:
         raise ValidationError(f"value does not match the declared field type {declared_type!r}")
+    if constraints is not None:
+        allowed = constraints.get("enum")
+        if allowed is not None and value not in allowed:
+            raise ValidationError(
+                f"value is not a member of the declared enum for field type {declared_type!r}",
+                details={"violated_declaration": "enum", "declared_type": declared_type},
+            )
+
+
+def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> list:
+    """Phase 9 WP-3a (design D-2 (2), contract `SchemaOperationRequest.
+    field_constraints.description`): validates an `enum` value carried on
+    `create_entity`'s `field_constraints`, `add_field`, or `alter_field`
+    BEFORE it is ever written to a backend's own constraint registry --
+    "an `enum` on an `object`/`array`/`json` field, an empty or
+    duplicated `enum`, [or] an `enum` member outside the field's declared
+    type ... fails `VALIDATION_FAILED`; none of them is silently
+    ignored." Returns a plain `list` copy (never the caller's own
+    mutable object) on success.
+
+    WP-3a rework 2 (監督裁定 m-1, 2026-09-07): this function's own
+    fixed two-argument signature (`enum_values`, `declared_type` --
+    m-3, shared with r2db-api's own isomorphism-tested counterpart) has
+    no way to know the REQUEST-relative path a violation is attributable
+    to (`field_constraints/<field>/enum` from `create_collection`'s own
+    `field_constraints`, or the bare `enum` top-level key from `add_
+    field`/`alter_field` -- three different callers, three different
+    paths, for the identical malformed declaration) -- so it raises a
+    plain, detail-less `errors.ValidationError` for each of the three
+    checks below; `cell.py`'s own `_validate_enum_declaration_with_path`
+    wraps every call site and attaches the actual `details` shape (`{"
+    violated_declaration": "constraint_declaration", "field": <path>,
+    "declared_type": declared_type}` -- errors.details_vocabulary's own
+    11th vocabulary word, contract correction pending) there instead.
+    """
+    if declared_type not in _ENUM_ELIGIBLE_TYPES:
+        raise ValidationError(
+            f"enum cannot be declared on a field of declared type {declared_type!r}"
+        )
+    if not isinstance(enum_values, list) or not enum_values:
+        raise ValidationError("enum must be a non-empty list")
+    seen: list = []
+    for member in enum_values:
+        if not enum_member_matches_type(member, declared_type):
+            raise ValidationError(
+                f"enum member does not match the declared field type {declared_type!r}"
+            )
+        for existing in seen:
+            if type(existing) is type(member) and existing == member:
+                raise ValidationError("enum must not contain duplicate members")
+        seen.append(member)
+    return list(enum_values)

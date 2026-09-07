@@ -42,6 +42,20 @@ SQL_OPERATOR_TOKENS = {
     "in": "IN",
 }
 
+# Phase 9 WP-3a rework (code review §2 A, 監督裁定 A 2026-09-07): sentinel
+# default for `alter_field_constraints`'s own `enum` parameter (and
+# `cell.ApplicationCell.alter_field`'s identical one), distinguishing "the
+# request omitted `enum`" (leave the field's current `enum` exactly as it
+# is) from an explicit `enum: null` ("clear the field's `enum`" -- the
+# ONLY way the contract's own `SchemaOperationRequest.enum` -- `["array",
+# "null"]` after the supervisor's own separate contract correction -- can
+# express "no enum" on an operation that must also be able to mean "leave
+# it alone"). A plain `None` default cannot carry this third state: Python
+# collapses "the caller didn't pass this keyword at all" and "the caller
+# passed `None`" into the identical value the callee sees. A bare `enum`
+# (a non-empty `list`) means set/replace, exactly as before this rework.
+UNCHANGED = object()
+
 
 class StorageBackend:
     """Documents the methods ``ApplicationCell`` calls on a backend.
@@ -104,7 +118,7 @@ class StorageBackend:
         exists)."""
         raise NotImplementedError
 
-    def create_collection(self, name, fields, *, field_types=None, audit_hook=None):
+    def create_collection(self, name, fields, *, field_types=None, field_constraints=None, audit_hook=None):
         """``fields``: ``{field_name: declared_type}`` using this
         foundation's own vocabulary (``cell._FIELD_TYPE_VOCABULARY``).
         Raises ``errors.ConflictError`` if ``name`` already exists. Bumps
@@ -120,6 +134,15 @@ class StorageBackend:
         contract type) -- ``None``/a partial map is tolerated defensively
         but should not occur.
 
+        Phase 9 WP-3a (design docs/design/
+        PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (1)/
+        (4)): ``field_constraints``, when given, is ``{field_name:
+        {"nullable": bool, "enum": [...]}}`` (partial -- a name in
+        ``fields`` it omits gets ``{"nullable": True}``, no ``enum``) --
+        written to this application's own constraint registry, in the
+        SAME transaction as the DDL and the ``field_types`` registry
+        write above.
+
         Phase 4 (design docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md
         D-2/D-10): ``audit_hook``, when given, is called (``pre_commit()``)
         as the LAST thing this method does before its own commit point --
@@ -127,7 +150,7 @@ class StorageBackend:
         item 2). See ``audit_hook.py`` for the full call contract."""
         raise NotImplementedError
 
-    def add_field(self, collection, field, field_type, *, contract_type=None, audit_hook=None):
+    def add_field(self, collection, field, field_type, *, contract_type=None, enum=None, nullable=None, audit_hook=None):
         """Raises ``errors.NotFoundError`` if ``collection`` does not
         exist, ``errors.ConflictError`` if ``field`` already exists on it.
         Bumps the schema revision atomically with the DDL.
@@ -137,8 +160,92 @@ class StorageBackend:
         registry for ``field``, atomically with the DDL above -- see
         ``create_collection``'s own identical parameter.
 
+        Phase 9 WP-3a (design D-2 (1)/(4)): ``enum``/``nullable``, when
+        given, are this one new field's own constraint declaration --
+        written to the constraint registry in the same transaction as
+        the DDL. ``nullable=None`` (the common case, no explicit
+        declaration) resolves to the contract default ``True``.
+
         Phase 4: same ``audit_hook`` contract as ``create_collection``
         above."""
+        raise NotImplementedError
+
+    def field_constraints(self, collection):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): live ``{field_name:
+        {"nullable": bool, "enum": [...]}}`` registry mapping for
+        ``collection`` -- total over every field of ``collection``
+        (``"enum"`` present only where declared). Raises ``errors.
+        NotFoundError`` if ``collection`` does not exist, mirroring
+        ``field_types``. The single source of truth ``GET /v1/catalog``
+        and the cell-layer choke point (``cell.py::_prepare_values``,
+        never ``_bind_filters``) both read."""
+        raise NotImplementedError
+
+    def all_field_constraints(self):
+        """Phase 9 WP-3a (design D-2 (1)/(4)): ``{collection: {field:
+        {"nullable": bool, "enum": [...]}}}`` for EVERY collection this
+        backend currently has -- ``GET /v1/catalog``'s own sole data
+        source for ``field_constraints``, alongside ``all_field_types``."""
+        raise NotImplementedError
+
+    def field_types_and_constraints(self, collection):
+        """Phase 9 WP-3a rework (code review §2 C, P-8/G-4 performance
+        finding): ``field_types(collection)`` and ``field_constraints(
+        collection)`` combined into the ONE read both already make
+        against the identical registry row (the PostgreSQL backend's own
+        ``_mdb_field_types`` row, one per field) -- returns ``(types,
+        constraints)``, the exact pair those two calls would each
+        return on their own. Raises ``errors.NotFoundError`` if
+        ``collection`` does not exist, mirroring both. ``cell.py::
+        _prepare_values`` (and, via its own returned pair,
+        ``_check_missing_required_fields``) is the sole caller -- this
+        method exists to cut a write's own backend round trips, not to
+        replace ``field_types``/``field_constraints`` for every other
+        caller (``alter_field``'s own enum-type lookup, ``_decode_rows``,
+        ``_bind_filters``, and this package's own tests all keep calling
+        one or the other alone)."""
+        raise NotImplementedError
+
+    def alter_field_constraints(self, collection, field, *, enum=UNCHANGED, nullable=None, audit_hook=None, deadline=None):
+        """Phase 9 WP-3a (design D-2 (5)/(6), 実装の形 4, 監督裁定 S-g;
+        code review §2 A, 監督裁定 A 2026-09-07 for the tri-state ``enum``
+        below): redeclares ``field``'s own ``enum``/``nullable``
+        constraints. ``nullable=None`` leaves it unchanged (the contract
+        gives it no null state to distinguish from omission -- it is a
+        plain ``boolean`` property). ``enum`` is tri-state: the sentinel
+        default ``UNCHANGED`` (this module's own) leaves the field's
+        current ``enum`` exactly as it is; ``None`` CLEARS it (the field
+        declares no ``enum`` afterward); any other value (a non-empty
+        ``list``, already validated by the caller) SETS/REPLACES it.
+        Raises ``errors.NotFoundError`` if ``collection``/``field`` does
+        not exist.
+
+        MUST perform, inside ONE transaction -- never a separate
+        pre-flight scan followed by a separate commit (the ``create_
+        collection``/``add_field`` "read, then DDL in another tx" shape
+        does not apply here): (1) SELECT every existing row of
+        ``collection`` and check it against the constraints this call
+        would establish: raise ``errors.ConflictError`` with
+        ``details={"field": "enum"|"nullable", "violated_declaration":
+        "enum"|"nullable"}`` (the SAME value on both keys -- ``field``
+        names the request's own top-level key this violation is
+        attributable to, design D-3 (2); never a row value or a row
+        count, SI-10) and change NOTHING -- neither the registry nor the
+        schema revision -- if even one row would violate them; (2)
+        otherwise, write the new constraints to the registry and bump
+        the schema revision; (3) commit. Returns the new schema revision
+        (an ``int``) on success. A PostgreSQL implementation additionally
+        locks ``collection`` (``LOCK TABLE ... IN SHARE MODE``) BEFORE
+        step (1)'s own scan, inside the SAME transaction -- closing the
+        READ COMMITTED phantom-write window between that scan and this
+        method's own COMMIT (code review §2 F, 監督裁定 F 2026-09-07); an
+        in-process backend needs no such lock (a single Python call is
+        already atomic with respect to any other operation on the same
+        process).
+
+        Phase 4: same ``audit_hook`` contract as ``create_collection``
+        above -- called (``pre_commit()``) as the LAST thing before this
+        method's own commit point, only on the non-conflicting path."""
         raise NotImplementedError
 
     def field_types(self, collection):

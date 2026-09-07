@@ -122,8 +122,8 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 28, (
-        f"expected exactly 28 ResourceLimitError(...) call sites (pre-Phase-8 count was 12: Q1-D11's cell.py x5 + "
+    assert len(findings) == 32, (
+        f"expected exactly 31 ResourceLimitError(...) call sites (pre-Phase-8 count was 12: Q1-D11's cell.py x5 + "
         f"config.py x1 + WP-3's http.py x1 + WP-4's control_plane.py x3 + P35 WP-2's cell.py x1 + Phase 4 "
         f"WP-3(b)'s control_plane.py x1 -- see git history for that count's own full breakdown) -- Phase 8 WP-1a "
         f"(design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-1, L7-1) adds 13 new call sites for the "
@@ -136,9 +136,16 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
         f"12 + 13 = 25 -- plus WP-1a REWORK 1's own 3 more (裁定 2, 監督裁定 2026-09-06): backend_postgres.py x3 "
         f"(`insert_in_transaction`/`update_in_transaction`/`delete_in_transaction`, the SAME `QueryCanceled`/"
         f"`LockNotAvailable` -> `execution_ms` mapping the 6 standalone methods above already had, previously "
-        f"missing from the transact-batch path every HTTP mutation actually uses). 25 + 3 = 28, "
-        f"found {len(findings)}: {findings!r} -- if a new call site was added or removed "
-        f"intentionally, update this count in the same commit"
+        f"missing from the transact-batch path every HTTP mutation actually uses). 25 + 3 = 28 -- plus Phase 9 "
+        f"WP-3a's own 3 more (design docs/design/"
+        f"PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-2 (7), §5 U-1 = (β)): cell.py x3, the "
+        f"`enum_members` LIMIT_EXCEEDED pre-flight check in `_resolve_field_constraints` (serving `create_entity`'s "
+        f"own `field_constraints`), `add_field`, and `alter_field`, each refusing an `enum` declaration whose "
+        f"member count exceeds this deployment's own `config.max_enum_members` before anything is created or "
+        f"altered -- plus 1 more, backend_postgres.py's own `alter_field_constraints` (design D-2 実装の形 4): the "
+        f"SAME `QueryCanceled`/`LockNotAvailable` -> `execution_ms` mapping `create_collection`/`add_field` "
+        f"already have, on this new schema-mutating method. 28 + 3 + 1 = 32, found {len(findings)}: {findings!r} -- "
+        f"if a new call site was added or removed intentionally, update this count in the same commit"
     )
 
     violations = []
