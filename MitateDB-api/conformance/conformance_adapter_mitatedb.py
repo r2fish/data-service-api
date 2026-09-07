@@ -418,8 +418,20 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
     release = threading.Event()
     errors: list[BaseException] = []
 
-    def _stalled_limit_gate(principal, request=None, *, request_id=None):
-        inner = original_gate(principal, request, request_id=request_id)
+    # `*args, **kwargs`, forwarded verbatim to `original_gate` (rather than
+    # a fixed `principal, request=None, *, request_id=None` signature):
+    # `ApplicationCell._limit_gate` has already grown one new keyword
+    # since this monkeypatch was first written (`effective_limits`, Phase
+    # 9 WP-3d) -- a hardcoded signature here would either drop that
+    # keyword silently or raise `TypeError` on any FUTURE one, and WP-3cd
+    # separately had to route `_gate()` around this exact fragility via an
+    # identity comparison (`self.config`) rather than this proxy ever
+    # seeing it. This stall point's own placement (after the real gate's
+    # `__enter__` -- rate/concurrency/request_bytes/operation_depth --
+    # and before that value reaches the caller) is unchanged; only the
+    # argument plumbing is now signature-agnostic.
+    def _stalled_limit_gate(*args, **kwargs):
+        inner = original_gate(*args, **kwargs)
         return _StalledGateContextManager(inner, entered, release)
 
     cell_obj._limit_gate = _stalled_limit_gate  # noqa: SLF001
@@ -1037,6 +1049,21 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
             # above (`max_batch_entities`/`max_result_rows`/`max_filter_
             # terms`, all 5).
             max_enum_members=5,
+            # Phase 9 WP-3c (design D-5, 追補 2 S-f; 監督裁定集約
+            # rulings-r5-r6.md I-10, 裁定 J-7): small like every other
+            # COUNT-valued field above (<= `_MAX_EXERCISABLE_LIMIT`, 200)
+            # -- `test_c23_idempotency_semantics.py`'s own (full) leg
+            # reads this deployment's own declared `idempotency_entries`
+            # back out of `capabilities()` and drives exactly that many
+            # distinct-key inserts before asserting the (declared + 1)-th
+            # distinct key is refused `LIMIT_EXCEEDED`/`idempotency_
+            # entries`. `idempotency_retention_ms=60_000` (60s) is
+            # declared-only on this leg (never driven -- waiting it out
+            # for real would make the suite itself slow, `test_c23`'s own
+            # module docstring), so this value only needs to outlast one
+            # test run, not match any production number.
+            idempotency_entries=5,
+            idempotency_retention_ms=60_000,
         )
         fresh = MitateDBConformanceAdapter(config=small_config)
         try:
@@ -1516,7 +1543,25 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
                     kwargs["budget"] = dict(budget)
                 if idempotency_key is not None:
                     kwargs["idempotency_key"] = idempotency_key
-                foundation_type = CONTRACT_TYPE_TO_FOUNDATION_TYPE.get(field_type, field_type) if field_type is not None else "json"
+                # C-23 (iv)(v): an unrecognized `field_type` (not one of
+                # this peer's own seven contract words) must reach
+                # `session.add_field` as a VALIDATION_FAILED refusal from
+                # the peer itself, not a port-side KeyError raised by this
+                # adapter pre-judging the word (adapters do not decide
+                # validity on the peer's behalf). `.get(field_type,
+                # field_type)` maps only known contract words; an unknown
+                # one is passed through UNCHANGED as the foundation-type
+                # positional argument, which is itself not a member of
+                # `cell._FIELD_TYPE_VOCABULARY` for any real unrecognized
+                # word, so `session.add_field` raises `ValidationError` on
+                # its own first gate (`cell.py`'s own `add_field`, "field_type
+                # not in _FIELD_TYPE_VOCABULARY" check) -- before any
+                # idempotency record is written, so a same-key resend
+                # after this failure is a genuinely new execution.
+                foundation_type = (
+                    CONTRACT_TYPE_TO_FOUNDATION_TYPE.get(field_type, field_type)
+                    if field_type is not None else "json"
+                )
                 return session.add_field(entity, field, foundation_type, **kwargs)
             result = self._call(op)
         elif operation == "alter_field":
@@ -1918,6 +1963,7 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         plan: str | None = None,
         budget: Mapping[str, int] | None = None,
         transaction: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Mapping[str, Any]:
         """port v1.13 (design D-4/D-6): always routed through `session.
         transact()` (the same real atomic dispatcher `attempt_batch_with_
@@ -1938,13 +1984,26 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         point (mirrors this class's `create_entity_with_declared_types`/
         `add_field_with_declared_type` convention: real shape, not a
         stub), defaulting to `None` (omitted, byte-compatible with every
-        pre-addendum caller)."""
+        pre-addendum caller). WP-1 addendum (C-25 (4)): `idempotency_key`
+        is carried through on `item`, exactly like `attempt_batch_with_
+        addresses`'s own per-operation loop already places its folded
+        value -- this peer's real `transact()` reads it off each item, not
+        off a request-level keyword."""
         filters = [Filter(where_field, "eq", where_value)] if where_field is not None else None
         item: dict[str, Any] = {"type": operation, "collection": entity, "values": dict(values or {})}
         if expected_revision is not None:
             item["expected_revision"] = expected_revision
         if unique_key is not None:
             item["unique_key"] = unique_key
+        if idempotency_key is not None:
+            # port v1.11 (design D-6.7 C-07 (ii)): `_plan_operation`'s own
+            # `_TRANSACT_*_KEYS` excess-key check (cell.py) already
+            # recognizes this key on this peer's per-operation item shape
+            # and refuses it with a real, present `CapabilityError` before
+            # execution (`idempotency: unavailable`) -- carried through
+            # exactly like `expected_revision`/`unique_key` above, never
+            # interpreted by this adapter.
+            item["idempotency_key"] = idempotency_key
         if filters is not None:
             item["filters"] = filters
         if destructive:
