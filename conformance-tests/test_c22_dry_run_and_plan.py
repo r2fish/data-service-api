@@ -354,6 +354,19 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
                 # territory. Leave this leg unobserved here too.
                 audit_count_before = None
 
+        # (3) external-effect absence, row-count half: snapshotted
+        # immediately before the SAME two dry runs (6) below drives --
+        # never `count_before_all` (captured before this entity had any
+        # rows at all), which the (1) precondition sub-leg above may
+        # already have moved on by exactly one real, harmless seed insert
+        # (declare-first on `revision_preconditions`, lines 281-301) on a
+        # plug where that sub-leg actually runs. The dry_run-must-not-
+        # change-state assertion below is about the two dry runs
+        # themselves, not about the sub-legs that preceded them, so its
+        # baseline is retaken right here, immediately before them --
+        # mirroring the audit half's own before/after bracket above.
+        count_before_dry_run = iso.count(runtime, entity)
+
         # (6) plan determinism: two dry runs of the identical request
         # return the identical token.
         dry1 = iso.attempt_mutation_with_result(**insert_kwargs, dry_run=True)
@@ -379,8 +392,8 @@ def test_c22_dry_run_and_plan(adapter: ConformanceAdapter, isolated) -> None:
         )
 
         # (3) external-effect absence.
-        assert iso.count(runtime, entity) == count_before_all, (
-            f"{adapter.name}: a dry run changed row count ({count_before_all} -> {iso.count(runtime, entity)})"
+        assert iso.count(runtime, entity) == count_before_dry_run, (
+            f"{adapter.name}: a dry run changed row count ({count_before_dry_run} -> {iso.count(runtime, entity)})"
         )
         assert iso.select_eq(runtime, entity, ["label"], "label", marker) == [], (
             f"{adapter.name}: a dry-run insert left a real, readable row behind"
