@@ -68,6 +68,8 @@ executable (four adapters) -- `conformance-tests/test_c07_atomicity_and_retry.py
 
 **Phase 9 WP-1 correction (2026-09-07, design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5(7)/§6.4):** the paragraph above (current row's own text through phase 8) is superseded by contract 1.7.0's own `idempotency` capability (D-5): the current row now states the state that obtains once each peer's own WP-2c/WP-3c flips `idempotency` off `unavailable` and closes L7-8, per design's own directive (repeated at D-5(7), §6.3's table, and §6.4) to make that rewrite in WP-1 itself, ahead of either peer's real flip. **Disclosed timing note, added by WP-1b (not itself a design decision)**: at the WP-1 commit that makes this rewrite, neither peer has yet flipped `idempotency` off `unavailable` -- vector (ii)'s own executable evidence is, at that moment, still entirely on the `unavailable` branch this paragraph itself describes, and L7-8 does not actually close until each peer's own WP-2c/WP-3c lands (the current row's own new "Timeline disclosure (WP-1)" sentence states this explicitly). The declare-first mechanism this row has always used (an unedited test, an `if/else` keyed on live declaration) carries that transition without any further edit to this file, exactly as designed.
 
+**Phase 9 WP-2cd/WP-3cd completion correction (2026-09-08, design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.4, v1.7; main `ac5eac2`):** the current row's own WP-1 declare-first text (verbatim, moved here in this same edit) read: "as of this commit (WP-1), both registered peers still declare `idempotency: unavailable`, so this row's own executable evidence is entirely on the `unavailable` branch -- a key-bearing request is refused `CAPABILITY_UNSUPPORTED` before execution, zero side effects. The positive branch (a same-key resend returns the same result) becomes load-bearing on all four plugs once each peer's own WP-2c/WP-3c lands and flips the declaration to anything other than `unavailable` -- this row's own test is unchanged by that flip (not one line edited for phase 9; the branch this test's own `if/else` takes moves because the DECLARATION moves, C-07 (ii)'s own declare-first design). Its own fuller semantics are C-23's territory (`conformance-tests/test_c23_idempotency_semantics.py`)." Both peers have now declared `idempotency: enabled` (WP-2cd/WP-3cd), so the current row is rewritten to state the now-obtaining state, per design §6.4's own verbatim replacement text: "both registered peers declare `idempotency: enabled` from contract 1.7.0; the positive branch (a same-key resend returns the same result) is load-bearing on all four plugs. Its own fuller semantics are C-23's territory." L9-7/L7-8 close with this edit (design 台帳, `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §10). The declare-first test itself is unchanged (not one line edited) -- the branch it observes moved because the DECLARATION moved.
+
 ---
 
 ## C-08
@@ -233,7 +235,8 @@ A second `xfail(strict=True)` guard registered alongside it (`test_c19_adapters_
 ---
 
 ## C-20
-No historical narrative was separated out of this row's current text; the current row already reflects only today's state (new row, phase 9 WP-1).
+
+**Phase 9 WP-2a/WP-3a completion correction (2026-09-08, `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §6.4; main `ac5eac2`):** the current row's own WP-1 completion sentence (verbatim, moved here in this same edit) read: "WP-1 completion: 4 plugs all observe `unavailable` (no peer has implemented `constraint_declarations` yet); the transition to `enforced` on each peer happens in that peer's own WP-2a/WP-3a commit, without editing this suite." Both registered peers have since declared `constraint_declarations` other than `unavailable` (WP-2a/WP-3a), so the current row is rewritten to state the now-obtaining state. The test itself is unchanged.
 
 ---
 
@@ -248,17 +251,20 @@ executable (four adapters) -- `conformance-tests/test_c21_denial_details_vocabul
 ---
 
 ## C-22
-No historical narrative was separated out of this row's current text; the current row already reflects only today's state (new row, phase 9 WP-1).
+
+**Phase 9 WP-2b/WP-3b completion correction (2026-09-08, `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §6.4; main `ac5eac2`):** the current row's own WP-1 completion sentence (verbatim, moved here in this same edit) read: "WP-1 completion: 4 plugs all observe `unavailable`; the transition to `dry_run_enabled` happens per-peer in WP-2b/WP-3b, without editing this suite." Both registered peers have since declared `dry_run` other than `unavailable` (WP-2b/WP-3b), so the current row is rewritten to state the now-obtaining state. The test itself is unchanged.
 
 ---
 
 ## C-23
-No historical narrative was separated out of this row's current text; the current row already reflects only today's state (new row, phase 9 WP-1).
+
+**Phase 9 WP-2c/WP-3c completion correction (2026-09-08, `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §6.4; main `ac5eac2`):** the current row's own WP-1 completion sentence (verbatim, moved here in this same edit) read: "WP-1 completion: 4 plugs all observe `unavailable` (unchanged from C-07 (ii)'s own pre-1.7.0 state); the transition to `retry_same_result` happens per-peer in WP-2c/WP-3c." Both registered peers have since declared `idempotency` other than `unavailable` (WP-2c/WP-3c), so the current row is rewritten to state the now-obtaining state, matching C-07 (ii)'s own history entry. The test itself is unchanged.
 
 ---
 
 ## C-24
-No historical narrative was separated out of this row's current text; the current row already reflects only today's state (new row, phase 9 WP-1).
+
+**Phase 9 WP-2d/WP-3d completion correction (2026-09-08, `docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md` §6.4; main `ac5eac2`):** the current row's own WP-1 completion sentence (verbatim, moved here in this same edit) read: "WP-1 completion: 4 plugs all observe `unavailable`; the transition to `budget_enforced` happens per-peer in WP-2d/WP-3d." Both registered peers have since declared `request_budget` other than `unavailable` (WP-2d/WP-3d), so the current row is rewritten to state the now-obtaining state. The test itself is unchanged.
 
 ---
 
