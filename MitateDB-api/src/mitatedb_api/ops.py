@@ -1015,7 +1015,7 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     "F-11": 10,
     "F-13": 11,
     "F-9": 12,
-    # Contract 1.7.0 (work order §2 WP-3e F-3, `{scratchpad}/
+    # Contract 1.7.0 (work order §2 WP-2e/WP-3e F-3, `{scratchpad}/
     # rulings-r3-r7-flip.md` F-3): `check_contract_170_declarations`'s
     # own new condition -- the next unused exit code (F-12 is reserved,
     # out of scope for this command, `_verify_declarations_checks`'s own
@@ -1094,13 +1094,16 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         return _verify_declarations_fail(exc)
     _verify_declarations_ok("F-7/F-10/F-11/F-13/F-9", "connected role's writer timeout settings valid")
 
-    # Contract 1.7.0 (work order §2 WP-3e F-3, `{scratchpad}/
-    # rulings-r3-r7-flip.md` F-3): the "enabled" declaration checked
-    # against the actual deployed state -- the served capabilities
-    # document AND (the one part that can genuinely fail against a real
-    # deployment) every registered application's own per-application
-    # upgrade ledger. Run unconditionally like the writer-role check just
-    # above.
+    # Contract 1.7.0 (work order §2 WP-2e/WP-3e F-3, `{scratchpad}/
+    # rulings-r3-r7-flip.md` F-3; WP-2e/WP-3e rework `{scratchpad}/
+    # audit-wp2e.md` D-2, ruling L-2 = (A); closure audit M-7, `{scratchpad}
+    # /audit-wp2e-2.md` R-7): the "enabled" declaration checked against the
+    # actual deployed state -- the served capabilities document (its
+    # `capabilities` AND `limits` blocks alike, never a second, separately
+    # constructed limits object), AND (the one part that can genuinely
+    # fail against a real deployment) every registered application's own
+    # per-application upgrade ledger (R-2/R-5). Run unconditionally like
+    # the writer-role check just above.
     try:
         applied_by_application = _applied_upgrade_numbers_by_application(conn, dsn)
         platform_declarations.check_contract_170_declarations(

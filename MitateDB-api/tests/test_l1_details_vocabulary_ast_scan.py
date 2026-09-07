@@ -152,30 +152,28 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     ("backend_postgres.py", 1752),  # generic driver-exception translation
 })
 
-#: 追補 4 O-1: `control_plane.py`'s own ONE remaining bare site --
-#: `rotate_credential`'s "a revoked credential cannot be rotated" -- is
-#: NOT a declaration violation the closed 11-word `violated_declaration`
-#: vocabulary (`errors.details_vocabulary.violated_declaration_
-#: vocabulary`) has a word for: the REQUEST shape is fine (a syntactically
-#: valid credential id), and the value itself is not wrong either -- what
-#: is wrong is a STATE precondition on an already-existing resource (the
-#: named credential is revoked), the same kind of fact `ConflictError`
-#: ("application already exists", this same module, 4 other sites) exists
-#: to carry, not `ValidationError`. Reclassifying this ONE site's
-#: exception type is a bigger semantic change than this WP's own "add
-#: 4-key details" scope (existing peer-local tests, `test_control_plane_
-#: service.py::test_rotate_credential_refuses_a_revoked_credential`/
-#: `test_enable_credential_never_resurrects_a_revoked_credential`, pin
-#: `ValidationError` specifically) -- reported here as a disclosed,
-#: narrowly-confined allowlist entry (not silently exempted: `test_
-#: control_plane_allowlist_entry_matches_a_real_bare_site` below verifies
-#: it against real, current code) rather than forcing an ill-fitting
-#: vocabulary word onto a site the closed vocabulary was never meant to
-#: cover. A supervisor-level decision (reclassify to `ConflictError`, or
-#: extend the vocabulary) is left open, not silently resolved here.
-_CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
-    ("control_plane.py", 1667),  # rotate_credential: "a revoked credential cannot be rotated" -- a state conflict, no 11-word vocabulary fit
-})
+#: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
+#: `rotate_credential`'s "a revoked credential cannot be rotated" -- as a
+#: disclosed, narrowly-confined allowlist entry, with the supervisor-level
+#: decision (reclassify to `ConflictError`, or extend the vocabulary)
+#: explicitly left open. O-8 (版フリップ監査, ruling `{scratchpad}/
+#: rulings-r3-r7-flip.md` 追補4, pair-closing) resolves it: a STATE
+#: precondition on an already-existing resource (the named credential is
+#: revoked) is a resource-state CONFLICT, the same kind of fact
+#: `ConflictError` ("application already exists", this same module, 4
+#: other sites) already exists to carry -- not a declaration violation
+#: the closed 11-word `violated_declaration` vocabulary has a word for,
+#: and not `ValidationError`. The site now raises `ConflictError`
+#: (`control_plane.py`), which is outside `_VOCAB_CLASSES` entirely (this
+#: scan only tracks `ValidationError`/`CapabilityError`) -- so this
+#: allowlist is now EMPTY, not populated with a rewritten entry: there is
+#: no remaining bare `ValidationError`/`CapabilityError` site in
+#: `control_plane.py` this scan's own 11-word vocabulary fails to cover.
+#: `test_control_plane_service.py::test_rotate_credential_refuses_a_
+#: revoked_credential`/`test_enable_credential_never_resurrects_a_
+#: revoked_credential` now pin `ConflictError` (updated in the same
+#: pair-closing commit).
+_CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()
 
 
 def _call_target_name(node: ast.expr) -> str | None:
@@ -392,7 +390,11 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # details) is 12 / 4 / 4 (`control_http.py`'s own "missing
         # required fields, no sole attributable key" leg is a genuine
         # 4th call site, mirroring `http.py`'s own analogous split).
-        "control_plane.py": 12,
+        # O-8 pair-closing: `rotate_credential`'s "a revoked credential
+        # cannot be rotated" site now raises `ConflictError`, outside
+        # `_VOCAB_CLASSES` -- `control_plane.py` drops from 12 to 11
+        # `ValidationError`/`CapabilityError` call sites.
+        "control_plane.py": 11,
         "control_http.py": 4,
         "audit_query.py": 4,
     }, counts
@@ -434,15 +436,22 @@ def test_control_plane_allowlist_is_confined_to_control_plane_py_and_one_entry()
     and named-module-confined -- unlike the backend allowlist, growth here
     should be rare and each addition individually justified in prose (a
     site genuinely outside the closed 11-word vocabulary), never used as
-    a general escape hatch for "did not get around to it yet"."""
-    assert _CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST == frozenset({("control_plane.py", 1667)})
+    a general escape hatch for "did not get around to it yet". O-8
+    pair-closing resolved the one entry O-1 left open (`rotate_
+    credential`'s revoked-credential refusal now raises `ConflictError`,
+    outside this scan's `_VOCAB_CLASSES` entirely) -- the allowlist is
+    now empty, kept as a named, typed constant (not deleted outright) so
+    a future genuinely-no-vocabulary-fit site has an established place to
+    be added, individually justified, the same way this one was."""
+    assert _CONTROL_PLANE_NO_VOCABULARY_ALLOWLIST == frozenset()
 
 
 def test_control_plane_allowlist_entry_matches_a_real_bare_site():
     """Mirrors `test_allowlist_entries_match_real_bare_call_sites` above,
-    scoped to the one-entry control-plane allowlist -- if `rotate_
-    credential`'s own site moves, is fixed, or is removed, this goes red
-    rather than silently exempting a line that no longer needs it."""
+    scoped to the (now empty) control-plane allowlist -- if a new bare
+    `ValidationError`/`CapabilityError` site appears in `control_plane.py`
+    that this scan's own 4-key check does not already cover, this goes
+    red rather than silently letting it slip through unaccounted for."""
     real_bare_sites = {
         (module, lineno)
         for module in ("control_plane.py",)

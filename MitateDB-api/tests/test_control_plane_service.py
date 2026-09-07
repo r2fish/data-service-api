@@ -453,11 +453,15 @@ def test_list_credentials_merges_application_and_control_rows() -> None:
 
 
 def test_rotate_credential_refuses_a_revoked_credential() -> None:
+    # O-8 (版フリップ監査, ruling `{scratchpad}/rulings-r3-r7-flip.md`
+    # 追補4): a state conflict (target contradicts the requested
+    # operation), not a ValidationError shoehorned into the 11-word
+    # vocabulary -- matches r2db-api's own same-site fix (CONFLICT).
     service, _backend, cid, secret = _bootstrapped()
     service.register_application(secret, "rotapp")
     issued = service.issue_credential(secret, "rotapp", "runtime")
     service.revoke_credential(secret, issued["credential_id"])
-    with pytest.raises(ValidationError):
+    with pytest.raises(ConflictError):
         service.rotate_credential(secret, issued["credential_id"])
 
 
@@ -532,7 +536,9 @@ def test_enable_credential_never_resurrects_a_revoked_credential() -> None:
     state = service.set_credential_enabled(secret, issued["credential_id"], True)
     assert state["revoked"] is True
     # Still cannot rotate (store-level gate proves it is actually dead).
-    with pytest.raises(ValidationError):
+    # O-8: CONFLICT, not ValidationError (see test_rotate_credential_
+    # refuses_a_revoked_credential above).
+    with pytest.raises(ConflictError):
         service.rotate_credential(secret, issued["credential_id"])
 
 
