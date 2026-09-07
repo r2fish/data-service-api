@@ -1068,18 +1068,61 @@ class ApplicationCell:
         digest resend, and `errors.ResourceLimitError` (I-6,
         `limit_class="idempotency_entries"`) when this Application is at
         capacity even after reclaiming elapsed records -- both BEFORE
-        anything the caller would go on to execute."""
+        anything the caller would go on to execute.
+
+        WP-3e rework 2 (rulings-r3-r7-flip.md 追補 L-6 / 追補 2 M-6): a
+        stored record that does not itself carry `request_id` (written
+        before this peer began folding `request_id` into every persisted
+        idempotency response) is treated as though no record exists at
+        all -- neither the conflict check nor a replay ever sees it. The
+        caller re-executes the request as a fresh one; that fresh
+        execution's own eventual write (`record_idempotency`, or a DDL
+        method's own `idempotency_record` write) overwrites this row
+        with a `request_id`-carrying response, since both backends'
+        write paths already replace an existing row for the same key
+        (`SQLiteBackend`'s plain `self._idempotency[key] = ...`
+        assignment, `PostgresBackend._write_idempotency_row`'s own
+        `ON CONFLICT (key) DO UPDATE`). No fallback value is ever
+        substituted for a missing `request_id` -- see the removed
+        `replay.setdefault("request_id", ...)` this rework deleted from
+        `create_collection`/`add_field`/`alter_field`, which is now
+        unreachable: `_idempotency_check` never returns a
+        `request_id`-less replay in the first place.
+
+        Two stored shapes carry `request_id` differently: a schema
+        operation's own persisted response is a single dict with
+        `request_id` at its top level; `transact()`'s own persisted
+        response is the WHOLE `results` list, with `request_id` folded
+        only into its LAST element (`ApplicationCell.transact`'s own
+        write site). Both are checked here so this one choke point stays
+        the only place that decides "does this record carry
+        `request_id`" -- a caller never has to know which shape its own
+        stored response takes."""
         digest = idempotency_digest(digest_request)
         now_ms = int(time.time() * 1000)
         self._backend.idempotency_reap_expired(now_ms, self.config.idempotency_retention_ms)
         existing = self._backend.idempotency_get(idempotency_key)
+        stored_response = None
+        if existing is not None:
+            stored_response = json.loads(existing["response_json"])
+            if isinstance(stored_response, list):
+                has_request_id = (
+                    bool(stored_response)
+                    and isinstance(stored_response[-1], dict)
+                    and "request_id" in stored_response[-1]
+                )
+            else:
+                has_request_id = isinstance(stored_response, dict) and "request_id" in stored_response
+            if not has_request_id:
+                existing = None
+                stored_response = None
         if existing is not None:
             if existing["digest"] != digest:
                 raise ConflictError(
                     "idempotency_key was already used with a different request",
                     details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
                 )
-            return json.loads(existing["response_json"]), digest, now_ms
+            return stored_response, digest, now_ms
         if self._backend.idempotency_count() >= self.config.idempotency_entries:
             raise ResourceLimitError("idempotency record capacity exceeded", limit_class="idempotency_entries")
         return None, digest, now_ms
@@ -1279,25 +1322,13 @@ class ApplicationCell:
                     # own durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="create_collection", target_id=name, request_id=request_id)
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
-                    # LIMITATION): the stored `response_json` this replay
-                    # was built from (`backend_sqlite.py`/`backend_
-                    # postgres.py`'s own `create_collection`) predates
-                    # this WP and does not itself carry `request_id` --
-                    # unlike `transact()`'s own mutation-level replay
-                    # (whose envelope this WP folds `request_id` into
-                    # BEFORE it is ever persisted), so this schema-level
-                    # replay cannot correlate to the ORIGINAL execution's
-                    # own id (full Q-4 fidelity for this one code path is
-                    # out of this WP's scope -- backend response-
-                    # construction changes were judged too invasive for a
-                    # property C-25's own test file does not exercise,
-                    # which probes only mutation-level replay). `setdefault`
-                    # still satisfies Q-2 (every successful response
-                    # carries SOME request_id) using THIS request's own
-                    # resolved value as a safe fallback, never a crash.
-                    if isinstance(replay, dict):
-                        replay.setdefault("request_id", request_id)
+                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): the
+                    # `setdefault("request_id", ...)` fallback this WP
+                    # previously carried here is REMOVED -- `replay` is
+                    # never `request_id`-less any more, because
+                    # `_idempotency_check` now treats such a record as
+                    # though it did not exist (see that method's own
+                    # docstring).
                     return replay
             # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
             # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
@@ -1531,14 +1562,10 @@ class ApplicationCell:
                     # durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="add_field", target_id=collection, request_id=request_id)
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
-                    # LIMITATION): mirrors `create_collection`'s own
-                    # identical `setdefault` fallback above -- see that
-                    # comment for the full reasoning (the stored response
-                    # this replay is built from does not itself carry
-                    # `request_id`).
-                    if isinstance(replay, dict):
-                        replay.setdefault("request_id", request_id)
+                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                    # `create_collection`'s own removal above -- `replay`
+                    # is never `request_id`-less (see `_idempotency_
+                    # check`'s own docstring).
                     return replay
             # Q1-D11-consistent shape bound (same reasoning as `create_
             # collection`'s own field-count check above): the total column
@@ -1763,14 +1790,10 @@ class ApplicationCell:
                     # durable row before it is ever returned.
                     self._write_replayed_schema_event(
                         principal, operation="alter_field", target_id=collection, request_id=request_id)
-                    # Phase 9 WP-3e (design D-7 (3)/(4), Q-2/Q-4, DISCLOSED
-                    # LIMITATION): mirrors `create_collection`'s own
-                    # identical `setdefault` fallback above -- see that
-                    # comment for the full reasoning (the stored response
-                    # this replay is built from does not itself carry
-                    # `request_id`).
-                    if isinstance(replay, dict):
-                        replay.setdefault("request_id", request_id)
+                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                    # `create_collection`'s own removal above -- `replay`
+                    # is never `request_id`-less (see `_idempotency_
+                    # check`'s own docstring).
                     return replay
             available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
             if field not in available:

@@ -20,6 +20,7 @@ request_id.py` in SHAPE (same propositions), never in code.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -372,6 +373,73 @@ def test_idempotency_replay_of_a_schema_operation_returns_the_original_request_i
     second = dev.add_field("widgets", "replayed_field", "text", idempotency_key=key)
     assert first == second
     assert first["request_id"]
+
+
+# ---------------------------------------------------------------------------
+# WP-3e rework 2 (rulings-r3-r7-flip.md 追補 L-6 / 追補 2 M-6): a stored
+# idempotency record that does not itself carry `request_id` (a pre-1.7.0
+# record) is treated as though it does not exist -- a resend re-executes,
+# never replays, and the fresh execution's own write overwrites the row.
+# ---------------------------------------------------------------------------
+
+
+def test_idempotency_record_without_request_id_on_mutation_is_treated_as_absent(service):
+    """`transact()`'s own persisted response is the whole `results` LIST,
+    with `request_id` folded only into its last element -- stripping it
+    there simulates a record written before this rollout."""
+    _, _, _dev, runtime = service
+    key = "wp3e-rework2-l6-mutation-key"
+    first = runtime.transact(
+        [{"type": "insert", "collection": "widgets", "values": {"title": "a"}, "idempotency_key": key}])
+    assert first[-1]["request_id"]
+
+    cell = runtime._ApplicationRuntime__cell
+    backend = cell._backend
+    record = backend._idempotency[key]
+    stored = json.loads(record["response_json"])
+    del stored[-1]["request_id"]
+    record["response_json"] = json.dumps(stored)
+
+    rows_before = runtime.read("widgets")
+
+    second = runtime.transact(
+        [{"type": "insert", "collection": "widgets", "values": {"title": "a"}, "idempotency_key": key}])
+    rows_after = runtime.read("widgets")
+
+    # A genuine re-execution happened (a second row was inserted), never a
+    # replay of the stripped record.
+    assert len(rows_after) == len(rows_before) + 1
+    assert second[-1]["request_id"]
+    assert second[-1]["request_id"] != first[-1]["request_id"]
+
+    # The record itself was overwritten by the fresh execution's own write
+    # and now carries `request_id` again.
+    updated = json.loads(backend._idempotency[key]["response_json"])
+    assert updated[-1]["request_id"] == second[-1]["request_id"]
+
+
+def test_idempotency_record_without_request_id_on_schema_op_is_treated_as_absent(service):
+    """Mirrors the mutation-level test above for the SCHEMA side, where the
+    persisted response is a single dict with `request_id` at its top
+    level. A resend re-executes `add_field` as a genuinely new attempt --
+    observed here as a `ConflictError`/`ValidationError` from the second,
+    real attempt to add a field name that already exists (the tell-tale
+    sign this was NOT answered from the stripped record, which would have
+    returned successfully with no error at all)."""
+    _, _, dev, _runtime = service
+    key = "wp3e-rework2-l6-schema-key"
+    first = dev.add_field("widgets", "rework2_l6_field", "text", idempotency_key=key)
+    assert first["request_id"]
+
+    cell = dev._ApplicationRuntime__cell
+    backend = cell._backend
+    record = backend._idempotency[key]
+    stored = json.loads(record["response_json"])
+    del stored["request_id"]
+    record["response_json"] = json.dumps(stored)
+
+    with pytest.raises((ValidationError, ConflictError)):
+        dev.add_field("widgets", "rework2_l6_field", "text", idempotency_key=key)
 
 
 # ---------------------------------------------------------------------------
