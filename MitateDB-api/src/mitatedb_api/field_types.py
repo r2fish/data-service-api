@@ -104,35 +104,40 @@ def json_type_name(value: Any) -> str:
     return "unknown"  # pragma: no cover -- unreachable: upstream JSON decoding never produces any other type
 
 
-def enum_member_matches_type(value: Any, declared_type: str) -> bool:
+def enum_member_matches_type(value: Any, declared_type: str | None) -> bool:
     """WP-3a rework 2 (監督裁定 m-3, 2026-09-07 -- helper name shared
-    with r2db-api's own isomorphism-tested counterpart): the scalar
-    type-membership test both `check_declared_value`'s own `string`/
-    `integer`/`number`/`boolean` branches AND `validate_enum_declaration`'s
-    own per-member check need -- extracted to one place so the two never
-    drift (previously `validate_enum_declaration` called `check_declared_
-    value` itself for this, which worked but hid this test as a side
-    effect of a function whose real job is choke-point VALUE validation,
-    not enum-member type-checking in isolation).
+    with r2db-api's own isomorphism-tested counterpart, isomorphism
+    pairing added by the supervisor's own pair-closing commit, work
+    order §4 の 12 / §6 訂正註 10): the scalar type-membership test both
+    `check_declared_value`'s own `string`/`integer`/`number`/`boolean`
+    branches AND `validate_enum_declaration`'s own per-member check
+    need -- extracted to one place so the two never drift (previously
+    `validate_enum_declaration` called `check_declared_value` itself for
+    this, which worked but hid this test as a side effect of a function
+    whose real job is choke-point VALUE validation, not enum-member
+    type-checking in isolation).
 
-    Only meaningful for `declared_type in _ENUM_ELIGIBLE_TYPES` -- `object`/
-    `array`/`json` are handled by `check_declared_value` directly, since
-    `enum` can never be declared on them (`validate_enum_declaration`'s own
-    eligibility check refuses that before any member is ever checked).
+    Never accepts `None` here -- callers reject a null member up front
+    (`enum` constrains non-null values only). `declared_type` outside
+    `_ENUM_ELIGIBLE_TYPES` never reaches this function at all --
+    `validate_enum_declaration` below rejects the declaration itself
+    first, so this function's own fallback is unreachable in practice
+    (kept as a plain `False`, never a raise, since a predicate function
+    has no `details` shape of its own to attach).
 
     `bool` is checked before `int` (Python's `isinstance(True, int)` is
     `True`) so an unguarded `integer`/`number` branch never silently
     accepts a `bool` member -- same precedent `check_declared_value`'s
     own docstring already states."""
-    if declared_type == "string":
-        return isinstance(value, str)
     if declared_type == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if declared_type == "number":
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if declared_type == "boolean":
         return isinstance(value, bool)
-    raise ValidationError(f"unknown declared field type {declared_type!r}")
+    if declared_type == "string":
+        return isinstance(value, str)
+    return False
 
 
 def check_declared_value(value: Any, declared_type: "str | None", *, constraints: "dict | None" = None) -> None:
@@ -213,7 +218,23 @@ def check_declared_value(value: Any, declared_type: "str | None", *, constraints
             )
 
 
-def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> list:
+class _ConstraintDeclarationError(Exception):
+    """WP-3a rework 2 (監督裁定 m-1, 2026-09-07 -- isomorphism pairing
+    added by the supervisor's own pair-closing commit, work order §4 の
+    12 / §6 訂正註 10): internal-only signal `validate_enum_declaration`
+    below raises when an `enum` declaration is itself invalid -- never
+    surfaced outside this module. `cell.py`'s own
+    `_validate_enum_declaration_with_path` catches this at every one of
+    `validate_enum_declaration`'s 3 call sites and re-raises `errors.
+    ValidationError` with the `details` shape (`field` as the request-
+    relative PATH, `violated_declaration: "constraint_declaration"`,
+    `declared_type`) that only the CALL SITE -- never this shared
+    validator -- knows how to compose, mirroring r2db-api's own
+    `structured._ConstraintDeclarationError`/`_fail_constraint_
+    declaration` split (same reasoning, independently arrived at)."""
+
+
+def validate_enum_declaration(enum_values: Any, declared_type: str | None) -> tuple[Any, ...]:
     """Phase 9 WP-3a (design D-2 (2), contract `SchemaOperationRequest.
     field_constraints.description`): validates an `enum` value carried on
     `create_entity`'s `field_constraints`, `add_field`, or `alter_field`
@@ -221,8 +242,8 @@ def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> 
     "an `enum` on an `object`/`array`/`json` field, an empty or
     duplicated `enum`, [or] an `enum` member outside the field's declared
     type ... fails `VALIDATION_FAILED`; none of them is silently
-    ignored." Returns a plain `list` copy (never the caller's own
-    mutable object) on success.
+    ignored." Returns the validated members as a tuple, in the order
+    declared (round-trip fidelity for the constraint registry entry).
 
     WP-3a rework 2 (監督裁定 m-1, 2026-09-07): this function's own
     fixed two-argument signature (`enum_values`, `declared_type` --
@@ -231,8 +252,9 @@ def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> 
     to (`field_constraints/<field>/enum` from `create_collection`'s own
     `field_constraints`, or the bare `enum` top-level key from `add_
     field`/`alter_field` -- three different callers, three different
-    paths, for the identical malformed declaration) -- so it raises a
-    plain, detail-less `errors.ValidationError` for each of the three
+    paths, for the identical malformed declaration) -- so it raises
+    `_ConstraintDeclarationError` (never `errors.ValidationError`
+    directly -- see that class' own docstring) for each of the three
     checks below; `cell.py`'s own `_validate_enum_declaration_with_path`
     wraps every call site and attaches the actual `details` shape (`{"
     violated_declaration": "constraint_declaration", "field": <path>,
@@ -241,19 +263,14 @@ def validate_enum_declaration(enum_values: Any, declared_type: "str | None") -> 
     instead.
     """
     if declared_type not in _ENUM_ELIGIBLE_TYPES:
-        raise ValidationError(
-            f"enum cannot be declared on a field of declared type {declared_type!r}"
-        )
+        raise _ConstraintDeclarationError("enum can only be declared on a field of type string, integer, number or boolean.")
     if not isinstance(enum_values, list) or not enum_values:
-        raise ValidationError("enum must be a non-empty list")
-    seen: list = []
+        raise _ConstraintDeclarationError("enum must be a non-empty list.")
+    validated: list[Any] = []
     for member in enum_values:
-        if not enum_member_matches_type(member, declared_type):
-            raise ValidationError(
-                f"enum member does not match the declared field type {declared_type!r}"
-            )
-        for existing in seen:
-            if type(existing) is type(member) and existing == member:
-                raise ValidationError("enum must not contain duplicate members")
-        seen.append(member)
-    return list(enum_values)
+        if member is None or not enum_member_matches_type(member, declared_type):
+            raise _ConstraintDeclarationError("enum member does not match the field's declared type.")
+        if member in validated:
+            raise _ConstraintDeclarationError("enum must not contain duplicate members.")
+        validated.append(member)
+    return tuple(validated)
