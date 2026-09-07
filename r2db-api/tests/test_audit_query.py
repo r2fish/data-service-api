@@ -2353,7 +2353,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_88_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2629,10 +2629,23 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # comparison reads.
     ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),
     ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "enum_member_matches_type"),
+    # Phase 9 R-4 pair-closing commit (design docs/design/PHASE9_CONTRACT_
+    # 170_DECLARATION_AND_VERIFICATION_V1.md D-4 (7), 追補 2 S-a; work
+    # order §2 WP-2b/WP-3b 完了条件 13(iii); 監督裁定 F-7): WP-2b's own
+    # `structured.normalize_request_for_plan`/`compute_plan_token` and
+    # WP-3b's own `cell.normalize_request_for_plan`/`compute_plan_token`
+    # -- the two `plan`-token helpers both peers place under the
+    # identical names, F-7 fixed ahead of time so this pairing could be
+    # added once both WPs merged. Verified normalize-and-diff equal
+    # (`_isomorphic_symbol_source` + `_normalize`, both sides) before
+    # adding: both bodies already matched byte-for-byte after
+    # normalization, no peer-local rework needed.
+    ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_plan"),
+    ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "compute_plan_token"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_88_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_90_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2648,9 +2661,13 @@ def test_isomorphic_target_table_is_pinned_to_its_current_88_rows() -> None:
     `tests/test_ops_verify_declarations.py` constants, verified normalize-
     and-diff equal before adding, not assumed from `ops.py`'s own header
     comment that already claimed them "pinned"); widened a seventh time by
-    the phase 9 pair-closing commit (裁定 T-2, work order §4 の 12 / §6
+    the phase 9 R-2 pair-closing commit (裁定 T-2, work order §4 の 12 / §6
     訂正註 10), once WP-2a and WP-3a's own same-named `validate_enum_
-    declaration`/`enum_member_matches_type` pair had both merged to main:
+    declaration`/`enum_member_matches_type` pair had both merged to main;
+    widened an eighth time by the phase 9 R-4 pair-closing commit (design
+    D-4 (7)/追補 2 S-a, 監督裁定 F-7), once WP-2b and WP-3b's own
+    same-named `normalize_request_for_plan`/`compute_plan_token` pair had
+    both merged to main:
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -2682,7 +2699,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_88_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_88_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_90_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2812,8 +2829,10 @@ def test_isomorphic_target_table_is_pinned_to_its_current_88_rows() -> None:
         ("tests/test_ops_verify_declarations.py", "tests/test_ops_verify_declarations.py", "_DATA_URL"),
         ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "validate_enum_declaration"),
         ("src/r2db_api/structured.py", "src/mitatedb_api/field_types.py", "enum_member_matches_type"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "normalize_request_for_plan"),
+        ("src/r2db_api/structured.py", "src/mitatedb_api/cell.py", "compute_plan_token"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 88
+    assert len(_ISOMORPHIC_TARGETS) == 90
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
