@@ -325,6 +325,27 @@ jobs:
       - name: Check document ID references (design DEVELOPMENT_PROCESS_HYGIENE_V1.md D-2)
         run: python3 tools/check_doc_refs.py
 
+  tools-tests:
+    # Phase 10 (supervisor addition, 2026-09-08): tools/tests/ was run by
+    # nobody -- the root suite's `testpaths` (pyproject.toml) lists only
+    # conformance-tests and the two peers' tests, and no CI job invoked it,
+    # so the self-tests of check_doc_refs / check_image_pins / change_class /
+    # rewrite_hash_refs only ever ran on a developer machine. Always runs
+    # (independent of change-class, like doc-refs): these scripts gate every
+    # push, so their own tests must too. pytest is the only dependency; the
+    # scripts themselves are standard-library-only.
+    name: tools-tests (self-tests of the gating scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest (pinned via constraints.txt)
+        run: pip install -c constraints.txt pytest
+      - name: Run tools/tests
+        run: python -m pytest tools/tests -q
+
   scanner:
     name: public-value scan (tree mode)
     runs-on: ubuntu-latest
