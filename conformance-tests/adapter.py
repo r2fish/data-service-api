@@ -1075,6 +1075,26 @@ class ConformanceAdapter(ABC):
 
     name: str
 
+    # port v1.14 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+    # D-1 (A) 4, WP-3): which transport this plug's own client actually
+    # dials through -- `"in_process"` (drives the peer's product objects
+    # directly, no ASGI/HTTP boundary at all), `"asgi"` (an in-process
+    # ASGI transport, `httpx.ASGITransport` -- no real socket), or
+    # `"socket"` (a real loopback TCP socket, fronted by a real reverse
+    # proxy -- `conformance-tests/socket_harness.py`). Deliberately a bare
+    # annotation with NO default: every currently-registered adapter
+    # declares its own value explicitly (one class-attribute line each,
+    # e.g. `transport_kind = "in_process"`), and a future adapter that
+    # forgets to declare it fails LOUDLY (`AttributeError` on first read),
+    # never silently inheriting a fallback that could misclassify it (
+    # `tools/perf_baseline.py`'s own `_classify_plug` reads this
+    # declaration rather than guessing from the adapter's name or
+    # attribute shape, design D-12; `test_c19_client_self_sufficiency.py`'s
+    # real-dial branch and `test_socket_harness.py`'s own
+    # `test_every_registered_adapter_declares_transport_kind` both depend
+    # on this attribute never carrying a default here).
+    transport_kind: str
+
     # --- control plane (outside application authority) ---
     @abstractmethod
     def provision_application(self, application_id: str) -> None: ...

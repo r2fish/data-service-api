@@ -228,6 +228,14 @@ CCR-01〜12について、却下・保留となるCCRはない。Google Cloud、
 
     **U-5 = (B) により `error_codes` を初版から外したこと**: `endpoints.*.error_codes` (返し得る code の配列) は R-8 の派生カタログに含めない。根拠 (§5 U-5 = (B)、2026-09-07 監督確定): ある endpoint がどの code を返し得るかは、宣言された capability の組み合わせ・配備の limit 構成・request の形に依存する条件的事実であり、endpoint 単体の静的な列挙として固定すると「この code は返らない」という誤った安全側の期待を client に持たせる (返り得る code が増えることは additive だが、client が「この一覧にない code は来ない」と読めば非 additive な保証を契約が暗黙に負うことになる)。`errors.codes` の全域列挙と `errors.details_vocabulary` の閉じた語彙で足りるとし、endpoint ごとの部分集合は初版では公開しない。
 
+13. **フェーズ10 契約 1.8.0 (`limit_enforcement` の適用単位を配備全体と定義し、配備者宣言 `process_ceilings` から複数プロセス配備は `deployment_required` を導く) への裁定 (2026-09-08、監督確定、依頼者委任「判断しなければならないものが出たらあなたの推奨で進めてください。後で報告してください。」)。** 新規 CCR ではなく、既存の意味論 (`capability_status.rules` の enforcement 語彙制限、`limits`/`limit_enforcement` の宣言規律) を明確化する additive 変更として採用する。実施設計は `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §3 D-5 (R-18 の裁定) (i)〜(v)、§5 U-1。契約への反映は WP-5 単一コミットで完了する。前例は従属判断 9 (1.4.0 の束 8 件一括)・従属判断 10 (1.5.0 の束 2 件一括)・従属判断 11 (1.6.0 の束 4 件一括)・従属判断 12 (1.7.0 の束 7 件一括)。
+
+    **(a) 本文 — 1.8.0 が足す 1 項目**: `limit_enforcement` の `enforced`/`deployment_required` は、これまで契約上どちらも「単位」を明示していなかった (1 プロセスの話なのか、配備全体の話なのか)。1.8.0 は `capability_status.rules` に 1 文 (`limit_enforcement values describe the whole deployment reachable at the declared surfaces base URL, never one server process...`) を足して単位を配備全体に固定し、`limits.profile` の末尾に同じ規律を要約する 1 文を足す。無条件義務は `limit_enforcement_scoped_to_deployment_behind_base_url` の 1 件のみ (subordinate ruling 13)。根拠: r2db-api は各 base URL を単一プロセスで serve するが、MitateDB-api は Cloud Run 上で複数プロセスが同じ base URL を serve し得る (`--max-instances` > 1) — 契約がこの単位を定義しないまま `enforced` を宣言させると、in-memory per-process の bound を「配備全体で保たれている」と読める偽の宣言になり得た。**契約の変更はここまでである**: 配備者宣言 `process_ceilings` 機構そのもの (両 peer への `platform_declarations` 追加、`limit_enforcement` の 3 区分写像、起動時 fail-fast) は契約を要さない配備/実装の変更であり、WP-6 の範囲である。
+
+    **(b) 却下した代替案**: `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §4 A-1〜A-4 (配備制約への固定 (`--max-instances=1`)・共有 limiter・契約文なしの `deployment_required`) を却下する。理由は同文書 §5 U-1 のとおり — 契約の沈黙が共通の問題である以上、埋めるべきは契約であり、配備制約への固定は「高性能が大前提」という依頼者目標と矛盾する。
+
+    **版数の扱い**: 1.7.0 は既に main へ公開済みであるため、従属判断 4/5 のような個別版数据え置きの余地はなく、1 件を単独の 1.8.0 として出荷する (依頼者裁定の委任に基づく監督確定)。**実施記録 (契約公開、WP-5)**: 契約 1.8.0 は第10次作業指示書 WP-5 節で公開する。**この WP は両 peer の `contract_version` を動かさない** — 両 peer は 1.7.0 を宣言したまま (`process_ceilings` 宣言と `limit_enforcement` 写像を実装する WP-6 の pair-closing コミットで flip する)。
+
 配備の DB 認証 posture も同日 (2026-08-28)、依頼者が起票側推奨に委任し **posture B (UNIX socket + peer 認証)** で確定した。これは契約ではなく配備の判断であり、記録は `r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §3 と設計文書 §3。問題が生じた場合は posture A へ切り替え可能 (code は両 posture で同一に動く)。
 
 採用時に効く既知の依存: CCR-14 の失効確認条項は destructive 確認の有効性定義 (C-06 共通化の前提、MitateDB の確認トークン不検証) の解決に依存する。この定義が決まるまで当該条項は実効化しない。**→ 2026-08-29 に解決 (従属判断6「宣言と復唱」方式)。実効化は契約 1.2.0 の作業単位 (WP-5 完了後) で行われるまで、条項は休止を続ける。**

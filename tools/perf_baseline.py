@@ -87,13 +87,16 @@ class SelfCheckFailure(RuntimeError):
 
 
 class UnknownAdapterShape(RuntimeError):
-    """Raised when a registered plug's registry name and its built
-    adapter object's own structural shape disagree about which of the two
-    forms this tool currently knows how to classify (WP-5 rework ruling
-    item 4). `main()` turns this into a non-zero exit, never a silent
-    guess -- see `_classify_plug`'s own docstring for why guessing here is
-    unsafe (a real socket plug, L7-2, could plausibly reuse the same httpx
-    client shape an ASGI plug uses)."""
+    """Raised when a registered plug's registry name and its own declared
+    `transport_kind` (`adapter.py` port v1.14, design D-1 (A) 4) disagree
+    about which transport this tool currently knows how to classify (WP-5
+    rework ruling item 4; reworked in Phase 10 WP-3, design D-12, to read
+    the declaration instead of the built object's own attribute shape --
+    a real socket plug's httpx client can plausibly set the same `_loop`/
+    `_client` attributes an ASGI plug's does, so attribute shape alone
+    was never safe to guess from). `main()` turns this into a non-zero
+    exit, never a silent guess -- see `_classify_plug`'s own docstring
+    for the exact agreement this checks."""
 
 
 # ---------------------------------------------------------------------
@@ -154,52 +157,88 @@ def _discover_and_build(registry_path: Path) -> list[tuple[str, ConformanceAdapt
 
 
 _HTTP_NAME_SUFFIX = "-http"
+_SOCKET_NAME_SUFFIX = "-socket"
+
+# Phase 10 WP-3 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+# D-12): the printed `transport=` label for each of `ConformanceAdapter.
+# transport_kind`'s 3 declared values (`adapter.py` port v1.14). A fixed,
+# 1:1 mapping -- never a re-derived guess -- so the label an adapter's
+# OWN declaration resolves to never depends on this tool's own naming
+# taste. `"in-process"`/`"asgi-inprocess"` are the SAME literal label
+# text this tool printed before this revision (existing 4 plugs' own
+# output is unchanged, byte-for-byte); `"socket"` is the one genuinely
+# new label this revision adds (no currently-registered plug declares it
+# yet -- WP-4 registers the first one).
+_TRANSPORT_LABELS: dict[str, str] = {
+    "in_process": "in-process",
+    "asgi": "asgi-inprocess",
+    "socket": "socket",
+}
+
+# Which registry-name suffix each declared `transport_kind` is expected
+# to carry -- `None` means "no suffix at all" (the two in-process plugs).
+_EXPECTED_NAME_SUFFIX: dict[str, "str | None"] = {
+    "in_process": None,
+    "asgi": _HTTP_NAME_SUFFIX,
+    "socket": _SOCKET_NAME_SUFFIX,
+}
 
 
 def _classify_plug(plug_name: str, adapter_obj: ConformanceAdapter) -> tuple[str, str]:
     """Returns `(peer, transport)` for one registered plug.
 
-    WP-5 rework ruling item 4: this used to be two separate functions
-    (`_peer_of` deriving the peer column from the name string alone,
-    `_transport_of` deriving the transport column from the built object's
-    attribute shape alone) that silently fell back to `in-process`/the
-    name unchanged for anything that did not match. That is unsafe: a
-    real socket plug (L7-2) whose httpx client also happens to set
-    `_loop`/`_client` (very plausible -- a real-socket httpx transport is
-    still an httpx client) would get mislabeled `asgi-inprocess`, and if
-    its registry name does not end in '-http' (e.g. a '-socket' suffix)
-    it would also get a stray brand-new peer column instead of being
-    grouped with its own in-process sibling. Both used to happen with no
-    error -- a wrong row would simply be printed into a public record.
+    Phase 10 WP-3 rework (design D-12, monitor 裁定 2026-09-08,
+    `OPERATING_CONDITIONS.md` section 1.7 item 52 -- "代理指標を使わな
+    い"): this used to classify a plug by re-deriving its transport from
+    the BUILT OBJECT'S OWN attribute shape (`hasattr(adapter_obj,
+    "_loop")`/`"_client"`) combined with a name-suffix guess -- a proxy
+    for the real, contract-independent property this tool actually cares
+    about (design D-1 (A) 4's own `transport_kind` declaration). That
+    proxy was already measured unsafe for a real socket plug (WP-5
+    rework ruling item 4: a real-socket httpx client also sets `_loop`/
+    `_client`, so attribute shape alone cannot distinguish `asgi` from
+    `socket` at all). This revision reads `adapter_obj.transport_kind`
+    directly instead -- the SAME attribute `test_c19_client_self_
+    sufficiency.py`'s own real-dial branch and this adapter's own
+    `test_socket_harness.py` self-test key off -- and still cross-checks
+    it against the registry NAME's own suffix convention (never trusting
+    either signal alone): a plug whose name and declaration disagree
+    still raises `UnknownAdapterShape` (turned into a non-zero exit by
+    `main()`) rather than guessing.
 
-    This tool currently knows exactly two shapes, and now REQUIRES the
-    name and the object's own attributes to agree about which one a plug
-    is, refusing (raising `UnknownAdapterShape`, turned into a non-zero
-    exit by `main()`) anything else rather than guessing:
+    - `"in_process"`: registry name has NEITHER a `-http` NOR a `-socket`
+      suffix.
+    - `"asgi"`: registry name ends in `-http`.
+    - `"socket"`: registry name ends in `-socket`.
 
-    - in-process: registry name has no '-http' suffix AND the built
-      adapter object exposes neither `_loop` nor `_client`.
-    - asgi-inprocess: registry name ends in '-http' AND the built adapter
-      object exposes both `_loop` and `_client` (every currently
-      registered HTTP plug's own ASGITransport-backed httpx client, set
-      in `__init__`).
-
-    Extend this function explicitly -- do not just widen the fallback --
-    when L7-2 registers its first real socket plug; see
+    A plug declaring a `transport_kind` outside this 3-word vocabulary
+    (a typo, or a future 4th value this tool has not been extended for)
+    also raises `UnknownAdapterShape` -- extend this function's own
+    `_TRANSPORT_LABELS`/`_EXPECTED_NAME_SUFFIX` tables explicitly, do not
+    widen either check into a fallback; see
     `tools/PERF_BASELINE_README.md`."""
-    has_http_shape = hasattr(adapter_obj, "_loop") and hasattr(adapter_obj, "_client")
-    is_http_name = plug_name.endswith(_HTTP_NAME_SUFFIX)
-    if is_http_name and has_http_shape:
-        return plug_name[: -len(_HTTP_NAME_SUFFIX)], "asgi-inprocess"
-    if not is_http_name and not has_http_shape:
-        return plug_name, "in-process"
-    raise UnknownAdapterShape(
-        f"{plug_name}: registry name has a '-http' suffix ({is_http_name}) but the built "
-        f"adapter object's own httpx-client shape (_loop/_client present) is {has_http_shape} -- "
-        "these disagree, so this tool refuses to guess a peer/transport label for it "
-        "(this tool currently only knows the plain in-process shape and the '-http' + "
-        "ASGITransport httpx-client shape; see tools/PERF_BASELINE_README.md)"
-    )
+    declared = getattr(adapter_obj, "transport_kind", None)
+    label = _TRANSPORT_LABELS.get(declared)
+    if label is None:
+        raise UnknownAdapterShape(
+            f"{plug_name}: transport_kind={declared!r} is not one of {sorted(_TRANSPORT_LABELS)} -- "
+            "this tool refuses to guess a transport label for an undeclared or unrecognized value "
+            "(see tools/PERF_BASELINE_README.md)"
+        )
+    expected_suffix = _EXPECTED_NAME_SUFFIX[declared]
+    if expected_suffix is None:
+        name_agrees = not (plug_name.endswith(_HTTP_NAME_SUFFIX) or plug_name.endswith(_SOCKET_NAME_SUFFIX))
+        peer = plug_name
+    else:
+        name_agrees = plug_name.endswith(expected_suffix)
+        peer = plug_name[: -len(expected_suffix)] if name_agrees else plug_name
+    if not name_agrees:
+        raise UnknownAdapterShape(
+            f"{plug_name}: declares transport_kind={declared!r} but its registry name does not carry "
+            f"the expected suffix ({expected_suffix!r}) -- these disagree, so this tool refuses to "
+            "guess a peer/transport label for it (see tools/PERF_BASELINE_README.md)"
+        )
+    return peer, label
 
 
 # ---------------------------------------------------------------------
