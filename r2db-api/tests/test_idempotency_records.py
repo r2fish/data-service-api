@@ -577,6 +577,63 @@ def test_postgres_record_is_written_in_the_same_transaction_as_the_data(app_a) -
         cell.close()
 
 
+def test_postgres_execution_failure_releases_lock_for_a_new_execution(app_a) -> None:  # noqa: F811
+    """Code-review fix F4 (Opus review 2, WP-6d rework, should-fix): after
+    a keyed request FAILS during EXECUTION (the idempotency lookup
+    already found no record, and a real backend write was attempted and
+    rolled back -- the SAME "second op writes a non-string value" shape
+    the test above uses, not merely a pass-1 request-shape refusal), the
+    SAME key's next request must execute as a brand-new request: success,
+    its own `request_id`, exactly one row's worth of effect
+    (`affected == 1`) -- never a replay, never a hang.
+
+    For r2db-api this outcome is guaranteed by construction: `_idempotency
+    _key_lock` is a `pg_advisory_xact_lock` (`postgres.py`), released
+    AUTOMATICALLY at ROLLBACK regardless of which connection took it --
+    unlike MitateDB-api's session-scoped `pg_advisory_lock`, there is no
+    separate `idempotency_unlock` call here that could be skipped on a
+    failure path (nothing analogous to F1/F3's own MitateDB-specific
+    bugs is even structurally possible on this peer). This test is the
+    direct evidence for that guarantee on the real database, over a
+    cell with a real connection pool (`pool_size=2`, `make_cell`'s own
+    default) -- not merely an inference from the lock TYPE."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "fwidgets", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+
+        import psycopg
+
+        def _row_count() -> int:
+            with psycopg.connect(app_a.developer_dsn, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM public.fwidgets")
+                    return cur.fetchone()[0]
+
+        key = "f4-pg-rollback-1"
+        failing_ops = [{"operation": "insert", "values": {"label": "one"}}, {"operation": "insert", "values": {"label": 123}}]
+        with pytest.raises(FoundationError):
+            cell.transact(
+                "fwidgets", failing_ops, LIMITS,
+                plan_request={"entity": "fwidgets", "operations": failing_ops}, idempotency_key=key,
+            )
+        assert _row_count() == 0, "the failed attempt's own tentative insert must have rolled back"
+
+        ok_ops = [{"operation": "insert", "values": {"label": "two"}}]
+        retried = cell.transact(
+            "fwidgets", ok_ops, LIMITS, plan_request={"entity": "fwidgets", "operations": ok_ops},
+            idempotency_key=key, request_id="rid-f4-pg-retry",
+        )
+        assert retried.replayed is False, "the same key, presented after a failed attempt, must be a NEW execution"
+        assert retried.affected == 1
+        assert retried.request_id == "rid-f4-pg-retry"
+        assert _row_count() == 1
+    finally:
+        cell.close()
+
+
 def _pg_strip_request_id(dsn: str, key: str) -> None:
     """Simulates the pre-1.7.0 `_r2db_idempotency` row shape directly
     against the real side table: strips `request_id` from the stored

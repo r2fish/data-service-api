@@ -443,17 +443,30 @@ _PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
 _IDEMPOTENCY_TABLE = "_mdb_idempotency"
 
 # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
-# `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
-# PER-KEY idempotency lock -- see `idempotency_begin` below. A distinct
-# namespace keeps this lock space from colliding with the single-
-# bigint form `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (761761761) uses:
-# the two-int form composes its 64-bit lock id as
-# `(namespace << 32 | hashtext(key))`, so a namespace of 0 would land
-# in the SAME space `pg_advisory_xact_lock(761761761)` occupies, and a
-# bootstrap/reset ritual could then collide with an idempotency-key
-# lock. This namespace is a large, distinctive constant, far from both
-# `_RITUAL_ADVISORY_LOCK_KEY` and `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_
-# KEY` below (a single-bigint key, disjoint space again).
+# `pg_advisory_lock(namespace, hashtext(key))` namespace for the
+# PER-KEY idempotency lock -- see `idempotency_begin` below.
+#
+# Code-review fix F8 (Opus review 2): the rationale this comment
+# carried before this fix was FALSE and is corrected here (the constant
+# itself is unaffected). It claimed a namespace of 0 would land in the
+# SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_
+# LOCK_KEY` (761761761, a `pg_advisory_xact_lock`) uses, risking a
+# collision between a bootstrap/reset ritual's lock and an idempotency-
+# key lock. PostgreSQL actually keeps those two key spaces disjoint by
+# construction, regardless of namespace value: the 1-argument
+# `pg_advisory_[xact_]lock(bigint)` form and the 2-argument
+# `pg_advisory_[xact_]lock(int, int)` form record different `objsubid`
+# values in `pg_locks` (1 for the 1-argument form, 2 for the
+# 2-argument form) -- so `pg_advisory_xact_lock(761761761)` and
+# `pg_advisory_lock(0, 761761761)` are two DIFFERENT locks, never the
+# same one, even though they would superficially "look like" the same
+# 64-bit id under a naive `(namespace << 32 | hashtext(key))` encoding.
+# This namespace constant is still a large, distinctive value, far from
+# both `_RITUAL_ADVISORY_LOCK_KEY` and `_IDEMPOTENCY_COUNT_ADVISORY_
+# LOCK_KEY` below -- kept for HUMAN legibility (so two DIFFERENT lock
+# families never share a suspiciously similar-looking id in a
+# `pg_locks` dump), not because a collision with the 1-argument form
+# was ever actually possible.
 _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 76176100
 # Ruling U-7: table-level (not per-key) advisory lock serializing
 # `idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5
@@ -1721,21 +1734,36 @@ class PostgresBackend:
     #
     # `idempotency_begin`/`idempotency_reserve` below REPLACE that
     # self-committing trio (`idempotency_get`/`idempotency_reap_expired`/
-    # `idempotency_count`, removed) with two methods that take a
-    # `for_developer` flag and run DIRECTLY on the SAME connection
-    # (`self._developer` or `self._runtime`) the caller's own eventual
-    # write will later land on, INSIDE that connection's own currently
-    # open transaction -- never committing or rolling back themselves on
-    # success (the caller's own eventual `commit()`/`rollback()`, right
-    # after `record_idempotency`/`_write_idempotency_row`, governs both
-    # this read AND that write together, one transaction). Each takes a
-    # `pg_advisory_xact_lock` FIRST, before touching the table -- see
-    # each method's own docstring for which lock and why. `cell.py`'s
-    # `_idempotency_check` is the only caller, threading `for_developer`
-    # through from each of its own 4 keyed entry points (`False`:
-    # `transact`, over `self._runtime`; `True`: `create_collection`/
-    # `add_field`/`alter_field`, over `self._developer`).
+    # `idempotency_count`, removed) with two methods that run DIRECTLY on
+    # a caller-supplied `conn` (code-review fix F6, Opus review 2, ruled
+    # in -- see `idempotency_connection`'s own docstring below for why
+    # this is passed through rather than resolved internally from a
+    # `for_developer` flag as an earlier version of this fix did) --
+    # `self._developer` or `self._runtime`, the SAME connection the
+    # caller's own eventual write will later land on. Code-review fix F1
+    # (Opus review 2, blocker) corrects what this paragraph used to claim
+    # here: each method commits ITSELF, immediately, right after its own
+    # reap/lookup or COUNT -- it does NOT stay open inside one
+    # transaction shared with the caller's later write (on the `transact`
+    # path, `cell.py`'s own `self._backend.begin(deadline=deadline)`,
+    # called for pass 2 after this returns, opens with `self._runtime.
+    # rollback()`, which silently discarded an uncommitted reap DELETE
+    # here before this fix). What actually closes the SAME race a shared
+    # transaction would have closed for r2db is the SESSION-scoped
+    # `pg_advisory_lock` each method takes FIRST, before touching the
+    # table -- not `pg_advisory_xact_lock` (a session lock, unlike a
+    # transaction-scoped one, survives this method's own commit, so it
+    # still spans the read and the later write) -- see each method's own
+    # docstring for which lock and why. `cell.py`'s `_idempotency_check`
+    # is the only caller, resolving `conn` once via `idempotency_
+    # connection` (`for_developer=False`: `transact`, over `self.
+    # _runtime`; `True`: `create_collection`/`add_field`/`alter_field`,
+    # over `self._developer`) and threading that SAME handle through
+    # `idempotency_begin`/`idempotency_reserve`/`idempotency_unlock`.
     # ------------------------------------------------------------------
+
+    def idempotency_connection(self, *, for_developer=False):
+        return self._developer if for_developer else self._runtime
 
     def _write_idempotency_row(self, conn, key, digest, response_json, now_ms):
         """Writes (or replaces) one record over `conn`'s OWN currently
@@ -1756,11 +1784,34 @@ class PostgresBackend:
             _execute(cur, statement, [key, digest, response_json, now_ms])
 
     @_guard_pending_platform_upgrades
-    def idempotency_begin(self, key, now_ms, retention_ms, *, for_developer=False):
-        """Ruling U-7 (WP-6d): `for_developer` selects the WRITING
-        connection this keyed entry point will eventually commit on --
+    def idempotency_begin(self, key, now_ms, retention_ms, *, conn, deadline=None):
+        """Ruling U-7 (WP-6d): `conn` (code-review fix F6, Opus review 2,
+        ruled in) is the WRITING connection this keyed entry point will
+        eventually commit on -- resolved ONCE by the caller, via
+        `idempotency_connection`, and passed through here rather than
+        re-resolved internally (see that method's own docstring for why):
         `self._developer` for the 3 DDL methods, `self._runtime` for
         `transact` (default).
+
+        `deadline` (code-review fix F2, Opus review 2, should-fix):
+        without this, `pg_advisory_lock` below waits UNBOUNDED for a
+        second process holding the same key's lock -- and since `cell.
+        py` also holds this cell's own in-process `self._lock` (an
+        `RLock`) for a keyed request's entire lookup -> execute -> store
+        window, an unbounded wait here stalls every OTHER request this
+        same cell would otherwise serve too, not merely this one key.
+        `_timeout_ms(deadline)`/`_set_timeouts` (this class's own Phase 8
+        WP-1a helpers, module comment above `_timeout_ms`) are reused
+        here exactly as every other backend method already uses them --
+        `SET LOCAL lock_timeout`/`statement_timeout`, scoped to this
+        method's own transaction, bounding how long `pg_advisory_lock`
+        may block before PostgreSQL cancels it (mirrors r2db-api's own
+        `postgres.py::_set_timeouts` preceding its own lock acquisition).
+        A timed-out lock wait raises `psycopg.errors.LockNotAvailable`/
+        `QueryCanceled`, mapped below to `ResourceLimitError(limit_class=
+        "execution_ms")` -- the SAME error class every other lock/
+        statement-timeout site on this backend already maps to (`insert`/
+        `update`/`delete_in_transaction` etc.), not a hang.
 
         M-1 (WP-6d, MitateDB-specific realization of U-7 -- CLAUDE.md
         "platform-specific controls may differ...when they provide the
@@ -1787,12 +1838,23 @@ class PostgresBackend:
         with an explicit instead of an implicit release point.
 
         Reaps expired records, then looks up `key`, over `conn`
-        (whichever connection `for_developer` selects) -- does NOT
-        commit or roll back the surrounding transaction on success (the
-        caller's own eventual `commit()`/`rollback()`, after whichever
-        of `record_idempotency`/`_write_idempotency_row` it reaches,
-        governs this reap/lookup's own fate too, same as every other
-        statement in that same transaction).
+        (whichever connection `idempotency_connection`'s own
+        `for_developer` selected for this request) -- and commits
+        immediately (code-review fix F1, Opus review 2): the read and
+        the caller's later write do NOT share one transaction on the
+        `transact` path (`for_developer=False`) -- `cell.py::transact`'s
+        own `self._backend.begin(deadline=deadline)`, called for pass 2
+        AFTER this method returns, opens with `self._runtime.rollback()`,
+        which would silently discard this method's own reap DELETE if it
+        were left uncommitted (measured: it did, before this fix -- see
+        this method's own commit-site comment below for the concrete
+        reproduction). What DOES span both this lookup and the caller's
+        eventual write is the SESSION-scoped advisory lock taken above --
+        a lock survives this commit (unlike an xact-scoped one), so a
+        second concurrent request for the SAME key still blocks here
+        until the first's `idempotency_unlock` releases it, restoring
+        the SAME pre-WP-6d reap/serialization semantics this docstring's
+        earlier "one transaction" wording incorrectly described.
 
         The lock key: two-int form (`_IDEMPOTENCY_KEY_LOCK_NAMESPACE`,
         `hashtext(key)`), not a bare `hashtext(key)::bigint` -- `hashtext`
@@ -1813,9 +1875,16 @@ class PostgresBackend:
         folded in here so the lock/reap/lookup happen as one step,
         never as separate round trips a concurrent session could
         interleave between)."""
-        conn = self._developer if for_developer else self._runtime
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with conn.cursor() as cur:
+                # Code-review fix F2 (Opus review 2, should-fix): set
+                # BEFORE acquiring the lock below -- see this method's
+                # own docstring for why an unbounded wait here is worse
+                # than on most other backend calls (it stalls this
+                # cell's own in-process `self._lock` too).
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s, hashtext(%s))"),
                           [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
                 _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
@@ -1823,6 +1892,42 @@ class PostgresBackend:
                 _execute(cur, sql.SQL("SELECT digest, response_json FROM {} WHERE key = %s")
                           .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [key])
                 row = cur.fetchone()
+            # Code-review fix F1 (Opus review 2, blocker): commit HERE,
+            # immediately -- not left open for the caller's own eventual
+            # commit/rollback as the docstring above used to claim. On
+            # the `transact` path (`for_developer=False`), `cell.py`'s
+            # `transact` calls `self._backend.begin(deadline=deadline)`
+            # for pass 2 AFTER this method returns, and `begin()` opens
+            # with `self._runtime.rollback()` (discarding whatever
+            # uncommitted work sits on this connection) -- so leaving the
+            # reap DELETE uncommitted here silently discarded it on every
+            # keyed `transact` call (verified: `idempotency_retention_ms
+            # =1`, two keyed transacts left BOTH keys' rows in the table,
+            # never reaped -- on `main`, before WP-6d, the reap was its
+            # own self-committing round trip and correctly left only the
+            # new key's row). The SESSION advisory lock taken above is
+            # untouched by this commit (`pg_advisory_lock`, not `_xact` --
+            # a session lock survives commit/rollback on its own
+            # connection, same as every self-committing catalog read
+            # `cell.py` runs between this call and the eventual write);
+            # it is what actually serializes a same-key race, not this
+            # transaction boundary -- see this method's own docstring
+            # above. Correct on the DDL path (`for_developer=True`,
+            # `conn` is `self._developer`) too: that connection commits
+            # once per DDL call already (`create_collection`/`add_field`/
+            # `alter_field`'s own terminal `self._developer.commit()`),
+            # so committing the reap+lookup here simply closes it out a
+            # statement earlier than before, same as the `transact` path.
+            conn.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            # Code-review fix F2: the SAME mapping every other lock/
+            # statement-timeout site on this backend already uses
+            # (`insert`/`update`/`delete_in_transaction` etc.) -- a
+            # bounded wait for a same-key advisory lock that expires
+            # surfaces as a real, classified `LIMIT_EXCEEDED` refusal,
+            # never an unbounded hang.
+            conn.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.Error as exc:
             conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
@@ -1832,7 +1937,7 @@ class PostgresBackend:
         return {"digest": digest, "response_json": response_json}
 
     @_guard_pending_platform_upgrades
-    def idempotency_reserve(self, *, for_developer=False):
+    def idempotency_reserve(self, *, conn, deadline=None):
         """Ruling U-7 (WP-6d): table-level, SESSION-scoped advisory
         lock (same `pg_advisory_lock`-not-`_xact` reasoning as
         `idempotency_begin` above -- self-commits between this COUNT
@@ -1854,25 +1959,63 @@ class PostgresBackend:
         INSERT (which needs ROW EXCLUSIVE) -- see the WP-6d report for
         the Phase 9 R-2 precedent's own lock-mode finding.
         `pg_advisory_lock` has no such self-conflict-free class: a
-        second holder of the SAME key always waits for the first."""
-        conn = self._developer if for_developer else self._runtime
+        second holder of the SAME key always waits for the first.
+
+        `deadline` (code-review fix F2, Opus review 2, should-fix):
+        identical purpose as `idempotency_begin`'s own parameter of the
+        same name -- bounds how long this method's own `pg_advisory_
+        lock` (the table-level count lock, a DIFFERENT key than
+        `idempotency_begin`'s per-key lock) may wait. `conn` (code-review
+        fix F6): the SAME handle a paired `idempotency_begin` call in
+        this same request already used -- see `idempotency_connection`'s
+        own docstring for why this is passed through rather than
+        re-resolved."""
+        timeout_ms = self._timeout_ms(deadline)
         try:
             with conn.cursor() as cur:
+                if timeout_ms is not None:
+                    self._set_timeouts(cur, timeout_ms)
                 _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
                 _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(_IDEMPOTENCY_TABLE)))
                 (count,) = cur.fetchone()
+            # Code-review fix F1 (Opus review 2, blocker): commit HERE,
+            # immediately, for the identical reason `idempotency_begin`
+            # above now does -- this COUNT would otherwise sit open on
+            # `conn` until the caller's own eventual commit/rollback,
+            # and on the `transact` path that window is discarded by
+            # `self._backend.begin(deadline=deadline)`'s own `self.
+            # _runtime.rollback()` before it is ever reached. A bare
+            # `SELECT count(*)` leaves nothing for that rollback to
+            # discard either way (unlike `idempotency_begin`'s own
+            # reap DELETE), so this commit is here for symmetry and to
+            # close out the SESSION-scoped `pg_advisory_lock` acquired
+            # above's surrounding transaction promptly, not because a
+            # correctness bug was measured on this specific method.
+            conn.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+            # Code-review fix F2: same mapping as `idempotency_begin`
+            # above -- see that method's own comment.
+            conn.rollback()
+            raise ResourceLimitError("operation exceeds the execution budget", limit_class="execution_ms")
         except psycopg.Error as exc:
             conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
         return count
 
-    def idempotency_unlock(self, key, *, for_developer=False):
+    def idempotency_unlock(self, key, *, conn):
         """Ruling U-7 (WP-6d): releases BOTH session-scoped advisory
         locks `idempotency_begin`/`idempotency_reserve` above may have
-        taken for THIS request -- always both, unconditionally (a lock
-        never taken this session simply reports `false`, harmlessly).
-        Called from `cell.py`'s `_idempotency_pg_scope` context manager,
-        in a `finally`, so it runs on EVERY exit from a keyed critical
+        taken for THIS request, on `conn` -- always both, unconditionally
+        (a lock never taken this session simply reports `false`,
+        harmlessly). `conn` (code-review fix F6, Opus review 2, ruled in)
+        is the SAME handle `idempotency_begin`/`idempotency_reserve`
+        above used for THIS request -- `cell.py`'s `_idempotency_pg_
+        scope` obtains it ONCE, from `idempotency_connection`, at
+        scope-open, and passes it here too, rather than this method
+        re-resolving `for_developer` independently (see `idempotency_
+        connection`'s own docstring for why that distinction matters).
+        Called from `_idempotency_pg_scope`'s own context manager, in a
+        `finally`, so it runs on EVERY exit from a keyed critical
         section: replay, CONFLICT, LIMIT_EXCEEDED, a pass-1-equivalent
         validation failure, an execution failure, or success.
 
@@ -1887,7 +2030,6 @@ class PostgresBackend:
         always safe to reach in ANY state -- already clean (a no-op),
         merely open (discarded, matching every other failure path's own
         rollback), or aborted (cleared)."""
-        conn = self._developer if for_developer else self._runtime
         conn.rollback()
         with conn.cursor() as cur:
             _execute(cur, sql.SQL("SELECT pg_advisory_unlock(%s, hashtext(%s))"),

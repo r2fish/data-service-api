@@ -71,8 +71,12 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # only (1621 -> 1732) -- the new `_idempotency_key_lock`/`_idempotency_
     # reserve_lock` methods and their module-level lock constants, inserted
     # earlier in this same file, push every later line down; `_fail_client_
-    # value`'s own single `fail()` call is otherwise unchanged.
-    ("postgres.py", 1732),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # value`'s own single `fail()` call is otherwise unchanged. Code-review
+    # fix F7 (Opus review 2): another line shift only (1732 -> 1744) --
+    # correcting `_IDEMPOTENCY_KEY_LOCK_NAMESPACE`'s own false collision
+    # rationale lengthened that comment block by 12 lines; the call site
+    # itself is still otherwise unchanged.
+    ("postgres.py", 1744),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

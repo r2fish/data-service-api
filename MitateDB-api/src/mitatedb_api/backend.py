@@ -447,35 +447,76 @@ class StorageBackend:
     # at all (see `backend_postgres.py`'s own `idempotency_begin`/
     # `idempotency_reserve` docstrings).
 
-    def idempotency_begin(self, key, now_ms, retention_ms, *, for_developer=False):
-        """Reaps expired records, then looks up `key` -- see
-        `idempotency_get`/`idempotency_reap_expired` above for the
-        return shape and reclamation rule, both preserved exactly.
-        `for_developer` selects which of this cell's two connections
-        (when a backend has more than one) this runs on: `False`
-        (default) is `transact`'s own writing connection, `True` is the
-        3 DDL methods' own writing connection -- see `PostgresBackend`'s
-        own docstring for what this buys."""
+    def idempotency_connection(self, *, for_developer=False):
+        """Code-review fix F6 (Opus review 2, ruled in -- forward-safety
+        for WP-8b pooling): resolves the connection handle THIS request's
+        own keyed critical section will use for its ENTIRE idempotency
+        lock lifetime. Called EXACTLY ONCE by `cell.py`'s `_idempotency_
+        pg_scope`, before `idempotency_begin` ever runs, and the SAME
+        returned handle is threaded through `idempotency_begin`/
+        `idempotency_reserve`/`idempotency_unlock` as their own `conn`
+        argument below -- none of those three methods resolve `self.
+        _developer`/`self._runtime` (or an equivalent) themselves any
+        more. Without this, `idempotency_unlock` used to re-resolve
+        `for_developer` independently, at a LATER point in the request;
+        if a future change makes those attributes per-request checkouts
+        (a connection pool, WP-8b), that later re-resolution could return
+        a DIFFERENT connection than the one that actually took the lock
+        -- leaking a session lock onto whatever connection happens to be
+        checked out at unlock time, which could ride into a completely
+        unrelated FUTURE request. Binding the handle once, at scope-open,
+        closes that whole class of bug structurally, before it can exist.
+        `for_developer` has the same meaning it always has: `False`
+        (default) is `transact`'s own writing connection, `True` is the 3
+        DDL methods' own writing connection. `SQLiteBackend` returns
+        `None` (no connection concept; every idempotency method below is
+        a no-op with respect to this handle on that backend)."""
         raise NotImplementedError
 
-    def idempotency_reserve(self, *, for_developer=False):
+    def idempotency_begin(self, key, now_ms, retention_ms, *, conn, deadline=None):
+        """Reaps expired records, then looks up `key`, over `conn` --
+        see `idempotency_get`/`idempotency_reap_expired` above for the
+        return shape and reclamation rule, both preserved exactly. `conn`
+        (code-review fix F6) is the handle `idempotency_connection` above
+        returned for this SAME request, at the start of its own keyed
+        critical section -- not re-resolved here. `deadline` (code-review
+        fix F2, Opus review 2): the SAME wall-clock deadline every other
+        backend call on this request already receives (`cell.py`'s own
+        `_gate`/`_limit_gate` context managers) -- `PostgresBackend` uses
+        it to bound how long this call's own `pg_advisory_lock` may wait
+        before giving up, mirroring every other backend method's own `SET
+        LOCAL lock_timeout` (`_timeout_ms`/`_set_timeouts`).
+        `SQLiteBackend` accepts and ignores both `conn` and `deadline`
+        (no connection, no lock either could bound)."""
+        raise NotImplementedError
+
+    def idempotency_reserve(self, *, conn, deadline=None):
         """Number of records THIS Application currently retains, after
-        `idempotency_begin`'s own reap -- see `idempotency_count`
-        above. `for_developer` has the identical meaning as `idempotency_
-        begin`'s own parameter, and must select the SAME connection a
-        paired `idempotency_begin` call in this same request just used."""
+        `idempotency_begin`'s own reap -- see `idempotency_count` above.
+        `conn` (code-review fix F6) must be the SAME handle a paired
+        `idempotency_begin` call in this same request just used --
+        `idempotency_connection`'s own docstring explains why this is
+        passed through rather than re-resolved. `deadline` (code-review
+        fix F2): identical meaning and purpose as `idempotency_begin`'s
+        own parameter of the same name."""
         raise NotImplementedError
 
-    def idempotency_unlock(self, key, *, for_developer=False):
+    def idempotency_unlock(self, key, *, conn):
         """Ruling U-7 (WP-6d): releases whatever `idempotency_begin`/
         `idempotency_reserve` locked for `key` in this request -- called
         unconditionally by `ApplicationCell._idempotency_pg_scope` in a
-        `finally`, on EVERY exit from a keyed critical section.
-        `SQLiteBackend` implements this as a no-op (nothing was locked).
-        `PostgresBackend` implements it as the paired release of the two
-        SESSION-scoped `pg_advisory_lock`s those methods take -- see its
-        own docstring for why session-, not transaction-, scoped locks
-        are this backend's correct realization of ruling U-7."""
+        `finally`, on EVERY exit from a keyed critical section. `conn`
+        (code-review fix F6) is the SAME handle `_idempotency_pg_scope`
+        obtained from `idempotency_connection` at scope-open and passed
+        to `idempotency_begin`/`idempotency_reserve` above -- this method
+        unlocks on THAT object, never by re-resolving `for_developer`
+        itself (see `idempotency_connection`'s own docstring for why).
+        `SQLiteBackend` implements this as a no-op (nothing was locked;
+        `conn` is always `None` there). `PostgresBackend` implements it
+        as the paired release of the two SESSION-scoped `pg_advisory_
+        lock`s those methods take -- see its own docstring for why
+        session-, not transaction-, scoped locks are this backend's
+        correct realization of ruling U-7."""
         raise NotImplementedError
 
     def record_idempotency(self, key, digest, response_json, now_ms):

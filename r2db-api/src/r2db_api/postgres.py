@@ -177,16 +177,28 @@ _IDEMPOTENCY_TABLE = "_r2db_idempotency"
 _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
 # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
 # `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
-# PER-KEY idempotency lock -- see `_idempotency_key_lock` below. Kept in
-# its own namespace so this lock space cannot collide with the single-
-# bigint form `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (1414141) uses: the
-# two-int form composes its 64-bit lock id as (namespace << 32 | key2),
-# so a namespace of 0 would land in the same space `pg_advisory_xact_
-# lock(1414141)` occupies, and a bootstrap/reset ritual could then
-# collide with an idempotency-key lock. This namespace is a large,
-# distinctive constant far from both `_RITUAL_ADVISORY_LOCK_KEY` values
-# (r2db 1414141, MitateDB 761761761) and from `_IDEMPOTENCY_COUNT_
-# ADVISORY_LOCK_KEY` below (a single-bigint key, disjoint space again).
+# PER-KEY idempotency lock -- see `_idempotency_key_lock` below.
+#
+# Code-review fix F7 (Opus review 2): the rationale this comment
+# carried before this fix was FALSE and is corrected here (the constant
+# itself is unaffected). It claimed a namespace of 0 would land in the
+# SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_
+# LOCK_KEY` (1414141) uses, risking a collision between a bootstrap/
+# reset ritual's lock and an idempotency-key lock. PostgreSQL actually
+# keeps those two key spaces disjoint by construction, regardless of
+# namespace value: the 1-argument `pg_advisory_xact_lock(bigint)` form
+# and the 2-argument `pg_advisory_xact_lock(int, int)` form record
+# different `objsubid` values in `pg_locks` (1 for the 1-argument form,
+# 2 for the 2-argument form) -- so `pg_advisory_xact_lock(1414141)` and
+# `pg_advisory_xact_lock(0, 1414141)` are two DIFFERENT locks, never the
+# same one, even though they would superficially "look like" the same
+# 64-bit id under a naive `(namespace << 32 | key2)` encoding. This
+# namespace constant is still a large, distinctive value, far from both
+# `_RITUAL_ADVISORY_LOCK_KEY` values (r2db 1414141, MitateDB 761761761)
+# and from `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` below -- kept for
+# HUMAN legibility (so two DIFFERENT lock families never share a
+# suspiciously similar-looking id in a `pg_locks` dump), not because a
+# collision with the 1-argument form was ever actually possible.
 _IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
 # Ruling U-7: table-level (not per-key) advisory lock serializing
 # `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5
