@@ -121,8 +121,10 @@ re-verify them; it assumes they are already true.
    `POSTGRES_PROVISIONING_RUNBOOK.md` §7 -- this runbook's job is standing up
    the ASGI process and nginx listener, not PostgreSQL network policy.
 5. A dedicated install location for this deployment exists on the target
-   host, with a virtualenv containing this package installed (`pip install`
-   from a build of this repository's `r2db-api/`) built with an interpreter
+   host, with a virtualenv containing this package installed (`pip install
+   -c constraints.txt` from a build of this repository's `r2db-api/`,
+   `constraints.txt` read from the repository root of that same checkout/
+   `git archive` extraction -- R-19) built with an interpreter
    satisfying this codebase's own `requires-python` (`>=3.11`,
    `r2db-api/pyproject.toml`) -- confirm with `python3 --version` on the
    target, the same caution the project's own test setup applies: system
