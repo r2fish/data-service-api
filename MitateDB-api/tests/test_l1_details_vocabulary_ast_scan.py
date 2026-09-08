@@ -137,6 +137,15 @@ _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 #: LOCK_NAMESPACE`/`_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` module-level
 #: constants + their comments, inserted above `schema_count`). Recomputed
 #: from the real file via `_fail_call_sites`, not hand-counted.
+#: `phase10-r35` merge (WP-6d line-number shift, 2026-09-08): the two
+#: `LOCK TABLE ... IN SHARE MODE` -> `... IN SHARE ROW EXCLUSIVE MODE`
+#: comment rewrites (`alter_field_constraints`, `add_field`) inserted
+#: +16 lines then +17 more lines (net +33 for everything after the
+#: second rewrite, +16 only for the three sites between the two
+#: rewrites) -- NOT a uniform offset, so every entry below is
+#: re-verified against the current file via `_fail_call_sites`, not
+#: hand-shifted. Entry count unchanged (20): no site was added or
+#: removed, only comment/lock-clause text.
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # Code-review fix F1/F2/F6 (Opus review 2, WP-6d rework): every line
     # number below shifted when `idempotency_begin`/`idempotency_reserve`
@@ -154,19 +163,19 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     ("backend_postgres.py", 803),   # generic driver-exception translation
     ("backend_postgres.py", 855),   # generic driver-exception translation
     ("backend_postgres.py", 880),   # generic driver-exception translation
-    ("backend_postgres.py", 1042),  # generic driver-exception translation
-    ("backend_postgres.py", 1059),  # generic driver-exception translation
-    ("backend_postgres.py", 1190),  # generic driver-exception translation
-    ("backend_postgres.py", 1331),  # generic driver-exception translation
-    ("backend_postgres.py", 1417),  # generic driver-exception translation
-    ("backend_postgres.py", 1469),  # generic driver-exception translation
+    ("backend_postgres.py", 1058),  # generic driver-exception translation
+    ("backend_postgres.py", 1075),  # generic driver-exception translation
+    ("backend_postgres.py", 1206),  # generic driver-exception translation
+    ("backend_postgres.py", 1364),  # generic driver-exception translation
+    ("backend_postgres.py", 1450),  # generic driver-exception translation
     ("backend_postgres.py", 1502),  # generic driver-exception translation
-    ("backend_postgres.py", 1528),  # generic driver-exception translation
-    ("backend_postgres.py", 1595),  # generic driver-exception translation
-    ("backend_postgres.py", 1623),  # generic driver-exception translation
-    ("backend_postgres.py", 1664),  # generic driver-exception translation
-    ("backend_postgres.py", 1933),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 2002),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 1535),  # generic driver-exception translation
+    ("backend_postgres.py", 1561),  # generic driver-exception translation
+    ("backend_postgres.py", 1628),  # generic driver-exception translation
+    ("backend_postgres.py", 1656),  # generic driver-exception translation
+    ("backend_postgres.py", 1697),  # generic driver-exception translation
+    ("backend_postgres.py", 1966),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 2035),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
