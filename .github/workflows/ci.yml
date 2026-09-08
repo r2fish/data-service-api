@@ -315,10 +315,42 @@ jobs:
               "failed": count("failed"),
               "skipped": count("skipped"),
               "xfailed": count("xfailed"),
+              "xpassed": count("xpassed"),
+              "deselected": count("deselected"),
               "summary_line": summary,
           }
           pathlib.Path("pytest-tally.json").write_text(json.dumps(tally, indent=2))
           print(json.dumps(tally, indent=2))
+
+          # OPERATING_CONDITIONS.md item 22: the pass condition is
+          # failed = 0 / skipped = 0 / xfailed = 0 -- item 26 warns a skip
+          # silently converts "unverified" into "allowed". Written above so
+          # the tally artifact/job summary still records what happened
+          # (`if: always()` on both later steps), but this step must not
+          # let a nonzero skipped/xfailed count through as a passing gate.
+          # Supervisor ruling 2026-09-08 extends the same items 22/26
+          # reasoning to two more categories the summary line can carry:
+          # xpassed (a test marked `xfail` actually passed -- a stale
+          # xfail declaration masquerading as a documented failure) and
+          # deselected (pytest's own `-k`/`-m`/`--deselect` narrowed what
+          # ran, so this tally is not the whole suite and cannot stand in
+          # for it).
+          if (
+              tally["skipped"] != "0"
+              or tally["xfailed"] != "0"
+              or tally["xpassed"] != "0"
+              or tally["deselected"] != "0"
+          ):
+              print(
+                  "ERROR: OPERATING_CONDITIONS.md item 22 requires "
+                  "skipped == 0 and xfailed == 0; item 26 (skip converts "
+                  "unverified into allowed) extends to xpassed == 0 (a "
+                  "stale xfail declaration) and deselected == 0 (the "
+                  "tally is not the whole suite) -- "
+                  f"summary line: {summary!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
           PYEOF
 
       - name: Write job summary (passed / failed / skipped / xfailed)
@@ -370,7 +402,7 @@ jobs:
 
           authoritative = json.load(open("tally-3.11/pytest-tally.json"))
           reproduced = json.load(open("tally-3.12/pytest-tally.json"))
-          keys = ("passed", "failed", "skipped", "xfailed")
+          keys = ("passed", "failed", "skipped", "xfailed", "xpassed", "deselected")
           mismatch = {
               k: {"3.11": authoritative[k], "3.12": reproduced[k]}
               for k in keys
@@ -380,6 +412,32 @@ jobs:
               print("3.11 (authoritative) vs 3.12 tally mismatch:", mismatch)
               sys.exit(1)
           print("3.11 and 3.12 tallies match:", {k: authoritative[k] for k in keys})
+
+          # OPERATING_CONDITIONS.md item 22: failed = 0 / skipped = 0 /
+          # xfailed = 0 is the pass condition. Each matrix job's own
+          # "Extract pass/fail/skip/xfail tally" step already enforces
+          # this, but this job downloads and re-reads both tallies
+          # independently -- checked again here so a compare-only rerun
+          # against stale/uploaded artifacts cannot let a nonzero
+          # skipped/xfailed count through unnoticed just because the two
+          # sides happened to match each other. Supervisor ruling
+          # 2026-09-08 extends the same items 22/26 reasoning to xpassed
+          # (a stale xfail declaration) and deselected (the tally is not
+          # the whole suite).
+          nonzero = {
+              k: {"3.11": authoritative[k], "3.12": reproduced[k]}
+              for k in ("skipped", "xfailed", "xpassed", "deselected")
+              if authoritative[k] != "0" or reproduced[k] != "0"
+          }
+          if nonzero:
+              print(
+                  "OPERATING_CONDITIONS.md item 22 violated (skipped == 0 "
+                  "and xfailed == 0 required); item 26 extends this to "
+                  "xpassed == 0 (a stale xfail declaration) and "
+                  "deselected == 0 (the tally is not the whole suite):",
+                  nonzero,
+              )
+              sys.exit(1)
           PYEOF
 
   doc-refs:
