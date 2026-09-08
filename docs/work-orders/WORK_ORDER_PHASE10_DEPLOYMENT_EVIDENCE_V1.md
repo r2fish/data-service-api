@@ -720,7 +720,7 @@ shasum -a 256 spec/data-service-api.v1.json \
 | 5 | **in-memory 経路**でも 2 スレッド同時で実行が 1 回である | `<peer>/src/...`: `threading.Lock` を外す → `::test_in_memory_same_key_executes_once` |
 | 6 | 異キー 2 件を `idempotency_entries` 上限 −1 の状態で同時に走らせると、**件数 bound が保たれ 1 件が `LIMIT_EXCEEDED`** になる | `<peer>/src/...`: 表単位の advisory lock を外す → `::test_entries_bound_holds_under_concurrent_distinct_keys` |
 | 7 | **deadlock 検査** — 完了条件 1 / 2 / 6 の同時テストを繰り返し実行しても deadlock も lock 待ちタイムアウトも発生しない (**`LOCK TABLE ... IN SHARE MODE` を採らない根拠の実測**) | `<peer>/src/...`: 表単位 lock を `LOCK TABLE ... IN SHARE MODE` に置き換える → 完了条件 6 のテストが deadlock (または待ち) で赤になることを実測し **verbatim を報告に添える** (**変異は復元し、コミットに含めない**) |
-| 8 | フェーズ9 R-2 の前例 (`alter_field` / `add_field` の `LOCK TABLE ... IN SHARE MODE`) の lock mode を現物で確認し、**同じ誤りが無い**ことを報告した | **監査照合** — 確認した file:line と判断を報告に書く |
+| 8 | フェーズ9 R-2 の前例 (`alter_field` / `add_field` の `LOCK TABLE ... IN SHARE MODE`) の lock mode を現物で確認し、**同じ誤りが無い**ことを報告した | **監査照合** — 確認した file:line と判断を報告に書く 【監督註 2026-09-08】報告の答えは「同じ誤りが在った」であり (下の完了条件 8 の報告)、是正はフェーズ10 R-35 (WP-R35) で行った。本行の「無い」は当初の期待の記録として残す。 |
 | 9 | 既存の C-23 / C-07 (ii) と両 peer の `tests/test_idempotency_records.py` が緑のまま (**逐次経路の意味は変わらない**) | **監査照合** — 集計行の 4 数 |
 | 10 | **性能差分**: 本 WP の前後で `tools/perf_baseline.py` の `mutate` / `batch` の p50 / p95 を測り、**差分を報告に添える** (**閾値は無い。回避もしない**) | **監査照合** — `PERFRUN` + `PERF` 行の verbatim (完了ゲートでの記録は WP-9) |
 | **11** (**v1.2 の追記。レビュー指摘 F3 の是正で足した**) | **lock を取った接続が `finally` で必ず解放される** (MitateDB。**pass 1 が失敗しても advisory lock が残らない**) | `MitateDB-api/src/mitatedb_api/cell.py`: `idempotency_unlock` の呼び出しを `finally` の外へ出す → `MitateDB-api/tests/test_idempotency_concurrency.py` の当該テスト (**実測の赤は `still holds 2 advisory lock(s)`**) |
