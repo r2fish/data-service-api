@@ -1370,7 +1370,7 @@ def test_alter_field_constraints_lock_table_blocks_concurrent_write(app_pg) -> N
         backend.close()
 
 
-def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_pg) -> None:
+def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_pg, monkeypatch: pytest.MonkeyPatch) -> None:
     """R-35 (Phase 10, WP-6d-i review): plain `LOCK TABLE ... IN SHARE
     MODE` does not conflict with itself, so two concurrent `add_field`
     calls declaring `nullable: false` on the SAME entity, from two
@@ -1407,6 +1407,7 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
         real_execute = bp_module._execute
         lock_call_count = {"n": 0}
         lock_acquired = threading.Event()  # backend_a's own LOCK TABLE has returned
+        b_lock_started = threading.Event()  # backend_b's LOCK TABLE is about to be issued
         b_lock_returned = threading.Event()  # backend_b's own LOCK TABLE has returned
         release_a = threading.Event()
 
@@ -1417,6 +1418,8 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
             if is_lock:
                 lock_call_count["n"] += 1
                 my_index = lock_call_count["n"]
+                if my_index != 1:
+                    b_lock_started.set()
             result = real_execute(cursor, statement, params)
             if is_lock:
                 if my_index == 1:
@@ -1426,7 +1429,7 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
                     b_lock_returned.set()
             return result
 
-        bp_module._execute = paced_execute
+        monkeypatch.setattr(bp_module, "_execute", paced_execute)
         a_errors: list = []
 
         def _add_field_a():
@@ -1451,6 +1454,7 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
             thread_b = threading.Thread(target=_add_field_b)
             thread_b.start()
             try:
+                assert b_lock_started.wait(timeout=10), "backend_b never reached its own LOCK TABLE"
                 assert not b_lock_returned.wait(timeout=0.5), (
                     "backend_b's LOCK TABLE returned while backend_a still holds the lock -- "
                     "the two locks did not conflict (R-35 regression)"
@@ -1460,7 +1464,6 @@ def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadloc
                 thread_b.join(timeout=10)
         finally:
             thread_a.join(timeout=10)
-            bp_module._execute = real_execute
 
         assert not thread_a.is_alive(), "backend_a's thread never finished -- bounded-wait violated"
         assert not thread_b.is_alive(), "backend_b's thread never finished -- bounded-wait violated"

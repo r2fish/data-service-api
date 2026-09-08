@@ -1278,6 +1278,7 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
         real_run = postgres_module._run
         lock_call_count = {"n": 0}
         lock_acquired = threading.Event()  # thread A's own LOCK TABLE has returned
+        b_lock_started = threading.Event()  # thread B's LOCK TABLE is about to be issued
         b_lock_returned = threading.Event()  # thread B's own LOCK TABLE has returned
         release_a = threading.Event()
 
@@ -1291,6 +1292,8 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
             if is_lock:
                 lock_call_count["n"] += 1
                 my_index = lock_call_count["n"]
+                if my_index != 1:
+                    b_lock_started.set()
             result = real_run(cursor, statement, params)
             if is_lock:
                 if my_index == 1:
@@ -1334,6 +1337,7 @@ def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock
             thread_b = threading.Thread(target=_add_field_b)
             thread_b.start()
             try:
+                assert b_lock_started.wait(timeout=10), "thread B never reached its own LOCK TABLE"
                 assert not b_lock_returned.wait(timeout=0.5), (
                     "thread B's LOCK TABLE returned while thread A still holds the lock -- "
                     "the two locks did not conflict (R-35 regression)"
