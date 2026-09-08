@@ -161,8 +161,11 @@ jobs:
           docker logs pg16 || true
           exit 1
 
-      - name: Install PostgreSQL client (both adapters shell out to psql)
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: "Install PostgreSQL client (both adapters shell out to psql) and nginx (design D-3: required dependency of conformance-tests/socket_harness.py) -- one `apt-get update` for both (F-9 差し戻し 監督裁定 2026-09-08: the previous two separate steps each ran their own redundant `apt-get update`)"
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client nginx
+
+      - name: "Stop the distro's own nginx service (design D-11 (1): Debian starts a default-conf service on install; this job's own conformance gate must be the only nginx running for the duration -- see the marker-scoped residue check below, which would NOT itself catch this distro service left running, since its own argv carries none of this harness's own `conformance-socket-harness` marker)"
+        run: sudo systemctl disable --now nginx || sudo service nginx stop
 
       - name: Install (exact-pinned via constraints.txt)
         run: pip install -c constraints.txt -e ./r2db-api[test] -e ./MitateDB-api[test]
@@ -174,6 +177,73 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest -q -n 5 --dist loadgroup 2>&1 | tee pytest-output.log
+
+      - name: "Check for leftover socket-harness process/port residue (design D-2 (f) / D-11 (2))"
+        # `if: always()` -- this check matters MOST after a failed gate run
+        # (a stalled test that never reached its own `.stop()`/fixture
+        # teardown is exactly the residue this step exists to catch), not
+        # only after a green one. Two independent checks (F-3 差し戻し,
+        # 監督裁定 2026-09-08):
+        #   (i) a marker-scoped `pgrep` on the harness's own literal
+        #       markers (`conformance-tests/socket_harness.py`'s own
+        #       `NGINX_PREFIX_MARKER`, and this WP's own subprocess-
+        #       launcher self-test's probe module name) rather than a bare
+        #       `pgrep nginx`/`pgrep uvicorn`, which would also match an
+        #       unrelated process on this runner (design's own "prefix で
+        #       スコープしない pgrep は runner の無関係なプロセスに当た
+        #       る"). This alone MISSES an orphaned nginx WORKER: nginx
+        #       rewrites a worker's own argv to the fixed string `nginx:
+        #       worker process`, which carries no marker at all, so a
+        #       killed master that leaves a worker behind is invisible
+        #       here.
+        #   (ii) every port `socket_harness.py::RealSocketSurface` ever
+        #        recorded in one of its own `ports.json` ledgers (under
+        #        `${TMPDIR:-/tmp}/conf-socket-*/conformance-socket-harness/
+        #        ports.json` -- N-3 差し戻し, 監督裁定 2026-09-08: rooted
+        #        at `${TMPDIR:-/tmp}`, matching Python's own `tempfile.
+        #        mkdtemp(prefix="conf-socket-")` resolution order, never a
+        #        bare `/tmp` that silently degrades to scanning 0 files on
+        #        a runner where `TMPDIR` is set to something else) must
+        #        have NO listener left on it (`ss -ltn`) -- this is what
+        #        catches the orphaned-worker gap (i) leaves open,
+        #        independent of any process's own argv. Finding 0 files to
+        #        scan is NOT itself a failure (a run with no socket-plug
+        #        test collected writes none), but it is echoed explicitly
+        #        below rather than silently passing through an empty loop,
+        #        so a `TMPDIR` mismatch that would otherwise degrade this
+        #        check to "always green" is visible in the job log.
+        if: always()
+        run: |
+          residue_found=0
+          if pgrep -fl "conformance-socket-harness"; then
+            echo "ERROR: leftover conformance-tests/socket_harness.py nginx process(es) found above" >&2
+            residue_found=1
+          fi
+          if pgrep -fl "conf_socket_probe_app"; then
+            echo "ERROR: leftover conformance-tests/socket_harness.py subprocess-uvicorn residue found above" >&2
+            residue_found=1
+          fi
+          scan_root="${TMPDIR:-/tmp}"
+          shopt -s nullglob
+          ports_files=("${scan_root}"/conf-socket-*/conformance-socket-harness/ports.json)
+          shopt -u nullglob
+          if [ "${#ports_files[@]}" -eq 0 ]; then
+            echo "No ports.json ledgers found under ${scan_root}/conf-socket-* -- 0 files to scan (not itself a failure)."
+          else
+            for f in "${ports_files[@]}"; do
+              for port in $(python3 -c "import json; print(' '.join(str(p) for p in json.load(open('$f'))))"); do
+                if ss -ltn "sport = :${port}" | grep -q ":${port}\b"; then
+                  echo "ERROR: port ${port} (recorded in ${f}) still has a listener:" >&2
+                  ss -ltn "sport = :${port}" >&2
+                  residue_found=1
+                fi
+              done
+            done
+          fi
+          if [ "$residue_found" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No socket-harness process/port residue found."
 
       - name: Extract pass/fail/skip/xfail tally
         if: always()

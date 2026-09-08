@@ -721,6 +721,7 @@ _HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
 def _hold_in_flight_via_http_requests(
     cell_obj: object, method_name: str, app: Any, secret: str, path: str, n: int,
     classify: Callable[[BaseException], str], adapter_name: str,
+    build_client: Callable[[Any, str], httpx.AsyncClient],
 ):
     """port v1.12 `hold_in_flight` realization for the HTTP plug
     (adapter-internal plumbing, never port-visible -- design docs/design/
@@ -728,11 +729,16 @@ def _hold_in_flight_via_http_requests(
     stall-and-wait shape to `conformance_adapter_r2db.py`'s own in-process
     twin, except each of the `n` held requests is a REAL `GET <path>` HTTP
     round trip, issued from its own OS thread against its OWN fresh event
-    loop + `httpx.AsyncClient(ASGITransport(app=app))` -- the shared
-    adapter's single `self._loop.run_until_complete` cannot itself hold
-    more than one request in flight (D-2's own "HTTP plug の単一loop構造
-    との折り合い"), so genuine concurrency needs one loop per held
-    request, never the shared one."""
+    loop + a client built through `build_client(app, base_url)` -- the
+    calling adapter's own `_build_client` hook (monitor 裁定 2026-09-08,
+    F-10), never a direct, hook-bypassing `httpx.AsyncClient(ASGITransport(
+    app=app))` construction, so a socket-adapter override of `_build_client`
+    (WP-4) reaches `hold_in_flight`'s own held requests too, not only the
+    shared/isolated surfaces' own clients. The shared adapter's single
+    `self._loop.run_until_complete` cannot itself hold more than one
+    request in flight (D-2's own "HTTP plug の単一loop構造との折り合い"),
+    so genuine concurrency needs one loop per held request, never the
+    shared one."""
     original = getattr(cell_obj, method_name)
     entered = threading.Semaphore(0)
     release = threading.Event()
@@ -749,7 +755,7 @@ def _hold_in_flight_via_http_requests(
         loop = asyncio.new_event_loop()
         try:
             async def _once() -> None:
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                async with build_client(app, BASE_URL) as client:
                     response = await client.get(path, headers=[("authorization", f"Bearer {secret}")])
                     if response.status_code >= 400:
                         failure = _HttpFailure(response)
@@ -883,6 +889,60 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     """
 
     name = "r2db-api (http+postgres)"
+    # port v1.14 (design D-1 (A) 4, WP-3): drives the real ASGI app
+    # through `httpx.ASGITransport` (in-process, no real socket) by
+    # default -- the socket adapter (WP-4) subclasses this adapter and
+    # overrides `transport_kind`/`_build_client`/`_surfaces_value` below,
+    # never the other way around.
+    transport_kind = "asgi"
+
+    # ------------------------------------------------------------------
+    # hooks (design D-1 (A) 6, WP-3): the socket adapter (WP-4) overrides
+    # BOTH of these -- `_build_client` to dial a real loopback socket
+    # fronted by a real nginx (`conformance-tests/socket_harness.py`)
+    # instead of an in-process ASGI transport, and `_surfaces_value` to
+    # report that real, dialable URL instead of this module's synthetic,
+    # non-dialable `_SURFACES` constant. Every construction site below
+    # that used to build a client or inject `surfaces` directly now goes
+    # through one of these two hooks, so a subclass overriding them
+    # changes EVERY site at once (`__init__`'s data/control clients, the
+    # control-stack rebuild path, `isolated_control_surface`, and
+    # `isolated_application_surface`) -- extraction is behavior-
+    # preserving: the default bodies below are byte-for-byte what every
+    # call site constructed directly before this hook existed.
+    # ------------------------------------------------------------------
+
+    def _build_client(self, app: Any, base_url: str) -> httpx.AsyncClient:
+        """Default: an in-process ASGI-transport client against `app`
+        (unchanged behavior). Takes `base_url` even though the default
+        body's own choice of host is irrelevant to an ASGI transport (no
+        real DNS/TCP happens) -- a real-socket override needs exactly
+        this same (app, base_url) shape to dial a real address instead."""
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+
+    def _surfaces_value(self) -> dict:
+        """Default: this module's own synthetic, non-dialable `_SURFACES`
+        constant (unchanged behavior)."""
+        return _SURFACES
+
+    def _reset_surface_state(self) -> None:
+        """Hook (monitor 裁定 2026-09-08, F-2 (b)): called on the ISOLATED
+        COPY inside `isolated_application_surface()`, immediately after
+        `copy.copy(self)` and before that copy's own composition begins.
+        Default: no-op -- this adapter holds no per-surface OS-level
+        resource (port reservation, server handle) that a shallow copy
+        needs re-initializing on its own; every field the ASGI default
+        cares about is either shared read-only state (fine to alias) or
+        freshly overwritten a few lines below `isolated_application_
+        surface`'s own call site (`_app_pg`/`_provisioned_cells`/
+        `_counter`/`_service`/`_control`/`_app`/`_loop`/`_client`). A
+        socket-adapter override (WP-4) uses this hook to give its OWN
+        copy a dedicated port reservation / server state instead of
+        silently sharing whatever `copy.copy` carried over from the
+        parent surface (design D-1 (A) 6: `copy.copy` is a SHALLOW copy --
+        without an explicit reset hook, a subclass with real per-surface
+        handles has no documented, hook-driven place to replace them)."""
+        return None
 
     def __init__(self) -> None:
         admin_dsn = _admin_dsn()
@@ -1045,7 +1105,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             )
             self._service = DataService(
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
-                durable_audit=self._application_durable_audit, surfaces=_SURFACES,
+                durable_audit=self._application_durable_audit, surfaces=self._surfaces_value(),
             )
             self._control = ControlAuthority(self._service)
 
@@ -1057,7 +1117,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # when it claims no `/control` route exists.
             self._app = app
             self._loop = asyncio.new_event_loop()
-            self._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+            self._client = self._build_client(app, BASE_URL)
 
             # ------------------------------------------------------------
             # control plane (WP-5 provided branch): the real `/control/v1`
@@ -1124,7 +1184,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # rebuild's old-and-new pools briefly coexisting.
             self._control_pool_size = 2
             self._control_app, self._control_stores = self._build_control_stack()
-            self._control_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+            self._control_client = self._build_client(self._control_app, BASE_URL)
 
             # Durable audit observation (design §12.5(iv)/§4: "Postgres は
             # control_audit に SELECT を持つ r2dbsvc_control 相当DSNの別
@@ -1216,7 +1276,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # as the real composition root's own defaults).
             audit_dsn=self._platform.auditreader_dsn,
             audit_reader_pool_size=self._control_pool_size,
-            surfaces=_SURFACES,
+            surfaces=self._surfaces_value(),
             # Q4 phase WP-1 (design D-1(c)): this adapter's control stack
             # never reads the DB-side writer-role catalog (design §3.11
             # point 4, see this file's own note at `_application_durable_
@@ -1529,7 +1589,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             old_client = self._control_client
             old_stores = self._control_stores
             self._control_app, self._control_stores = self._build_control_stack()
-            self._control_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+            self._control_client = self._build_client(self._control_app, BASE_URL)
             self._control_request_count = 0
             # The OLD stack's pooled connections must be released, not
             # merely dereferenced -- see `_build_control_stack`'s own
@@ -1967,7 +2027,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # requests_per_minute` vector.
         effective_limits = apply_limits_override(self._control_limits, limits_override)
         app, stores = self._build_control_stack(limits=effective_limits)
-        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        client = self._build_client(app, BASE_URL)
         # This primitive's OWN residue list (supervisor ruling 2026-09-06
         # item 2): applications `register_application` below registers
         # successfully are recorded here and deprovisioned on exit -- never
@@ -2089,18 +2149,20 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         # pieces below are deliberately overwritten with fresh, isolated
         # ones.
         iso = copy.copy(self)
+        iso._reset_surface_state()
         iso._app_pg = {}
         iso._provisioned_cells = []
         iso._counter = 0
         iso._service = DataService(
             iso._credentials, limits=_ISOLATED_APPLICATION_LIMITS, cell_factory=iso._make_cell,
-            control_plane_status="enabled", durable_audit=iso._application_durable_audit, surfaces=_SURFACES,
+            control_plane_status="enabled", durable_audit=iso._application_durable_audit,
+            surfaces=iso._surfaces_value(),
         )
         iso._control = ControlAuthority(iso._service)
         app = create_app(iso._service)
         iso._app = app
         iso._loop = asyncio.new_event_loop()
-        iso._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        iso._client = iso._build_client(app, BASE_URL)
         try:
             yield iso
         finally:
@@ -2151,7 +2213,9 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         secret = session.secret
         classify = self.classify
         adapter_name = self.name
-        return _hold_in_flight_via_http_requests(cell, "catalog", app, secret, "/v1/catalog", n, classify, adapter_name)
+        return _hold_in_flight_via_http_requests(
+            cell, "catalog", app, secret, "/v1/catalog", n, classify, adapter_name, self._build_client,
+        )
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).

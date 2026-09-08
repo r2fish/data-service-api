@@ -256,7 +256,9 @@ class _PgAppInfo:
     developer_dsn: str
 
 
-def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
+def _bootstrap_platform(
+    prefix: str, admin_dsn: str, script_dir: Path, surfaces: Mapping[str, Any],
+) -> _Platform:
     """Runs the real `0001_bootstrap_platform.sql`..`0004_deprovision_
     application.sql` (with the literal token `mitatedb` textually replaced
     by this run's unique prefix, per those files' own header comments) --
@@ -326,21 +328,22 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     # `surfaces` (D-2(c)): BOTH `data`/`control` -- this adapter's own
     # `build_control_service` call requires `control` unconditionally
     # (design §3.7: "control プロセスは自らの control surface を必ず持
-    # つ"), and its data-plane `FoundationConfig` construction below uses
-    # the SAME `_DATA_SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL`
-    # constants as the value SOURCE this row's own values are seeded
-    # from -- keeping both origins textually visible at this one seed
-    # site, rather than only inside a composition-root env var.
+    # つ"). port v1.14 (design D-1 (A) 6, WP-3): `surfaces` is now a
+    # PARAMETER (the caller's own `_surfaces_value()` hook result) rather
+    # than this function reaching for the module-level `_DATA_SURFACE_
+    # BASE_URL`/`_CONTROL_SURFACE_BASE_URL` constants directly -- the
+    # DEFAULT hook still returns exactly those two constants (byte-for-
+    # byte the same JSON this literal string concatenation used to build,
+    # now via `json.dumps` on the dict), so this is behavior-preserving;
+    # the socket adapter (WP-4) overrides the hook to seed its own real,
+    # dialable URLs here instead.
     surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
     try:
         with surfaces_conn.cursor() as cur:
             cur.execute(
                 sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', {value})").format(
                     table=sql.Identifier(schema, "platform_declarations"),
-                    value=sql.Literal(
-                        '{"data":{"base_url":"' + _DATA_SURFACE_BASE_URL + '"},'
-                        '"control":{"base_url":"' + _CONTROL_SURFACE_BASE_URL + '"}}'
-                    ),
+                    value=sql.Literal(json.dumps(surfaces)),
                 ),
             )
     finally:
@@ -610,6 +613,7 @@ _HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S = 30.0
 def _hold_in_flight_via_http_requests_over_stalled_gate(
     cell_obj: object, app: Any, bearer: str, path: str, n: int,
     classify: Callable[[BaseException], str], adapter_name: str,
+    build_client: Callable[[Any, str], httpx.AsyncClient],
 ):
     """port v1.12 `hold_in_flight` realization for the HTTP plug
     (adapter-internal plumbing, never port-visible -- design docs/design/
@@ -621,12 +625,16 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
     `ApplicationRuntime.catalog()` -> `ApplicationCell.catalog()`) reaches
     the SAME `_limit_gate` call, on the SAME `ApplicationCell` class).
     Each of the `n` held requests is a REAL `GET <path>` HTTP round trip,
-    issued from its own OS thread against its OWN fresh event loop +
-    `httpx.AsyncClient(ASGITransport(app=app))` -- the shared adapter's
-    single `self._loop.run_until_complete` cannot itself hold more than
-    one request in flight (D-2's own "HTTP plug の単一loop構造との折り
-    合い"), so genuine concurrency needs one loop per held request, never
-    the shared one."""
+    issued from its own OS thread against its OWN fresh event loop + a
+    client built through `build_client(app, base_url)` -- the calling
+    adapter's own `_build_client` hook (monitor 裁定 2026-09-08, F-10),
+    never a direct, hook-bypassing `httpx.AsyncClient(ASGITransport(
+    app=app))` construction, so a socket-adapter override of `_build_client`
+    (WP-4) reaches `hold_in_flight`'s own held requests too. The shared
+    adapter's single `self._loop.run_until_complete` cannot itself hold
+    more than one request in flight (D-2's own "HTTP plug の単一loop構造
+    との折り合い"), so genuine concurrency needs one loop per held
+    request, never the shared one."""
     original_gate = cell_obj._limit_gate  # noqa: SLF001 -- adapter-internal plumbing, same convention this file's own isolated_application_surface() already uses.
     entered = threading.Semaphore(0)
     release = threading.Event()
@@ -650,7 +658,7 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
         loop = asyncio.new_event_loop()
         try:
             async def _once() -> None:
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL) as client:
+                async with build_client(app, BASE_URL) as client:
                     response = await client.get(path, headers=[("authorization", f"Bearer {bearer}")])
                     if response.status_code >= 400:
                         failure = _HttpFailure(response)
@@ -737,6 +745,48 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     """
 
     name = "MitateDB-api (http+postgres)"
+    # port v1.14 (design D-1 (A) 4, WP-3): drives the real ASGI app
+    # through `httpx.ASGITransport` (in-process, no real socket) by
+    # default -- the socket adapter (WP-4) subclasses this adapter and
+    # overrides `transport_kind`/`_build_client`/`_surfaces_value` below,
+    # never the other way around.
+    transport_kind = "asgi"
+
+    # ------------------------------------------------------------------
+    # hooks (design D-1 (A) 6, WP-3) -- see the identically-named hooks on
+    # `r2db-api/conformance/conformance_adapter_r2db_http.py`'s own
+    # `R2DBHttpConformanceAdapter` for the full rationale (independent
+    # implementation of the same hook SHAPE, P-6: peer code is never
+    # shared, only the common port's own contract for these two names is).
+    # ------------------------------------------------------------------
+
+    def _build_client(self, app: Any, base_url: str) -> httpx.AsyncClient:
+        """Default: an in-process ASGI-transport client against `app`
+        (unchanged behavior)."""
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+
+    def _surfaces_value(self) -> dict:
+        """Default: this module's own synthetic, non-dialable
+        `_DATA_SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL` constants
+        (unchanged behavior). Feeds BOTH the `platform_declarations` DB
+        row `_bootstrap_platform` seeds (the control-plane's own real
+        composition-root read, `build_control_service`) and this
+        adapter's own `FoundationConfig` (the data-plane's own capability
+        document) from the exact same values, so the two documents'
+        `surfaces` can never silently diverge."""
+        return {
+            "data": {"base_url": _DATA_SURFACE_BASE_URL},
+            "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
+        }
+
+    def _reset_surface_state(self) -> None:
+        """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-
+        named hook on `r2db-api/conformance/conformance_adapter_r2db_http.
+        py`'s own `R2DBHttpConformanceAdapter` for the full rationale
+        (independent implementation of the same hook SHAPE, P-6). Default:
+        no-op; called on the isolated copy, right after `copy.copy(self)`
+        and before that copy's own composition begins."""
+        return None
 
     def __init__(self) -> None:
         self._counter = 0
@@ -750,9 +800,17 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         with self._prefix_guard.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(hashtext(%s))", _lock_key(prefix))
 
+        # port v1.14 (design D-1 (A) 6, WP-3): computed ONCE and reused for
+        # both the DB-seeded control-plane row (`_bootstrap_platform`
+        # below) and this adapter's own data-plane `FoundationConfig`
+        # (below) -- never re-derived independently at each site, so the
+        # two documents' `surfaces` cannot silently diverge even if a
+        # future override's own hook body were not perfectly idempotent.
+        surfaces = self._surfaces_value()
+
         self._script_dir = tempfile.mkdtemp(prefix="mitatedb_http_migrations_")
         try:
-            self._platform = _bootstrap_platform(prefix, admin_dsn, Path(self._script_dir))
+            self._platform = _bootstrap_platform(prefix, admin_dsn, Path(self._script_dir), surfaces)
         except Exception:
             _sweep_prefix(admin_dsn, prefix)
             shutil.rmtree(self._script_dir, ignore_errors=True)
@@ -793,7 +851,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # override just this one attribute on its own copy.
             self._application_config = FoundationConfig(
                 control_plane_status="enabled",
-                data_base_url=_DATA_SURFACE_BASE_URL, control_base_url=_CONTROL_SURFACE_BASE_URL,
+                data_base_url=surfaces["data"]["base_url"], control_base_url=surfaces["control"]["base_url"],
             )
             # Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス
             # 1個)"): this adapter (unlike the in-process one, which routes
@@ -881,7 +939,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._loop_owner = True
             import asyncio
             self._loop = asyncio.new_event_loop()
-            self._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+            self._client = self._build_client(app, BASE_URL)
 
             # ------------------------------------------------------------
             # control plane (WP-5 provided branch): the real `/control/v1`
@@ -945,8 +1003,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             self._control_service = build_control_service(control_env)
             self._control_app = create_control_app(
                 self._control_service, request_bytes_limit=self._control_service.limits.request_bytes)
-            self._control_client = httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=self._control_app), base_url=BASE_URL)
+            self._control_client = self._build_client(self._control_app, BASE_URL)
 
             # `control_credential()`'s own maintained handle (memoize +
             # call-time validity check -- port v1.5 WP-1 independent review
@@ -1524,7 +1581,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             env = self._control_env
         service = build_control_service(env)
         app = create_control_app(service, request_bytes_limit=service.limits.request_bytes)
-        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        client = self._build_client(app, BASE_URL)
         # This primitive's OWN residue list (supervisor ruling 2026-09-06
         # item 2): applications `register_application` below registers
         # successfully are recorded here and deprovisioned on exit -- never
@@ -1615,6 +1672,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     @contextmanager
     def isolated_application_surface(self):
         iso = copy.copy(self)
+        iso._reset_surface_state()
         iso._app_pg = {}
         iso._cells = OrderedDict()
         # Phase 8 WP-1a (design D-1 "隔離instance は自分専用のホルダを1個
@@ -1625,8 +1683,22 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         # `iso` from ever touching the shared surface's own in-flight
         # counter or rate windows.
         iso._limit_holder = _LimitStateHolder()
+        # port v1.14 (design D-1 (A) 6, WP-3): `data_base_url`/
+        # `control_base_url` are named explicitly here (via `iso`'s OWN
+        # `_surfaces_value()` call, not inherited unnamed through
+        # `replace()`'s pass-through of every field it does not mention)
+        # so the isolated surface's construction goes through the same
+        # hook the shared surface's own `__init__` does -- for the
+        # DEFAULT hook this is behavior-preserving (`iso._surfaces_value()`
+        # returns the identical constants `self._application_config`
+        # already carries), but a socket-adapter override (WP-4) can now
+        # give the isolated surface its own, separate URLs instead of
+        # silently inheriting the parent's real address.
+        _iso_surfaces = iso._surfaces_value()
         iso._application_config = replace(
             self._application_config,
+            data_base_url=_iso_surfaces["data"]["base_url"],
+            control_base_url=_iso_surfaces["control"]["base_url"],
             max_batch_items=10, max_batch_entities=5, max_result_rows=5,
             max_filter_terms=5, max_request_bytes=4096, max_schema_objects=20,
             # Phase 8 WP-1a: same values/rationale as the in-process
@@ -1675,7 +1747,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         app = create_app(iso._service, request_bytes_limit=iso._application_config.max_request_bytes)
         iso._app = app
         iso._loop = asyncio.new_event_loop()
-        iso._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        iso._client = iso._build_client(app, BASE_URL)
         try:
             yield iso
         finally:
@@ -1709,7 +1781,7 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         assert isinstance(session, _Session)
         cell = self._cells[session.application_id]
         return _hold_in_flight_via_http_requests_over_stalled_gate(
-            cell, self._app, session.bearer, "/v1/catalog", n, self.classify, self.name,
+            cell, self._app, session.bearer, "/v1/catalog", n, self.classify, self.name, self._build_client,
         )
 
     # ------------------------------------------------------------------
