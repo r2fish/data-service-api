@@ -62,7 +62,7 @@
 | **WP-1c** (v1.1) | **新規ファイルは無い** — budget digest のテストは両 peer の既存 `tests/test_idempotency_records.py` に足す |
 | **WP-6d-i** (v1.1) | 両 peer の `tests/test_idempotency_concurrency.py` |
 | **WP-6d-ii** (v1.1) | `conformance-tests/test_c27_concurrent_same_key.py` |
-| **WP-R35** (v1.2) | **未確定** — 2 スレッドテストを両 peer の既存テストに足すか新設するかは実装報告で監督が確定し、新設する場合の名を本表に足す (§0.0 の 4) |
+| **WP-R35** (v1.2) | **新規ファイルなし (確定 2026-09-08)** — 2 スレッドテストは両 peer の既存 `tests/test_constraints_declaration.py` に足した。当初の記述: 2 スレッドテストを両 peer の既存テストに足すか新設するかは実装報告で監督が確定し、新設する場合の名を本表に足す (§0.0 の 4) |
 
 **plug 名は `r2db-api-socket` / `MitateDB-api-socket` である** (設計 §6.1。本書の確定ではなく設計の確定)。
 
@@ -693,7 +693,7 @@ shasum -a 256 spec/data-service-api.v1.json \
 
 #### WP-6d-i — 両 peer の lock (**WP-3 に依存しない。今すぐ着手できる**)
 
-**状態 (v1.2)**: **実装済み (2026-09-08)。worktree / branch `phase10-wp6d`、実装 `21cc8fb`。** **Opus のコードレビュー 1 巡目の判定は「accept with fixes」であり、指摘 F1〜F8 の是正コミットは `6a3453d`、R-34 の branch `phase10-r34` との統合は `685ebfa` である (再レビュー実施中)。** **main へのマージは `<hash>` であり、次のゲート束で監督が行う。** **発注時の想定と実現の形が peer で分かれた** — **MitateDB は catalog 読みが同じ接続の途中で自己 commit するので transaction-scoped lock が早期に解放され、SESSION advisory lock + 明示解放になった** (下記「実施の記録」、設計 §3 D-13 の実施註)。
+**状態 (v1.2)**: **実装済み (2026-09-08)。worktree / branch `phase10-wp6d`、実装 `21cc8fb`。** **Opus のコードレビュー 1 巡目の判定は「accept with fixes」であり、指摘 F1〜F8 の是正コミットは `6a3453d`、R-34 の branch `phase10-r34` との統合は `685ebfa` である (再レビュー accept)。** **main へのマージは `4e1020a` (WP-6d-i + R-34 + R-35 の束。ゲート = 単独 root suite) であり、次のゲート束で監督が行う。** **発注時の想定と実現の形が peer で分かれた** — **MitateDB は catalog 読みが同じ接続の途中で自己 commit するので transaction-scoped lock が早期に解放され、SESSION advisory lock + 明示解放になった** (下記「実施の記録」、設計 §3 D-13 の実施註)。
 
 **触るファイル**: `r2db-api/src/r2db_api/postgres.py` (**`_idempotency_lookup` の直前に key lock**)、`r2db-api/src/r2db_api/structured.py` (**in-memory cell の `threading.Lock`**)、`MitateDB-api/src/mitatedb_api/backend_postgres.py` (**照会を書く側の接続の同一トランザクションへ移し、その前に lock**)、`MitateDB-api/src/mitatedb_api/cell.py` (**in-memory 経路の `threading.Lock`**)、両 peer の `tests/test_idempotency_concurrency.py` (**新設**)。
 
@@ -798,7 +798,7 @@ shasum -a 256 spec/data-service-api.v1.json \
 
 ### WP-R35 — フェーズ9 R-2 の走査 lock mode の是正 (**新設 v1.2。骨子**)
 
-**状態**: **実施中 (2026-09-08)。worktree / branch `phase10-r35`。コミットは `<hash>` である。** **出所は WP-6d-i のコードレビュー (本書 WP-6d-i の完了条件 8 の報告) であり、本フェーズの新規変更が作った欠陥ではない。**
+**状態**: **実施済み (2026-09-08)。worktree / branch `phase10-r35`。コミットは `46b081a` + レビュー是正 `7ead163` である (Opus レビュー accept)。** **出所は WP-6d-i のコードレビュー (本書 WP-6d-i の完了条件 8 の報告) であり、本フェーズの新規変更が作った欠陥ではない。**
 
 **目的**: **両 peer の nullable 違反走査の `LOCK TABLE ... IN SHARE MODE` を `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` に改め、キー無しの同時スキーマ変更 2 件が deadlock detector でしか解けない相互待ちに入らないようにする** (設計 §3 **D-15**、計画文書 §8 の **R-35**)。**R-2 の走査が依拠する性質 (行の書き手を排除する) は保つ。**
 
