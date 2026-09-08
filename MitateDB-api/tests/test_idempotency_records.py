@@ -398,6 +398,14 @@ class IdempotencyRecordsTests(unittest.TestCase):
         self.assertIsNotNone(first["revision"])
         self.assertIn("budget_shape_field", self._field_types("notes"))
 
+    def test_schema_alter_field_omitted_budget_then_resend_with_empty_budget_is_conflict(self):
+        key = "idem-schema-budget-shape-3"
+        first = self.dev.alter_field("notes", "title", nullable=True, idempotency_key=key)
+        with self.assertRaises(ConflictError) as ctx:
+            self.dev.alter_field("notes", "title", nullable=True, idempotency_key=key, budget={})
+        self.assertEqual(ctx.exception.details["violated_declaration"], "idempotency_key")
+        self.assertIsNotNone(first["revision"])
+
     # -- J-1/I-13: the plan-digest inclusion rule, through the REAL entry
     # point -- `test_idempotency_key_is_part_of_the_plan_digest`
     # (`IdempotencyDigestTests` below) only proves the digest RULE in
