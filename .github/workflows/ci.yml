@@ -349,3 +349,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y nginx
       - name: Lint r2db-api deploy assets (WP-3 script)
         run: bash r2db-api/deploy/scripts/lint_deploy_assets.sh --require-tools
+
+  image-pins:
+    # Always runs, independent of change-class and with no `needs` -- same
+    # "a Class A push still needs this" reasoning as `doc-refs` above,
+    # applied to R-19 (roadmap docs/design/ROADMAP_POST_PHASE7_V1.md
+    # section 8, design D-6): the production MitateDB-api container image's
+    # dependency resolution must never silently drift from the exact-pin
+    # record (`constraints.txt`) the rest of this workflow's completion
+    # gate installs against. Builds the image from the repository root
+    # (the Dockerfile's own BUILD CONTEXT note), freezes the venv actually
+    # baked into it, and diffs that freeze against `constraints.txt` with
+    # `tools/check_image_pins.py` (Phase 10 WP-2).
+    name: image pins match constraints.txt (R-19)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the MitateDB-api image
+        run: docker build -f MitateDB-api/docker/Dockerfile -t mitatedb-api:ci .
+      - name: Freeze the image's installed venv
+        run: docker run --rm --entrypoint /opt/venv/bin/pip mitatedb-api:ci freeze > image-freeze.txt
+      - name: Compare the image freeze against constraints.txt
+        run: python3 tools/check_image_pins.py --freeze image-freeze.txt --constraints constraints.txt --require starlette --require psycopg --require uvicorn

@@ -231,6 +231,11 @@ fi
 # release tarball) -- it does not fetch source itself, matching this WP's
 # own "do not recover assets from a real host" discipline in the opposite
 # direction: this script also never assumes a specific fetch mechanism.
+# Also assumed (R-19): the repository root containing `constraints.txt`
+# has been extracted one directory ABOVE R2DBSVC_INSTALL_ROOT -- a
+# release tarball of the r2db-api/ subtree alone does NOT satisfy this
+# and fails fast at the install command below; see the comment
+# immediately preceding that command for the full explanation.
 # ---------------------------------------------------------------------------
 log "creating install root ${R2DBSVC_INSTALL_ROOT} (if absent) and its venv"
 sudo mkdir -p "${R2DBSVC_INSTALL_ROOT}"
@@ -243,8 +248,26 @@ else
     log "venv already present at ${R2DBSVC_INSTALL_ROOT}/.venv -- not re-created"
 fi
 
+# `constraints.txt` (R-19) is expected at the repository root of the same
+# checkout/`git archive` extraction that placed r2db-api/ at
+# R2DBSVC_INSTALL_ROOT -- i.e. one directory above R2DBSVC_INSTALL_ROOT
+# itself, mirroring DEPLOYMENT_RUNBOOK.md's own :126-127 and
+# POSTGRES_PROVISIONING_RUNBOOK.md's own :606/:1568 wording ("the
+# repository root of that same checkout/`git archive` extraction"). This
+# script does not build or verify that archive -- it has no way to
+# distinguish an extraction of the whole repository (constraints.txt at
+# that parent directory, sibling to r2db-api/) from an extraction of the
+# r2db-api/ subtree alone (no constraints.txt anywhere nearby) -- so it
+# refuses to install rather than silently installing without the pin file
+# the archive is assumed to carry (supervisor ruling 2026-09-08, WP-2).
+REPO_ROOT="$(dirname "${R2DBSVC_INSTALL_ROOT}")"
+if [ ! -f "$REPO_ROOT/constraints.txt" ]; then
+    log "constraints.txt not found at $REPO_ROOT/constraints.txt (expected one directory above R2DBSVC_INSTALL_ROOT, at the repository root of the same checkout/git archive extraction, R-19). Aborting before install -- verify this deployment's archive/build step places constraints.txt there, or that R2DBSVC_INSTALL_ROOT points one level below an extraction that includes it, before re-running."
+    exit 1
+fi
+
 log "installing r2db-api into the venv (matching this codebase's requires-python >=3.11 -- see pyproject.toml; the exact interpreter version is an operator/CI choice, not asserted by this script, per DEPLOYMENT_RUNBOOK.md's own :105 note)"
-sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install "${R2DBSVC_INSTALL_ROOT}"
+sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install -c "$REPO_ROOT/constraints.txt" "${R2DBSVC_INSTALL_ROOT}"
 
 # ---------------------------------------------------------------------------
 # Step 3 -- PostgreSQL migrations (POSTGRES_PROVISIONING_RUNBOOK.md §5/§9/
@@ -423,8 +446,11 @@ control_surface_declared=$(sudo cat "$control_surface_marker")
 # explicitly here: `ops`'s own default migrations-directory resolution
 # assumes an editable/source checkout layout and does not find the
 # migrations directory once this package is `pip install`ed into a venv
-# (step 2 above) -- see `r2db_api.ops._migrations_dir`'s own `R2DB_
-# MIGRATIONS_DIR` override.
+# (step 2 above already passes `-c constraints.txt` itself when it installs
+# this package, `constraints.txt` at the repository root of this same
+# checkout/`git archive` extraction, R-19; see that step's own comment for
+# the derived path and its fail-fast check) -- see
+# `r2db_api.ops._migrations_dir`'s own `R2DB_MIGRATIONS_DIR` override.
 # ---------------------------------------------------------------------------
 OPS=("${R2DBSVC_INSTALL_ROOT}/.venv/bin/python" -m r2db_api.ops)
 

@@ -26,10 +26,11 @@
 # ruling, contract now ships as packaged data -- see the CONTRACT
 # PACKAGING note below the builder stage): every `COPY` source in this
 # file (`COPY MitateDB-api/pyproject.toml ./`, `COPY MitateDB-api/src
-# ./src`) is written REPOSITORY-ROOT-relative, not `MitateDB-api/`-
-# relative -- a build context scoped to `MitateDB-api/` alone would make
-# both of those `COPY` sources resolve to nonexistent paths (there is no
-# `MitateDB-api/MitateDB-api/pyproject.toml`). Build this image from the
+# ./src`, `COPY constraints.txt ./`) is written REPOSITORY-ROOT-relative,
+# not `MitateDB-api/`-relative -- a build context scoped to `MitateDB-api/`
+# alone would make all three of those `COPY` sources resolve to
+# nonexistent paths (there is no `MitateDB-api/MitateDB-api/pyproject.
+# toml`, nor a `MitateDB-api/constraints.txt`). Build this image from the
 # REPOSITORY ROOT, naming this file explicitly, e.g.:
 #   docker build -f MitateDB-api/docker/Dockerfile -t mitatedb-api:SERVICE_data .
 # -- see `cloud-run-cloud-sql.md` §6's own build step for the full command
@@ -55,14 +56,25 @@ WORKDIR /build
 # CONTEXT note above this stage).
 COPY MitateDB-api/pyproject.toml ./
 COPY MitateDB-api/src ./src
+# `constraints.txt` is repository-root-relative like the two `COPY`s above
+# (see the BUILD CONTEXT note above this stage) -- it is the same file
+# CI's own `pip install -c constraints.txt ...` step resolves against
+# (R-19, `tools/check_image_pins.py`).
+COPY constraints.txt ./
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-# `pip install .` resolves `starlette`/`psycopg[binary]`/`uvicorn` from
-# `pyproject.toml`'s own `[project.dependencies]` (WP-1) -- no separate
-# requirements file, no version drift between what this image installs and
-# what `pip install -e .[test]` installs locally for development.
-RUN pip install --no-cache-dir .
+# `pip install -c constraints.txt .` resolves `starlette`/`psycopg[binary]`/
+# `uvicorn` from `pyproject.toml`'s own `[project.dependencies]` (WP-1),
+# constrained to the exact versions pinned in `constraints.txt` -- the same
+# exact-pin file CI's completion gate installs against, so this image's
+# dependency resolution cannot silently drift from CI's. CI job
+# `image-pins` (`.github/workflows/ci.yml`) runs `pip freeze` inside a
+# built image and diffs it against `constraints.txt` with
+# `tools/check_image_pins.py` to keep this true. The prior comment here
+# asserted "no version drift" without anything actually checking that
+# claim -- that assertion was unverified until this job existed.
+RUN pip install --no-cache-dir -c constraints.txt .
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime -- the venv built above, copied onto a slim base, run as
