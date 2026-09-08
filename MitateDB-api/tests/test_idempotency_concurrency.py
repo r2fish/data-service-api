@@ -451,6 +451,71 @@ def test_postgres_reap_is_committed_not_discarded_by_begin(app_a) -> None:  # no
         close_cell(cell)
 
 
+def test_postgres_reap_is_committed_not_discarded_by_begin_on_replay_path(app_a) -> None:  # noqa: F811
+    """WP-6d-i companion to `test_postgres_reap_is_committed_not_
+    discarded_by_begin` above: that test only exercises the NEW-key
+    path, where `idempotency_reserve`'s own `conn.commit()` (also added
+    by F1) would independently rescue `idempotency_begin`'s reap even if
+    `idempotency_begin`'s own commit were removed -- `idempotency_
+    reserve` runs right after `idempotency_begin` on that path and
+    commits the SAME connection a second time. On the REPLAY path
+    (`cell.py::_idempotency_check`, ~1148-1176: an existing record whose
+    digest matches returns immediately, `if existing is not None: ...
+    return stored_response, digest, now_ms`), `idempotency_reserve` is
+    never called at all, and the eventual `idempotency_unlock` (`cell.
+    py`'s `_idempotency_pg_scope`) begins with `conn.rollback()`. So on
+    a replay, `idempotency_begin`'s own commit is the ONLY thing that
+    can persist its reap DELETE -- this test must fail exactly when
+    that commit is removed, even though the sibling test above still
+    passes (its own new-key path is rescued by `idempotency_reserve`'s
+    separate commit, untouched by the same mutation)."""
+    cell = make_cell(app_a, FoundationConfig(idempotency_retention_ms=400))
+    try:
+        dev = ApplicationDeveloper(
+            cell, Principal(application_id=app_a.app_id, credential_id="dev-f1r", role=Role.DEVELOPER))
+        runtime = ApplicationRuntime(
+            cell, Principal(application_id=app_a.app_id, credential_id="rt-f1r", role=Role.RUNTIME))
+        dev.create_collection("notes_f1r", {"title": "text"})
+
+        runtime.transact(
+            [{"type": "insert", "collection": "notes_f1r", "values": {"title": "a"}}],
+            idempotency_key="f1r-replay-a")
+        # `idempotency_retention_ms=400`: when B is FIRST sent, 0.30s
+        # later, A is only ~300ms old -- not yet expired, so B's own
+        # `idempotency_begin` reap leaves A's row untouched.
+        time.sleep(0.30)
+        runtime.transact(
+            [{"type": "insert", "collection": "notes_f1r", "values": {"title": "b"}}],
+            idempotency_key="f1r-replay-b")
+        # A further 0.15s later: A is now ~450ms old (past the 400ms
+        # retention window) and B is only ~150ms old (still within it).
+        time.sleep(0.15)
+        # Re-send B with an IDENTICAL operations list (same digest) --
+        # a REPLAY: `_idempotency_check` finds B's own existing record,
+        # confirms the digest matches, and returns the stored response
+        # WITHOUT ever calling `idempotency_reserve`. Only `idempotency_
+        # begin`'s own reap DELETE + commit runs on this call.
+        runtime.transact(
+            [{"type": "insert", "collection": "notes_f1r", "values": {"title": "b"}}],
+            idempotency_key="f1r-replay-b")
+
+        conn = psycopg.connect(app_a.runtime_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key FROM _mdb_idempotency ORDER BY key")
+                keys = [row[0] for row in cur.fetchall()]
+        finally:
+            conn.close()
+        assert keys == ["f1r-replay-b"], (
+            f"expected only the replayed key's own row to remain, found {keys!r} -- A's row "
+            "survives when idempotency_begin's own reap DELETE is discarded on the REPLAY path, "
+            "where idempotency_reserve is never called to commit it a second time (F1 regression, "
+            "replay path)"
+        )
+    finally:
+        close_cell(cell)
+
+
 def test_postgres_key_lock_timeout_maps_to_limit_exceeded(app_a) -> None:  # noqa: F811
     """Code-review fix F2 (Opus review 2, should-fix): before this fix,
     `idempotency_begin`'s own `pg_advisory_lock` had no `lock_timeout` --
