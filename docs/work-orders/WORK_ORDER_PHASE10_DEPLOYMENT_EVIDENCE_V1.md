@@ -693,7 +693,7 @@ shasum -a 256 spec/data-service-api.v1.json \
 
 #### WP-6d-i — 両 peer の lock (**WP-3 に依存しない。今すぐ着手できる**)
 
-**状態 (v1.2)**: **実装済み (2026-09-08)。worktree / branch `phase10-wp6d`、実装 `21cc8fb`。** **Opus のコードレビュー 1 巡目の判定は「accept with fixes」であり、指摘 F1〜F8 の是正コミットは `6a3453d`、R-34 の branch `phase10-r34` との統合は `685ebfa` である (再レビュー accept)。** **main へのマージは `4e1020a` (WP-6d-i + R-34 + R-35 の束。ゲート = 単独 root suite) であり、次のゲート束で監督が行う。** **発注時の想定と実現の形が peer で分かれた** — **MitateDB は catalog 読みが同じ接続の途中で自己 commit するので transaction-scoped lock が早期に解放され、SESSION advisory lock + 明示解放になった** (下記「実施の記録」、設計 §3 D-13 の実施註)。
+**状態 (v1.2)**: **実装済み (2026-09-08)。worktree / branch `phase10-wp6d`、実装 `21cc8fb`。** **Opus のコードレビュー 1 巡目の判定は「accept with fixes」であり、指摘 F1〜F8 の是正コミットは `6a3453d`、R-34 の branch `phase10-r34` との統合は `685ebfa` である (再レビュー accept)。** **main へのマージは `4e1020a` (WP-6d-i + R-34 + R-35 の束) + 直後の pin 修正 `ee80c97` (`test_limit_class_vocabulary.py` の `ResourceLimitError` 呼び出し数 33 → 35。F2 の 2 箇所分。ゲート 3 が検出し、ゲート 4 で再確認) であり、次のゲート束で監督が行う。** **発注時の想定と実現の形が peer で分かれた** — **MitateDB は catalog 読みが同じ接続の途中で自己 commit するので transaction-scoped lock が早期に解放され、SESSION advisory lock + 明示解放になった** (下記「実施の記録」、設計 §3 D-13 の実施註)。
 
 **触るファイル**: `r2db-api/src/r2db_api/postgres.py` (**`_idempotency_lookup` の直前に key lock**)、`r2db-api/src/r2db_api/structured.py` (**in-memory cell の `threading.Lock`**)、`MitateDB-api/src/mitatedb_api/backend_postgres.py` (**照会を書く側の接続の同一トランザクションへ移し、その前に lock**)、`MitateDB-api/src/mitatedb_api/cell.py` (**in-memory 経路の `threading.Lock`**)、両 peer の `tests/test_idempotency_concurrency.py` (**新設**)。
 
