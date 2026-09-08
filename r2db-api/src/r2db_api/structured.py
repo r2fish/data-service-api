@@ -2893,10 +2893,13 @@ class ApplicationCell:
             #
             # Monitor ruling F (rulings-wp3a-review.md, applied to r2db by
             # M-1/rulings-wp2a-review.md): `PostgresCell.apply_schema`'s
-            # own alter_field branch takes `LOCK TABLE ... IN SHARE MODE`
-            # before this same scan, closing a race where another
-            # transaction commits a violating row between the scan and the
-            # registry write. This in-memory backend needs no such lock:
+            # own alter_field branch takes `LOCK TABLE ... IN SHARE ROW
+            # EXCLUSIVE MODE` (plain `SHARE MODE` does not conflict with
+            # itself and can deadlock two concurrent callers at their own
+            # later `ALTER TABLE`, R-35, Phase 10, WP-6d-i review) before
+            # this same scan, closing a race where another transaction
+            # commits a violating row between the scan and the registry
+            # write. This in-memory backend needs no such lock:
             # `ApplicationCell` serves one process, one operation at a
             # time (there is no concurrent transaction that could commit a
             # row between this scan and `entity_registry[...]` below), so

@@ -933,8 +933,8 @@ class PostgresBackend:
                 else:
                     new_enum = None
                 # Code review §2 F / 監督裁定 F (2026-09-07): locks
-                # `collection` IN SHARE MODE before scanning its existing
-                # rows, inside this SAME transaction -- SHARE MODE
+                # `collection` IN SHARE ROW EXCLUSIVE MODE before scanning
+                # its existing rows, inside this SAME transaction -- this
                 # blocks a concurrent INSERT/UPDATE/DELETE (ROW
                 # EXCLUSIVE) on this table for the rest of this
                 # transaction while still permitting concurrent SELECTs
@@ -946,7 +946,23 @@ class PostgresBackend:
                 # unscanned"; under READ COMMITTED (this connection's own
                 # default) it does not, by itself, close this phantom-
                 # write window -- this lock does.
-                _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE MODE").format(sql.Identifier(collection)))
+                #
+                # R-35 (Phase 10, WP-6d-i review): the original fix used
+                # plain `SHARE MODE`, which does not conflict with itself
+                # -- two concurrent `alter_field`/`add_field` calls on the
+                # SAME entity could both acquire it here, then each block
+                # at its own later `ALTER TABLE` (ACCESS EXCLUSIVE)
+                # waiting on the other's SHARE lock, a guaranteed mutual
+                # wait broken only by PostgreSQL's deadlock detector
+                # aborting one side with an error rather than the two
+                # calls simply serializing. `SHARE ROW EXCLUSIVE`
+                # conflicts with itself, so the second caller instead
+                # waits here, at LOCK TABLE, and proceeds only once the
+                # first transaction commits or rolls back -- it still
+                # excludes concurrent row writers (ROW EXCLUSIVE) exactly
+                # as plain SHARE did, so the scan property above is
+                # unchanged.
+                _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(sql.Identifier(collection)))
                 _execute(cur, sql.SQL("SELECT {} FROM {}").format(
                     sql.Identifier(field), sql.Identifier(collection)))
                 violation = None
@@ -1235,19 +1251,36 @@ class PostgresBackend:
                 if resolved_nullable is False:
                     # M-6 (監督裁定, WP-3a rework 2, 2026-09-07): mirrors
                     # `alter_field_constraints`'s own existing-row rule
-                    # (LOCK TABLE ... IN SHARE MODE, inside this SAME
-                    # transaction, before the scan), for a NEW field
-                    # instead of an existing one -- a NEW field declaring
-                    # `nullable: false` on an entity that already holds
-                    # rows would leave every one of them holding `null`
-                    # in it (there being no earlier value for it to have
-                    # held), so it is refused the same way. Checked
-                    # BEFORE the DDL below, so a conflicting call changes
-                    # NOTHING -- no column, no registry row, no revision
-                    # bump; this cursor's own transaction rolls back
-                    # whole (`except ... self._developer.rollback()`
-                    # below, the same as every other failure path here).
-                    _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE MODE").format(sql.Identifier(collection)))
+                    # (LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE, inside
+                    # this SAME transaction, before the scan), for a NEW
+                    # field instead of an existing one -- a NEW field
+                    # declaring `nullable: false` on an entity that
+                    # already holds rows would leave every one of them
+                    # holding `null` in it (there being no earlier value
+                    # for it to have held), so it is refused the same
+                    # way. Checked BEFORE the DDL below, so a conflicting
+                    # call changes NOTHING -- no column, no registry row,
+                    # no revision bump; this cursor's own transaction
+                    # rolls back whole (`except ... self._developer.
+                    # rollback()` below, the same as every other failure
+                    # path here).
+                    #
+                    # R-35 (Phase 10, WP-6d-i review): plain `SHARE MODE`
+                    # does not conflict with itself, so two concurrent
+                    # `add_field`/`alter_field` calls on the SAME entity
+                    # could both acquire it, then each block at its own
+                    # later `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on
+                    # the other's SHARE lock -- a guaranteed mutual wait,
+                    # broken only by PostgreSQL's deadlock detector
+                    # aborting one side with an error instead of the two
+                    # calls simply serializing. `SHARE ROW EXCLUSIVE`
+                    # conflicts with itself, so the second caller instead
+                    # waits here, at LOCK TABLE, and proceeds only once
+                    # the first transaction commits or rolls back -- it
+                    # still excludes concurrent row writers (ROW
+                    # EXCLUSIVE) exactly as plain SHARE did, so the scan
+                    # property above is unchanged.
+                    _execute(cur, sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(sql.Identifier(collection)))
                     _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(collection)))
                     (existing_rows,) = cur.fetchone()
                     if existing_rows > 0:
