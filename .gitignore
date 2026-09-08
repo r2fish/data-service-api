@@ -60,3 +60,6 @@ temp/
 *.gdoc
 *.gsheet
 *.gslides
+
+# setuptools editable-install metadata (created by `pip install -e`)
+*.egg-info/
