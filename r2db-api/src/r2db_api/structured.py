@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -1977,6 +1978,18 @@ class ApplicationCell:
     # scoped to the Application regardless of which credential's request
     # reaches it (ruling I-5) -- no separate scoping code is needed.
     _idempotency: dict[str, "_IdempotencyRecord"] = field(default_factory=dict, repr=False)
+    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): this
+    # in-memory backend has no database transaction to take a
+    # `pg_advisory_xact_lock` inside, so the analogous serialization is a
+    # cell-wide `threading.Lock` (ruling U-7 explicitly allows "per cell")
+    # held for the ENTIRE lookup -> execute -> store window of `transact`/
+    # `apply_schema` (`_transact_locked`/`_apply_schema_locked` below) --
+    # uvicorn (or a future threadpool, U-10) can run two requests against
+    # the SAME `ApplicationCell` on different threads, and nothing before
+    # this ruling prevented them from interleaving between the dict
+    # lookup and the dict store. Not a dataclass-compared/repr'd field --
+    # a `threading.Lock` supports neither.
+    _idempotency_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for entity, rows in list(self.entities.items()):
@@ -2157,6 +2170,35 @@ class ApplicationCell:
         return [self._describe_entity(name) for name in sorted(self.entities)]
 
     def transact(
+        self,
+        entity: str,
+        operations: list[dict[str, Any]],
+        limits: ResourceLimits,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        request_id: str | None = None,
+    ) -> MutationOutcome:
+        """Ruling U-7 (WP-6d): thin lock wrapper -- `self._idempotency_lock`
+        is held for this call's entire duration, so a concurrent thread
+        calling `transact`/`apply_schema` on this SAME cell cannot
+        interleave with this one's own idempotency lookup -> execute ->
+        store window (see `_idempotency_lock`'s own field comment above).
+        All actual behavior lives in `_transact_locked` below, unchanged.
+        """
+        with self._idempotency_lock:
+            return self._transact_locked(
+                entity, operations, limits,
+                deadline=deadline, clock=clock, audit_hook=audit_hook, dry_run=dry_run,
+                plan=plan, plan_request=plan_request, idempotency_key=idempotency_key, request_id=request_id,
+            )
+
+    def _transact_locked(
         self,
         entity: str,
         operations: list[dict[str, Any]],
@@ -2580,6 +2622,33 @@ class ApplicationCell:
         return False
 
     def apply_schema(
+        self,
+        operation: dict[str, Any],
+        *,
+        developer: bool,
+        limits: ResourceLimits,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+        audit_hook: ApplicationAuditHook | None = None,
+        dry_run: bool = False,
+        plan: str | None = None,
+        plan_request: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        request_id: str | None = None,
+    ) -> "SchemaOutcome":
+        """Ruling U-7 (WP-6d): thin lock wrapper -- see `transact`'s
+        identical wrapper above and `_idempotency_lock`'s own field
+        comment. All actual behavior lives in `_apply_schema_locked`
+        below, unchanged.
+        """
+        with self._idempotency_lock:
+            return self._apply_schema_locked(
+                operation, developer=developer, limits=limits, deadline=deadline, clock=clock,
+                audit_hook=audit_hook, dry_run=dry_run, plan=plan, plan_request=plan_request,
+                idempotency_key=idempotency_key, request_id=request_id,
+            )
+
+    def _apply_schema_locked(
         self,
         operation: dict[str, Any],
         *,

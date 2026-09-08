@@ -67,7 +67,12 @@ _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORT
 #: no in-memory sibling at all -- `test_backend_layer_allowlist_entries_
 #: have_no_in_memory_sibling_denial` below pins that.
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
-    ("postgres.py", 1621),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # WP-6d (ruling U-7, `{scratchpad}/review2/frame.md` F-①): line shift
+    # only (1621 -> 1732) -- the new `_idempotency_key_lock`/`_idempotency_
+    # reserve_lock` methods and their module-level lock constants, inserted
+    # earlier in this same file, push every later line down; `_fail_client_
+    # value`'s own single `fail()` call is otherwise unchanged.
+    ("postgres.py", 1732),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 

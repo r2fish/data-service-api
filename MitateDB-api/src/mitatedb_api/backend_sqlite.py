@@ -899,6 +899,30 @@ class SQLiteBackend:
     def idempotency_count(self):
         return len(self._idempotency)
 
+    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): thin
+    # wrappers -- `cell.py::ApplicationCell._idempotency_check` calls
+    # THESE now, not the three methods directly above. `for_developer`
+    # is accepted (the `_idempotency_check` call sites need one uniform
+    # signature across backends) and ignored: this backend has no
+    # separate connections to choose between, and `ApplicationCell.
+    # _lock` (an `RLock`, widened by this same WP-6d to cover this
+    # method's own caller's ENTIRE lookup -> execute -> store window,
+    # not merely the DML envelope) already serializes every concurrent
+    # thread sharing this cell -- there is nothing left for a
+    # PostgreSQL-style advisory lock to add on this backend.
+    def idempotency_begin(self, key, now_ms, retention_ms, *, for_developer=False):
+        self.idempotency_reap_expired(now_ms, retention_ms)
+        return self.idempotency_get(key)
+
+    def idempotency_reserve(self, *, for_developer=False):
+        return self.idempotency_count()
+
+    def idempotency_unlock(self, key, *, for_developer=False):
+        """No-op -- `PostgresBackend`'s own counterpart releases the two
+        session-scoped `pg_advisory_lock`s `idempotency_begin`/
+        `idempotency_reserve` may have taken; this backend never takes
+        any (see `idempotency_begin`'s own comment above)."""
+
     def record_idempotency(self, key, digest, response_json, now_ms):
         # `transact()`'s own single-batch path: `ApplicationCell.transact`
         # calls this directly (not through a DDL method's own

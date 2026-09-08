@@ -442,6 +442,28 @@ _PLATFORM_UPGRADES_TABLE = platform_upgrades.LEDGER_TABLE_NAME
 # it.
 _IDEMPOTENCY_TABLE = "_mdb_idempotency"
 
+# Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
+# `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
+# PER-KEY idempotency lock -- see `idempotency_begin` below. A distinct
+# namespace keeps this lock space from colliding with the single-
+# bigint form `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (761761761) uses:
+# the two-int form composes its 64-bit lock id as
+# `(namespace << 32 | hashtext(key))`, so a namespace of 0 would land
+# in the SAME space `pg_advisory_xact_lock(761761761)` occupies, and a
+# bootstrap/reset ritual could then collide with an idempotency-key
+# lock. This namespace is a large, distinctive constant, far from both
+# `_RITUAL_ADVISORY_LOCK_KEY` and `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_
+# KEY` below (a single-bigint key, disjoint space again).
+_IDEMPOTENCY_KEY_LOCK_NAMESPACE = 76176100
+# Ruling U-7: table-level (not per-key) advisory lock serializing
+# `idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5
+# (iii)) -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a
+# single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT
+# constant from it (that lock guards bootstrap/reset ritual ordering;
+# this one guards `idempotency_entries` capacity accounting -- two
+# independent serialization points that must never share one lock id).
+_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 761761762
+
 # m-1 (independent review correction, extended Q4 phase WP-4; Phase 9
 # WP-3c adds `_IDEMPOTENCY_TABLE`): the full set of this package's own
 # bookkeeping table names `schema_count()` excludes from its
@@ -1685,13 +1707,34 @@ class PostgresBackend:
     # ------------------------------------------------------------------
     # Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
     # rulings-r5-r6.md I-1): idempotency records, `public._mdb_idempotency`
-    # (per-application upgrade 0010). Lookup/reap/count always run over
-    # `self._runtime` -- a plain, small, self-committing read/delete, same
-    # connection `ApplicationCell.transact`'s own batch runs on, and
-    # independent of whichever connection the eventual WRITE lands on
-    # (`record_idempotency` below, `self._runtime`; `create_collection`/
-    # `add_field`/`alter_field_constraints`'s own `idempotency_record`
-    # parameter, `self._developer`, via `_write_idempotency_row`).
+    # (per-application upgrade 0010).
+    #
+    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
+    # PRE-WP-6d, lookup/reap/count ran over `self._runtime` as a plain,
+    # small, SELF-COMMITTING read/delete -- a SEPARATE transaction from
+    # whichever connection the eventual WRITE later landed on
+    # (`record_idempotency`, `self._runtime`; the 3 DDL methods' own
+    # `idempotency_record` parameter, `self._developer`, via `_write_
+    # idempotency_row`). That gap is exactly F-①'s race: two concurrent
+    # requests for the SAME key each ran their own self-committing
+    # lookup, both saw "no record", and both went on to execute.
+    #
+    # `idempotency_begin`/`idempotency_reserve` below REPLACE that
+    # self-committing trio (`idempotency_get`/`idempotency_reap_expired`/
+    # `idempotency_count`, removed) with two methods that take a
+    # `for_developer` flag and run DIRECTLY on the SAME connection
+    # (`self._developer` or `self._runtime`) the caller's own eventual
+    # write will later land on, INSIDE that connection's own currently
+    # open transaction -- never committing or rolling back themselves on
+    # success (the caller's own eventual `commit()`/`rollback()`, right
+    # after `record_idempotency`/`_write_idempotency_row`, governs both
+    # this read AND that write together, one transaction). Each takes a
+    # `pg_advisory_xact_lock` FIRST, before touching the table -- see
+    # each method's own docstring for which lock and why. `cell.py`'s
+    # `_idempotency_check` is the only caller, threading `for_developer`
+    # through from each of its own 4 keyed entry points (`False`:
+    # `transact`, over `self._runtime`; `True`: `create_collection`/
+    # `add_field`/`alter_field`, over `self._developer`).
     # ------------------------------------------------------------------
 
     def _write_idempotency_row(self, conn, key, digest, response_json, now_ms):
@@ -1713,46 +1756,144 @@ class PostgresBackend:
             _execute(cur, statement, [key, digest, response_json, now_ms])
 
     @_guard_pending_platform_upgrades
-    def idempotency_get(self, key):
+    def idempotency_begin(self, key, now_ms, retention_ms, *, for_developer=False):
+        """Ruling U-7 (WP-6d): `for_developer` selects the WRITING
+        connection this keyed entry point will eventually commit on --
+        `self._developer` for the 3 DDL methods, `self._runtime` for
+        `transact` (default).
+
+        M-1 (WP-6d, MitateDB-specific realization of U-7 -- CLAUDE.md
+        "platform-specific controls may differ...when they provide the
+        SAME required safety outcome"): `r2db-api`'s own U-7 fix uses a
+        transaction-scoped `pg_advisory_xact_lock`, correct THERE
+        because `r2db_api.postgres.PostgresCell` wraps an ENTIRE keyed
+        request in ONE `with conn.transaction():` from lookup through
+        store. This backend cannot do that: `field_domains`/`schema_
+        revision` (and every other catalog read `cell.py` calls between
+        the idempotency lookup and the eventual DDL/DML write) are each
+        their OWN SELF-COMMITTING round trip on this SAME connection
+        (measured: an xact lock taken here would be released the moment
+        ANY one of those later self-commits, long before this key's own
+        write). This method therefore takes a SESSION-scoped
+        `pg_advisory_lock` instead -- released ONLY by an explicit
+        `idempotency_unlock` call (`cell.py`'s `_idempotency_pg_scope`
+        context manager calls it in a `finally`, guaranteeing release on
+        EVERY exit: replay, CONFLICT, LIMIT_EXCEEDED, pass-1-equivalent
+        validation failure, execution failure, or success) -- a session
+        lock survives every intervening self-commit on this connection,
+        closing the SAME race `pg_advisory_xact_lock` closes for r2db,
+        by the SAME mechanism (a second concurrent request for the SAME
+        key blocks here until the first's session releases it), just
+        with an explicit instead of an implicit release point.
+
+        Reaps expired records, then looks up `key`, over `conn`
+        (whichever connection `for_developer` selects) -- does NOT
+        commit or roll back the surrounding transaction on success (the
+        caller's own eventual `commit()`/`rollback()`, after whichever
+        of `record_idempotency`/`_write_idempotency_row` it reaches,
+        governs this reap/lookup's own fate too, same as every other
+        statement in that same transaction).
+
+        The lock key: two-int form (`_IDEMPOTENCY_KEY_LOCK_NAMESPACE`,
+        `hashtext(key)`), not a bare `hashtext(key)::bigint` -- `hashtext`
+        alone is only a 32-bit hash, so a bare-bigint lock would crowd
+        every key's lock into the SAME narrow space `_IDEMPOTENCY_
+        COUNT_ADVISORY_LOCK_KEY`/`ops.py::_RITUAL_ADVISORY_LOCK_KEY`
+        also occupy; namespacing the high 32 bits keeps per-key locks
+        visibly separate (mirrors `r2db-api`'s own identical reasoning).
+        A `hashtext` collision between two DIFFERENT keys only over-
+        serializes (accepted) -- it can never under-serialize. The DB
+        is per-Application, so the raw key alone is Application-scoped
+        already (I-5) -- no extra scoping component is needed.
+
+        Returns `{"digest": str, "response_json": str}` for `key`, or
+        `None` if this Application has no (unexpired) record for it --
+        identical shape to the pre-WP-6d `idempotency_get` this method
+        replaces (removed, along with `idempotency_reap_expired`, both
+        folded in here so the lock/reap/lookup happen as one step,
+        never as separate round trips a concurrent session could
+        interleave between)."""
+        conn = self._developer if for_developer else self._runtime
         try:
-            with self._runtime.cursor() as cur:
+            with conn.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s, hashtext(%s))"),
+                          [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
+                _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
+                          .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [now_ms, retention_ms])
                 _execute(cur, sql.SQL("SELECT digest, response_json FROM {} WHERE key = %s")
                           .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [key])
                 row = cur.fetchone()
         except psycopg.Error as exc:
-            self._runtime.rollback()
+            conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
         if row is None:
             return None
         digest, response_json = row
         return {"digest": digest, "response_json": response_json}
 
     @_guard_pending_platform_upgrades
-    def idempotency_reap_expired(self, now_ms, retention_ms):
-        try:
-            with self._runtime.cursor() as cur:
-                _execute(cur, sql.SQL("DELETE FROM {} WHERE %s - created_at_ms > %s")
-                          .format(sql.Identifier(_IDEMPOTENCY_TABLE)), [now_ms, retention_ms])
-        except psycopg.Error as exc:
-            self._runtime.rollback()
-            raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
+    def idempotency_reserve(self, *, for_developer=False):
+        """Ruling U-7 (WP-6d): table-level, SESSION-scoped advisory
+        lock (same `pg_advisory_lock`-not-`_xact` reasoning as
+        `idempotency_begin` above -- self-commits between this COUNT
+        and the eventual write would release an xact lock early too)
+        serializing this COUNT-then-write across DIFFERENT keys (D-5
+        (iii)). Released by the SAME `idempotency_unlock` call that
+        releases `idempotency_begin`'s own per-key lock (`cell.py`'s
+        `_idempotency_pg_scope`) -- unconditionally, whether or not this
+        method was ever reached (a replay short-circuits before it;
+        `pg_advisory_unlock` on a lock this session never took simply
+        returns `false`, never an error). Replaces the pre-WP-6d
+        self-committing `idempotency_count` (removed).
 
-    @_guard_pending_platform_upgrades
-    def idempotency_count(self):
+        `LOCK TABLE public.{_IDEMPOTENCY_TABLE} IN SHARE MODE` was
+        considered and rejected for this purpose: two concurrent SHARE
+        holders never conflict with EACH OTHER (SHARE only conflicts
+        with ROW EXCLUSIVE and stronger), so both would pass the COUNT
+        and only then deadlock against each other's own subsequent
+        INSERT (which needs ROW EXCLUSIVE) -- see the WP-6d report for
+        the Phase 9 R-2 precedent's own lock-mode finding.
+        `pg_advisory_lock` has no such self-conflict-free class: a
+        second holder of the SAME key always waits for the first."""
+        conn = self._developer if for_developer else self._runtime
         try:
-            with self._runtime.cursor() as cur:
+            with conn.cursor() as cur:
+                _execute(cur, sql.SQL("SELECT pg_advisory_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
                 _execute(cur, sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(_IDEMPOTENCY_TABLE)))
                 (count,) = cur.fetchone()
         except psycopg.Error as exc:
-            self._runtime.rollback()
+            conn.rollback()
             raise ValidationError("storage backend rejected the request") from exc
-        else:
-            self._runtime.commit()
         return count
+
+    def idempotency_unlock(self, key, *, for_developer=False):
+        """Ruling U-7 (WP-6d): releases BOTH session-scoped advisory
+        locks `idempotency_begin`/`idempotency_reserve` above may have
+        taken for THIS request -- always both, unconditionally (a lock
+        never taken this session simply reports `false`, harmlessly).
+        Called from `cell.py`'s `_idempotency_pg_scope` context manager,
+        in a `finally`, so it runs on EVERY exit from a keyed critical
+        section: replay, CONFLICT, LIMIT_EXCEEDED, a pass-1-equivalent
+        validation failure, an execution failure, or success.
+
+        `conn.rollback()` FIRST is not optional: an exception raised
+        between `idempotency_begin` and here (a validation failure with
+        no explicit rollback of its own -- unlike `transact`'s/each DDL
+        method's own terminal `except psycopg.Error`/`except Exception`
+        clause, which already rolls back before this ever runs) can
+        leave `conn` in PostgreSQL's own aborted-transaction state,
+        where EVERY further statement (including `pg_advisory_unlock`
+        itself) is rejected until a `ROLLBACK`. This call is therefore
+        always safe to reach in ANY state -- already clean (a no-op),
+        merely open (discarded, matching every other failure path's own
+        rollback), or aborted (cleared)."""
+        conn = self._developer if for_developer else self._runtime
+        conn.rollback()
+        with conn.cursor() as cur:
+            _execute(cur, sql.SQL("SELECT pg_advisory_unlock(%s, hashtext(%s))"),
+                      [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
+            _execute(cur, sql.SQL("SELECT pg_advisory_unlock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
+        conn.commit()
 
     @_guard_pending_platform_upgrades
     def record_idempotency(self, key, digest, response_json, now_ms):

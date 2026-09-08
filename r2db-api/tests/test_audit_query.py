@@ -1453,6 +1453,11 @@ _NON_AUDIT_OPERATION_PARAMETERS: frozenset[str] = frozenset(
         "structured.bind_schema_operation",
         "structured.ApplicationCell._apply",
         "structured.ApplicationCell.apply_schema",
+        # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
+        # `apply_schema` above is now a thin `with self._idempotency_
+        # lock:` wrapper -- the ORIGINAL body (same `operation`
+        # parameter, unchanged) moved verbatim to this new name.
+        "structured.ApplicationCell._apply_schema_locked",
     }
 )
 

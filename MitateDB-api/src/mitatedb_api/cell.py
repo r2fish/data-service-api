@@ -1056,7 +1056,7 @@ class ApplicationCell:
             target_kind="collection", target_id=target_id,
         )
 
-    def _idempotency_check(self, idempotency_key, digest_request):
+    def _idempotency_check(self, idempotency_key, digest_request, *, for_developer=False):
         """Phase 9 WP-3c (design D-5, 追補 2 S-a/S-b; 監督裁定集約
         rulings-r5-r6.md I-3/I-4/I-6/I-8): the shared lookup/write-prep
         choke every idempotency-key-carrying entry point (`transact`,
@@ -1066,6 +1066,21 @@ class ApplicationCell:
         responsible for the `not dry_run` guard themselves (I-7: never
         called at all for a dry run) and for what `digest_request` itself
         contains (this method has no per-operation knowledge of it).
+
+        Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
+        `for_developer` is `False` (default) for `transact` (its own
+        eventual write, `record_idempotency`, lands on the backend's
+        `_runtime`-equivalent connection) and `True` for the 3 DDL
+        callers (their own eventual write, an `idempotency_record`
+        tuple, lands on the `_developer`-equivalent connection) --
+        forwarded verbatim to `self._backend.idempotency_begin`/
+        `idempotency_reserve` below, so a `PostgresBackend` runs this
+        whole lookup (lock included) on the SAME connection/transaction
+        the caller will later execute and store on. Every caller also
+        holds `self._lock` (an `RLock`, widened by this same WP-6d) for
+        its ENTIRE lookup -> execute -> store window -- the in-memory/
+        SQLite-backend counterpart of this same guarantee, see
+        `backend_sqlite.SQLiteBackend.idempotency_begin`'s own comment.
 
         Returns `(replay_response, digest, now_ms)`. `replay_response`
         is not `None` when a retained record already answers this exact
@@ -1114,8 +1129,8 @@ class ApplicationCell:
         stored response takes."""
         digest = idempotency_digest(digest_request)
         now_ms = int(time.time() * 1000)
-        self._backend.idempotency_reap_expired(now_ms, self.config.idempotency_retention_ms)
-        existing = self._backend.idempotency_get(idempotency_key)
+        existing = self._backend.idempotency_begin(
+            idempotency_key, now_ms, self.config.idempotency_retention_ms, for_developer=for_developer)
         stored_response = None
         if existing is not None:
             stored_response = json.loads(existing["response_json"])
@@ -1137,7 +1152,7 @@ class ApplicationCell:
                     details={"violated_declaration": "idempotency_key", "field": "idempotency_key"},
                 )
             return stored_response, digest, now_ms
-        if self._backend.idempotency_count() >= self.config.idempotency_entries:
+        if self._backend.idempotency_reserve(for_developer=for_developer) >= self.config.idempotency_entries:
             raise ResourceLimitError("idempotency record capacity exceeded", limit_class="idempotency_entries")
         return None, digest, now_ms
 
@@ -1152,6 +1167,41 @@ class ApplicationCell:
         validate_identifier(value, label)
         self._backend.check_reserved(value, label)
         return value
+
+    @contextmanager
+    def _idempotency_pg_scope(self, idempotency_key, *, for_developer, dry_run):
+        """Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
+        combined into the SAME `with self._lock, self._idempotency_pg_
+        scope(...):` statement at all 4 keyed entry points (`transact`,
+        `create_collection`, `add_field`, `alter_field`) -- guarantees
+        `self._backend.idempotency_unlock` runs on EVERY exit from the
+        keyed critical section it wraps (a replay's early `return`, a
+        CONFLICT/LIMIT_EXCEEDED raise, a pass-1-equivalent validation
+        failure, an execution failure, or success), regardless of which
+        one. `PostgresBackend.idempotency_begin`/`idempotency_reserve`
+        acquire their own session-scoped advisory locks LAZILY, inside
+        `_idempotency_check` itself (called from within this scope) --
+        nothing else guarantees their release, since a session lock
+        (unlike the transaction-scoped kind r2db-api's own U-7 fix
+        uses) survives every self-committing catalog read (`field_
+        domains`/`schema_revision`) this method's own body may run
+        AFTER the lookup and BEFORE the eventual write -- see
+        `PostgresBackend.idempotency_begin`'s own docstring for why a
+        session lock, not an xact one, is this backend's correct
+        realization of the SAME U-7 safety outcome (CLAUDE.md:
+        "platform-specific controls may differ...when they provide the
+        same required safety outcome"). A no-op for SQLite/in-memory
+        backends (`idempotency_unlock` there is a no-op too, `self.
+        _lock` -- held by the SAME combined `with` statement -- already
+        serializes them within this one process) and for a dry run or
+        an unkeyed request (I-7: neither ever locks at all)."""
+        if idempotency_key is None or dry_run:
+            yield
+            return
+        try:
+            yield
+        finally:
+            self._backend.idempotency_unlock(idempotency_key, for_developer=for_developer)
 
     def create_collection(self, principal, name, fields, destructive=False, *, request_id=None,
                           field_types=None, field_constraints=None, dry_run=False, plan=None,
@@ -1364,91 +1414,100 @@ class ApplicationCell:
                     digest_request["idempotency_key"] = idempotency_key
             idempotency_response_digest = None
             idempotency_now_ms = None
-            if idempotency_key is not None and not dry_run:
-                # Phase 9 WP-3c (design D-5, I-3/I-7): checked here --
-                # after every VALIDATION_FAILED/LIMIT_EXCEEDED refusal
-                # above, before the plan precondition and before anything
-                # is created below (`create_collection` has no separate
-                # target-existence stage of its own, D-3's `ConflictError`
-                # for an already-existing name surfaces from the backend
-                # call itself, at execution -- this lookup runs before
-                # THAT too).
-                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                    idempotency_key, digest_request)
-                if replay is not None:
-                    # J-4 (SI-14): a replayed schema response earns its
-                    # own durable row before it is ever returned.
-                    self._write_replayed_schema_event(
-                        principal, operation="create_collection", target_id=name, request_id=request_id)
-                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): the
-                    # `setdefault("request_id", ...)` fallback this WP
-                    # previously carried here is REMOVED -- `replay` is
-                    # never `request_id`-less any more, because
-                    # `_idempotency_check` now treats such a record as
-                    # though it did not exist (see that method's own
-                    # docstring).
-                    return replay
-            # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
-            # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
-            # refusal above (this operation has no confirmation/target-
-            # existence stage of its own to order against: `create_
-            # collection` never refers to an entity that must already
-            # exist), before anything is created below. Only computed at
-            # all when there is a `plan` to check or a fresh one to
-            # return (`dry_run`) -- an ordinary real call (`dry_run=
-            # False, plan=None`, every pre-WP-3b caller) makes NO extra
-            # backend round trip for this, unchanged behavior (measured:
-            # `_schema_revision_uncounted` itself calls `self._backend.
-            # schema_revision()`, a real commit on this backend's own
-            # developer connection -- an unconditional call here would
-            # have silently added one to every schema operation, real or
-            # not). `current_revision` is read once, under `self._lock`
-            # (`_schema_revision_uncounted`, the SAME ungated accessor
-            # `_post_schema_revision` uses) -- the value both a submitted
-            # `plan` is checked against and a fresh one (dry_run) is
-            # computed against, so the two can never disagree with each
-            # other.
-            expected_token = None
-            if dry_run or plan is not None:
-                # Minor m-2 (review): no separate `with self._lock:` here
-                # -- `_schema_revision_uncounted` already acquires it (an
-                # `RLock`, safe to re-enter from the SAME thread, so this
-                # was never a deadlock, only a pointless second acquire).
-                current_revision = self._schema_revision_uncounted()
-                # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
-                # rework): built ABOVE, before this method's own
-                # idempotency choke -- see that hoisted block's own
-                # comment for the full per-key rationale (`operation`/
-                # `entity`/`fields`/`field_types`/`field_constraints`/
-                # `digest_extra`/`idempotency_key`, unchanged from the
-                # pre-hoist version this replaces). `compute_plan_token`
-                # excludes only `plan`/`dry_run`, so an `idempotency_key`
-                # this object carries (I-13) is part of what THIS token
-                # commits to too.
-                expected_token = compute_plan_token(digest_request, current_revision)
-                check_plan_precondition(plan, expected_token)
-            # Phase 4 (design D-2 item 2): every schema operation is
-            # unconditionally fail-closed class -- the hook's own `pre_commit()`
-            # is called by `self._backend.create_collection` itself, as the
-            # last thing it does before its own commit point. Phase 9 WP-3b
-            # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
-            # run -- no audit hook, no audit event, not even an attempt.
-            hook = None if dry_run else self._make_audit_hook(
-                principal, event_class="schema_change", operation="create_collection",
-                target_kind="collection", target_id=name, request_id=request_id,
-            )
-            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-            # the 4th tuple element -- the backend's own `response_json`
-            # construction (`backend_sqlite.py`/`backend_postgres.py`)
-            # persists it alongside `committed`/`revision`/`descriptor`,
-            # so a later replay's `json.loads(...)` carries the ORIGINAL
-            # execution's own request_id, never a fresh one (matching
-            # `transact()`'s own identical mutation-level guarantee).
-            idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                if idempotency_key is not None and not dry_run else None
-            )
-            with self._lock:
+            # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①):
+            # widened `self._lock` scope -- see `transact`'s identical
+            # comment above for the full rationale. Covers the
+            # idempotency lookup and the plan-precondition check below
+            # it, not only the backend DDL call. The PREVIOUS inner
+            # `with self._lock:` around that DDL call is removed (now
+            # simply inside this one continuous acquisition).
+            with self._lock, self._idempotency_pg_scope(
+                idempotency_key, for_developer=True, dry_run=dry_run
+            ):
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked here --
+                    # after every VALIDATION_FAILED/LIMIT_EXCEEDED refusal
+                    # above, before the plan precondition and before anything
+                    # is created below (`create_collection` has no separate
+                    # target-existence stage of its own, D-3's `ConflictError`
+                    # for an already-existing name surfaces from the backend
+                    # call itself, at execution -- this lookup runs before
+                    # THAT too).
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, for_developer=True)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its
+                        # own durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="create_collection", target_id=name, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): the
+                        # `setdefault("request_id", ...)` fallback this WP
+                        # previously carried here is REMOVED -- `replay` is
+                        # never `request_id`-less any more, because
+                        # `_idempotency_check` now treats such a record as
+                        # though it did not exist (see that method's own
+                        # docstring).
+                        return replay
+                # Phase 9 WP-3b (design D-4 (2)/(7)): the plan precondition is
+                # checked here -- after every VALIDATION_FAILED/LIMIT_EXCEEDED
+                # refusal above (this operation has no confirmation/target-
+                # existence stage of its own to order against: `create_
+                # collection` never refers to an entity that must already
+                # exist), before anything is created below. Only computed at
+                # all when there is a `plan` to check or a fresh one to
+                # return (`dry_run`) -- an ordinary real call (`dry_run=
+                # False, plan=None`, every pre-WP-3b caller) makes NO extra
+                # backend round trip for this, unchanged behavior (measured:
+                # `_schema_revision_uncounted` itself calls `self._backend.
+                # schema_revision()`, a real commit on this backend's own
+                # developer connection -- an unconditional call here would
+                # have silently added one to every schema operation, real or
+                # not). `current_revision` is read once, under `self._lock`
+                # (`_schema_revision_uncounted`, the SAME ungated accessor
+                # `_post_schema_revision` uses) -- the value both a submitted
+                # `plan` is checked against and a fresh one (dry_run) is
+                # computed against, so the two can never disagree with each
+                # other.
+                expected_token = None
+                if dry_run or plan is not None:
+                    # Minor m-2 (review): no separate `with self._lock:` here
+                    # -- `_schema_revision_uncounted` already acquires it (an
+                    # `RLock`, safe to re-enter from the SAME thread, so this
+                    # was never a deadlock, only a pointless second acquire).
+                    current_revision = self._schema_revision_uncounted()
+                    # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                    # rework): built ABOVE, before this method's own
+                    # idempotency choke -- see that hoisted block's own
+                    # comment for the full per-key rationale (`operation`/
+                    # `entity`/`fields`/`field_types`/`field_constraints`/
+                    # `digest_extra`/`idempotency_key`, unchanged from the
+                    # pre-hoist version this replaces). `compute_plan_token`
+                    # excludes only `plan`/`dry_run`, so an `idempotency_key`
+                    # this object carries (I-13) is part of what THIS token
+                    # commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): every schema operation is
+                # unconditionally fail-closed class -- the hook's own `pre_commit()`
+                # is called by `self._backend.create_collection` itself, as the
+                # last thing it does before its own commit point. Phase 9 WP-3b
+                # (design D-4 (4), §5 U-2 = (A)): NOT built at all for a dry
+                # run -- no audit hook, no audit event, not even an attempt.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="create_collection",
+                    target_kind="collection", target_id=name, request_id=request_id,
+                )
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
+                )
                 revision, descriptor = self._backend.create_collection(
                     name, validated_fields, field_types=declared_types,
                     field_constraints=resolved_constraints, audit_hook=hook, deadline=deadline,
@@ -1617,106 +1676,116 @@ class ApplicationCell:
                     digest_request["idempotency_key"] = idempotency_key
             idempotency_response_digest = None
             idempotency_now_ms = None
-            if idempotency_key is not None and not dry_run:
-                # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
-                # `field_domains` immediately below -- this method's own
-                # target-existence check.
-                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                    idempotency_key, digest_request)
-                if replay is not None:
-                    # J-4 (SI-14): a replayed schema response earns its own
-                    # durable row before it is ever returned.
-                    self._write_replayed_schema_event(
-                        principal, operation="add_field", target_id=collection, request_id=request_id)
-                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
-                    # `create_collection`'s own removal above -- `replay`
-                    # is never `request_id`-less (see `_idempotency_
-                    # check`'s own docstring).
-                    return replay
-            # Q1-D11-consistent shape bound (same reasoning as `create_
-            # collection`'s own field-count check above): the total column
-            # count this collection would carry AFTER this call mirrors the
-            # same fixed contract shape dimension `max_fields` already gates
-            # at definition time -- not a repeated, finite-resource
-            # consumption class, so `ValidationError`, not `ResourceLimitError`
-            # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
-            # `ResourceLimitError` call-site count unaffected by this WP).
-            current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
-            if len(current) >= self.config.max_fields:
-                # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
-                # names the request key this bound is about -- `add_field`
-                # has no plural container to point at (unlike `create_
-                # collection`'s own `fields`), so this points at the one
-                # new field name the request itself carries.
-                raise ValidationError(
-                    "field limit exceeded",
-                    details=violation("request_schema", field="field"),
+            # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①):
+            # widened `self._lock` scope -- see `transact`'s identical
+            # comment (module `transact` method) for the full
+            # rationale. Covers the idempotency lookup, target-
+            # existence (`field_domains`), and every other validation
+            # below it, not only the backend DDL call. The PREVIOUS
+            # inner `with self._lock:` around that DDL call is removed
+            # (now simply inside this one continuous acquisition).
+            with self._lock, self._idempotency_pg_scope(
+                idempotency_key, for_developer=True, dry_run=dry_run
+            ):
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # `field_domains` immediately below -- this method's own
+                    # target-existence check.
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, for_developer=True)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its own
+                        # durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="add_field", target_id=collection, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                        # `create_collection`'s own removal above -- `replay`
+                        # is never `request_id`-less (see `_idempotency_
+                        # check`'s own docstring).
+                        return replay
+                # Q1-D11-consistent shape bound (same reasoning as `create_
+                # collection`'s own field-count check above): the total column
+                # count this collection would carry AFTER this call mirrors the
+                # same fixed contract shape dimension `max_fields` already gates
+                # at definition time -- not a repeated, finite-resource
+                # consumption class, so `ValidationError`, not `ResourceLimitError`
+                # (keeps `test_limit_class_vocabulary.py`'s own AST-scanned
+                # `ResourceLimitError` call-site count unaffected by this WP).
+                current = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                if len(current) >= self.config.max_fields:
+                    # WP-3e rework T1 (追補 L-1): `request_schema`, `field`
+                    # names the request key this bound is about -- `add_field`
+                    # has no plural container to point at (unlike `create_
+                    # collection`'s own `fields`), so this points at the one
+                    # new field name the request itself carries.
+                    raise ValidationError(
+                        "field limit exceeded",
+                        details=violation("request_schema", field="field"),
+                    )
+                if nullable is not None and not isinstance(nullable, bool):
+                    # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
+                    # identical `add_field` site, `structured.py`): a
+                    # non-boolean `nullable` on `add_field` is the
+                    # declaration itself being invalid (`constraint_
+                    # declaration`, not a `request_schema` shape defect --
+                    # `nullable` IS a recognized top-level key here) --
+                    # `declared_type` is this field's own resolved type
+                    # (known here, unlike `alter_field` below).
+                    raise ValidationError(
+                        "nullable must be a boolean",
+                        details={
+                            "violated_declaration": "constraint_declaration",
+                            "field": "nullable",
+                            "declared_type": declared_type,
+                        },
+                    )
+                validated_enum = None
+                if enum is not None:
+                    validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                    if len(validated_enum) > self.config.max_enum_members:
+                        raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+                # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+                # checked after target-existence (`field_domains` above) and
+                # every other refusal, before anything is created below --
+                # see `create_collection`'s own identical comment for why
+                # this whole block is skipped (no extra backend round trip)
+                # when there is neither a `plan` to check nor a fresh one to
+                # return.
+                expected_token = None
+                if dry_run or plan is not None:
+                    # Minor m-2 (review): no separate `with self._lock:` --
+                    # see `create_collection`'s own identical comment above.
+                    current_revision = self._schema_revision_uncounted()
+                    # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure
+                    # H-3 (a); Phase 9 WP-3c rework): built ABOVE, before this
+                    # method's own idempotency choke -- see that hoisted
+                    # block's own comment for the full per-key rationale
+                    # (`field_type` sourced from `contract_type`, the RAW
+                    # argument, never the resolved `declared_type` -- H-3 (a),
+                    # unchanged by this hoist). `compute_plan_token` excludes
+                    # only `plan`/`dry_run`, so an `idempotency_key` this
+                    # object carries (I-13) is part of what THIS token commits
+                    # to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): same unconditional fail-closed
+                # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
+                # not built at all for a dry run.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="add_field",
+                    target_kind="collection", target_id=collection, request_id=request_id,
                 )
-            if nullable is not None and not isinstance(nullable, bool):
-                # Phase 9 WP-3e (design D-3 (3), mirrors r2db-api's own
-                # identical `add_field` site, `structured.py`): a
-                # non-boolean `nullable` on `add_field` is the
-                # declaration itself being invalid (`constraint_
-                # declaration`, not a `request_schema` shape defect --
-                # `nullable` IS a recognized top-level key here) --
-                # `declared_type` is this field's own resolved type
-                # (known here, unlike `alter_field` below).
-                raise ValidationError(
-                    "nullable must be a boolean",
-                    details={
-                        "violated_declaration": "constraint_declaration",
-                        "field": "nullable",
-                        "declared_type": declared_type,
-                    },
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
                 )
-            validated_enum = None
-            if enum is not None:
-                validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
-                if len(validated_enum) > self.config.max_enum_members:
-                    raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
-            # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
-            # checked after target-existence (`field_domains` above) and
-            # every other refusal, before anything is created below --
-            # see `create_collection`'s own identical comment for why
-            # this whole block is skipped (no extra backend round trip)
-            # when there is neither a `plan` to check nor a fresh one to
-            # return.
-            expected_token = None
-            if dry_run or plan is not None:
-                # Minor m-2 (review): no separate `with self._lock:` --
-                # see `create_collection`'s own identical comment above.
-                current_revision = self._schema_revision_uncounted()
-                # `digest_request` (rework, 監督裁定 M-1/G-1; WP-3b closure
-                # H-3 (a); Phase 9 WP-3c rework): built ABOVE, before this
-                # method's own idempotency choke -- see that hoisted
-                # block's own comment for the full per-key rationale
-                # (`field_type` sourced from `contract_type`, the RAW
-                # argument, never the resolved `declared_type` -- H-3 (a),
-                # unchanged by this hoist). `compute_plan_token` excludes
-                # only `plan`/`dry_run`, so an `idempotency_key` this
-                # object carries (I-13) is part of what THIS token commits
-                # to too.
-                expected_token = compute_plan_token(digest_request, current_revision)
-                check_plan_precondition(plan, expected_token)
-            # Phase 4 (design D-2 item 2): same unconditional fail-closed
-            # pre-commit hook as `create_collection` above. Phase 9 WP-3b:
-            # not built at all for a dry run.
-            hook = None if dry_run else self._make_audit_hook(
-                principal, event_class="schema_change", operation="add_field",
-                target_kind="collection", target_id=collection, request_id=request_id,
-            )
-            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-            # the 4th tuple element -- the backend's own `response_json`
-            # construction (`backend_sqlite.py`/`backend_postgres.py`)
-            # persists it alongside `committed`/`revision`/`descriptor`,
-            # so a later replay's `json.loads(...)` carries the ORIGINAL
-            # execution's own request_id, never a fresh one (matching
-            # `transact()`'s own identical mutation-level guarantee).
-            idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                if idempotency_key is not None and not dry_run else None
-            )
-            with self._lock:
                 # ConflictError if `field` already exists
                 revision, descriptor = self._backend.add_field(
                     collection, field, field_type, contract_type=declared_type,
@@ -1853,102 +1922,112 @@ class ApplicationCell:
                     digest_request["idempotency_key"] = idempotency_key
             idempotency_response_digest = None
             idempotency_now_ms = None
-            if idempotency_key is not None and not dry_run:
-                # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
-                # `field_domains` immediately below -- this method's own
-                # target-existence check.
-                replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
-                    idempotency_key, digest_request)
-                if replay is not None:
-                    # J-4 (SI-14): a replayed schema response earns its own
-                    # durable row before it is ever returned.
-                    self._write_replayed_schema_event(
-                        principal, operation="alter_field", target_id=collection, request_id=request_id)
-                    # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
-                    # `create_collection`'s own removal above -- `replay`
-                    # is never `request_id`-less (see `_idempotency_
-                    # check`'s own docstring).
-                    return replay
-            available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
-            if field not in available:
-                # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
-                # request NAMES a field the entity does not have -- a
-                # constraint-declaration violation (`errors.details_
-                # vocabulary.violated_declaration_vocabulary`'s own
-                # `constraint_declaration` word: "a declaration naming a
-                # field the request does not create"), not a request-
-                # shape one; `field` echoes the request's own top-level
-                # `field` key (design D-3 (2)), never a type pair (D-3
-                # (3): this is not a violation about a value's own type).
-                raise ValidationError(
-                    "unknown field",
-                    details={
-                        "violated_declaration": "constraint_declaration",
-                        "field": "field",
-                    },
+            # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①):
+            # widened `self._lock` scope -- see `transact`'s identical
+            # comment (module `transact` method) for the full
+            # rationale. Covers the idempotency lookup, target-
+            # existence (`field_domains`), and every other validation
+            # below it, not only the backend DDL call. The PREVIOUS
+            # inner `with self._lock:` around that DDL call is removed
+            # (now simply inside this one continuous acquisition).
+            with self._lock, self._idempotency_pg_scope(
+                idempotency_key, for_developer=True, dry_run=dry_run
+            ):
+                if idempotency_key is not None and not dry_run:
+                    # Phase 9 WP-3c (design D-5, I-3/I-7): checked before
+                    # `field_domains` immediately below -- this method's own
+                    # target-existence check.
+                    replay, idempotency_response_digest, idempotency_now_ms = self._idempotency_check(
+                        idempotency_key, digest_request, for_developer=True)
+                    if replay is not None:
+                        # J-4 (SI-14): a replayed schema response earns its own
+                        # durable row before it is ever returned.
+                        self._write_replayed_schema_event(
+                            principal, operation="alter_field", target_id=collection, request_id=request_id)
+                        # WP-3e rework 2 (rulings 追補 L-6/追補 2 M-6): mirrors
+                        # `create_collection`'s own removal above -- `replay`
+                        # is never `request_id`-less (see `_idempotency_
+                        # check`'s own docstring).
+                        return replay
+                available = self._backend.field_domains(collection)  # NotFoundError if `collection` does not exist
+                if field not in available:
+                    # WP-3a closure (監督裁定 2026-09-07, audit §3 G3): the
+                    # request NAMES a field the entity does not have -- a
+                    # constraint-declaration violation (`errors.details_
+                    # vocabulary.violated_declaration_vocabulary`'s own
+                    # `constraint_declaration` word: "a declaration naming a
+                    # field the request does not create"), not a request-
+                    # shape one; `field` echoes the request's own top-level
+                    # `field` key (design D-3 (2)), never a type pair (D-3
+                    # (3): this is not a violation about a value's own type).
+                    raise ValidationError(
+                        "unknown field",
+                        details={
+                            "violated_declaration": "constraint_declaration",
+                            "field": "field",
+                        },
+                    )
+                if nullable is not None and not isinstance(nullable, bool):
+                    # D-3 details for a request-shape violation about a
+                    # VALUE's own type: `field` is the request-relative
+                    # top-level key, `declared_type`/`observed_type` included
+                    # per D-3 (3)'s value-type-violation branch.
+                    raise ValidationError(
+                        "nullable must be a boolean",
+                        details={
+                            "violated_declaration": "request_schema",
+                            "field": "nullable",
+                            "declared_type": "boolean",
+                            "observed_type": json_type_name(nullable),
+                        },
+                    )
+                if enum is UNCHANGED or enum is None:
+                    validated_enum = enum  # UNCHANGED, or None (clears)
+                else:
+                    declared_type = self._backend.field_types(collection).get(field)
+                    validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
+                    if len(validated_enum) > self.config.max_enum_members:
+                        raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
+                # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
+                # checked after target-existence/`enum` validation, before
+                # anything is altered below -- see `create_collection`'s own
+                # identical comment for why this whole block is skipped (no
+                # extra backend round trip) when there is neither a `plan` to
+                # check nor a fresh one to return.
+                expected_token = None
+                if dry_run or plan is not None:
+                    # Minor m-2 (review): no separate `with self._lock:` --
+                    # see `create_collection`'s own identical comment above.
+                    current_revision = self._schema_revision_uncounted()
+                    # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
+                    # rework): built ABOVE, before this method's own
+                    # idempotency choke -- see that hoisted block's own
+                    # comment for the full per-key rationale (`field_type`
+                    # never included -- the `field_type is not None` check
+                    # above always refuses first, unchanged by this hoist).
+                    # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                    # an `idempotency_key` this object carries (I-13) is part
+                    # of what THIS token commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                # Phase 4 (design D-2 item 2): same unconditional fail-closed
+                # pre-commit hook as `create_collection`/`add_field` above.
+                # Phase 9 WP-3b: not built at all for a dry run.
+                hook = None if dry_run else self._make_audit_hook(
+                    principal, event_class="schema_change", operation="alter_field",
+                    target_kind="collection", target_id=collection, request_id=request_id,
                 )
-            if nullable is not None and not isinstance(nullable, bool):
-                # D-3 details for a request-shape violation about a
-                # VALUE's own type: `field` is the request-relative
-                # top-level key, `declared_type`/`observed_type` included
-                # per D-3 (3)'s value-type-violation branch.
-                raise ValidationError(
-                    "nullable must be a boolean",
-                    details={
-                        "violated_declaration": "request_schema",
-                        "field": "nullable",
-                        "declared_type": "boolean",
-                        "observed_type": json_type_name(nullable),
-                    },
+                # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
+                # the 4th tuple element -- the backend's own `response_json`
+                # construction (`backend_sqlite.py`/`backend_postgres.py`)
+                # persists it alongside `committed`/`revision`/`descriptor`,
+                # so a later replay's `json.loads(...)` carries the ORIGINAL
+                # execution's own request_id, never a fresh one (matching
+                # `transact()`'s own identical mutation-level guarantee).
+                idempotency_record = (
+                    (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
+                    if idempotency_key is not None and not dry_run else None
                 )
-            if enum is UNCHANGED or enum is None:
-                validated_enum = enum  # UNCHANGED, or None (clears)
-            else:
-                declared_type = self._backend.field_types(collection).get(field)
-                validated_enum = _validate_enum_declaration_with_path(enum, declared_type, "enum")
-                if len(validated_enum) > self.config.max_enum_members:
-                    raise ResourceLimitError("enum member limit exceeded", limit_class="enum_members")
-            # Phase 9 WP-3b (design D-4 (2)/(7)): plan precondition,
-            # checked after target-existence/`enum` validation, before
-            # anything is altered below -- see `create_collection`'s own
-            # identical comment for why this whole block is skipped (no
-            # extra backend round trip) when there is neither a `plan` to
-            # check nor a fresh one to return.
-            expected_token = None
-            if dry_run or plan is not None:
-                # Minor m-2 (review): no separate `with self._lock:` --
-                # see `create_collection`'s own identical comment above.
-                current_revision = self._schema_revision_uncounted()
-                # `digest_request` (rework, 監督裁定 G-1; Phase 9 WP-3c
-                # rework): built ABOVE, before this method's own
-                # idempotency choke -- see that hoisted block's own
-                # comment for the full per-key rationale (`field_type`
-                # never included -- the `field_type is not None` check
-                # above always refuses first, unchanged by this hoist).
-                # `compute_plan_token` excludes only `plan`/`dry_run`, so
-                # an `idempotency_key` this object carries (I-13) is part
-                # of what THIS token commits to too.
-                expected_token = compute_plan_token(digest_request, current_revision)
-                check_plan_precondition(plan, expected_token)
-            # Phase 4 (design D-2 item 2): same unconditional fail-closed
-            # pre-commit hook as `create_collection`/`add_field` above.
-            # Phase 9 WP-3b: not built at all for a dry run.
-            hook = None if dry_run else self._make_audit_hook(
-                principal, event_class="schema_change", operation="alter_field",
-                target_kind="collection", target_id=collection, request_id=request_id,
-            )
-            # Phase 9 WP-3e (design D-7 (3)/(4), Q-4): `request_id` is now
-            # the 4th tuple element -- the backend's own `response_json`
-            # construction (`backend_sqlite.py`/`backend_postgres.py`)
-            # persists it alongside `committed`/`revision`/`descriptor`,
-            # so a later replay's `json.loads(...)` carries the ORIGINAL
-            # execution's own request_id, never a fresh one (matching
-            # `transact()`'s own identical mutation-level guarantee).
-            idempotency_record = (
-                (idempotency_key, idempotency_response_digest, idempotency_now_ms, request_id)
-                if idempotency_key is not None and not dry_run else None
-            )
-            with self._lock:
                 # ConflictError (existing rows violate the new constraints)
                 # or NotFoundError propagate from here unchanged -- the
                 # SAME refusal a dry run reaches too (the existing-row
@@ -2707,102 +2786,121 @@ class ApplicationCell:
                     digest_request["idempotency_key"] = idempotency_key
             idempotency_response_digest = None
             now_ms = None
-            if idempotency_key is not None and not dry_run:
-                # I-7: a dry run never records or consults an idempotency
-                # record, regardless of whether `idempotency_key` was
-                # presented -- the `not dry_run` guard above is this
-                # method's only such check.
-                replay, idempotency_response_digest, now_ms = self._idempotency_check(idempotency_key, digest_request)
-                if replay is not None:
-                    # I-3/I-8: answered from the record, before target
-                    # existence/confirmation/precondition/execution are
-                    # ever reached -- the exact `results` object this
-                    # method itself returned when the original request
-                    # committed. J-4 (SI-14): a replayed mutation response
-                    # earns its own durable row before it is ever
-                    # returned -- otherwise a confirmed destructive
-                    # delete's own resend would return `committed: true`
-                    # while leaving zero evidence this Application was
-                    # touched at time T (WP-2cd/WP-3cd audit N-5).
-                    self._push_replayed_data_operation_event(
-                        principal, operation="transact", target_id=None, request_id=request_id)
-                    return replay
+            # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①):
+            # this cell-wide `RLock` (`self._lock`, already used below
+            # for the begin/execute/commit envelope) now also covers
+            # the idempotency lookup and pass 1 validation above it --
+            # widened from its pre-WP-6d scope (pass 2 only). Without
+            # this, two threads sharing this SAME `ApplicationCell`
+            # (uvicorn's threadpool, or a future one, U-10) could both
+            # pass `_idempotency_check` (both see "no record yet")
+            # before either reached this lock, then both execute and
+            # both store -- the in-memory/SQLite counterpart of the
+            # PostgreSQL-side race this same ruling closes with
+            # `pg_advisory_xact_lock` (`backend_postgres.py`). The
+            # PREVIOUS inner `with self._lock:` immediately below
+            # `self._backend.begin(deadline=deadline)` is removed (not
+            # merely made redundant) -- it is now simply INSIDE this
+            # one, continuous acquisition; nothing here re-enters the
+            # lock a second time.
+            with self._lock, self._idempotency_pg_scope(
+                idempotency_key, for_developer=False, dry_run=dry_run
+            ):
+                if idempotency_key is not None and not dry_run:
+                    # I-7: a dry run never records or consults an idempotency
+                    # record, regardless of whether `idempotency_key` was
+                    # presented -- the `not dry_run` guard above is this
+                    # method's only such check.
+                    replay, idempotency_response_digest, now_ms = self._idempotency_check(idempotency_key, digest_request)
+                    if replay is not None:
+                        # I-3/I-8: answered from the record, before target
+                        # existence/confirmation/precondition/execution are
+                        # ever reached -- the exact `results` object this
+                        # method itself returned when the original request
+                        # committed. J-4 (SI-14): a replayed mutation response
+                        # earns its own durable row before it is ever
+                        # returned -- otherwise a confirmed destructive
+                        # delete's own resend would return `committed: true`
+                        # while leaving zero evidence this Application was
+                        # touched at time T (WP-2cd/WP-3cd audit N-5).
+                        self._push_replayed_data_operation_event(
+                            principal, operation="transact", target_id=None, request_id=request_id)
+                        return replay
 
-            # Pass 1: validate every operation, across every entity, before
-            # any execution begins (P35-D9/P35-D10 above). Nothing below this
-            # line has touched `self._backend`'s own transaction state yet.
-            # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
-            # raise `DestructiveConfirmationRequired` (via `_validate_delete_
-            # confirmation`, the same choke `delete()` uses) -- routed
-            # (coalesced) here, at the one call site with `principal` in
-            # scope, mirroring `delete()`'s own identical wrapping.
-            # Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
-            # `_plan_operation` builds is renamed `execution_plan` here
-            # (it was `plan` before this WP) -- this method's own new
-            # `plan` PARAMETER (the caller-presented token) needs the
-            # name `add_field`/`alter_field`/`create_collection` above
-            # already use for the identical concept; keeping both names
-            # `plan` in one scope would shadow one with the other.
-            execution_plan = []
-            for index, operation in enumerate(operations):
-                try:
-                    execution_plan.append(self._plan_operation(operation, index, limits=limits))
-                except DestructiveConfirmationRequired:
-                    collection = operation.get("collection") if isinstance(operation, dict) else None
-                    self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
-                    raise
+                # Pass 1: validate every operation, across every entity, before
+                # any execution begins (P35-D9/P35-D10 above). Nothing below this
+                # line has touched `self._backend`'s own transaction state yet.
+                # Phase 4 (design D-3): `_plan_operation`'s own delete branch may
+                # raise `DestructiveConfirmationRequired` (via `_validate_delete_
+                # confirmation`, the same choke `delete()` uses) -- routed
+                # (coalesced) here, at the one call site with `principal` in
+                # scope, mirroring `delete()`'s own identical wrapping.
+                # Phase 9 WP-3b (design D-4 (7)): the LOCAL execution plan
+                # `_plan_operation` builds is renamed `execution_plan` here
+                # (it was `plan` before this WP) -- this method's own new
+                # `plan` PARAMETER (the caller-presented token) needs the
+                # name `add_field`/`alter_field`/`create_collection` above
+                # already use for the identical concept; keeping both names
+                # `plan` in one scope would shadow one with the other.
+                execution_plan = []
+                for index, operation in enumerate(operations):
+                    try:
+                        execution_plan.append(self._plan_operation(operation, index, limits=limits))
+                    except DestructiveConfirmationRequired:
+                        collection = operation.get("collection") if isinstance(operation, dict) else None
+                        self._route_delete_confirmation_denial(principal, collection, request_id=request_id)
+                        raise
 
-            # Phase 4 (design D-2's normative rule): the confirmation choke,
-            # not `event_class`, is the fail-closed/buffer-class dispatch
-            # point -- a batch containing at least one "delete" kind is
-            # fail-closed class for the WHOLE batch (D-10: at most one durable
-            # row per operation, so the batch gets exactly one pre-commit row,
-            # never one per individual delete inside it); a batch with none is
-            # buffer-class (P4-D5's new emit site).
-            destructive = any(kind == "delete" for kind, _ in execution_plan)
-            # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
-            # evaluation_order): the plan precondition is checked HERE --
-            # after pass 1 above, which is where every destructive
-            # operation's own confirmation is validated
-            # (`_plan_operation`/`_route_delete_confirmation_denial`), and
-            # before pass 2 below, which is EXECUTION. A batch that is
-            # both unconfirmed and carries a stale `plan` therefore always
-            # refuses for the missing confirmation first (D-4 (2)'s own
-            # ordering example) -- pass 1 above already raised before
-            # control ever reaches this line. This whole block is skipped
-            # (no extra backend round trip) when there is neither a
-            # `plan` to check nor a fresh one to return -- `create_
-            # collection`'s own identical comment explains why.
-            expected_token = None
-            if dry_run or plan is not None:
-                # Minor m-2 (review): no separate `with self._lock:` --
-                # see `create_collection`'s own identical comment above.
-                current_revision = self._schema_revision_uncounted()
-                # `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
-                # rework, I-13): built ONCE, above (before pass 1), not
-                # here -- see this method's own idempotency-lookup block
-                # for the full construction rationale (entity/budget/
-                # transaction/idempotency_key handling unchanged from the
-                # pre-WP-3c version this replaces). Reused verbatim here:
-                # `compute_plan_token` excludes only `plan`/`dry_run`, so
-                # an `idempotency_key` this object carries (I-13) is part
-                # of what THIS token commits to too.
-                expected_token = compute_plan_token(digest_request, current_revision)
-                check_plan_precondition(plan, expected_token)
-            hook = None
-            # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
-            # all for a dry run -- no audit hook, no audit event.
-            if destructive and not dry_run:
-                hook = self._make_audit_hook(
-                    principal, event_class="destructive_data_operation", operation="transact",
-                    target_kind="collection", target_id=None, request_id=request_id,
-                )
+                # Phase 4 (design D-2's normative rule): the confirmation choke,
+                # not `event_class`, is the fail-closed/buffer-class dispatch
+                # point -- a batch containing at least one "delete" kind is
+                # fail-closed class for the WHOLE batch (D-10: at most one durable
+                # row per operation, so the batch gets exactly one pre-commit row,
+                # never one per individual delete inside it); a batch with none is
+                # buffer-class (P4-D5's new emit site).
+                destructive = any(kind == "delete" for kind, _ in execution_plan)
+                # Phase 9 WP-3b (design D-4 (2)/(7), destructive_confirmation.
+                # evaluation_order): the plan precondition is checked HERE --
+                # after pass 1 above, which is where every destructive
+                # operation's own confirmation is validated
+                # (`_plan_operation`/`_route_delete_confirmation_denial`), and
+                # before pass 2 below, which is EXECUTION. A batch that is
+                # both unconfirmed and carries a stale `plan` therefore always
+                # refuses for the missing confirmation first (D-4 (2)'s own
+                # ordering example) -- pass 1 above already raised before
+                # control ever reaches this line. This whole block is skipped
+                # (no extra backend round trip) when there is neither a
+                # `plan` to check nor a fresh one to return -- `create_
+                # collection`'s own identical comment explains why.
+                expected_token = None
+                if dry_run or plan is not None:
+                    # Minor m-2 (review): no separate `with self._lock:` --
+                    # see `create_collection`'s own identical comment above.
+                    current_revision = self._schema_revision_uncounted()
+                    # `digest_request` (WP-3b closure, H-1/H-2; Phase 9 WP-3c
+                    # rework, I-13): built ONCE, above (before pass 1), not
+                    # here -- see this method's own idempotency-lookup block
+                    # for the full construction rationale (entity/budget/
+                    # transaction/idempotency_key handling unchanged from the
+                    # pre-WP-3c version this replaces). Reused verbatim here:
+                    # `compute_plan_token` excludes only `plan`/`dry_run`, so
+                    # an `idempotency_key` this object carries (I-13) is part
+                    # of what THIS token commits to too.
+                    expected_token = compute_plan_token(digest_request, current_revision)
+                    check_plan_precondition(plan, expected_token)
+                hook = None
+                # Phase 9 WP-3b (design D-4 (4), §5 U-2 = (A)): not built at
+                # all for a dry run -- no audit hook, no audit event.
+                if destructive and not dry_run:
+                    hook = self._make_audit_hook(
+                        principal, event_class="destructive_data_operation", operation="transact",
+                        target_kind="collection", target_id=None, request_id=request_id,
+                    )
 
-            # Pass 2: execute the fully-bound plan inside the begin/commit/
-            # rollback envelope -- unchanged from before this WP other than
-            # reading its arguments from `execution_plan` instead of
-            # re-validating them from the raw operation dicts inline.
-            with self._lock:
+                # Pass 2: execute the fully-bound plan inside the begin/commit/
+                # rollback envelope -- unchanged from before this WP other than
+                # reading its arguments from `execution_plan` instead of
+                # re-validating them from the raw operation dicts inline.
                 self._backend.begin(deadline=deadline)
                 # Phase 4 (design D-2, review M-6): `hook_fired` distinguishes
                 # "the durable pre-commit write itself failed" (nothing was
