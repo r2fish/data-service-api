@@ -105,6 +105,20 @@ def _load_registry() -> list[dict]:
 
 
 def _discover_and_build() -> list[tuple[str, ConformanceAdapter]]:
+    # Phase 10 WP-3 note (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+    # V1.md D-2 (g)): this function builds EVERY registered adapter's
+    # Python OBJECT eagerly, on EVERY xdist worker, unchanged by this WP
+    # -- a socket adapter's own `build_adapter()` (WP-4) must therefore
+    # bind no real port and spawn no real process from inside its own
+    # `__init__`. `conformance-tests/socket_harness.py`'s own
+    # `RealSocketSurface` is built exactly for this: it stays inert until
+    # `.data_base_url`/`.control_base_url` is first read, so a worker
+    # whose own tests never touch a given socket plug (`--dist loadgroup`
+    # confines each adapter's own tests to one worker) never starts that
+    # plug's nginx/uvicorn at all, even though this function still
+    # constructs the (otherwise-inert) adapter OBJECT for it. This
+    # function itself needs no code change for that laziness to hold --
+    # it never calls anything beyond `build_adapter()`.
     entries = _load_registry()
     built: list[tuple[str, ConformanceAdapter]] = []
     required_failures: list[str] = []

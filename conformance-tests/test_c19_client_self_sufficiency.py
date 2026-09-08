@@ -78,6 +78,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+import httpx
 import pytest
 
 from adapter import (
@@ -320,6 +321,156 @@ def test_c19_surfaces_declare_and_echo_on_http_plugs(adapter_name: str) -> None:
         f"{adapter.name}: a second, independent control_capabilities() call returned different surfaces -- "
         f"{control_document_1.get('surfaces')!r} vs {control_document_2.get('surfaces')!r}"
     )
+
+
+# --- vector 2b (D-4, Phase 10 WP-3): the real-dial form on socket plugs ---
+
+
+_SOCKET_ADAPTER_NAMES: tuple[str, ...] = tuple(
+    name for name, obj in registered_adapters().items() if getattr(obj, "transport_kind", None) == "socket"
+)
+# Deliberately NO non-vacuity assert here (monitor 裁定
+# `{scratchpad}/wo-rulings-1.md` 裁定 2, phase 10 WP-3): WP-3 lands before
+# any adapter declares `transport_kind == "socket"` at all, so asserting
+# "at least one" here would fail on this very branch, on every run, until
+# WP-4a lands. WP-4a adds that assert once `r2db-api-socket` is
+# registered (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-4:
+# "非vacuity assertは『registryにtransport_kind == "socket"のplugが1件以
+# 上ある』-- registered_adapters()/registryを読む形にする").
+#
+# NOT `@pytest.mark.parametrize("adapter_name", _SOCKET_ADAPTER_NAMES)`:
+# measured directly (test_c11_response_schema_conformance.py's own
+# `_require_params_for` docstring records the identical finding), an
+# EMPTY parametrize list does not collect zero items silently -- pytest
+# instead collects exactly one SKIPPED placeholder item (`test_..._
+# socket_plugs[NOTSET]`), which this repository's own discipline treats
+# as a failure mode indistinguishable from silently permitting the
+# unknown (`skip禁止`, `OPERATING_CONDITIONS.md` section 1.3 item 26) and
+# would violate WP-3's own "skipped 0 / xfailed 0" completion gate. A
+# single, always-collected test function that loops over this (possibly
+# empty) tuple avoids that placeholder entirely: zero iterations is an
+# ordinary PASS, matching every other "declare-first, silently vacuous"
+# vector already in this file (e.g. the version-gated early `return`s
+# above).
+#
+# registry-guards group note (F-8 (ii) 差し戻し, 監督裁定 2026-09-08,
+# `docs/design/CONFORMANCE_ADAPTER_V1.md` §24.2): this function carries no
+# `adapter` parametrize, so `conftest.py`'s `pytest_collection_modifyitems`
+# puts it in the `registry-guards` xdist group -- the group `conftest.py`'s
+# own residue-guard fixtures otherwise assume never provisions anything or
+# starts a real process. WP-4a's own non-vacuity assert on `_SOCKET_
+# ADAPTER_NAMES` (added once a `"socket"` plug is registered) MUST keep
+# that assumption true for the group as a whole: keep the "registry has
+# >= 1 socket plug" check itself a pure registry read (no real surface
+# started), and if the real-dial body below is ever split out of this one
+# function, keep it in the SAME function/group rather than handing socket-
+# plug launches to a different xdist group's tests.
+
+
+def test_c19_surfaces_are_really_dialable_on_socket_plugs() -> None:
+    """Design D-4 / D-1 (A) 4: for a `transport_kind == "socket"` plug,
+    the D-2 declare-and-echo vector above (`test_c19_surfaces_declare_
+    and_echo_on_http_plugs`, self-consistency across two in-process calls
+    to the SAME running app) becomes a REAL dial instead --
+    `surfaces.data`/`surfaces.control` name this plug's own real,
+    dialable loopback URL (its own nginx, `conformance-tests/socket_
+    harness.py`), and a BRAND NEW httpx client (never the adapter's own
+    internal one, never reusing its transport) GETs
+    `<base_url>/capabilities` over REAL TCP and gets back the identical
+    `contract_version`/`surfaces` the adapter's own `capability_
+    document()`/`control_capabilities()` already returned in-process.
+    Both planes are dialed (design D-4: "data/controlの両面をダイヤル
+    する -- C-19のD-2 vectorが本来見ているのはもう一方の面である").
+
+    The branch's own judgement is `adapter.transport_kind == "socket"`
+    (via `_SOCKET_ADAPTER_NAMES` above, computed from the registry) --
+    never a name suffix or URL shape guess (`OPERATING_CONDITIONS.md`
+    section 1.7 item 52).
+
+    As of WP-3, `_SOCKET_ADAPTER_NAMES` is always empty, so this loop's
+    own body never executes and this test PASSES vacuously -- a
+    deliberate, disclosed vacuity (see the comment above
+    `_SOCKET_ADAPTER_NAMES`), not silently permitted uncertainty: WP-4a's
+    own socket adapter is what first drives this body for real, and the
+    mutation this body would need to catch (design D-4's own "壊すとど
+    う見えるか": socket adapter の surfaces の値を実 port と違う port に
+    すると、この枝が接続失敗で赤になる) has no plug to exercise it
+    against yet either.
+    """
+    for adapter_name in _SOCKET_ADAPTER_NAMES:
+        adapter = registered_adapters()[adapter_name]
+        data_document = _capability_document(adapter)
+        contract_version = str(data_document.get("contract_version", "0.0.0"))
+        if _semver_tuple(contract_version) < (1, 6, 0):
+            continue
+
+        surfaces = data_document.get("surfaces")
+        assert isinstance(surfaces, Mapping), (
+            f"{adapter.name}: capability_document() carries no usable 'surfaces' -- {data_document!r}"
+        )
+        data_url = surfaces.get("data", {}).get("base_url") if isinstance(surfaces.get("data"), Mapping) else None
+        assert data_url, f"{adapter.name}: surfaces.data.base_url is missing or empty -- {surfaces!r}"
+
+        probe_app = fresh_identifier("c19dial")
+        adapter.provision_application(probe_app)
+        try:
+            handle = adapter.issue_credential(probe_app, "runtime")
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(
+                    data_url + "/capabilities", headers={"authorization": f"Bearer {handle.secret}"},
+                )
+            # 監督裁定 2026-09-08 (F-8): an AUTHENTICATED GET on the data
+            # plane must answer exactly 200 -- `< 500` is a READINESS
+            # probe's own judgement (`socket_harness.py::wait_until_ready`,
+            # which deliberately tolerates 401 with NO Authorization
+            # header); this vector already sends a real runtime credential,
+            # so anything other than 200 (a 401/403/404) is itself a real
+            # failure this assertion must not let slide past to the two
+            # document-comparison asserts below.
+            assert response.status_code == 200, (
+                f"{adapter.name}: an authenticated real TCP GET on the declared surfaces.data.base_url "
+                f"({data_url!r}) answered status {response.status_code}, expected 200"
+            )
+            dialed_document = response.json()
+        finally:
+            adapter.deprovision_application(probe_app)
+
+        assert dialed_document.get("contract_version") == contract_version, (
+            f"{adapter.name}: the real dial to surfaces.data.base_url returned contract_version "
+            f"{dialed_document.get('contract_version')!r}, the in-process call returned {contract_version!r}"
+        )
+        assert dialed_document.get("surfaces") == surfaces, (
+            f"{adapter.name}: the real dial to surfaces.data.base_url returned different surfaces -- "
+            f"{dialed_document.get('surfaces')!r} vs {surfaces!r}"
+        )
+
+        if _control_plane_status(adapter) == "unavailable":
+            continue
+        control_url = (
+            surfaces.get("control", {}).get("base_url") if isinstance(surfaces.get("control"), Mapping) else None
+        )
+        assert control_url, f"{adapter.name}: surfaces.control.base_url is missing or empty -- {surfaces!r}"
+
+        control_actor = adapter.control_credential()
+        control_document = adapter.control_capabilities(control_actor)
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                control_url + "/capabilities", headers={"authorization": f"Bearer {control_actor.secret}"},
+            )
+        # 監督裁定 2026-09-08 (F-8): same reasoning as the data-plane dial
+        # above -- an authenticated GET must answer exactly 200.
+        assert response.status_code == 200, (
+            f"{adapter.name}: an authenticated real TCP GET on the declared surfaces.control.base_url "
+            f"({control_url!r}) answered status {response.status_code}, expected 200"
+        )
+        dialed_control_document = response.json()
+        assert dialed_control_document.get("contract_version") == control_document.get("contract_version"), (
+            f"{adapter.name}: the real dial to surfaces.control.base_url disagreed on contract_version"
+        )
+        assert dialed_control_document.get("surfaces") == control_document.get("surfaces"), (
+            f"{adapter.name}: the real dial to surfaces.control.base_url returned different surfaces -- "
+            f"{dialed_control_document.get('surfaces')!r} vs {control_document.get('surfaces')!r}"
+        )
 
 
 # --- vector 3 (D-3): typed catalog + round-trip --------------------------

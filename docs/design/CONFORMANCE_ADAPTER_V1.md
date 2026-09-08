@@ -2,13 +2,15 @@
 
 ## 文書情報
 
+- 版数: 1.14 (§24 を新設。port v1.14: phase 10 WP-3、design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-1 (A) 4 由来の coordinated revision -- `ConformanceAdapter` に既定を持たない抽象属性 `transport_kind` (`"in_process"` / `"asgi"` / `"socket"`) を 1 個追加する。新規 abstract method は無い。既存 4 registered adapter は現状どおりの値 (`in_process` × 2、`asgi` × 2) を宣言し挙動は変わらない。5・6 番目の plug (`r2db-api-socket`/`MitateDB-api-socket`、`socket` を宣言) は本 WP では未登録 (WP-4 が登録する)。詳細は §24
+- §24.3 追補 (2026-09-08, WP-3 差し戻し反映、監督裁定 `{scratchpad}/phase10/wp3-rulings.md`): port v1.14 のまま (バージョン番号は据え置き、port-level 変更なし)。`_build_client` の契約を明記 (F-2 (c): app 1個につきclient 1個。socket実装はappごとにuvicorn+nginxの対を持ってよく、1 nginxで2 upstreamを束ねる形は要求しない)。3個目の hook `_reset_surface_state(self) -> None` (既定no-op、`isolated_application_surface`が`copy.copy(self)`直後に呼ぶ) を追加 (F-2 (b))。`hold_in_flight`実現 (`_hold_in_flight_via_http_requests`/`_hold_in_flight_via_http_requests_over_stalled_gate`) も`_build_client`hookを経由するよう修正 (F-10、旧extraction が見落としていた直接構築箇所)。§24.3末尾の未実測断定を訂正 (F-7)。§24.2 に、`test_c19_surfaces_are_really_dialable_on_socket_plugs` が `registry-guards` xdist group に入ることと WP-4a の非 vacuity assert がその group を跨がない形にすべき旨の注記を追加 (F-8 (ii))。詳細は §24.3
 - 版数: 1.13 (§23 を新設。port v1.13: phase 9 WP-1、design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1 由来の coordinated revision -- 5 新規 abstract method (`schema_operation_with_result`/`attempt_mutation_with_result`/`attempt_batch_with_result`/`attempt_cross_entity_batch_with_result`/`query_with_budget`) を追加し、契約 1.7.0 が新設する 8 項目 (`dry_run`/`plan`/`budget`/schema `idempotency_key`/`enum`・`nullable`・`field_constraints`/結果側 `request_id`/結果側 `descriptor`/`alter_field`) を運ぶ。`alter_field` は独立 primitive ではなく `schema_operation_with_result` の `operation` 引数へ畳んだ (§23.2、監督裁定 2026-09-07)。5 限界 (i)〜(v) は `ConformanceAdapter` の class docstring に置く (WP-1b rework)。削除は無い。詳細は §23
 - 版数: 1.12 (§22 を新設。port v1.12: phase 8 WP-1b、design docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-2 由来の coordinated revision -- 2 新規追加: `hold_in_flight(session, n)` (C-05 V2 の in-flight 保持 primitive、`concurrency` を初めて駆動可能にする) と `select_eq`/`attempt_filter` への `limit`/`extra_predicates` optional フィールド (L7-21、`result_items` 両側化・`query_complexity` の能力判定化)。削除は無い。詳細は §22
 - 版数: 1.11 (§21 を新設。port v1.11: phase 7 WP-4、design docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md D-6 由来の coordinated revision -- 2 新規追加: `isolated_application_surface()` (C-05 V2 の隔離 data-plane primitive、`isolated_control_surface()` と対だが yield する形が異なる) と `BatchOperation`/`ScopedBatchOperation` への `idempotency_key` optional フィールド (C-07 (ii))。削除は無い。**この改訂で §19 (v1.9)/§20 (v1.10) の間に文書情報の版数行が追随していなかった欠落 (1.8 のまま) も同時に解消した** (事実のみの記録、コード変更なし — port は既に v1.10 の内容を持っていた)
 - §21.4 追補 (2026-09-06, WP-5 rework round 2, 監督裁定 item 1): port v1.11 のまま (バージョン番号は据え置き)。`isolated_control_surface()` に optional keyword-only `limits_override` 引数を追加し、yield 形を bare callable から非normative `IsolatedControlHandle` (`capabilities`/`register_application`/`list_applications`) に拡張、`adapter.py` に非normative `apply_limits_override` ヘルパーを追加。`test_c14_authority_boundary.py` の `applications` vector を隔離 surface 駆動 (override 8) に変更。4 plug 実装。詳細は §21.4。
 - §23.4 追補 (2026-09-07, 監督裁定 A `{scratchpad}/rulings-wp3a-review.md`): port v1.13 のまま (バージョン番号は据え置き)。`schema_operation_with_result(..., enum=...)` に tri-state sentinel `ENUM_CLEAR` (`adapter.py` モジュールレベル、`_EnumClear` 単一インスタンス) を追加し、「省略」(`None`、既定) と「明示 `enum: null`」(`ENUM_CLEAR`) を区別できるようにした。既存呼び出し (省略、または `Sequence` を渡すもの) は byte 互換のまま。4 adapter (`conformance_adapter_r2db{,_http}.py`/`conformance_adapter_mitatedb{,_http}.py`) の `schema_operation_with_result` を同型に更新し、`test_c20_constraint_declaration_agreement.py` の肯定枝に leg (9) (`alter_field(enum=ENUM_CLEAR)` で enum が解除される) を追加。詳細は §23.4。
 - port v1.8: `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` phase 4 WP-1 由来の coordinated revision -- 3 新規 abstract method (`audit_query`/`flush_audit_buffer`/`audit_visibility_lag_ms`)、declare-first dispatch、`SurfaceAbsent` の意味拡張 (audit_query 専用)。全 4 registered adapter は本 WP 時点で `audit_query: unavailable` のままのため、PROVIDED 分岐は本 WP では実行されない (WP-2(b)/WP-3(b) で初実行) -- CONDITIONS.md C-09/C-11 行にこの限界を明記。**§17 (v1.7) 欠番の解消 (WP-1 コードレビュー指摘、2026-09-02)**: `conformance-tests/adapter.py` のコメントが既に "port v1.7" (`ScopedBatchOperation`/`attempt_cross_entity_batch`、phase 3.5 WP-3 由来) を名乗っているのに本文書に対応節が無い欠落を、v1.8 追記と同一改訂で §17 として backfill した (事実のみの記録、コード変更なし) — v1.8 は空き番号 §17 ではなく §18 として新設し、番号を整合させた
-- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07
+- 発行日: 2026-08-30 (v1.6)。§17 (v1.7 backfill) / §18 (v1.8) 追記日: 2026-09-02。§21 (v1.11) 追記日: 2026-09-06。§22 (v1.12) / §23 (v1.13) 追記日: 2026-09-07。§24 (v1.14) 追記日: 2026-09-08
 - 設計担当: Opus (§1〜§11)。§12/§13 は `docs/design/R2DB_CCR13_STORAGE_V1.md` (設計: Fable) の指示に基づき、本文書 §11 の coordinated design revision 手順を実装側 (Sonnet) が適用したもの (独立レビュー: Opus)。§15 は `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md` (設計: Fable) work package WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§16 は `docs/design/DESTRUCTIVE_CONFIRMATION_V1.md` (設計: Fable) work package WP-2 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの。§17 は `docs/design/PHASE35_CROSS_ENTITY_AND_CONTRACT_130_V1.md` (設計: Fable) work package WP-3 の事実を、実装側 (Sonnet) が phase 4 WP-1 の際に事実のみ backfill したもの。§18 は `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` (設計: Fable) phase 4 WP-1 の指示に基づき、同じ coordinated design revision 手順を実装側 (Sonnet) が適用したもの
 - 位置づけ: `conformance-tests/` が両peer実体に対して同一condition IDを実行できるようにするための正規設計。実装はこの設計に従う。
 
@@ -3269,3 +3271,163 @@ byte-for-byte request shape.
 ### 23.7 追補 (2026-09-07): `attempt_mutation_with_result` gains `idempotency_key`
 
 `test_c25_result_request_id.py`'s (4) replay leg needs a request-level idempotency key on a single-operation call -- added as keyword-only `idempotency_key: str | None = None`, carried through unedited to whatever real entry point already receives `dry_run`/`plan`/`budget`/`transaction` (embedded on the single operation item for an in-process plug whose real dispatcher reads it there, exactly where `fold_batch_idempotency_key`'s existing callers already place it; on the request body's own top-level `extra_body` key for a wire-surface plug, exactly where `attempt_batch_with_addresses` already places its own folded value), in all 4 registered plugs; byte-compatible for every pre-addendum caller that omits it.
+
+## 24. v1.14 port revision (Phase 10 WP-3, coordinated with docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-1 (A) 4 / D-1 (A) 6 / D-12)
+
+Phase 10 gives the port a way to know, DECLARATIVELY, which transport an
+adapter's own client actually dials through -- previously this could only
+be guessed from an adapter's `name` string (`"http+postgres"` substring)
+or attribute shape, both of which design D-12 calls a proxy indicator
+(`OPERATING_CONDITIONS.md` section 1.7 item 52: "代理指標を使わない").
+This revision adds one class attribute, no new abstract methods, no
+removals.
+
+### 24.1 `transport_kind` -- a bare, default-less abstract attribute
+
+`ConformanceAdapter` gains:
+
+```python
+transport_kind: str
+```
+
+placed immediately after the existing `name: str` line. This is a PEP
+526 variable annotation ONLY -- no `=` assignment -- so it never becomes
+a real class attribute on the ABC itself (`"transport_kind" not in
+vars(ConformanceAdapter)`); a concrete subclass that forgets to set its
+own `transport_kind = "..."` class attribute raises `AttributeError` the
+first time anything reads `adapter.transport_kind`, rather than silently
+inheriting a fallback value. This mirrors `name`'s own existing
+convention exactly (design D-1 (A) 4, monitor 裁定 2026-09-08: "既定は無
+い (各 adapter が明示する抽象属性)").
+
+Three values, closed vocabulary (contract-independent -- this word list
+lives in the port, never in `spec/data-service-api.v1.json`):
+
+| value | meaning | declared by |
+|---|---|---|
+| `"in_process"` | drives the peer's own product objects directly; no ASGI/HTTP boundary at all | `conformance_adapter_r2db.py`, `conformance_adapter_mitatedb.py` |
+| `"asgi"` | an in-process ASGI transport (`httpx.ASGITransport`) -- no real socket | `conformance_adapter_r2db_http.py`, `conformance_adapter_mitatedb_http.py` |
+| `"socket"` | a real loopback TCP socket, fronted by a real reverse proxy (`conformance-tests/socket_harness.py`) | `conformance_adapter_r2db_socket.py` / `conformance_adapter_mitatedb_socket.py` (WP-4; not registered as of WP-3) |
+
+All 4 currently-registered adapters declare their own value as a single
+class-attribute line (`transport_kind = "in_process"` / `"asgi"`),
+immediately after their own `name = "..."` line -- the SAME declared
+value every one of them already implied by construction; this revision
+changes no adapter's own behavior, only makes the classification
+explicit and machine-readable.
+
+### 24.2 Consumers
+
+- `tools/perf_baseline.py`'s `_classify_plug` (design D-12) reads this
+  declaration instead of an adapter's `name` suffix and attribute shape,
+  so its own `transport=` label on the `PERF` line is 1:1 with the
+  adapter's own declared value, never a re-derived guess. A plug whose
+  name/attribute shape disagrees with its OWN declared `transport_kind`
+  still raises `UnknownAdapterShape` (unchanged: a genuinely undeclared
+  or malformed plug must still fail loud, not silently fall back to a
+  broadened heuristic).
+- `test_c19_client_self_sufficiency.py`'s real-dial branch (design D-4)
+  is driven by `adapter.transport_kind == "socket"`, never a name/URL
+  shape guess -- as of WP-3 this branch's own parametrize list is empty
+  (no adapter declares `"socket"` yet), a deliberate, documented vacuity
+  (monitor 裁定 `{scratchpad}/wo-rulings-1.md` 裁定 2: the non-vacuity
+  assert on this branch is added by WP-4a, once a `"socket"` plug is
+  registered). **registry-guards group との相互作用 (F-8 (ii) 差し戻し,
+  監督裁定 2026-09-08):** この branch を持つ関数 (`test_c19_surfaces_are_
+  really_dialable_on_socket_plugs`) は `@pytest.mark.parametrize("adapter",
+  ...)` を持たない (ループ形式の単一関数) ため、`conformance-tests/
+  conftest.py`'s own `pytest_collection_modifyitems` (`group = str(
+  adapter_param) if adapter_param else "registry-guards"`) によって
+  `registry-guards` xdist group に入る -- この group は本来
+  `registered_adapters()` を読むだけで実プロビジョニング/実プロセス起動
+  を伴わない前提 (同ファイルの `_wp5_application_residue_guard`/`_wp5_
+  residue_guard_is_not_vacuous` の docstring 「carries no real cost for
+  e.g. `registry-guards`-group tests」) の上に立つ。WP-4a がこの branch へ
+  「registry に `transport_kind == "socket"` の plug が 1 件以上ある」の
+  非 vacuity assert を足し、かつその本体 (実 socket dial のループ) を実行
+  させると、`registry-guards` group を担当する worker が socket plug の
+  実 nginx+uvicorn 面を追加で起動することになり、上記前提が崩れる (完了
+  条件 14 の起動プロセス数もこの分を含めて数える必要がある)。したがって
+  WP-4a は、非 vacuity の判定 (registry の読み取りのみ、実面を起動しな
+  い) をこの一関数の外へ切り出す場合でも `registry-guards` group を跨い
+  で別の group のテストへ持ち出さないこと -- 実 dial は元々この一関数に
+  閉じているので、判定を分離しても同じ関数内に留めるのが最も単純。
+- `conformance-tests/socket_harness.py`'s own self-test
+  (`test_socket_harness.py::test_every_registered_adapter_declares_
+  transport_kind`) pins both halves of this section: every currently
+  registered adapter carries a value from the 3-word vocabulary, AND the
+  ABC itself carries no default.
+
+### 24.3 Hook extraction on the two HTTP+PostgreSQL plugs (design D-1 (A) 6) -- non-normative, no port change
+
+Not a port-level change (no new abstract method, no signature change on
+any existing one) -- recorded here because it is the OTHER half of what
+makes `transport_kind == "socket"` realizable in WP-4 without a second,
+independently-written HTTP+PostgreSQL plug. `conformance_adapter_r2db_
+http.py`'s `R2DBHttpConformanceAdapter` and `conformance_adapter_
+mitatedb_http.py`'s `MitateDBHttpConformanceAdapter` each gain two
+overridable instance methods (identical shape, independently
+implemented, P-6):
+
+- `_build_client(self, app, base_url) -> httpx.AsyncClient` -- default:
+  `httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+  base_url=base_url)` (byte-for-byte what every call site constructed
+  directly before this extraction). **Contract (監督裁定 2026-09-08, F-2
+  (c)):** exactly one `app` per call, exactly one client back -- `app` is
+  always a single composed ASGI callable (the data plane's OR the control
+  plane's, never both at once). A `transport_kind == "socket"` override
+  (WP-4) is free to give EACH `app` its own dedicated uvicorn + its own
+  dedicated nginx (one real reverse-proxy pair per app, so "one surface"
+  becomes a DATA pair plus a CONTROL pair, two independent real reverse
+  proxies) -- this hook never requires, and no caller may assume, that a
+  single shared nginx instance fronts two upstreams the way `conformance-
+  tests/socket_harness.py`'s own `RealSocketSurface` convenience class
+  happens to compose them. `RealSocketSurface` is ONE way to satisfy this
+  hook's contract, not the contract itself.
+- `_surfaces_value(self) -> dict` -- default: the plug's own existing
+  synthetic, non-dialable `surfaces` constant (r2db: the module-level
+  `_SURFACES` dict; MitateDB: `{"data": {"base_url": _DATA_SURFACE_
+  BASE_URL}, "control": {"base_url": _CONTROL_SURFACE_BASE_URL}}`,
+  which now also feeds the `platform_declarations` DB row `_bootstrap_
+  platform` seeds via a new `surfaces` parameter, replacing that
+  function's own former direct reference to those two module constants).
+- `_reset_surface_state(self) -> None` (監督裁定 2026-09-08, F-2 (b)) --
+  default: no-op. Called on `isolated_application_surface()`'s own fresh
+  `copy.copy(self)` instance, immediately after the copy and before that
+  copy's own composition begins. `copy.copy` is a SHALLOW copy: a
+  `transport_kind == "socket"` subclass that holds real per-surface OS
+  state (a port reservation, a server handle) on `self` would otherwise
+  have its isolated copy silently ALIAS the parent's own live handles
+  with no hook-driven place to replace them; this hook is that place.
+
+Every construction site that used to build a client or inject `surfaces`
+directly (both plugs' own `__init__` data/control clients, r2db's
+control-stack rebuild path, both plugs' `isolated_control_surface`, both
+plugs' `isolated_application_surface`, and both plugs' `hold_in_flight`
+realization -- `_hold_in_flight_via_http_requests` / `_hold_in_flight_
+via_http_requests_over_stalled_gate`, the one remaining direct-
+construction site the original extraction missed, closed by 監督裁定
+2026-09-08 F-10) now goes through one of these hooks, including the
+isolated-surface sites (design D-1 (A) 6 point (c): "隔離surfaceの構築
+も同じhookを通す"). A socket-adapter subclass (WP-4) overrides
+`_build_client`/`_surfaces_value`/`_reset_surface_state`; its isolated
+surface then gets its own dedicated uvicorn+nginx instance rather than
+silently sharing the parent's (the exact failure design D-1 (A) 6 names:
+"隔離面が親の共有appをserveしたまま緑で通りC-05の隔離駆動が無音で誤
+る"), and `hold_in_flight`'s own held requests dial the real socket too,
+never falling back to an in-process ASGI transport the parent surface
+itself no longer uses.
+
+Behavior-preserving for all 4 currently-registered plugs, fixed by
+running `conformance-tests` before and after this extraction and
+observing an identical 4-number tally for the pre-existing test surface
+(WP-3 completion condition 10). 監督裁定 2026-09-08 (F-7): that before/
+after tally is recorded in WP-3's own completion report
+(`{scratchpad}/phase10/wp3-report.md`/`wp3-report-2.md`), not in this
+design document -- `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §11
+carries no such record as of this revision. Completion condition 14 (the
+real launch-COUNT question -- how many uvicorn/nginx processes a full run
+starts once a `transport_kind == "socket"` plug exists) cannot be
+measured at all until WP-4a registers one; WP-4a measures it then and
+records it, together with this section's own before/after tally, in
+`docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §11.
