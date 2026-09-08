@@ -304,6 +304,26 @@ def _prose_unconditional_counts(version_binding: str) -> dict[str, int]:
     return counts
 
 
+# Phase 10 WP-5a (contract 1.8.0, design docs/design/
+# PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-5 (i)) flagged this as a design gap
+# (WP-5a report): 1.8.0's monitor-finalized fixed text originally supplied
+# only 4 pieces -- (1) capability_status.rules, (2) limits.profile, (3) the
+# obligations entry, (4) the CONTRACT_HISTORY.md anchor -- none of them a
+# version_binding restatement, so version_binding's prose did not name
+# 1.8.0 at all and this check went red for 1.8.0 without an exception.
+#
+# Supervisor ruling (2026-09-08): the exception WP-5a added here was NOT
+# adopted -- the prose/machine agreement this test enforces is the L9-9
+# mechanism and must not be weakened for any version, 1.8.0 included. The
+# monitor supplied a 5th fixed-text piece instead (fixed text (5),
+# scratchpad/phase10/fixed-text-1.8.0.md): the "Only an implementation
+# declaring 1.8.0 or higher ..." paragraph itself, placed in version_
+# binding directly after the 1.7.0 paragraph and before the
+# retroactive-denial enumeration (which fixed text (6) also extends to
+# 1.8.0-only, mechanically, the way contract 1.7.0 extended the 1.6.0-only
+# enumeration -- see `git log -S"1.7.0-only" -- spec/data-service-api.v1.
+# json`). With that paragraph in place, 1.8.0 passes this check on its own
+# merits like every other version; no exception is needed or kept.
 def test_obligations_version_set_matches_the_prose():
     """(v)."""
     contract = _contract()
@@ -315,8 +335,8 @@ def test_obligations_version_set_matches_the_prose():
     assert obligations_versions, "versioning.obligations must not be empty"
 
     assert obligations_versions == prose_versions, (
-        f"versioning.obligations version set {sorted(obligations_versions)} does not match "
-        f"version_binding's own prose version set {sorted(prose_versions)}"
+        f"versioning.obligations version set {sorted(obligations_versions)} does not match version_binding's "
+        f"own prose version set {sorted(prose_versions)}"
     )
 
 

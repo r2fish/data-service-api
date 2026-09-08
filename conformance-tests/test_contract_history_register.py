@@ -440,6 +440,35 @@ def test_contract_history_companion_introduced_in_agrees_with_a_since_marker_whe
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 10 WP-5a (contract 1.8.0, design docs/design/
+# PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-5 (i), CCR_DISPOSITION.md
+# subordinate ruling 13): contract 1.8.0 introduces 3 new contract values
+# ((1) capability_status.rules' new array element, (2) limits.profile's
+# appended sentence, (3) versioning.obligations' 1.8.0 entry) that --
+# unlike every "## <json_path>" section above -- carry NO "Since
+# X.Y.Z"/"subordinate ruling N"-shaped provenance marker of their own
+# (verified: 0 scanner-pattern hits on all 3). An earlier revision of this
+# WP recorded that provenance as a free-standing "### " (3-hash) anchor
+# section in the companion, deliberately outside this file's "## <json_
+# path>" heading-set-equality check, with 3 dedicated tests here pinning
+# that anchor's text, its subordinate-ruling reference, and its
+# non-membership in the manifest. Supervisor ruling 2026-09-08 (WP-5a
+# review, CONTRACT_HISTORY "### " free anchor disposition) rejected that
+# shape: a second, unregistered heading kind left this register's own "2
+# sets match exactly" guarantee with an escape hatch for any anchor added
+# the same way later, and `## versioning.version_binding` already carries
+# subordinate ruling 13 in its own listing (it is one of 1.8.0's own 4
+# pieces of prose). The 3 new marker-free values' provenance, and the
+# monitor-finalized anchor sentence itself, are now recorded verbatim in
+# `## versioning.version_binding`'s own "Revision note" instead -- inside
+# the existing, already-registered section, not a new heading -- so no
+# dedicated test is needed here: the ordinary `## <json_path>` register
+# checks above (heading-set equality, quote-verbatim, ruling-reference
+# validity) already cover that section, unchanged.
+# ---------------------------------------------------------------------------
+
+
 def test_stripped_contract_has_zero_scanner_hits_outside_the_unstripped_paths():
     """New assert (work order §2 WP-1 (6) / (18)): scan the RAW contract
     JSON (no reverse-apply) and require that every path the scanner still
