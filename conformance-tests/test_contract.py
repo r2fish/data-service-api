@@ -75,20 +75,230 @@ def test_all_ccrs_have_disposition_records():
     assert "却下・保留となるCCRはない" in text
 
 
-def test_contract_declares_1_7_0():
-    # Phase 9 WP-1 (docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md
-    # §3 D-1..D-9, CCR_DISPOSITION.md subordinate ruling 12):
+def test_contract_declares_1_8_0():
+    # Phase 10 WP-5a (docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+    # §3 D-5 (i)/(v), CCR_DISPOSITION.md subordinate ruling 13):
     # the version bump itself, pinned so a future revert of just this one
     # line is caught here rather than only by whichever other test happens
-    # to touch contract_version. Supersedes the 1.6.0 pin (phase 6 WP-1,
-    # subordinate ruling 11) this test itself carried before -- 1.6.0 is
+    # to touch contract_version. Supersedes the 1.7.0 pin (phase 9 WP-1,
+    # subordinate ruling 12) this test itself carried before -- 1.7.0 is
     # already published, so this file never re-adds a standalone
-    # "declares 1.6.0" test: any implementation still declaring 1.6.0 or
+    # "declares 1.7.0" test: any implementation still declaring 1.7.0 or
     # earlier is exercised by version_binding's own retroactivity rule,
     # not by a dedicated pin here for a version this document no longer
-    # declares.
+    # declares. NOTE (WP-5a scope): this is the contract JSON's OWN
+    # contract_version field -- neither peer's own runtime declaration
+    # (`service.py`/`control_plane.py`/`cell.py`) moves in this WP; both
+    # peers still declare 1.7.0 until WP-6's pair-closing version-flip
+    # commit (design D-5 (v), work order WP-5 "触らないファイル").
     contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
-    assert contract["contract_version"] == "1.7.0"
+    assert contract["contract_version"] == "1.8.0"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 WP-5a (contract 1.8.0, design docs/design/
+# PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-5 (i), CCR_DISPOSITION.md
+# subordinate ruling 13): completion conditions 1-4 and 6 (work order §2
+# WP-5 table). The 3 sentences/entry below are copied VERBATIM from the
+# monitor-finalized fixed-text file (scratchpad/phase10/fixed-text-1.8.0.md)
+# -- never paraphrased (OPERATING_CONDITIONS.md §1.5 items 35/36).
+# ---------------------------------------------------------------------------
+
+FIXED_1_8_0_CAPABILITY_STATUS_RULE = (
+    "limit_enforcement values describe the whole deployment reachable at the declared surfaces "
+    "base URL, never one server process: a peer declares enforced for a limit class only when the "
+    "bound holds across every process that may serve that base URL at the same time, and declares "
+    "deployment_required when the bound is held per process and more than one process may serve "
+    "that base URL."
+)
+
+FIXED_1_8_0_LIMITS_PROFILE_SUFFIX = (
+    "Enforcement scope is the deployment behind the declared base URL (capability_status.rules); a "
+    "bound kept in per-process memory is enforced for the deployment only while exactly one process "
+    "serves that base URL."
+)
+
+FIXED_1_8_0_OBLIGATIONS_ENTRY = {
+    "version": "1.8.0",
+    "subordinate_ruling": 13,
+    "unconditional": ["limit_enforcement_scoped_to_deployment_behind_base_url"],
+    "conditional": [],
+}
+
+# The full key set of `limits` BEFORE 1.8.0 (phase 9 state) -- completion
+# condition 2 requires (2) to land inside the EXISTING `profile` string,
+# never as a new sibling key; this snapshot is what makes "no new key"
+# mechanically checkable rather than merely eyeballed.
+_PRE_1_8_0_LIMITS_KEYS = frozenset({
+    "audit_requests_per_minute_note",
+    "classes",
+    "enum_members",
+    "example_profile",
+    "finite_required",
+    "profile",
+    "request_budget",
+})
+
+
+def test_contract_pins_the_1_8_0_ruling_sentences_verbatim():
+    """Completion conditions 1-3 (work order §2 WP-5 table): the 3
+    monitor-finalized 1.8.0 pieces land at their designated contract
+    locations, byte-for-byte -- (1) as `capability_status.rules`' final
+    (5th) array element, (2) appended to the END of `limits.profile`'s
+    existing string (condition 2: never a new key), and (3) as
+    `versioning.obligations`' 1.8.0 entry, carrying exactly the same 4
+    keys every other entry in that array carries (condition 3)."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+
+    # (1) capability_status.rules.
+    rules = contract["capability_status"]["rules"]
+    assert len(rules) == 5, (
+        f"expected 5 capability_status.rules (4 pre-1.8.0 + 1.8.0's own new rule), got {len(rules)}: {rules!r}"
+    )
+    assert rules[-1] == FIXED_1_8_0_CAPABILITY_STATUS_RULE
+
+    # (2) limits.profile -- condition 2.
+    limits = contract["limits"]
+    assert isinstance(limits["profile"], str)
+    assert limits["profile"].endswith(FIXED_1_8_0_LIMITS_PROFILE_SUFFIX), (
+        f"limits.profile does not end with the monitor-finalized 1.8.0 sentence verbatim: {limits['profile']!r}"
+    )
+    key_diff = set(limits.keys()) ^ _PRE_1_8_0_LIMITS_KEYS
+    assert not key_diff, (
+        f"limits gained/lost a key -- 1.8.0's (2) must land inside the existing `profile` STRING, "
+        f"never as a new sibling key: {sorted(key_diff)}"
+    )
+
+    # (3) versioning.obligations -- condition 3.
+    obligations = contract["versioning"]["obligations"]
+    assert obligations[-1] == FIXED_1_8_0_OBLIGATIONS_ENTRY, (
+        f"versioning.obligations' 1.8.0 entry does not byte-match the monitor-finalized entry: {obligations[-1]!r}"
+    )
+    assert set(obligations[-1].keys()) == {"version", "subordinate_ruling", "unconditional", "conditional"}
+
+
+def _subordinate_ruling_numbers_in_ccr_disposition() -> set[int]:
+    """Own copy of `test_contract_history_register.py`'s identically-
+    purposed helper (this suite's convention: each test module owns its
+    own copy, e.g. `test_c09_audit_evidence.py`'s docstring). Finds every
+    numbered item under `spec/CCR_DISPOSITION.md`'s "### 従属判断 --
+    すべて裁定済み" heading."""
+    text = (ROOT / "spec" / "CCR_DISPOSITION.md").read_text()
+    lines = text.splitlines()
+    heading_marker = "### 従属判断"
+    heading_line_idx = None
+    for i, line in enumerate(lines, start=1):
+        if line.strip().startswith(heading_marker):
+            heading_line_idx = i
+            break
+    assert heading_line_idx is not None, f"CCR_DISPOSITION.md has no {heading_marker!r} heading"
+    numbers: set[int] = set()
+    item_re = re.compile(r"^(\d{1,2})\.\s+\*\*")
+    for i, line in enumerate(lines, start=1):
+        if i <= heading_line_idx:
+            continue
+        m = item_re.match(line)
+        if m:
+            numbers.add(int(m.group(1)))
+    return numbers
+
+
+def test_versioning_obligations_subordinate_rulings_exist_in_ccr_disposition():
+    """Completion condition 6: every `subordinate_ruling` number named in
+    `versioning.obligations` (including 1.8.0's own 13) must exist as a
+    numbered item under `spec/CCR_DISPOSITION.md`'s "### 従属判断 --
+    すべて裁定済み" heading -- a contract obligation whose disposition
+    record was dropped, or never existed, is caught here rather than only
+    informally."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    valid_numbers = _subordinate_ruling_numbers_in_ccr_disposition()
+    assert valid_numbers, "found 0 numbered subordinate rulings in spec/CCR_DISPOSITION.md"
+
+    obligations = contract["versioning"]["obligations"]
+    assert obligations, "versioning.obligations is empty -- this check would be vacuous"
+    missing = sorted(
+        entry["subordinate_ruling"]
+        for entry in obligations
+        if entry["subordinate_ruling"] not in valid_numbers
+    )
+    assert not missing, (
+        f"versioning.obligations names subordinate_ruling number(s) with no matching numbered item "
+        f"in spec/CCR_DISPOSITION.md: {missing}"
+    )
+
+
+# Phase 10 WP-5b (contract 1.8.0, supervisor ruling 2026-09-08): the
+# monitor-finalized version_binding paragraph for 1.8.0 (fixed text (5),
+# scratchpad/phase10/fixed-text-1.8.0.md), copied verbatim -- unlike the
+# WP-5a pieces above, this was NOT part of WP-5a's own scope (that report's
+# open design question); the supervisor's disposition is that it belongs
+# in version_binding itself, placed directly after the 1.7.0 paragraph and
+# before the retroactive-denial enumeration (ruling item 1), and that the
+# `_VERSION_BINDING_PROSE_EXCEPTIONS = {"1.8.0"}` carve-out WP-5a added to
+# test_operation_catalog_register.py's test_obligations_version_set_
+# matches_the_prose is removed rather than kept (ruling items 2-3).
+PIN_1_8_0_VERSION_BINDING_PARAGRAPH = (
+    "Only an implementation declaring 1.8.0 or higher additionally claims conformance to the obligation "
+    "1.8.0 introduces (subordinate ruling 13). That obligation is unconditional in the same sense as every "
+    "obligation enumerated above -- it binds simply by declaring 1.8.0, independent of any capability's own "
+    "status: every limit_enforcement value it publishes describes the whole deployment reachable at the "
+    "declared surfaces base URL, never one server process, so it declares enforced for a limit class only "
+    "when the bound holds across every process that may serve that base URL at the same time, and declares "
+    "deployment_required when the bound is held per process and more than one process may serve that base "
+    "URL. 1.8.0 introduces no obligation on what a client must send: a request valid under 1.7.0 stays valid."
+)
+
+# New (contract 1.8.0): the single-item retroactive-denial row for
+# 1.7.0-declaring peers, following the same pattern PIN_1_7_0_RETROACTIVE_
+# DENIAL_ROW_1_6_0 above documents for the 1.6.0/1.7.0 transition.
+PIN_1_8_0_RETROACTIVE_DENIAL_ROW_1_7_0 = "is not held to any 1.8.0-only obligation retroactively"
+
+
+def test_contract_pins_the_1_8_0_version_binding_paragraph_verbatim():
+    """WP-5b (supervisor ruling 2026-09-08, items 1-2): monitor-finalized
+    fixed text (5) is present verbatim in versioning.version_binding,
+    directly after the 1.7.0 paragraph and before the (mechanically
+    extended) retroactive-denial enumeration; and the new single-item
+    1.7.0-declaring retroactive-denial row exists too."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    version_binding = contract["versioning"]["version_binding"]
+
+    assert _normalize_prose_for_pin(PIN_1_8_0_VERSION_BINDING_PARAGRAPH) in _normalize_prose_for_pin(version_binding), (
+        "versioning.version_binding no longer contains the monitor-finalized 1.8.0 paragraph "
+        "(fixed text (5)) verbatim"
+    )
+    assert PIN_1_8_0_RETROACTIVE_DENIAL_ROW_1_7_0 in version_binding, (
+        "versioning.version_binding is missing the new 1.7.0-declaring retroactive-denial row"
+    )
+
+    # Placement: fixed text (5) must sit between the end of the 1.7.0
+    # paragraph and the retroactive-denial enumeration (ruling item 1),
+    # not merely somewhere in version_binding.
+    anchor_1_7_0_end = "and a request valid under 1.6.0 stays valid."
+    idx_1_7_0_end = version_binding.index(anchor_1_7_0_end)
+    idx_1_8_0_paragraph = version_binding.index("Only an implementation declaring 1.8.0 or higher")
+    idx_retroactive_row = version_binding.index(PIN_1_8_0_RETROACTIVE_DENIAL_ROW_1_7_0)
+    assert idx_1_7_0_end < idx_1_8_0_paragraph < idx_retroactive_row, (
+        "the 1.8.0 version_binding paragraph is not placed directly after the 1.7.0 paragraph and "
+        "before the retroactive-denial enumeration"
+    )
+
+
+def test_contract_packaged_copies_are_byte_identical():
+    """Completion condition 4: the 3 packaged copies of the contract JSON
+    (spec/ + both peers' own `contract/` packages) are byte-for-byte
+    identical, verified by sha256 rather than a mere length/spot check."""
+    import hashlib
+
+    paths = {
+        "spec": ROOT / "spec" / "data-service-api.v1.json",
+        "r2db-api": ROOT / "r2db-api" / "src" / "r2db_api" / "contract" / "data-service-api.v1.json",
+        "MitateDB-api": ROOT / "MitateDB-api" / "src" / "mitatedb_api" / "contract" / "data-service-api.v1.json",
+    }
+    digests = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+    assert len(set(digests.values())) == 1, (
+        f"the 3 packaged contract copies are not byte-identical: {digests}"
+    )
 
 
 def test_contract_audit_fields_include_optional_target_id_and_it_is_not_forbidden():
@@ -606,7 +816,11 @@ PIN_1_6_0_ITEM_3_FIELD_TYPES = """The field-type vocabulary gains a seventh memb
 # subject (which version denies which later-only obligation to which
 # earlier-declaring peer) in a single place rather than splitting it
 # between this paragraph and the new 1.7.0 one.
-PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only or 1.7.0-only obligation retroactively."""
+# Phase 10 WP-5b (contract 1.8.0, supervisor ruling 2026-09-08, subordinate
+# ruling 13): widened AGAIN, mechanically, from "1.6.0-only or 1.7.0-only"
+# to "1.6.0-only, 1.7.0-only, or 1.8.0-only" -- the same extension applied
+# to this sentence for 1.7.0 above, applied once more for 1.8.0.
+PIN_1_6_0_VERSION_BINDING_PARAGRAPH = """Only an implementation declaring 1.6.0 or higher additionally claims conformance to the obligations 1.6.0 introduces (subordinate ruling 11). **Two of those obligations are unconditional in the same sense as every obligation enumerated above** — they bind simply by declaring 1.6.0, independent of any capability's own status: (a) its `GET /v1/capabilities` document carries `surfaces.data.base_url`, the absolute base URL of its own data surface, and — where a control surface is provided at all (`control_plane` other than `unavailable`, the same precondition subordinate rulings 8 and 9 already carry) — both surfaces' capability documents additionally carry `surfaces.control.base_url`, each document carrying the same `surfaces`; and (b) the `secret` returned by any issue or rotate path it offers, in band or out of band, is accepted verbatim as a bearer token on the surface that credential is for, with no composition, splitting, or derivation required of the client (`security.schemes`). **The remaining 1.6.0 obligations are conditional**, in the same sense 1.4.0's own conditional list is: they bind only insofar as the implementation's own `capabilities()` declares the named capability as something other than `unavailable`. Where it declares `application_catalog` as something other than `unavailable`: (1) every `EntityDescriptor` it returns carries `field_types`, total over that entity's own `fields`, reporting `json` for any field created without a declared type. Where it declares `schema_operations` as something other than `unavailable`: (2) a `create_entity` it executes accepts `field_types` and creates each field named there with the type declared there, and an `add_field` it executes accepts every member of the seven-member vocabulary, `json` included; a `field_types` naming a field outside the request's own `fields`, carrying a value outside that vocabulary, or sent without `fields`, is refused with `VALIDATION_FAILED`. **1.6.0 introduces no obligation on what a client must send**: `SchemaOperationRequest.field_types` is optional wherever it appears, and a request valid under 1.5.0 stays valid. An implementation still declaring 1.5.0 is not held to any 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively."""
 
 # (5-current) structured_operations.upsert sentence BEFORE the D-3(vii) edit
 # -- pinned so the manual "obligation count unchanged (2)" audit trail (WP-1
@@ -628,19 +842,34 @@ PIN_1_6_0_UPSERT_SENTENCE_AFTER = """upsert on an entity without a declared uniq
 # constants are renamed PIN_1_7_0_* (their content now includes the
 # 1.7.0-only member; the old PIN_1_6_0_RETROACTIVE_DENIAL_ROW_* names are
 # retired rather than kept as an intermediate, now-incorrect value).
+#
+# Phase 10 WP-5b (contract 1.8.0, supervisor ruling 2026-09-08, subordinate
+# ruling 13): each of these 4 rows is widened AGAIN, mechanically, adding
+# ", or 1.8.0-only" on top of the "..., or 1.7.0-only" member phase 9
+# already added -- the same treatment PIN_1_6_0_VERSION_BINDING_PARAGRAPH's
+# own trailing sentence and PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0 (below)
+# receive. Names are kept as PIN_1_7_0_* (they were never renamed to
+# PIN_1_8_0_* -- only their content changes, following the same
+# no-intermediate-rename convention the comment above already states).
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_1_0 = (
-    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only "
+    "is not held to any 1.2.0-only, 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only "
     "obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0 = (
-    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
+    "is not held to any 1.3.0-only, 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only "
+    "obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0 = (
-    "is not held to any 1.4.0-only, 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
+    "is not held to any 1.4.0-only, 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively"
 )
 PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0 = (
-    "is not held to any 1.5.0-only, 1.6.0-only, or 1.7.0-only obligation retroactively"
+    "is not held to any 1.5.0-only, 1.6.0-only, 1.7.0-only, or 1.8.0-only obligation retroactively"
 )
+# New (contract 1.8.0): the single-item row for 1.6.0-declaring peers,
+# widened from "1.7.0-only" alone (phase 9 WP-1's own new sentence,
+# introduced -- not extended -- alongside the 1.7.0 paragraph) to
+# "1.7.0-only or 1.8.0-only".
+PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0 = "is not held to any 1.7.0-only or 1.8.0-only obligation retroactively"
 
 
 def test_contract_pins_the_requester_finalized_1_6_0_prose():
@@ -804,8 +1033,21 @@ def test_contract_pins_the_requester_finalized_1_6_0_prose():
 # no-op on backtick/`**` for text that has none).
 # ---------------------------------------------------------------------------
 
+#
+# Phase 10 WP-5b (contract 1.8.0, supervisor ruling 2026-09-08): TRUNCATED
+# from its original end -- the trailing sentence ("An implementation still
+# declaring 1.6.0 is not held to any 1.7.0-only obligation retroactively.")
+# is no longer textually adjacent to this paragraph in the live contract:
+# monitor-finalized fixed text (5) (scratchpad/phase10/fixed-text-1.8.0.md)
+# is inserted directly after this paragraph and before that sentence
+# (supervisor ruling item 1: "1.7.0 の段落の直後(遡及不適用の列挙の前)"), so
+# a pin ending in that sentence could no longer match as one contiguous
+# substring. That sentence (now widened to add ", or 1.8.0-only") is pinned
+# separately below as PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0, checked with
+# plain `in version_binding` containment -- the same non-contiguous style
+# already used for the 1.1.0-1.4.0 rows in this same test.
 PIN_1_7_0_VERSION_BINDING_PARAGRAPH = (
-    "Only an implementation declaring 1.7.0 or higher additionally claims conformance to the obligations 1.7.0 introduces (subordinate ruling 12). Two of those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.7.0, independent of any capability's own status: (a) every denial it answers with VALIDATION_FAILED, IDENTIFIER_INVALID or CAPABILITY_UNSUPPORTED carries the details keys errors.details_vocabulary requires for that code, with violated_declaration drawn from the closed vocabulary named there, and carries no row value, no suggested value, no corrective action and no internal name; and (b) every successful QueryResult, MutationResult and SchemaOperationResult it returns carries request_id, the same identifier its own audit evidence for that request carries. The remaining 1.7.0 obligations are conditional, in the same sense 1.4.0's and 1.6.0's own conditional lists are: they bind only insofar as the implementation's own capabilities() declares the named capability -- or, where two are named, both of them -- as something other than unavailable. Where it declares constraint_declarations and schema_operations both as something other than unavailable: (1) a create_entity it executes accepts field_constraints, an add_field and an alter_field it executes accept enum and nullable, each field is created or altered with the constraints declared there, those constraints are enforced on every value written to that field, and an alter_field whose declared constraints existing rows would violate is refused in full with CONFLICT, changing nothing. Where it declares constraint_declarations and application_catalog both as something other than unavailable: (2) every EntityDescriptor it returns carries field_constraints, total over that entity's own fields, reporting nullable: true and no enum for a field that declares neither. Where it declares dry_run as something other than unavailable: (3) a request carrying dry_run receives the decision the identical request without it would receive -- the same code and the same details on a refusal, the same affected count on a success -- and leaves no externally visible state change, subject to the two consumptions structured_operations.dry_run.external_effects names; and a plan it returns is deterministic, and is verified by recomputation on the real request, refusing with PRECONDITION_FAILED where it no longer agrees. Where it declares idempotency as something other than unavailable: (4) an idempotency_key is recorded with a digest of the request it accompanied, in the same transaction as that request's own effects; the same key with the same digest, resent within idempotency_retention_ms, returns the original result without re-executing, including the original request_id; and the same key with a different digest is refused with CONFLICT. Where it declares request_budget as something other than unavailable: (5) a budget narrows a bound downward only, a budget above the deployed value or naming a class that does not apply to that endpoint is refused with VALIDATION_FAILED, and exceeding a narrowed bound is refused with LIMIT_EXCEEDED naming that limit class. 1.7.0 introduces no obligation on what a client must send: dry_run, plan, budget, field_constraints, enum, nullable, and SchemaOperationRequest.idempotency_key are optional wherever they appear, and a request valid under 1.6.0 stays valid. An implementation still declaring 1.6.0 is not held to any 1.7.0-only obligation retroactively."
+    "Only an implementation declaring 1.7.0 or higher additionally claims conformance to the obligations 1.7.0 introduces (subordinate ruling 12). Two of those obligations are unconditional in the same sense as every obligation enumerated above -- they bind simply by declaring 1.7.0, independent of any capability's own status: (a) every denial it answers with VALIDATION_FAILED, IDENTIFIER_INVALID or CAPABILITY_UNSUPPORTED carries the details keys errors.details_vocabulary requires for that code, with violated_declaration drawn from the closed vocabulary named there, and carries no row value, no suggested value, no corrective action and no internal name; and (b) every successful QueryResult, MutationResult and SchemaOperationResult it returns carries request_id, the same identifier its own audit evidence for that request carries. The remaining 1.7.0 obligations are conditional, in the same sense 1.4.0's and 1.6.0's own conditional lists are: they bind only insofar as the implementation's own capabilities() declares the named capability -- or, where two are named, both of them -- as something other than unavailable. Where it declares constraint_declarations and schema_operations both as something other than unavailable: (1) a create_entity it executes accepts field_constraints, an add_field and an alter_field it executes accept enum and nullable, each field is created or altered with the constraints declared there, those constraints are enforced on every value written to that field, and an alter_field whose declared constraints existing rows would violate is refused in full with CONFLICT, changing nothing. Where it declares constraint_declarations and application_catalog both as something other than unavailable: (2) every EntityDescriptor it returns carries field_constraints, total over that entity's own fields, reporting nullable: true and no enum for a field that declares neither. Where it declares dry_run as something other than unavailable: (3) a request carrying dry_run receives the decision the identical request without it would receive -- the same code and the same details on a refusal, the same affected count on a success -- and leaves no externally visible state change, subject to the two consumptions structured_operations.dry_run.external_effects names; and a plan it returns is deterministic, and is verified by recomputation on the real request, refusing with PRECONDITION_FAILED where it no longer agrees. Where it declares idempotency as something other than unavailable: (4) an idempotency_key is recorded with a digest of the request it accompanied, in the same transaction as that request's own effects; the same key with the same digest, resent within idempotency_retention_ms, returns the original result without re-executing, including the original request_id; and the same key with a different digest is refused with CONFLICT. Where it declares request_budget as something other than unavailable: (5) a budget narrows a bound downward only, a budget above the deployed value or naming a class that does not apply to that endpoint is refused with VALIDATION_FAILED, and exceeding a narrowed bound is refused with LIMIT_EXCEEDED naming that limit class. 1.7.0 introduces no obligation on what a client must send: dry_run, plan, budget, field_constraints, enum, nullable, and SchemaOperationRequest.idempotency_key are optional wherever they appear, and a request valid under 1.6.0 stays valid."
 )
 
 PIN_1_7_0_VIOLATED_DECLARATION_VOCABULARY = (
@@ -914,6 +1156,7 @@ def test_contract_pins_the_requester_finalized_1_7_0_prose():
         PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_2_0,
         PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_3_0,
         PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_4_0,
+        PIN_1_7_0_RETROACTIVE_DENIAL_ROW_1_6_0,
     ):
         assert row in version_binding, f"versioning.version_binding is missing retroactive-denial row: {row!r}"
 
