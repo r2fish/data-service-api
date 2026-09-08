@@ -621,38 +621,44 @@ def test_application_audit_rows_always_read_back_as_plane_application(kind, plat
 
 
 def _run_delayed_tx_vector(h: types.SimpleNamespace, *, dsn: str, table: str, insert_sql: str, marker: str) -> None:
-    """WP-2(b) fix round 2 (coordinator ruling, item A): a SMALL, test-
-    friendly lag (harness timeouts set to 1000ms/1000ms -> lag ~3s) and a
-    hold time LONGER than the lag (`lag_s + 0.5`) -- the two properties
-    that make the "row not yet visible" assertion below GENUINELY load-
-    bearing, not merely restating the visibility-lag threshold:
+    """WP-2(b) fix round 3 (R-34): explicit synchronization instead of
+    wall-clock sleeps for the writer/main coordination (round 2's
+    `hold_s`/`probe_at_s` sleeps were flaky under machine load -- the
+    writer's INSERT could be delayed, or the main thread's probe could
+    slip, independently of each other).
 
-    The probe below runs at `lag_s + 0.2` after the INSERT -- PAST the
-    naive `recorded_at < now() - lag` threshold -- while the writer
-    transaction is (by construction, `hold_s > lag_s + 0.2`) still
-    demonstrably open. If a future change removed the hold (mutated to an
-    immediate commit), the row would already be committed AND would
-    already satisfy the threshold at this exact probe point, so it WOULD
-    appear -- flipping this assertion to red. What is actually being
-    proven here is that MVCC invisibility, not the threshold alone, is
-    still doing real work at this boundary; a fixed `sleep` alone (with no
-    real transaction hold) cannot make this assertion fail, so a hold that
-    silently stopped holding would be caught here.
+    The property under test is unchanged from round 2's docstring: the
+    probe must run PAST the naive `recorded_at < now() - lag` threshold
+    while the writer transaction is demonstrably still open, so that MVCC
+    invisibility -- not the threshold alone -- is what makes the row
+    invisible. A mutated immediate commit must turn the assertion red.
+
+    Synchronization: the writer signals `inserted` right after its INSERT
+    executes (so the main thread knows the tx is open and knows the
+    INSERT's own wall-clock time); the main thread waits on `inserted`,
+    then sleeps only `lag_s + 0.2` measured from the writer's recorded
+    INSERT time (not from thread-start), probes, asserts invisibility,
+    and only then sets `release` to let the writer commit -- so the
+    "still open" guarantee comes from the writer never having been told
+    it may commit, not from a hold duration guessed in advance.
     """
     lag_s = h.service._audit_visibility_lag_ms / 1000  # noqa: SLF001
-    hold_s = lag_s + 0.5
-    probe_at_s = lag_s + 0.2
-    assert probe_at_s < hold_s, "test's own timing assumption (probe before commit) does not hold"
+    probe_delay_s = lag_s + 0.2
 
     result_holder: dict = {}
-    start = time.monotonic()
+    inserted = threading.Event()
+    release = threading.Event()
 
     def _hold_and_write() -> None:
         conn = psycopg.connect(dsn, autocommit=False)
         try:
             with conn.cursor() as cur:
                 cur.execute(sql.SQL(insert_sql).format(table=sql.Identifier(h.platform.schema, table)), [marker])
-            time.sleep(hold_s)
+            result_holder["inserted_at"] = time.monotonic()
+            inserted.set()
+            # Bounded wait: if the main thread's probe assertion fails
+            # (raises) before calling release.set(), do not hang forever.
+            release.wait(timeout=30)
             conn.commit()
         finally:
             conn.close()
@@ -661,13 +667,23 @@ def _run_delayed_tx_vector(h: types.SimpleNamespace, *, dsn: str, table: str, in
     writer = threading.Thread(target=_hold_and_write)
     writer.start()
 
-    time.sleep(max(0.0, probe_at_s - (time.monotonic() - start)))
-    assert writer.is_alive(), "writer already finished before the load-bearing probe point -- hold_s must exceed probe_at_s"
-    probe = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
-    assert not any(e.get("request_id") == marker for e in probe["events"]), (
-        "the row became visible before its writer transaction committed -- "
-        "this is the load-bearing assertion (see this helper's own docstring)"
+    assert inserted.wait(timeout=10), "writer did not signal after INSERT in time"
+    inserted_at = result_holder["inserted_at"]
+    time.sleep(max(0.0, (inserted_at + probe_delay_s) - time.monotonic()))
+    assert writer.is_alive() and not release.is_set(), (
+        "writer already released/finished before the load-bearing probe point -- "
+        "the transaction must still be open (not yet told to commit) at probe time"
     )
+    try:
+        probe = h.service.audit_query(h.control_credential_secret, {"limit": 1000})
+        assert not any(e.get("request_id") == marker for e in probe["events"]), (
+            "the row became visible before its writer transaction committed -- "
+            "this is the load-bearing assertion (see this helper's own docstring)"
+        )
+    finally:
+        # Always release the writer so it can commit and the thread can
+        # exit, even if the assertion above raised.
+        release.set()
 
     writer.join(timeout=10)
     assert result_holder.get("done"), "writer thread did not finish in time"
@@ -1453,6 +1469,11 @@ _NON_AUDIT_OPERATION_PARAMETERS: frozenset[str] = frozenset(
         "structured.bind_schema_operation",
         "structured.ApplicationCell._apply",
         "structured.ApplicationCell.apply_schema",
+        # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
+        # `apply_schema` above is now a thin `with self._idempotency_
+        # lock:` wrapper -- the ORIGINAL body (same `operation`
+        # parameter, unchanged) moved verbatim to this new name.
+        "structured.ApplicationCell._apply_schema_locked",
     }
 )
 
