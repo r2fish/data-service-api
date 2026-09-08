@@ -1075,6 +1075,57 @@ def test_sweep_orphans_never_kills_a_pid_whose_cmdline_lacks_the_marker():
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def test_sweep_orphans_never_signals_a_non_positive_pid(monkeypatch, tmp_path):
+    """監督裁定 2026-09-08 U-12 / external review 2 R-27: a pidfile whose
+    parsed pid is `<= 0` must be treated as never ours -- explicitly, and
+    BEFORE the owner check -- because `os.kill(0, sig)` signals this whole
+    process group and `os.kill(-1, sig)` every process this user may
+    signal. `0` and `-1` below exercise that guard directly; a third
+    pidfile names a real, positive pid (this test's own parent process)
+    that certainly exists but carries none of this harness's marker, so it
+    is caught by the ALREADY-tested owner check (see `test_sweep_orphans_
+    never_kills_a_pid_whose_cmdline_lacks_the_marker`) rather than the new
+    `pid <= 0` guard -- included here to confirm the two paths agree on
+    the observable outcome (nothing signalled, pidfile gone).
+
+    mutation (`socket_harness.py`): remove the `pid <= 0` guard -- this
+    test goes red because `_process_cmdline(0)` or `_process_cmdline(-1)`
+    is then called (asserted never to happen below) and, on a marker
+    match, `os.kill` would be reached with a non-positive pid (asserted to
+    raise below rather than silently signal something).
+    """
+    prefix = tmp_path / "orphan_prefix"
+    prefix.mkdir()
+    (prefix / "zero.pid").write_text("0")
+    (prefix / "negative.pid").write_text("-1")
+    (prefix / "reused.pid").write_text(str(os.getppid()))
+
+    real_process_cmdline = sh._process_cmdline
+
+    def guarded_process_cmdline(pid):
+        if pid <= 0:
+            pytest.fail(f"_process_cmdline must never be called with a non-positive pid, got {pid}")
+        return real_process_cmdline(pid)
+
+    kill_calls: list[tuple[int, int]] = []
+
+    def guarded_kill(pid, sig):
+        if pid <= 0:
+            raise AssertionError(f"os.kill must never be called with a non-positive pid, got {pid}")
+        kill_calls.append((pid, sig))
+
+    monkeypatch.setattr(sh, "_process_cmdline", guarded_process_cmdline)
+    monkeypatch.setattr(sh.os, "kill", guarded_kill)
+
+    killed = sh.sweep_orphans(prefix)
+
+    assert killed == []
+    assert kill_calls == [], "sweep_orphans must not signal any of these three pidfiles"
+    assert not (prefix / "zero.pid").exists()
+    assert not (prefix / "negative.pid").exists()
+    assert not (prefix / "reused.pid").exists()
+
+
 # ---------------------------------------------------------------------------
 # `free_port` sanity
 # ---------------------------------------------------------------------------
