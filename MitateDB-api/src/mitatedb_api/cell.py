@@ -1408,6 +1408,16 @@ class ApplicationCell:
                     digest_request["field_types"] = dict(field_types)
                 if field_constraints is not None:
                     digest_request["field_constraints"] = field_constraints
+                if budget is not None:
+                    # WP-1c ext (契約 1.7.0 idempotency.record: "every
+                    # other field, including budget...is part of what a
+                    # resend must match"): folded in here, BEFORE the
+                    # `digest_extra` update below, so the HTTP path's
+                    # identical `digest_extra["budget"]` value (`http.py`
+                    # schema-operation dispatch) simply overwrites this
+                    # with the same value -- an in-process caller (no
+                    # `digest_extra`) now gets the same coverage.
+                    digest_request["budget"] = budget
                 if digest_extra:
                     digest_request.update(digest_extra)
                 if idempotency_key is not None:
@@ -1670,6 +1680,11 @@ class ApplicationCell:
                     digest_request["enum"] = list(enum)
                 if nullable is not None:
                     digest_request["nullable"] = nullable
+                if budget is not None:
+                    # WP-1c ext -- see `create_collection`'s identical
+                    # comment for the rationale (契約 1.7.0 idempotency.
+                    # record).
+                    digest_request["budget"] = budget
                 if digest_extra:
                     digest_request.update(digest_extra)
                 if idempotency_key is not None:
@@ -1916,6 +1931,11 @@ class ApplicationCell:
                     digest_request["nullable"] = nullable
                 if enum is not UNCHANGED:
                     digest_request["enum"] = enum
+                if budget is not None:
+                    # WP-1c ext -- see `create_collection`'s identical
+                    # comment for the rationale (契約 1.7.0 idempotency.
+                    # record).
+                    digest_request["budget"] = budget
                 if digest_extra:
                     digest_request.update(digest_extra)
                 if idempotency_key is not None:
@@ -2778,7 +2798,7 @@ class ApplicationCell:
                 }
                 if entity is not None:
                     digest_request["entity"] = entity
-                if budget:
+                if budget is not None:
                     digest_request["budget"] = budget
                 if transaction is not None:
                     digest_request["transaction"] = transaction

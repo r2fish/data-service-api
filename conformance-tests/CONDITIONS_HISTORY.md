@@ -297,3 +297,11 @@ Both r2db-api and MitateDB-api have since flipped `contract_version` to 1.7.0 (W
 **起票 2026-09-08 (フェーズ10 設計 `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` v1.1 §3 D-1 (B)):** this row was opened as `not yet executable`, ahead of the launchers, the `composition_roots` registry section and the test file that make it executable, so that the design document's own `C-26` references resolve -- the same sequence phase 9 followed for C-20..C-25 (design commit first, condition row second). The condition itself is new; nothing was moved out of an earlier row into this section.
 
 Executability lands in phase 10 WP-6c. Until then the row carries no historical narrative of its own: its current text is its first text.
+
+---
+
+## C-27
+
+**起票 2026-09-08 (フェーズ10 設計 `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` v1.3 §3 D-13、§5 U-7/U-8/U-9):** this row was opened as `not yet executable`, ahead of the port hook and the test file that make it executable, so that the design document's own `C-27` references resolve -- the same sequence C-20..C-26 followed (design commit first, condition row second). The condition itself is new; nothing was moved out of an earlier row into this section, and **C-23 is not narrowed** -- C-23 continues to fix the meaning of a resend on the sequential path, and this row adds the concurrent-arrival case that phase 9's own completion did not cover.
+
+Executability lands in phase 10 WP-6d-ii. Until then the row carries no historical narrative of its own: its current text is its first text.

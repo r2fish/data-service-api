@@ -118,11 +118,21 @@ FIXED_1_8_0_LIMITS_PROFILE_SUFFIX = (
     "serves that base URL."
 )
 
+# Phase 10 WP-5c (contract 1.8.0 addendum, supervisor ruling U-9
+# 2026-09-08): 1.8.0's `conditional` list is no longer empty. The addendum
+# adds one conditional obligation -- concurrent sends of one
+# idempotency_key are serialized -- carried in exactly the shape the 1.7.0
+# entry's own conditional items carry ({"obligation", "capability"}).
 FIXED_1_8_0_OBLIGATIONS_ENTRY = {
     "version": "1.8.0",
     "subordinate_ruling": 13,
     "unconditional": ["limit_enforcement_scoped_to_deployment_behind_base_url"],
-    "conditional": [],
+    "conditional": [
+        {
+            "obligation": "idempotency_concurrent_same_key_sends_serialized",
+            "capability": ["idempotency"],
+        }
+    ],
 }
 
 # The full key set of `limits` BEFORE 1.8.0 (phase 9 state) -- completion
@@ -237,15 +247,52 @@ def test_versioning_obligations_subordinate_rulings_exist_in_ccr_disposition():
 # `_VERSION_BINDING_PROSE_EXCEPTIONS = {"1.8.0"}` carve-out WP-5a added to
 # test_operation_catalog_register.py's test_obligations_version_set_
 # matches_the_prose is removed rather than kept (ruling items 2-3).
+#
+# Phase 10 WP-5c (contract 1.8.0 addendum, supervisor ruling U-9
+# 2026-09-08): this paragraph was rewritten before 1.8.0 reached `main`.
+# 1.8.0 now introduces TWO obligations -- the unconditional
+# enforcement-scope one WP-5a/5b already carried, and one conditional
+# obligation gated on the `idempotency` capability (concurrent sends of
+# one key are serialized). The pin below is the monitor-finalized
+# replacement text, copied verbatim.
+#
+# Note the deliberate "One of those obligations is unconditional" wording
+# ("is", not "are"): test_operation_catalog_register.py's
+# `_UNCONDITIONAL_COUNT_RE` matches only "N of those obligations are
+# unconditional", so 1.8.0 still states no machine-read unconditional
+# count and that file's "exactly 3 versions state one (1.4.0, 1.6.0,
+# 1.7.0)" assertion is unchanged.
 PIN_1_8_0_VERSION_BINDING_PARAGRAPH = (
-    "Only an implementation declaring 1.8.0 or higher additionally claims conformance to the obligation "
-    "1.8.0 introduces (subordinate ruling 13). That obligation is unconditional in the same sense as every "
-    "obligation enumerated above -- it binds simply by declaring 1.8.0, independent of any capability's own "
-    "status: every limit_enforcement value it publishes describes the whole deployment reachable at the "
-    "declared surfaces base URL, never one server process, so it declares enforced for a limit class only "
-    "when the bound holds across every process that may serve that base URL at the same time, and declares "
-    "deployment_required when the bound is held per process and more than one process may serve that base "
-    "URL. 1.8.0 introduces no obligation on what a client must send: a request valid under 1.7.0 stays valid."
+    "Only an implementation declaring 1.8.0 or higher additionally claims conformance to the obligations "
+    "1.8.0 introduces (subordinate ruling 13). One of those obligations is unconditional in the same sense "
+    "as every obligation enumerated above -- it binds simply by declaring 1.8.0, independent of any "
+    "capability's own status: every limit_enforcement value it publishes describes the whole deployment "
+    "reachable at the declared surfaces base URL, never one server process, so it declares enforced for a "
+    "limit class only when the bound holds across every process that may serve that base URL at the same "
+    "time, and declares deployment_required when the bound is held per process and more than one process "
+    "may serve that base URL. The remaining 1.8.0 obligation is conditional, in the same sense 1.4.0's, "
+    "1.6.0's and 1.7.0's own conditional lists are: it binds only insofar as the implementation's own "
+    "capabilities() declares idempotency as something other than unavailable: (1) two requests carrying the "
+    "same idempotency_key that arrive together are serialized so that at most one of them executes, the "
+    "other being answered after the first commits as a resend -- from the record where the digests agree, "
+    "with CONFLICT where they differ -- and the idempotency_entries bound is evaluated under that same "
+    "serialization (structured_operations.idempotency.record). 1.8.0 introduces no obligation on what a "
+    "client must send: a request valid under 1.7.0 stays valid."
+)
+
+# Phase 10 WP-5c: the sentence pair appended to the END of
+# `structured_operations.idempotency.record` by the same addendum,
+# monitor-finalized and copied verbatim. Pinned separately from
+# PIN_1_7_0_IDEMPOTENCY_RECORD (which pins the 1.7.0 body and is a
+# containment check, so it stays green under an append) so that deleting
+# the addendum sentence is caught rather than silently tolerated.
+PIN_1_8_0_IDEMPOTENCY_RECORD_CONCURRENT_SENDS = (
+    "This holds for concurrent sends as well: two requests carrying the same key that arrive together are "
+    "serialized by the implementation so that at most one of them executes; the other is answered after the "
+    "first commits as a resend -- from the record where the digests agree, with CONFLICT where they differ "
+    "-- or, where the first failed and left no record, executes as a new request. The idempotency_entries "
+    "bound is evaluated under that same serialization, so two concurrent requests recording different keys "
+    "cannot both pass a check that only one of them would pass in sequence."
 )
 
 # New (contract 1.8.0): the single-item retroactive-denial row for
@@ -281,6 +328,33 @@ def test_contract_pins_the_1_8_0_version_binding_paragraph_verbatim():
     assert idx_1_7_0_end < idx_1_8_0_paragraph < idx_retroactive_row, (
         "the 1.8.0 version_binding paragraph is not placed directly after the 1.7.0 paragraph and "
         "before the retroactive-denial enumeration"
+    )
+
+
+def test_contract_pins_the_1_8_0_concurrent_same_key_addendum_verbatim():
+    """WP-5c (supervisor ruling U-9 2026-09-08): the addendum sentence pair
+    sits at the END of `structured_operations.idempotency.record`, verbatim
+    (it is the normative home the version_binding conditional obligation
+    points at), and 1.8.0's `versioning.obligations` conditional entry names
+    a capability that actually exists in `capability_status.defined`."""
+    contract = json.loads((ROOT / "spec" / "data-service-api.v1.json").read_text())
+    record = contract["structured_operations"]["idempotency"]["record"]
+    assert record.rstrip().endswith(PIN_1_8_0_IDEMPOTENCY_RECORD_CONCURRENT_SENDS), (
+        "structured_operations.idempotency.record does not end with the monitor-finalized 1.8.0 "
+        f"addendum sentences verbatim: {record[-400:]!r}"
+    )
+
+    obligations_by_version = {entry["version"]: entry for entry in contract["versioning"]["obligations"]}
+    conditional = obligations_by_version["1.8.0"]["conditional"]
+    assert len(conditional) == 1, f"1.8.0 conditional list should hold exactly 1 element, got {conditional!r}"
+    defined = set(contract["capability_status"]["defined"])
+    for capability in conditional[0]["capability"]:
+        assert capability in defined, (
+            f"1.8.0 conditional obligation names capability {capability!r}, not in capability_status.defined"
+        )
+    assert set(conditional[0].keys()) == {"obligation", "capability"}, (
+        "1.8.0's conditional item does not carry the same 2 keys 1.7.0's conditional items carry: "
+        f"{sorted(conditional[0])}"
     )
 
 

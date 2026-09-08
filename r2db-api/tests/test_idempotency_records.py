@@ -156,6 +156,30 @@ def test_condition_3_same_key_different_body_is_conflict() -> None:
     assert len(cell.entities["widgets"]) == 1, "the conflicting resend must not have executed"
 
 
+def test_condition_3b_omitted_budget_then_resend_with_empty_budget_is_conflict_not_replay() -> None:
+    """F-② (外部レビュー 2, scratchpad/review2/frame.md, 監督裁定 U-11):
+    `budget` is part of what a resend must match (契約 1.7.0
+    `idempotency.record`, "every other field, including budget,
+    transaction and confirmation, is part of what a resend must match")
+    -- an omitted `budget` and a present-but-empty `budget: {}` are two
+    DIFFERENT requests. Pins r2db's own already-correct `if budget is not
+    None:` (`service.py:1237`) against the peer defect (`MitateDB-api`'s
+    `cell.py` used `if budget:`, which dropped an empty-but-PRESENT
+    `budget: {}` from the digest exactly as if it had been omitted)."""
+    ops = [{"operation": "insert", "values": {"label": "one"}}]
+    plan_request_omitted = _mutate_plan_request("widgets", ops)
+    cell = _memory_cell_with_widgets()
+    first = cell.transact("widgets", ops, LIMITS, plan_request=plan_request_omitted, idempotency_key="k1", request_id="rid-cond3b-1")
+    assert first.replayed is False
+
+    plan_request_empty_budget = dict(plan_request_omitted, budget={})
+    with pytest.raises(FoundationError) as exc:
+        cell.transact("widgets", ops, LIMITS, plan_request=plan_request_empty_budget, idempotency_key="k1", request_id="rid-cond3b-2")
+    assert exc.value.code == "CONFLICT"
+    assert exc.value.details == {"violated_declaration": "idempotency_key", "field": "idempotency_key"}
+    assert len(cell.entities["widgets"]) == 1, "the conflicting resend must not have executed"
+
+
 def test_condition_4_replay_of_a_destructive_operation_skips_target_existence_and_confirmation() -> None:
     """完了条件 4: 記録済み key の再送が target-existence / confirmation /
     precondition を評価せずに答える -- drop_entity の再送は entity がもう
@@ -379,6 +403,49 @@ def test_service_plan_token_changes_with_idempotency_key_through_the_real_reques
     assert exc.value.code == "PRECONDITION_FAILED"
     rows = [r for r in service.query(runtime, "notes", select=["id", "body"]) if r.get("body") == "j1-wiring"]
     assert len(rows) == 1, "the fail-closed PRECONDITION_FAILED resend must not have executed"
+
+
+def test_service_omitted_budget_then_resend_with_empty_budget_is_conflict_through_the_real_request_path() -> None:
+    """F-② (外部レビュー 2, 監督裁定 U-11), wiring-level pin -- mirrors
+    `test_service_plan_token_changes_with_idempotency_key_through_the_
+    real_request_path`'s own "fix the WIRING, not just the helper"
+    rationale: drives `DataService._mutate_outcome`'s own `plan_request`
+    assembly (`service.py:1237`, `if budget is not None:`) through the
+    real `mutate_result` entry point, rather than handing a hand-built
+    `plan_request` straight to `cell.transact` the way `test_condition_3b_
+    ...` above does."""
+    service, _control = build_service()
+    runtime = runtime_context(service)
+    ops = [{"operation": "insert", "values": {"body": "budget-shape"}}]
+
+    first = service.mutate_result(runtime, "notes", list(ops), idempotency_key="svc-budget-k1")
+    assert first.committed is True
+
+    with pytest.raises(FoundationError) as exc:
+        service.mutate_result(runtime, "notes", list(ops), idempotency_key="svc-budget-k1", budget={})
+    assert exc.value.code == "CONFLICT"
+    assert exc.value.details == {"violated_declaration": "idempotency_key", "field": "idempotency_key"}
+    rows = [r for r in service.query(runtime, "notes", select=["id", "body"]) if r.get("body") == "budget-shape"]
+    assert len(rows) == 1, "the conflicting resend must not have executed"
+
+
+def test_service_plan_digest_differs_between_omitted_and_empty_budget_through_the_real_request_path() -> None:
+    """F-② companion: the plan token itself (not only the idempotency
+    CONFLICT above) must differ between an omitted `budget` and a
+    present-but-empty `budget: {}`, through the real `mutate_result`
+    dry_run path (`service.py`'s own `plan_request` assembly, the SAME
+    `if budget is not None:` line)."""
+    service, _control = build_service()
+    runtime = runtime_context(service)
+    ops = [{"operation": "insert", "values": {"body": "budget-plan-shape"}}]
+
+    plan_omitted = service.mutate_result(runtime, "notes", list(ops), dry_run=True).plan
+    plan_empty_budget = service.mutate_result(runtime, "notes", list(ops), dry_run=True, budget={}).plan
+    assert plan_omitted is not None
+    assert plan_empty_budget is not None
+    assert plan_omitted != plan_empty_budget, (
+        "an omitted budget and an empty-but-present budget: {} must produce different plan digests"
+    )
 
 
 def test_audit_key_is_never_written_to_an_audit_event() -> None:

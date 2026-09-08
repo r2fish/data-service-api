@@ -319,6 +319,93 @@ class IdempotencyRecordsTests(unittest.TestCase):
         second = self.runtime.transact([delete_op])
         self.assertEqual(first, second)
 
+    # -- F-② (外部レビュー 2, scratchpad/review2/frame.md, 監督裁定 U-11):
+    # `budget` is part of what a resend must match (契約 1.7.0
+    # `idempotency.record`, "every other field, including budget,
+    # transaction and confirmation, is part of what a resend must
+    # match") -- an omitted `budget` and a present-but-empty `budget: {}`
+    # are two DIFFERENT requests, exactly like r2db's own `plan_request`
+    # (`if budget is not None:`, `r2db-api/src/r2db_api/service.py:1237`).
+    # Before this fix, `cell.py::transact`'s own `digest_request`
+    # construction used `if budget:` (truthy), which drops an empty-but-
+    # PRESENT `budget: {}` from the digest exactly as if it had been
+    # omitted -- a resend adding `budget: {}` to an omitted-budget
+    # original was wrongly answered as a REPLAY instead of refused
+    # CONFLICT.
+
+    def test_omitted_budget_then_resend_with_empty_budget_is_conflict_not_replay(self):
+        key = "idem-budget-shape-1"
+        first = self.runtime.transact(
+            [{"type": "insert", "collection": "notes", "values": {"title": "no-budget"}, "idempotency_key": key}])
+        with self.assertRaises(ConflictError) as ctx:
+            self.runtime.transact(
+                [{"type": "insert", "collection": "notes", "values": {"title": "no-budget"}, "idempotency_key": key}],
+                budget={})
+        self.assertEqual(ctx.exception.details["violated_declaration"], "idempotency_key")
+        self.assertEqual(ctx.exception.details["field"], "idempotency_key")
+        # The CONFLICT-refused resend must not have executed a second time.
+        self.assertEqual(len(self.runtime.read("notes")), 1)
+        self.assertEqual(len(first), 1)
+
+    def test_plan_digest_differs_between_omitted_and_empty_budget(self):
+        body = [{"type": "insert", "collection": "notes", "values": {"title": "budget-plan"}}]
+        plan_omitted = self.runtime.transact(body, dry_run=True)[-1]["plan"]
+        plan_empty = self.runtime.transact(body, dry_run=True, budget={})[-1]["plan"]
+        self.assertNotEqual(
+            plan_omitted, plan_empty,
+            "an omitted budget and an empty-but-present budget: {} must produce different plan digests",
+        )
+
+    # -- F-② extended to the three schema-operation digest sites
+    # (`create_collection`/`create_entity`, `add_field`, `alter_field`):
+    # each receives `budget` for limit narrowing (see `_gate(...,
+    # budget=...)`) but, before this fix, never folded it into its OWN
+    # `digest_request` -- only the HTTP layer's `digest_extra` carried it
+    # (`http.py`'s schema-operation dispatch, ~:1260). A direct,
+    # in-process caller (bypassing HTTP, exactly like every other test in
+    # this class) proves the cell-level digest itself now covers
+    # `budget`, not merely that HTTP happens to inject it separately.
+
+    def test_schema_create_entity_omitted_budget_then_resend_with_empty_budget_is_conflict(self):
+        key = "idem-schema-budget-shape-1"
+        first = self.dev.create_entity("budget_shape_widgets", {"label": "text"}, idempotency_key=key)
+        with self.assertRaises(ConflictError) as ctx:
+            self.dev.create_entity("budget_shape_widgets", {"label": "text"}, idempotency_key=key, budget={})
+        self.assertEqual(ctx.exception.details["violated_declaration"], "idempotency_key")
+        # The CONFLICT-refused resend must not have executed a second
+        # time (a second real create_entity of the SAME name would raise
+        # ConflictError for a different reason -- confirmed by revision).
+        self.assertIsNotNone(first["revision"])
+        self.assertEqual(
+            len([e for e in self.dev.catalog() if e["entity"] == "budget_shape_widgets"]), 1,
+        )
+
+    def test_schema_create_entity_plan_digest_differs_between_omitted_and_empty_budget(self):
+        plan_omitted = self.dev.create_entity("budget_shape_plan_widgets", {"label": "text"}, dry_run=True)["plan"]
+        plan_empty = self.dev.create_entity(
+            "budget_shape_plan_widgets", {"label": "text"}, dry_run=True, budget={})["plan"]
+        self.assertNotEqual(
+            plan_omitted, plan_empty,
+            "an omitted budget and an empty-but-present budget: {} must produce different plan digests",
+        )
+
+    def test_schema_add_field_omitted_budget_then_resend_with_empty_budget_is_conflict(self):
+        key = "idem-schema-budget-shape-2"
+        first = self.dev.add_field("notes", "budget_shape_field", "integer", idempotency_key=key)
+        with self.assertRaises(ConflictError) as ctx:
+            self.dev.add_field("notes", "budget_shape_field", "integer", idempotency_key=key, budget={})
+        self.assertEqual(ctx.exception.details["violated_declaration"], "idempotency_key")
+        self.assertIsNotNone(first["revision"])
+        self.assertIn("budget_shape_field", self._field_types("notes"))
+
+    def test_schema_alter_field_omitted_budget_then_resend_with_empty_budget_is_conflict(self):
+        key = "idem-schema-budget-shape-3"
+        first = self.dev.alter_field("notes", "title", nullable=True, idempotency_key=key)
+        with self.assertRaises(ConflictError) as ctx:
+            self.dev.alter_field("notes", "title", nullable=True, idempotency_key=key, budget={})
+        self.assertEqual(ctx.exception.details["violated_declaration"], "idempotency_key")
+        self.assertIsNotNone(first["revision"])
+
     # -- J-1/I-13: the plan-digest inclusion rule, through the REAL entry
     # point -- `test_idempotency_key_is_part_of_the_plan_digest`
     # (`IdempotencyDigestTests` below) only proves the digest RULE in

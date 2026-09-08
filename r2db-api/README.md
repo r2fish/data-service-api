@@ -155,10 +155,15 @@ All of the above has been exercised against a real local PostgreSQL 16
 server (`r2db-api/tests/test_postgres.py`, `test_http.py`, and the
 `r2db-api-http` conformance adapter) -- not against a mocked or simulated
 database. That is local/test-cluster evidence, not production evidence.
-**PostgreSQL provisioning has not been performed on the VPS**; the
-migrations exist in this repository but have not been run there, and no
-production identity/network/database-grant evidence exists yet
-(`security/CONTROL_MAPPING.md` records this per invariant).
+**r2db Stage 1, contract 1.6.0, was installed on the VPS on 2026-09-05**:
+migrations 0001, 0002, 0005, 0006, 0007 and 0003 were applied in that order (0004 is the deprovision script and is never applied at install), `pg_hba`/`pg_ident` posture B was
+configured, and external reachability on port 8443 was verified
+(`docs/work-orders/DEPLOY_PHASE6_20260904.md` §8, items 9-12). The
+records do not show any later contract version having been deployed to
+that VPS since -- `docs/work-orders/DEPLOY_Q4_20260905.md` is an
+unexecuted procedure/template for a later application, not a completion
+record (`security/CONTROL_MAPPING.md` records the acceptance-boundary
+detail per invariant).
 
 ### What remains reference-only or unimplemented
 
