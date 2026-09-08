@@ -329,14 +329,32 @@ def test_c19_surfaces_declare_and_echo_on_http_plugs(adapter_name: str) -> None:
 _SOCKET_ADAPTER_NAMES: tuple[str, ...] = tuple(
     name for name, obj in registered_adapters().items() if getattr(obj, "transport_kind", None) == "socket"
 )
-# Deliberately NO non-vacuity assert here (monitor 裁定
-# `{scratchpad}/wo-rulings-1.md` 裁定 2, phase 10 WP-3): WP-3 lands before
-# any adapter declares `transport_kind == "socket"` at all, so asserting
-# "at least one" here would fail on this very branch, on every run, until
-# WP-4a lands. WP-4a adds that assert once `r2db-api-socket` is
-# registered (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-4:
-# "非vacuity assertは『registryにtransport_kind == "socket"のplugが1件以
-# 上ある』-- registered_adapters()/registryを読む形にする").
+# WP-4a non-vacuity guard (design D-4: "非vacuity assertは『registryに
+# transport_kind == "socket"のplugが1件以上ある』-- registered_adapters()/
+# registryを読む形にする"): a pure read of the already-built registry
+# (`registered_adapters()`, computed above at MODULE IMPORT time) -- no
+# real surface is started to evaluate this, so this stays safe inside the
+# `registry-guards` xdist group's own "no real provisioning" assumption
+# (`CONFORMANCE_ADAPTER_V1.md` section 24.2's own note). Kept in THIS same
+# module, immediately after `_SOCKET_ADAPTER_NAMES` -- never handed to a
+# different xdist group, and never mixed into the real-dial loop body
+# below (`test_c19_surfaces_are_really_dialable_on_socket_plugs`), whose
+# own judgement (`adapter.transport_kind == "socket"`) this guard does not
+# touch.
+#
+# mutation (`conformance-tests/registry.json`): remove the `r2db-api-
+# socket` entry -- this assert goes red because `_SOCKET_ADAPTER_NAMES`
+# collects zero names.
+assert _SOCKET_ADAPTER_NAMES, (
+    "no registered adapter declares transport_kind == 'socket' -- registry.json must register at "
+    "least one socket-transport plug (design D-4, WP-4a completion condition 12)"
+)
+# History (monitor 裁定 `{scratchpad}/wo-rulings-1.md` 裁定 2, phase 10
+# WP-3): WP-3 deliberately placed NO non-vacuity assert here, since it
+# lands before any adapter declares `transport_kind == "socket"` at all --
+# asserting "at least one" then would have failed on this very branch, on
+# every run, until a socket plug existed. WP-4a (immediately above) is what
+# adds that assert, now that `r2db-api-socket` is registered.
 #
 # NOT `@pytest.mark.parametrize("adapter_name", _SOCKET_ADAPTER_NAMES)`:
 # measured directly (test_c11_response_schema_conformance.py's own
