@@ -810,6 +810,14 @@ port v1.11 が足すのは「**adapter が `idempotency_key` を実リクエス�
 
 ---
 
+### 13.4 WP-9 — 公開ゲート (2026-09-06〜08、監督分完了、手順 7 は依頼者判断で保留)
+
+- **成果物**: `tools/rewrite_hash_refs.py` (+ `tools/tests/`、自己テスト + 14 pytest、変異 2 種赤)、`docs/work-orders/PUBLICATION_GATE_20260906.md` (手順 0.5〜7 と実施記録)、スキャナの精密化 5 点 (履歴モードの diff マーカー剥がし、ハイフン付き最終ラベル、明白な合成 id、R1 local part の英数字必須、`sha256` 省略表記の digest allow)。
+- **リハーサル**: remote から取り直した scratch clone に対して `git filter-repo --replace-text` (置換表 14 行 → 規則 23 本) + `--mailmap` (別 GitHub アカウントの noreply identity 1 commit を r2fish へ) を 5 回 (main の進行に追随)、いずれも書換後の履歴走査 0 件、hash 参照更新は ambiguous 0 / unmatched 0。書換前の履歴側検出は 662 件 (ほぼ全て `DEPLOY_PHASE6` の置換前版)。
+- **本番 (2026-09-08)**: 手順 0 (合図 + 全 branch マージ済み・全 worktree クリーンの確認) → 1 (fresh clone、filter-repo、commit-map 422 commit をリポジトリ外へ) → 2 (44 文書 718 件の hash 更新、`--verify` 残存 0、§3 の記録行から旧 hash を排除) → 3 (依頼者が r2fish で同名リポジトリを delete + 再作成 (private・空)、監督が 28 branch を push、ref 集合は削除前と同一) → 4 (再作成後の remote からの新規 clone で履歴走査 0 件 / 482 commit、identity 1 種、hash 残存 0) → 5 (作業機の linked worktree 17 本を除去、共有 checkout を新履歴へ、旧 object を prune) → 6 (運用者が VPS で runtime credential を revoke + issue、control credential を reset — 2 件とも id が変わった) → 6.5 (依頼者判断: 対象語なし) → **7 は保留** (依頼者判断: 譲渡・ライセンス方針を先に決める)。再作成後のリポジトリの初回 CI は手動起動で 7 job 緑 (`2807 passed`)。
+- **実バグ・学び**: 履歴モードの diff マーカーが R1 の local part になる (577 件の偽陽性) / 設計注記に書いた検出例の字面自体がスキャナに掛かる (2 度) → 監督コミットはスキャナ終了コードで gate する / 再作成直後の一括 push は Actions の run を起動しない (手動起動で可) / ops CLI の `R2DB_CONTROL_DSN` はプロセス env に無く運用者が組み立てる、unix socket は peer 認証のため loopback TCP を使う。
+- **受理境界**: 手順 7 未実施 (状態は「いつでも切替可能」。切替前に fresh clone で `--history` 0 件を再確認する規律を §3 に置いた)。VPS 側は `git archive` 配布のため clone の作り直し対象外。
+
 ## 付録 A. スキャナのプロトタイプ結果 (常設規律 5)
 
 **使い捨てスキャナ `proto_realvalue_scan.py`** (scratchpad、標準 `re` のみ、655 行) を worktree の**追跡 217 ファイル**に走らせた結果である。**件数のみを転記する** — マスク済み断片やパスの一覧は転記しない。

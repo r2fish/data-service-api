@@ -55,3 +55,8 @@ temp/
 
 # Claude Code personal overrides (never commit)
 .claude/settings.local.json
+
+# Google Drive shortcut files (the shared checkout lives in a Drive-synced folder); never repository content
+*.gdoc
+*.gsheet
+*.gslides
