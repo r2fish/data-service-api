@@ -577,6 +577,63 @@ def test_postgres_record_is_written_in_the_same_transaction_as_the_data(app_a) -
         cell.close()
 
 
+def test_postgres_execution_failure_releases_lock_for_a_new_execution(app_a) -> None:  # noqa: F811
+    """Code-review fix F4 (Opus review 2, WP-6d rework, should-fix): after
+    a keyed request FAILS during EXECUTION (the idempotency lookup
+    already found no record, and a real backend write was attempted and
+    rolled back -- the SAME "second op writes a non-string value" shape
+    the test above uses, not merely a pass-1 request-shape refusal), the
+    SAME key's next request must execute as a brand-new request: success,
+    its own `request_id`, exactly one row's worth of effect
+    (`affected == 1`) -- never a replay, never a hang.
+
+    For r2db-api this outcome is guaranteed by construction: `_idempotency
+    _key_lock` is a `pg_advisory_xact_lock` (`postgres.py`), released
+    AUTOMATICALLY at ROLLBACK regardless of which connection took it --
+    unlike MitateDB-api's session-scoped `pg_advisory_lock`, there is no
+    separate `idempotency_unlock` call here that could be skipped on a
+    failure path (nothing analogous to F1/F3's own MitateDB-specific
+    bugs is even structurally possible on this peer). This test is the
+    direct evidence for that guarantee on the real database, over a
+    cell with a real connection pool (`pool_size=2`, `make_cell`'s own
+    default) -- not merely an inference from the lock TYPE."""
+    cell = make_cell(app_a)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "fwidgets", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True, limits=LIMITS,
+        )
+
+        import psycopg
+
+        def _row_count() -> int:
+            with psycopg.connect(app_a.developer_dsn, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM public.fwidgets")
+                    return cur.fetchone()[0]
+
+        key = "f4-pg-rollback-1"
+        failing_ops = [{"operation": "insert", "values": {"label": "one"}}, {"operation": "insert", "values": {"label": 123}}]
+        with pytest.raises(FoundationError):
+            cell.transact(
+                "fwidgets", failing_ops, LIMITS,
+                plan_request={"entity": "fwidgets", "operations": failing_ops}, idempotency_key=key,
+            )
+        assert _row_count() == 0, "the failed attempt's own tentative insert must have rolled back"
+
+        ok_ops = [{"operation": "insert", "values": {"label": "two"}}]
+        retried = cell.transact(
+            "fwidgets", ok_ops, LIMITS, plan_request={"entity": "fwidgets", "operations": ok_ops},
+            idempotency_key=key, request_id="rid-f4-pg-retry",
+        )
+        assert retried.replayed is False, "the same key, presented after a failed attempt, must be a NEW execution"
+        assert retried.affected == 1
+        assert retried.request_id == "rid-f4-pg-retry"
+        assert _row_count() == 1
+    finally:
+        cell.close()
+
+
 def _pg_strip_request_id(dsn: str, key: str) -> None:
     """Simulates the pre-1.7.0 `_r2db_idempotency` row shape directly
     against the real side table: strips `request_id` from the stored
@@ -739,11 +796,13 @@ def test_postgres_upgrade_11_not_applied_fails_closed_at_lookup_before_execution
         with pytest.raises(FoundationError) as exc:
             cell.transact("j5widgets", ops, LIMITS, plan_request={"entity": "j5widgets", "operations": ops}, idempotency_key="j5-k1")
         assert exc.value.code == "SERVICE_UNAVAILABLE"
-        assert counts["n"] == 4, (
-            f"_run() dispatch count before the failure: {counts['n']} (expected 4 -- `_set_timeouts`'s own 2 SET LOCAL "
-            f"statements + the lookup's own DELETE+SELECT, matching a keyed REPLAY's identical 4-statement cost; a value "
-            f"near/above 10 means catalog load and/or the INSERT ran first too, i.e. the pre-J-5 execute-then-roll-back path "
-            f"-- measured directly: 10, with `_idempotency_lookup`'s old `UndefinedTable`-swallowing restored)"
+        assert counts["n"] == 5, (
+            f"_run() dispatch count before the failure: {counts['n']} (expected 5 -- `_set_timeouts`'s own 2 SET LOCAL "
+            f"statements + ruling U-7's own `_idempotency_key_lock` (WP-6d, {{scratchpad}}/review2/frame.md F-①: one "
+            f"`pg_advisory_xact_lock` dispatch, taken BEFORE the lookup) + the lookup's own DELETE+SELECT, matching a "
+            f"keyed REPLAY's identical 5-statement cost (was 4 before WP-6d); a value near/above 10 means catalog load "
+            f"and/or the INSERT ran first too, i.e. the pre-J-5 execute-then-roll-back path -- measured directly: 10, "
+            f"with `_idempotency_lookup`'s old `UndefinedTable`-swallowing restored)"
         )
         assert _row_count("j5widgets") == 0, "the fail-closed request must not have executed at all -- no row growth"
     finally:
@@ -790,11 +849,22 @@ def test_postgres_keyed_write_round_trip_count_after_removing_the_redundant_dele
         # M-6: request_id-bearing, so the replay leg below is genuine.
         outcome = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-1")
         assert outcome.replayed is False
-        assert counts["n"] == 11, f"keyed write round trips: {counts['n']} (expected 11 after J-6 removes the redundant reserve-stage DELETE; 12 before it, measured directly by re-adding the DELETE)"
+        # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①): +2 over
+        # J-6's own 11 -- `_idempotency_key_lock` (before the lookup) and
+        # `_idempotency_reserve_lock` (before the reserve-stage COUNT), one
+        # `pg_advisory_xact_lock` dispatch each, both taken on a genuine
+        # (non-replay) keyed write. Measured directly (13), matching J-6's
+        # own "measure the delta, do not guess" convention.
+        assert counts["n"] == 13, f"keyed write round trips: {counts['n']} (expected 13 after WP-6d's own 2 advisory-lock dispatches; 11 before it, per J-6)"
 
         counts["n"] = 0
         replay = cell.transact("rtwidgets", ops, LIMITS, plan_request={"entity": "rtwidgets", "operations": ops}, idempotency_key="rt-k1", request_id="rid-rt-2")
         assert replay.replayed is True
-        assert counts["n"] == 4, f"replay round trips: {counts['n']} (expected 4, unchanged by J-6 -- a replay never reaches _idempotency_reserve)"
+        # Ruling U-7: +1 over J-6's own 4 -- `_idempotency_key_lock` runs
+        # even for a replay (it must, to serialize against a CONCURRENT
+        # writer for this same key); `_idempotency_reserve_lock` still
+        # does not (a replay returns before ever reaching the reserve
+        # stage, unchanged from J-6).
+        assert counts["n"] == 5, f"replay round trips: {counts['n']} (expected 5 after WP-6d's own 1 advisory-lock dispatch; 4 before it, per J-6 -- a replay never reaches _idempotency_reserve either way)"
     finally:
         cell.close()

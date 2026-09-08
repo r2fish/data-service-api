@@ -175,6 +175,39 @@ _FIELD_CONSTRAINTS_TABLE = "_r2db_field_constraints"
 #: upgrade.sql`).
 _IDEMPOTENCY_TABLE = "_r2db_idempotency"
 _BOOKKEEPING_TABLES: frozenset[str] = frozenset({_REVISION_TABLE, platform_upgrades.LEDGER_TABLE_NAME, _FIELD_CONSTRAINTS_TABLE, _IDEMPOTENCY_TABLE})
+# Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): two-int
+# `pg_advisory_xact_lock(namespace, hashtext(key))` namespace for the
+# PER-KEY idempotency lock -- see `_idempotency_key_lock` below.
+#
+# Code-review fix F7 (Opus review 2): the rationale this comment
+# carried before this fix was FALSE and is corrected here (the constant
+# itself is unaffected). It claimed a namespace of 0 would land in the
+# SAME lock space the single-bigint form `ops.py::_RITUAL_ADVISORY_
+# LOCK_KEY` (1414141) uses, risking a collision between a bootstrap/
+# reset ritual's lock and an idempotency-key lock. PostgreSQL actually
+# keeps those two key spaces disjoint by construction, regardless of
+# namespace value: the 1-argument `pg_advisory_xact_lock(bigint)` form
+# and the 2-argument `pg_advisory_xact_lock(int, int)` form record
+# different `objsubid` values in `pg_locks` (1 for the 1-argument form,
+# 2 for the 2-argument form) -- so `pg_advisory_xact_lock(1414141)` and
+# `pg_advisory_xact_lock(0, 1414141)` are two DIFFERENT locks, never the
+# same one, even though they would superficially "look like" the same
+# 64-bit id under a naive `(namespace << 32 | key2)` encoding. This
+# namespace constant is still a large, distinctive value, far from both
+# `_RITUAL_ADVISORY_LOCK_KEY` values (r2db 1414141, MitateDB 761761761)
+# and from `_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` below -- kept for
+# HUMAN legibility (so two DIFFERENT lock families never share a
+# suspiciously similar-looking id in a `pg_locks` dump), not because a
+# collision with the 1-argument form was ever actually possible.
+_IDEMPOTENCY_KEY_LOCK_NAMESPACE = 20261007
+# Ruling U-7: table-level (not per-key) advisory lock serializing
+# `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys (D-5
+# (iii)) -- same family as `ops.py::_RITUAL_ADVISORY_LOCK_KEY` (a
+# single, fixed 64-bit `pg_advisory_xact_lock` key), a DIFFERENT
+# constant from it (that lock guards bootstrap/reset ritual ordering;
+# this one guards `idempotency_entries` capacity accounting -- two
+# independent serialization points that must never share one lock id).
+_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY = 1414142
 # Contract 1.1.0 (CCR-13, docs/design/R2DB_CCR13_STORAGE_V1.md R-1/R-3/R-4):
 # every entity table this backend creates now carries a server-assigned
 # `id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (the row address) and
@@ -1185,6 +1218,68 @@ class PostgresCell:
     # matches `_load_field_constraints`'s own posture of not depending on
     # a caller having gotten the ordering right).
 
+    def _idempotency_key_lock(self, conn: "psycopg.Connection[Any]", key: str) -> None:
+        """Ruling U-7 (WP-6d): transaction-scoped advisory lock keyed on
+        this idempotency key -- taken directly in the OUTER `with conn.
+        transaction():` (`transact`/`apply_schema`), immediately BEFORE
+        calling `_idempotency_lookup`, never inside `_idempotency_
+        lookup`'s own nested `with conn.transaction():` (a SAVEPOINT).
+        `pg_advisory_xact_lock` auto-releases only at the enclosing
+        (outer) transaction's own commit/rollback, never at a savepoint
+        rollback or a savepoint's own commit -- taking it here, before
+        the savepoint even opens, makes that lifetime obvious by
+        construction rather than relying on that Postgres-specific
+        savepoint/advisory-lock interaction.
+
+        Effect: a second concurrent request for the SAME key blocks here
+        until the first's transaction commits or rolls back. It then
+        proceeds to `_idempotency_lookup` and sees either the first
+        request's now-committed record (same digest -> replay, different
+        digest -> CONFLICT) or nothing at all (first request rolled
+        back -- e.g. `NOT_FOUND`/a refused confirmation -- so this
+        request executes as new). The DB is per-Application (module
+        docstring), so the raw idempotency key alone is Application-
+        scoped already -- no extra scoping component is needed here.
+
+        Two-int form (`_IDEMPOTENCY_KEY_LOCK_NAMESPACE`, `hashtext(key)`)
+        chosen over a plain `hashtext(key)::bigint`: `hashtext` alone is
+        only a 32-bit hash, so a bare-bigint lock would put every key's
+        lock in the SAME narrow 32-bit-sized space `_IDEMPOTENCY_COUNT_
+        ADVISORY_LOCK_KEY` and `ops.py::_RITUAL_ADVISORY_LOCK_KEY` also
+        occupy (all three are small positive integers); namespacing the
+        high 32 bits keeps per-key locks in a visibly separate space.
+        `hashtext` collisions between two DIFFERENT keys are accepted
+        (ruling U-7): a collision only over-serializes (two unrelated
+        keys briefly wait on each other), it can never under-serialize.
+        """
+        with conn.cursor() as cur:
+            _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s, hashtext(%s))"), [_IDEMPOTENCY_KEY_LOCK_NAMESPACE, key])
+
+    def _idempotency_reserve_lock(self, conn: "psycopg.Connection[Any]") -> None:
+        """Ruling U-7 (WP-6d): table-level advisory lock serializing
+        `_idempotency_reserve`'s COUNT-then-write across DIFFERENT keys
+        (D-5 (iii)) -- taken directly in the OUTER transaction, BEFORE
+        calling `_idempotency_reserve`, never inside that method's own
+        nested `with conn.transaction():` savepoint (same reasoning as
+        `_idempotency_key_lock` above: the lock's lifetime should not
+        depend on savepoint/advisory-lock interaction being understood
+        by a future reader). A constant lock id (not keyed on anything)
+        because this guards the TABLE'S row count, not any one key.
+
+        `LOCK TABLE public.<idempotency table> IN SHARE MODE` was
+        considered and rejected for this same purpose: two concurrent
+        SHARE lock holders never conflict with EACH OTHER (SHARE only
+        conflicts with ROW EXCLUSIVE and stronger), so both would pass
+        the COUNT and only then deadlock against each other's own
+        subsequent INSERT (which needs ROW EXCLUSIVE, which SHARE does
+        conflict with) -- see the WP-6d report for the Phase 9 R-2
+        precedent's own lock mode finding. `pg_advisory_xact_lock` has
+        no such self-conflict-free class: a second holder of the SAME
+        key always waits for the first, full stop.
+        """
+        with conn.cursor() as cur:
+            _run(cur, sql.SQL("SELECT pg_advisory_xact_lock(%s)"), [_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY])
+
     def _idempotency_lookup(self, conn: "psycopg.Connection[Any]", key: str) -> tuple[str, str, dict[str, Any]] | None:
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
         with conn.transaction():
@@ -1227,9 +1322,27 @@ class PostgresCell:
         # just treated as absent (`_idempotency_record_has_request_id`
         # returned false, at both call sites below) reaches this SAME
         # method for the SAME key, and must overwrite the stale row
-        # rather than fail on the primary key it still holds. Mirrors
+        # rather than fail on the primary key it still holds -- an
+        # expired-but-not-yet-reaped row, or a pre-1.7.0-shaped row with
+        # no `request_id` at all, are the only ways a live row can still
+        # be sitting under this key when this INSERT runs. Mirrors
         # `ApplicationCell._idempotency_store`'s plain dict assignment,
         # which overwrites unconditionally by construction.
+        #
+        # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①): this
+        # `ON CONFLICT DO UPDATE` is NOT what makes concurrent same-key
+        # requests safe -- `_idempotency_key_lock` (taken by every caller
+        # before `_idempotency_lookup`, in the same outer transaction)
+        # is what closes that race, by making the second concurrent
+        # request wait for the first's commit/rollback before either one
+        # reaches this method at all. Once that lock serializes entry,
+        # nothing else can be racing THIS INSERT for the SAME key: the
+        # conflict this clause resolves is only ever this key's own
+        # prior (already-committed, sequential) row -- never a row a
+        # peer transaction is concurrently trying to write right now.
+        # Kept as `DO UPDATE` (not narrowed to a bare `INSERT`) purely
+        # for that stale-row-still-present case above, not for
+        # concurrency.
         table = sql.Identifier(_IDEMPOTENCY_TABLE)
         with conn.cursor() as cur:
             _run(
@@ -1437,6 +1550,12 @@ class PostgresCell:
                     if idempotency_key is not None and not dry_run:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
+                        # Ruling U-7 (WP-6d): taken in THIS outer
+                        # transaction, before `_idempotency_lookup` opens
+                        # its own nested savepoint -- see `_idempotency_
+                        # key_lock`'s own docstring for why the lock must
+                        # sit here and not inside that savepoint.
+                        self._idempotency_key_lock(conn, idempotency_key)
                         record = self._idempotency_lookup(conn, idempotency_key)
                         # L-6/M-6: a record with no `request_id` (pre-1.7.0)
                         # is not a usable replay source -- treated as
@@ -1460,7 +1579,11 @@ class PostgresCell:
                                 request_id=stored_payload["request_id"],
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
-                        # request executes anything.
+                        # request executes anything. Ruling U-7: the
+                        # table-level count lock is likewise taken in
+                        # THIS outer transaction, before `_idempotency_
+                        # reserve` opens its own nested savepoint.
+                        self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
                     catalog = self._load_catalog(conn)
                     if entity not in catalog:
@@ -2126,6 +2249,11 @@ class PostgresCell:
                     if idempotency_key is not None and not dry_run:
                         assert plan_request is not None  # service.py always builds this
                         idempotency_digest_value = idempotency_digest(plan_request)
+                        # Ruling U-7 (WP-6d): see `transact`'s identical
+                        # comment -- taken in THIS outer transaction,
+                        # before `_idempotency_lookup`'s own nested
+                        # savepoint.
+                        self._idempotency_key_lock(conn, idempotency_key)
                         record = self._idempotency_lookup(conn, idempotency_key)
                         # L-6/M-6: a record with no `request_id` (pre-1.7.0)
                         # is not a usable replay source -- treated as
@@ -2150,7 +2278,10 @@ class PostgresCell:
                                 request_id=stored_payload["request_id"],
                             )
                         # Ruling I-6/D-5 (5): capacity checked before this
-                        # request executes anything.
+                        # request executes anything. Ruling U-7: table-
+                        # level count lock, same outer-transaction
+                        # placement as `transact` above.
+                        self._idempotency_reserve_lock(conn)
                         self._idempotency_reserve(conn, limits)
                     # Contract 1.7.0 (D-4 (7)/(3), addendum 2 S-a/S-j,
                     # WP-2b): read ONCE, before any DDL/registry write this
@@ -2283,13 +2414,31 @@ class PostgresCell:
                         # rows is refused with CONFLICT on the same rule" --
                         # the SAME tx + lock `alter_field`'s own existing-
                         # row scan uses below (M-1/F): `LOCK TABLE ... IN
-                        # SHARE MODE` before the existence check, so a
-                        # concurrent INSERT cannot slip a row in between
-                        # this check and the DDL/registry write below.
+                        # SHARE ROW EXCLUSIVE MODE` before the existence
+                        # check, so a concurrent INSERT cannot slip a row
+                        # in between this check and the DDL/registry write
+                        # below.
+                        #
+                        # R-35 (Phase 10, WP-6d-i review): plain `SHARE
+                        # MODE` does not conflict with itself, so two
+                        # concurrent `add_field`/`alter_field` calls on the
+                        # SAME entity could both acquire it, then each
+                        # block at its own later `ALTER TABLE` (ACCESS
+                        # EXCLUSIVE) waiting on the other's SHARE lock --
+                        # a guaranteed mutual wait, broken only by
+                        # PostgreSQL's deadlock detector aborting one side
+                        # with an error instead of the two calls simply
+                        # serializing. `SHARE ROW EXCLUSIVE` conflicts with
+                        # itself, so the second caller instead waits here,
+                        # at LOCK TABLE, and proceeds only once the first
+                        # transaction commits or rolls back -- it still
+                        # excludes concurrent row writers (ROW EXCLUSIVE)
+                        # exactly as plain SHARE did, so the R-2 existing-
+                        # row-scan property above is unchanged.
                         if bound.constraints is not None and not bound.constraints.nullable:
                             add_field_table_ident = sql.Identifier(bound.entity)
                             with conn.cursor() as cur:
-                                _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=add_field_table_ident))
+                                _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE").format(table=add_field_table_ident))
                             with conn.cursor() as cur:
                                 _run(cur, sql.SQL("SELECT 1 FROM {table} LIMIT 1").format(table=add_field_table_ident))
                                 if cur.fetchone() is not None:
@@ -2355,22 +2504,41 @@ class PostgresCell:
                         field_ident = sql.Identifier(bound.field)
                         # Monitor ruling F/M-1 (rulings-wp3a-review.md,
                         # rulings-wp2a-review.md): lock the entity's own
-                        # table (SHARE MODE -- blocks concurrent writers,
-                        # never concurrent readers) BEFORE the scan below,
-                        # inside this SAME transaction. Without this, READ
-                        # COMMITTED lets another session INSERT/UPDATE a
-                        # row that violates the new constraints, commit it
-                        # AFTER this scan sees zero violations but BEFORE
-                        # this transaction's own `_write_field_constraints`
-                        # commits -- `alter_field` would then succeed while
-                        # a violating row already exists, making the
-                        # catalog's own declaration false (G-3) the instant
-                        # it is published. `SHARE MODE` (not a row lock)
+                        # table (SHARE ROW EXCLUSIVE -- blocks concurrent
+                        # writers, never concurrent readers) BEFORE the
+                        # scan below, inside this SAME transaction. Without
+                        # this, READ COMMITTED lets another session
+                        # INSERT/UPDATE a row that violates the new
+                        # constraints, commit it AFTER this scan sees zero
+                        # violations but BEFORE this transaction's own
+                        # `_write_field_constraints` commits -- `alter_
+                        # field` would then succeed while a violating row
+                        # already exists, making the catalog's own
+                        # declaration false (G-3) the instant it is
+                        # published. A table-level lock (not a row lock)
                         # because the scan below reads the WHOLE table, not
                         # a single identified row (contrast the upsert
                         # TOCTOU fix below, M-2, which locks one row).
+                        #
+                        # R-35 (Phase 10, WP-6d-i review): the original fix
+                        # used plain `SHARE MODE`, which does not conflict
+                        # with itself -- two concurrent `alter_field`/`add_
+                        # field` calls on the SAME entity could both
+                        # acquire it here, then each block at its own later
+                        # `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on the
+                        # other's SHARE lock, a guaranteed mutual wait
+                        # broken only by PostgreSQL's deadlock detector
+                        # aborting one side with an error rather than the
+                        # two calls simply serializing. `SHARE ROW
+                        # EXCLUSIVE` conflicts with itself, so the second
+                        # caller instead waits here, at LOCK TABLE, and
+                        # proceeds only once the first transaction commits
+                        # or rolls back -- it still excludes concurrent row
+                        # writers (ROW EXCLUSIVE) exactly as plain SHARE
+                        # did, so the R-2 existing-row-scan property above
+                        # is unchanged.
                         with conn.cursor() as cur:
-                            _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=table_ident))
+                            _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE").format(table=table_ident))
                         if not new_constraints.nullable:
                             with conn.cursor() as cur:
                                 _run(cur, sql.SQL("SELECT 1 FROM {table} WHERE {f} IS NULL LIMIT 1").format(table=table_ident, f=field_ident))
