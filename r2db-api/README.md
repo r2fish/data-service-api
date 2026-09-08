@@ -56,23 +56,40 @@ versus what remains unevidenced.
   byte-identical packaged copy ships with the distribution so a checkout
   without the sibling `spec/` tree still imports.
 - **`migrations/`** (`0001_bootstrap_control_plane.sql` through
-  `0006_control_plane_http.sql`): schema-per-application (database-per-
-  application, see the provisioning runbook §0), two dedicated PostgreSQL
-  roles per application (`runtime`: DML only; `developer`: DDL within its
-  own schema only), and row-level security as a defence-in-depth layer
-  under both. A separately-bootstrapped control role
+  `0011_idempotency_records_upgrade.sql`, 11 files): `0001` control-plane
+  bootstrap; `0002` provisioning-function helpers; `0003`/`0004`
+  provision/deprovision one application -- schema-per-application
+  (database-per-application, see the provisioning runbook §0), two
+  dedicated PostgreSQL roles per application (`runtime`: DML only;
+  `developer`: DDL within its own schema only), and row-level security as a
+  defence-in-depth layer under both; `0005` credential store + read-only
+  API role; `0006` control-plane HTTP surface storage --
+  `control_credentials`/`control_audit` and the least-privilege
+  `r2dbsvc_controlplane` role (see the control-plane bullet below); `0007`
+  application-plane durable audit sink (phase 4, `application_audit`);
+  `0008` platform-declarations table + audit-writer-role timeouts (Q4
+  phase); `0009` retrofits the per-application platform-upgrade ledger onto
+  an application provisioned before Q4 WP-3; `0010` adds the
+  per-application field-constraints declaration registry (contract 1.7.0
+  R-2); `0011` adds the per-application idempotency-record side table
+  (contract 1.7.0 R-5). A separately-bootstrapped control role
   (`NOSUPERUSER`/`NOCREATEDB`) performs provisioning; the API process never
-  holds that credential. `0006` additionally lays down the control-plane
-  HTTP surface's own storage -- `control_credentials`/`control_audit` and
-  the least-privilege `r2dbsvc_controlplane` role (see the control-plane
-  bullet below). `docs/POSTGRES_PROVISIONING_RUNBOOK.md` is the operator
-  runbook. Provisioning is always run by an operator against a real
-  PostgreSQL server -- **never by the API process** -- and always targets a
-  footprint namespaced separately from the existing VPS deployment.
+  holds that credential. `docs/POSTGRES_PROVISIONING_RUNBOOK.md` is the
+  operator runbook. Provisioning is always run by an operator against a
+  real PostgreSQL server -- **never by the API process** -- and always
+  targets a footprint namespaced separately from the existing VPS
+  deployment.
 - **A control-plane HTTP surface, `/control/v1`** (CCR-14,
-  `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`): 11 endpoints
-  (`capabilities`, application register/list/enable/disable, credential
-  issue/list/rotate/revoke/disable/enable) served by a distinct ASGI app
+  `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`): 12 distinct control
+  endpoints (`capabilities`, application register/list/enable/disable,
+  credential issue/list/rotate/revoke/disable/enable, `audit_query`) --
+  C-14's fail-closed authority boundary (`conformance-tests/CONDITIONS.md`)
+  covers 11 of these, every one except `audit_query` --
+  `src/r2db_api/control_http.py`'s route table has 13 `Route(...)` entries
+  because `audit_query` is registered twice, at its canonical
+  `/control/v1/audit/query` path and, for one further minor version, also
+  at the `/v1/audit/query` alias (contract `endpoints.audit_query.
+  deprecation_note`; same handler) -- served by a distinct ASGI app
   (`src/r2db_api/control_http.py`, assembled by `src/r2db_api/control_main.py`)
   with its own credential type (`role=control`, a dedicated verifier table
   and HMAC pepper -- structurally unable to coexist with an application
@@ -104,13 +121,18 @@ versus what remains unevidenced.
   this peer's own `cross_entity_mutation` stays `unavailable` (P35-D1, no
   real client demand on this peer) -- both r2db adapters take C-16's
   documented ABSENT branch (in-process = surface-absent, http = a real,
-  mounted present-denial stub), never the PROVIDED branch MitateDB takes. C-14 (control-plane
-  authority boundary) and C-15 (bootstrap/reset lifecycle) run against a
-  real `/control/v1` for this adapter and against a real, in-process
-  `ControlPlaneService` for the plain `r2db-api` adapter -- both currently
-  take the PROVIDED branch (`control_plane: enabled`, exercised for real);
-  `MitateDB-api` still takes the surface-absent branch (no equivalent
-  surface exists yet -- next phase). See `docs/design/CONFORMANCE_ADAPTER_V1.md`,
+  mounted present-denial stub), never the PROVIDED branch MitateDB takes
+  (MitateDB declares `cross_entity_mutation: partial` on both its
+  adapters). C-14 (control-plane authority boundary) and C-15
+  (bootstrap/reset lifecycle) run against a real `/control/v1` for this
+  adapter and against a real, in-process `ControlPlaneService` for the
+  plain `r2db-api` adapter. `MitateDB-api` implements its own `/control/v1`
+  control-plane HTTP surface too (`MitateDB-api/src/mitatedb_api/control_http.py`)
+  -- all four registered adapters (`r2db-api`, `r2db-api-http`,
+  `MitateDB-api`, `MitateDB-api-http`) currently declare `control_plane:
+  enabled` and take C-14's and C-15's PROVIDED branch for real, end-to-end;
+  no peer is on the surface-absent branch for either condition. See
+  `docs/design/CONFORMANCE_ADAPTER_V1.md`,
   `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`, and
   `conformance-tests/CONDITIONS.md`.
 - **CCR-13 storage layer** (`docs/design/R2DB_CCR13_STORAGE_V1.md`): typed
@@ -126,8 +148,8 @@ versus what remains unevidenced.
   `row_addressability`/`revision_preconditions` all `enabled` or
   `partial` as appropriate, no longer `unavailable`). Conditions C-17
   (declaration/addressability/uniqueness agreement) and C-18 (revision-
-  precondition semantics) are executable across all three conformance
-  adapters.
+  precondition semantics) are executable across all four conformance
+  adapters (`conformance-tests/CONDITIONS.md`).
 
 All of the above has been exercised against a real local PostgreSQL 16
 server (`r2db-api/tests/test_postgres.py`, `test_http.py`, and the
@@ -179,7 +201,8 @@ production identity/network/database-grant evidence exists yet
   **Update, phase 4 WP-2(b): `audit_query` itself is implemented, on the
   control host.** `POST /control/v1/audit/query` (canonical, contract 1.4.0
   classifies it under `control_endpoints`) and `POST /v1/audit/query` (the
-  same handler, kept as an alias for one minor) read the UNION of
+  same handler, kept as an alias for one further minor version) read the
+  UNION of
   `control_audit` and `application_audit` as the SELECT-only
   `r2dbsvc_auditreader` role, in a total order of
   `(recorded_at, plane, event_id)`, paged with an opaque per-event cursor,

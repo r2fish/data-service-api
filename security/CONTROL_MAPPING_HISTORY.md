@@ -149,6 +149,16 @@ finite `ResourceLimits` across required classes; atomic credential-rate window, 
 
 **Phase 3.5**: `batch_entities`' publish-and-enforce agreement is additionally covered by `conformance-tests/test_c16_cross_entity_atomicity.py` (condition C-16, executable on all four adapters -- see the SI-11 row below).
 
+**R-21 correction (2026-09-08, roadmap `docs/design/ROADMAP_POST_PHASE7_V1.md` v1.6 §8 R-21, WP-0 pre-phase-10 remediation) -- superseded text kept verbatim below; the replacement is a documentation-accuracy correction, not a security-contract change:**
+
+Superseded text, verbatim, exactly as it stood in `security/CONTROL_MAPPING.md`'s SI-08 row, MitateDB-api column, before this correction:
+
+**Honest scope**: application-plane request rate, concurrency, and execution-time bounds remain unimplemented on this peer -- tracked as future work (design §7), not claimed here.
+
+Supervisor ruling (verbatim, `scratchpad/phase10/fixed-text-r21-ruling.md`):
+
+監督裁定 2026-09-08 (フェーズ10 着手前是正、roadmap v1.6 §8 R-21): `security/CONTROL_MAPPING.md` の SI-08 行にある MitateDB 記述「application-plane request rate, concurrency, and execution-time bounds remain unimplemented on this peer」は、フェーズ8 WP-1a (rework 1、2026-09-06) 以降、事実に反する。現行は `requests_per_minute` / `concurrency` が `enforced`、`execution_ms` が `reference_wall_clock` である (`MitateDB-api/src/mitatedb_api/cell.py` の capabilities 文書組み立て)。本是正は現状記述の更新であり、Security Invariants の意味と security-contract を変更しない。
+
 ---
 
 ## SI-09
