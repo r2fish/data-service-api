@@ -22,13 +22,17 @@ public contract.
 
 Phase 3 (`docs/design/MITATEDB_PHASE3_HTTP_PERSISTENCE_V1.md`) is complete:
 the common contract's application-plane HTTP surface (`/v1/*`) and the
-control plane (`/control/v1`, 11 endpoints + the out-of-band bootstrap/
-reset ceremony) both run over real PostgreSQL persistence, and this peer
-registers as **two** conformance adapters. `security/CONTROL_MAPPING.md`
+control plane (`/control/v1`, 12 distinct endpoints + the out-of-band
+bootstrap/reset ceremony) both run over real PostgreSQL persistence, and
+this peer registers as **two** conformance adapters. `security/CONTROL_MAPPING.md`
 is the authoritative row-by-row account of what is local/test evidence
-versus what remains unevidenced (Cloud SQL/Cloud Run production platform
-evidence is `absent` until an operator runs `docs/cloud-run-cloud-sql.md`
-once).
+versus what remains unevidenced. Cloud SQL/Cloud Run production platform
+evidence is partial, not absent: `docs/cloud-run-cloud-sql.md` §9.1 records
+the runbook's first real execution against a live Cloud SQL 16.14 instance
+(2026-09-01, operator-reported, supervisor-verified) -- role/database DDL,
+the `GRANT ... WITH SET TRUE` construct, and `log_statement` suppression
+PASS, while deprovision and the cloudsqlsuperuser fail-closed probe remain
+unexercised against that instance.
 
 Run the local test suite with:
 
@@ -70,13 +74,26 @@ when PostgreSQL is unreachable, they fail loudly).
   the ASGI `receive` loop, measured from actual bytes received, sized from
   the SAME `FoundationConfig.max_request_bytes` the capability document
   declares. `POST /v1/schema/operations` supports `create_entity`/
-  `add_field`; every other schema operation and every endpoint behind an
-  `unavailable` capability (`audit_query`, `application_catalog`) refuses
-  uniformly with `CAPABILITY_UNSUPPORTED`, matching its own declaration
-  exactly -- `MitateDB-api/tests/test_http.py::test_declared_unavailable_
-  endpoints_deny_uniformly_after_auth` parametrizes `POST /v1/audit/query`
-  among them and pins both the post-authentication `CAPABILITY_UNSUPPORTED`
-  and the unauthenticated `AUTH_*`-first ordering. (`audit_query` is
+  `add_field`/`alter_field` (developer credentials only; `create_index`/
+  `drop_index`/`drop_entity`/`jobs` stay `unsupported`); every other schema
+  operation and the one endpoint behind an `unavailable` capability
+  (`audit_query`) refuses uniformly with `CAPABILITY_UNSUPPORTED`, matching
+  its own declaration exactly -- `MitateDB-api/tests/test_http.py::test_
+  declared_unavailable_endpoints_deny_uniformly_after_auth` parametrizes
+  `POST /v1/audit/query` (its only case) and pins both the
+  post-authentication `CAPABILITY_UNSUPPORTED` and the unauthenticated
+  `AUTH_*`-first ordering. The other three `unavailable` capabilities have
+  no endpoint of their own to deny uniformly and are refused in their own,
+  different forms: `best_effort_transactions` is a present denial of the
+  *request-parameter value* `transaction: "best_effort"` on
+  `POST /v1/data/{entity}/mutations` (`http.py:1004-1010`); the
+  cross-entity `POST /v1/data/mutations` batch has no `transaction` field
+  to refuse at all (`http.py:1137`). `revision_preconditions` is a present
+  denial of the `expected_revision` parameter `transact()` accepts on
+  either mutation entry point (`conformance-tests/CONDITIONS.md:47`, C-18).
+  `row_addressability` has no call surface at all on the in-process
+  adapter -- `SurfaceAbsent` (`conformance-tests/CONDITIONS.md:46`, C-17
+  form (a)). (`audit_query` is
   `unavailable` **on this host**: since phase 4 WP-3(b) it is `enabled` on
   the control service, which is a different deployment unit making a
   different, equally true statement about itself -- see the audit note under
@@ -91,9 +108,16 @@ when PostgreSQL is unreachable, they fail loudly).
   existing `batch_items`. See `security/CONTROL_MAPPING.md`'s SI-08/SI-11
   rows for the full enforcement/atomicity evidence.
 - **Control plane, `/control/v1`** (`src/mitatedb_api/control_plane.py`,
-  `control_http.py`, `control_main.py`): the contract's 11 endpoints
+  `control_http.py`, `control_main.py`): 12 distinct control endpoints
   (capabilities, application register/list/enable/disable, credential
-  issue/list/rotate/revoke/disable/enable), a fixed evaluation order
+  issue/list/rotate/revoke/disable/enable, `audit_query`) -- C-14's
+  fail-closed authority boundary (`conformance-tests/CONDITIONS.md`)
+  covers 11 of these, every one except `audit_query` --
+  `control_http.py`'s route table has 13 `Route(...)` entries because
+  `audit_query` is registered twice, at its canonical
+  `/control/v1/audit/query` path and, for one further minor version, also
+  at the `/v1/audit/query` alias (contract `endpoints.audit_query.
+  deprecation_note`; same handler) -- a fixed evaluation order
   (rate-limit -> authenticate -> must_rotate gate -> capability check ->
   shape -> target resolution -> bounds -> destructive-confirmation ->
   execute+audit), three enforced resource classes
@@ -135,13 +159,17 @@ when PostgreSQL is unreachable, they fail loudly).
   (`conformance/conformance_adapter_mitatedb_http.py`, real HTTP + real
   PostgreSQL, throwaway-prefixed databases/roles per run, the bootstrap/
   reset ceremony run as a real `python -m mitatedb_api.ops` subprocess).
-  Both are `required: true` in `../conformance-tests/registry.json`.
-  Executable conditions this peer now participates in for real: C-01,
-  C-03, C-06, C-08, C-11 (partial, see `conformance-tests/CONDITIONS.md`),
-  C-12, C-13, C-14, C-15, C-16 (PROVIDED branch, phase 3.5 WP-3 --
-  `cross_entity_mutation` is `partial` on both adapters), C-17
-  (structural-evidence branch, since `row_addressability` stays
-  `unavailable`), C-18.
+  Both are `required: true` in `../conformance-tests/registry.json`
+  (all 4 registered adapters -- `r2db-api`, `r2db-api-http`, `MitateDB-api`,
+  `MitateDB-api-http` -- are `required: true`).
+  Executable conditions this peer now participates in for real: **all 26
+  registered conditions, C-00 through C-25** (`conformance-tests/CONDITIONS.md`),
+  each executable on all four registered adapters. Notable branches for this
+  peer: C-11 partial (see `conformance-tests/CONDITIONS.md`); C-14/C-15
+  PROVIDED (`control_plane: enabled`, exercised for real end-to-end); C-16
+  PROVIDED (phase 3.5 WP-3 -- `cross_entity_mutation` is `partial` on both
+  adapters); C-17 structural-evidence branch (`row_addressability` stays
+  `unavailable`).
 - **Deployment assets** (`docker/Dockerfile`, `docs/cloud-run-cloud-sql.md`,
   `docs/CONTROL_PLANE_COMPROMISE_PLAYBOOK.md`): one non-root, multi-stage
   image serving either ASGI app (`SERVICE=data`/`SERVICE=control`), a
@@ -155,19 +183,27 @@ when PostgreSQL is unreachable, they fail loudly).
 All of the above has been exercised against a real local PostgreSQL 16
 cluster (`tests/test_postgres.py`, `test_control_plane_postgres.py`, and
 both conformance adapters) -- not a mocked database. That is local/
-test-cluster evidence, not production evidence: no step in
-`docs/cloud-run-cloud-sql.md` has yet been run against a real Cloud SQL
-instance or a real Cloud Run deployment (`security/CONTROL_MAPPING.md`
-records this per invariant, and `docs/cloud-run-cloud-sql.md` §9 is the
-real-instance verification procedure for when that changes).
+test-cluster evidence, not full production evidence: `docs/cloud-run-cloud-sql.md`
+§9.1 records the runbook's first real execution, against a live Cloud SQL
+16.14 instance (2026-09-01, operator-reported, supervisor-verified) --
+role/database DDL, the `GRANT ... WITH SET TRUE` construct, and
+`log_statement` suppression PASS, while deprovision (`pg_terminate_backend`)
+and the `assert_role_has_no_memberships`/cloudsqlsuperuser fail-closed probe
+remain unexercised against that instance (`security/CONTROL_MAPPING.md`
+records this per invariant; `docs/cloud-run-cloud-sql.md` §9 is the ongoing
+real-instance verification procedure).
 
 ### What remains reference-only or unimplemented
 
-- **Capability envelope frozen this phase** (design v1.2 §0): `upsert`,
-  `contains`/`matches`/`is_null`, `row_addressability`,
-  `revision_preconditions`, `idempotency`, `application_catalog`,
-  and `best_effort_transactions` stay at their current
-  declaration (`unavailable`/`unsupported`). **`cross_entity_mutation` no
+- **Remaining declaration gaps** (`cell.py`'s `__build_capabilities_document`,
+  as of this WP): `upsert` (`unsupported` within `atomic_mutation`/
+  `cross_entity_mutation`), `contains`/`matches`/`is_null` (`unsupported`
+  within `structured_query`), `create_index`/`drop_index`/`drop_entity`/
+  `jobs` (`unsupported` within `schema_operations`), `row_addressability`,
+  `revision_preconditions`, and `best_effort_transactions` stay
+  `unavailable`/`unsupported`. **`idempotency` (Phase 9 WP-3c, `cell.py:3887`)
+  and `application_catalog` (Phase 6 WP-3, `cell.py:3860`) no longer belong
+  on this list**: both are `enabled`. **`cross_entity_mutation` no
   longer belongs on this list**: the requester approved phase 3.5
   (2026-08-31) and it shipped as `partial` in WP-2/WP-3 -- see the "What
   now exists" section above and
@@ -176,12 +212,21 @@ real-instance verification procedure for when that changes).
   service (the data service still declares it `unavailable`, truthfully --
   that host does not serve it), see the audit note at the end of this
   section and `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md`.
-- **Application-plane resource bounds beyond `request_bytes`**: request
-  rate, concurrency, and execution-time limits are not implemented at the
-  application-code layer on this peer (Cloud Run's own concurrency/
-  timeout settings are a deployment-layer control, not yet declared as
-  such -- `limit_enforcement: deployment_required` -- anywhere in this
-  codebase).
+- **Application-plane resource bounds** (Phase 8 WP-1a, rework 1,
+  2026-09-06): `requests_per_minute` and `concurrency` are `enforced` --
+  `_LimitStateHolder.acquire_rate`/`.concurrency_slot` (`cell.py:744`,
+  `:775-782`, `:785-794`), declared in `limit_enforcement`
+  (`cell.py:4051`, `:4055`); `execution_ms` is declared
+  `reference_wall_clock`, not `enforced` (`cell.py:4044`) -- a wall-clock
+  deadline (`time.monotonic() + max_execution_ms`) handed to the backend,
+  `backend_postgres.py` converts it into a real `SET LOCAL
+  statement_timeout`/`lock_timeout` (`backend_postgres.py:1658-1661`),
+  matching r2db-api's own identical declaration. Cloud Run's own
+  concurrency/timeout settings remain a separate, undeclared
+  deployment-layer control on top of the above -- the contract's
+  `limit_enforcement` enum has a `deployment_required` member for exactly
+  this kind of control (`contract/data-service-api.v1.json:198,1201`), but
+  it appears nowhere in either peer's own declaration code.
 - **RLS defence-in-depth**, **IAM DB authentication/Cloud SQL Connector**,
   and a **shared/cross-instance control-plane rate window** (needed only
   if the control service ever runs with more than one instance) are all
