@@ -582,7 +582,7 @@ gh repo view <GITHUB_OWNER>/<REPO_NAME> --json visibility
 | 4 再作成後の remote からの履歴スキャン | 監督 | 2026-09-08 | 成功 | 掛けたクローン = 再作成後の remote からの新規 clone (`gh repo clone`、HEAD `a15f03a`) / `total_flagged` = 0 (482 commit、ツリー 0、identity 1 種、`rewrite_hash_refs.py --verify` 残存 0) |
 | 5 clone・worktree の作り直し | 監督 (作業機) / 運用者 (VPS) | 2026-09-08 (作業機) | 作業機: linked worktree 17 本を `git worktree remove --force` + `prune` で除去、共有 checkout を再作成後の `origin/main` に `reset --hard`、旧 local branch を削除して 27 本を再追跡、`reflog expire` + `gc --prune=now` で旧 object を除去 (旧 hash は到達不能・object 不在を確認、ローカル履歴走査 0 件)。scratch の書換前後 clone・置換規則・mailmap は削除、commit-map と ref 一覧は運用者記録へ保存 | 作り直した対象 = 共有 checkout 1 + worktree 17 (VPS 側は `git archive` 配布のため `.git` 無し — 次回配布時に新履歴から取り直す) |
 | 6 credential の revoke + 再発行 | 運用者 (VPS、`python -m r2db_api.ops` を `r2dbsvc_control` ロールの DSN で。unix socket は peer 認証のため loopback TCP を使用) | 2026-09-08 | 成功: runtime credential (application 1 件) を `revoke-credential` → `issue-credential … runtime` で再発行 (旧 id は revoked、新 id が有効であることを `list-credentials` で確認)、control credential を `reset --confirm RESET_CONTROL_CREDENTIALS` で全件 revoke + 1 本再発行 | 2 件とも revoke + 再発行 (rotate ではない)。新 id・secret は本書に書かない (policy)。新 bearer の配布先 = runtime: application 側 / control: 運用者記録 |
-| 6.5 R7 の人手確認 | | | | 確認した語数 = / ヒット総数 = |
+| 6.5 R7 の人手確認 | 依頼者 (判断) / 監督 (記録) | 2026-09-08 | 依頼者判断: 公開を差し控えたい個人特定語 (本名・個人アカウント等) は無い — R7 の対象語なし。したがって grep は実施していない (「0 件」ではなく「対象語なし」として記録) | 確認した語数 = 0 (対象語なし) / ヒット総数 = 該当なし |
 | 7 visibility の切替 | | | | |
 
 ### 3.3 書換後の記録
