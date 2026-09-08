@@ -75,11 +75,42 @@ Exit code:
          reference has no definition in its family's canonical file(s).
 
 Standard library only (tools/public_value_scan.py convention) -- no
-external dependency, no subprocess, no dependence on `sys.executable`.
+external dependency, no dependence on `sys.executable`. WP-1 (roadmap v1.6
+R-17) adds one narrow subprocess call, `git ls-files`, for the empty-
+tracked-markdown guard below; every other check in this file remains pure
+filesystem/regex work, unchanged.
+
+WP-1 (R-17) -- empty tracked markdown guard:
+Google Drive's sync sometimes converts a tracked `.md` into a `.gdoc`
+shortcut and leaves the original `.md` behind at 0 bytes (observed
+2026-09-08: docs/work-orders/PUBLICATION_GATE_20260906.md entered commit
+4d4f1a5 this way). This is a second, independent scan: every git-tracked
+`.md` file (repo-wide, via `git ls-files -z -- '*.md'`, NOT the fixed
+docs/spec/security/conformance-tests + root-files set iter_scan_files
+walks for the reference check above) is checked for `st_size == 0`. A
+zero-byte tracked `.md` is fatal (exit 1) regardless of the reference
+check's own result. Outside a git working tree (or when `git` itself is
+unavailable), this falls back to iter_scan_files's own rglob-based file
+set and says so in one printed line -- an untracked file is invisible to
+`git ls-files` by design (it is not yet part of the repository this guard
+protects), so the fallback set is scoped the same way the primary
+reference scan already is, not to every `.md` under the repository root.
+
+A `tracked markdown files scanned: N` line is printed immediately before
+the `empty markdown files: N` tally (supervisor ruling on WP-1 code
+review point 3), with a trailing ` (fallback)` when the fallback path was
+used. When `git ls-files` SUCCEEDS but reports N == 0 tracked `.md` files,
+that is never treated as "nothing to check, therefore clean": this
+repository always has at least one tracked `.md` file, so a git-success
+zero is itself a fatal (exit 1) scan-vacuity signal, the same "空振り禁止"
+principle as the per-family counts below. A fallback-path zero is NOT
+fatal by itself -- an empty fallback set can legitimately happen when this
+script runs outside any repository this guard is meant to protect.
 """
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,6 +162,71 @@ def relpath(repo_root: Path, path: Path) -> str:
         return str(path.relative_to(repo_root))
     except ValueError:
         return str(path)
+
+
+# ---------------------------------------------------------------------------
+# WP-1 (R-17): empty tracked markdown guard. Independent scan set from
+# iter_scan_files above -- see the module docstring's "WP-1 (R-17)" section.
+# ---------------------------------------------------------------------------
+_FALLBACK_NOTICE = (
+    "check_doc_refs: git unavailable or repo root is not a git working "
+    "tree; falling back to the fixed scanned-file set (iter_scan_files) "
+    "for the empty-tracked-markdown check"
+)
+
+
+def iter_tracked_markdown_files(repo_root: Path) -> tuple[list[Path], str | None]:
+    """Returns (files, fallback_notice).
+
+    `files` is every markdown file the empty-file guard (R-17) examines:
+    normally the repository's own git-tracked `*.md` set, read via
+    `git ls-files -z -- '*.md'` (NUL-separated, so a path is never split on
+    embedded whitespace) run with `cwd=repo_root`. This is a deliberately
+    separate scan set from iter_scan_files's fixed directory list -- a
+    tracked `.md` anywhere in the tree counts here, not only inside
+    docs/spec/security/conformance-tests + the root files + tools/*.md.
+
+    `fallback_notice` is None when `git ls-files` succeeded. When `git` is
+    not installed, `repo_root` is not inside a git working tree, or the
+    listing could not be decoded as UTF-8, this falls back to
+    iter_scan_files's own rglob-based file set and `fallback_notice` is a
+    single fixed line describing the fallback -- callers must print it
+    exactly once, never silently substitute the fallback set."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        proc = None
+
+    if proc is not None and proc.returncode == 0:
+        try:
+            names = proc.stdout.decode("utf-8", errors="strict").split("\0")
+        except UnicodeDecodeError:
+            names = None
+        if names is not None:
+            return sorted(repo_root / name for name in names if name), None
+
+    return iter_scan_files(repo_root), _FALLBACK_NOTICE
+
+
+def find_empty_markdown_files(files: list[Path]) -> list[Path]:
+    """Returns the subset of `files` that exist and are exactly 0 bytes
+    (`st_size == 0`), sorted. A path that no longer exists or cannot be
+    stat'd is skipped, never treated as empty -- this guard is about a
+    file that IS present but was truncated to nothing, not about a
+    listing that has gone stale."""
+    empties: list[Path] = []
+    for path in files:
+        try:
+            if path.is_file() and path.stat().st_size == 0:
+                empties.append(path)
+        except OSError:
+            continue
+    return sorted(empties)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +484,25 @@ def run(repo_root: Path, out=None, err=None) -> int:
         )
         return 1
 
+    # WP-1 (R-17): empty tracked markdown guard. Computed here (after both
+    # readability gates above have already passed) so its own fallback
+    # notice, if any, prints before the family-count lines below -- but its
+    # own pass/fail is independent of the reference-scan result computed
+    # next, and is reported right before whichever final tally line prints.
+    tracked_md_files, fallback_notice = iter_tracked_markdown_files(repo_root)
+    if fallback_notice is not None:
+        print(fallback_notice, file=out)
+    empty_md_files = find_empty_markdown_files(tracked_md_files)
+    scanned_count = len(tracked_md_files)
+    scanned_line = f"tracked markdown files scanned: {scanned_count}"
+    if fallback_notice is not None:
+        scanned_line += " (fallback)"
+    # git succeeding with an empty tracked-`.md` set is a scan-vacuity
+    # failure on its own (this repository always has at least one tracked
+    # `.md` file) -- a fallback-path empty set is not, since the fallback
+    # can legitimately run outside any repository this guard protects.
+    vacuous_scan = fallback_notice is None and scanned_count == 0
+
     # Dangling entries carry (rel, lineno, token, message) so the final
     # report can be sorted by NUMERIC line number (design D-2 / R-I) --
     # sorting the formatted "file:line: ..." strings themselves would sort
@@ -446,7 +561,44 @@ def run(repo_root: Path, out=None, err=None) -> int:
     if dangling:
         for _, _, _, message in sorted(dangling, key=lambda entry: entry[:3]):
             print(message, file=out)
-        print(f"check_doc_refs FAILED: {len(dangling)} dangling reference(s)", file=out)
+        for path in empty_md_files:
+            print(f"EMPTY: {relpath(repo_root, path)}", file=out)
+        print(scanned_line, file=out)
+        print(f"empty markdown files: {len(empty_md_files)}", file=out)
+        if empty_md_files:
+            # Both conditions are independently fatal; a reader of only the
+            # final line must not miss that empty tracked files were ALSO
+            # found (code review point 4). The exact single-condition
+            # wording below is quoted verbatim elsewhere and stays intact.
+            print(
+                f"check_doc_refs FAILED: {len(dangling)} dangling reference(s), "
+                f"{len(empty_md_files)} empty tracked markdown file(s)",
+                file=out,
+            )
+        else:
+            print(f"check_doc_refs FAILED: {len(dangling)} dangling reference(s)", file=out)
+        return 1
+
+    for path in empty_md_files:
+        print(f"EMPTY: {relpath(repo_root, path)}", file=out)
+    print(scanned_line, file=out)
+    print(f"empty markdown files: {len(empty_md_files)}", file=out)
+
+    if empty_md_files:
+        print(
+            f"check_doc_refs FAILED: {len(empty_md_files)} empty tracked markdown file(s)",
+            file=out,
+        )
+        return 1
+
+    if vacuous_scan:
+        print(
+            "check_doc_refs FAILED: 0 tracked markdown files scanned via git "
+            "ls-files despite git succeeding; refusing to report a clean "
+            "result (this repository always has at least one tracked .md "
+            "file)",
+            file=out,
+        )
         return 1
 
     print("check_doc_refs OK: 0 dangling references", file=out)

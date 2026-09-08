@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +51,16 @@ def _append(root: Path, rel: str, line: str) -> None:
     p = root / rel
     existing = p.read_text(encoding="utf-8") if p.exists() else ""
     p.write_text(existing + line, encoding="utf-8")
+
+
+def _git_init_and_add(root: Path) -> None:
+    """Initializes `root` as a git repository and stages every file
+    currently present under it (`git add -A`), without committing --
+    `git ls-files` (the primary path iter_tracked_markdown_files takes)
+    reads the index, so a commit is never required for it to see a file
+    as tracked."""
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
 
 
 def _build_minimal_tree(tmp_path: Path, *, omit: str | None = None) -> Path:
@@ -371,3 +382,192 @@ def test_dangling_lines_sorted_by_numeric_line_number(tmp_path):
         f"dangling output must be ordered by numeric line number (2 before "
         f"10), not by string comparison of 'file:line:'; got:\n{out}"
     )
+
+
+# ---------------------------------------------------------------------------
+# WP-1 (R-17), completion condition 1: a tracked, zero-byte `.md` fails the
+# run and is listed as "EMPTY: <path>" -- the Google-Drive-sync-truncation
+# scenario (commit 4d4f1a5) this guard exists to catch.
+# ---------------------------------------------------------------------------
+def test_empty_tracked_markdown_fails(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/design/EMPTY_DOC.md", "")
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code != 0, f"a tracked empty .md must fail the run; output:\n{out}{err}"
+    lines = out.splitlines()
+    assert "EMPTY: docs/design/EMPTY_DOC.md" in lines, out
+    assert "empty markdown files: 1" in lines, out
+
+
+# ---------------------------------------------------------------------------
+# WP-1 (R-17), completion condition 2: an empty `.md` that was never staged
+# (`git add`) is outside the `git ls-files` set and must not be reported.
+# ---------------------------------------------------------------------------
+def test_untracked_empty_markdown_is_ignored(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _git_init_and_add(root)
+    # Written AFTER `git add -A` -- never staged, so `git ls-files` never
+    # lists it.
+    _write(root, "docs/design/UNTRACKED_EMPTY.md", "")
+
+    code, out, err = _run(root)
+    assert code == 0, (
+        f"an untracked empty .md must not fail the run; got exit {code}, "
+        f"output:\n{out}{err}"
+    )
+    assert "empty markdown files: 0" in out.splitlines(), out
+
+
+# ---------------------------------------------------------------------------
+# WP-1 (R-17), completion condition 3: no empty tracked `.md` at all reports
+# "empty markdown files: 0" immediately before the existing final tally
+# line, and the run stays clean.
+# ---------------------------------------------------------------------------
+def test_no_empty_markdown_reports_zero(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code == 0, f"minimal tree must stay clean; got exit {code}, output:\n{out}{err}"
+    lines = out.splitlines()
+    assert "empty markdown files: 0" in lines, out
+    idx = lines.index("empty markdown files: 0")
+    assert lines[idx + 1] == "check_doc_refs OK: 0 dangling references", (
+        f"'empty markdown files: 0' must appear immediately before the "
+        f"existing tally line; got:\n{out}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WP-1 (R-17), completion condition 4: outside a git working tree, the
+# guard falls back to iter_scan_files's own rglob set (saying so in one
+# line) and still catches a zero-byte `.md` there.
+# ---------------------------------------------------------------------------
+def test_fallback_outside_git(tmp_path):
+    root = _build_minimal_tree(tmp_path)  # deliberately no git init here
+    _write(root, "docs/design/EMPTY_NO_GIT.md", "")
+
+    code, out, err = _run(root)
+    assert code != 0, f"a zero-byte .md must fail even via the fallback; output:\n{out}{err}"
+    combined = out + err
+    assert "falling back" in combined.lower(), combined
+    assert "EMPTY: docs/design/EMPTY_NO_GIT.md" in out.splitlines(), out
+
+
+# ---------------------------------------------------------------------------
+# Rework instruction 1 (Opus review, WP-1 差し戻し): iter_tracked_markdown_
+# files's scan set (git ls-files -z -- '*.md', repo-wide) is a DELIBERATELY
+# different set from iter_scan_files's fixed docs/spec/security/
+# conformance-tests + root-files + tools/*.md set -- the module docstring
+# and the function's own docstring both assert this ("a tracked `.md`
+# anywhere in the tree counts here"), but before this test no synthetic
+# tree placed a tracked empty `.md` OUTSIDE iter_scan_files's set, so a
+# mutation that intersected the git-success return value with
+# iter_scan_files(repo_root) passed all 18 prior tests unnoticed. SECURITY
+# .md at the repo root is outside both _SCAN_DIRS and _SCAN_ROOT_FILES (only
+# README.md/CLAUDE.md are root files here) -- the same shape as this real
+# repository's own root SECURITY.md.
+# ---------------------------------------------------------------------------
+def test_empty_tracked_markdown_outside_scan_set_is_detected(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "SECURITY.md", "")
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"a tracked empty .md outside iter_scan_files's set must still "
+        f"fail the run; output:\n{out}{err}"
+    )
+    assert "EMPTY: SECURITY.md" in out.splitlines(), out
+    assert "empty markdown files: 1" in out.splitlines(), out
+
+
+# ---------------------------------------------------------------------------
+# Rework instruction 2 (Opus review, WP-1 差し戻し): the `if dangling:`
+# early-return branch must still emit the EMPTY: <path> line(s) and the
+# 'empty markdown files: N' tally when a dangling reference AND a
+# zero-byte tracked .md occur in the SAME run. Before this test, a mutation
+# that deleted those two output statements from the `if dangling:` branch
+# passed all 18 prior tests unnoticed -- no synthetic tree combined a
+# dangling reference with a tracked empty file.
+# ---------------------------------------------------------------------------
+def test_dangling_and_empty_both_reported_together(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/design/OTHER.md", "See SI-99 for details.\n")
+    _write(root, "docs/design/EMPTY_WITH_DANGLING.md", "")
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code != 0
+    lines = out.splitlines()
+    assert "EMPTY: docs/design/EMPTY_WITH_DANGLING.md" in lines, out
+    assert "empty markdown files: 1" in lines, out
+    # Rework instruction 4: the final tally line must name BOTH counts when
+    # both conditions are present, not only the dangling count.
+    assert any(
+        "check_doc_refs FAILED:" in line
+        and "1 dangling reference" in line
+        and "1 empty tracked markdown file" in line
+        for line in lines
+    ), out
+
+
+# ---------------------------------------------------------------------------
+# Rework instruction 3 (supervisor ruling on Opus review point 3): a
+# 'tracked markdown files scanned: N' line prints immediately before the
+# 'empty markdown files: N' tally. When `git ls-files` SUCCEEDS but the
+# tracked-`.md` set is empty, that is a scan-vacuity failure on its own
+# (exit 1) regardless of the dangling/empty results -- this repository
+# always has at least one tracked `.md` file, so a git-success zero can
+# only mean the guard silently scanned nothing.
+# ---------------------------------------------------------------------------
+def test_scanned_count_line_precedes_tally(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _git_init_and_add(root)
+
+    code, out, err = _run(root)
+    assert code == 0, f"minimal tree must stay clean; got exit {code}, output:\n{out}{err}"
+    lines = out.splitlines()
+    scanned = [l for l in lines if l.startswith("tracked markdown files scanned:")]
+    assert len(scanned) == 1, out
+    idx = lines.index(scanned[0])
+    assert lines[idx + 1] == "empty markdown files: 0", (
+        f"the scanned-count line must appear immediately before the "
+        f"'empty markdown files:' tally; got:\n{out}"
+    )
+    assert not scanned[0].endswith("(fallback)"), scanned[0]
+
+
+def test_vacuous_git_scan_fails(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    # `git init` only, deliberately no `git add` -- `git ls-files -z --
+    # '*.md'` returns an empty, zero-exit-code list even though the
+    # canonical .md files exist on disk (check_canonical_readability reads
+    # them directly, never via git).
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"a git-success 0-tracked-.md scan must never report clean; "
+        f"output:\n{out}{err}"
+    )
+    assert "tracked markdown files scanned: 0" in out.splitlines(), out
+
+
+def test_fallback_zero_scan_does_not_force_failure(tmp_path, monkeypatch):
+    # Not a git working tree, so iter_tracked_markdown_files falls back to
+    # iter_scan_files -- forced empty here to isolate the "fallback zero is
+    # not itself fatal" half of the ruling (an empty fallback set can
+    # legitimately happen outside any repository this guard protects).
+    root = _build_minimal_tree(tmp_path)
+    monkeypatch.setattr(cdr, "iter_scan_files", lambda repo_root: [])
+
+    code, out, err = _run(root)
+    assert code == 0, (
+        f"a fallback scan of 0 files must not itself force a failure "
+        f"(only a git-success 0 count does); got exit {code}, "
+        f"output:\n{out}{err}"
+    )
+    assert "tracked markdown files scanned: 0 (fallback)" in out.splitlines(), out
