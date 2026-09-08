@@ -64,7 +64,7 @@ One `PERFRUN` line, then one `PERF` line per (peer, plug, op):
 
 ```
 PERFRUN host=<OS/arch> python=<version> commit=<short sha> date=<YYYY-MM-DD>
-PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess> op=<query|mutate|batch|cross_entity> n=<N> p50_ms=<x.xxx> p95_ms=<x.xxx> backend_calls=<n.nn>
+PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess|socket> op=<query|mutate|batch|cross_entity> n=<N> p50_ms=<x.xxx> p95_ms=<x.xxx> backend_calls=<n.nn>
 ```
 
 Three operations are measured on every plug: `query` (`select_eq`, one
@@ -81,17 +81,28 @@ lines (4 plugs x 3 ops, plus 2 plugs x 1 `cross_entity` op).
 
 ## The limits of what these numbers mean
 
-- **In-process only.** Every number here is an in-process (or, for the two
-  HTTP plugs, ASGI-in-process -- `httpx.ASGITransport`, no real socket, no
-  TLS, no reverse proxy) measurement. `transport=asgi-inprocess` names this
-  explicitly. Real-network numbers do not exist yet (they require an
-  actual deployed socket plug, phase 10's own L7-2). This tool currently
-  only knows how to classify two plug shapes (plain in-process, and
-  `-http`-suffixed + ASGITransport httpx client) and refuses to run
-  (non-zero exit, no guessed row) for anything else -- when L7-2 registers
-  a real socket plug, `_classify_plug` in `tools/perf_baseline.py` needs
-  an explicit third branch (and very likely a `socket` transport label),
-  not a widened fallback.
+- **In-process / ASGI-in-process, until a socket plug is registered.**
+  Every number from the 4 currently-registered plugs is an in-process (or,
+  for the two HTTP plugs, ASGI-in-process -- `httpx.ASGITransport`, no
+  real socket, no TLS, no reverse proxy) measurement. `_classify_plug`
+  (Phase 10 WP-3, design D-12) reads each adapter's own DECLARED
+  `transport_kind` (`conformance-tests/adapter.py` port v1.14 -- one of
+  `"in_process"`/`"asgi"`/`"socket"`), never the built object's own
+  attribute shape or its registry name alone (a proxy indicator this tool
+  used to rely on, `OPERATING_CONDITIONS.md` section 1.7 item 52), and
+  cross-checks the declaration against the registry name's own suffix
+  convention (`-http` for `asgi`, `-socket` for `socket`, no suffix for
+  `in_process`) -- a plug whose name and declaration disagree, or whose
+  declared value falls outside this 3-word vocabulary, still refuses to
+  run (non-zero exit, no guessed row) rather than printing a wrong label.
+  `transport=in-process`/`transport=asgi-inprocess` are the SAME literal
+  labels this tool printed before this revision; `transport=socket` is
+  the one genuinely new label it adds, for the real-socket + reverse-proxy
+  plugs (`r2db-api-socket`/`MitateDB-api-socket`, phase 10's own L7-2)
+  WP-4 registers -- not yet registered as of this WP, so no `PERF` line
+  carries it yet. `backend_calls` stays available for a socket plug too
+  (it holds its own composition in-process, unlike a launched-elsewhere
+  composition root, design D-12) -- only the transport itself is real.
 - **`backend_calls` is a call count, not a round-trip count, and its
   granularity differs by plug on purpose:**
   - For the two PostgreSQL-backed plugs (`r2db-api-http`,

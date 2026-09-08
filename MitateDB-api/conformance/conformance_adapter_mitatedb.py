@@ -488,6 +488,9 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
     """
 
     name = "MitateDB-api"
+    # port v1.14 (design D-1 (A) 4, WP-3): drives `MitateDataService`/
+    # `ApplicationCell` directly, no ASGI/HTTP boundary at all.
+    transport_kind = "in_process"
 
     def __init__(self, *, config: FoundationConfig | None = None) -> None:
         # port v1.11 (design D-6.1/D-6.5 addendum (1)): `config` is how
