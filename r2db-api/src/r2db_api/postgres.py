@@ -2283,13 +2283,31 @@ class PostgresCell:
                         # rows is refused with CONFLICT on the same rule" --
                         # the SAME tx + lock `alter_field`'s own existing-
                         # row scan uses below (M-1/F): `LOCK TABLE ... IN
-                        # SHARE MODE` before the existence check, so a
-                        # concurrent INSERT cannot slip a row in between
-                        # this check and the DDL/registry write below.
+                        # SHARE ROW EXCLUSIVE MODE` before the existence
+                        # check, so a concurrent INSERT cannot slip a row
+                        # in between this check and the DDL/registry write
+                        # below.
+                        #
+                        # R-35 (Phase 10, WP-6d-i review): plain `SHARE
+                        # MODE` does not conflict with itself, so two
+                        # concurrent `add_field`/`alter_field` calls on the
+                        # SAME entity could both acquire it, then each
+                        # block at its own later `ALTER TABLE` (ACCESS
+                        # EXCLUSIVE) waiting on the other's SHARE lock --
+                        # a guaranteed mutual wait, broken only by
+                        # PostgreSQL's deadlock detector aborting one side
+                        # with an error instead of the two calls simply
+                        # serializing. `SHARE ROW EXCLUSIVE` conflicts with
+                        # itself, so the second caller instead waits here,
+                        # at LOCK TABLE, and proceeds only once the first
+                        # transaction commits or rolls back -- it still
+                        # excludes concurrent row writers (ROW EXCLUSIVE)
+                        # exactly as plain SHARE did, so the R-2 existing-
+                        # row-scan property above is unchanged.
                         if bound.constraints is not None and not bound.constraints.nullable:
                             add_field_table_ident = sql.Identifier(bound.entity)
                             with conn.cursor() as cur:
-                                _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=add_field_table_ident))
+                                _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE").format(table=add_field_table_ident))
                             with conn.cursor() as cur:
                                 _run(cur, sql.SQL("SELECT 1 FROM {table} LIMIT 1").format(table=add_field_table_ident))
                                 if cur.fetchone() is not None:
@@ -2355,22 +2373,41 @@ class PostgresCell:
                         field_ident = sql.Identifier(bound.field)
                         # Monitor ruling F/M-1 (rulings-wp3a-review.md,
                         # rulings-wp2a-review.md): lock the entity's own
-                        # table (SHARE MODE -- blocks concurrent writers,
-                        # never concurrent readers) BEFORE the scan below,
-                        # inside this SAME transaction. Without this, READ
-                        # COMMITTED lets another session INSERT/UPDATE a
-                        # row that violates the new constraints, commit it
-                        # AFTER this scan sees zero violations but BEFORE
-                        # this transaction's own `_write_field_constraints`
-                        # commits -- `alter_field` would then succeed while
-                        # a violating row already exists, making the
-                        # catalog's own declaration false (G-3) the instant
-                        # it is published. `SHARE MODE` (not a row lock)
+                        # table (SHARE ROW EXCLUSIVE -- blocks concurrent
+                        # writers, never concurrent readers) BEFORE the
+                        # scan below, inside this SAME transaction. Without
+                        # this, READ COMMITTED lets another session
+                        # INSERT/UPDATE a row that violates the new
+                        # constraints, commit it AFTER this scan sees zero
+                        # violations but BEFORE this transaction's own
+                        # `_write_field_constraints` commits -- `alter_
+                        # field` would then succeed while a violating row
+                        # already exists, making the catalog's own
+                        # declaration false (G-3) the instant it is
+                        # published. A table-level lock (not a row lock)
                         # because the scan below reads the WHOLE table, not
                         # a single identified row (contrast the upsert
                         # TOCTOU fix below, M-2, which locks one row).
+                        #
+                        # R-35 (Phase 10, WP-6d-i review): the original fix
+                        # used plain `SHARE MODE`, which does not conflict
+                        # with itself -- two concurrent `alter_field`/`add_
+                        # field` calls on the SAME entity could both
+                        # acquire it here, then each block at its own later
+                        # `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on the
+                        # other's SHARE lock, a guaranteed mutual wait
+                        # broken only by PostgreSQL's deadlock detector
+                        # aborting one side with an error rather than the
+                        # two calls simply serializing. `SHARE ROW
+                        # EXCLUSIVE` conflicts with itself, so the second
+                        # caller instead waits here, at LOCK TABLE, and
+                        # proceeds only once the first transaction commits
+                        # or rolls back -- it still excludes concurrent row
+                        # writers (ROW EXCLUSIVE) exactly as plain SHARE
+                        # did, so the R-2 existing-row-scan property above
+                        # is unchanged.
                         with conn.cursor() as cur:
-                            _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE MODE").format(table=table_ident))
+                            _run(cur, sql.SQL("LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE").format(table=table_ident))
                         if not new_constraints.nullable:
                             with conn.cursor() as cur:
                                 _run(cur, sql.SQL("SELECT 1 FROM {table} WHERE {f} IS NULL LIMIT 1").format(table=table_ident, f=field_ident))

@@ -1292,9 +1292,12 @@ def test_query_path_never_reads_field_constraints(app_pg) -> None:
 
 def test_alter_field_constraints_lock_table_blocks_concurrent_write(app_pg) -> None:
     """Code review §2 F / 監督裁定 F (2026-09-07): `alter_field_
-    constraints` locks its target table `IN SHARE MODE` BEFORE scanning
-    its existing rows, inside the SAME transaction -- this closes the
-    READ COMMITTED phantom-write window a bare single transaction
+    constraints` locks its target table `IN SHARE ROW EXCLUSIVE MODE`
+    (originally plain `SHARE MODE`, revised by R-35, Phase 10, WP-6d-i
+    review -- see the deterministic two-connection serialization test
+    below for that scenario) BEFORE scanning its existing rows, inside
+    the SAME transaction -- this closes the READ COMMITTED phantom-write
+    window a bare single transaction
     (完了条件 13, `test_alter_field_constraints_is_a_single_transaction`
     above) does not, on its own, close: absent the lock, a second
     session could COMMIT a newly-violating row in the gap between this
@@ -1365,6 +1368,111 @@ def test_alter_field_constraints_lock_table_blocks_concurrent_write(app_pg) -> N
         assert thread.is_alive() is False
     finally:
         backend.close()
+
+
+def test_two_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_pg) -> None:
+    """R-35 (Phase 10, WP-6d-i review): plain `LOCK TABLE ... IN SHARE
+    MODE` does not conflict with itself, so two concurrent `add_field`
+    calls declaring `nullable: false` on the SAME entity, from two
+    INDEPENDENT developer connections, could both acquire it, then each
+    block at their own later `ALTER TABLE` (ACCESS EXCLUSIVE) waiting on
+    the other's SHARE lock -- a guaranteed mutual wait resolved only by
+    PostgreSQL's deadlock detector aborting one side with an error.
+    `SHARE ROW EXCLUSIVE` (self-conflicting) instead makes the second
+    caller wait AT `LOCK TABLE` until the first commits.
+
+    Verified against a REAL two-connection race (contrast the SQL-text-
+    level M-1-style pins elsewhere in this file): two separate
+    `PostgresBackend` instances (`backend_a`/`backend_b`, each its own
+    developer connection, mirroring the concurrent-writer test above's
+    own use of a wholly separate connection) both call `add_field` on
+    the SAME entity. `backend_a`'s call is paused (a monkeypatched
+    module-level `backend_postgres._execute`) immediately AFTER its own
+    `LOCK TABLE` RETURNS and before its `ALTER TABLE`. While it is
+    paused, `backend_b`'s `add_field` is issued from the main thread --
+    if the two locks conflict, `backend_b`'s own `LOCK TABLE` blocks
+    INSIDE `cursor.execute` itself and never reaches the line that would
+    record it as returned, so it must not do so within a short window.
+    Releasing `backend_a` lets both complete, in sequence, with no
+    deadlock error, and the final catalog carries both new fields."""
+    from mitatedb_api import backend_postgres as bp_module
+
+    backend_a = PostgresBackend(runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn)
+    backend_b = PostgresBackend(runtime_dsn=app_pg.runtime_dsn, developer_dsn=app_pg.developer_dsn)
+    try:
+        cell = ApplicationCell(app_pg.app_id, FoundationConfig(), backend=backend_a)
+        dev, runtime = _sessions_for(cell, app_pg.app_id)
+        entity = _make_entity(dev, "lockrace")
+
+        real_execute = bp_module._execute
+        lock_call_count = {"n": 0}
+        lock_acquired = threading.Event()  # backend_a's own LOCK TABLE has returned
+        b_lock_returned = threading.Event()  # backend_b's own LOCK TABLE has returned
+        release_a = threading.Event()
+
+        def paced_execute(cursor, statement, params=()):
+            rendered = statement.as_string(cursor) if hasattr(statement, "as_string") else str(statement)
+            is_lock = rendered.strip().upper().startswith("LOCK TABLE")
+            my_index = None
+            if is_lock:
+                lock_call_count["n"] += 1
+                my_index = lock_call_count["n"]
+            result = real_execute(cursor, statement, params)
+            if is_lock:
+                if my_index == 1:
+                    lock_acquired.set()
+                    assert release_a.wait(timeout=10), "test-side release never arrived"
+                else:
+                    b_lock_returned.set()
+            return result
+
+        bp_module._execute = paced_execute
+        a_errors: list = []
+
+        def _add_field_a():
+            try:
+                backend_a.add_field(entity, "field_a", "text", contract_type="string", nullable=False)
+            except Exception as exc:  # pragma: no cover - surfaced via a_errors
+                a_errors.append(exc)
+
+        thread_a = threading.Thread(target=_add_field_a)
+        thread_a.start()
+        try:
+            assert lock_acquired.wait(timeout=10), "backend_a never reached its own LOCK TABLE"
+
+            b_errors: list = []
+
+            def _add_field_b():
+                try:
+                    backend_b.add_field(entity, "field_b", "text", contract_type="string", nullable=False)
+                except Exception as exc:  # pragma: no cover - surfaced via b_errors
+                    b_errors.append(exc)
+
+            thread_b = threading.Thread(target=_add_field_b)
+            thread_b.start()
+            try:
+                assert not b_lock_returned.wait(timeout=0.5), (
+                    "backend_b's LOCK TABLE returned while backend_a still holds the lock -- "
+                    "the two locks did not conflict (R-35 regression)"
+                )
+            finally:
+                release_a.set()
+                thread_b.join(timeout=10)
+        finally:
+            thread_a.join(timeout=10)
+            bp_module._execute = real_execute
+
+        assert not thread_a.is_alive(), "backend_a's thread never finished -- bounded-wait violated"
+        assert not thread_b.is_alive(), "backend_b's thread never finished -- bounded-wait violated"
+        assert not a_errors, a_errors
+        assert not b_errors, b_errors
+        assert b_lock_returned.is_set(), "backend_b's LOCK TABLE never returned even after release"
+
+        catalog = {row["entity"]: row for row in dev.catalog()}
+        assert {"field_a", "field_b"}.issubset(set(catalog[entity]["fields"])), catalog[entity]
+    finally:
+        backend_a.close()
+        backend_b.close()
 
 
 def test_alter_field_fails_safely_on_an_application_missing_the_0009_upgrade(app_pg) -> None:

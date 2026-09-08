@@ -262,9 +262,12 @@ class StorageBackend:
         the registry/bumping the revision/committing -- see
         ``create_collection``'s own identical ``dry_run`` contract.
         A PostgreSQL implementation additionally
-        locks ``collection`` (``LOCK TABLE ... IN SHARE MODE``) BEFORE
-        step (1)'s own scan, inside the SAME transaction -- closing the
-        READ COMMITTED phantom-write window between that scan and this
+        locks ``collection`` (``LOCK TABLE ... IN SHARE ROW EXCLUSIVE
+        MODE`` -- plain ``SHARE MODE`` does not conflict with itself and
+        can deadlock two concurrent callers at their own later
+        ``ALTER TABLE``, R-35, Phase 10, WP-6d-i review) BEFORE step (1)'s
+        own scan, inside the SAME transaction -- closing the READ
+        COMMITTED phantom-write window between that scan and this
         method's own COMMIT (code review §2 F, 監督裁定 F 2026-09-07); an
         in-process backend needs no such lock (a single Python call is
         already atomic with respect to any other operation on the same
