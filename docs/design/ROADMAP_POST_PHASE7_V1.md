@@ -1,6 +1,7 @@
 # フェーズ7 以降の計画 (Roadmap) v1
 
-- 版数: **v1.5 (2026-09-08)**。v1.4 からの変更: **フェーズ9 が完了した**ので §1 に「1.0b 更新 (2026-09-08、フェーズ9 完了)」を足し (§9 の 6)、§5 のフェーズ9 節に完了と完了条件の充足を書き、§8 の R-2〜R-8 の行き先を「フェーズ9 完了」に改めた。**R-14 に従い、§5 のフェーズ9 R-4 行と §8 の R-8 行に、フェーズ9 設計 §10.1 の改版文案を逐語で足した。** **行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。**§8 の R-16 行には、フェーズ9 が P-2 の周回のどこを条件化したかを 1 文で足した** (R-16 の着手条件である「フェーズ9 設計文書との重複確認」の材料)。
+- 版数: **v1.6 (2026-09-08)**。v1.5 からの変更: **依頼者が提示した外部レビュー (2026-09-08) の指摘を監督が現物で検証し、是正すべき点を台帳に起票した。** §1 に「1.0c 更新 (2026-09-08、外部レビュー検証)」を足し、§5 のフェーズ10 節に着手前・同フェーズ内の是正を追記し、§8 に **R-17〜R-23** を足した。**R-17 (公開ゲート実施記録の空ファイル化) は同じコミットで復元して閉じた。** **行は 1 つも消していない。**
+- 旧 **v1.5 (2026-09-08)**。v1.4 からの変更: **フェーズ9 が完了した**ので §1 に「1.0b 更新 (2026-09-08、フェーズ9 完了)」を足し (§9 の 6)、§5 のフェーズ9 節に完了と完了条件の充足を書き、§8 の R-2〜R-8 の行き先を「フェーズ9 完了」に改めた。**R-14 に従い、§5 のフェーズ9 R-4 行と §8 の R-8 行に、フェーズ9 設計 §10.1 の改版文案を逐語で足した。** **行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。**§8 の R-16 行には、フェーズ9 が P-2 の周回のどこを条件化したかを 1 文で足した** (R-16 の着手条件である「フェーズ9 設計文書との重複確認」の材料)。
 - 旧 **v1.4 (2026-09-07)**。v1.3 からの変更: §9 の 11 に訂正注 — `tools/check_doc_refs.py` の CI 上の位置を「3.11 / 3.12 両 job の pytest 前段」から**常時実行の独立 job `doc-refs`** に改めた (Class A の push で conformance が回らなくても検査は要る。設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-2 訂正 v1.5 / D-4)。§8 の R-15 行に D-4 (CI は変更クラスで conformance の要否を決める) を追記した。**R-14 に従い、旧文は残し訂正注を添える形である。**
 - 旧 **v1.3 (2026-09-07)**。v1.2 からの変更: §9 に 7〜11 を追加、§8 に R-15 / R-16 を追加。根拠: 設計 `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` D-3、依頼者裁定 2026-09-07 (U-4 (A))。
 - 旧 **v1.2 (2026-09-07)**。v1.1 からの変更: **フェーズ8 が完了した**ので §1「現状」を更新し (§9 の 6)、§5 のフェーズ8 節に完了と完了条件の充足を書き、§8 の R-9〜R-12 の行き先を「フェーズ8 完了」に改めた。**R-14 に従い、§5 / §8 の R-10 行と §5 / §7 / §8 の R-12 行を、根拠と日付を添えて改版した** (フェーズ8 設計 §10 L8-8)。**行は 1 つも消していない** — 旧文を残したうえで改版文を足す形である。
@@ -30,6 +31,16 @@
 ---
 
 ## 1. 現状
+
+### 1.0c 更新 (2026-09-08、外部レビュー検証。§9 の 6)
+
+**§1.0b は下に残す。以下は §1.0b に足す分だけである (フェーズの完了状態は §1.0b のまま)。**
+
+- **依頼者が提示した外部レビュー (2026-09-08) を監督が現物で検証した。** 検証は root suite の単独実行 (`2807 passed` / 0 failed、収集 2807)、契約複製 3 本の sha256 一致、catalog 鮮度、`check_doc_refs` 0 件、現行ツリーの value scan 0 件、`pip check` 0 件、test DB / role 残骸 0 件で、レビューの数値と一致した (警告は 1 種 × xdist worker 5 件)。
+- **指摘は事実として裏付けられた。** 是正の起票先は **§8 の R-17〜R-23** である。**訂正 2 点**: `CONTROL_MAPPING.md` で最長の行は SI-08 ではなく **SI-14 (26,012 文字)** である (SI-08 は 5,797 文字)。警告の出現数は 1 件ではなく **5 件** (同一 1 種)。
+- **追加で見つかったもの 2 点**: r2db の配備 runbook も素の `pip install` である (R-19 に含めた)。開発機 `.venv` の psycopg は 3.3.4 で `constraints.txt` の 3.3.5 と一致しない (`OPERATING_CONDITIONS.md` §2 の 16)。
+- **閉じた**: **R-17** (公開ゲート実施記録 `docs/work-orders/PUBLICATION_GATE_20260906.md` を `966e0af` から復元。再発防止の機械検査は開いたまま)。
+- **次の一手**: **フェーズ10 着手前に R-21 (正本文書の陳腐化) を是正し、フェーズ10 設計で R-18 の裁定を仰ぐ。** R-19 / R-20 はフェーズ10 の範囲、R-22 / R-23 は依頼者判断待ち。
 
 ### 1.0b 更新 (2026-09-08、フェーズ9 完了。§9 の 6)
 
@@ -213,6 +224,7 @@
 - **L7-2** 実 socket を持つ HTTP plug (5・6 番目の plug)。reverse proxy 込み。ここで初めて `surfaces` の「宣言 URL の実在」が load-bearing になる (L6-5 / L6-12)。
 - **L6-5a** `surfaces` を DB 側単一真実へ載せる (Q4 と同じ機構)。相互ダイヤルによる健全性検査は採らない (§6)。
 - **着手条件**: CI が実サーバ起動の場を持つこと (フェーズ7 D-3 で成立済み)。フェーズ9 と触るファイルが重ならないことを設計で確認する。
+- **【追記 2026-09-08 (v1.6)】着手前・同フェーズ内の是正 (§8 の R-17〜R-23)。** **着手前**: **R-21** (`CONTROL_MAPPING.md` SI-08 行と両 README の陳腐化を現物から書き直す)。**本フェーズの範囲に足す**: **R-17** の再発防止検査 (追跡中の `.md` が 0 バイトなら赤)、**R-19** (本番 image / 配備手順を `constraints.txt` の exact-pin に揃える)、**R-18** の裁定 (資源制限 `enforced` の適用単位。配備面の証拠を扱う本フェーズが最も近い)、**R-20** の実測 (L7-2 の実 socket adapter で同時要求下の tail latency を測ってから方式を決める)。**設計文書 §1〜§2 に転記する (§9 の 1)。** 変更クラスは各行の記載による (§9 の 8)。
 
 ### フェーズ11 以降 — 実需駆動 (§3.2 の保留項目)
 
@@ -274,6 +286,13 @@
 | **R-14** | 本書の改版規約: 判定 (§3, §6) を覆すときは、覆した根拠と日付を該当行に残し版数を上げる。行を消さない | 本書 |
 | **R-15** | 開発プロセス衛生 v1: 現行運用条件の単一正本 (`docs/work-orders/OPERATING_CONDITIONS.md`)、文書 ID 参照検査 (`tools/check_doc_refs.py`)、作業指示書の Change Set Manifest 化。設計は `docs/design/DEVELOPMENT_PROCESS_HYGIENE_V1.md` (D-1 / D-2 / D-3) **【追記 2026-09-07 (v1.4)】D-4「CI は変更クラスで conformance の要否を決める」(`tools/change_class.py`、CI の `change-class` job) を本項の範囲に含める** | 本書 §9 の 7〜11 |
 | **R-16** | **起票候補**: P-2 の周回 (catalog を読む → 要求を作る → 判定を受ける → 安全に再送する) を両 peer で通す scenario 級 conformance。**フェーズ9 設計文書との重複確認を着手条件とする** — フェーズ9 が同じ周回の一部を既に条件化している可能性があり、着手前に突合する。本作業では設計しない **【追記 2026-09-08 (v1.5)。着手条件である「フェーズ9 設計文書との重複確認」の材料】** **フェーズ9 は P-2 の周回のうち「判定を受ける」と「安全に再送する」の 2 段を共通条件として条件化した** — **C-20 (宣言と挙動の一致) / C-21 (拒否が構造化診断を持つ) / C-22 (dry_run の判定が実呼びと一致し副作用 0) / C-23 (再送の意味) / C-24 (要求単位 budget) / C-25 (`request_id` による相関) の 6 条件である。** **R-16 が足すべきものは、この 6 条件が個別に見ている性質ではなく、「catalog を読む → 要求を作る → 判定を受ける → 安全に再送する」を 1 本の scenario として通したときに初めて見える不整合 (段と段の間の受け渡し) である。** | フェーズ10 以降 |
+| **R-17** | 公開ゲート実施記録 `docs/work-orders/PUBLICATION_GATE_20260906.md` の空ファイル化。commit `4d4f1a5` が 637 行を全削除していた (Google Drive 同期の `.gdoc` 変換の巻き添え。`*.gdoc` は同 commit で `.gitignore` 済み)。フェーズ7 設計 §13.4 が「手順 0.5〜7 と実施記録」の成果物として指す文書であり、詳細証跡が現行ツリーから失われていた。`tools/check_doc_refs.py` は参照 ID の解決しか見ないので検出しない | **閉じた (2026-09-08、v1.6)**: `966e0af` の内容を復元し同ファイル §5 に訂正註。**開いている残**: 追跡中の `.md` が 0 バイトになったら赤にする機械検査 (pre-commit + CI `doc-refs` job。`tools/check_doc_refs.py` への追加か独立 script。**Class B**)。コミット前の目視規律は `OPERATING_CONDITIONS.md` §2 の 15 | フェーズ10 |
+| **R-18** | 資源制限 `enforced` の適用単位が契約で未定義 (プロセス単位か、公開 base URL が表す配備全体か。`capability.enforcement_enum` と `rules` のどちらにも無い)。MitateDB の `requests_per_minute` / `concurrency` は 1 プロセス 1 個の in-memory 状態 (`cell.py` `_LimitStateHolder`、docstring 自身が「1プロセス1個」) で、Cloud Run の data service は runbook §6.1 で `--max-instances` を固定していない (control service は Invariant 1 で 1 に固定)。M インスタンスなら実効上限は最大 M 倍。r2db は systemd の単一 uvicorn プロセス (`--workers` 無し) なので現状は配備 = プロセスであり、実害は MitateDB の Cloud Run 配備に限られるが、契約の沈黙は共通 | **フェーズ10 設計で依頼者裁定**: (a) 契約に適用単位を明記 (**Class C**) / (b) data service も `--max-instances=1` に固定 (runbook、**Class A**) / (c) 共有 limiter (Cloud SQL / Redis 等。**Class B + C**) / (d) 複数インスタンス時は `deployment_required` を宣言 (**Class C**)。**裁定までの暫定 (Class A、フェーズ10 着手前に可)**: MitateDB runbook §6.1 に「data service を 2 インスタンス以上にすると `limit_enforcement` の 2 宣言が偽になる」caveat を Invariant 1 と同じ形で置く | フェーズ10 |
+| **R-19** | 本番 image の依存解決が CI と一致しない。CI は `pip install -c constraints.txt` (exact-pin)、`MitateDB-api/docker/Dockerfile` は `constraints.txt` を COPY せず `pip install .` (`pyproject.toml` は `starlette>=1.0` / `psycopg[binary]>=3.1` / `uvicorn>=0.30` の下限指定)。同 Dockerfile の「version drift がない」コメントは CI との比較では不成立。r2db の配備 runbook / provisioning script も素の `pip install` | **フェーズ10 (Class B)**: Dockerfile が repo root の `constraints.txt` を COPY して `pip install -c constraints.txt .` にする (build context は repo root なので可)、r2db の配備手順の `pip install` に `-c constraints.txt` を足す、Dockerfile のコメントを直す、**CI に「image の `pip freeze` が constraints と一致する」検査を足す**。併せて開発機 `.venv` を constraints に揃える (`OPERATING_CONDITIONS.md` §2 の 16) | フェーズ10 |
+| **R-20** | 両 peer の HTTP handler (`http.py`、各 15 本の `async def`) が同期の service / psycopg を直接呼ぶ。`to_thread` / `run_in_threadpool` / `AsyncConnection` / `psycopg_pool` は両 peer の src に 0 件。単一 event loop 上で DB 待ちが他要求を塞ぎ、tail latency・実効 concurrency・timeout 挙動に影響し得る設計リスク (機能不良は未確認)。現行の HTTP conformance は ASGITransport の in-process 試験で実 socket を通らない | **フェーズ10 L7-2 で実測してから決める**: 実 socket adapter で同時要求下の tail latency を測り、(i) threadpool 委譲 (`starlette.concurrency.run_in_threadpool`) / (ii) async psycopg + pool / (iii) uvicorn 多プロセス (R-18 と連動。in-memory limiter が壊れる) から選ぶ。**実測前に直さない** (P-8 の「閾値は無い」と同じ姿勢で、まず数値を持つ) | フェーズ10 |
+| **R-21** | 正本文書の陳腐化。(1) `security/CONTROL_MAPPING.md` SI-08 行が MitateDB の application-plane rate / concurrency / execution-time を「remain unimplemented on this peer」と記す — 実際はフェーズ8 WP-1a で実装・`enforced` 宣言済み (`cell.py` `__build_capabilities_document`)。(2) `r2db-api/README.md`: migration が `0006` まで (実 `0011`)、control endpoint 11 本 (実 12 本、`/v1/audit/query` alias 込みで Route 13 行)、MitateDB の control surface が無い旨の記述 (実装済み)。(3) `MitateDB-api/README.md`: control endpoint 11 本、`idempotency` 等を未実装に列挙、rate / concurrency 未実装、「実 Cloud SQL 実行なし」(runbook §9.1 に 2026-09-01 の実行記録あり)、C-18 までの列挙 | **フェーズ10 着手前に是正**。CONTROL_MAPPING は `security/` 配下なので **Class D** (裁定記録を添えて 1 コミット。内容は現状記述の更新であり security-contract の変更ではないことを明記)、README 2 本は **Class A**。**是正時は現行コード・migration 一覧・Route 一覧から書き起こし、旧文を写さない。** CONTROL_MAPPING の履歴規約 (`CONTROL_MAPPING_HISTORY.md`) に従う | フェーズ10 着手前 |
+| **R-22** | 保守性。`MitateDB-api/src/mitatedb_api/cell.py` 4,244 行、`r2db-api/src/r2db_api/structured.py` 3,182 行、`postgres.py` 2,799 行。最長関数は `transact` 447 行 (cell.py)、`apply_schema` 443 行 (postgres.py)、`bind_schema_operation` 399 行 (structured.py)。長大な履歴コメントが認知負荷を上げる。`security/CONTROL_MAPPING.md` は 1 invariant 1 行で、SI-14 行 26,012 文字、SI-08 行 5,797 文字 — 差分レビューと更新漏れ検出に不向き (R-21 の陳腐化はこの形の帰結でもある) | **依頼者判断待ち** (行き先候補: 開発プロセス衛生 v2、またはフェーズ11 以降の実需前)。分割は挙動不変の **Class B** (同型 helper `_ISOMORPHIC_TARGETS` に触れれば **C**、集合を増減すれば **D**)。CONTROL_MAPPING は invariant ごとの節 + 「統制 / 証拠 / 状態」の表への再編 (**Class D**、内容不変)。**P-1〜P-9 と「先送りしない」原則に照らし、R-21 の是正時に再編を同時に行うかを依頼者に問う** | 依頼者判断待ち |
+| **R-23** | AI エージェント向けの不足。`spec/README.md` の目標「仕様・base URL・API key だけで利用」に対し、`OPERATION_CATALOG.json` は method / path / role / schema 名の索引であり、schema 本体・認証例・完全な要求例・server binding・標準 discovery URL を一体提供しない。`operation_catalog_url` は契約に optional として存在するが両 peer が宣言しない (L9-4) | **フェーズ11 以降 (実需駆動、§3.2)**。非正本の派生物 (OpenAPI / JSON Schema bundle / agent manifest / 具体例) を `tools/contract_catalog.py` と同じ「生成 + 再生成 byte 一致」方式で出す案。**OpenAPI を正本にしない判断 (`spec/README.md`) は変えない。** **L9-4 の解消は先行して可 (Class C)** | フェーズ11 以降 |
 
 ---
 
