@@ -571,3 +571,24 @@ def test_fallback_zero_scan_does_not_force_failure(tmp_path, monkeypatch):
         f"output:\n{out}{err}"
     )
     assert "tracked markdown files scanned: 0 (fallback)" in out.splitlines(), out
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 -- the L10 family (two-digit phase prefix). Before this
+# registration, L_REF_RE matched only single-digit phases (`[4-9]`), so an
+# `L10-1` token was neither a reference nor a definition anywhere and a
+# dangling L10 reference could never be reported.
+def test_l10_two_digit_phase_prefix_is_a_family_reference(tmp_path):
+    root = _build_minimal_tree(tmp_path)
+    _write(root, "docs/design/OTHER_L10_USER.md", "see **L10-42** for the ledger row\n")
+
+    code, out, err = _run(root)
+    assert code != 0, (
+        f"an L10-42 reference with no definition in L10's canonical file must be "
+        f"dangling; got exit {code}, output:\n{out}{err}"
+    )
+    assert any("L10-42" in line for line in _dangling_lines(out)), out
+
+    _append(root, cdr.PHASE_CANONICAL["L10"][0], "- **L10-42 socket plug CI time**\n")
+    code, out, err = _run(root)
+    assert code == 0, f"a bold L10-42 span inside L10's own canonical file must define it; got exit {code}:\n{out}{err}"

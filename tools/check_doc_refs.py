@@ -287,7 +287,7 @@ SIMPLE_FAMILIES: dict[str, dict] = {
 # never merely somewhere with a matching bold span. LQ4 has two canonical
 # files (design D-2 / section 1.2(4)); both must be readable.
 # ---------------------------------------------------------------------------
-L_REF_RE = re.compile(r"\bL(?:Q4|[4-9])-\d{1,2}[a-z]?\b")
+L_REF_RE = re.compile(r"\bL(?:Q4|10|[4-9])-\d{1,2}[a-z]?\b")
 # Known behavior of this pattern (kept simple on purpose, design D-2
 # 開示事項): it matches within a single line only -- a "**...**" span split
 # across a line break is never found, which only makes this check MORE
@@ -308,6 +308,7 @@ PHASE_CANONICAL: dict[str, tuple[str, ...]] = {
     "L7": ("docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md",),
     "L8": ("docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md",),
     "L9": ("docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md",),
+    "L10": ("docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md",),
     "LQ4": (
         "docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md",
         "docs/design/PHASE7_EVIDENCE_REPRODUCIBILITY_AND_PUBLICATION_V1.md",
