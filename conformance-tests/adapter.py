@@ -993,6 +993,35 @@ class IsolatedControlHandle:
         return self.capabilities(actor)
 
 
+@dataclass(frozen=True)
+class IdempotencyHold:
+    """Yielded by `hold_after_idempotency_lookup()`'s own `with` block
+    (port v1.15, design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3
+    D-13 "実装の形 (6d-ii) の確定" (2)). Non-normative, the same status
+    `IsolatedControlHandle` above already carries for its own kind of
+    yielded handle -- this port prescribes only what `wait_until_held`
+    does, never this class's own shape beyond that one method.
+
+    `wait_until_held(timeout_s=30.0) -> int`: blocks until the ONE held
+    request `hold_after_idempotency_lookup` is arming has actually
+    reached the stall point at the end of its own idempotency admission
+    window (see that method's own docstring), then returns the REAL
+    measured count of requests held there (always `1` for a correct
+    realization -- this primitive holds exactly one request, never
+    more) -- never a bare echo of an argument this method does not even
+    take (`hold_in_flight`'s own `entered_count`/裁定 5 rationale,
+    carried over unchanged: a caller must be able to tell "did this
+    primitive actually hold something" without a tautological check).
+    Raises `AssertionError` -- never skips, never times out silently --
+    if the held request has not reached that point within `timeout_s`
+    seconds (`OPERATING_CONDITIONS.md` §1.3 の 26)."""
+
+    _wait_until_held: Callable[[float], int]
+
+    def wait_until_held(self, timeout_s: float = 30.0) -> int:
+        return self._wait_until_held(timeout_s)
+
+
 # ---------------------------------------------------------------------------
 # 4.4 Abstract adapter
 # ---------------------------------------------------------------------------
@@ -1795,6 +1824,70 @@ class ConformanceAdapter(ABC):
         See each plug's own implementation comment for exactly which
         object is wrapped and why that wrap point sits inside the
         concurrency counter's own window.
+        """
+
+    @abstractmethod
+    def hold_after_idempotency_lookup(self, session, idempotency_key: str) -> AbstractContextManager["IdempotencyHold"]:
+        """`session` 上で次に到着する、`idempotency_key` に一致する key を持つ要求を 1 件だけ、その要求自身の **idempotency 受理区間の末尾**で停止させたまま保持する。受理区間の末尾とは、照会が「記録なし」を返し、`idempotency_entries` の予約を取り終え、その区間が取った lock をすべて保持したまま、効果をまだ 1 件も実行していない地点である。保持中に同じ key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると先着は解放され、実行・記録・commit まで進む。保持するのは 1 件だけであり、`idempotency_key` に一致しない要求は素通しする。
+
+        Verbatim above (常設規律 4, word-for-word from design docs/design/
+        PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-13 "実装の形 (6d-ii) の
+        確定" (1)'s own quoted contract text -- see also that same
+        section's own claim that this docstring stays true of it, the
+        same convention `hold_in_flight`'s own docstring above already
+        follows for its own §22.1 citation).
+
+        port v1.15 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+        D-13, work order docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_
+        EVIDENCE_V1.md WP-6d-ii): new condition C-27's own driving
+        primitive -- "同一 idempotency key 同時送信" decisively serialized
+        by an adapter hook, the same "test-driving primitive, never a
+        test-only hook on product code" discipline `hold_in_flight`
+        above already establishes, applied to the idempotency admission
+        window instead of the concurrency counter.
+
+        Structural difference from `hold_in_flight` (design D-13 "実装の
+        形 (6d-ii) の確定" (2)): this primitive never issues any request
+        of its own. The held request ("A") and the second, waiting
+        request ("B") are both issued by the CALLER, each from its own
+        OS thread -- this method only arms the ONE stall point and
+        yields the `IdempotencyHold` handle a caller uses to wait for A
+        to actually reach it (`IdempotencyHold.wait_until_held`, above).
+        A caller confirms B has not completed while A is held with a
+        bounded wait window of its own -- the same shape both peers'
+        own `tests/test_idempotency_concurrency.py::_assert_second_
+        call_is_blocked` already uses.
+
+        `with` を抜けると先着は解放され (design's own sentence above) --
+        exiting the `with` block releases the ONE held request
+        regardless of whether `wait_until_held` was ever called: a
+        caller that never confirms the hold reached its stall point
+        before exiting has simply not verified anything about non-
+        vacuity, exactly as a caller of `hold_in_flight` that never
+        awaits `entered_count` has not.
+
+        `idempotency_key` に一致しない要求は素通しする (design's own
+        sentence above) -- a request whose `idempotency_key` differs
+        from this call's argument, or whose lookup found an EXISTING
+        record (a replay or a `CONFLICT`, never a fresh admission),
+        reaches its own normal outcome undisturbed; this primitive only
+        ever stalls the ONE request that is both key-matching and
+        genuinely fresh (design D-13 "実装の形 (6d-ii) の確定" (3): the
+        stall point sits at the END of the admission window, after the
+        `idempotency_entries` reservation, specifically so observation
+        (iii)'s own count-bound race is not silently serialized by the
+        caller's own test orchestration instead of by the real lock this
+        primitive is meant to exercise).
+
+        Called against the YIELDED instance of `isolated_application_
+        surface()`, never against the shared, session-scoped adapter --
+        the same convention `hold_in_flight` above already follows.
+
+        See each plug's own implementation comment (design D-13 "実装の
+        形 (6d-ii) の確定" (4)) for exactly which method(s) are wrapped,
+        why the wrap point sits at the end of the admission window on
+        that peer's own structure, and what a second, key-matching
+        request actually waits on while this primitive holds the first.
         """
 
     # ------------------------------------------------------------------

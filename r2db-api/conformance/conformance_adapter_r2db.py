@@ -27,7 +27,7 @@ import uuid
 import weakref
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 # The common port lives at conformance-tests/adapter.py. When the combined
 # suite runs from the repository root (root pyproject.toml pythonpath,
@@ -53,6 +53,7 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
@@ -280,6 +281,74 @@ def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, 
         setattr(cell_obj, method_name, original)
     if errors:
         raise errors[0]
+
+
+# port v1.15 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-13
+# "実装の形 (6d-ii) の確定" (4), work order WP-6d-ii): `hold_after_
+# idempotency_lookup` realization for this in-process plug. Unlike
+# `_hold_in_flight_via_stalled_cell_method` above, this primitive never
+# issues any request itself -- the caller issues both the held request
+# ("A") and the second, waiting one ("B") from its own OS threads
+# (design D-13 "実装の形 (6d-ii) の確定" (2), the one structural
+# difference from `hold_in_flight`). This function only ARMS the stall
+# point and returns the `IdempotencyHold` handle.
+#
+# `structured.ApplicationCell.transact`/`apply_schema` hold this SAME
+# cell's own `self._idempotency_lock` (a `threading.Lock`) for their
+# ENTIRE call -- lookup -> reserve -> execute -> store -- so B never
+# even reaches `_idempotency_lookup` while A is held: B blocks at
+# `transact`'s/`apply_schema`'s own outer `with self._idempotency_lock:`
+# instead (design D-13 "実装の形 (6d-ii) の確定" (4) 表, `r2db-api` row).
+# This function therefore only needs to recognize WHICH call is A (key-
+# matching, genuinely fresh) and stall it after `_idempotency_reserve`
+# returns -- the end of the admission window, after the count reservation,
+# before `_transact_locked`/`_apply_schema_locked` ever executes anything
+# (`structured.py:2269`/`:2294`, `:2697`/`:2718`).
+
+
+@contextmanager
+def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, idempotency_key: str) -> Iterator[IdempotencyHold]:
+    original_lookup = cell_obj._idempotency_lookup  # noqa: SLF001 -- adapter-internal plumbing, same convention as `_hold_in_flight_via_stalled_cell_method` above.
+    original_reserve = cell_obj._idempotency_reserve  # noqa: SLF001
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    armed = threading.local()
+
+    def _lookup(key: str, *, now: float):
+        record = original_lookup(key, now=now)
+        # Arms ONLY this calling thread: a fresh admission (record is
+        # `None`) for the key this hold is watching. A replay or a
+        # different key passes straight through (design's own "idempotency
+        #_key に一致しない要求は素通しする").
+        if record is None and key == idempotency_key:
+            armed.hold = True
+        return record
+
+    def _reserve(limits, *, now: float):
+        if getattr(armed, "hold", False):
+            armed.hold = False
+            entered.release()
+            release.wait()
+        return original_reserve(limits, now=now)
+
+    setattr(cell_obj, "_idempotency_lookup", _lookup)
+    setattr(cell_obj, "_idempotency_reserve", _reserve)
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_idempotency_lookup: the held request never reached the end of its "
+                f"idempotency admission window within {timeout_s}s (expected it to stall right after "
+                "_idempotency_reserve returns -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield IdempotencyHold(_wait_until_held)
+    finally:
+        release.set()
+        setattr(cell_obj, "_idempotency_lookup", original_lookup)
+        setattr(cell_obj, "_idempotency_reserve", original_reserve)
 
 
 class R2DBConformanceAdapter(ConformanceAdapter):
@@ -804,6 +873,24 @@ class R2DBConformanceAdapter(ConformanceAdapter):
         return _hold_in_flight_via_stalled_cell_method(
             cell, "catalog", lambda: self._call(lambda: self._service.catalog(session)), n,
         )
+
+    # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+    # WP-6d-ii): wraps the SAME per-application cell's own
+    # `_idempotency_lookup`/`_idempotency_reserve` bound methods
+    # `structured.ApplicationCell.transact`/`apply_schema` already call
+    # at `structured.py:2269`/`:2294` and `:2697`/`:2718`. See
+    # `_hold_after_idempotency_lookup_via_stalled_cell_methods`'s own
+    # module comment for why the cell's own `self._idempotency_lock`
+    # (not this hook) is what a concurrent second request actually waits
+    # on for this in-process plug.
+    def hold_after_idempotency_lookup(self, session, idempotency_key: str):
+        """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_idempotency_lookup_via_stalled_cell_methods` and the
+        comment immediately above this method."""
+        cell = self._service._cells[session.application_id]  # noqa: SLF001
+        return _hold_after_idempotency_lookup_via_stalled_cell_methods(cell, idempotency_key)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).

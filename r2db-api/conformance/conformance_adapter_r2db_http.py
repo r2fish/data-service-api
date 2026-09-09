@@ -60,7 +60,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -88,6 +88,7 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
@@ -822,6 +823,63 @@ def _hold_in_flight_via_http_requests(
         raise errors[0]
 
 
+# port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+# WP-6d-ii): `hold_after_idempotency_lookup` realization for this HTTP
+# plug. `PostgresCell._idempotency_key_lock` (`postgres.py:1566`/`:2264`)
+# takes a `pg_advisory_xact_lock` on this key BEFORE `_idempotency_
+# lookup` is ever called, so a second, key-matching request ("B") blocks
+# at the DATABASE level -- inside its own `_idempotency_key_lock` call --
+# for as long as this hold keeps A's transaction open; it never reaches
+# this wrapper's own `_idempotency_lookup`/`_idempotency_reserve` at all
+# while A is held (design D-13 "実装の形 (6d-ii) の確定" (4) 表,
+# `r2db-api-http` row). `PostgresCell` carries no in-process cell lock of
+# its own (its `threading.Lock`s belong to `_RolePool`/
+# `SharedPoolManager`, never the request path), so this real advisory
+# lock is what B actually waits on, not any Python-level state this
+# function holds.
+
+
+@contextmanager
+def _hold_after_idempotency_lookup_via_stalled_cell_methods(cell_obj: object, idempotency_key: str) -> Iterator[IdempotencyHold]:
+    original_lookup = cell_obj._idempotency_lookup  # noqa: SLF001
+    original_reserve = cell_obj._idempotency_reserve  # noqa: SLF001
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+    armed = threading.local()
+
+    def _lookup(conn: Any, key: str):
+        record = original_lookup(conn, key)
+        if record is None and key == idempotency_key:
+            armed.hold = True
+        return record
+
+    def _reserve(conn: Any, limits: Any):
+        if getattr(armed, "hold", False):
+            armed.hold = False
+            entered.release()
+            release.wait()
+        return original_reserve(conn, limits)
+
+    setattr(cell_obj, "_idempotency_lookup", _lookup)
+    setattr(cell_obj, "_idempotency_reserve", _reserve)
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_idempotency_lookup: the held request never reached the end of its "
+                f"idempotency admission window within {timeout_s}s (expected it to stall right after "
+                "_idempotency_reserve returns -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield IdempotencyHold(_wait_until_held)
+    finally:
+        release.set()
+        setattr(cell_obj, "_idempotency_lookup", original_lookup)
+        setattr(cell_obj, "_idempotency_reserve", original_reserve)
+
+
 def _stringify_for_path(payload: Any) -> str:
     """A URL path segment is always text on the wire: any real HTTP client
     placing a non-string value into a path must serialize it first. `str()`
@@ -1429,6 +1487,49 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
 
     def _run(self, coro: Any) -> Any:
+        if self._loop.is_running():
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                # Same-thread re-entrancy: THIS thread is already inside
+                # a running loop (necessarily `self._loop`, since a
+                # second, distinct loop cannot be running concurrently
+                # on the same thread) and a coroutine on it called back
+                # into `_run`. `asyncio` refuses to drive one loop object
+                # from within itself regardless of which loop object is
+                # named, so let the normal call below raise its loud,
+                # original `RuntimeError('This event loop is already
+                # running')` instead of masking it with a throwaway loop.
+                return self._loop.run_until_complete(coro)
+            # A genuinely different OS thread reached here while this
+            # SAME shared adapter instance's own `self._loop` is already
+            # mid-flight on ANOTHER thread -- `hold_after_idempotency_
+            # lookup`'s own "B" probe, issued by a C-27 test while "A" is
+            # held. `asyncio` refuses to drive one loop object from two
+            # threads at once (`run_until_complete` raises `RuntimeError
+            # ('This event loop is already running')` immediately,
+            # measured), so this call gets its OWN throwaway loop
+            # instead. Reusing `self._client` itself across loops here is
+            # safe on every plug this adapter builds: on the ASGI-
+            # transport plugs its transport is `httpx.ASGITransport`, an
+            # in-process function call into `app(scope, receive, send)`
+            # with no real socket and no per-loop connection pool to
+            # mismatch; on this repo's real-socket subclass (`R2DBSocket
+            # ConformanceAdapter`), `_LazySocketClient.send` (`conformance_
+            # adapter_r2db_socket.py:389-472`, WP-4a) opens a FRESH,
+            # one-shot `httpx.AsyncHTTPTransport` per call instead of
+            # holding a persistent pool on `self`, so there is likewise no
+            # loop-affine state to cross a loop boundary -- every PRE-
+            # EXISTING (sequential, single-thread) call path never takes
+            # this branch at all, since `self._loop` sits idle between
+            # calls.
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
         return self._loop.run_until_complete(coro)
 
     def _send(
@@ -2318,6 +2419,24 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
         return _hold_in_flight_via_http_requests(
             cell, "catalog", app, secret, "/v1/catalog", n, classify, adapter_name, self._build_client,
         )
+
+    # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+    # WP-6d-ii): wraps the SAME per-application `PostgresCell`'s own
+    # `_idempotency_lookup`/`_idempotency_reserve` (`postgres.py:1283`/
+    # `:1296`). See `_hold_after_idempotency_lookup_via_stalled_cell_
+    # methods`'s own module comment for why the REAL `pg_advisory_xact_
+    # lock` this cell already takes (WP-6d-i), not any state this hook
+    # holds, is what a concurrent second request actually waits on.
+    def hold_after_idempotency_lookup(self, session, idempotency_key: str):
+        """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_idempotency_lookup_via_stalled_cell_methods` and the
+        comment immediately above this method."""
+        assert isinstance(session, _Session)
+        app_id = self.scope_of(session).application_id
+        cell = self._service._cells[app_id]  # noqa: SLF001
+        return _hold_after_idempotency_lookup_via_stalled_cell_methods(cell, idempotency_key)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-2(b) PROVIDED branch).
