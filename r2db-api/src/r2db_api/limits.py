@@ -118,6 +118,53 @@ class ResourceLimits:
             stack.extend((child, next_depth) for child in children)
 
 
+def role_pool_size(limits: ResourceLimits) -> int:
+    """Phase 10 WP-8a review F-1 fix (supervisor ruling 2026-09-08): the
+    per-served-application PostgreSQL role pool capacity (runtime AND
+    developer -- `r2db_api.postgres.PostgresCell` takes one `pool_size`
+    for both roles) `r2db_api.main`'s composition root hands to
+    `PostgresCell` MUST be at least `limits.concurrency`, the SAME
+    declared ceiling `DataService._slot` enforces (`service.py`).
+
+    Before WP-8a's `run_in_threadpool` delegation, a single event-loop
+    thread serialized every request's synchronous section, so one
+    application could never actually present more than 1 concurrent
+    request to its own pool regardless of how small that pool was
+    (WP-4b ruling 3). Once delegation let concurrent requests reach the
+    pool for real, a pool sized below the declared `concurrency` ceiling
+    (previously: whatever `SharedPoolManager`'s own fixed default worked
+    out to -- `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW`, default 2 + 2 =
+    4, entirely disconnected from `ResourceLimits.concurrency`, default
+    32) opened a NEW failure mode: the 5th concurrent request against ONE
+    application, still comfortably under the declared bound, timed out in
+    `_RolePool.connection()` (`postgres.py`'s own `_DEFAULT_ACQUIRE_
+    TIMEOUT_S`) and failed closed with 503 SERVICE_UNAVAILABLE instead of
+    the declared 429 LIMIT_EXCEEDED a client is told to expect at 32. This
+    function is the single place that ties the two together, so the pool
+    can never again silently under-provision relative to the declared
+    bound -- see `r2db-api/docs/POSTGRES_PROVISIONING_RUNBOOK.md`'s role-
+    pool-ceiling note for the resulting `max_connections` arithmetic.
+
+    Deliberately NOT `max(limits.concurrency, R2DB_POOL_SIZE + R2DB_POOL_
+    MAX_OVERFLOW)`: those two env vars now govern only `SharedPoolManager`'s
+    own fallback default (used by any pool that does not specify a size
+    explicitly) -- letting them silently override the served-application
+    floor back down again would reopen exactly this failure mode for an
+    operator who had tuned them before this fix existed. An operator who
+    wants MORE than `concurrency` connections per application pool can
+    still raise `ResourceLimits.concurrency` itself (there is currently no
+    separate per-application override), which raises both bounds in
+    lockstep by construction.
+
+    The platform pool (`R2DB_PLATFORM_POOL_SIZE`, `r2db_api.main.
+    build_app`) is intentionally NOT changed by this function -- Phase 10
+    WP-8a review F-2 (`_authenticate` running before any limiter, so the
+    platform pool's own demand is not bounded by `concurrency` either) is
+    a separate, both-peers fix (WP-8c), not this one.
+    """
+    return limits.concurrency
+
+
 # Contract 1.7.0 (D-6 (2), addendum R-g, WP-2d): the applicability table --
 # which `budget` classes carry meaning on which endpoint. `mutate`/`cross_
 # entity_mutate` share the identical pair (D-6's own v1.1 revision, review
