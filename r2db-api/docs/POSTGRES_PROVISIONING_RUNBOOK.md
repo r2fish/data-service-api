@@ -314,6 +314,45 @@ still walks through (deployment-wide sizing across both role AND platform
 pools is R-31's own, broader, Phase 11 concern; this note records the
 fact only).
 
+**Fact (Phase 10 WP-4f, supervisor ruling 2026-09-09):** the arithmetic
+above assumed every role's own `CONNECTION LIMIT` (as shipped by
+`0002`/`0005`/`0006`) was already high enough to admit the real pool it
+backs -- WP-4e's own conformance investigation found this false for
+`r2dbsvc_controlplane` (4 platform-plane stores x a fixed `pool_size` 4 =
+16, against a shipped `CONNECTION LIMIT` of only 10 -- already exceeded by
+a SINGLE control-plane process, no test harness involved), and the
+identical shape recurs for `r2dbsvc_api` (2 stores x declared `concurrency`
+= 64, against 10) and every served application's own runtime/developer
+roles (1 store x declared `concurrency` = 32, against 20/10). Migration
+`0013_role_connection_limits.sql` raises exactly these four role classes
+to (real pool composition) + 4 (a fixed operator-headroom margin):
+
+| Role | Pool composition | Old `CONNECTION LIMIT` | New `CONNECTION LIMIT` |
+| --- | --- | --- | --- |
+| `r2dbsvc_api` | `credentials` + `durable_audit`, each pool-sized to declared `concurrency` (default 32) = 2 x 32 = 64 | 10 | 68 |
+| `r2dbsvc_controlplane` | 4 platform-plane stores x fixed `pool_size` 4 (WP-4e's own investigated-and-reverted default, `control_main.build_control_app`) = 16 | 10 | 20 |
+| `<slug>_runtime` | 1 store, `PostgresCell`'s own pool sized to declared `concurrency` (default 32) | 20 | 36 |
+| `<slug>_developer` | 1 store, same sizing as `<slug>_runtime` | 10 | 36 |
+| `r2dbsvc_control` | short-lived, one-shot CLI/provisioning connections only -- no persistent pool | 5 | unchanged (already >= its own real pool composition) |
+| `r2dbsvc_auditreader` | 1 store, fixed `pool_size` 4 (`PostgresAuditQueryStore`'s own default) | 5 | unchanged (already >= its own real pool composition) |
+
+`max_connections` must therefore be >= the sum of every role's own
+`CONNECTION LIMIT` above (the four raised roles' new values, plus
+`r2dbsvc_control`/`r2dbsvc_auditreader`'s unchanged ones, plus every OTHER
+role this cluster hosts), PLUS however many interactive/diagnostic `psql`
+sessions an operator expects to hold open at once, PLUS `superuser_
+reserved_connections` (default 3) -- re-check this (`SHOW max_
+connections;`) before applying `0013` to a cluster already close to its
+own configured ceiling.
+
+`python -m r2db_api.ops verify-declarations` now also checks this (new
+check `F-16`): each role's own `pg_roles.rolconnlimit` is `-1` or at least
+its own real pool-composition floor above (the SAME arithmetic this
+migration bakes in), run unconditionally alongside every other check that
+command already runs -- so a FUTURE deployment that raises `ResourceLimits.
+concurrency` without a follow-up migration like `0013` is caught at verify
+time instead of silently reopening this exact failure mode.
+
 ## 5. Order of operations
 
 ```
@@ -344,9 +383,13 @@ re-run is a deliberate signal, not silently absorbed.
 
 **The platform migrations that come after `0002`** are each described in
 their own section, and are applied in file order: `0005` (§9, credential
-store), `0006` (§11, control-plane storage), `0007` (§15, audit sink) and
+store), `0006` (§11, control-plane storage), `0007` (§15, audit sink),
 **`0008` (§16, platform declarations + writer-role timeouts, Q4 phase --
-both processes now REFUSE TO START until it is applied)**. **§17 covers the
+both processes now REFUSE TO START until it is applied)**, `0012`
+(process ceilings, Phase 10 WP-6a -- also required before either process
+starts, F-15), and `0013` (§4, role `CONNECTION LIMIT`s, Phase 10 WP-4f --
+additive only, safe to apply at any point after `0002`/`0005`/`0006`/`0007`
+exist). **§17 covers the
 third class of migration** -- per-application upgrade scripts, of which
 `0009` is this peer's first: those are applied per application database, by
 `python -m r2db_api.ops upgrade-applications`, never by hand in this order.

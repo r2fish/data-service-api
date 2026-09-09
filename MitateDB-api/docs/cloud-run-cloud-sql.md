@@ -398,6 +398,46 @@ python -m mitatedb_api.ops declare-coalescing-window --ms 60000
 python -m mitatedb_api.ops show-declarations
 ```
 
+**Phase 10 WP-4f (supervisor ruling 2026-09-09) adds a role `CONNECTION
+LIMIT` migration, peer-symmetric with r2db-api's own `0013_role_
+connection_limits.sql`.** A PostgreSQL role's `CONNECTION LIMIT` must be
+at least the real worst-case number of simultaneous connections the
+process(es) using that role can open at once ("pool 合計") -- otherwise a
+burst of real concurrent requests hits PostgreSQL's own hard `FATAL: too
+many connections for role` refusal instead of the declared 429/503 the
+contract promises. Apply this platform single-shot migration (idempotent
+-- safe to re-run) BEFORE (or after -- order relative to `0007`/`0011` is
+irrelevant) the `platform_declarations` migration above:
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0012_role_connection_limits.sql
+```
+
+Role floor arithmetic (formula: worst-case pool composition + 4 fixed
+operator-headroom connections):
+
+| Role | Pool composition | Old `CONNECTION LIMIT` | New `CONNECTION LIMIT` |
+| --- | --- | --- | --- |
+| `mitatedbsvc_api` | platform pool (`role_pool_size`, declared `max_concurrency`, default 32) + durable audit sink's own per-write transient connections (also bounded by `max_concurrency`) = 2 x 32 = 64 | 20 | 68 |
+| `mitatedbsvc_controlplane` | 4 platform-plane stores, peer-symmetric worst case with r2db-api's own measured 16 | 10 | 20 |
+| `<app>_rt` (runtime) | 1 store, bounded by `max_concurrency` = 32 | 20 | 36 |
+| `<app>_dv` (developer) | 1 store, bounded by `max_concurrency` = 32 | 10 | 36 |
+| `mitatedbsvc_provision` | short-lived, one-shot CLI/provisioning connections only -- no persistent pool | 5 | unchanged (already >= its own real pool composition) |
+| `mitatedbsvc_auditreader` | 1 store, fixed floor 4 | 5 | unchanged (already >= its own real pool composition) |
+
+`max_connections` (Cloud SQL flag `max_connections`, or `SHOW max_
+connections;`) must be >= the sum of every role's own `CONNECTION LIMIT`
+above, PLUS however many interactive/diagnostic `psql` sessions an
+operator expects to hold open at once, PLUS `superuser_reserved_
+connections` (default 3) -- re-check this before applying the migration
+to an instance already close to its own configured ceiling.
+
+`python -m mitatedb_api.ops verify-declarations` now also checks this
+(new check `F-16`): each role's own `pg_roles.rolconnlimit` is `-1` or at
+least its own real pool-composition floor above, run unconditionally
+alongside every other check that command already runs.
+
 All four subcommands connect with `MITATEDB_PROVISION_DSN` (the same
 `mitatedbsvc_provision` credential the migrations above already use).
 **Every one of these changes is a startup-time snapshot** (design U-3):

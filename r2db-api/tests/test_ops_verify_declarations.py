@@ -45,6 +45,13 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # Phase 10 WP-4f (supervisor ruling 2026-09-09): raises `r2dbsvc_api`/
+    # `r2dbsvc_controlplane`'s own `CONNECTION LIMIT` -- inserted here
+    # (before 0008, not appended at the tuple's own end) so `MIGRATION_
+    # NAMES_WITHOUT_DECLARATIONS`'s own `[:-2]` slice below still drops
+    # exactly `{0008, 0012}`, unchanged (this file's own isomorphism-pinned
+    # symbol, `tests/test_audit_query.py::_ISOMORPHIC_TARGETS`).
+    "0013_role_connection_limits.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
     # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
     # check` to admit `process_ceilings`. `_bootstrap` below auto-seeds a
@@ -151,6 +158,11 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
     _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+    # Phase 10 WP-4f: unconditional, like 0002/0005/0006/0007 above --
+    # depends only on those four (never on 0008/0012), so it always runs
+    # here regardless of which fixture variant (`MIGRATION_NAMES` vs
+    # `MIGRATION_NAMES_WITHOUT_DECLARATIONS`) called this function.
+    _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     if "0008_platform_declarations_and_writer_timeouts.sql" in rewritten:
         _run_psql(
             control_dsn,
@@ -563,3 +575,59 @@ def test_verify_declarations_f14_passes_when_every_application_has_applied_every
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "OK   F-14" in out, out
+
+
+# ===========================================================================
+# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09): every role this
+# deployment pools connections against has a CONNECTION LIMIT of -1 or at
+# least its own real pool-composition floor -- `0013_role_connection_
+# limits.sql` (already applied unconditionally by `_bootstrap` above) is
+# what makes the POSITIVE case real: before that migration, `r2dbsvc_api`'s
+# own CONNECTION LIMIT (10) already sat below its own floor (64), so F-16
+# would fail on every freshly-bootstrapped platform, not just the mutated
+# one below.
+# ===========================================================================
+
+
+def test_verify_declarations_f16_passes_after_migration_0013(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Positive control: a freshly bootstrapped platform (migration 0013
+    already applied by `_bootstrap`, one real provisioned application so
+    its own runtime/developer roles exist too) passes F-16 -- proving the
+    FAIL test below is really about the lowered CONNECTION LIMIT, not some
+    other difference between the two fixtures."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf16ok")
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK   F-16" in out, out
+
+
+def test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real mutation this check exists to catch: an operator (or a
+    future migration regression) lowers `r2dbsvc_api`'s own CONNECTION
+    LIMIT back below its own real pool-composition floor (2 stores x
+    concurrency 32 = 64) -- here, back to `0005_credential_store.sql`'s own
+    pre-WP-4f value (10), simulating exactly the state every platform was
+    in before migration 0013 existed. `ops verify-declarations` must exit
+    non-zero (F-16's own exit code, 15) and name the role, its current
+    limit, and the required floor -- never a silent `OK F-16`."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_control_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf16bad")
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(sql.Identifier(platform.api_role)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.control_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 15
+    assert "FAIL F-16" in out, out
+    assert platform.api_role in out, out
+    assert "CONNECTION LIMIT 10" in out, out
+    assert "64" in out, out

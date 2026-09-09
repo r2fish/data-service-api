@@ -873,6 +873,143 @@ _CONTRACT_170_ENABLED_CAPABILITIES: tuple = ("constraint_declarations", "dry_run
 _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "idempotency_retention_ms")
 
 
+# ---------------------------------------------------------------------------
+# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric with
+# r2db-api's own same-numbered check -- see that peer's own module for the
+# full WP-4e finding this responds to): every PostgreSQL role this
+# deployment's own processes pool connections against must have a
+# `CONNECTION LIMIT` (`pg_roles.rolconnlimit`) of `-1` (unlimited) or at
+# least that role's own worst-case simultaneous connection count ("pool
+# 合計") -- otherwise a burst of real concurrent requests hits PostgreSQL's
+# own hard `FATAL: too many connections for role` refusal instead of the
+# declared 429/503 the contract promises.
+#
+# Role IDENTITY is read from REAL GRANTS (`information_schema.role_table_
+# grants` on the fixed, migration-defined `application_audit`/
+# `control_audit` table names), never from a schema/role-name string-
+# rewrite convention -- this module's own header already avoids that
+# technique for writer-role identification (D-2(h): `audit_writer_roles`
+# is read from the declaration row, never derived); the SAME reasoning
+# applies here. Runtime/developer role names ARE read directly off
+# `<schema>.applications` -- also real stored data, not a derived name.
+#
+# Deliberately excludes `mitatedbsvc_provision` (short-lived, one-shot
+# CLI/provisioning connections only -- no persistent pool, and no stored
+# declaration this check could read to derive a floor for it, the same
+# "out of scope" category as F-1/F-2/F-12).
+# ---------------------------------------------------------------------------
+
+#: `mitatedb_api.main`'s own platform pool (`PostgresCredentialStore`'s
+#: `BoundedConnectionPool`, pool-sized to the declared `max_concurrency`
+#: ceiling, Phase 10 WP-4e) PLUS `PostgresApplicationAuditSink`'s own
+#: per-write transient connections against the SAME role (worst case, one
+#: per in-flight request, also bounded by `max_concurrency`) -- both
+#: against `mitatedbsvc_api`. Identified by `INSERT` on `application_audit`.
+_API_ROLE_STORE_COUNT = 2
+
+#: `mitatedb_api.control_composition`'s own 4 platform-plane stores
+#: (`applications`/`credentials_registry`/`control_credentials`/`audit`),
+#: peer-symmetric worst case with r2db-api's own measured 16 (4 stores x
+#: 4) -- this peer's own stores open one connection per call rather than a
+#: persistent multi-connection pool, so the floor here is the SAME
+#: worst-case bound applied conservatively, not a literal `pool_size`
+#: read off this peer's own code. Identified by `INSERT` on `control_
+#: audit`.
+_CONTROLPLANE_ROLE_POOL_FLOOR = 16
+
+#: `PostgresAuditQueryStore`'s own reader -- one connection per call
+#: (this module's own header), peer-symmetric floor with r2db-api's own
+#: fixed `pool_size` 4. Identified by `SELECT` on BOTH `application_audit`
+#: AND `control_audit` (migration 0005's own grant shape -- no other role
+#: holds `SELECT` on either table).
+_AUDITREADER_ROLE_POOL_FLOOR = 4
+
+
+def _roles_with_table_privilege(conn: "psycopg.Connection", schema: str, table: str, privilege: str) -> list:
+    """Every role (`grantee`) actually granted `privilege` on `<schema>.
+    <table>` -- `information_schema.role_table_grants` is a world-readable
+    view: any connection can run this regardless of its own login role.
+    Ordered by `grantee` so callers get deterministic iteration order."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT grantee FROM information_schema.role_table_grants "
+            "WHERE table_schema = %s AND table_name = %s AND privilege_type = %s ORDER BY grantee",
+            [schema, table, privilege],
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def _f16_message(role: str, current_limit: int, required_floor: int, *, ops_module: str) -> str:
+    return (
+        f"role '{role}' has CONNECTION LIMIT {current_limit}, below its own real pool-composition floor "
+        f"{required_floor} -- a burst of real concurrent requests can hit PostgreSQL's own hard 'too many "
+        f"connections for role' refusal instead of the declared 429/503 the contract promises. Raise it with "
+        f"'ALTER ROLE {role} CONNECTION LIMIT {required_floor};' on the provision DSN for a throwaway/test "
+        f"platform, or a new migration for an already-shipped deployment (never edit a shipped migration file) "
+        f"-- see {ops_module}'s own provisioning runbook."
+    )
+
+
+def check_role_connection_limits(conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int) -> None:
+    """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
+    role (in the deterministic order built below) whose `pg_roles.
+    rolconnlimit` is neither `-1` nor at least its own computed floor.
+    `concurrency` is the caller's own declared per-role pool ceiling
+    (`config.FoundationConfig.max_concurrency`) -- this function takes it
+    as a plain argument rather than reading `MITATEDB_MAX_CONCURRENCY`
+    itself, so a deployment that has genuinely raised its declared
+    concurrency is checked against ITS OWN real floor, not a silently-stale
+    code-level default.
+
+    Checks exactly the role classes `0012_role_connection_limits.sql`
+    (this peer) raises: the platform-plane `<...>_api`/`<...>_
+    controlplane`/`<...>_auditreader` roles (module-level floor constants
+    above) and every PROVISIONED application's own runtime/developer roles
+    (floor = `concurrency`, Phase 10 WP-4f peer-symmetric with r2db-api's
+    own WP-8a). A role with no grants matching any of the three
+    platform-plane shapes above (identity unknown to this check) is
+    silently skipped, never flagged."""
+    floors: dict = {}
+    for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
+        floors[role] = _API_ROLE_STORE_COUNT * concurrency
+    for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
+        floors[role] = _CONTROLPLANE_ROLE_POOL_FLOOR
+    reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
+    reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
+    for role in sorted(reader_of_application_audit & reader_of_control_audit):
+        floors[role] = _AUDITREADER_ROLE_POOL_FLOOR
+
+    # Two-state registry (0002's own header): a registered-but-never-
+    # provisioned row has `runtime_role`/`developer_role` still NULL --
+    # excluded here the same way `0012_role_connection_limits.sql`'s own
+    # migration-time loop excludes it.
+    applications_table = sql.Identifier(schema, "applications")
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "SELECT runtime_role, developer_role FROM {table} "
+                "WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL ORDER BY application_id"
+            ).format(table=applications_table)
+        )
+        for runtime_role, developer_role in cur.fetchall():
+            floors[runtime_role] = concurrency
+            floors[developer_role] = concurrency
+
+    if not floors:
+        return
+    role_names = sorted(floors)
+    with conn.cursor() as cur:
+        cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [role_names])
+        current_limits = dict(cur.fetchall())
+    for role in role_names:
+        current = current_limits.get(role)
+        if current is None or current == -1:
+            continue
+        required = floors[role]
+        if current < required:
+            raise PlatformDeclarationError(_f16_message(role, current, required, ops_module=ops_module), code="F-16")
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -902,6 +1039,7 @@ __all__ = [
     "RoleTimeoutCatalog",
     "Surfaces",
     "check_control_surface_consistency",
+    "check_role_connection_limits",
     "check_writer_role_timeouts",
     "derive_visibility_lag_ms",
     "read_declared_role_timeouts",

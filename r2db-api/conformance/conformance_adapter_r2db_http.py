@@ -340,6 +340,21 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
+        # Phase 10 WP-4f (supervisor ruling 2026-09-09): raises `<prefix>_
+        # api`/`<prefix>_controlplane`'s own `CONNECTION LIMIT` to match
+        # their real pool composition -- WP-4e's own investigation found
+        # this adapter's `[r2db-api-socket]` plug tripping the pre-existing
+        # `r2dbsvc_controlplane` gap (`CONNECTION LIMIT 10` vs. a real
+        # worst case of 16), a genuine production defect this migration
+        # fixes, not an adapter-only workaround (the ruling's own
+        # constraint: "throwaway platform は本番 migration をそのまま適用
+        # する -- adapter 専用に limit を上げない"). Depends only on
+        # 0002/0005/0006/0007 above (never on 0008, which this adapter
+        # deliberately never runs -- see this function's own docstring),
+        # so it is safe to apply here even though this adapter's own
+        # control stack never reads the DB-side `platform_declarations`
+        # table at all.
+        "0013_role_connection_limits.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -351,6 +366,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
     _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
     _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+    _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
     api_dsn = _dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db)
     controlplane_dsn = _dsn_with(admin_dsn, user=controlplane_role, password=controlplane_password, dbname=platform_db)
     auditreader_dsn = _dsn_with(admin_dsn, user=auditreader_role, password=auditreader_password, dbname=platform_db)
@@ -1249,6 +1265,25 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # idle-eviction mechanism on `_RolePool` itself, both outside
             # this WP's own scope (pool SIZING/composition only, not pool
             # LIFECYCLE) -- reported for a separate ruling.
+            #
+            # Phase 10 WP-4f (supervisor ruling 2026-09-09) supplied the
+            # "genuine fix" the paragraph above named as out of WP-4e's own
+            # scope: `0013_role_connection_limits.sql` (this adapter's own
+            # `_bootstrap_platform` now applies it, unconditionally, like
+            # every other platform migration -- never an adapter-only
+            # override) raises `<prefix>_controlplane`'s own `CONNECTION
+            # LIMIT` from 10 to 20. `self._control_pool_size` stays at the
+            # SAME deliberately small `2` -- this adapter's own worst case
+            # (4 stores x 2 stacks x `pool_size` 2 = 16) now fits with 4
+            # connections of headroom under the new limit, matching a real
+            # single-process deployment's own worst case (4 stores x fixed
+            # `pool_size` 4 = 16, the SAME 16, `0013`'s own migration
+            # header) -- raising `_control_pool_size` itself remains
+            # unnecessary (and, per the paragraph above, still actively
+            # counter-productive against `_RolePool`'s own no-idle-eviction
+            # behavior) now that the real constraint it was hitting is
+            # fixed at its actual source, the role's own `CONNECTION
+            # LIMIT`, not the pool's local `maxconn`.
             self._control_pool_size = 2
             self._control_app, self._control_stores = self._build_control_stack()
             self._control_client = self._build_client(self._control_app, BASE_URL)

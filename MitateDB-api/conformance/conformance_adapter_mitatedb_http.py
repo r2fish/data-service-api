@@ -303,6 +303,17 @@ def _bootstrap_platform(
         # auditreader role -- `_run_psql` below runs this AFTER 0002,
         # exactly the order the file's own header requires.
         "0005_application_audit.sql",
+        # Phase 10 WP-4f (supervisor ruling 2026-09-09; peer-symmetric with
+        # r2db-api's own `0013_role_connection_limits.sql`): raises
+        # `<prefix>svc_api`/`<prefix>svc_controlplane`'s own `CONNECTION
+        # LIMIT` to match their real pool composition -- the same
+        # production migration a real deployment would apply (the
+        # ruling's own constraint: "throwaway platform は本番 migration
+        # をそのまま適用する -- adapter 専用に limit を上げない"). Depends
+        # only on 0002/0005 above, so it is applied here BEFORE the
+        # declarations-table migrations below (order-independent either
+        # way, mirroring r2db-api's own adapter).
+        "0012_role_connection_limits.sql",
         # Q4 phase (design D-1/D-2, work order §4 WP-2 変更対象 D):
         # platform declarations table + the two service writer roles'
         # timeout role settings -- THIS adapter's own `build_control_
@@ -340,6 +351,10 @@ def _bootstrap_platform(
     # (`WHO RUNS THIS: mitatedbsvc_provision`, migration 0005's own
     # header) -- runs as the SAME `provision_dsn` 0002 already ran as.
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+    # Phase 10 WP-4f: unconditional, like 0002/0005 above -- depends only
+    # on those two, so it always runs here regardless of the declarations-
+    # table migrations below.
+    _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
     # Q4 phase: platform declarations + writer-role timeouts -- only
     # depends on 0002's two roles, run here (before the password-ALTER
     # block below, order-independent either way).

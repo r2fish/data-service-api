@@ -1055,6 +1055,11 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # Phase 10 WP-6a (design D-5(ii)): `process_ceilings` row present and
     # well-formed -- the next unused exit code.
     "F-15": 14,
+    # Phase 10 WP-4f (supervisor ruling 2026-09-09): every role this
+    # deployment pools connections against has a CONNECTION LIMIT of -1 or
+    # at least its own real pool-composition floor -- the next unused exit
+    # code.
+    "F-16": 15,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1158,7 +1163,41 @@ def _verify_declarations_checks(conn: "psycopg.Connection", args: argparse.Names
         "contract 1.7.0 capabilities enabled, enum_members/idempotency_entries/idempotency_retention_ms limits valid, "
         f"and every registered application has applied upgrades {sorted(platform_upgrades.PLATFORM_UPGRADE_NUMBERS)}",
     )
+
+    # Phase 10 WP-4f (supervisor ruling 2026-09-09): every role this
+    # deployment pools connections against (identified by REAL GRANTS,
+    # never a schema/role-name string-rewrite convention -- see `check_
+    # role_connection_limits`'s own docstring) must have a CONNECTION
+    # LIMIT of -1 or at least its own real pool-composition floor.
+    # `_declared_concurrency()` is peer-local -- this function's own call
+    # site stays textually isomorphic across peers; see that helper's own
+    # docstring for the peer-specific body it hides. Run unconditionally
+    # like the writer-role/F-14 checks above.
+    try:
+        platform_declarations.check_role_connection_limits(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=_declared_concurrency(),
+        )
+    except platform_declarations.PlatformDeclarationError as exc:
+        return _verify_declarations_fail(exc)
+    _verify_declarations_ok("F-16", "each role's CONNECTION LIMIT is -1 or at least its own real pool-composition floor")
     return 0
+
+
+def _declared_concurrency() -> int:
+    """Same lenient-degrade discipline as `main._optional_int`/`config.
+    FoundationConfig.max_concurrency`'s own default: an unset or
+    unparsable `MITATEDB_MAX_CONCURRENCY` silently falls back to the
+    dataclass default rather than raising here -- this is only a
+    verification-time floor computation, not the real composition root's
+    own strict parse."""
+    raw = os.environ.get("MITATEDB_MAX_CONCURRENCY")
+    if not raw:
+        return FoundationConfig.max_concurrency
+    try:
+        return int(raw)
+    except ValueError:
+        return FoundationConfig.max_concurrency
 
 
 def _served_capabilities_document() -> dict:
@@ -1250,9 +1289,12 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     prefixed, in `read_platform_declarations`'s own fixed order followed
     by F-3c (only when `--control` is given), F-6 (only when this peer's
     own `*_CONTROL_PLANE_STATUS` env var is defined), then the writer-role
-    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally. The first FAIL
-    stops the run and returns that F-number's own fixed exit code
-    (`_VERIFY_DECLARATIONS_EXIT_CODES`, via `_verify_declarations_checks`).
+    dual check (F-7/F-10/F-11/F-13/F-9) unconditionally, then the
+    limit-class check (F-14) unconditionally, then (Phase 10 WP-4f,
+    supervisor ruling 2026-09-09) the role CONNECTION LIMIT check (F-16)
+    unconditionally. The first FAIL stops the run and returns that
+    F-number's own fixed exit code (`_VERIFY_DECLARATIONS_EXIT_CODES`, via
+    `_verify_declarations_checks`).
 
     Exit codes follow design D-5 実装の形 (a) literally: 1 is a USAGE
     error (this command's own required env var, `MITATEDB_PROVISION_DSN`,
@@ -1277,7 +1319,9 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
     are out of this command's reach -- named, with the reason, on the last
     output line, printed for every code `_verify_declarations_checks`
-    returns (0 through 13 alike), never only on the 0 path."""
+    returns (0 through 15 alike -- F-14's own exit code (contract 1.7.0),
+    F-15's own (Phase 10 WP-6a, contract 1.8.0), and F-16's own (Phase 10
+    WP-4f) included), never only on the 0 path."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
