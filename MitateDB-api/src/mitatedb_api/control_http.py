@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Mapping
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -253,119 +254,169 @@ def _precharge(request: Request) -> None:
 # --------------------------------------------------------------------------
 
 
+# WP-8b (design D-8 (3)): every handler below delegates its own
+# synchronous section (rate precharge / `_service(request).<op>` -- a real
+# `ControlPlaneService` call, itself Postgres-backed on this HTTP
+# composition) to `starlette.concurrency.run_in_threadpool`, same
+# rationale/limiter-size fact as `http.py`'s own identical module-level
+# comment. A handler with a request body delegates `_precharge`/`_bearer`
+# on their own, BEFORE the body is read -- `_precharge`'s own docstring
+# ("rate-limit runs before EVERYTHING else, including reading ... the
+# request body") is what fixes that ordering, not this WP -- then
+# delegates the shape check plus the real service call together, after
+# the async body read.
+
+
 @_endpoint
 async def get_control_capabilities(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    document = request.app.state.control_service.control_capabilities(
-        secret, rate_precharged=True)
-    # R-7: the HTTP-layer enforcement fact, added on top of the
-    # service-layer default (`unavailable`) in the same commit as the real
-    # enforcement it declares (`RequestByteBoundMiddleware` below).
-    document = {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        document = request.app.state.control_service.control_capabilities(
+            secret, rate_precharged=True)
+        # R-7: the HTTP-layer enforcement fact, added on top of the
+        # service-layer default (`unavailable`) in the same commit as the real
+        # enforcement it declares (`RequestByteBoundMiddleware` below).
+        return {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
+
+    document = await run_in_threadpool(_sync)
     return JSONResponse(document, status_code=200)
 
 
 @_endpoint
 async def post_register_application(request: Request) -> Response:
-    _precharge(request)
+    await run_in_threadpool(_precharge, request)
     secret = _bearer(request)
     body = await _read_json_object(request)
-    _check_object_shape(body, _SCHEMAS["ApplicationRegistrationRequest"], label="ApplicationRegistrationRequest")
-    result = _service(request).register_application(
-        secret, body.get("application_id"), rate_precharged=True)
+
+    def _sync() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["ApplicationRegistrationRequest"], label="ApplicationRegistrationRequest")
+        return _service(request).register_application(
+            secret, body.get("application_id"), rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def get_list_applications(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    result = _service(request).list_applications(secret, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        return _service(request).list_applications(secret, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_disable_application(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    application_id = request.path_params["application_id"]
-    result = _service(request).set_application_enabled(
-        secret, application_id, False, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        application_id = request.path_params["application_id"]
+        return _service(request).set_application_enabled(
+            secret, application_id, False, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_enable_application(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    application_id = request.path_params["application_id"]
-    result = _service(request).set_application_enabled(
-        secret, application_id, True, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        application_id = request.path_params["application_id"]
+        return _service(request).set_application_enabled(
+            secret, application_id, True, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_issue_credential(request: Request) -> Response:
-    _precharge(request)
+    await run_in_threadpool(_precharge, request)
     secret = _bearer(request)
     body = await _read_json_object(request)
-    _check_object_shape(body, _SCHEMAS["CredentialIssueRequest"], label="CredentialIssueRequest")
-    result = _service(request).issue_credential(
-        secret, body.get("application_id"), body.get("role"), rate_precharged=True)
+
+    def _sync() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["CredentialIssueRequest"], label="CredentialIssueRequest")
+        return _service(request).issue_credential(
+            secret, body.get("application_id"), body.get("role"), rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def get_list_credentials(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    result = _service(request).list_credentials(secret, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        return _service(request).list_credentials(secret, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_rotate_credential(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    target_credential_id = request.path_params["credential_id"]
-    result = _service(request).rotate_credential(secret, target_credential_id, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        target_credential_id = request.path_params["credential_id"]
+        return _service(request).rotate_credential(secret, target_credential_id, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_revoke_credential(request: Request) -> Response:
-    _precharge(request)
+    await run_in_threadpool(_precharge, request)
     secret = _bearer(request)
     target_credential_id = request.path_params["credential_id"]
     raw_body = await request.body()
     body: dict[str, Any] = {}
     if raw_body:
         body = await _read_json_object(request)
-        _check_object_shape(body, _SCHEMAS["CredentialRevokeRequest"], label="CredentialRevokeRequest")
-    result = _service(request).revoke_credential(
-        secret, target_credential_id,
-        destructive=body.get("destructive"), confirmation=body.get("confirmation"), rate_precharged=True)
+
+    def _sync() -> dict[str, Any]:
+        if raw_body:
+            _check_object_shape(body, _SCHEMAS["CredentialRevokeRequest"], label="CredentialRevokeRequest")
+        return _service(request).revoke_credential(
+            secret, target_credential_id,
+            destructive=body.get("destructive"), confirmation=body.get("confirmation"), rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_disable_credential(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    target_credential_id = request.path_params["credential_id"]
-    result = _service(request).set_credential_enabled(
-        secret, target_credential_id, False, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        target_credential_id = request.path_params["credential_id"]
+        return _service(request).set_credential_enabled(
+            secret, target_credential_id, False, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
 @_endpoint
 async def post_enable_credential(request: Request) -> Response:
-    _precharge(request)
-    secret = _bearer(request)
-    target_credential_id = request.path_params["credential_id"]
-    result = _service(request).set_credential_enabled(
-        secret, target_credential_id, True, rate_precharged=True)
+    def _sync() -> dict[str, Any]:
+        _precharge(request)
+        secret = _bearer(request)
+        target_credential_id = request.path_params["credential_id"]
+        return _service(request).set_credential_enabled(
+            secret, target_credential_id, True, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
@@ -398,7 +449,11 @@ def _precharge_audit(request: Request) -> None:
 
 @_endpoint
 async def post_audit_query(request: Request) -> Response:
-    _precharge_audit(request)
+    # WP-8b (design D-8 (3)): `_precharge_audit` delegated on its own,
+    # before the body is read (same ordering rationale as `_precharge`
+    # above); the real `audit_query` service call is delegated together
+    # with the optional shape check, after the async body read.
+    await run_in_threadpool(_precharge_audit, request)
     secret = _bearer(request)
     # `AuditQueryRequest`'s own contract schema has no `required` entries
     # at all (every field optional) -- read the same way `post_revoke_
@@ -407,8 +462,13 @@ async def post_audit_query(request: Request) -> Response:
     body: dict[str, Any] = {}
     if raw_body:
         body = await _read_json_object(request)
-        _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
-    result = _service(request).audit_query(secret, body, rate_precharged=True)
+
+    def _sync() -> dict[str, Any]:
+        if raw_body:
+            _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
+        return _service(request).audit_query(secret, body, rate_precharged=True)
+
+    result = await run_in_threadpool(_sync)
     return JSONResponse(result, status_code=200)
 
 
