@@ -415,8 +415,10 @@ def _take_bound_advisory_lock(cursor: "psycopg.Cursor[Any]", *, schema: str, tab
     below are this function's only two callers.
 
     This is `pg_advisory_xact_lock(hashtext(<key>))`, NOT `LOCK TABLE ...
-    IN SHARE MODE` (this function's own pre-review-round-3 form, which the
-    design addendum names and forbids explicitly): SHARE conflicts with
+    IN SHARE MODE` (the form the design addendum names and forbids
+    explicitly; this peer's own pre-review-round-3 form was `SHARE ROW
+    EXCLUSIVE MODE`, which serializes correctly but is not the prescribed
+    idiom and was asymmetric with r2db): SHARE conflicts with
     the ROW EXCLUSIVE the following INSERT needs, but SHARE never
     conflicts with a concurrent SHARE, so two concurrent callers could
     both acquire SHARE, both read a count one under the limit, and only
@@ -501,10 +503,11 @@ class PostgresApplicationRegistry(_PostgresRegistryBase):
         application`'s own `applications` limit gate. Takes `_take_bound_
         advisory_lock` (a table-scoped constant-key `pg_advisory_xact_
         lock` -- see that function's own docstring for the full
-        rationale, including why `LOCK TABLE ... IN SHARE ROW EXCLUSIVE
-        MODE`, this method's pre-review-round-3 form, could still
-        deadlock two self-conflicting-mode holders escalating to their
-        own `INSERT`) on `work`'s own connection (never a separate,
+        rationale; `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE`, this
+        method's pre-review-round-3 form, self-conflicts and therefore
+        serializes writers correctly -- it was replaced for symmetry with
+        r2db and with the design's prescribed idiom, not because it
+        deadlocked) on `work`'s own connection (never a separate,
         already-committed connection the way the pre-WP-6b `applications_
         count()`-then-later-INSERT call sequence used), BEFORE the count:
         a second concurrent `register_application` call's own `count_
@@ -711,8 +714,9 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
         table-scoped constant-key `pg_advisory_xact_lock` -- see that
         function's own docstring for the full rationale, including why
         `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE`, this method's
-        pre-review-round-3 form, could still deadlock two self-
-        conflicting-mode holders escalating to their own `INSERT`) on
+        pre-review-round-3 form, self-conflicts and serializes writers
+        correctly; it was replaced for symmetry with r2db and the design's
+        prescribed idiom) on
         `work`'s own connection, BEFORE the count: a second concurrent
         `issue_credential` call's own `count_active_for_application_
         locked` -- which takes the SAME key -- blocks until THIS
