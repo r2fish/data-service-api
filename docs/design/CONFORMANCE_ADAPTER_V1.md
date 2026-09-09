@@ -2,6 +2,7 @@
 
 ## 文書情報
 
+- 版数: 1.15 (§25 を新設。port v1.15: phase 10 WP-6d-ii、design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-13「実装の形 (6d-ii) の確定」由来の coordinated revision -- 1 新規 abstract method `hold_after_idempotency_lookup(session, idempotency_key)` (新条件 C-27、同一 idempotency key の同時送信を決定的に直列化させる primitive) と、非 normative な yield handle `IdempotencyHold` (`wait_until_held(timeout_s=30.0) -> int`) を追加する。`hold_in_flight` (port v1.12) の構造を踏襲するが、この primitive 自身は要求を出さない (呼び出し側が先着・後着の両方を別々の OS スレッドから出す) 点が唯一の構造上の違いである。既存 4 registered adapter が実現し、5・6 番目の socket plug (`r2db-api-socket`/`MitateDB-api-socket`) は http adapter の composition をそのまま継承する (socket 固有のコードは無い)。削除は無い。詳細は §25
 - 版数: 1.14 (§24 を新設。port v1.14: phase 10 WP-3、design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-1 (A) 4 由来の coordinated revision -- `ConformanceAdapter` に既定を持たない抽象属性 `transport_kind` (`"in_process"` / `"asgi"` / `"socket"`) を 1 個追加する。新規 abstract method は無い。既存 4 registered adapter は現状どおりの値 (`in_process` × 2、`asgi` × 2) を宣言し挙動は変わらない。5・6 番目の plug (`r2db-api-socket`/`MitateDB-api-socket`、`socket` を宣言) は本 WP では未登録 (WP-4 が登録する)。詳細は §24
 - §24.3 追補 (2026-09-08, WP-3 差し戻し反映、監督裁定 `{scratchpad}/phase10/wp3-rulings.md`): port v1.14 のまま (バージョン番号は据え置き、port-level 変更なし)。`_build_client` の契約を明記 (F-2 (c): app 1個につきclient 1個。socket実装はappごとにuvicorn+nginxの対を持ってよく、1 nginxで2 upstreamを束ねる形は要求しない)。3個目の hook `_reset_surface_state(self) -> None` (既定no-op、`isolated_application_surface`が`copy.copy(self)`直後に呼ぶ) を追加 (F-2 (b))。`hold_in_flight`実現 (`_hold_in_flight_via_http_requests`/`_hold_in_flight_via_http_requests_over_stalled_gate`) も`_build_client`hookを経由するよう修正 (F-10、旧extraction が見落としていた直接構築箇所)。§24.3末尾の未実測断定を訂正 (F-7)。§24.2 に、`test_c19_surfaces_are_really_dialable_on_socket_plugs` が `registry-guards` xdist group に入ることと WP-4a の非 vacuity assert がその group を跨がない形にすべき旨の注記を追加 (F-8 (ii))。詳細は §24.3
 - 版数: 1.13 (§23 を新設。port v1.13: phase 9 WP-1、design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md §6.1 由来の coordinated revision -- 5 新規 abstract method (`schema_operation_with_result`/`attempt_mutation_with_result`/`attempt_batch_with_result`/`attempt_cross_entity_batch_with_result`/`query_with_budget`) を追加し、契約 1.7.0 が新設する 8 項目 (`dry_run`/`plan`/`budget`/schema `idempotency_key`/`enum`・`nullable`・`field_constraints`/結果側 `request_id`/結果側 `descriptor`/`alter_field`) を運ぶ。`alter_field` は独立 primitive ではなく `schema_operation_with_result` の `operation` 引数へ畳んだ (§23.2、監督裁定 2026-09-07)。5 限界 (i)〜(v) は `ConformanceAdapter` の class docstring に置く (WP-1b rework)。削除は無い。詳細は §23
@@ -3431,3 +3432,128 @@ starts once a `transport_kind == "socket"` plug exists) cannot be
 measured at all until WP-4a registers one; WP-4a measures it then and
 records it, together with this section's own before/after tally, in
 `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §11.
+
+## 25. v1.15 port revision (Phase 10 WP-6d-ii, coordinated with docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md §3 D-13 「実装の形 (6d-ii) の確定」)
+
+Phase 10's own D-13 closes a real gap external review 2 found: two
+concurrent requests carrying the SAME idempotency key could both observe
+"no record" and both execute (`docs/design/ROADMAP_POST_PHASE7_V1.md` §8
+R-24). WP-6d-i closed this inside both peers' own backend/in-memory
+locks; this revision gives the common suite a deterministic way to
+DRIVE that closure -- new condition C-27 -- the same "test-driving
+primitive, never a test-only hook on product code" discipline `hold_in_
+flight` (port v1.12) already established, applied to the idempotency
+admission window instead of the concurrency counter. One addition, no
+removals.
+
+### 25.1 `hold_after_idempotency_lookup(session, idempotency_key)` (D-13 「実装の形 (6d-ii) の確定」(1)/(2))
+
+Added to `ConformanceAdapter` immediately after `hold_in_flight`:
+
+```python
+def hold_after_idempotency_lookup(self, session, idempotency_key: str) -> AbstractContextManager["IdempotencyHold"]
+```
+
+Meaning (verbatim, design §3 D-13 「実装の形 (6d-ii) の確定」(1) -- carried
+into the port docstring unparaphrased, per this repository's own 常設
+規律 4): 「`session` 上で次に到着する、`idempotency_key` に一致する key を
+持つ要求を 1 件だけ、その要求自身の **idempotency 受理区間の末尾**で停止
+させたまま保持する。受理区間の末尾とは、照会が「記録なし」を返し、
+`idempotency_entries` の予約を取り終え、その区間が取った lock をすべて
+保持したまま、効果をまだ 1 件も実行していない地点である。保持中に同じ
+key を持つ 2 件目の要求を出すと、2 件目はその同じ lock の上で実際に待ち、
+先着が解放されて commit した後にはじめて答えを返す。`with` を抜けると
+先着は解放され、実行・記録・commit まで進む。保持するのは 1 件だけであり、
+`idempotency_key` に一致しない要求は素通しする。」
+
+**Structural difference from `hold_in_flight`** (design 同 (2)): this
+primitive never issues any request of its own. The held request ("A")
+and the second, waiting request ("B") are both issued by the CALLER,
+each from its own OS thread -- this method only arms the ONE stall
+point and yields the `IdempotencyHold` handle a caller uses to wait for
+A to actually reach it. A caller confirms B has not completed while A
+is held with a bounded wait window of its own -- the same shape both
+peers' own `tests/test_idempotency_concurrency.py::_assert_second_call_
+is_blocked` already uses.
+
+**`IdempotencyHold`** (non-normative, `adapter.py` module level, the
+same "non-normative handle yielded by a primitive" status `Isolated
+ControlHandle` (§21.4) already carries): one method,
+
+```python
+def wait_until_held(self, timeout_s: float = 30.0) -> int
+```
+
+Blocks until the held request has actually reached the stall point,
+then returns the REAL measured count of requests held there (always `1`
+for a correct realization -- this primitive holds exactly one request,
+never more; `hold_in_flight`'s own `entered_count`/裁定 5 rationale,
+carried over unchanged: a caller must be able to tell "did this
+primitive actually hold something" without a tautological check).
+Raises `AssertionError` -- never skips, never times out silently -- if
+the held request has not reached that point within `timeout_s` seconds
+(`OPERATING_CONDITIONS.md` §1.3 の 26). Default `30.0` matches the 4
+adapters' own pre-existing `_HOLD_IN_FLIGHT_ENTRY_TIMEOUT_S` constant.
+
+**Why the stall point sits at the END of the admission section, not at
+the lookup's own return point** (design 同 (3)): the monitor's own
+original framing ("照会の直後・実行の前") is satisfied by either point,
+but only the END of the admission section keeps observation (iii)
+(the `idempotency_entries` count bound) genuinely load-bearing. Stalling
+at the lookup's own return leaves the count-bound lock un-taken, so a
+concurrent second, different-key request would race UNHELD and this
+suite's own test orchestration -- not the real lock -- would end up
+serializing the two attempts, staying green even with the count-bound
+lock removed (a vacuous observation, design's own words: "既存の逐次経路
+の bound 検査 (C-23) と同じものを二度書くだけの、変異で赤くならない
+観測になる").
+
+### 25.2 Per-plug realization (design D-13 「実装の形 (6d-ii) の確定」(4), measured)
+
+**Realization is adapter-internal, never a product-code hook** (design
+§4, same discipline as `hold_in_flight`): each plug monkeypatches a real
+bound method (or pair of methods) on the SAME cell/backend object it
+already constructs out-of-band for `isolated_application_surface()`.
+Both peers' own `tests/test_idempotency_concurrency.py` already stop at
+this exact same point, by this exact same technique -- this port
+revision only lifts that shape up to the common port.
+
+| plug | wraps | why the stall point is the end of the admission section on this peer's own structure | what a concurrent second request actually waits on |
+|---|---|---|---|
+| `r2db-api` (in-process) | the isolated instance's own per-application `structured.ApplicationCell`'s own `_idempotency_lookup` (arms the calling thread when the key matches and the record is absent) and `_idempotency_reserve` (stalls the armed thread at its own return) | `transact`/`apply_schema` hold the cell's own `self._idempotency_lock` (a `threading.Lock`) for their ENTIRE call -- lookup -> reserve -> execute -> store -- so `_idempotency_reserve`'s own return is already past the reservation and still inside that lock | the cell's own `threading.Lock` (`transact`'s/`apply_schema`'s own outer entry) -- a second request never even reaches `_idempotency_lookup` while the first is held |
+| `r2db-api-http` | the SAME per-application `PostgresCell`'s own `_idempotency_lookup`/`_idempotency_reserve` (`postgres.py`), identical wrap shape | the effect's own outer transaction takes `_idempotency_key_lock` (a `pg_advisory_xact_lock` on the key) before `_idempotency_lookup`, and `_idempotency_reserve_lock` (a table-level `pg_advisory_xact_lock`) before `_idempotency_reserve` -- `_idempotency_reserve`'s own return holds BOTH | the real `pg_advisory_xact_lock`s themselves -- a second request for the SAME key blocks inside its own `_idempotency_key_lock` call; a second request for a DIFFERENT key, once past its own key lock, blocks inside `_idempotency_reserve_lock` |
+| `MitateDB-api` (in-process) | the SAME per-application `ApplicationCell`'s own `_idempotency_check` (`cell.py`) -- the ONE choke that performs both the lookup AND the reservation and returns `(replay_response, digest, now_ms)`; a fresh admission is exactly `replay_response is None` | every public entry point holds this cell's own `self._lock` (an `RLock`, phase 10 WP-8b's own outer lock) for its ENTIRE call -- lookup -> pass-1 -> pass-2 -- so `_idempotency_check`'s own return is already past the reservation and still inside that lock | the cell's own `RLock` -- a second request never even reaches `_idempotency_check` while the first is held |
+| `MitateDB-api-http` | the SAME per-application `ApplicationCell`, identical wrap shape (the real HTTP dispatch reaches the SAME cell class the in-process plug does) | identical to the in-process plug's own reasoning -- this common suite drives exactly one `ApplicationCell` per Application, one process, one cell | the SAME cell's own `RLock` -- the PostgreSQL SESSION advisory locks `idempotency_begin`/`idempotency_reserve` also take are never reached by a second in-process request either (disclosed limit, §25.3) |
+
+**Socket plugs (WP-4) are two subclasses of the http adapters and inherit
+this realization unchanged** -- no socket-specific code exists for this
+primitive (design D-1 (A) 6 composition, §24.3): an HTTP plug's app runs
+in the same process as the test, so the monkeypatch reaches it exactly
+as `hold_in_flight` already established (C-05's own precedent).
+
+**xdist group** (design 同 (8)): no explicit `xdist_group` marker on
+C-27's own per-plug tests -- `conformance-tests/conftest.py`'s own
+adapter-param-based auto-grouping already places them, the same
+treatment C-05's own tests get (C-05 itself carries no explicit marker
+either). Only the registry-wide, non-parametrized non-vacuity guard
+(driven-plug-count) falls into the shared `registry-guards` group.
+
+### 25.3 Disclosed limit (design D-13 「実装の形 (6d-ii) の確定」(7), carried verbatim in meaning into `CONDITIONS.md`'s own C-27 row)
+
+On `MitateDB-api-http`, removing the PostgreSQL SESSION advisory locks
+(`idempotency_begin`/`idempotency_reserve` take) does NOT turn C-27 red.
+This common suite drives exactly one `ApplicationCell` per Application
+(one process, one cell), and that cell's own `RLock` already serializes
+the two concurrent requests before either ever reaches the advisory
+lock -- the advisory lock only becomes load-bearing ACROSS cells (that
+is, across processes sharing one PostgreSQL-backed Application), a
+shape this common suite has no way to construct (the same observation
+boundary `process_ceilings` and C-26 (4) already disclose: this suite
+cannot serve one deployment from two processes). This is an
+observation-scope disclosure, not a weakening of C-27 itself -- the
+`r2db-api-http` row of §25.2's own table pins the equivalent real
+advisory lock directly, inside this very suite; the MitateDB advisory
+lock's own non-vacuity is instead carried by the PEER-LOCAL `MitateDB-
+api/tests/test_idempotency_concurrency.py`, which drives two separate
+`cell_a`/`cell_b` objects against the SAME PostgreSQL database precisely
+to exercise it where the in-process cell lock cannot.

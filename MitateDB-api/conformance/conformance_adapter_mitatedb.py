@@ -28,7 +28,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 # The common port lives at conformance-tests/adapter.py. When the combined
 # suite runs from the repository root (root pyproject.toml pythonpath,
@@ -55,6 +55,7 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
@@ -500,6 +501,62 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
         cell_obj._limit_gate = original_gate  # noqa: SLF001
     if errors:
         raise errors[0]
+
+
+# port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+# WP-6d-ii): `hold_after_idempotency_lookup` realization for this
+# in-process plug. `ApplicationCell._idempotency_check` (`cell.py:1201`)
+# is the ONE choke every keyed entry point calls -- it performs BOTH the
+# lookup AND the `idempotency_entries` reservation and returns `(replay_
+# response, digest, now_ms)`; a fresh admission is exactly the case
+# `replay_response is None` (`cell.py:1318`). Every public entry point
+# already holds this SAME cell's own `self._lock` (an `RLock`, WP-8b 案
+# A) for its ENTIRE call -- lookup -> pass-1 -> pass-2 -- so a second,
+# key-matching request ("B") never even reaches `_idempotency_check`
+# while "A" is held: B blocks acquiring `self._lock` at the top of
+# whatever public method it calls instead (design D-13 "実装の形
+# (6d-ii) の確定" (4) 表, `MitateDB-api` row). This function only needs
+# to recognize the ONE call that is both key-matching and a fresh
+# admission, and stall its RETURN -- the end of the admission window,
+# after the reservation, before the caller executes anything.
+_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Iterator[IdempotencyHold]:
+    original_check = cell_obj._idempotency_check  # noqa: SLF001
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _checked(key, digest_request, *, conn=None, deadline=None):
+        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+        replay_response, _digest, _now_ms = result
+        # A fresh admission (`replay_response is None`) for the key this
+        # hold is watching -- a replay, a CONFLICT/LIMIT_EXCEEDED
+        # (raised, never reaching this point), or a different key passes
+        # straight through (design's own "idempotency_key に一致しない
+        # 要求は素通しする").
+        if replay_response is None and key == idempotency_key:
+            entered.release()
+            release.wait()
+        return result
+
+    setattr(cell_obj, "_idempotency_check", _checked)
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_idempotency_lookup: the held request never reached the end of its "
+                f"idempotency admission window within {timeout_s}s (expected it to stall right after "
+                "_idempotency_check returns a fresh admission -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield IdempotencyHold(_wait_until_held)
+    finally:
+        release.set()
+        setattr(cell_obj, "_idempotency_check", original_check)
 
 
 class MitateDBConformanceAdapter(ConformanceAdapter):
@@ -1114,6 +1171,20 @@ class MitateDBConformanceAdapter(ConformanceAdapter):
         method."""
         cell = self._control.cells[session.principal.application_id]
         return _hold_in_flight_via_stalled_gate(cell, lambda: self._call(lambda: session.catalog()), n)
+
+    # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+    # WP-6d-ii): wraps this SAME cell's own `_idempotency_check` --
+    # see `_hold_after_idempotency_check`'s own module comment for why
+    # this cell's own `self._lock` (not this hook) is what a concurrent
+    # second request actually waits on.
+    def hold_after_idempotency_lookup(self, session, idempotency_key: str):
+        """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_idempotency_check` and the comment immediately
+        above this method."""
+        cell = self._control.cells[session.principal.application_id]
+        return _hold_after_idempotency_check(cell, idempotency_key)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).

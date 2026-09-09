@@ -69,7 +69,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -94,6 +94,7 @@ from adapter import (  # noqa: E402
     ControlCredentialHandle,
     CredentialHandle,
     Fixture,
+    IdempotencyHold,
     IsolatedControlHandle,
     PayloadNotExpressible,
     ScopedBatchOperation,
@@ -765,6 +766,52 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
         raise errors[0]
 
 
+# port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+# WP-6d-ii): `hold_after_idempotency_lookup` realization for this HTTP
+# plug -- see `conformance_adapter_mitatedb.py`'s own identical-named
+# helper for the full rationale (this peer's own `ApplicationCell._
+# idempotency_check` is the single choke both plugs share; only the
+# transport differs). This same running process's cell is reached
+# in-process here too (`self._cells[app_id]`, same object every real
+# `POST` request against this Application dispatches into), so this
+# realization needs no HTTP-specific plumbing beyond locating the cell.
+# `ApplicationCell._lock` (WP-8b 案 A) is what a concurrent second
+# request actually waits on, exactly as on the in-process plug.
+_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _hold_after_idempotency_check(cell_obj: object, idempotency_key: str) -> Iterator[IdempotencyHold]:
+    original_check = cell_obj._idempotency_check  # noqa: SLF001
+    entered = threading.Semaphore(0)
+    release = threading.Event()
+
+    def _checked(key, digest_request, *, conn=None, deadline=None):
+        result = original_check(key, digest_request, conn=conn, deadline=deadline)
+        replay_response, _digest, _now_ms = result
+        if replay_response is None and key == idempotency_key:
+            entered.release()
+            release.wait()
+        return result
+
+    setattr(cell_obj, "_idempotency_check", _checked)
+
+    def _wait_until_held(timeout_s: float) -> int:
+        if not entered.acquire(timeout=timeout_s):
+            raise AssertionError(
+                f"hold_after_idempotency_lookup: the held request never reached the end of its "
+                f"idempotency admission window within {timeout_s}s (expected it to stall right after "
+                "_idempotency_check returns a fresh admission -- see this helper's own module comment)"
+            )
+        return 1
+
+    try:
+        yield IdempotencyHold(_wait_until_held)
+    finally:
+        release.set()
+        setattr(cell_obj, "_idempotency_check", original_check)
+
+
 class _AuthGate:
     """Wraps the real, read-only `PostgresCredentialStore` this composition's
     `HttpService` authenticates through, adding one adapter-only,
@@ -1105,6 +1152,24 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
     # ------------------------------------------------------------------
 
     def _run(self, coro: Any) -> Any:
+        if self._loop.is_running():
+            # WP-6d-ii (design D-13 "実装の形 (6d-ii) の確定" (2)): see
+            # `conformance_adapter_r2db_http.py`'s own identical fallback
+            # for the full rationale -- a second, genuinely concurrent OS
+            # thread (`hold_after_idempotency_lookup`'s own "B" probe)
+            # reached here while this SAME shared adapter instance's own
+            # `self._loop` is already mid-flight on another thread; give
+            # this call its own throwaway loop instead of raising
+            # `RuntimeError('This event loop is already running')`.
+            # `self._client`'s transport is `httpx.ASGITransport`, with
+            # no per-loop connection state to mismatch. Every PRE-
+            # EXISTING (sequential, single-thread) call path never takes
+            # this branch.
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
         return self._loop.run_until_complete(coro)
 
     def _send(
@@ -1856,6 +1921,19 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return _hold_in_flight_via_http_requests_over_stalled_gate(
             cell, self._app, session.bearer, "/v1/catalog", n, self.classify, self.name, self._build_client,
         )
+
+    # port v1.15 (design D-13 "実装の形 (6d-ii) の確定" (4), work order
+    # WP-6d-ii): wraps this SAME per-application cell's own `_idempotency_
+    # check` -- see `_hold_after_idempotency_check`'s own module comment.
+    def hold_after_idempotency_lookup(self, session, idempotency_key: str):
+        """See `ConformanceAdapter.hold_after_idempotency_lookup`'s own
+        docstring (`adapter.py`) for this primitive's port-level meaning;
+        this realization's own stall point is documented on
+        `_hold_after_idempotency_check` and the comment immediately
+        above this method."""
+        assert isinstance(session, _Session)
+        cell = self._cells[session.application_id]
+        return _hold_after_idempotency_check(cell, idempotency_key)
 
     # ------------------------------------------------------------------
     # audit_query surface (port v1.8, phase 4 WP-3(b) PROVIDED branch).
