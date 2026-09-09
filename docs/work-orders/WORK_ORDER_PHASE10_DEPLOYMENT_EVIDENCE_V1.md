@@ -1,6 +1,7 @@
 # フェーズ10 作業指示書 — 配備面の証拠 (契約 1.8.0「資源制限の適用単位」)
 
-- 版数: **v1.2 (2026-09-08)**。v1.1 からの変更: **WP-6d-i の manifest に状態・実施の記録・足したテストの完了条件 11〜13 を書き、WP-R35 の manifest (骨子) を新設した** (設計 v1.4 §3 D-15、計画文書 §8 の **R-35**)。**§0.5 / §1.1 / §1.2 の表に WP-R35 の行を足し、§5 に訂正註 3 を置いた。** **既存 manifest の本文は 1 文も書き換えていない** (`OPERATING_CONDITIONS.md` §1.8 の 57)。
+- 版数: **v1.3 (2026-09-09)**。v1.2 からの変更: **WP-6d-ii の manifest に「【確定 v1.3】」節を足した** — **hook `hold_after_idempotency_lookup` の契約、触るファイルと触らないファイルの確定、完了条件↔変異の表 (plug ごと)、検証コマンド、取り込み順とペアセッションへの通知**である (設計 v1.5 §3 D-13 の「実装の形 (6d-ii) の確定」)。**§0.5 に WP-6d-ii の新規ファイル行、§1.1 に worktree 行、§1.2 に `WP-4 統合 → WP-6d-ii` の順序行を足し、§5 に訂正註 4 を置いた。** **既存 manifest の本文は 1 文も書き換えていない** (`OPERATING_CONDITIONS.md` §1.8 の 57)。**v1.1 の WP-6d-ii の表のうち行 3 / 4 / 7 は確定節の表が差し替える** — 差し替えの内訳は §5 の訂正註 4 に書く。
+- 旧 **v1.2 (2026-09-08)**。v1.1 からの変更: **WP-6d-i の manifest に状態・実施の記録・足したテストの完了条件 11〜13 を書き、WP-R35 の manifest (骨子) を新設した** (設計 v1.4 §3 D-15、計画文書 §8 の **R-35**)。**§0.5 / §1.1 / §1.2 の表に WP-R35 の行を足し、§5 に訂正註 3 を置いた。** **既存 manifest の本文は 1 文も書き換えていない** (`OPERATING_CONDITIONS.md` §1.8 の 57)。
 - 旧 **v1.1 (2026-09-08)**。v1.0 からの変更: **外部レビュー 2 (2026-09-08、依頼者提示) の監督検証を受けて、WP-1c と WP-6d (6d-i / 6d-ii) の Change Set Manifest を足し、WP-3 に rework 項目、WP-8 に前提条件、WP-5 に追補を足した** (設計 v1.3 §3 D-13 / D-14、§5 U-7〜U-13)。**§0.5 / §1.1 / §1.2 の表に行を足した。** **WP-9 の完了条件に 17〜20 を、§3 に収集数の増分註・CI の `skipped` / `xfailed` 検査の行・§3.3 の 9〜11 を足した** (設計 v1.3 §9 の 14〜17)。**WP-5 の追補は監督が実施済みである** (branch `phase10-wp5` の `73adbda`)。 **既存の manifest 本文は書き換えず、追記と §5 の訂正註 2 で示す** (`OPERATING_CONDITIONS.md` §1.8 の 57)。
 - 旧 **v1.0 (2026-09-08、起草)**
 - 形式: **WP ごとの Change Set Manifest** (計画文書 `docs/design/ROADMAP_POST_PHASE7_V1.md` §9 の 9。**フェーズ10 がこの形式で書く最初のフェーズである**)
@@ -66,6 +67,8 @@
 
 **plug 名は `r2db-api-socket` / `MitateDB-api-socket` である** (設計 §6.1。本書の確定ではなく設計の確定)。
 
+**【追記 2026-09-09 (v1.3)】WP-6d-ii が足す新規ファイルは上表の 1 本だけである。** **hook の abstract method と非 normative handle `IdempotencyHold` は既存の `conformance-tests/adapter.py` に入り、port の新 § は既存の `docs/design/CONFORMANCE_ADAPTER_V1.md` に入る** — **どちらも新規ファイルではない** (設計 v1.5 §3 D-13 の「実装の形 (6d-ii) の確定」(10))。
+
 **`conformance-tests/test_c27_concurrent_same_key.py` の名は監督が確定した** (外部レビュー 2 の裁定枠、2026-09-08。**本書の確定ではない**)。**WP-6d-i の peer テスト名 (`tests/test_idempotency_concurrency.py`) は本書の確定である** (§0.0 の 4)。**WP-1c は新規ファイルを作らない** — 既存の `tests/test_idempotency_records.py` に足すので、§1.1 の 5 (同じディレクトリの系統分け) には当たらない。
 
 ---
@@ -74,7 +77,7 @@
 
 ### 1.1 worktree の割当
 
-1. **並行作業は WP ごとの linked worktree `.claude/worktrees/phase10-wp<N>` で行う** (`OPERATING_CONDITIONS.md` §1.2 の 13)。**`<N>` は WP 記号をそのまま使う** (`phase10-wp1c`、`phase10-wp3`、`phase10-wp4a`、`phase10-wp4b`、`phase10-wp5`、`phase10-wp6a`、`phase10-wp6b`、`phase10-wp6c`、`phase10-wp6d`、`phase10-wp7`、`phase10-wp8a`、`phase10-wp8b`、`phase10-wp9`)。 **【追記 2026-09-08 (v1.2)】WP-R35 の worktree / branch は `phase10-r35` である** — **台帳 ID をそのまま使う形であり、`phase10-wp<N>` の例外として監督が確定した (2026-09-08)。** **R-34 の実施に使った `phase10-r34` も同じ形である。**
+1. **並行作業は WP ごとの linked worktree `.claude/worktrees/phase10-wp<N>` で行う** (`OPERATING_CONDITIONS.md` §1.2 の 13)。**`<N>` は WP 記号をそのまま使う** (`phase10-wp1c`、`phase10-wp3`、`phase10-wp4a`、`phase10-wp4b`、`phase10-wp5`、`phase10-wp6a`、`phase10-wp6b`、`phase10-wp6c`、`phase10-wp6d`、`phase10-wp7`、`phase10-wp8a`、`phase10-wp8b`、`phase10-wp9`)。 **【追記 2026-09-08 (v1.2)】WP-R35 の worktree / branch は `phase10-r35` である** — **台帳 ID をそのまま使う形であり、`phase10-wp<N>` の例外として監督が確定した (2026-09-08)。** **R-34 の実施に使った `phase10-r34` も同じ形である。** **【追記 2026-09-09 (v1.3)】WP-6d-ii の worktree / branch は `phase10-wp6dii` である** — **`phase10-wp6d` は WP-6d-i の branch であり main へマージ済みだからである。local main から新しく張る。**
 2. **共有ツリー (リポジトリルートの作業ツリー) を checkout しない。マージは専用の別 worktree 経由で行う** (同 §1.2 の 14〜15)。
 3. **worktree の `.venv` は共有 `.venv` への symlink である。worktree ごとに作り直さない** (同 §2 の 1)。
 4. **着手前に「触るファイルの重なり 0」を設計 §8.1 の表と実ファイル名で照合し、重なりが見つかったら実装に入る前に監督へ上げる** (同 §1.2 の 16)。**既知の重なりは §1.2 の重なり表の 1 件だけである。それ以外の重なりを見つけたら上げる。**
@@ -115,6 +118,7 @@
 | **WP-1c → WP-6d-i** (v1.1) | `MitateDB-api/src/mitatedb_api/cell.py` (WP-1c は `digest_request` の `if budget is not None:`、6d-i は idempotency の lock)。**関数は違うが同一ファイルなので直列に取り込む** (設計 §8.1) |
 | **WP-6d-i → WP-6a / WP-6b** (v1.1) | 両 peer の `src/` — **`idempotency_entries` の件数 bound は 6a / 6b、同一キーの直列化は 6d-i の担当であり、同じ関数に両者が入る** (設計 D-5 (ii) の追記 (1)、D-13) |
 | **WP-3 → WP-6d-ii** (v1.1) | `conformance-tests/adapter.py` と 4 adapter (hook)。**WP-4 とは並行可** (socket adapter は hook を継承する) |
+| **WP-4 の統合 → WP-6d-ii** (**v1.3。上行の「WP-4 とは並行可」は消さずに残す**) | `conformance-tests/adapter.py` と 4 adapter の**ファイル単位の territory**。**論理的な依存ではない** (WP-6d-ii は socket adapter 2 本に触らない) — **同じ 5 ファイルを 2 つの WP が同時に開かないための運用順である** (共有 checkout の規律、`OPERATING_CONDITIONS.md` §1.2)。**WP-4 の統合 branch が local main に入ってから着手し、着手前にペアセッションへ通知する** (設計 v1.5 §8.1 の追補行、§3 D-13 (9)) |
 | **WP-6a / 6b → WP-6d-ii** (v1.1 追補) | 版フリップ。C-27 は 1.8.0 の条件付き義務の実行可能条件であり、フリップ前に入れると xfail を要して CI (`xfailed == 0`、WP-1c) が赤になる (設計 D-13、§8.1) |
 | **WP-5 / WP-6c → WP-6d-ii** (v1.1) | `conformance-tests/CONDITIONS.md` (C-27 行を `executable` に改める)。**C-26 / C-27 の宣言行そのものは本改版で既に入っている** |
 | **WP-6d-i → WP-R35** (v1.2) | 両 peer の backend (`r2db-api/src/r2db_api/postgres.py` / `MitateDB-api/src/mitatedb_api/backend_postgres.py`)。**関数は違う** (6d-i は idempotency の照会・記録、WP-R35 は `add_field` / `alter_field` の走査 lock) **が同一ファイルなので直列に取り込む** (設計 §8.1 の WP-R35 行)。**WP-6a / 6b とも同じ規約に従う** |
@@ -794,6 +798,66 @@ shasum -a 256 spec/data-service-api.v1.json \
 **使用テンプレート**: **2** → **5** → **6**。
 **変更クラス**: **C** (`conformance-tests/` 配下 + 条件行)。**同名 helper の pair-closing commit は D。**
 
+**【確定 2026-09-09 (v1.3)】** — **正本は設計 v1.5 §3 D-13 の「実装の形 (6d-ii) の確定」(1)〜(10) である。本節は発注に必要な確定だけを置き、契約文・保持点の根拠・開示は設計の節番号で指す** (§0.0 の 2)。**上の v1.1 の表のうち行 3 / 4 / 7 は本節の表が差し替える** (§5 の訂正註 4)。**それ以外の行 (1 / 2 / 5 / 6 / 8 / 9 / 10) はそのまま有効である。**
+
+**着手条件 (2 つとも満たしてから開始する)**:
+
+1. **WP-6a / 6b の版フリップが local main に入っていること** — **満たしている** (local main `a3a35af`。両 peer が `contract_version` 1.8.0 を宣言する)。
+2. **WP-4 の統合 branch (socket plug 2 本を足して 6 plug になる版) が local main に入っていること** — **`conformance-tests/adapter.py` と 4 adapter が WP-4 統合 branch の territory だからである** (設計 §8.1 の追補行、D-13 (9))。**論理的な依存ではない。** **着手前にペアセッションへ通知する。**
+
+**触るファイル (確定)**:
+
+| ファイル | 変更 |
+|---|---|
+| `conformance-tests/test_c27_concurrent_same_key.py` | **新設。** C-27 の 4 観測 + 版 gate + 非 vacuity guard |
+| `conformance-tests/adapter.py` | **abstract method `hold_after_idempotency_lookup(self, session, idempotency_key)` を 1 つ**と、**非 normative な handle `IdempotencyHold`** (`wait_until_held(timeout_s=30.0) -> int` の 1 メソッド) を足す。**docstring には設計 D-13 (1) の契約文を逐語で置く** (常設規律 4。`hold_in_flight` の docstring がそうしているのと同じ形) |
+| `r2db-api/conformance/conformance_adapter_r2db.py` / `..._r2db_http.py` | **実現。** `_idempotency_lookup` (arm) + `_idempotency_reserve` (保持) の 2 つを monkeypatch する (設計 D-13 (4) の表) |
+| `MitateDB-api/conformance/conformance_adapter_mitatedb.py` / `..._mitatedb_http.py` | **実現。** `ApplicationCell._idempotency_check` 1 つを monkeypatch する (同上) |
+| `conformance-tests/CONDITIONS.md` | **C-27 行を `executable` に改め、開示 (設計 D-13 (7) の MitateDB の行) を書く。旧文は `CONDITIONS_HISTORY.md` の `## C-27` へ逐語で移す。Status セルは `MAX_CELL_LENGTH = 3000` 以内 — 現行は 2,864 字なので、`executable` への改訂は「足す」だけでは収まらない。旧文の移送で作ること** |
+| `conformance-tests/CONDITIONS_HISTORY.md` | 旧文の移送 |
+| `docs/design/CONFORMANCE_ADAPTER_V1.md` | **新 § を 1 つ (`## 25. v1.15 port revision ...`)、文書情報の版数行を `1.14` → **`1.15`** に上げる** (現行は同文書 `:5` の行が `1.14` である)。**内容は設計 D-13 (1)〜(4) と (7) の開示** |
+
+**触らないファイル**: **両 peer の `src/` と `migrations/`** (**6d-i の成果物をそのまま駆動する。product code に test 用 hook を足さない**)、**socket adapter 2 本** (**hook を継承する。WP-4 の成果物に触らない**)、`spec/` 配下と契約 JSON 3 複製、`security/` 配下、`conformance-tests/registry.json`、`conformance-tests/conftest.py` (**xdist group は自動で付く。設計 D-13 (8)**)、`CONDITIONS.md` の **C-27 以外の行** (WP-5 / WP-6c の担当)、`COLLECTION_FLOOR`、`tools/`、`.github/workflows/ci.yml`。
+
+**実装の指示 (確定節)**:
+
+1. **hook は要求を出さない。** **保持される先着 (A) も待たされる後着 (B) も、テスト自身が別々の OS スレッドから出す** (`hold_in_flight` との唯一の構造上の違い)。**保持中に B が完了していないことを有限の待ち窓で実測する** — 両 peer の `tests/test_idempotency_concurrency.py` の `_assert_second_call_is_blocked` と同じ形である。
+2. **保持点は受理区間の末尾である** — 照会が「記録なし」を返し、`idempotency_entries` の予約を取り終え、その区間の lock をすべて保持したまま、効果を 1 件も実行していない地点 (設計 D-13 (1) (3))。**照会の戻り際で止めない** — (iii) が変異で赤くならなくなる (同 (3))。
+3. **`isolated_application_surface()` の新しい instance に対して駆動する** (C-05 の V2 driver と同じ規約)。**(iii) の上限 E は capability document から読む。定数を書かない** (`test_c23_idempotency_semantics.py:382` の既存の形)。
+4. **版 gate は `pytest.fail` である。** **`pytest.skip` も `xfail` も使わない** (`OPERATING_CONDITIONS.md` §1.3 の 26。CI の `xfailed == 0` / `xpassed == 0` 検査と衝突する)。
+5. **plug 名で分岐しない** (同 §1.7 の 52)。**版と capability は現物の宣言から読む。**
+6. **C-23 の条件文と駆動集合を変えない。**
+7. **変異が peer で違うことを、テストではなく `CONDITIONS.md` の開示と報告で扱う** — **`MitateDB-api-http` では PG session advisory lock を外しても C-27 は赤にならない** (1 plug = 1 cell、cell の `RLock` が先に効く)。**これは実装の欠陥ではなく共通 suite の観測限界であり、advisory lock の非 vacuity は peer-local テスト (2 cell 構成) が担う** (設計 D-13 (7))。**この事実を報告に書き、開示を C-27 行に載せること自体が完了条件である。**
+
+**完了条件 ↔ 変異 (1 対 1。本表が v1.1 の表の行 3 / 4 / 7 を差し替える)**:
+
+| # | 完了条件 (assert 水準) | 変異 (`file:操作`) → 赤になる test id |
+|---|---|---|
+| **3'** | **(iii)** 宣言された `idempotency_entries` = E を読み、E−1 まで埋めた隔離面に対して異キー 2 件を同時に出すと、**ちょうど 1 件が `LIMIT_EXCEEDED` + `details.limit_class == "idempotency_entries"`**、もう 1 件は成功し、**効果行の数が内訳と一致する**。**保持中に後着は完了していない** | **`r2db-api-http`**: `r2db-api/src/r2db_api/postgres.py` の `_idempotency_reserve_lock` 呼び出し (`:1594` / `:2292`) を外す / **`r2db-api`**: `structured.py` の `transact` / `apply_schema` の `with self._idempotency_lock:` を外す / **MitateDB 2 plug**: `cell.py` の `_idempotency_lock_scope` を `nullcontext()` 固定にする → いずれも `conformance-tests/test_c27_concurrent_same_key.py::test_c27_entries_bound_holds_under_concurrency` |
+| **4'** | **(iv)** **先着が受理の後に失敗する** (宣言済みの制約に違反する行の挿入。**plug 固有の失敗注入を使わない**) と**記録が残らず**、後着は replay でも `CONFLICT` でもなく**新規要求として実行される** (独自の `request_id`、効果行 1 件) | **両 peer**: 失敗経路でも idempotency 記録を残す形にする → `::test_c27_failed_first_attempt_lets_the_second_execute_as_new` |
+| **7'** | **hook の保持点が受理区間の末尾である** — 保持中、後着は**実際に lock 上で待っており**、先着はまだ効果を 1 件も実行していない | **当該 plug の `conformance/` の hook 実現**: 保持点を `_idempotency_lookup` の戻り際 (予約より前) へ動かす → `::test_c27_entries_bound_holds_under_concurrency` (**後着が待たずに走り切るので LIMIT_EXCEEDED が 0 件になる**)。保持点を実行の後へ動かす → `::test_c27_same_digest_executes_once` (**先着が実行を終えるので後着が replay にならない**) |
+| **11** (新規) | **版 gate**: **1.8.0 未満を宣言しながら `idempotency` を `unavailable` 以外と宣言する plug は `pytest.fail` になる** (skip / xfail ではない) | `conformance-tests/test_c27_concurrent_same_key.py`: gate を `pytest.skip` / `xfail` に変える → `::test_c27_version_gate_fails_a_plug_declaring_below_180_with_idempotency` (**合成した宣言を食わせる単体の guard**) |
+| **12** (新規) | **hook の待ち上限を超えたら `AssertionError` で赤になる** (skip しない)。**`wait_until_held` の戻り値は実測値であり引数の折り返しではない** | `conformance-tests/adapter.py` または hook 実現: 上限超過を握り潰す / 戻り値を定数 1 にする → `::test_c27_hold_timeout_fails_loudly` |
+| **13** (新規) | **開示**: **`CONDITIONS.md` の C-27 行に「MitateDB の 2 plug では cell の `RLock` が先に直列化するので、PG session advisory lock の非 vacuity は peer-local テスト (2 cell 構成) が担う」旨が書かれている** | **監査照合** — 行の現物と、報告に添える peer-local テストの file:line |
+
+**検証コマンドと集計行の期待形 (確定節。実装担当は root suite を実行しない — `OPERATING_CONDITIONS.md` §1.3 の 19〜27)**:
+
+```
+./.venv/bin/python -m pytest -q conformance-tests/test_c27_concurrent_same_key.py   → 全 passed (4 plug が駆動、skipped 0 / xfailed 0)
+./.venv/bin/python -m pytest -q -n 5 --dist loadgroup conformance-tests              → 全 passed (skipped 0 / xfailed 0 / xpassed 0 / deselected 0)
+  # `test_conditions_register.py` を単独で走らせない — @pytest.mark.condition を
+  # 収集できず 3 件が構造的に赤になる (実測 2026-09-09: `3 failed, 7 passed`)。
+  # CONDITIONS.md の形の検査 (セル長・履歴リンク・履歴 id) は上の全体実行に含まれる。
+./.venv/bin/python -m pytest -q r2db-api/tests                                       → 全 passed (回帰確認。src は触らない)
+./.venv/bin/python -m pytest -q MitateDB-api/tests                                   → 全 passed (同上)
+./.venv/bin/python tools/check_doc_refs.py                                           → check_doc_refs OK: 0 dangling references
+./.venv/bin/python tools/public_value_scan.py <新設・変更した全ファイル>              → total_flagged=0
+```
+
+**変異はすべて復元し、コミットに含めない** (`OPERATING_CONDITIONS.md` §1.4 の 28〜31)。**変異ごとの赤の verbatim (test id と 4 数) を報告に添える。**
+
+**監督ゲート**: **local の単独実行の root suite 1 本である** (`pytest -q -n 5 --dist loadgroup` を単独で。local PG `max_connections` 300)。**CI は回さない** — **GitHub の課金上限が有効な間、本リポジトリでの push は行わない** (したがって CI の集計行は本 WP の完了条件に含めない。`skipped` / `xfailed` の 0 は local の集計行で確認する)。
+
 ---
 
 ### WP-R35 — フェーズ9 R-2 の走査 lock mode の是正 (**新設 v1.2。骨子**)
@@ -1072,3 +1136,6 @@ shasum -a 256 spec/data-service-api.v1.json \
 
 
 3. **【訂正註 2026-09-08 (v1.2。実施の反映)】** **WP-6d-i の実装とそのコードレビューを受けて、本書に 3 点を足した。既存 manifest の本文は 1 文も書き換えていない。** **(a)** **WP-6d-i の manifest に「状態」「実施の記録」と完了条件 **11〜13** を足した** — **11 は `finally` での unlock、12 は回収 (reap) の永続化、13 は lock 待ちタイムアウトの `LIMIT_EXCEEDED` 写像であり、いずれも Opus のコードレビュー (F1 / F2 / F3) の是正で足したテストである。** **実現の形が peer で分かれた理由 (MitateDB の catalog 読みが同一接続の途中で自己 commit するため transaction-scoped lock が早期解放される) は設計 §3 D-13 の実施註が正本であり、本書は指すだけである** (§0.0 の 2)。**(b)** **WP-R35 の manifest (骨子) を新設した** — **フェーズ9 R-2 の走査 lock mode (`LOCK TABLE ... IN SHARE MODE`) を `SHARE ROW EXCLUSIVE` に改める Class B の小 WP であり、出所は WP-6d-i の完了条件 8 の報告である** (設計 §3 **D-15**、計画文書 §8 の **R-35**。**worktree `phase10-r35`、実施中**)。**(c)** **§0.5 に WP-R35 のテスト置き場の行 (未確定)、§1.1 に `phase10-r35` / `phase10-r34` の worktree 命名の例外、§1.2 に `WP-6d-i → WP-R35` の直列行を足した。** **WP-9 の完了条件 20 (台帳の閉止と持ち越し) は、**R-34** (完了ゲートの timing テストの同期化。branch `phase10-r34` の `12a7bd7` / `5a59002`) と **R-35** の閉止行も対象に含める** — **本文の列挙は v1.1 時点のものであり、書き換えずに本註で補う。**
+
+
+4. **【訂正註 2026-09-09 (v1.3。WP-6d-ii の実装の形の確定)】** **設計 v1.5 §3 D-13 の「実装の形 (6d-ii) の確定」を受けて、WP-6d-ii の manifest に「【確定 2026-09-09 (v1.3)】」節を足した。既存 manifest の本文は 1 文も書き換えていない。** **差し替えの内訳は 3 行である**: **(a) 行 3 の変異** — v1.1 は「表単位の advisory lock を外す」1 つだけを挙げていたが、**その変異が (iii) を赤にするのは `r2db-api-http` だけである。** `r2db-api` (in-memory cell) は cell の `threading.Lock`、**MitateDB の 2 plug は cell の `RLock` (`_idempotency_lock_scope`)** が直列化を担う。**確定節の表 3' が plug ごとの変異を書く。** **(b) 行 4 の保持点** — v1.1 は「照会の直後・実行の前」と書いていたが、**その地点では `idempotency_entries` の件数 lock をまだ取っていないので、(iii) が変異で赤くならない** (設計 D-13 (3))。**保持点は受理区間の末尾 (照会が absent → 件数の予約 → 効果の実行前) に確定した。監督の枠の「照会の直後・実行の前」はそのまま満たす。** **(c) 行 7 の待ち上限** — hook が要求を出さない形に確定したので、上限は `IdempotencyHold.wait_until_held` が持つ (確定節の完了条件 12)。 **加えて足したのは、観測 (iv) (完了条件 4')、版 gate の `pytest.fail` (完了条件 11)、開示 (完了条件 13) である。** **v1.1 の行 1 / 2 / 5 / 6 / 8 / 9 / 10 は差し替えていない。** **監督ゲートは local の単独 root suite 1 本であり、CI は回さない (GitHub の課金上限が有効な間、本リポジトリでの push を行わない)** — **v1.1 の manifest の検証コマンド欄はこの前提を持っていなかったので、確定節の欄が正である。**
