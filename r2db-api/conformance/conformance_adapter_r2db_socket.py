@@ -50,9 +50,15 @@ ONE way to satisfy this hook's contract, not the contract itself"):
     plug's own `surfaces.control.base_url` -- already reported by an
     earlier `_surfaces_value()` call, possibly already consumed by a C-19
     real dial -- must keep answering. `_DeclaredSocketSurface.rebind_app`
-    below restarts the upstream uvicorn (and, since nginx cannot hot-swap
-    its own `proxy_pass` target, the nginx in front of it) while keeping
-    the externally-declared listen port fixed.
+    below (WP-4c, item 4 fix) swaps the served app in place via a thin
+    `_AppDispatch` indirection, WITHOUT restarting the upstream uvicorn or
+    the nginx in front of it: an earlier revision of this method did
+    restart both on every such rebuild, which required a fresh readiness
+    poll against `/control/v1/capabilities` -- unauthenticated GETs that
+    (measured, this WP) each consume one unit of the control plane's own
+    global, pre-auth `control_requests_per_minute` window, causing a
+    `LIMIT_EXCEEDED` cascade under `-n 5 --dist loadgroup` CPU contention.
+    See `_AppDispatch`'s own docstring for the full trace.
 
 Every construction site in the inherited `__init__`/`isolated_control_
 surface`/`isolated_application_surface`/`hold_in_flight` that calls `self.
@@ -92,7 +98,6 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
-import socket
 import sys
 import tempfile
 import time
@@ -116,6 +121,61 @@ import socket_harness  # noqa: E402 -- conformance-tests/socket_harness.py (WP-3
 from adapter import ConformanceAdapter  # noqa: E402
 
 from conformance_adapter_r2db_http import R2DBHttpConformanceAdapter  # noqa: E402
+
+
+class _AppDispatch:
+    """WP-4c (2026-09-08, item 4 -- `control_requests_per_minute` cascade
+    root cause): the ONE ASGI callable `socket_harness.start_uvicorn_
+    thread` is ever handed for a given `_DeclaredSocketSurface`, forwarding
+    every request to whichever real app object `rebind_app` currently
+    designates (`self.app`, swapped in place).
+
+    Without this indirection, `_DeclaredSocketSurface.rebind_app` had to
+    STOP and RESTART the real uvicorn thread and the nginx in front of it
+    every time the bound app object changed identity -- which happens on
+    every `_privileged_control_send` periodic rebuild (`conformance_
+    adapter_r2db_http.py`'s own `_CONTROL_REBUILD_THRESHOLD`, a fresh
+    `ControlPlaneService` + fresh in-memory rate window every 40 privileged
+    calls). Each such restart required a fresh `socket_harness.wait_until_
+    ready` readiness poll against BOTH `/v1/capabilities` and `/control/
+    v1/capabilities` -- real, unauthenticated GET requests. Measured
+    (this WP): `r2db_api.control_plane.ControlPlaneService.capabilities`
+    calls `self._check_rate()` BEFORE `self._authenticate(...)`
+    (`r2db-api/src/r2db_api/control_plane.py:691-693`) -- so EVERY one of
+    those readiness-poll GETs against `/control/v1/capabilities` consumes
+    one unit of the control plane's own GLOBAL, pre-auth `control_
+    requests_per_minute` window, the SAME window every ordinary
+    control-plane test call also draws from. Under CPU contention (this
+    dev machine running 5 xdist workers plus a second worktree's own
+    concurrent suite, observed directly), a slow restart's own poll
+    retries (every 50ms, up to 30s per endpoint) can burn most of a
+    freshly-reset window's budget purely on self-inflicted polling before
+    any real test assertion ever runs against it -- tripping
+    `LIMIT_EXCEEDED` for whatever ordinary test happens to run next.
+    Never present on the ASGI-transport plug (`httpx.ASGITransport` has no
+    real process to restart or poll at all), which is why only this plug
+    showed the cascade.
+
+    Indirection removes the restart -- and therefore the poll -- from the
+    app-swap path entirely: the real uvicorn thread and nginx process for
+    a given surface start exactly ONCE (the first time that surface is
+    dialed) and never again; `rebind_app` on an already-started surface
+    becomes a plain attribute assignment, generating no HTTP traffic of
+    any kind. `MitateDB-api-socket`'s own surface (`_AppSocketSurface`,
+    `conformance_adapter_mitatedb_socket.py`) does not need the equivalent
+    fix: it has no periodic control-app-rebuild mechanism at all
+    (`conformance_adapter_mitatedb_http.py` carries no `_CONTROL_REBUILD_
+    THRESHOLD`/`_privileged_control_send`), so its control app object
+    never changes identity mid-session.
+    """
+
+    __slots__ = ("app",)
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self.app(scope, receive, send)
 
 
 class _DeclaredSocketSurface:
@@ -149,6 +209,7 @@ class _DeclaredSocketSurface:
         self._declared_port: int = self._reservation.port
         self.declared_base_url = f"http://127.0.0.1:{self._declared_port}"
         self._app: Any = None
+        self._dispatch: Optional[_AppDispatch] = None
         self._started = False
         self._uvicorn: Optional[socket_harness.UvicornThreadHandle] = None
         self._nginx: Optional[socket_harness.NginxHandle] = None
@@ -157,16 +218,17 @@ class _DeclaredSocketSurface:
     def rebind_app(self, app: Any) -> None:
         """Associates this surface with `app`. Before the first real start,
         this only records `app` for `_ensure_started` to use. After a real
-        start (the control-plane rebuild path, design's own docstring
-        above), this restarts the upstream uvicorn AND the nginx in front
-        of it (nginx cannot hot-swap its own `proxy_pass` target) while
-        re-binding the SAME already-declared, already-possibly-consumed
-        listen port -- never a new one."""
+        start, this WP-4c (item 4) fix swaps `self._dispatch.app` in
+        place -- see `_AppDispatch`'s own docstring for why an already-
+        running surface never needs to stop/restart its real uvicorn/nginx
+        just because the bound app object's identity changed (the
+        control-plane periodic-rebuild path, design's own docstring
+        above)."""
         if app is self._app:
             return
         self._app = app
-        if self._started:
-            self._restart_on_same_port()
+        if self._dispatch is not None:
+            self._dispatch.app = app
 
     @property
     def base_url(self) -> str:
@@ -194,8 +256,13 @@ class _DeclaredSocketSurface:
                 raise socket_harness.HarnessStartupError(
                     f"{self._label} surface: startup budget exceeded before any process started"
                 )
+            # WP-4c (item 4): wrap in `_AppDispatch` rather than handing
+            # `self._app` to uvicorn directly -- `rebind_app` on this
+            # (now-started) surface swaps `self._dispatch.app` in place
+            # instead of restarting this uvicorn thread/nginx process.
+            self._dispatch = _AppDispatch(self._app)
             uvicorn_handle = socket_harness.start_uvicorn_thread(
-                self._app, start_timeout_s=min(socket_harness.UPSTREAM_READY_TIMEOUT_S, remaining),
+                self._dispatch, start_timeout_s=min(socket_harness.UPSTREAM_READY_TIMEOUT_S, remaining),
             )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -251,43 +318,6 @@ class _DeclaredSocketSurface:
             except Exception:  # noqa: BLE001 -- the ORIGINAL failure is what propagates
                 pass
             raise
-
-    def _restart_on_same_port(self) -> None:
-        old_nginx = self._nginx
-        old_uvicorn = self._uvicorn
-        old_base_dir = self._base_dir
-        self._started = False
-        self._nginx = None
-        self._uvicorn = None
-        errors: list[str] = []
-        if old_nginx is not None:
-            try:
-                old_nginx.stop()
-            except Exception as exc:  # noqa: BLE001 -- report, never swallow
-                errors.append(f"nginx: {exc!r}")
-        if old_uvicorn is not None:
-            try:
-                old_uvicorn.stop()
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"uvicorn: {exc!r}")
-        if old_base_dir is not None:
-            shutil.rmtree(old_base_dir, ignore_errors=True)
-        if errors:
-            raise RuntimeError(
-                f"_DeclaredSocketSurface({self._label!r}).rebind_app: stopping the previous "
-                f"upstream/nginx before rebinding failed: {'; '.join(errors)}"
-            )
-        # Re-bind the SAME already-declared port number -- `reserve_port()`
-        # always picks an ephemeral one, so this binds `self._declared_port`
-        # directly (the old nginx has already released it above; `stop()`
-        # is a bounded SIGTERM-then-wait-then-SIGKILL, so the socket is free
-        # by the time `.stop()` returns in the ordinary case).
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", self._declared_port))
-        sock.listen(128)
-        self._reservation = socket_harness.ReservedPort(port=self._declared_port, sock=sock)
-        self._ensure_started()
 
     def stop(self) -> None:
         self._stop_best_effort()
@@ -503,7 +533,8 @@ class R2DBSocketConformanceAdapter(R2DBHttpConformanceAdapter):
         calling `self._build_client(...)` for them (`__init__:1118-1120`,
         `:1186-1187`, `_privileged_control_send`'s own rebuild): matching
         `self._app` reuses (or, on a control-plane rebuild, in-place
-        restarts) the ONE data surface this instance holds (`self.
+        RE-DISPATCHES -- WP-4c item 4: no restart, see `_AppDispatch`'s own
+        docstring) the ONE data surface this instance holds (`self.
         _data_surface` -- the shared, long-lived one for the original
         adapter; an isolated copy's own dedicated one instead, per `_reset_
         surface_state` below); matching `self._control_app` does the same

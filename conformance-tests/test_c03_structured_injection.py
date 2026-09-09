@@ -7,11 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from adapter import (
     UNCLASSIFIED,
     VALID_CONFIRMATION,
+    ConformanceAdapter,
     ConformanceDenial,
     Fixture,
     MUST_COVER_IDENTIFIER_POSITIONS,
@@ -33,6 +35,60 @@ pytestmark = pytest.mark.condition("C-03")
 IDENTIFIER_DENIAL_CODES = {"IDENTIFIER_INVALID", "VALIDATION_FAILED", "NOT_FOUND"}
 
 ALL_IDENTIFIER_PAYLOADS: list[Any] = [*IDENTIFIER_PAYLOADS, *NON_STRING_IDENTIFIERS]
+
+# WP-4c (2026-09-08, 監督裁定 scratchpad/phase10/wp4b-rulings.md 項 4):
+# classification BY CARRIAGE, not by peer -- of `identifier_positions()`'s
+# own position names, the ONLY one carried as a URL PATH segment is
+# `"entity"` (both peers' own `entity_probe`: r2db-api-http's `_stringify_
+# for_path(payload)` into `_data_path(...)`, MitateDB-api-http's `str(
+# payload)` into `self._query(...)`). Every other identifier position
+# (`select_field`/`filter_field`/`insert_field`/`schema_entity`/
+# `schema_field`) is a native JSON BODY field on both peers -- never
+# subject to h11/uvicorn's own HTTP/1.1 request-line/header wire framing,
+# so it is never a candidate for the wire-rejection branch below,
+# regardless of transport.
+WIRE_CARRIED_IDENTIFIER_POSITIONS = frozenset({"entity"})
+
+
+def _is_wire_rejection(adapter: ConformanceAdapter, position_name: str, exc: BaseException) -> bool:
+    """WP-4c (design D-3, `security/THREAT_MODEL_V1.md`-adjacent wire
+    framing; 監督裁定 wp4b-rulings.md 項 4): true only when ALL of the
+    following hold --
+
+    1. `adapter.transport_kind == "socket"` (a real TCP/HTTP-1.1 client
+       through nginx + uvicorn; the in-process and ASGI plugs never see
+       real wire framing at all, so this branch can never fire for them).
+    2. `position_name` is in `WIRE_CARRIED_IDENTIFIER_POSITIONS` (a URL
+       path segment -- header-carried values, e.g. C-15's bearer corpus,
+       are classified the same way at their own call sites).
+    3. `exc` is either (a) a raw `httpx.HTTPError` the CLIENT itself
+       raised before ever sending the request at all (h11's own local
+       request-line/header-value validation -- e.g. `httpx.
+       LocalProtocolError` for a control byte the URL-encoding step could
+       not make safe), or (b) a `ConformanceDenial` whose code is
+       `UNCLASSIFIED` -- this file's own adapters' `classify()` maps
+       exactly a non-`application/problem+json` HTTP failure (h11/
+       uvicorn's own generic 4xx page, emitted before the app ever runs)
+       to that code.
+
+    Neither shape is held to `IDENTIFIER_DENIAL_CODES`/contract-code
+    membership or the payload-non-echo requirement immediately below in
+    the caller: there is no app-authored response to hold to those
+    standards -- the app never ran. A body-carried position (anything
+    outside `WIRE_CARRIED_IDENTIFIER_POSITIONS`) NEVER takes this branch
+    even on a socket plug with the identical `UNCLASSIFIED` shape: 裁定
+    4's own text requires body-carried invalid values to keep demanding a
+    genuine contract-coded denial on every plug, unchanged. See
+    `test_c03_wire_rejection_never_applies_to_a_body_carried_position`
+    for the pin.
+    """
+    if getattr(adapter, "transport_kind", None) != "socket":
+        return False
+    if position_name not in WIRE_CARRIED_IDENTIFIER_POSITIONS:
+        return False
+    if isinstance(exc, ConformanceDenial):
+        return exc.code == UNCLASSIFIED
+    return isinstance(exc, httpx.HTTPError)
 
 
 def _unclassified_hint(code: str) -> str:
@@ -127,6 +183,13 @@ def test_identifier_positions_reject_every_payload(adapter, fx: Fixture):
                 )
                 continue
             except ConformanceDenial as denial:
+                if _is_wire_rejection(adapter, position_name, denial):
+                    # WP-4c (裁定 4): h11/uvicorn refused this on the wire,
+                    # before the app ran -- there is no app-authored
+                    # denial to hold to IDENTIFIER_DENIAL_CODES or the
+                    # non-echo checks below.
+                    denied_anywhere[index] = True
+                    continue
                 _assert_is_contract_code(denial.code)
                 denied_anywhere[index] = True
                 if denial.code not in IDENTIFIER_DENIAL_CODES:
@@ -141,6 +204,17 @@ def test_identifier_positions_reject_every_payload(adapter, fx: Fixture):
                 # port v1.6 review M-3: same second channel as the
                 # value-position check below.
                 assert_no_payload_echo_in_details(denial.details, payload, context=f"{position_name}:{payload!r}")
+            except Exception as exc:  # noqa: BLE001 -- WP-4c (裁定 4): a
+                # wire-carried position on a socket plug can be refused by
+                # h11's own CLIENT-side request validation (e.g. `httpx.
+                # LocalProtocolError`) before any `ConformanceDenial` is
+                # ever raised at all. Re-raised unchanged (never silently
+                # absorbed) unless `_is_wire_rejection` recognizes this
+                # exact shape.
+                if _is_wire_rejection(adapter, position_name, exc):
+                    denied_anywhere[index] = True
+                    continue
+                raise
             else:
                 failures.append(f"{position_name}: payload {payload!r} was NOT denied")
 
@@ -389,4 +463,54 @@ def test_matches_value_position_applies_real_wildcard_grammar_and_rejects_bad_pa
     )
     assert adapter.count(fx.runtime_a, entity) == count_before, (
         f"{adapter.name}: state changed despite a rejected malformed matches pattern"
+    )
+
+
+# --- 7. WP-4c wire-rejection classification pin -----------------------------
+
+
+def test_c03_wire_rejection_never_applies_to_a_body_carried_position() -> None:
+    """WP-4c non-vacuity + mutation pin (design D-3, 監督裁定 wp4b-rulings.md
+    項 4): `_is_wire_rejection` must return `False` for every identifier
+    position OUTSIDE `WIRE_CARRIED_IDENTIFIER_POSITIONS`, even when handed
+    the EXACT shape (socket-transport adapter, `UNCLASSIFIED` denial) that
+    DOES count as a wire rejection at the one position ("entity") that is
+    genuinely a URL path segment -- so a body-carried identifier position
+    can never silently stop requiring a genuine contract-coded denial on a
+    socket plug. The second assertion is the non-vacuity half: the SAME
+    denial, at the SAME fake socket adapter, at the "entity" position DOES
+    count, proving the function is not merely always `False`.
+
+    Mutation (this WP's own): widen `WIRE_CARRIED_IDENTIFIER_POSITIONS` to
+    also include a body-carried position, e.g. `frozenset({"entity",
+    "insert_field"})` -> this test's first assertion goes red for
+    `"insert_field"`.
+    """
+    body_positions = {"select_field", "filter_field", "insert_field", "schema_entity", "schema_field"}
+    assert body_positions, "corpus of body-carried positions is empty -- this scan would be vacuous"
+    assert body_positions.isdisjoint(WIRE_CARRIED_IDENTIFIER_POSITIONS), (
+        "WIRE_CARRIED_IDENTIFIER_POSITIONS must not overlap the body-carried positions it is "
+        "compared against below"
+    )
+
+    class _FakeSocketAdapter:
+        transport_kind = "socket"
+
+    fake_adapter = _FakeSocketAdapter()
+    fake_denial = ConformanceDenial(code=UNCLASSIFIED, adapter="fake-socket", native_type="_HttpFailure", details={})
+
+    offenders = [
+        position_name for position_name in body_positions
+        if _is_wire_rejection(fake_adapter, position_name, fake_denial)
+    ]
+    assert not offenders, (
+        f"body-carried position(s) wrongly classified as a wire rejection: {offenders!r}"
+    )
+
+    # Non-vacuity: the identical (adapter, denial) pair DOES count at the
+    # one genuinely wire-carried position.
+    assert _is_wire_rejection(fake_adapter, "entity", fake_denial), (
+        "the 'entity' position, on a fake socket-transport adapter, with an UNCLASSIFIED denial, "
+        "must be classified as a wire rejection -- otherwise this whole test would trivially pass "
+        "by _is_wire_rejection always returning False"
     )

@@ -861,40 +861,70 @@ def _install_residue_tracking(adapter_obj: "ConformanceAdapter", tracker: _Appli
     identity check inside each wrapper then confines actual TRACKING (as
     opposed to behavior, which is unconditionally preserved) to the small,
     fixed set of `_BUILT_ADAPTERS` instances.
+
+    WP-4c fix (2026-09-08, 監督裁定 wp4b-rulings.md 項 2): a subclass whose
+    own class dict does NOT define `provision_application`/
+    `deprovision_application`/`register_application_inband`/
+    `capability_document` (e.g. `MitateDBSocketConformanceAdapter`
+    inheriting them unchanged from `MitateDBHttpConformanceAdapter`) is a
+    DIFFERENT `cls` from its parent, so the `cls in _RESIDUE_PATCHED_
+    CLASSES` guard above does not fire a second time -- `cls.<method>`
+    resolves, via the MRO, to the PARENT'S method object, which this
+    function has ALREADY wrapped once (when it ran for the parent
+    instance). Wrapping it again here closes a second wrapper around the
+    first: one call site then fires `tracker.record_created`/
+    `record_removed` TWICE, so `_ApplicationResidueTracker._active` gains
+    a duplicate entry and `end_test_and_sweep()` (`_wp5_application_
+    residue_guard`) tries to `deprovision_application` the same
+    `application_id` a second time, which raises ("application not
+    registered") for every fixture-using test on an inheriting plug.
+    Each wrapper below therefore marks itself with a `_wp5_residue_
+    wrapped` attribute and checks the CURRENTLY RESOLVED method (which,
+    for an inheriting subclass, IS the parent's already-marked wrapper)
+    before wrapping -- idempotent per underlying function object, not
+    merely per `cls`.
     """
     cls = type(adapter_obj)
     if cls in _RESIDUE_PATCHED_CLASSES:
         return
     _RESIDUE_PATCHED_CLASSES.add(cls)
 
-    original_provision = cls.provision_application
+    def _already_wrapped(method: Any) -> bool:
+        return bool(getattr(method, "_wp5_residue_wrapped", False))
 
-    def provision_application(self, application_id, *args, **kwargs):
-        result = original_provision(self, application_id, *args, **kwargs)
-        if self in _TRACKED_ADAPTERS:
-            tracker.record_created(self, application_id)
-        return result
+    if not _already_wrapped(cls.provision_application):
+        original_provision = cls.provision_application
 
-    cls.provision_application = provision_application
+        def provision_application(self, application_id, *args, **kwargs):
+            result = original_provision(self, application_id, *args, **kwargs)
+            if self in _TRACKED_ADAPTERS:
+                tracker.record_created(self, application_id)
+            return result
 
-    original_deprovision = cls.deprovision_application
+        provision_application._wp5_residue_wrapped = True
+        cls.provision_application = provision_application
 
-    def deprovision_application(self, application_id, *args, **kwargs):
-        result = original_deprovision(self, application_id, *args, **kwargs)
-        if self in _TRACKED_ADAPTERS:
-            tracker.record_removed(self, application_id)
-        return result
+    if not _already_wrapped(cls.deprovision_application):
+        original_deprovision = cls.deprovision_application
 
-    cls.deprovision_application = deprovision_application
+        def deprovision_application(self, application_id, *args, **kwargs):
+            result = original_deprovision(self, application_id, *args, **kwargs)
+            if self in _TRACKED_ADAPTERS:
+                tracker.record_removed(self, application_id)
+            return result
+
+        deprovision_application._wp5_residue_wrapped = True
+        cls.deprovision_application = deprovision_application
 
     original_register = getattr(cls, "register_application_inband", None)
-    if original_register is not None:
+    if original_register is not None and not _already_wrapped(original_register):
         def register_application_inband(self, actor, application_id, *args, **kwargs):
             result = original_register(self, actor, application_id, *args, **kwargs)
             if self in _TRACKED_ADAPTERS:
                 tracker.record_created(self, application_id)
             return result
 
+        register_application_inband._wp5_residue_wrapped = True
         cls.register_application_inband = register_application_inband
 
     # `capability_document()` is exempt from tracking ONLY on the two
@@ -929,7 +959,7 @@ def _install_residue_tracking(adapter_obj: "ConformanceAdapter", tracker: _Appli
     # `_wp5_application_residue_guard` exactly like any other per-test
     # provision.
     original_capability_document = getattr(cls, "capability_document", None)
-    if original_capability_document is not None:
+    if original_capability_document is not None and not _already_wrapped(original_capability_document):
         def capability_document(self, *args, **kwargs):
             caches_its_own_probe = hasattr(self, "_capability_probe_session")
             if caches_its_own_probe:
@@ -940,6 +970,7 @@ def _install_residue_tracking(adapter_obj: "ConformanceAdapter", tracker: _Appli
                 if caches_its_own_probe:
                     tracker.exit_suppressed()
 
+        capability_document._wp5_residue_wrapped = True
         cls.capability_document = capability_document
 
 
