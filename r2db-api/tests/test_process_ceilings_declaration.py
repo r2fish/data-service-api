@@ -56,7 +56,7 @@ Scope (WP-6a is r2db-api only; MitateDB-api is WP-6b's own file):
      `test_control_plane_ceiling_mapping` above injects `process_ceiling`
      directly and so never exercises that composition-root read.
 
-Migration `0008_process_ceilings.sql`'s own naming-convention static test
+Migration `0012_process_ceilings.sql`'s own naming-convention static test
 (platform single-shot, never `*_upgrade.sql`) lives in this repository's
 existing `test_platform_upgrade_ledger_scan.py` (completion condition 8) --
 not duplicated here.

@@ -204,7 +204,8 @@ def _take_bound_advisory_lock(cursor: "psycopg.Cursor[Any]", *, schema: str, tab
     own count is guaranteed to already reflect the first caller's INSERT
     (or its absence, if the first rolled back) -- closing the TOCTOU
     window without ever letting two holders past the count at once.
-    (Phase 9 R-2's own `LOCK TABLE ... IN SHARE MODE`, `postgres.py`'s
+    (Phase 9 R-2's own `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` (SHARE
+    MODE until Phase 10 R-35), `postgres.py`'s
     `add_field`/`alter_field`, is NOT a precedent for this idiom -- it
     guards a read-then-DDL existence scan against a *concurrent schema
     change*, not a count-then-INSERT bound; citing it as this idiom's
