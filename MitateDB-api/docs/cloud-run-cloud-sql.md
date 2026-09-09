@@ -369,6 +369,23 @@ explicit, equivalent form of that same omission -- for a deployment with
 no control surface; neither is required, but passing both is a usage
 error, since this command replaces the entire row.)
 
+**Phase 10 WP-6b (design D-5 (ii)) adds a second required-before-first-
+startup declaration, `process_ceilings`.** Apply its own platform
+single-shot migration (also idempotent) and declare the row -- **required
+alongside `surfaces` before either service will start (F-15)**:
+
+```sh
+psql "host=127.0.0.1 port=5432 dbname=mitatedb_platform user=mitatedbsvc_provision password=$MITATEDBSVC_PROVISION_PASSWORD" \
+  -f MitateDB-api/migrations/0011_process_ceilings.sql
+python -m mitatedb_api.ops declare-process-ceilings --data 1 --control 1
+```
+
+`--data`/`--control` must match this deployment's own `--max-instances`
+for `mitatedb-data`/`mitatedb-ctrl` respectively (Invariant 1, generalized
+§6.2) -- see that section for the full correctness argument and §6.1 for
+the upgrade order on an EXISTING deployment (migration → declare →
+restart, never the reverse; LQ4-24).
+
 Change either writer timeout with `set-platform-timeouts` (always both
 roles together -- there is no per-role flag) or the coalescing window with
 `declare-coalescing-window`, and inspect the current state (both the
@@ -546,10 +563,17 @@ a_value_longer_than_the_length_check`).
 **Multiply by M.** Coalescing counters and the buffer are **process-local**,
 so deployment-wide the ceilings are `2 x <keys> x <windows> x M` and
 `<buffer capacity> x M`, where **M is `mitatedb-data`'s own
-`--max-instances`**. Note the asymmetry with the control service: `mitatedb-
-ctrl` is pinned to `--max-instances=1` by Invariant 1, but `mitatedb-data`
-is not, so **M here is the data service's scaler maximum**, and that number,
-not the per-process default, belongs in the arithmetic.
+`--max-instances`**. Since Invariant 1 (§6.2, generalized Phase 10 WP-6b)
+pins `--max-instances` on EITHER Cloud Run service to equal the declared
+`process_ceilings` value for that plane, **M here is this deployment's own
+declared `process_ceilings.data` (`ops declare-process-ceilings`'s own
+`--data` value), the SAME number `mitatedb-data`'s `--max-instances` must
+already equal** -- never a scaler maximum picked independently of that
+declaration. This peer currently ships with `process_ceilings: {1, 1}` and
+`--max-instances=1` on both services (§6.2), so M defaults to 1; a future
+deployment running `mitatedb-data` with more than one instance must
+re-declare `process_ceilings.data` to match (Invariant 1), and this
+arithmetic must use the re-declared number, not the per-process default.
 
 ```
 bytes/hour  ~=  2 KiB * M * ( <ops/hour>
@@ -1026,11 +1050,16 @@ gcloud run deploy mitatedb-data \
   --add-cloudsql-instances=example-project:us-central1:mitatedb-platform \
   --service-account=mitatedb-data-runtime@example-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
+  --max-instances=1 \
   --set-secrets=MITATEDB_CREDENTIAL_PEPPER=mitatedb-credential-pepper:latest,MITATEDB_PLATFORM_DSN=mitatedb-platform-dsn:latest \
   --set-env-vars=MITATEDB_SERVE_APPS=acme,MITATEDB_CONTROL_PLANE_STATUS=enabled
 # ... plus one --set-secrets pair per onboarded application's own
 # MITATEDB_APP_<ID_UPPER>_{RUNTIME,DEVELOPER}_DSN.
 ```
+
+**`--max-instances=1` here matches the `process_ceilings.data = 1` this
+deployment declares below (Phase 10 WP-6b, design D-5 (ii)/(iii)) --
+see Invariant 1 in §6.2, generalized to both services.**
 
 **Q4 phase (design D-2) supersedes `MITATEDB_DATA_BASE_URL`/
 `MITATEDB_CONTROL_BASE_URL` as env vars** -- they are now **removed**
@@ -1073,6 +1102,38 @@ service URLs (`gcloud run services describe ... --format='value
 (status.url)'`) before going live, then restart BOTH services (design
 U-3: startup snapshot).
 
+**Phase 10 WP-6b (design D-5 (ii)): `process_ceilings` is declared the
+same way, and is REQUIRED (F-15) alongside `surfaces` before either
+service will start**:
+
+```sh
+python -m mitatedb_api.ops declare-process-ceilings --data 1 --control 1
+```
+
+`--data`/`--control` are how many processes may serve each plane's own
+base URL at the same time -- **this value must match the `--max-
+instances` this deployment actually passes to `gcloud run deploy` for
+`mitatedb-data`/`mitatedb-ctrl` respectively** (Invariant 1, generalized
+in §6.2 below); the app itself cannot verify the Cloud Run side of that
+match (the same limitation as the `MITATEDB_PLATFORM_DSN`/`MITATEDB_
+CONTROLPLANE_DSN` pairing two paragraphs above, and the same limitation
+LQ4-15 already names for a different pair of values) -- keeping the two
+in agreement is a runbook/deployer discipline, checked post-deploy the
+same way §6.3 already cross-checks `surfaces`, never enforced by either
+process at startup.
+
+**Upgrade order on an EXISTING deployment (this migration/declaration
+did not exist before Phase 10): apply migration `0011_process_
+ceilings.sql` to the platform database, THEN run `declare-process-
+ceilings` above, THEN restart both services** -- never the reverse
+(startup is a snapshot read, design U-3; declaring before the migration
+is applied fails with an undefined-CHECK-vocabulary error, and restarting
+before declaring re-fails startup with F-15). **`part1_provision_host_
+and_db.sh` does not yet run migration `0008`/`declare-surfaces` either
+(LQ4-24) -- a script-provisioned host has the identical gap for THIS
+migration/declaration pair, and needs the same manual catch-up this
+paragraph describes until LQ4-24 is closed.**
+
 Invoker binding: **only `mitate-application`'s own service account**, never
 `allUsers` and never a broad project role:
 
@@ -1114,19 +1175,39 @@ of the pair it applies to).
 `--set-secrets` entry entirely to leave `audit_query` declared
 `unavailable` on this deployment.
 
-**Invariant 1 (design R-6 second-round M-7, D-K): `--max-instances=1` is
-not a scaling convenience, it is a correctness requirement.**
-`ControlPlaneService`'s own `control_requests_per_minute` rate limiter is
-an in-process window (`control_plane.py`'s own `_rate_window` list) -- with
-more than one instance, each instance would enforce the bound
-independently, so the control-discovery response's own `limit_enforcement:
-{control_requests_per_minute: "enforced"}` claim (contract `capability_
-status.rules`) would become false under real concurrent scale-out. A
-shared window (Redis, Cloud SQL-backed, or `deployment_required`
-re-declaration) is future-work (§7 of the design doc, D-K) -- until that
-lands, `max-instances=1` is the only way this declaration stays true, and
-removing this flag without also doing that future work is a silent
-regression to a false claim, not merely a capacity change.
+**Invariant 1 (design R-6 second-round M-7, D-K; generalized Phase 10
+WP-6b, design D-5 (ii)/(iii)): `--max-instances` on EITHER Cloud Run
+service must equal the `process_ceilings` value THIS deployment declares
+for that plane (`data` for `mitatedb-data`, `control` for `mitatedb-
+ctrl`, §6.1 above) -- it is not a scaling convenience, it is a
+correctness requirement.** `ControlPlaneService`'s own `control_requests_
+per_minute`/`audit_requests_per_minute` rate limiters (and, symmetrically
+on the data service, `ApplicationCell`'s own `requests_per_minute`/
+`concurrency`) are in-process windows -- with more than one instance of
+either service, each instance would enforce its own bound independently,
+so the deployment as a whole would no longer bound the class the
+served `limit_enforcement` document claims. Contract 1.8.0 makes this
+precise: an `enforced` declaration for one of these classes describes
+the WHOLE deployment reachable at the declared surfaces base URL, never
+one process, and is only honest while the declared `process_ceilings`
+ceiling for that plane is 1; a deployer who declares 2 or more gets
+`deployment_required` back from `/capabilities`/`control_capabilities`
+instead (Phase 10 WP-6b), an accurate statement rather than a false
+`enforced` one. **This peer currently ships with `process_ceilings: {1,
+1}` on both planes and `--max-instances=1` on both services** -- a
+future change to run either plane with more than one instance (a shared
+window: Redis, Cloud SQL-backed, or an accepted `deployment_required`
+declaration) is out of this WP's scope (design §7/§9 future-work ledger,
+D-K); until then, raising `--max-instances` on either service WITHOUT
+also re-declaring that plane's own `process_ceilings` (`ops
+declare-process-ceilings`, restarting both processes) is a silent
+regression to a false `enforced` claim, not merely a capacity change.
+**The app cannot verify the Cloud Run side of this match** (`gcloud run
+services describe ... --format='value(spec.template.spec.
+containerConcurrency)'`-style inspection is outside either composition
+root's own reach) -- topology and declaration agreement is a runbook
+discipline, verified post-deploy (§6.3), the same limitation LQ4-15
+already names for surfaces/DSN pairing.
 
 Invoker binding: operators only (a Google group, never `allUsers`, never
 the broad application service account):

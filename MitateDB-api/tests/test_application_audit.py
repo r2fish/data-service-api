@@ -90,6 +90,14 @@ MIGRATION_NAMES = (
     # new table" assertion meaningful (0007's own new GRANTs land in the
     # BASELINE snapshot, not in "what 0005 added").
     "0007_platform_declarations.sql",
+    # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+    # key`'s own CHECK constraint to accept `process_ceilings` -- no
+    # GRANT statements of its own, so it does not affect the `0005`
+    # GRANT-invariance snapshot comparison below either way. Every test
+    # here that touches `platform_declarations` (directly, or via
+    # `main.build_app`/`build_control_service`) now depends on this
+    # migration + the row seeded below, or fails startup with F-15.
+    "0011_process_ceilings.sql",
 )
 
 
@@ -235,6 +243,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         finally:
             admin.close()
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
         try:
             with surfaces_conn.cursor() as cur:
@@ -245,6 +254,14 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
                         '{"data":{"base_url":"' + _DATA_BASE_URL + '"},'
                         '"control":{"base_url":"' + _CONTROL_BASE_URL + '"}}'
                     ],
+                )
+                # Phase 10 WP-6b (design D-5 (ii)): seeded alongside
+                # `surfaces` -- `main.build_app`/`build_control_service`
+                # both now require this row too (F-15).
+                cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', %s)").format(
+                        table=sql.Identifier(schema, "platform_declarations")),
+                    ['{"data": 1, "control": 1}'],
                 )
         finally:
             surfaces_conn.close()

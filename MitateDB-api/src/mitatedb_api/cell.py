@@ -805,7 +805,7 @@ class ApplicationCell:
     """
 
     def __init__(self, application_id, config=None, audit=None, guard=None, backend=None,
-                 audit_router=None, limit_holder=None):
+                 audit_router=None, limit_holder=None, process_ceiling=1):
         validate_identifier(application_id, "application_id")
         self.application_id = application_id
         self.config = config or FoundationConfig()
@@ -845,6 +845,21 @@ class ApplicationCell:
         # construct exactly one holder and pass it to every cell they
         # build).
         self.__limit_holder = limit_holder if limit_holder is not None else _LimitStateHolder()
+        # Phase 10 WP-6b (design D-5 (ii)): the deployer's OWN declared
+        # `process_ceilings.data` (default 1 -- every pre-existing direct
+        # construction of this class, this repository's own tests and
+        # in-process conformance adapter included, keeps behaving exactly
+        # as it did before this WP: `limit_enforcement` for `concurrency`/
+        # `requests_per_minute` stays `enforced`). `main.build_app` is the
+        # one real caller that ever passes a value other than the default,
+        # read from the single source `platform_declarations.
+        # read_platform_declarations` returns (never re-derived here). A
+        # PUBLIC, plain attribute -- like `self.config` above -- since
+        # `ApplicationRuntime.__build_capabilities_document` (this same
+        # module, a different class) reads it via `self.__cell.
+        # process_ceiling`, exactly how it already reads `self.__cell.
+        # config`.
+        self.process_ceiling = process_ceiling
 
     @contextmanager
     def _limit_gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
@@ -4028,6 +4043,16 @@ class ApplicationRuntime:
     def __build_capabilities_document(self, principal):
         is_developer = principal.role == Role.DEVELOPER
         config = self.__cell.config
+        # Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region
+        # map -- the two in-memory-per-process-bound classes below
+        # (`concurrency`/`requests_per_minute`, `_LimitStateHolder`'s own
+        # docstring: "process-wide (one per composition root)") degrade
+        # from `enforced` to `deployment_required` once more than one
+        # process may serve this deployment's data-plane base URL at the
+        # same time -- region (i) (every other class in `limit_
+        # enforcement` below) is UNAFFECTED by ceiling (it is bound
+        # per-request, not per-process).
+        _in_memory_enforcement = "enforced" if self.__cell.process_ceiling <= 1 else "deployment_required"
         return {
             # Phase 4 WP-3(b) (P4-D4, contract `versioning.version_
             # binding`), flipped to 1.5.0 in Phase 5 WP-3 (design D-1,
@@ -4265,11 +4290,18 @@ class ApplicationRuntime:
                 # per-application, never per-request) now bounds in-flight
                 # application-plane requests for real, released in a
                 # `finally` on every exit path (success or exception).
-                "concurrency": "enforced",
+                # Phase 10 WP-6b (design D-5 (ii)): that per-process bound
+                # only describes the WHOLE deployment while exactly one
+                # process may serve this base URL -- `_in_memory_
+                # enforcement` (computed above from the deployer's own
+                # declared `process_ceilings.data`) degrades this to
+                # `deployment_required` once more than one process may.
+                "concurrency": _in_memory_enforcement,
                 # Phase 8 WP-1a (design D-1): `_LimitStateHolder.
                 # acquire_rate` now bounds a credential-keyed 60s sliding
-                # window for real.
-                "requests_per_minute": "enforced",
+                # window for real. Phase 10 WP-6b: same ceiling-dependent
+                # degradation as `concurrency` immediately above.
+                "requests_per_minute": _in_memory_enforcement,
                 # Phase 8 WP-1a rework 1 (裁定 1, 監督裁定 2026-09-06):
                 # `enforced` on BOTH surfaces -- `_check_operation_depth`
                 # (module-level, above) is wired into `_limit_gate`
@@ -4342,7 +4374,15 @@ class ApplicationRuntime:
                 # vacuity note, work order §2 WP-3c: "retention の期限切れ
                 # 検査は行わない"), so it is declared `reference_wall_
                 # clock`, matching `execution_ms`'s own identical
-                # reasoning above.
+                # reasoning above. WP-6d-i (design D-5 (ii) addendum (1))
+                # is what keeps this bound genuinely `enforced` under
+                # concurrent writers on the PostgreSQL backend (a lock +
+                # recount immediately before the write, in the SAME
+                # transaction -- `backend_postgres.py::_write_idempotency_
+                # row`); this declaration site itself predates that WP and
+                # is unchanged by it, since the class was already
+                # `enforced` for the single-writer case this dict-literal
+                # declares.
                 "idempotency_entries": "enforced",
                 "idempotency_retention_ms": "reference_wall_clock",
             },

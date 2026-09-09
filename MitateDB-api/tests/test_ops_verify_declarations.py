@@ -48,11 +48,21 @@ MIGRATION_NAMES = (
     "0002_registry_and_functions.sql",
     "0005_application_audit.sql",
     "0007_platform_declarations.sql",
+    # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+    # key`'s own CHECK constraint to accept `process_ceilings`. `_bootstrap`
+    # below auto-seeds a default `{"data": 1, "control": 1}` row whenever
+    # this migration ran (mirroring `0007`'s own auto-seed of `audit_
+    # coalescing_window_ms`/`audit_writer_roles`) -- none of this file's
+    # own tests are ABOUT `process_ceilings` (that is `test_process_
+    # ceilings_declaration.py`'s job), so every test here needs it present
+    # and out of the way, not set individually.
+    "0011_process_ceilings.sql",
 )
-#: F-8's own fixture omits the last entry above -- this is that same
-#: sequence minus migration 0007 (the migration that creates
-#: `platform_declarations` in the first place).
-MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-1]
+#: F-8's own fixture omits the last TWO entries above -- this is that same
+#: sequence minus migrations 0007/0011 (0007 creates `platform_
+#: declarations` in the first place; 0011 only widens a CHECK on a table
+#: that, on THIS fixture, does not exist at all).
+MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-2]
 
 _DATA_URL = "https://ops-verify-test.example.invalid/v1"
 _CONTROL_URL = "https://ops-verify-test.example.invalid/control/v1"
@@ -144,6 +154,20 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
             rewritten["0007_platform_declarations.sql"],
             {"api_role": api_role, "controlplane_role": controlplane_role},
         )
+    if "0011_process_ceilings.sql" in rewritten:
+        _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+        # Phase 10 WP-6b: auto-seed the default ceiling row -- see
+        # `MIGRATION_NAMES`'s own comment above for why every test in this
+        # file needs it present unconditionally.
+        with psycopg.connect(provision_dsn) as _seed_conn:
+            with _seed_conn.cursor() as _seed_cur:
+                _seed_cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', %s) ON CONFLICT (key) DO NOTHING").format(
+                        table=sql.Identifier(schema, "platform_declarations")
+                    ),
+                    [Json({"data": 1, "control": 1})],
+                )
+            _seed_conn.commit()
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -297,6 +321,37 @@ def test_verify_declarations_f4b_when_audit_writer_roles_value_is_malformed(
     _set_row(platform, "audit_writer_roles", [])
     rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
     assert rc == 6
+
+
+def test_verify_declarations_f15_when_process_ceilings_row_is_absent(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 10 WP-6b (design D-5 (ii)): `process_ceilings` is checked
+    for row-existence right after `audit_coalescing_window_ms` (F-4) and
+    before any of the three rows' own VALUES are validated -- unlike
+    `surfaces`, `_bootstrap` DOES auto-seed a default `process_ceilings`
+    row (`MIGRATION_NAMES`'s own comment above), so this test has to
+    delete it explicitly to reach F-15."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _delete_row(platform, "process_ceilings")
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    assert rc == 14
+
+
+def test_verify_declarations_f15_when_process_ceilings_value_is_malformed(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The malformed-VALUE half of F-15 (design D-5 (ii)):
+    `validate_process_ceilings_value` shares the SAME F-number as the
+    missing-row check immediately above -- `process_ceilings` is one new
+    key, not two (unlike `surfaces`/F-3+F-5 or `audit_coalescing_window_
+    ms`/F-4+F-4b, which each pre-date this WP and already had a separate
+    F-number budgeted for their own missing-row vs malformed-value
+    conditions)."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _set_row(platform, "process_ceilings", {"data": 0, "control": 1})
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    assert rc == 14
 
 
 def test_verify_declarations_f5_when_surfaces_value_is_malformed(
