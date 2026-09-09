@@ -93,7 +93,42 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
     for item in items:
         callspec = getattr(item, "callspec", None)
         adapter_param = callspec.params.get("adapter") if callspec is not None else None
-        group = str(adapter_param) if adapter_param else "registry-guards"
+        # Phase 10 WP-6c (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+        # V1.md D-1 (B) 8): an item parametrized (directly, or indirectly
+        # through a fixture that itself depends on `launcher_class` below,
+        # e.g. `test_c26_composition_root.py`'s own module-scoped
+        # `lifecycle` fixture) over `launcher_class` carries NO `adapter`
+        # param at all -- without this branch it would fall into the
+        # shared `registry-guards` group below and get co-scheduled (and
+        # therefore serialized onto ONE worker) with every whole-registry
+        # vacuity guard in the suite, even though a C-26 item starts a
+        # real, separate OS process per launcher and has nothing in
+        # common with those guards' read-only checks. Grouped per
+        # LAUNCHER (`c26-<peer>`) instead, so the two registered launchers
+        # (r2db-api/MitateDB-api) can still run on separate xdist workers
+        # concurrently -- `--dist loadgroup` schedules everything sharing
+        # one group onto the SAME worker, exactly like the `adapter`
+        # branch below does for each adapter's own session-scoped state.
+        launcher_param = callspec.params.get("launcher_class") if callspec is not None else None
+        # F9 (WP-6c review 2026-09-09): `launcher_param` is checked BEFORE
+        # `adapter_param` on purpose -- no currently-collected item ever
+        # carries both (a `launcher_class`-parametrized item takes no
+        # `adapter` fixture, and vice versa, by construction of every
+        # fixture in this file today), so this ordering is unreachable
+        # code today, not a live behavior choice. If a FUTURE item ever
+        # parametrized over both, a real per-process composition-root
+        # launcher (an expensive, foreground-blocking OS process start)
+        # should take priority over the lighter, already-amortized
+        # session-scoped `adapter` state for xdist-group placement -- so
+        # this order (`launcher_param` first) is deliberately kept in the
+        # unreachable case too, rather than swapped, and this comment
+        # records that choice instead of leaving it to be re-derived.
+        if launcher_param:
+            group = f"c26-{launcher_param}"
+        elif adapter_param:
+            group = str(adapter_param)
+        else:
+            group = "registry-guards"
         item.add_marker(pytest.mark.xdist_group(name=group))
 
 
@@ -260,6 +295,77 @@ def _close_all_adapters_at_session_end():
     which adapter param groups ran in what order."""
     yield
     _close_all_adapters()
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 WP-6c: `composition_roots` discovery (design docs/design/
+# PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-1 (B), §6.1) -- the C-26 launchers,
+# a SEPARATE registry section from `adapters` above. A launcher is not a
+# `ConformanceAdapter` (it is never returned by any `build_adapter()`, and
+# `test_c26_composition_root.py` never touches `_BUILT_ADAPTERS`), so this
+# is deliberately its own small discovery function rather than a case
+# folded into `_discover_and_build`.
+# ---------------------------------------------------------------------------
+
+
+def _load_composition_roots() -> list[dict]:
+    data = json.loads(REGISTRY_PATH.read_text())
+    return data.get("composition_roots", [])
+
+
+def _discover_composition_roots() -> list[tuple[str, type]]:
+    """Imports each registered launcher CLASS (never an instance) at
+    collection time -- mirrors `_discover_and_build`'s own eager-but-inert
+    construction (design D-2 (g)), but even lighter here: importing a
+    module and reading one class attribute off it performs no I/O at all
+    (`RealServerR2db`/`RealServerMitateDB`'s own `__init__` is pure
+    attribute assignment -- provisioning a real throwaway platform and
+    starting real processes only happens inside their own `start()`,
+    called explicitly by `test_c26_composition_root.py`'s own fixtures).
+    A missing/malformed entry (unlike a `required: true` adapter) raises
+    immediately, in the same "hard collection error, never a skip" spirit
+    (design principle 4) -- there is no meaningful "optional" composition
+    root."""
+    entries = _load_composition_roots()
+    discovered: list[tuple[str, type]] = []
+    for entry in entries:
+        name = entry["name"]
+        module_name = entry["module"]
+        class_name = entry["launcher_class"]
+        conformance_dir = str(ROOT / name / "conformance")
+        if conformance_dir not in sys.path:
+            sys.path.insert(0, conformance_dir)
+        module = importlib.import_module(module_name)
+        launcher_cls = getattr(module, class_name)
+        discovered.append((name, launcher_cls))
+    return discovered
+
+
+_COMPOSITION_ROOTS: list[tuple[str, type]] = _discover_composition_roots()
+_COMPOSITION_ROOT_NAMES: list[str] = [name for name, _ in _COMPOSITION_ROOTS]
+_COMPOSITION_ROOT_CLASS_BY_NAME: dict[str, type] = dict(_COMPOSITION_ROOTS)
+
+
+def registered_composition_roots() -> dict[str, type]:
+    """Public accessor (mirrors `registered_adapters()` above) -- the
+    registered launcher CLASSES, keyed by peer name. `test_c26_
+    composition_root.py`'s own non-vacuity guard (design D-1 (B) 7: "`
+    composition_roots` が2件以上") reads this directly, the same shape
+    `test_c19_client_self_sufficiency.py`'s own registry-wide guards
+    already use for `registered_adapters()`."""
+    return dict(_COMPOSITION_ROOT_CLASS_BY_NAME)
+
+
+@pytest.fixture(scope="session", params=_COMPOSITION_ROOT_NAMES, ids=_COMPOSITION_ROOT_NAMES)
+def launcher_class(request: pytest.FixtureRequest) -> type:
+    """The registered C-26 launcher CLASSES, one per `composition_roots`
+    entry, parametrized so `test_c26_composition_root.py`'s own fixtures
+    run once per launcher with the peer name as the pytest test id (mirrors
+    the `adapter` fixture's own parametrization above). Returns the CLASS,
+    never a shared instance -- every test/fixture that needs a live
+    launcher constructs (and tears down) its own instance, so no C-26 test
+    can observe another one's residual state."""
+    return _COMPOSITION_ROOT_CLASS_BY_NAME[request.param]
 
 
 @pytest.fixture()

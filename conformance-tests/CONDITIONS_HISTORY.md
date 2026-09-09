@@ -298,6 +298,18 @@ Both r2db-api and MitateDB-api have since flipped `contract_version` to 1.7.0 (W
 
 Executability lands in phase 10 WP-6c. Until then the row carries no historical narrative of its own: its current text is its first text.
 
+**WP-6c landed (2026-09-09, `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §3 D-1 (B), work order §2 WP-6c):** the current row's own Status cell (verbatim, moved here in this same edit) read:
+
+not yet executable -- phase 10 WP-6c lands the per-peer launchers, the registry's `composition_roots` section and `conformance-tests/test_c26_composition_root.py`; the row is declared here so the design document's own `C-26` references resolve, the same sequence C-20..C-25 followed in phase 9 (design first, condition row second). Intended scope when it lands: one observation set per registered launcher, covering the six items the Condition cell states, with the launcher writing `surfaces` and `process_ceilings` through the real `ops` CLI before either process starts (a declaration is a startup snapshot). The ceiling-1/ceiling-2 observation is the only place this common suite can observe that the mapping from a declared ceiling to `limit_enforcement` holds on a real start; it does not observe how many processes actually run, since a launcher starts one, so agreement between the declared ceiling and the deployment's real topology rests on runbook discipline and the post-deployment check -- no plug can otherwise learn how many processes serve its own base URL, a scope limit C-05 discloses on its own row. Non-vacuity: a registry guard asserts `composition_roots` holds two or more entries, so a single-peer registration cannot make the condition pass on one launcher's evidence. Design: `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` §3 D-1 (B), §3 D-4, §6.1, §6.2 and §7. [history](CONDITIONS_HISTORY.md#c-26)
+
+The two launchers (`r2db-api/conformance/real_server_r2db.py::RealServerR2db`, `MitateDB-api/conformance/real_server_mitatedb.py::RealServerMitateDB`), the `composition_roots` registry section, `conformance-tests/conftest.py`'s per-launcher `c26-<peer>` xdist grouping, and `conformance-tests/test_c26_composition_root.py` now exist and this condition is executable, so the row is rewritten to state the now-obtaining, executable form -- see the current row for the corresponding text and `conformance-tests/test_c26_composition_root.py` for the test.
+
+**F5 correction (WP-6c review 2026-09-09):** the Status cell above was rewritten to `executable` in the same edit that landed WP-6c, but the row's own Evidence cell was left unedited by oversight and kept stating the file did not exist yet. The Evidence cell (verbatim, moved here in this same edit) previously read:
+
+real-startup observation of the documented composition root -- `conformance-tests/test_c26_composition_root.py` (not yet created), driven over every launcher registered in `conformance-tests/registry.json`'s own `composition_roots` section
+
+The current row's Evidence cell now names the file without the stale "(not yet created)" qualifier, and names both launcher classes explicitly.
+
 ---
 
 ## C-27
