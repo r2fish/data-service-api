@@ -934,7 +934,7 @@ _CONTROLPLANE_ROLE_POOL_FLOOR = 16
 _AUDITREADER_ROLE_POOL_FLOOR = 4
 
 
-def _roles_with_table_privilege(conn: "psycopg.Connection", schema: str, table: str, privilege: str) -> list:
+def _roles_with_table_privilege(conn: "psycopg.Connection", schema: str, table: str, privilege: str) -> list[str]:
     """Every role (`grantee`) actually granted `privilege` on `<schema>.
     <table>` -- `information_schema.role_table_grants` is a world-readable
     view: any connection can run this regardless of its own login role.

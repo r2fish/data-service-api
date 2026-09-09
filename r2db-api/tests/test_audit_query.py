@@ -2402,7 +2402,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_105_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_137_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2783,10 +2783,97 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_build_client"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_surfaces_value"),
     ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_reset_surface_state"),
+    # Phase 10 WP-9a pair-closing commit (design docs/design/PHASE10_
+    # DEPLOYMENT_EVIDENCE_V1.md D-1 (b), section 7; work order Class D):
+    # (a) the C-26 composition-root launcher's own same-named helpers
+    # (WP-6a/WP-6b's `RealServerR2db`/`RealServerMitateDB`, WP-6c's own
+    # rework rounds) verified normalize-and-diff equal before adding --
+    # `_control_env`'s own dict was reordered on this peer to match
+    # MitateDB-api's own key order (behavior-unchanged: env-var
+    # application never depends on dict insertion order) and `_normalize`
+    # above widened, the SAME "both known spellings, symmetrically"
+    # technique already used for `r2db_api`/`mitatedb_api` and
+    # `ResourceLimits`/`FoundationConfig`, to also fold each peer's own
+    # UPPERCASE env-var-name prefix (`R2DB_`/`MITATEDB_`). The launcher's
+    # OWN composition/lifecycle methods (`__init__`, `_ensure_
+    # provisioned`, `_app_env`, `start`, `restart`, `read_declared_
+    # surfaces`, `attempt_start_without_process_ceilings`, `attempt_
+    # start_with_lowered_role_limit`, `_Platform`, `_AppInfo`,
+    # `_bootstrap_platform`, `_provision_app`, `_ops_env`) and the class
+    # attribute `name` are deliberately NOT rows here: each carries a
+    # real per-peer difference `_normalize` does not fold away (this
+    # peer's `slug`-keyed application identity vs MitateDB-api's own
+    # `application_id`, `control_dsn` vs `provision_dsn`, MitateDB-api's
+    # own extra `_issue_runtime_credential` extraction and `shutil.
+    # rmtree` cleanup, `name`'s own peer-specific literal value) -- same
+    # category as the already-excluded `cmd_declare_process_ceilings`.
+    # (b) F-16's own peer-duplicated pure-Python pieces (`platform_
+    # declarations.py`'s `_table_owner`, `_roles_with_table_privilege`,
+    # the three role-class/floor constants, and the `_f16_message`
+    # builder) -- `_roles_with_table_privilege`'s return type hint
+    # widened to `list[str]` on MitateDB-api (matching this peer, cosmetic
+    # only) and `_f16_message`'s own trailing sentence on this peer
+    # rewritten to the peer-generic wording every other `_fN_message`
+    # builder already uses (dropping the `POSTGRES_PROVISIONING_RUNBOOK.
+    # md` filename reference, not pinned by any existing test) before
+    # adding. `check_role_connection_limits` itself is NOT a row: its own
+    # `application_slugs`/`application_ids` parameter and the SQL column
+    # name it filters by (`application_slug` vs `application_id`) are a
+    # real per-peer application-identity difference threading through the
+    # whole function body, the same category of gap that keeps
+    # `_bootstrap_platform`/`_provision_app` above unpinned. (c) WP-8c's
+    # own AST-scanning test helpers in `test_preauth_concurrency_bound.py`
+    # (`_parse_handler`, `_authenticate_call_nodes`) -- the F-7 rework's
+    # three same-NAMED `test_*` functions in that same file are NOT rows
+    # here: verified normalize-and-diff UNEQUAL (each peer exercises a
+    # different endpoint via a differently-shaped fixture, a real test
+    # body difference, not a naming coincidence `_normalize` should paper
+    # over). (d) WP-4e's `role_pool_size` (`limits.py`/`config.py`) was
+    # checked and is NOT a row: its parameter name (`limits` vs `config`)
+    # and the attribute it reads (`.concurrency` vs `.max_concurrency`)
+    # both differ, and folding either away would require a site-wide
+    # rename of a real dataclass field, beyond this WP's alignment scope.
+    # (e) Phase 10 WP-7 (`tools/perf_baseline.py` and its own test file)
+    # added no peer-duplicated helper at all -- both files are single,
+    # peer-agnostic modules shared by both peers' conformance plugs, not
+    # a same-named pair under `r2db-api/`/`MitateDB-api/` -- confirmed,
+    # no row added for it.
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_with_pythonpath"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_scrub_peer_env_prefixes"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_peer_env_prefixes_removed_from_os_environ"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "LauncherStartupError"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_admin_dsn"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_dsn_with"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_lock_path"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_claim_prefix_lock"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_release_prefix_lock"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_run_psql"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_run_ops"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_sweep_prefix"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_sweep_stale"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_parse_issued_secret"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "startup_events"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_record"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_control_env"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_best_effort_stop_processes"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "stop"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "data_base_url"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "control_base_url"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "runtime_bearer"),
+    ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "control_bearer"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_table_owner"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_roles_with_table_privilege"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_ROLE_CLASSES"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_API_ROLE_STORE_COUNT"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_CONTROLPLANE_ROLE_POOL_FLOOR"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_AUDITREADER_ROLE_POOL_FLOOR"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f16_message"),
+    ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
+    ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_105_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_137_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2821,7 +2908,15 @@ def test_isomorphic_target_table_is_pinned_to_its_current_105_rows() -> None:
     `_f15_shape_message`, `_f15_value_message`, `_take_bound_advisory_
     lock`) and WP-3's own same-named HTTP conformance adapter hooks
     (`_build_client`, `_surfaces_value`, `_reset_surface_state`) had all
-    merged to main on both peers:
+    merged to main on both peers; widened an eleventh time by the phase 10
+    WP-9a pair-closing commit (design docs/design/PHASE10_DEPLOYMENT_
+    EVIDENCE_V1.md D-1 (b)/§7, work order Class D), registering the C-26
+    launcher's own same-named helpers (WP-6a/WP-6b/WP-6c), F-16's own
+    peer-duplicated pure-Python pieces (WP-4f/WP-4g), and WP-8c's own
+    `_parse_handler`/`_authenticate_call_nodes` AST-scanning test helpers
+    (WP-8c's own F-7 rework) all at once, each verified normalize-and-diff
+    equal before adding -- see this table's own comment immediately above
+    the new rows for the candidates checked and deliberately NOT added:
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -2853,7 +2948,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_105_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_105_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_137_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -3000,8 +3095,95 @@ def test_isomorphic_target_table_is_pinned_to_its_current_105_rows() -> None:
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_build_client"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_surfaces_value"),
         ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_reset_surface_state"),
+        # Phase 10 WP-9a pair-closing commit (design docs/design/PHASE10_
+        # DEPLOYMENT_EVIDENCE_V1.md D-1 (b), section 7; work order Class D):
+        # (a) the C-26 composition-root launcher's own same-named helpers
+        # (WP-6a/WP-6b's `RealServerR2db`/`RealServerMitateDB`, WP-6c's own
+        # rework rounds) verified normalize-and-diff equal before adding --
+        # `_control_env`'s own dict was reordered on this peer to match
+        # MitateDB-api's own key order (behavior-unchanged: env-var
+        # application never depends on dict insertion order) and `_normalize`
+        # above widened, the SAME "both known spellings, symmetrically"
+        # technique already used for `r2db_api`/`mitatedb_api` and
+        # `ResourceLimits`/`FoundationConfig`, to also fold each peer's own
+        # UPPERCASE env-var-name prefix (`R2DB_`/`MITATEDB_`). The launcher's
+        # OWN composition/lifecycle methods (`__init__`, `_ensure_
+        # provisioned`, `_app_env`, `start`, `restart`, `read_declared_
+        # surfaces`, `attempt_start_without_process_ceilings`, `attempt_
+        # start_with_lowered_role_limit`, `_Platform`, `_AppInfo`,
+        # `_bootstrap_platform`, `_provision_app`, `_ops_env`) and the class
+        # attribute `name` are deliberately NOT rows here: each carries a
+        # real per-peer difference `_normalize` does not fold away (this
+        # peer's `slug`-keyed application identity vs MitateDB-api's own
+        # `application_id`, `control_dsn` vs `provision_dsn`, MitateDB-api's
+        # own extra `_issue_runtime_credential` extraction and `shutil.
+        # rmtree` cleanup, `name`'s own peer-specific literal value) -- same
+        # category as the already-excluded `cmd_declare_process_ceilings`.
+        # (b) F-16's own peer-duplicated pure-Python pieces (`platform_
+        # declarations.py`'s `_table_owner`, `_roles_with_table_privilege`,
+        # the three role-class/floor constants, and the `_f16_message`
+        # builder) -- `_roles_with_table_privilege`'s return type hint
+        # widened to `list[str]` on MitateDB-api (matching this peer, cosmetic
+        # only) and `_f16_message`'s own trailing sentence on this peer
+        # rewritten to the peer-generic wording every other `_fN_message`
+        # builder already uses (dropping the `POSTGRES_PROVISIONING_RUNBOOK.
+        # md` filename reference, not pinned by any existing test) before
+        # adding. `check_role_connection_limits` itself is NOT a row: its own
+        # `application_slugs`/`application_ids` parameter and the SQL column
+        # name it filters by (`application_slug` vs `application_id`) are a
+        # real per-peer application-identity difference threading through the
+        # whole function body, the same category of gap that keeps
+        # `_bootstrap_platform`/`_provision_app` above unpinned. (c) WP-8c's
+        # own AST-scanning test helpers in `test_preauth_concurrency_bound.py`
+        # (`_parse_handler`, `_authenticate_call_nodes`) -- the F-7 rework's
+        # three same-NAMED `test_*` functions in that same file are NOT rows
+        # here: verified normalize-and-diff UNEQUAL (each peer exercises a
+        # different endpoint via a differently-shaped fixture, a real test
+        # body difference, not a naming coincidence `_normalize` should paper
+        # over). (d) WP-4e's `role_pool_size` (`limits.py`/`config.py`) was
+        # checked and is NOT a row: its parameter name (`limits` vs `config`)
+        # and the attribute it reads (`.concurrency` vs `.max_concurrency`)
+        # both differ, and folding either away would require a site-wide
+        # rename of a real dataclass field, beyond this WP's alignment scope.
+        # (e) Phase 10 WP-7 (`tools/perf_baseline.py` and its own test file)
+        # added no peer-duplicated helper at all -- both files are single,
+        # peer-agnostic modules shared by both peers' conformance plugs, not
+        # a same-named pair under `r2db-api/`/`MitateDB-api/` -- confirmed,
+        # no row added for it.
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_with_pythonpath"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_scrub_peer_env_prefixes"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_peer_env_prefixes_removed_from_os_environ"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "LauncherStartupError"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_admin_dsn"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_dsn_with"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_lock_path"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_claim_prefix_lock"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_release_prefix_lock"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_run_psql"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_run_ops"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_sweep_prefix"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_sweep_stale"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_parse_issued_secret"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "startup_events"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_record"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_control_env"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "_best_effort_stop_processes"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "stop"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "data_base_url"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "control_base_url"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "runtime_bearer"),
+        ("conformance/real_server_r2db.py", "conformance/real_server_mitatedb.py", "control_bearer"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_table_owner"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_roles_with_table_privilege"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_ROLE_CLASSES"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_API_ROLE_STORE_COUNT"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_CONTROLPLANE_ROLE_POOL_FLOOR"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_AUDITREADER_ROLE_POOL_FLOOR"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f16_message"),
+        ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_parse_handler"),
+        ("tests/test_preauth_concurrency_bound.py", "tests/test_preauth_concurrency_bound.py", "_authenticate_call_nodes"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 105
+    assert len(_ISOMORPHIC_TARGETS) == 137
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -3167,6 +3349,17 @@ def _normalize(source: str) -> str:
     # sibling's row names ITS own class, and neither name is peer-name-free
     # the way every pre-existing pinned symbol's signature happened to be.
     text = text.replace("ResourceLimits", "<PEER_TYPE>").replace("FoundationConfig", "<PEER_TYPE>")
+    # Phase 10 WP-9a pair-closing commit: the same "both known spellings,
+    # symmetrically, on either side" technique the package-name line above
+    # already uses, extended to the two peers' own UPPERCASE env-var name
+    # prefixes (`R2DB_` here, `MITATEDB_` on MitateDB-api) -- the C-26
+    # composition-root launcher's own `_control_env` builds a dict of real
+    # environment variable names each peer's own `control_main.py`/
+    # `control_composition.py` reads at process startup, and those names
+    # necessarily carry the peer's own package name as an UPPERCASE
+    # prefix, a spelling the lowercase `r2db_api`/`mitatedb_api`
+    # substitution above never touches.
+    text = text.replace("R2DB_", "<PEER_ENV_PREFIX>").replace("MITATEDB_", "<PEER_ENV_PREFIX>")
     text = re.sub(r"[ \t]+$", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n\s*\n+", "\n", text)
     return text.strip()
