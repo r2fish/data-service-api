@@ -148,6 +148,7 @@ from .platform_declarations import (
     reject_removed_timeout_env,
 )
 from .errors import FoundationError
+from .limits import ResourceLimits, role_pool_size
 from .postgres import PostgresCell, _RefusingPlatformUpgradeCell, default_pool_manager
 from .service import _DEFAULT_AUDIT_FLUSH_INTERVAL_S, ControlAuthority, DataService
 
@@ -405,6 +406,15 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
     audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
 
+    # Phase 10 WP-8a review F-1 fix: ONE `ResourceLimits` instance, shared
+    # between the `DataService` this process serves requests through and
+    # every served application's own `PostgresCell` pool sizing below
+    # (`_role_pool_size`) -- so the declared concurrency ceiling and the
+    # pool capacity that must accommodate it can never drift apart by
+    # being two independently-constructed values.
+    resource_limits = ResourceLimits()
+    _role_pool_size = role_pool_size(resource_limits)
+
     def _cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell | _RefusingPlatformUpgradeCell:
         if entities:
             # The composition root never pre-populates entities -- every
@@ -422,6 +432,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             developer_dsn=developer_dsn,
             runtime_role=row["runtime_role"],
             developer_role=row["developer_role"],
+            pool_size=_role_pool_size,
         )
         # Q4 WP-3 (design D-3(f), requester ruling 2026-09-05 U-2; reworked
         # by supervisor ruling 2026-09-05 H-1(a)): "cell open time" IS this
@@ -455,7 +466,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         return cell
 
     service = DataService(
-        credentials, cell_factory=_cell_factory, control_plane_status=control_plane_status,
+        credentials, limits=resource_limits, cell_factory=_cell_factory, control_plane_status=control_plane_status,
         durable_audit=durable_audit, audit_buffer_capacity=audit_buffer_capacity,
         surfaces=surfaces,
         # Step 8 (Q4 D-2(e)): the DB-declared coalescing window, ms ->

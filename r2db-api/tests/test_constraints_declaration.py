@@ -21,6 +21,7 @@ directory that needs real PostgreSQL already pays independently.
 """
 from __future__ import annotations
 
+import threading
 import types
 from pathlib import Path
 from typing import Any
@@ -1195,11 +1196,19 @@ def test_pg_upsert_missing_field_check_locks_the_row_for_update(app_a: types.Sim
 
 def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     """Monitor ruling M-1/F (rulings-wp2a-review.md, rulings-wp3a-
-    review.md F): `alter_field` takes `LOCK TABLE ... IN SHARE MODE`
-    before its own existing-row scan, inside the same transaction --
-    pinned at the SQL text level (the race itself needs two concurrent
-    sessions, not realistically triggerable from a single-connection
-    test, same reasoning as the M-2 test above)."""
+    review.md F): `alter_field` takes `LOCK TABLE ... IN SHARE ROW
+    EXCLUSIVE MODE` before its own existing-row scan, inside the same
+    transaction -- pinned at the SQL text level (the race itself needs
+    two concurrent sessions, not realistically triggerable from a
+    single-connection test, same reasoning as the M-2 test above).
+
+    R-35 (Phase 10, WP-6d-i review): originally plain `SHARE MODE`,
+    which does not conflict with itself and could deadlock two
+    concurrent `add_field`/`alter_field` calls on the same entity at
+    their own later `ALTER TABLE` -- see the deterministic two-
+    connection race test right below this one for that scenario
+    actually observed against real PostgreSQL, not merely at the SQL-
+    text level."""
     import r2db_api.postgres as postgres_module
 
     cell = make_cell(app_a)
@@ -1221,12 +1230,132 @@ def test_pg_alter_field_locks_the_table_in_share_mode_before_scanning(app_a: typ
 
         lock_statements = [s for s in captured if "LOCK TABLE" in s.upper()]
         assert lock_statements, captured
-        assert "SHARE MODE" in lock_statements[0].upper()
+        assert "SHARE ROW EXCLUSIVE MODE" in lock_statements[0].upper()
         # The lock precedes the row-existence scan (the same statement
         # list order `_run` recorded them in).
         scan_index = next(i for i, s in enumerate(captured) if s.strip().upper().startswith("SELECT 1 FROM"))
         lock_index = captured.index(lock_statements[0])
         assert lock_index < scan_index
+    finally:
+        cell.close()
+
+
+# ---- R-35: the M-1/M-6 lock must not deadlock two concurrent schema ops --
+
+
+def test_pg_concurrent_add_field_calls_on_same_entity_serialize_without_deadlock(app_a: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-35 (Phase 10, WP-6d-i review): plain `LOCK TABLE ... IN SHARE
+    MODE` does not conflict with itself, so two concurrent `add_field`
+    calls declaring `nullable: false` on the SAME entity could both
+    acquire it, then each block at its own later `ALTER TABLE` (ACCESS
+    EXCLUSIVE) waiting on the other's SHARE lock -- a guaranteed mutual
+    wait resolved only by PostgreSQL's deadlock detector aborting one
+    side with an error. `SHARE ROW EXCLUSIVE` (self-conflicting) instead
+    makes the second caller wait AT `LOCK TABLE` until the first commits.
+
+    Verified against a REAL two-connection race, never merely at the SQL-
+    text level (contrast the M-1 test above, whose own docstring
+    disclaims exactly this scenario as untestable from one connection):
+    thread A's `add_field` is paused (a monkeypatched module-level
+    `postgres_module._run`) immediately AFTER its own `LOCK TABLE`
+    RETURNS and before its `ALTER TABLE`. While it is paused, thread B
+    (the main thread) starts a second, independent `add_field` on the
+    SAME entity -- if the two locks conflict, B's own `LOCK TABLE`
+    blocks INSIDE `cursor.execute` itself and never reaches the line
+    that would record it as returned, so it must not do so within a
+    short window. Releasing A lets both complete, in sequence, with no
+    deadlock error, and the final catalog carries both new fields."""
+    import r2db_api.postgres as postgres_module
+
+    cell = make_cell(app_a, pool_size=2)
+    try:
+        cell.apply_schema(
+            {"operation": "create_entity", "entity": "lockrace", "fields": ["label"], "field_types": {"label": "string"}},
+            developer=True,
+            limits=LIMITS,
+        )
+
+        real_run = postgres_module._run
+        lock_call_count = {"n": 0}
+        lock_acquired = threading.Event()  # thread A's own LOCK TABLE has returned
+        b_lock_started = threading.Event()  # thread B's LOCK TABLE is about to be issued
+        b_lock_returned = threading.Event()  # thread B's own LOCK TABLE has returned
+        release_a = threading.Event()
+
+        def paced_run(cursor: Any, statement: Any, params: Any = ()) -> Any:
+            try:
+                rendered = statement.as_string(cursor)
+            except Exception:
+                rendered = ""
+            is_lock = rendered.strip().upper().startswith("LOCK TABLE")
+            my_index = None
+            if is_lock:
+                lock_call_count["n"] += 1
+                my_index = lock_call_count["n"]
+                if my_index != 1:
+                    b_lock_started.set()
+            result = real_run(cursor, statement, params)
+            if is_lock:
+                if my_index == 1:
+                    lock_acquired.set()
+                    assert release_a.wait(timeout=10), "test-side release never arrived"
+                else:
+                    b_lock_returned.set()
+            return result
+
+        monkeypatch.setattr(postgres_module, "_run", paced_run)
+
+        a_errors: list[Exception] = []
+
+        def _add_field_a() -> None:
+            try:
+                cell.apply_schema(
+                    {"operation": "add_field", "entity": "lockrace", "field": "field_a", "field_type": "string", "nullable": False},
+                    developer=True,
+                    limits=LIMITS,
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via a_errors
+                a_errors.append(exc)
+
+        thread_a = threading.Thread(target=_add_field_a)
+        thread_a.start()
+        try:
+            assert lock_acquired.wait(timeout=10), "thread A never reached its own LOCK TABLE"
+
+            b_errors: list[Exception] = []
+
+            def _add_field_b() -> None:
+                try:
+                    cell.apply_schema(
+                        {"operation": "add_field", "entity": "lockrace", "field": "field_b", "field_type": "string", "nullable": False},
+                        developer=True,
+                        limits=LIMITS,
+                    )
+                except Exception as exc:  # pragma: no cover - surfaced via b_errors
+                    b_errors.append(exc)
+
+            thread_b = threading.Thread(target=_add_field_b)
+            thread_b.start()
+            try:
+                assert b_lock_started.wait(timeout=10), "thread B never reached its own LOCK TABLE"
+                assert not b_lock_returned.wait(timeout=0.5), (
+                    "thread B's LOCK TABLE returned while thread A still holds the lock -- "
+                    "the two locks did not conflict (R-35 regression)"
+                )
+            finally:
+                release_a.set()
+                thread_b.join(timeout=10)
+        finally:
+            thread_a.join(timeout=10)
+
+        assert not thread_a.is_alive(), "thread A never finished -- bounded-wait violated"
+        assert not thread_b.is_alive(), "thread B never finished -- bounded-wait violated"
+        assert not a_errors, a_errors
+        assert not b_errors, b_errors
+        assert b_lock_returned.is_set(), "thread B's LOCK TABLE never returned even after release"
+
+        catalog = {e["entity"]: e for e in cell.catalog()}
+        assert {"field_a", "field_b"}.issubset(set(catalog["lockrace"]["fields"])), catalog["lockrace"]
     finally:
         cell.close()
 

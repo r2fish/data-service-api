@@ -899,6 +899,42 @@ class SQLiteBackend:
     def idempotency_count(self):
         return len(self._idempotency)
 
+    # Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d): thin
+    # wrappers -- `cell.py::ApplicationCell._idempotency_check` calls
+    # THESE now, not the three methods directly above. `conn` (code-
+    # review fix F6, Opus review 2, ruled in) is accepted (the
+    # `_idempotency_check` call sites need one uniform signature across
+    # backends) and ignored: this backend has no connection concept at
+    # all (`idempotency_connection` below always returns `None`), and
+    # `ApplicationCell._lock` (an `RLock`, widened by WP-6d/narrowed
+    # again by F5 to cover this method's own caller's ENTIRE lookup ->
+    # execute -> store window for a keyed, real request) already
+    # serializes every concurrent thread sharing this cell -- there is
+    # nothing left for a PostgreSQL-style advisory lock to add on this
+    # backend.
+    def idempotency_connection(self, *, for_developer=False):
+        return None
+
+    def idempotency_begin(self, key, now_ms, retention_ms, *, conn=None, deadline=None):
+        # `deadline` (code-review fix F2, Opus review 2): accepted for
+        # the same uniform-signature reason `conn` is, above, and
+        # ignored identically -- this backend never takes a lock a
+        # deadline could bound.
+        self.idempotency_reap_expired(now_ms, retention_ms)
+        return self.idempotency_get(key)
+
+    def idempotency_reserve(self, *, conn=None, deadline=None):
+        return self.idempotency_count()
+
+    def idempotency_unlock(self, key, *, conn=None):
+        """No-op -- `PostgresBackend`'s own counterpart releases the two
+        session-scoped `pg_advisory_lock`s `idempotency_begin`/
+        `idempotency_reserve` may have taken, on the SAME `conn` handle
+        those methods used (code-review fix F6); this backend never
+        takes any (see `idempotency_begin`'s own comment above), and
+        `conn` is always `None` here regardless of what `idempotency_
+        connection` returns to a caller from this backend."""
+
     def record_idempotency(self, key, digest, response_json, now_ms):
         # `transact()`'s own single-batch path: `ApplicationCell.transact`
         # calls this directly (not through a DDL method's own
