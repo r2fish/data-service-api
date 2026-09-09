@@ -984,7 +984,20 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
                 self._cells.move_to_end(application_id)
                 return cell
 
-            self._service = HttpService(self._gate, _cell_factory, audit_router=self._audit_router)
+            # Phase 10 WP-4g (review F-2 fallout): `limit_holder` -- the
+            # SAME `_LimitStateHolder` every `ApplicationCell` this surface
+            # provisions already shares (`provision_application` above) --
+            # and `max_concurrency` -- this surface's own declared
+            # `self._application_config.max_concurrency` -- mirror `main.
+            # build_app`'s identical wiring (`main.py`'s own comment on its
+            # `HttpService(...)` call), so this adapter's pre-authentication
+            # concurrency admission actually gates on this surface's real
+            # cells instead of being unconstructable (`http.py`'s
+            # fail-closed check).
+            self._service = HttpService(
+                self._gate, _cell_factory, audit_router=self._audit_router,
+                limit_holder=self._limit_holder, max_concurrency=self._application_config.max_concurrency,
+            )
             app = create_app(self._service, request_bytes_limit=1_048_576)
             self._app = app
             self._loop_owner = True
@@ -1794,7 +1807,16 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             iso._cells.move_to_end(application_id)
             return cell
 
-        iso._service = HttpService(iso._gate, _cell_factory, audit_router=iso._audit_router)
+        # Phase 10 WP-4g (review F-2 fallout): same wiring as the shared
+        # surface's own `HttpService(...)` construction above, but with
+        # `iso`'s OWN fresh `_limit_holder` (set above) and `iso`'s OWN
+        # isolated-profile `max_concurrency=3` (`iso._application_config`,
+        # `replace(...)` above) -- never the shared surface's holder or
+        # concurrency value.
+        iso._service = HttpService(
+            iso._gate, _cell_factory, audit_router=iso._audit_router,
+            limit_holder=iso._limit_holder, max_concurrency=iso._application_config.max_concurrency,
+        )
         app = create_app(iso._service, request_bytes_limit=iso._application_config.max_request_bytes)
         iso._app = app
         iso._loop = asyncio.new_event_loop()
