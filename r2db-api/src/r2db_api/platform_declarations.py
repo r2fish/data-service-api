@@ -895,6 +895,234 @@ _CONTRACT_170_ENABLED_CAPABILITIES: tuple[str, ...] = ("constraint_declarations"
 _CONTRACT_170_LIMIT_CLASSES: tuple[str, ...] = ("enum_members", "idempotency_entries", "idempotency_retention_ms")
 
 
+# ---------------------------------------------------------------------------
+# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09, following the WP-4e
+# conformance investigation's own finding -- see that WP's report): every
+# PostgreSQL role this deployment's own processes pool connections against
+# must have a `CONNECTION LIMIT` (`pg_roles.rolconnlimit`) of `-1`
+# (unlimited) or at least that role's own worst-case simultaneous
+# connection count ("pool 合計") -- otherwise a burst of real concurrent
+# requests hits PostgreSQL's own hard `FATAL: too many connections for
+# role` refusal instead of the declared 429/503 the contract promises
+# (WP-4e's own measured `r2dbsvc_controlplane` finding: 4 stores x fixed
+# `pool_size` 4 = 16, against a `CONNECTION LIMIT` of only 10 -- already a
+# real production defect with a single control-plane process, no test
+# harness involved).
+#
+# Role IDENTITY is read from REAL GRANTS (`information_schema.role_table_
+# grants` on the fixed, migration-defined `application_audit`/
+# `control_audit` table names), never from a schema/role-name string-
+# rewrite convention: this module's own header already rejects that
+# technique for writer-role identification (rulings-q4-writer-roles.md,
+# rejected alternative (a)) precisely because it is production-only and
+# breaks under a throwaway-prefixed test fixture -- the SAME reasoning
+# applies here. `application_audit`/`control_audit` are schema-qualified
+# object names fixed by this migration set's own DDL (never deployment-
+# chosen), so querying grants on them is reading real, already-declared
+# database state, not guessing a name.
+#
+# Runtime/developer role names, unlike the platform-plane roles above, ARE
+# read directly off `<schema>.applications` -- also real stored data, not a
+# derived name.
+#
+# Deliberately excludes `r2dbsvc_control` (short-lived, one-shot CLI/
+# provisioning connections only -- no persistent pool, and no stored
+# declaration this check could read to derive a floor for it, the same
+# "out of scope" category as F-1/F-2/F-12, `_verify_declarations_checks`'s
+# own trailing disclosure line). This is an EXPLICIT exclusion
+# (`_table_owner`, below), not merely "no grants match its identity" --
+# `r2dbsvc_control` is the role every migration in this set runs `CREATE
+# TABLE application_audit`/`CREATE TABLE control_audit` AS (0007/0006's
+# own "WHO RUNS THIS" headers), so as the OWNER of both tables it
+# implicitly holds INSERT and SELECT on both without ever appearing as a
+# `grantee` row -- meaning it would otherwise match all three platform-
+# plane role classes below at once (measured 2026-09-10, WP-4 integration
+# review M-1).
+# ---------------------------------------------------------------------------
+
+#: `r2db_api.main`'s own `credentials` + `durable_audit` stores, both
+#: pool-sized to the declared concurrency ceiling and both against
+#: `r2dbsvc_api` (Phase 10 WP-4e) -- identified by `INSERT` on
+#: `application_audit`.
+_API_ROLE_STORE_COUNT = 2
+
+#: `r2db_api.control_main`'s own 4 platform-plane stores (`applications`/
+#: `credentials`/`control_credentials`/`audit`), each a FIXED `pool_size`
+#: of 4 (WP-4e's own investigated-and-reverted default, `build_control_
+#: app`'s own comment) -- NOT concurrency-derived, unlike `r2dbsvc_api`
+#: above. Identified by `INSERT` on `control_audit`.
+_CONTROLPLANE_ROLE_POOL_FLOOR = 16
+
+#: `PostgresAuditQueryStore`'s own single pool, fixed `pool_size` 4
+#: (`credential_store.py`'s own default). Identified by `SELECT` on BOTH
+#: `application_audit` AND `control_audit` (migration 0007's own grant
+#: shape -- no other role holds `SELECT` on either table).
+_AUDITREADER_ROLE_POOL_FLOOR = 4
+
+
+def _roles_with_table_privilege(conn: "psycopg.Connection", schema: str, table: str, privilege: str) -> list[str]:
+    """Every role (`grantee`) actually granted `privilege` on `<schema>.
+    <table>` -- `information_schema.role_table_grants` is a world-readable
+    view (like `pg_db_role_setting`, `_role_setting_rows`'s own comment
+    above): any connection can run this regardless of its own login role.
+    Ordered by `grantee` so callers get deterministic iteration order."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT grantee FROM information_schema.role_table_grants "
+            "WHERE table_schema = %s AND table_name = %s AND privilege_type = %s ORDER BY grantee",
+            [schema, table, privilege],
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def _table_owner(conn: "psycopg.Connection", schema: str, table: str) -> "str | None":
+    """The role that owns `<schema>.<table>` (`pg_tables.tableowner`) --
+    that role implicitly holds every privilege on the table (INSERT,
+    SELECT, ...) without ever appearing as a `grantee` row for a real
+    GRANT, which is exactly the shape `_roles_with_table_privilege` above
+    reads. Used below to keep that owner (the migration-running operator
+    role, e.g. `r2dbsvc_control`) from being misidentified as matching
+    every platform-plane role class at once (M-1, WP-4 integration review
+    2026-09-10). Returns `None` if the table does not exist (a caller
+    scoped to `role_classes={"api"}` or similar, e.g. `r2db_api.main`'s
+    own startup F-16 call, may run before `0007_application_audit.sql`
+    or `0006_control_plane_http.sql` are guaranteed applied against the
+    connection it happens to be given) -- exactly like `_roles_with_table_
+    privilege` above, which already tolerates a missing table by simply
+    returning no rows (`information_schema.role_table_grants` is a plain
+    view; filtering it on a nonexistent table name errors on neither
+    engine). `None` never equals a real role name, so the exclusion
+    checks below simply never match in that case, the same as if this
+    function were never called at all."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT tableowner FROM pg_tables WHERE schemaname = %s AND tablename = %s", [schema, table])
+        row = cur.fetchone()
+        return row[0] if row is not None else None
+
+
+def _f16_message(role: str, current_limit: int, required_floor: int, *, ops_module: str) -> str:
+    return (
+        f"role '{role}' has CONNECTION LIMIT {current_limit}, below its own real pool-composition floor "
+        f"{required_floor} -- a burst of real concurrent requests can hit PostgreSQL's own hard 'too many "
+        f"connections for role' refusal instead of the declared 429/503 the contract promises. Raise it with "
+        f"'ALTER ROLE {role} CONNECTION LIMIT {required_floor};' on the provision DSN for a throwaway/test "
+        f"platform, or a new migration for an already-shipped deployment (never edit a shipped migration file) "
+        f"-- see {ops_module}'s own POSTGRES_PROVISIONING_RUNBOOK.md section 4."
+    )
+
+
+#: The three platform-plane role classes `check_role_connection_limits`
+#: knows how to identify -- a caller narrowing `role_classes` below passes
+#: any subset of this set.
+_ROLE_CLASSES = frozenset({"api", "controlplane", "auditreader"})
+
+
+def check_role_connection_limits(
+    conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int,
+    role_classes: "frozenset[str] | None" = None,
+    application_slugs: "Sequence[str] | None" = None,
+) -> None:
+    """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
+    role (in the deterministic order built below) whose `pg_roles.
+    rolconnlimit` is neither `-1` nor at least its own computed floor.
+    `concurrency` is the caller's own declared per-role pool ceiling
+    (`ResourceLimits.concurrency`/`FoundationConfig.max_concurrency`) --
+    this function takes it as a plain argument rather than constructing
+    its own default instance, so a deployment that has genuinely raised
+    its declared concurrency is checked against ITS OWN real floor, not a
+    silently-stale code-level default.
+
+    Checks exactly the role classes `0013_role_connection_limits.sql`
+    (this peer) / the sibling peer's own same-numbered migration raises:
+    the platform-plane `<...>_api`/`<...>_controlplane`/`<...>_
+    auditreader` roles (module-level floor constants above) and every
+    REGISTERED application's own runtime/developer roles (floor =
+    `concurrency`, one store each, Phase 10 WP-8a). A role with no grants
+    matching any of the three platform-plane shapes above (identity
+    unknown to this check) is silently skipped, never flagged -- this
+    check only ever verifies roles it can positively identify, exactly
+    like every other read in this module never guesses at what it cannot
+    observe.
+
+    Phase 10 WP-4g (supervisor ruling 2026-09-09): `role_classes`/
+    `application_slugs` let a caller narrow this check to exactly the
+    role(s) ITS OWN process pools connections against, instead of every
+    role this whole platform has -- `ops verify-declarations`'s own
+    aggregate call (the pre-existing, unchanged default: both `None`)
+    still checks everything platform-wide, but `r2db_api.main`/`r2db_api.
+    control_main`'s own startup fail-fast calls (added this WP) pass
+    these so an UNRELATED application's or the SIBLING plane's own
+    misconfigured role never blocks a process that never pools a
+    connection against it at all. `role_classes`, when given, is any
+    subset of `{"api", "controlplane", "auditreader"}` (`None` -- the
+    default -- means all three, unchanged pre-existing behavior).
+    `application_slugs`, when given (not `None`), restricts the runtime/
+    developer role check to exactly the named slugs -- an EMPTY sequence
+    means "check no application role at all" (`control_main`'s own case:
+    that process serves no application); `None` (the default) means every
+    registered application, unchanged pre-existing behavior."""
+    if role_classes is None:
+        role_classes = _ROLE_CLASSES
+    floors: dict[str, int] = {}
+    # M-1 (WP-4 integration review 2026-09-10): a role can legitimately
+    # match MORE than one platform-plane class below (a role granted
+    # INSERT on both audit tables, or INSERT on one and SELECT on both,
+    # for example) -- `max(...)` keeps the STRICTEST floor that role is
+    # actually subject to instead of whichever class happened to assign
+    # last. `_table_owner` exclusion keeps the table-owning operator role
+    # (`r2dbsvc_control`, never a real pooled role -- see the module
+    # header above) from being misidentified as matching all three via
+    # its implicit owner ACL.
+    application_audit_owner = _table_owner(conn, schema, "application_audit")
+    control_audit_owner = _table_owner(conn, schema, "control_audit")
+    if "api" in role_classes:
+        for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
+            if role == application_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * concurrency)
+    if "controlplane" in role_classes:
+        for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
+            if role == control_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR)
+    if "auditreader" in role_classes:
+        reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
+        reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
+        for role in sorted(reader_of_application_audit & reader_of_control_audit):
+            if role == application_audit_owner or role == control_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR)
+
+    if application_slugs is None or len(application_slugs) > 0:
+        applications_table = sql.Identifier(schema, "applications")
+        base_statement = "SELECT runtime_role, developer_role FROM {table} WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL"
+        with conn.cursor() as cur:
+            if application_slugs is None:
+                cur.execute(sql.SQL(base_statement + " ORDER BY application_slug").format(table=applications_table))
+            else:
+                cur.execute(
+                    sql.SQL(base_statement + " AND application_slug = ANY(%s) ORDER BY application_slug").format(table=applications_table),
+                    [list(application_slugs)],
+                )
+            for runtime_role, developer_role in cur.fetchall():
+                floors[runtime_role] = concurrency
+                floors[developer_role] = concurrency
+
+    if not floors:
+        return
+    role_names = sorted(floors)
+    with conn.cursor() as cur:
+        cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [role_names])
+        current_limits = dict(cur.fetchall())
+    for role in role_names:
+        current = current_limits.get(role)
+        if current is None or current == -1:
+            continue
+        required = floors[role]
+        if current < required:
+            raise PlatformDeclarationError(_f16_message(role, current, required, ops_module=ops_module), code="F-16")
+
+
 def ops_module_hint() -> str:
     """`PEER_MODULE`, named through a function (not referenced directly by
     `check_contract_170_declarations`'s own f-strings) so this check's
@@ -925,6 +1153,7 @@ __all__ = [
     "Surfaces",
     "check_contract_170_declarations",
     "check_control_surface_consistency",
+    "check_role_connection_limits",
     "check_writer_role_timeouts",
     "derive_visibility_lag_ms",
     "ops_module_hint",

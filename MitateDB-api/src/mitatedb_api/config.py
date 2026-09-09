@@ -262,6 +262,28 @@ class FoundationConfig:
             raise ResourceLimitError("request size limit exceeded", limit_class="request_bytes")
 
 
+def role_pool_size(config: "FoundationConfig") -> int:
+    """Phase 10 WP-4e (supervisor ruling 2026-09-09, 同型 with r2db-api's
+    `r2db_api.limits.role_pool_size`): the platform pool's own floor
+    (`main.py`'s `pool.BoundedConnectionPool`, backing `PostgresCredential
+    Store`'s authentication reads) must be at least the declared `max_
+    concurrency` ceiling -- the SAME reasoning r2db-api's sibling function
+    already documents in full: once concurrent requests' authentication
+    reads can genuinely reach this pool at once (`http.py`'s own
+    `run_in_threadpool` delegation), a pool sized below the declared
+    bound times out waiting for a pooled connection and fails closed with
+    `AUTH_STATE_UNAVAILABLE` well under that bound, instead of a client
+    ever seeing the declared 429 `LIMIT_EXCEEDED` at the real ceiling.
+
+    Unlike r2db-api, this peer's per-application data path is NOT pooled
+    at all (`backend_postgres.PostgresBackend`: two fixed, persistent
+    connections per served application, serialized by `cell.py`'s own
+    request-wide lock, WP-8b) -- there is no per-application counterpart
+    to this function on this peer, only this one platform-pool consumer.
+    """
+    return config.max_concurrency
+
+
 # Phase 9 WP-3d (design D-6, 追補 R-g; 監督裁定集約 rulings-r5-r6.md B-1/
 # B-2/B-5): contract class name -> the `FoundationConfig` field it
 # narrows. Only the three budgetable classes (`limits.request_budget`:

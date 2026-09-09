@@ -31,9 +31,14 @@ import pytest
 
 import mitatedb_api.control_http as control_http_module
 import mitatedb_api.http as http_module
+import mitatedb_api.credential_store_postgres as credential_store_postgres_module
+from mitatedb_api.auth import Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.cell import ApplicationRuntime, _LimitStateHolder
+from mitatedb_api.config import FoundationConfig, role_pool_size
 from mitatedb_api.control_plane import ControlPlaneService
+from mitatedb_api.credential_store_postgres import PostgresCredentialStore
+from mitatedb_api.errors import AuthorizationStateUnavailable
 from mitatedb_api.pool import BoundedConnectionPool
 
 # Fixture reuse (same peer, two test files -- see this module's own
@@ -44,8 +49,13 @@ from mitatedb_api.pool import BoundedConnectionPool
 # transitive set `test_http.py` itself imports, so pytest's fixture
 # resolution finds `platform`/`app_a` from THIS module's own namespace
 # when it resolves `app_a_stack`'s own dependencies for a test here.
+# `credential_app` (also `test_postgres.py`) is this same file's own
+# lightweight "registered application" fixture -- the platform-pool test
+# below only exercises `credentials`/`applications`, never a real
+# per-application database, exactly like every OTHER `credential_app`
+# consumer in `test_postgres.py`.
 from .test_http import BASE_URL, _create_entity, _post, _run, app_a_stack  # noqa: F401
-from .test_postgres import app_a, platform  # noqa: F401
+from .test_postgres import app_a, credential_app, platform  # noqa: F401
 from .test_control_http_unmounted import _service_with_bootstrapped_credential
 # `_run` reused verbatim from `test_http.py`'s own identical `asyncio.run`
 # bridge (imported above) -- `httpx.ASGITransport` only implements the
@@ -965,3 +975,93 @@ def test_pool_acquire_is_thread_safe():
     # own bookkeeping is still exactly correct.
     assert len(created) == n, f"expected exactly {n} fake connections created, got {len(created)}"
     assert pool._created == n, f"expected pool._created == {n}, got {pool._created}"  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 WP-4e (supervisor ruling 2026-09-09, 同型 with r2db-api's own
+# `test_credential_persistence.py::test_platform_pool_sized_to_declared_
+# concurrency_avoids_premature_503`): the platform pool `main.build_app`
+# sizes for `PostgresCredentialStore` used to default to a fixed `pool.
+# DEFAULT_MAX_SIZE` (20), entirely disconnected from the declared `max_
+# concurrency` ceiling (default 32) -- the same F-1 shape as r2db-api's
+# own per-application role pools, applied here to this peer's ONE pooled
+# platform store (`config.role_pool_size`'s own docstring: this peer has
+# no per-application pool to match -- `backend_postgres.PostgresBackend`
+# never pools at all).
+# ---------------------------------------------------------------------------
+
+
+def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(platform, credential_app, monkeypatch):
+    """Real-PostgreSQL pin for WP-4e: with the platform pool sized via
+    `role_pool_size` (the exact function `main.build_app` now calls),
+    `max_concurrency` genuinely concurrent `authenticate()` calls against
+    ONE credential store are all served (0 x `AuthorizationStateUnavailable`
+    denials), even though each call is made to hold its checked-out
+    connection for longer than the pool's own `acquire_timeout`.
+
+    Real PostgreSQL, a real `BoundedConnectionPool` -- only `credential_
+    store_postgres._execute` (this module's own single execution choke
+    point) is monkeypatched to sleep for `hold_s` seconds AFTER the real
+    query runs but BEFORE returning, while `_borrow_connection`'s own
+    `with` block still holds the checked-out real connection -- so
+    `concurrency` threads genuinely contend for the pool's `max_size`
+    slots against a live PostgreSQL server, not a simulation.
+
+    Mutation: hardcoding this test's own `pool` construction back to a
+    fixed `max_size=2` (or `pool.DEFAULT_MAX_SIZE`) regardless of the
+    declared `max_concurrency=6` this test configures turns this red --
+    the 3rd+ concurrent `authenticate()` call then waits past `acquire_
+    timeout` for a connection none of the first two callers have released
+    yet (still sleeping), and raises `AuthorizationStateUnavailable`
+    instead of succeeding.
+    """
+    import concurrent.futures
+    import time
+
+    concurrency = 6
+    hold_s = 0.6
+    config = FoundationConfig(max_concurrency=concurrency)
+    platform_pool_size = role_pool_size(config)
+
+    pool = BoundedConnectionPool(platform.api_dsn, max_size=platform_pool_size, acquire_timeout=0.3)
+    store = PostgresCredentialStore(
+        platform.api_dsn, pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        schema=platform.registry_schema, pool=pool,
+    )
+
+    # `issue()` needs the controlplane (full-DML) role -- `store` above,
+    # against `platform.api_dsn` (SELECT-only, migration 0002), is the
+    # read path this test's own concurrent `authenticate()` calls below
+    # exercise, mirroring r2db-api's identical read/write store split.
+    writer = PostgresCredentialStore(
+        platform.controlplane_dsn, pepper="synthetic-test-pepper-wp4e-platform-pool-0000",
+        schema=platform.registry_schema,
+    )
+    try:
+        _credential_id, secret = writer.issue(credential_app, Role.RUNTIME)
+    finally:
+        writer.close()
+
+    original_execute = credential_store_postgres_module._execute
+
+    def _slow_execute(cursor, statement, params=()):
+        original_execute(cursor, statement, params)
+        time.sleep(hold_s)
+
+    monkeypatch.setattr(credential_store_postgres_module, "_execute", _slow_execute)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [executor.submit(store.authenticate, secret) for _ in range(concurrency)]
+            results = []
+            denials = []
+            for future in futures:
+                try:
+                    results.append(future.result(timeout=10))
+                except AuthorizationStateUnavailable as exc:
+                    denials.append(exc)
+        assert not denials, f"expected 0 AuthorizationStateUnavailable denials at in-flight == declared concurrency, got: {denials!r}"
+        assert len(results) == concurrency
+        assert all(principal.application_id == credential_app for principal in results)
+    finally:
+        store.close()

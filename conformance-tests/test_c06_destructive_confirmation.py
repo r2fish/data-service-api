@@ -1156,11 +1156,16 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # CURRENT expectation -- stale since WP-5 flipped it (the code below
 # already reflected the flip; only this prose lagged, exactly the kind of
 # drift this vacuity guard exists to catch in the DECLARATION, not to
-# accumulate in its own commentary). All four registered adapters
-# (`r2db-api`, `r2db-api-http` since WP-3; `MitateDB-api` since WP-5;
-# `MitateDB-api-http` since its own registration) declare a
-# `contract_version` >= 1.2.0 and take the strict branch; no adapter takes
-# the baseline branch. This is deliberately a
+# accumulate in its own commentary). All six registered adapters
+# (`r2db-api`, `r2db-api-http` since WP-3; `r2db-api-socket` since Phase
+# 10 WP-4 -- it subclasses `R2DBHttpConformanceAdapter` and never overrides
+# `capability_document()`, so it inherits the same declared
+# `contract_version` and takes the same branch as `r2db-api-http`;
+# `MitateDB-api` since WP-5; `MitateDB-api-http` since its own
+# registration; `MitateDB-api-socket` since Phase 10 WP-4, likewise
+# inheriting `MitateDBHttpConformanceAdapter`'s declaration verbatim)
+# declare a `contract_version` >= 1.2.0 and take the strict branch; no
+# adapter takes the baseline branch. This is deliberately a
 # literal, hardcoded expectation, not derived from anything computed below:
 # a future <1.2.0 peer's registration, or any peer's own version flip, MUST
 # update these two sets in the SAME commit as that change, or this test
@@ -1171,7 +1176,10 @@ def test_c06_v8_no_payload_echo_in_declarations(adapter, fx: Fixture):
 # field), matching `test_c11`/`test_c12`'s own convention -- NOT each
 # adapter object's own `.name` property (`"r2db-api (http+postgres)"` for
 # the HTTP plug, used elsewhere in this file for diagnostic messages only).
-_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({"r2db-api", "r2db-api-http", "MitateDB-api", "MitateDB-api-http"})
+_EXPECTED_STRICT_ADAPTER_NAMES: frozenset[str] = frozenset({
+    "r2db-api", "r2db-api-http", "r2db-api-socket",
+    "MitateDB-api", "MitateDB-api-http", "MitateDB-api-socket",
+})
 _EXPECTED_BASELINE_ADAPTER_NAMES: frozenset[str] = frozenset()
 
 

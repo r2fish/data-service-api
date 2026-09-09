@@ -55,7 +55,8 @@ from mitatedb_api.auth import CredentialStore, Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.backend_sqlite import SQLiteBackend
 from mitatedb_api.cell import (ApplicationCell, ApplicationDeveloper,
-                               ApplicationRuntime, Filter, _delete_confirmation_phrase)
+                               ApplicationRuntime, Filter, _delete_confirmation_phrase,
+                               _LimitStateHolder)
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import (AuditSinkUnavailable, AuthenticationError,
@@ -81,6 +82,15 @@ MIGRATION_NAMES = (
     "0003_provision_application.sql",
     "0004_deprovision_application.sql",
     "0005_application_audit.sql",
+    # Phase 10 WP-4g (supervisor ruling 2026-09-09): `mitatedb_api.main.
+    # build_app`/`mitatedb_api.control_composition.build_control_service`
+    # now run F-16 (this process' own role CONNECTION LIMIT)
+    # unconditionally at startup -- applied in the fixture right after
+    # 0002 (before 0005), same reasoning as 0007 immediately below: it
+    # only `ALTER`s 0002's own two roles (no GRANT statements of its own),
+    # so running it before `grant_snapshot_before_0005` is captured does
+    # not affect that snapshot comparison's own meaning.
+    "0012_role_connection_limits.sql",
     # Q4 phase (design D-1/D-2, work order §4 WP-2): platform declarations
     # table + the two service writer roles' timeout role settings. Applied
     # in the fixture right after 0002 (before 0005) -- it only depends on
@@ -242,6 +252,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
                 cur.execute(sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
         finally:
             admin.close()
+        _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         surfaces_conn = psycopg.connect(provision_dsn, autocommit=True)
@@ -854,6 +865,63 @@ def test_build_app_checks_the_env_mapping_argument_not_os_environ(
     monkeypatch.setenv("MITATEDB_DATA_BASE_URL", "https://this-must-never-be-read.example.invalid/v1")
     with _closing_build_app(main_module, env, monkeypatch):
         pass  # must not raise -- os.environ pollution above is never read
+
+
+def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor(
+    platform: types.SimpleNamespace, timeout_probe_app: types.SimpleNamespace,
+    main_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric with
+    r2db-api's own same-numbered test): F-16 is not only an `ops
+    verify-declarations` check (WP-4f) -- `mitatedb_api.main.build_app`
+    itself now fails fast on the SAME condition at real startup, scoped to
+    exactly the role THIS process' own pool composition uses (`platform.
+    api_role`, the `mitatedbsvc_api`-class role identified here by its own
+    real `INSERT` grant on `application_audit`, migration `0005` -- this
+    file's own `platform` fixture, unlike `test_main.py`'s/`test_postgres.
+    py`'s, always applies it). Lowering it back below its own real floor
+    (2 stores x concurrency 32 = 64) -- exactly the pre-`0012_role_
+    connection_limits.sql` state every platform was in before Phase 10
+    WP-4f -- must raise, never silently start a process that can hit
+    PostgreSQL's own hard 'too many connections for role' refusal under
+    real concurrent traffic. Restores the migration-seeded limit (68) in a
+    `finally` so this shared, module-scoped `platform` fixture is left
+    healthy for every other test in this file."""
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _APP_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+        "MITATEDB_SERVE_APPS": timeout_probe_app.app_id,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_RUNTIME_DSN": timeout_probe_app.runtime_dsn,
+        f"MITATEDB_APP_{timeout_probe_app.app_id.upper()}_DEVELOPER_DSN": timeout_probe_app.developer_dsn,
+        # This file's own `platform` fixture seeds `surfaces` WITH a
+        # `control` half (`_CONTROL_BASE_URL`) -- F-6 requires this
+        # process to agree by declaring itself `enabled`, never the
+        # default `unavailable` (mirrors `test_build_app_wires_the_real_
+        # writer_connection_to_the_declared_role_setting`'s own `_env`
+        # helper immediately above).
+        "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+    }
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 20").format(sql.Identifier(platform.api_role)))
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError, match="F-16|CONNECTION LIMIT"):
+            main_module.build_app(env)
+    finally:
+        with psycopg.connect(platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 68").format(sql.Identifier(platform.api_role)))
+            conn.commit()
+        # Non-空振り: proves the restore above is really what makes
+        # `build_app` healthy again -- a mutation that silently drops the
+        # new startup check would make BOTH the `pytest.raises` above AND
+        # this call succeed, but a mutation that left the check
+        # permanently broken (e.g. caching the FIRST observed limit) would
+        # fail here instead.
+        with _closing_build_app(main_module, env, monkeypatch):
+            pass
 
 
 def test_build_control_app_wires_the_real_control_audit_connection_to_the_declared_role_setting(
@@ -2538,7 +2606,16 @@ def test_auth_required_is_durably_recorded() -> None:
 
     sink = ApplicationAuditSink()
     router = make_router(sink)
-    service = HttpService(CredentialStore("x" * 16), lambda application_id: None, audit_router=router)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): `HttpService`
+    # now fails closed at construction time unless BOTH `limit_holder`/
+    # `max_concurrency` are supplied (`http.py::HttpService.__init__`'s own
+    # comment) -- this test never calls `acquire_concurrency_slot`, only
+    # `authenticate`, so the concrete values below are never exercised,
+    # but construction itself still requires them.
+    service = HttpService(
+        CredentialStore("x" * 16), lambda application_id: None, audit_router=router,
+        limit_holder=_LimitStateHolder(), max_concurrency=FoundationConfig().max_concurrency,
+    )
     with pytest.raises(Exception):  # `http._CredentialMissing`, a private class
         service.authenticate(None, request_id="req-probe")
     events = sink.events()

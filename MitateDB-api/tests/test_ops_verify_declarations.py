@@ -37,7 +37,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Json
 
 import mitatedb_api.ops as ops
-from mitatedb_api.platform_declarations import PlatformDeclarationError
+from mitatedb_api.platform_declarations import PlatformDeclarationError, check_role_connection_limits
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 ADMIN_DSN_ENV = "MITATEDB_TEST_ADMIN_DSN"
@@ -47,6 +47,15 @@ MIGRATION_NAMES = (
     "0001_bootstrap_platform.sql",
     "0002_registry_and_functions.sql",
     "0005_application_audit.sql",
+    # Phase 10 WP-4f (supervisor ruling 2026-09-09; peer-symmetric with
+    # r2db-api's own `0013_role_connection_limits.sql`): raises
+    # `mitatedbsvc_api`/`mitatedbsvc_controlplane`'s own `CONNECTION
+    # LIMIT`. Inserted here (before 0007, not appended at the tuple's own
+    # end) so `MIGRATION_NAMES_WITHOUT_DECLARATIONS`'s own `[:-2]` slice
+    # below still drops exactly `{0007, 0011}`, unchanged (this file's own
+    # isomorphism-pinned symbol, `tests/test_audit_query.py::
+    # _ISOMORPHIC_TARGETS`).
+    "0012_role_connection_limits.sql",
     "0007_platform_declarations.sql",
     # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
     # key`'s own CHECK constraint to accept `process_ceilings`. `_bootstrap`
@@ -148,6 +157,11 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
     provision_dsn = _dsn_with(admin_dsn, user=provision_role, password=provision_password, dbname=platform_db)
     _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+    # Phase 10 WP-4f: unconditional, like 0002/0005 above -- depends only
+    # on those two (never on 0007/0011), so it always runs here regardless
+    # of which fixture variant (`MIGRATION_NAMES` vs `MIGRATION_NAMES_
+    # WITHOUT_DECLARATIONS`) called this function.
+    _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
     if "0007_platform_declarations.sql" in rewritten:
         _run_psql(
             provision_dsn,
@@ -181,6 +195,7 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
         api_role=api_role, api_password=api_password, api_dsn=_dsn_with(admin_dsn, user=api_role, password=api_password, dbname=platform_db),
         controlplane_role=controlplane_role, controlplane_password=controlplane_password,
         platform_db=platform_db, schema=schema,
+        role_connection_limits_sql=rewritten["0012_role_connection_limits.sql"],
     )
 
 
@@ -596,3 +611,196 @@ def test_verify_declarations_f14_passes_when_every_application_has_applied_every
     rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
     out = capsys.readouterr().out
     assert rc == 0, out
+
+
+# ===========================================================================
+# H-1 non-regression (WP-4 integration review 2026-09-10): unlike
+# r2db-api's own `0013_role_connection_limits.sql`, MitateDB-api's
+# `0012_role_connection_limits.sql` section 2 already filtered
+# `runtime_role`/`developer_role IS NOT NULL` from the start (the review's
+# own finding) -- this pins that correct behavior directly, peer-symmetric
+# with r2db-api's own `test_0013_migration_tolerates_a_registered_only_
+# application_...` test, so a future edit cannot silently regress it.
+# ===========================================================================
+
+
+def test_0012_migration_tolerates_a_registered_only_application_and_still_raises_a_provisioned_applications_role_limits(
+    platform: types.SimpleNamespace,
+) -> None:
+    """H-1 non-regression, peer-symmetric (WP-4 integration review
+    2026-09-10): a registered-but-not-provisioned application row (`mitatedb_
+    registry.applications` two-state registry, 0002's own header -- a row
+    with `runtime_role`/`developer_role` still NULL) must not stop
+    `0012_role_connection_limits.sql` section 2 from raising a REAL
+    provisioned application's own role limits when re-applied (idempotent
+    by design). This uses this file's own function-scoped `platform`
+    fixture (not a module-scoped one shared with other tests' own
+    synthetic rows) so the only `applications` rows present are the two
+    this test itself inserts.
+
+    Mutation: reintroduce r2db-api's own pre-fix bug here too (drop the
+    `WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL` filter
+    from section 2) -> this test's `_run_psql` call raises `RuntimeError`
+    ("...null values cannot be formatted as an SQL identifier...")."""
+    registered_id = f"regonly{secrets.token_hex(3)}"
+    with psycopg.connect(platform.provision_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("INSERT INTO {table} (application_id) VALUES (%s)").format(table=sql.Identifier(platform.schema, "applications")),
+                [registered_id],
+            )
+        conn.commit()
+
+    provisioned_id = "regonlyprov"
+    _provision_app_for_verify(platform, provisioned_id)
+    database = f"{platform.prefix}_app_{provisioned_id}"
+    # `mitatedb_registry.begin_provision_application`'s own naming (0002):
+    # `<database>_rt` / `<database>_dv`, unlike r2db-api's own `_runtime`/
+    # `_developer` suffixes.
+    runtime_role = f"{database}_rt"
+    developer_role = f"{database}_dv"
+
+    _run_psql(platform.provision_dsn, platform.role_connection_limits_sql)
+
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolname, rolconnlimit FROM pg_roles WHERE rolname = ANY(%s)", [[runtime_role, developer_role]])
+            limits = dict(cur.fetchall())
+    assert limits[runtime_role] == 36, limits
+    assert limits[developer_role] == 36, limits
+
+
+# ===========================================================================
+# F-16 (Phase 10 WP-4f, supervisor ruling 2026-09-09; peer-symmetric with
+# r2db-api's own same-numbered test): every role this deployment pools
+# connections against has a CONNECTION LIMIT of -1 or at least its own real
+# pool-composition floor -- `0012_role_connection_limits.sql` (already
+# applied unconditionally by `_bootstrap` above) is what makes the POSITIVE
+# case real: before that migration, `mitatedbsvc_api`'s own CONNECTION
+# LIMIT (20) already sat below its own floor (64), so F-16 would fail on
+# every freshly-bootstrapped platform, not just the mutated one below.
+# ===========================================================================
+
+
+def test_verify_declarations_f16_passes_after_migration_0012(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Positive control: a freshly bootstrapped platform (migration 0012
+    already applied by `_bootstrap`, one real provisioned application so
+    its own runtime/developer roles exist too) passes F-16 -- proving the
+    FAIL test below is really about the lowered CONNECTION LIMIT, not some
+    other difference between the two fixtures."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf16ok")
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "OK   F-16" in out, out
+
+
+def test_verify_declarations_f16_fails_when_a_role_connection_limit_is_lowered_below_its_pool_composition_floor(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real mutation this check exists to catch: an operator (or a
+    future migration regression) lowers `mitatedbsvc_api`'s own CONNECTION
+    LIMIT back below its own real pool-composition floor (2 stores x
+    concurrency 32 = 64) -- here, back to `0002_registry_and_functions.
+    sql`'s own pre-WP-4f value (20), simulating exactly the state every
+    platform was in before migration 0012 existed. `ops verify-
+    declarations` must exit non-zero (F-16's own exit code, 15) and name
+    the role, its current limit, and the required floor -- never a silent
+    `OK F-16`."""
+    _set_row(platform, "surfaces", {"data": {"base_url": _DATA_URL}})
+    _declare_provision_role_as_the_writer(platform)
+    _provision_app_for_verify(platform, "verifyf16bad")
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 20").format(sql.Identifier(platform.api_role)))
+        conn.commit()
+    rc = _run_verify(monkeypatch, dsn=platform.provision_dsn, schema=platform.schema)
+    out = capsys.readouterr().out
+    assert rc == 15
+    assert "FAIL F-16" in out, out
+    assert platform.api_role in out, out
+    assert "CONNECTION LIMIT 20" in out, out
+    assert "64" in out, out
+
+
+def test_f16_floor_for_a_role_matching_multiple_classes_is_the_max_not_the_last_assigned(
+    platform: types.SimpleNamespace,
+) -> None:
+    """M-1 (WP-4 integration review 2026-09-10, peer-symmetric with
+    r2db-api's own same-named test): `check_role_connection_limits`'s own
+    `floors` dict previously did plain `floors[role] = N` for each of the
+    three platform-plane classes in turn (api, controlplane, auditreader,
+    in that order) -- a role granted matching privileges under MORE than
+    one class silently ended up with whichever class's floor was assigned
+    LAST (auditreader's, the smallest: 4), not the largest floor it is
+    actually subject to. This pins the fix with a synthetic role that is
+    NOT the schema-owning role (so the separate owner-exclusion this same
+    fix adds, tested below, cannot mask this arithmetic bug): granted
+    INSERT on both audit tables (api class, floor 2 x 32 = 64;
+    controlplane class, floor 16) and SELECT on both (auditreader class,
+    floor 4). The correct required floor is max(64, 16, 4) = 64 -- with
+    the pre-fix last-write-wins bug, the computed floor would be 4, and
+    this role's own CONNECTION LIMIT (10) would satisfy that, so
+    `check_role_connection_limits` would NOT raise at all (this test would
+    fail to see the expected `PlatformDeclarationError`)."""
+    role = f"{platform.prefix}_multiclass"
+    platform_dsn = _dsn_with(platform.admin_dsn, dbname=platform.platform_db)
+    with psycopg.connect(platform_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("CREATE ROLE {} LOGIN CONNECTION LIMIT 10").format(sql.Identifier(role)))
+            for table in ("application_audit", "control_audit"):
+                cur.execute(
+                    sql.SQL("GRANT INSERT, SELECT ON {} TO {}").format(sql.Identifier(platform.schema, table), sql.Identifier(role))
+                )
+        conn.commit()
+    try:
+        with psycopg.connect(platform.provision_dsn) as conn:
+            with pytest.raises(PlatformDeclarationError) as excinfo:
+                check_role_connection_limits(conn, schema=platform.schema, ops_module="test", concurrency=32, application_ids=())
+        assert excinfo.value.code == "F-16"
+        message = str(excinfo.value)
+        assert role in message, message
+        assert "CONNECTION LIMIT 10" in message, message
+        assert "64" in message, message
+    finally:
+        with psycopg.connect(platform_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+            conn.commit()
+        with psycopg.connect(platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+            conn.commit()
+
+
+def test_f16_the_schema_owning_role_is_never_flagged_even_though_it_matches_every_class(
+    platform: types.SimpleNamespace,
+) -> None:
+    """M-1 (WP-4 integration review 2026-09-10, peer-symmetric with
+    r2db-api's own same-named test): `platform.provision_role` (the role
+    every migration in this fixture runs AS, hence the OWNER of both
+    `application_audit`/`control_audit`) genuinely holds explicit INSERT
+    on both tables (0002/0005's own break-glass CLI grants) AND, as owner,
+    an implicit SELECT on both -- matching all three platform-plane
+    classes at once. It is not a real pooled role (module header's own
+    "Deliberately excludes" note) and must never be floor-checked at all,
+    regardless of its own real `CONNECTION LIMIT` (5, `0001_bootstrap_
+    platform.sql`'s own value, never raised by 0012). This pins that
+    exclusion directly: lowering it even further (to 1, well below every
+    floor constant) must still not raise."""
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 1").format(sql.Identifier(platform.provision_role)))
+        conn.commit()
+    try:
+        with psycopg.connect(platform.provision_dsn) as conn:
+            check_role_connection_limits(conn, schema=platform.schema, ops_module="test", concurrency=32, application_ids=())
+    finally:
+        with psycopg.connect(platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 5").format(sql.Identifier(platform.provision_role)))
+            conn.commit()

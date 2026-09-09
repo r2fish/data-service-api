@@ -97,7 +97,19 @@ _CAPABILITY_CONDITIONED = {
 # outcome for a required-entry set (監督裁定: 不実施の選択肢は採らない).
 _CONTROL_REQUIRED_FIXED = ("applications", "credentials_per_application", "control_requests_per_minute")
 
-_ALL_PLUG_NAMES = ("r2db-api", "r2db-api-http", "MitateDB-api", "MitateDB-api-http")
+# WP-4c (2026-09-08): updated from the original 4-plug tuple to the
+# current 6-plug registry (`r2db-api-socket`/`MitateDB-api-socket` added
+# by WP-4a/WP-4b). Still a STATIC pin, not derived from `registered_
+# adapters()` -- design D-6.1 V3/禁止事項 3 requires V3's own parametrize
+# base to be a literal tuple asserted (below, in `test_c05_all_plug_
+# names_match_the_registry`) against the live registry, precisely so a
+# plug rename/removal/addition that this tuple is NOT updated to match
+# is caught as a mismatch rather than silently narrowing (or padding)
+# V3's own coverage to whatever the registry happens to contain.
+_ALL_PLUG_NAMES = (
+    "r2db-api", "r2db-api-http", "r2db-api-socket",
+    "MitateDB-api", "MitateDB-api-http", "MitateDB-api-socket",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +442,27 @@ def _drive_requests_per_minute(adapter: ConformanceAdapter) -> bool:
         # earlier peer-name pin (`adapter.name == "r2db-api
         # (http+postgres)"`) is reverted to the general, transport-keyed
         # check it replaced.
-        already_consumed = 1 if "http" in adapter.name else 0
+        #
+        # WP-4c rework (監督裁定 wp4b-rulings.md 項 1, `OPERATING_
+        # CONDITIONS.md` §1.7 の 52 -- 代理指標を使わない): `"http" in
+        # adapter.name` was itself still a NAME-based proxy for the real
+        # property this correction depends on -- whether `authenticate()`
+        # makes a REAL wire round trip through the SAME rate-limited
+        # `_slot`/`_acquire_rate` path, which is a fact about the
+        # adapter's TRANSPORT, not its name. `r2db-api-socket`/`MitateDB-
+        # api-socket` (real TCP through nginx + uvicorn) make exactly the
+        # same real `GET /v1/capabilities` round trip an HTTP plug does,
+        # but their registry names contain no `"http"` substring at all
+        # (`"r2db-api-socket"`, `"MitateDB-api-socket"`) -- so the old
+        # name-based proxy was ALREADY WRONG for the socket plugs
+        # (`already_consumed` silently stayed `0`, undercounting by
+        # exactly the 1 unit `authenticate()` really consumes, producing
+        # `expected 50, got 49` on socket plugs). The property that
+        # actually decides this is `adapter.transport_kind`: `"asgi"`
+        # (existing HTTP plugs) and `"socket"` (new real-TCP plugs) both
+        # go through real wire framing for `authenticate()`'s `GET /v1/
+        # capabilities`; `"in_process"` does not.
+        already_consumed = 1 if adapter.transport_kind in ("asgi", "socket") else 0
         expected_successes = bound - already_consumed
 
         successes = 0
@@ -771,9 +803,13 @@ def test_c05_all_plug_names_match_the_registry() -> None:
     renamed, removed, or added without this tuple being updated to match
     -- the same "pin the constant, don't just trust it" rationale as
     `test_c05_fixed_nine_is_pinned` above, applied to the OTHER static
-    base this file hard-codes."""
+    base this file hard-codes.
+
+    WP-4c (2026-09-08): updated 4 -> 6 for the `r2db-api-socket`/
+    `MitateDB-api-socket` plugs WP-4a/WP-4b registered (design §6.1's own
+    6-plug registry table)."""
     assert frozenset(_ALL_PLUG_NAMES) == frozenset(registered_adapters().keys())
-    assert len(_ALL_PLUG_NAMES) == 4
+    assert len(_ALL_PLUG_NAMES) == 6
 
 
 # Phase 8 WP-1 rework 3 (裁定 1, 監督裁定 2026-09-07): the sentence below is
@@ -932,29 +968,34 @@ def test_c05_v2_declaration_and_position_agree(adapter: ConformanceAdapter) -> N
 # ---------------------------------------------------------------------------
 # L7-21 (Phase 8 WP-1b, R-C, design D-2 実装の形 (c)): peer-name-gated
 # drive-or-not is closed as a STATIC property of this module's own source,
-# not merely an absence observed at runtime on the currently-registered 4
-# plugs. Two propositions, each its own test (design's own instruction:
-# do NOT collapse this into "zero `adapter.name.startswith(` in the whole
-# file" -- that form would also flag the 3 allowlisted, genuinely
-# peer-specific FACTS below, none of which decide "drive or not").
+# not merely an absence observed at runtime on the currently-registered
+# plugs (6 as of WP-4c). Two propositions, each its own test (design's
+# own instruction: do NOT collapse this into "zero `adapter.name.
+# startswith(` in the whole file" -- that form would also flag the 2
+# allowlisted, genuinely peer-specific FACTS below, none of which decide
+# "drive or not").
 # ---------------------------------------------------------------------------
 
 # The allowlist (design D-2 実装の形 (c) 表, WP-1b): every remaining
 # `adapter.name` READ in this module that survives after `_drive_result_
 # items`'/`_drive_query_complexity`'s own peer-name exclusions are
 # removed (this WP) and `test_c05:646-659`'s V1 statistical control is
-# removed (WP-1a) -- 3 functions, each reading `adapter.name` for a
-# genuine peer-specific FACT (a counting rule, a transport-specific
-# already-consumed correction, an observation-mechanism difference),
-# never to decide whether a class is driven at all.
+# removed (WP-1a) -- 2 functions, each reading `adapter.name` for a
+# genuine peer-specific FACT (a counting rule, an observation-mechanism
+# difference), never to decide whether a class is driven at all.
+#
+# WP-4c rework (監督裁定 wp4b-rulings.md 項 1): `_drive_requests_per_
+# minute` is REMOVED from this allowlist -- its own `already_consumed`
+# correction no longer reads `adapter.name` at all (it reads `adapter.
+# transport_kind`, a non-name property; see that function's own updated
+# comment). Leaving a stale entry here would fail this module's own
+# `test_c05_l7_21_adapter_name_reads_are_allowlisted` second assertion
+# (every allowlist entry must be backed by a real-code `adapter.name`
+# match).
 _ADAPTER_NAME_READ_ALLOWLIST = {
     "_schema_objects_unit_cost": (
         "peer ごとの実測計数規則 (r2db は entity+field 数で 3、MitateDB は table 1 個で 1) -- "
         "駆動可否ではなく期待値の計算である"
-    ),
-    "_drive_requests_per_minute": (
-        "HTTP plug の authenticate() が同じ rate 窓を1単位消費することの補正 (already_consumed) -- "
-        "駆動可否ではなく観測位置の補正である (transport-specific, peer非依存)"
     ),
     "test_c05_e_isolated_application_surface_releases_resources": (
         "MitateDB in-process (SQLite) 固有の資源解放観測経路 -- 駆動可否ではなく観測手段の違いである"

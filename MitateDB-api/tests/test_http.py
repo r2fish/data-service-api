@@ -26,7 +26,8 @@ from mitatedb_api.application_audit import ApplicationAuditSink
 from mitatedb_api.audit_dispatch import AuditRouter
 from mitatedb_api.auth import Role
 from mitatedb_api.backend_postgres import PostgresBackend
-from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime
+from mitatedb_api.cell import ApplicationCell, ApplicationDeveloper, ApplicationRuntime, _LimitStateHolder
+from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import CapabilityError, ResourceLimitError, ValidationError
 from mitatedb_api.http import PROBLEM_CONTENT_TYPE, HttpService, _problem_for_exception, create_app
@@ -69,13 +70,21 @@ def app_a_stack(platform, app_a):
         platform.controlplane_dsn, pepper="synthetic-test-pepper-mitatedb-http-0000", schema=platform.registry_schema,
     )
     backend = PostgresBackend(app_a.runtime_dsn, app_a.developer_dsn)
-    cell = ApplicationCell(app_a.app_id, backend=backend)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): `HttpService`
+    # now fails closed at construction time unless BOTH `limit_holder`/
+    # `max_concurrency` are supplied (`http.py::HttpService.__init__`'s own
+    # comment) -- an explicit `_LimitStateHolder`, shared with `cell` below
+    # (never each side building its own private one), and this file's own
+    # `FoundationConfig` default (32), matching `ApplicationCell`'s own
+    # implicit default when no `config` is passed.
+    limit_holder = _LimitStateHolder()
+    cell = ApplicationCell(app_a.app_id, backend=backend, limit_holder=limit_holder)
 
     def _cell_factory(application_id: str) -> ApplicationCell:
         assert application_id == app_a.app_id
         return cell
 
-    service = HttpService(read_store, _cell_factory)
+    service = HttpService(read_store, _cell_factory, limit_holder=limit_holder, max_concurrency=FoundationConfig().max_concurrency)
     app = create_app(service, request_bytes_limit=1024)
 
     # Phase 6 WP-3 (design D-1(d)): `PostgresCredentialStore.issue` now
@@ -126,13 +135,17 @@ def app_a_stack_with_audit(platform, app_a):
     )
     backend = PostgresBackend(app_a.runtime_dsn, app_a.developer_dsn)
     router = AuditRouter(ApplicationAuditSink())
-    cell = ApplicationCell(app_a.app_id, backend=backend, audit_router=router)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): same
+    # fail-closed `HttpService` requirement `app_a_stack` above already
+    # documents -- an explicit, shared `_LimitStateHolder`.
+    limit_holder = _LimitStateHolder()
+    cell = ApplicationCell(app_a.app_id, backend=backend, audit_router=router, limit_holder=limit_holder)
 
     def _cell_factory(application_id: str) -> ApplicationCell:
         assert application_id == app_a.app_id
         return cell
 
-    service = HttpService(read_store, _cell_factory)
+    service = HttpService(read_store, _cell_factory, limit_holder=limit_holder, max_concurrency=FoundationConfig().max_concurrency)
     app = create_app(service, request_bytes_limit=1024)
 
     runtime_id, runtime_bearer = write_store.issue(app_a.app_id, Role.RUNTIME)
@@ -266,7 +279,12 @@ def test_authorization_state_unavailable_is_reported(app_a_stack):
     def _cell_factory(application_id: str):  # pragma: no cover - never reached
         raise AssertionError("unreachable store must fail before any cell lookup")
 
-    service = HttpService(unreachable, _cell_factory)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): same
+    # fail-closed `HttpService` requirement `app_a_stack` above documents
+    # -- this test's own `_cell_factory` is never reached (the store fails
+    # first), so the concrete `_LimitStateHolder` given here is never
+    # exercised either, but `HttpService.__init__` still requires one.
+    service = HttpService(unreachable, _cell_factory, limit_holder=_LimitStateHolder(), max_concurrency=FoundationConfig().max_concurrency)
     app = create_app(service, request_bytes_limit=1024)
 
     async def _call():

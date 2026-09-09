@@ -66,6 +66,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+import httpx
 import pytest
 
 from adapter import (
@@ -101,6 +102,52 @@ def _unclassified_hint(code: str) -> str:
 def _assert_is_contract_code(code: str) -> None:
     contract_codes = load_contract_error_codes()
     assert code in contract_codes, f"denial code {code!r} is not a contract error code{_unclassified_hint(code)}"
+
+
+def _is_wire_rejection(adapter, exc: BaseException) -> bool:
+    """WP-4c (design D-3, 監督裁定 scratchpad/phase10/wp4b-rulings.md 項 4);
+    narrowed M-2 (WP-4 integration review 2026-09-10): true only for a
+    `transport_kind == "socket"` plug, when `exc` is either (a) a raw
+    `httpx.LocalProtocolError` the CLIENT ITSELF raised before ever
+    sending the request at all -- the motivating case is
+    `test_c15_no_default_credential`'s own empty-string guessable secret
+    below: an empty bearer makes the Authorization header value `"Bearer
+    "` (trailing whitespace), which h11's own local header-value
+    validation refuses to frame at all (`httpx.LocalProtocolError:
+    Illegal header value b'Bearer '`) -- or (b) a `ConformanceDenial`
+    whose code is `UNCLASSIFIED` (a non-`application/problem+json` HTTP
+    failure: h11/uvicorn's own generic 4xx page, emitted before the app
+    ever runs).
+
+    Deliberately NOT the broader `httpx.HTTPError` base class: that also
+    covers `httpx.ConnectError`/`httpx.ReadTimeout`/`httpx.
+    RemoteProtocolError` -- real network failures raised when the peer
+    (uvicorn/nginx) is unreachable or hangs, not a client-side framing
+    refusal. Treating those as a "wire rejection" would make an entire
+    guessed-secret probe loop pass vacuously the instant the socket plug's
+    upstream goes down, instead of surfacing the real outage as a test
+    failure (measured 2026-09-10: an unreachable port makes every
+    `httpx.ConnectError` in this file's own loops silently count as a
+    rejection). `httpx.LocalProtocolError` is raised by httpx's own h11
+    encoder before any byte reaches the network, so it can never be
+    confused with an unreachable-peer condition.
+
+    Every bogus-secret probe in this file's own callers carries the
+    secret in the Authorization HEADER, never in a JSON body field, so --
+    unlike `test_c03_structured_injection.py`'s identically-named helper,
+    which must also check the identifier POSITION -- this one only needs
+    to check transport + exception shape. See `test_c15_wire_rejection_
+    requires_socket_transport` for the mutation pin (a non-socket plug,
+    or a `ConformanceDenial` with a real contract code, must never take
+    this branch) and `test_c15_wire_rejection_never_applies_to_a_reachability_failure`
+    for the M-2 pin (an upstream-down `httpx.HTTPError` subclass other
+    than `LocalProtocolError` must never take this branch).
+    """
+    if getattr(adapter, "transport_kind", None) != "socket":
+        return False
+    if isinstance(exc, ConformanceDenial):
+        return exc.code == UNCLASSIFIED
+    return isinstance(exc, httpx.LocalProtocolError)
 
 
 def _control_plane_status(adapter) -> str:
@@ -510,17 +557,115 @@ def test_c15_no_default_credential(adapter, fx: Fixture):
     existing_ref = adapter.control_credential().credential_ref
     for secret in (*guessable_secrets, application_secret):
         bogus_actor = ControlCredentialHandle(credential_ref=existing_ref, secret=secret)
-        with pytest.raises(ConformanceDenial) as ei:
+        try:
             adapter.control_capabilities(bogus_actor)
-        _assert_is_contract_code(ei.value.code)
-        assert ei.value.code in _FAIL_CLOSED_CODES, (
-            f"{adapter.name}: guessable/foreign secret {secret!r} authenticated against the control plane -- "
-            f"got {ei.value.code!r} instead of one of {sorted(_FAIL_CLOSED_CODES)!r}"
-        )
+        except ConformanceDenial as denial:
+            if _is_wire_rejection(adapter, denial):
+                # WP-4c (裁定 4): h11/uvicorn refused this on the wire,
+                # before the app ran -- there is no app-authored contract
+                # code to check here.
+                continue
+            _assert_is_contract_code(denial.code)
+            assert denial.code in _FAIL_CLOSED_CODES, (
+                f"{adapter.name}: guessable/foreign secret {secret!r} authenticated against the control "
+                f"plane -- got {denial.code!r} instead of one of {sorted(_FAIL_CLOSED_CODES)!r}"
+            )
+        except Exception as exc:  # noqa: BLE001 -- WP-4c (裁定 4): the
+            # empty-secret guess can be refused by h11's own CLIENT-side
+            # header-value validation before any `ConformanceDenial` is
+            # ever raised. Re-raised unchanged unless recognized.
+            if _is_wire_rejection(adapter, exc):
+                continue
+            raise
+        else:
+            raise AssertionError(
+                f"{adapter.name}: guessable/foreign secret {secret!r} was accepted by the control plane "
+                "-- no denial was raised at all"
+            )
 
     first = adapter.reset()
     second = adapter.reset()
     assert first.secret != second.secret, (
         f"{adapter.name}: two independent reset rituals against the same control-credential store minted "
         "the same secret"
+    )
+
+
+# --- WP-4c wire-rejection classification pin --------------------------------
+
+
+def test_c15_wire_rejection_requires_socket_transport() -> None:
+    """WP-4c non-vacuity + mutation pin (design D-3, 監督裁定 wp4b-rulings.md
+    項 4): `_is_wire_rejection` must return `False` for a non-socket
+    adapter even when handed the EXACT (`ConformanceDenial`, `UNCLASSIFIED`)
+    shape that DOES count on a socket adapter, and must return `False` for
+    a socket adapter when handed a `ConformanceDenial` carrying a genuine
+    fail-closed contract code (e.g. `AUTH_INVALID`) rather than
+    `UNCLASSIFIED` -- a real, correctly-coded denial from the app is never
+    silently waved through as a "wire rejection". The third assertion is
+    the non-vacuity half: the identical `UNCLASSIFIED` denial, on the
+    identical socket adapter, DOES count.
+
+    Mutation (this WP's own): drop the `exc.code == UNCLASSIFIED` check in
+    `_is_wire_rejection` (return `True` unconditionally for any
+    `ConformanceDenial` on a socket adapter) -> this test's second
+    assertion goes red.
+    """
+    class _FakeAsgiAdapter:
+        transport_kind = "asgi"
+
+    class _FakeSocketAdapter:
+        transport_kind = "socket"
+
+    asgi_adapter = _FakeAsgiAdapter()
+    socket_adapter = _FakeSocketAdapter()
+    unclassified_denial = ConformanceDenial(code=UNCLASSIFIED, adapter="fake", native_type="_HttpFailure", details={})
+    real_denial = ConformanceDenial(code="AUTH_INVALID", adapter="fake", native_type="_HttpFailure", details={})
+
+    assert not _is_wire_rejection(asgi_adapter, unclassified_denial), (
+        "a non-socket adapter must never take the wire-rejection branch, even with an UNCLASSIFIED denial"
+    )
+    assert not _is_wire_rejection(socket_adapter, real_denial), (
+        "a socket adapter with a genuine, correctly-coded denial must never be classified as a wire rejection"
+    )
+    assert _is_wire_rejection(socket_adapter, unclassified_denial), (
+        "a socket adapter with an UNCLASSIFIED denial must be classified as a wire rejection -- otherwise "
+        "this whole test would trivially pass by _is_wire_rejection always returning False"
+    )
+
+
+def test_c15_wire_rejection_never_applies_to_a_reachability_failure() -> None:
+    """M-2 (WP-4 integration review 2026-09-10): `_is_wire_rejection`'s raw-
+    exception branch must accept only `httpx.LocalProtocolError` (a
+    client-side framing refusal, raised before any byte reaches the
+    network), never the broader `httpx.HTTPError` base class it used to
+    check -- which also covers `httpx.ConnectError`/`httpx.ReadTimeout`/
+    `httpx.RemoteProtocolError`, the exceptions httpx raises when the
+    socket plug's own upstream (uvicorn/nginx) is unreachable or hangs.
+    Without this narrowing, an outage on the peer would make every guessed-
+    secret probe in this file's own loops silently count as "the server
+    correctly rejected this", passing vacuously instead of surfacing the
+    real outage.
+
+    Mutation (M-2's own): widen the raw-exception check back to
+    `isinstance(exc, httpx.HTTPError)` -> the `httpx.ConnectError`
+    assertion below goes red (a real unreachable-port `httpx.ConnectError`
+    is exactly what an actual socket-plug outage raises)."""
+    class _FakeSocketAdapter:
+        transport_kind = "socket"
+
+    socket_adapter = _FakeSocketAdapter()
+    local_protocol_error = httpx.LocalProtocolError("Illegal header value b'Bearer '")
+    connect_error = httpx.ConnectError("[Errno 61] Connection refused")
+    read_timeout = httpx.ReadTimeout("timed out")
+
+    assert _is_wire_rejection(socket_adapter, local_protocol_error), (
+        "a client-side framing refusal (LocalProtocolError) on a socket adapter must still count as a wire rejection"
+    )
+    assert not _is_wire_rejection(socket_adapter, connect_error), (
+        "an unreachable peer (ConnectError) must never be classified as a wire rejection -- it means the "
+        "socket plug's own upstream is down, not that the peer correctly refused a bad request"
+    )
+    assert not _is_wire_rejection(socket_adapter, read_timeout), (
+        "a hung peer (ReadTimeout) must never be classified as a wire rejection, for the same reason"
     )

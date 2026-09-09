@@ -213,9 +213,10 @@ from .credential_store import (
     PostgresCredentialStore,
     validate_control_pepper_separation,
 )
-from .limits import ControlPlaneLimits
+from .limits import ControlPlaneLimits, ResourceLimits
 from . import platform_declarations
 from .platform_declarations import (
+    check_role_connection_limits,
     check_writer_role_timeouts,
     derive_visibility_lag_ms,
     read_declared_role_timeouts,
@@ -393,6 +394,13 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
        検査は audit_reader の有無に依らず無条件"), regardless of whether
        `R2DB_AUDIT_DSN` is even configured on this process;
+    5b. (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same
+       borrowed connection: this process' own `r2dbsvc_controlplane` role
+       (plus `r2dbsvc_auditreader` too when `R2DB_AUDIT_DSN` is
+       configured) must have a real `CONNECTION LIMIT` of `-1` or at
+       least its own pool-composition floor -- scoped to exactly the
+       role(s) THIS process pools connections against, never the sibling
+       data-plane process' own role or any application's;
     6. assemble the rest of the stack via `assemble_control_stack(...)`,
        passing the already-built audit sink and the fully-resolved
        `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
@@ -431,6 +439,48 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
+    # Phase 10 WP-4e (supervisor ruling 2026-09-09) investigated deriving
+    # this default from a declared concurrency ceiling too (mirroring
+    # `r2db_api.main`'s data-plane platform pool fix, `role_pool_size`) --
+    # this process' own 4 platform-plane stores (`applications`/
+    # `credentials`/`control_credentials`/`audit`, all against the SAME
+    # `r2dbsvc_controlplane` role) share one hard PostgreSQL `CONNECTION
+    # LIMIT` -- 10 at the time of this measurement (`0006_control_plane_
+    # http.sql`'s own shipped value); WP-4f's own later migration
+    # (`0013_role_connection_limits.sql`, L-3 correction, WP-4 integration
+    # review 2026-09-10) has since raised this to 20 -- see that
+    # migration's own header for why (4 stores x this same fixed
+    # `pool_size` 4 = 16, already exceeding the pre-0013 limit of 10 with
+    # a SINGLE process, no test harness involved). The conclusion below
+    # (leave `pool_size` at the fixed `4`, do not derive it from declared
+    # concurrency) is UNCHANGED by that migration -- the actual failure
+    # mode this comment documents is about pool LIFECYCLE (connections
+    # never released), not the specific CONNECTION LIMIT number, and 0013
+    # raising the ceiling does not fix a lifecycle problem, only postpones
+    # when it bites. Measured directly against the conformance HTTP
+    # adapter's own identical stores (`conformance_adapter_r2db_http.py::
+    # self._control_pool_size`, same 4-stores-one-role shape): raising
+    # `pool_size` does NOT fix a pool-exhaustion timeout (`_RolePool`'s
+    # own `acquire_timeout` never fired) -- the measured failure was a
+    # REAL `psycopg.OperationalError` ("FATAL: too many connections for
+    # role"), a hard PostgreSQL refusal, on the FIRST-ever connection of a
+    # brand-new pool. `_RolePool` never shrinks (no idle eviction) -- a
+    # larger `pool_size` only lets this process permanently retain MORE
+    # real, cached-idle connections after any historical burst, worsening
+    # the real exposure against the role's own CONNECTION LIMIT (now 20,
+    # not 10) rather than helping it. Left at the original fixed `4` for
+    # this reason -- unlike `r2db_api.main`'s data-plane platform pool
+    # (only 2 stores share `r2dbsvc_api`'s own CONNECTION LIMIT, and no
+    # second, concurrently-alive stack of stores exists for that role the
+    # way `isolated_control_surface` builds one here) -- see the
+    # conformance adapter's own comment for the measured detail. A genuine
+    # fix needs either a higher `r2dbsvc_controlplane` `CONNECTION LIMIT`
+    # (0013 is exactly that, and does help in practice -- it just does not
+    # change the ANALYSIS above, which is about lifecycle, not headroom)
+    # or an idle-eviction mechanism on `_RolePool` itself, the latter
+    # outside this WP's own scope (pool SIZING/composition only, not pool
+    # LIFECYCLE) -- reported for a separate ruling. `R2DB_PLATFORM_
+    # POOL_SIZE` still wins outright when set explicitly.
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
 
     limits = ControlPlaneLimits(
@@ -507,6 +557,28 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
                 )
             )
         visibility_lag_ms = derive_visibility_lag_ms(all_catalogs)
+
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's
+        # own `ops verify-declarations` F-16 aggregate check): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # `r2dbsvc_controlplane` always (`role_classes` always contains
+        # `"controlplane"`), plus `r2dbsvc_auditreader` too whenever
+        # `R2DB_AUDIT_DSN` is configured (this process then genuinely
+        # pools a connection against that role too, via `audit_reader`
+        # below) -- never the sibling data-plane process' own `r2dbsvc_
+        # api` role, and never any application's runtime/developer role
+        # (`application_slugs=()`: this process serves no application at
+        # all). Run on this same borrowed connection (login role = the
+        # real `r2dbsvc_controlplane` writer role).
+        _own_role_classes = {"controlplane"}
+        if audit_dsn:
+            _own_role_classes.add("auditreader")
+        check_role_connection_limits(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=ResourceLimits().concurrency,
+            role_classes=frozenset(_own_role_classes), application_slugs=(),
+        )
 
     # Step 6: assemble the rest of the stack -- `surfaces`/`audit_
     # visibility_lag_ms`/`audit_coalescing_window_ms` are already fully

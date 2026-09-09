@@ -41,6 +41,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional
 
 import psycopg
@@ -321,14 +322,29 @@ class _AppInfo:
 
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
-    """Runs `0001`/`0002`/`0005`/`0007`/`0011` (with the literal token
-    `mitatedb` textually replaced by `prefix`) through the real `psql`
-    binary. `0003`/`0004` are kept for per-application provisioning only.
-    Unlike `conformance_adapter_mitatedb_http.py`'s own `_bootstrap_
+    """Runs `0001`/`0002`/`0005`/`0007`/`0011`/`0012` (with the literal
+    token `mitatedb` textually replaced by `prefix`) through the real
+    `psql` binary. `0003`/`0004` are kept for per-application provisioning
+    only. Unlike `conformance_adapter_mitatedb_http.py`'s own `_bootstrap_
     platform`, `surfaces`/`process_ceilings` are NEVER seeded here via raw
     SQL -- this launcher's whole point is exercising the real `ops
     declare-surfaces`/`declare-process-ceilings` CLI against this exact
-    table (design D-1 (B) 1)."""
+    table (design D-1 (B) 1).
+
+    Phase 10 WP-4g (test-fixture-blast-radius fix, peer-symmetric with
+    `real_server_r2db.py::_bootstrap_platform`'s own identical fix, and
+    mirroring WP-4f's own fix to every OTHER real-PG fixture this
+    repository has): `0012_role_connection_limits.sql` raises `mitatedb
+    svc_api`/`mitatedbsvc_controlplane`'s own `CONNECTION LIMIT` (and the
+    provisioning function's own per-application default, for every
+    application provisioned AFTER this point) to each role's real
+    pool-composition floor. Without it, this launcher's own `<prefix>svc_
+    api` role is left below `check_role_connection_limits`'s own floor,
+    and EVERY real composition-root startup this launcher ever attempts
+    fails fast on F-16 regardless of anything a caller does afterward.
+    Run immediately after `0011` and, critically, BEFORE `_provision_app`
+    is ever called for this platform, mirroring the r2db-api launcher's
+    own reasoning for why ordering matters here."""
     provision_password = secrets.token_urlsafe(24)
     api_password = secrets.token_urlsafe(24)
     controlplane_password = secrets.token_urlsafe(24)
@@ -342,6 +358,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0005_application_audit.sql",
         "0007_platform_declarations.sql",
         "0011_process_ceilings.sql",
+        "0012_role_connection_limits.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -361,6 +378,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
     _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
     _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
     _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
+    _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
 
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
@@ -719,6 +737,110 @@ class RealServerMitateDB:
             )
             return result
         finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
+
+    def attempt_start_with_lowered_role_limit(self) -> SimpleNamespace:
+        """F-16 observation (Phase 10 WP-4g, supervisor ruling 2026-09-09,
+        peer-symmetric with `RealServerR2db.attempt_start_with_lowered_
+        role_limit`'s own identical reasoning). Builds a SEPARATE,
+        independent throwaway platform (own prefix), with `surfaces`/
+        `process_ceilings` both declared NORMALLY, provisions one
+        application, then lowers that application's own `<prefix>_app_
+        <id>_rt` role's real PostgreSQL `CONNECTION LIMIT` below `check_
+        role_connection_limits`'s own declared-concurrency floor. This
+        role is chosen over the platform-wide `<prefix>svc_api` role
+        `attempt_start_without_process_ceilings` never touches:
+        `main.py`'s own `credentials`/`ApplicationCell`s (the only things
+        that ever open a REAL connection as this application's runtime
+        role) are constructed strictly AFTER `declarations_conn` (the
+        connection the F-16 check itself runs on) is closed -- lowering
+        this role's limit can therefore never itself break the platform-
+        wide pools this attempt still needs.
+
+        Runs `python -m uvicorn mitatedb_api.main:app` directly (blocking
+        `subprocess.run`, real stderr captured) with the role lowered:
+        this composition root must fail fast (F-16) at import time.
+        Restores the SAME role's `CONNECTION LIMIT` to `-1` (unlimited)
+        and starts the IDENTICAL composition root again (via `socket_
+        harness.start_uvicorn_subprocess` + `wait_until_ready`, dialed
+        directly at uvicorn's own bound port -- never through nginx or
+        the declared-but-unreachable `surfaces` URL this method never
+        binds), proving the fail-fast this observes is genuinely
+        CONDITIONED on the lowered limit. Always tears its own throwaway
+        platform (and the restored-attempt uvicorn subprocess, if still
+        running) down before returning, whichever branch this reached."""
+        script_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f16-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f16"
+        lock = _claim_prefix_lock(prefix)
+        restored_handle: Optional[sh.UvicornSubprocessHandle] = None
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            app = _provision_app(platform, script_dir, "f16app")
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            ceilings = _run_ops(
+                _ops_env(platform), "declare-process-ceilings", "--data", "1", "--control", "1",
+            )
+            if ceilings.returncode != 0:
+                raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings.stdout}\n{ceilings.stderr}")
+
+            runtime_role = f"{prefix}_app_{app.application_id}_rt"
+            app_id_upper = app.application_id.upper()
+            env = _scrub_peer_env_prefixes(os.environ)
+            env.update(_with_pythonpath({
+                "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
+                "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+                "MITATEDB_PLATFORM_SCHEMA": platform.schema,
+                "MITATEDB_SERVE_APPS": app.application_id,
+                f"MITATEDB_APP_{app_id_upper}_RUNTIME_DSN": app.runtime_dsn,
+                f"MITATEDB_APP_{app_id_upper}_DEVELOPER_DSN": app.developer_dsn,
+                "MITATEDB_CONTROL_PLANE_STATUS": "enabled",
+            }))
+
+            admin = psycopg.connect(_admin_dsn(), autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 1").format(sql.Identifier(runtime_role)))
+            finally:
+                admin.close()
+
+            lowered_port = sh.free_port()
+            lowered_result = subprocess.run(
+                [sys.executable, "-m", "uvicorn", "mitatedb_api.main:app", "--host", "127.0.0.1", "--port", str(lowered_port)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            admin = psycopg.connect(_admin_dsn(), autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(runtime_role)))
+            finally:
+                admin.close()
+
+            restored_port = sh.free_port()
+            with _peer_env_prefixes_removed_from_os_environ():
+                restored_handle = sh.start_uvicorn_subprocess(
+                    "mitatedb_api.main:app", pidfile=script_dir / "uvicorn-f16-restored.pid",
+                    port=restored_port, env=env,
+                )
+            restored_started = False
+            try:
+                sh.wait_until_ready(f"http://127.0.0.1:{restored_port}/v1/capabilities", label="mitatedb f16 restored")
+                restored_started = True
+            except Exception:  # noqa: BLE001 -- reported to the caller as `restored_started=False`, not raised
+                restored_started = False
+
+            return SimpleNamespace(lowered=lowered_result, restored_started=restored_started)
+        finally:
+            if restored_handle is not None:
+                restored_handle.stop()
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)

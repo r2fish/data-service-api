@@ -350,6 +350,54 @@ def test_build_control_app_rejects_malformed_data_base_url(label: str, bad_url: 
         _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
 
 
+def test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor(
+    platform: types.SimpleNamespace,
+) -> None:
+    """Phase 10 WP-4g (supervisor ruling 2026-09-09): F-16 is not only an
+    `ops verify-declarations` check (WP-4f) -- `r2db_api.control_main.
+    build_control_app` itself now fails fast on the SAME condition at real
+    startup, scoped to exactly the role THIS process' own pool composition
+    uses (`<prefix>_controlplane`, the role `assemble_control_stack`'s own
+    4 platform-plane stores all pool connections against). Lowering it
+    back below its own real floor (4 stores x fixed floor 16 = 16) --
+    exactly the pre-`0013_role_connection_limits.sql` state every platform
+    was in before Phase 10 WP-4f -- must raise, never silently start a
+    process that can hit PostgreSQL's own hard 'too many connections for
+    role' refusal under real concurrent traffic."""
+    import psycopg
+    from psycopg import sql
+
+    module = _control_main_module()
+    _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
+    controlplane_role = f"{platform.prefix}_controlplane"
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(sql.Identifier(controlplane_role)))
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError, match="F-16|CONNECTION LIMIT"):
+            module.build_control_app(env=_real_control_env(platform))
+    finally:
+        with psycopg.connect(platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 20").format(sql.Identifier(controlplane_role)))
+            conn.commit()
+        _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+        # Non-空振り: proves the restore above is really what makes
+        # `build_control_app` healthy again -- a mutation that silently
+        # drops the new startup check would make BOTH the `pytest.raises`
+        # above AND this call succeed, but a mutation that left the check
+        # permanently broken (e.g. caching the FIRST observed limit) would
+        # fail here instead.
+        _set_surfaces_row(platform, {"data": {"base_url": _GOOD_DATA_BASE_URL}, "control": {"base_url": _GOOD_CONTROL_BASE_URL}})
+        try:
+            asgi_app = module.build_control_app(env=_real_control_env(platform))
+            with TestClient(asgi_app):
+                pass
+        finally:
+            _set_surfaces_row(platform, _DEFAULT_SURFACES_VALUE)
+
+
 def test_build_control_app_rejects_missing_surfaces_row(platform: types.SimpleNamespace) -> None:
     import psycopg
     from psycopg import sql

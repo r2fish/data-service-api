@@ -27,12 +27,14 @@ from typing import Mapping, Optional
 import psycopg
 
 from .audit_query import PostgresAuditQueryStore
+from .config import FoundationConfig
 from .control_credential_store_postgres import PostgresControlCredentialStore
 from .control_plane import (ControlPlaneLimits, ControlPlaneService, PostgresApplicationRegistry,
                             PostgresControlBackend, PostgresCredentialRegistry)
 from .credential_store_postgres import DEFAULT_SCHEMA, assert_pepper_separation
 from . import platform_declarations
-from .platform_declarations import (check_writer_role_timeouts, derive_visibility_lag_ms,
+from .platform_declarations import (check_role_connection_limits, check_writer_role_timeouts,
+                                    derive_visibility_lag_ms,
                                     read_declared_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env,
                                     require_control_surface_declared)
@@ -150,6 +152,37 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
             )
             for role in declarations.audit_writer_roles
         ]
+
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric
+        # with r2db-api's own same-numbered startup addition): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # `mitatedbsvc_controlplane` always, plus `mitatedbsvc_
+        # auditreader` too whenever `MITATEDB_AUDIT_DSN` is configured
+        # (this process then genuinely opens per-call connections against
+        # that role too, via `audit_reader` below) -- never the sibling
+        # data-plane process' own `mitatedbsvc_api` role, and never any
+        # application's runtime/developer role (`application_ids=()`:
+        # this process serves no application at all). Run on this same
+        # connection (login role = the real `mitatedbsvc_controlplane`
+        # writer role). `_declared_concurrency` mirrors `main.build_app`'s
+        # own lenient-degrade `MITATEDB_MAX_CONCURRENCY` read (an unset or
+        # unparsable value silently keeps `FoundationConfig`'s own
+        # default) -- this is only a verification-time floor computation,
+        # like `ops.py`'s own same-named helper.
+        _own_role_classes = {"controlplane"}
+        if env.get("MITATEDB_AUDIT_DSN"):
+            _own_role_classes.add("auditreader")
+        _raw_declared_concurrency = env.get("MITATEDB_MAX_CONCURRENCY")
+        try:
+            _declared_concurrency = int(_raw_declared_concurrency) if _raw_declared_concurrency else FoundationConfig.max_concurrency
+        except ValueError:
+            _declared_concurrency = FoundationConfig.max_concurrency
+        check_role_connection_limits(
+            conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=_declared_concurrency,
+            role_classes=frozenset(_own_role_classes), application_ids=(),
+        )
     finally:
         conn.close()
 

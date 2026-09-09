@@ -124,6 +124,48 @@ def test_build_control_app_rejects_identical_peppers(control_main_module, contro
         control_main_module.build_control_app(env)
 
 
+def test_build_control_app_fails_fast_when_its_own_controlplane_role_connection_limit_is_lowered_below_the_pool_composition_floor(
+    control_main_module, control_platform,
+) -> None:
+    """Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric with
+    r2db-api's own same-numbered test): F-16 is not only an `ops
+    verify-declarations` check (WP-4f) -- `mitatedb_api.control_
+    composition.build_control_service` (reached here through `control_
+    main_module.build_control_app`, the real `uvicorn mitatedb_api.
+    control_main:app` entry point) itself now fails fast on the SAME
+    condition at real startup, scoped to exactly the role THIS process'
+    own pool composition uses (`control_platform.controlplane_role`, the
+    `mitatedbsvc_controlplane`-class role this process' own 4 platform-
+    plane stores all open connections against). Lowering it back below
+    its own real floor (4 stores x fixed floor 16 = 16) -- exactly the
+    pre-`0012_role_connection_limits.sql` state every platform was in
+    before Phase 10 WP-4f -- must raise, never silently start a process
+    that can hit PostgreSQL's own hard 'too many connections for role'
+    refusal under real concurrent traffic. Restores the migration-seeded
+    limit (20) in a `finally` so this shared `control_platform` fixture is
+    left healthy for every other test."""
+    env = _env(control_platform)
+    with psycopg.connect(control_platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(sql.Identifier(control_platform.controlplane_role)))
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError, match="F-16|CONNECTION LIMIT"):
+            control_main_module.build_control_app(env)
+    finally:
+        with psycopg.connect(control_platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 20").format(sql.Identifier(control_platform.controlplane_role)))
+            conn.commit()
+        # Non-空振り: proves the restore above is really what makes
+        # `build_control_app` healthy again -- a mutation that silently
+        # drops the new startup check would make BOTH the `pytest.raises`
+        # above AND this call succeed, but a mutation that left the check
+        # permanently broken (e.g. caching the FIRST observed limit) would
+        # fail here instead.
+        control_main_module.build_control_app(env)
+
+
 @pytest.mark.parametrize(
     "removed_var,value",
     [

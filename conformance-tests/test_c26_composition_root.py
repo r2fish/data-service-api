@@ -261,6 +261,48 @@ def test_c26_missing_declaration_fails_fast(launcher_class: type) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 10 WP-4g (supervisor ruling 2026-09-09): F-16 (role CONNECTION
+# LIMIT below its own real pool-composition floor) also fails fast at
+# composition-root startup -- added to this same module (rather than a
+# separate one) because it drives the identical real-process launcher
+# shape completion condition 5 above already established, just with a
+# different `attempt_start_*` helper.
+# ---------------------------------------------------------------------------
+
+
+def test_c26_role_connection_limit_below_pool_floor_fails_fast(launcher_class: type) -> None:
+    """A composition root started while its own served application's
+    runtime role has a PostgreSQL `CONNECTION LIMIT` set below `check_
+    role_connection_limits`'s own declared-concurrency floor fails fast
+    (F-16) -- stderr names it, never a silent start under a role limit a
+    real burst of concurrent requests could exceed. Restoring that same
+    role's limit (`CONNECTION LIMIT -1`, unlimited) and starting the
+    IDENTICAL composition root again succeeds -- proving the fail-fast
+    above was genuinely conditioned on the lowered limit, not some
+    unrelated breakage of this throwaway platform. Self-contained: this
+    test builds its own separate throwaway platform (`attempt_start_
+    with_lowered_role_limit`'s own docstring), independent of `lifecycle`
+    above, and tears it down again before returning either way."""
+    launcher = launcher_class()
+    observation = launcher.attempt_start_with_lowered_role_limit()
+    assert observation.lowered.returncode != 0, (
+        f"a composition root started with its own served application's runtime role CONNECTION LIMIT "
+        f"below the real pool-composition floor started successfully (returncode 0) instead of failing "
+        f"fast: stdout={observation.lowered.stdout!r}"
+    )
+    assert "F-16" in observation.lowered.stderr, (
+        f"expected an F-16 (role CONNECTION LIMIT below its own real pool-composition floor) message on "
+        f"stderr; got returncode={observation.lowered.returncode} stderr does not mention F-16: "
+        f"{observation.lowered.stderr!r}"
+    )
+    assert observation.restored_started, (
+        "the identical composition root did not start after the lowered role's CONNECTION LIMIT was "
+        "restored to -1 (unlimited) -- the F-16 fail-fast above may not be genuinely conditioned on the "
+        "lowered limit"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Completion condition 6 (design D-1 (B) 6)
 # ---------------------------------------------------------------------------
 

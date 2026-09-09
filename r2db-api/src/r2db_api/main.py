@@ -43,7 +43,14 @@ Environment variable contract (P2-D5, updated Q4 WP-1):
                                           SharedPoolManager`
     R2DB_PLATFORM_POOL_SIZE              optional -- platform pool cap
                                           (`r2db_api.credential_store.
-                                          PostgresCredentialStore`)
+                                          PostgresCredentialStore`, and the
+                                          durable audit sink sharing the
+                                          same role/DSN); default is no
+                                          longer a fixed `4` -- WP-4e
+                                          derives it from the declared
+                                          `ResourceLimits.concurrency`
+                                          (`role_pool_size`) unless this is
+                                          set explicitly
     R2DB_PLATFORM_SCHEMA                 optional, default
                                           `r2dbsvc_registry` -- not part of
                                           the design doc's table; added
@@ -142,6 +149,7 @@ from .http import create_app
 from . import platform_declarations
 from .platform_declarations import (
     check_control_surface_consistency,
+    check_role_connection_limits,
     check_writer_role_timeouts,
     read_platform_declarations,
     reject_removed_surface_env,
@@ -301,9 +309,13 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     malformed, F-6 for surfaces/control-plane-status agreement), (6) the
     writer-role double-check (F-7/F-10/F-11 against `pg_db_role_setting`,
     F-9 against this process' own writer pool's effective `pg_settings`
-    value), (7) build the audit sink (no SESSION `SET` -- design D-1(b)),
-    (8) wire `surfaces`/the coalescing window/the data-plane's own
-    `process_ceilings.data` into `DataService`.
+    value), (6b) Phase 10 WP-4g: F-16, this process' own role(s)' real
+    `CONNECTION LIMIT` against their own pool-composition floor (scoped to
+    the `r2dbsvc_api` role plus only the applications THIS process
+    serves), on the SAME borrowed writer connection, (7) build the audit
+    sink (no SESSION `SET` -- design D-1(b)), (8) wire `surfaces`/the
+    coalescing window/the data-plane's own `process_ceilings.data` into
+    `DataService`.
     """
     env = env if env is not None else os.environ
 
@@ -381,6 +393,17 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # once it reads `>= 2`.
     process_ceiling = declarations.process_ceilings.data
 
+    # Phase 10 WP-8a review F-1 fix: ONE `ResourceLimits` instance, shared
+    # between the `DataService` this process serves requests through and
+    # every served application's own `PostgresCell` pool sizing below
+    # (`_role_pool_size`) -- so the declared concurrency ceiling and the
+    # pool capacity that must accommodate it can never drift apart by
+    # being two independently-constructed values. Hoisted above the
+    # platform pool sizing immediately below (WP-4e) so BOTH derivations
+    # read from this same instance.
+    resource_limits = ResourceLimits()
+    _role_pool_size = role_pool_size(resource_limits)
+
     # Computed from `env` (this function's own parameter), and always
     # passed explicitly below -- not left as `None` for `PostgresCredential
     # Store` to default on its own, which would silently read the real
@@ -388,7 +411,24 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # own default lookup is `os.environ`-based, since it has no `env`
     # parameter of its own) and defeat `build_app(env=...)`'s whole point
     # of being fully driven by its argument for testability.
-    platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
+    #
+    # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
+    # a fixed `4`, entirely disconnected from the declared `concurrency`
+    # ceiling -- the exact F-1 shape WP-8a already fixed for the per-
+    # application role pools (`role_pool_size`, above), just not yet for
+    # this platform pool. Once `run_in_threadpool` (WP-8a) let concurrent
+    # requests' authentication reads genuinely reach this pool at once,
+    # a fixed `4` under-provisioned it relative to `concurrency` (default
+    # 32), and the same pool this credential store and the durable audit
+    # sink below share timed out waiting for a free connection and failed
+    # closed with `AUTH_STATE_UNAVAILABLE` (503) well under the declared
+    # bound. `_optional_int` still honors an explicit `R2DB_PLATFORM_POOL_
+    # SIZE` (an operator's own deliberate override always wins); only the
+    # SILENT fallback changes, from the old literal `4` to `role_pool_size
+    # (resource_limits)` -- the SAME derivation `_role_pool_size` above
+    # already uses, reused rather than reimplemented so the two ceilings
+    # can never drift apart either.
+    platform_pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", role_pool_size(resource_limits))
     credentials = PostgresCredentialStore(platform_dsn, pepper=pepper, schema=schema, pool_size=platform_pool_size)
     # Step 7 (Q4 D-1(b)): the durable application-plane audit sink -- the
     # SAME `R2DB_PLATFORM_DSN` (already `r2dbsvc_api`, which migration
@@ -413,18 +453,34 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
             _writer_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
             ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
         )
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's
+        # own `ops verify-declarations` F-16 aggregate check, and that
+        # WP's own investigated-and-fixed conformance finding): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # the `r2dbsvc_api`-class role (`role_classes={"api"}`) plus only
+        # the applications THIS process actually serves
+        # (`application_slugs=slugs`), never the sibling control-plane
+        # process' own `r2dbsvc_controlplane`/`r2dbsvc_auditreader` roles
+        # (this process never pools a connection against either) nor an
+        # application registered on this platform but served by some
+        # OTHER process -- see `check_role_connection_limits`'s own
+        # docstring for what each parameter narrows. Run on this same
+        # borrowed connection (login role = the real `r2dbsvc_api` writer
+        # role, D-1(c)), right after the writer-role dual check above.
+        check_role_connection_limits(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=resource_limits.concurrency,
+            role_classes=frozenset({"api"}), application_slugs=slugs,
+        )
 
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
     audit_flush_interval_s = _optional_float(env, "R2DB_AUDIT_FLUSH_INTERVAL_S", _DEFAULT_AUDIT_FLUSH_INTERVAL_S)
 
-    # Phase 10 WP-8a review F-1 fix: ONE `ResourceLimits` instance, shared
-    # between the `DataService` this process serves requests through and
-    # every served application's own `PostgresCell` pool sizing below
-    # (`_role_pool_size`) -- so the declared concurrency ceiling and the
-    # pool capacity that must accommodate it can never drift apart by
-    # being two independently-constructed values.
-    resource_limits = ResourceLimits()
-    _role_pool_size = role_pool_size(resource_limits)
+    # `resource_limits`/`_role_pool_size` (per-application role pool sizing)
+    # are now computed earlier, above the platform pool sizing (WP-4e) --
+    # see that block's own comment for why both derivations share the one
+    # `resource_limits` instance.
 
     def _cell_factory(application_id: str, entities: dict[str, list[dict[str, Any]]] | None) -> PostgresCell | _RefusingPlatformUpgradeCell:
         if entities:

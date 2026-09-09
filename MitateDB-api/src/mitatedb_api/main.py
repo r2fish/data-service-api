@@ -126,12 +126,13 @@ from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
 from .cell import ApplicationCell, _LimitStateHolder
-from .config import FoundationConfig
+from .config import FoundationConfig, role_pool_size
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
 from .http import HttpService, create_app
 from .identifiers import validate_identifier
 from . import platform_declarations
 from .platform_declarations import (check_control_surface_consistency,
+                                    check_role_connection_limits,
                                     check_writer_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env)
 from .pool import BoundedConnectionPool, pool_size_from_env
@@ -288,7 +289,30 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         if not row["provisioned"]:
             raise RuntimeError(f"application {application_id!r} named in MITATEDB_SERVE_APPS is registered but not yet provisioned (migrations/0003_provision_application.sql)")
 
-    pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"))
+    # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
+    # a fixed `pool.DEFAULT_MAX_SIZE` (20), entirely disconnected from the
+    # declared `max_concurrency` ceiling -- the same F-1 shape r2db-api's
+    # `role_pool_size` already fixed for its own per-application role
+    # pools (this peer has no per-application pool to match -- see `config.
+    # role_pool_size`'s own docstring). `FoundationConfig.from_env(env)`
+    # cannot be called this early -- it unconditionally requires
+    # `data_base_url` (raises `ValidationError` otherwise), which comes
+    # from `declarations`, read further below via `durable_audit.
+    # _connect()` -- so this reads `MITATEDB_MAX_CONCURRENCY` directly,
+    # the SAME lenient-degrade discipline `_optional_int` documents (an
+    # unset/unparsable value silently keeps the dataclass default, rather
+    # than raising here for what is only a pool-sizing floor; a genuinely
+    # invalid value still fails loudly later, when the REAL `config` below
+    # is built from this same `env` via `from_env`'s own strict parse).
+    # Routed through `role_pool_size` (not just `max_concurrency` inline)
+    # so the derivation itself, not merely the number, matches r2db-api's
+    # sibling. `MITATEDB_PLATFORM_POOL_SIZE` still wins outright when set
+    # explicitly (`pool_size_from_env`'s own `default=` is only the
+    # fallback).
+    _declared_concurrency = _optional_int(env, "MITATEDB_MAX_CONCURRENCY", FoundationConfig.max_concurrency)
+    pool_size = pool_size_from_env(
+        env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=role_pool_size(FoundationConfig(max_concurrency=_declared_concurrency)),
+    )
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
 
     # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single
@@ -337,6 +361,24 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         check_writer_role_timeouts(
             declarations_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
             ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric
+        # with r2db-api's own same-numbered startup addition): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # the `mitatedbsvc_api`-class role (`role_classes={"api"}`) plus
+        # only the applications THIS process actually serves
+        # (`application_ids=ids`), never the sibling control-plane
+        # process' own `mitatedbsvc_controlplane`/`mitatedbsvc_
+        # auditreader` roles (this process never pools a connection
+        # against either) nor an application registered on this platform
+        # but served by some OTHER process. Run on this same connection
+        # (login role = the real `mitatedbsvc_api` writer role), right
+        # after the writer-role dual check above.
+        check_role_connection_limits(
+            declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=_declared_concurrency,
+            role_classes=frozenset({"api"}), application_ids=ids,
         )
     finally:
         declarations_conn.close()
@@ -458,7 +500,20 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # already receives -- `HttpService.authenticate` is the ONLY call
     # site that can ever durably record `AUTH_REQUIRED` (no bearer token
     # presented at all).
-    service = HttpService(credentials, _cell_factory, audit_router=audit_router)
+    #
+    # Phase 10 WP-8c (design D-8 (3), review F-2): `limit_holder` -- the
+    # SAME instance every `ApplicationCell` built above already shares --
+    # and `max_concurrency` -- this deployment's own single, uniform
+    # `config.max_concurrency` (every cell above is built from the SAME
+    # `config`) -- let `http.py`'s route handlers reserve a concurrency
+    # slot on this EXACT counter, using this deployment's own real
+    # declared bound, BEFORE `_authenticate` runs (`HttpService.
+    # acquire_concurrency_slot`'s own docstring). Without these two, an
+    # unauthenticated flood of invalid bearer tokens never touches this
+    # counter at all, so `_authenticate`'s own `PostgresCredentialStore`
+    # round trip absorbs unbounded concurrent demand instead of being
+    # bounded by this deployment's own declared `concurrency` class.
+    service = HttpService(credentials, _cell_factory, audit_router=audit_router, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
 
     # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
     # thread that calls `audit_router.flush()` on a fixed interval for

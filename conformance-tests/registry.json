@@ -3,7 +3,9 @@
     {"name": "r2db-api", "module": "conformance_adapter_r2db", "required": true},
     {"name": "MitateDB-api", "module": "conformance_adapter_mitatedb", "required": true},
     {"name": "r2db-api-http", "module": "conformance_adapter_r2db_http", "required": true},
-    {"name": "MitateDB-api-http", "module": "conformance_adapter_mitatedb_http", "required": true}
+    {"name": "MitateDB-api-http", "module": "conformance_adapter_mitatedb_http", "required": true},
+    {"name": "r2db-api-socket", "module": "conformance_adapter_r2db_socket", "required": true},
+    {"name": "MitateDB-api-socket", "module": "conformance_adapter_mitatedb_socket", "required": true}
   ],
   "composition_roots": [
     {"name": "r2db-api", "module": "real_server_r2db", "launcher_class": "RealServerR2db"},

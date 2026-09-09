@@ -123,6 +123,18 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # requires. This harness never provisions a per-application database
         # (this module's own docstring), so `0003`/`0004` stay unneeded here.
         "0005_application_audit.sql",
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09): `mitatedb_api.
+        # control_composition.build_control_service`/`mitatedb_api.main.
+        # build_app` now run F-16 (this process' own role CONNECTION
+        # LIMIT) unconditionally at startup -- run AFTER 0002 (its own two
+        # `ALTER ROLE` targets, `<prefix>svc_api`/`<prefix>svc_
+        # controlplane`, must already exist), same ordering requirement as
+        # 0007 immediately below. Every test that calls `build_control_
+        # service` (directly or via this harness) now depends on this
+        # migration too, or the controlplane role's own pre-WP-4f
+        # `CONNECTION LIMIT` (10, `0002_registry_and_functions.sql`) sits
+        # below F-16's own real pool-composition floor and fails startup.
+        "0012_role_connection_limits.sql",
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- run AFTER 0002 (its own two `ALTER ROLE` targets,
@@ -167,6 +179,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         provision_dsn = _dsn_with(dsn, user=provision_role, password=provision_password, dbname=platform_db)
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
         _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
+        _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         admin = psycopg.connect(dsn, autocommit=True)

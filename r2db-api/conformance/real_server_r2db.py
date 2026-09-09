@@ -66,6 +66,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional
 
 import psycopg
@@ -346,17 +347,38 @@ class _AppInfo:
 
 
 def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platform:
-    """Runs the real migrations `0001`..`0003`, `0005`..`0008`, `0012`
-    (with the literal token `r2dbsvc` textually replaced by `prefix`)
-    through the real `psql` binary. `0004` (deprovision) is not needed --
-    this launcher's own teardown drops the whole prefix at once (`_sweep_
-    prefix`), never one application at a time. `0008`/`0012` (the
+    """Runs the real migrations `0001`..`0003`, `0005`..`0008`, `0012`,
+    `0013` (with the literal token `r2dbsvc` textually replaced by
+    `prefix`) through the real `psql` binary. `0004` (deprovision) is not
+    needed -- this launcher's own teardown drops the whole prefix at once
+    (`_sweep_prefix`), never one application at a time. `0008`/`0012` (the
     `platform_declarations` table + its `process_ceilings` key) ARE run
     here, unlike `conformance_adapter_r2db_http.py`'s own `_bootstrap_
     platform` -- that adapter injects `surfaces` directly and never goes
     through the declaration table at all (LQ4-11, design D-4); this
     launcher's whole point is exercising that exact table through the
-    real `ops declare-surfaces`/`declare-process-ceilings` CLI."""
+    real `ops declare-surfaces`/`declare-process-ceilings` CLI.
+
+    Phase 10 WP-4g (test-fixture-blast-radius fix, mirrors WP-4f's own
+    fix to every OTHER real-PG fixture this repository has): `0013_role_
+    connection_limits.sql` raises `r2dbsvc_api`/`r2dbsvc_controlplane`'s
+    own `CONNECTION LIMIT` (and `begin_provision_application`'s own
+    per-application default, for every application provisioned AFTER
+    this point) to each role's real pool-composition floor. Without it,
+    this launcher's own `r2dbsvc_api` role is left at 0005's original
+    `CONNECTION LIMIT 10` -- below `check_role_connection_limits`'s own
+    floor of 64 -- and EVERY real composition-root startup this launcher
+    ever attempts fails fast on F-16 regardless of anything a caller
+    does afterward (WP-4f's own investigated-and-fixed conformance
+    finding, just never previously applied to this file, which predates
+    that WP by one merge). Run immediately after `0012` (order relative
+    to `0009`/`0010`/`0011` does not matter, this file's own header) and,
+    critically, BEFORE `_provision_app` is ever called for this
+    platform -- `begin_provision_application`'s replaced definition
+    (section 3 of `0013`) is what gives every application THIS launcher
+    provisions its own `CONNECTION LIMIT 36` from the moment it is
+    created, never the pre-0013 `20`/`10` defaults `0002`/`0006` would
+    otherwise leave it at."""
     control_role = f"{prefix}_control"
     api_role = f"{prefix}_api"
     controlplane_role = f"{prefix}_controlplane"
@@ -378,6 +400,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         "0007_application_audit.sql",
         "0008_platform_declarations_and_writer_timeouts.sql",
         "0012_process_ceilings.sql",
+        "0013_role_connection_limits.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("r2dbsvc", prefix)
         out = script_dir / name
@@ -395,6 +418,7 @@ def _bootstrap_platform(prefix: str, admin_dsn: str, script_dir: Path) -> _Platf
         {"api_role": api_role, "controlplane_role": controlplane_role},
     )
     _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+    _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
 
     return _Platform(
         prefix=prefix,
@@ -801,6 +825,113 @@ class RealServerR2db:
             )
             return result
         finally:
+            _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
+
+    def attempt_start_with_lowered_role_limit(self) -> SimpleNamespace:
+        """F-16 observation (Phase 10 WP-4g, supervisor ruling 2026-09-09):
+        builds a SEPARATE, independent throwaway platform (own prefix),
+        with `surfaces`/`process_ceilings` both declared NORMALLY (so
+        nothing other than the role limit itself is a reason this
+        composition root could fail to start), provisions one
+        application, then lowers that application's own `<prefix>_app_
+        <slug>_runtime` role's real PostgreSQL `CONNECTION LIMIT` below
+        `check_role_connection_limits`'s own declared-concurrency floor.
+        This role is deliberately chosen over the platform-wide
+        `<prefix>_api` role `attempt_start_without_process_ceilings`
+        never touches: `main.py`'s own `_cell_factory` (the only thing
+        that ever opens a REAL connection as this application's runtime
+        role, via `PostgresCell`) is defined but not yet CALLED at the
+        point the F-16 check itself runs (`main.py`'s own step 6b, before
+        step 8's eager per-application cell loop) -- lowering this role's
+        limit can therefore never itself break some OTHER pool this
+        attempt still needs (the platform-wide credential-store/audit-
+        sink pools all run as the DIFFERENT `<prefix>_api` role).
+
+        Runs `python -m uvicorn r2db_api.main:app` directly (blocking
+        `subprocess.run`, real stderr captured -- mirrors `attempt_start_
+        without_process_ceilings`'s own reasoning) with the role lowered:
+        this composition root must fail fast (F-16) at import time.
+        Restores the SAME role's `CONNECTION LIMIT` to `-1` (unlimited)
+        and starts the IDENTICAL composition root again (this time via
+        `socket_harness.start_uvicorn_subprocess` + `wait_until_ready`,
+        dialed directly at uvicorn's own bound port -- never through
+        nginx or the declared-but-unreachable `surfaces` URL this method
+        never binds), proving the fail-fast this observes is genuinely
+        CONDITIONED on the lowered limit, not some unrelated breakage of
+        this throwaway platform. Always tears its own throwaway platform
+        (and the restored-attempt uvicorn subprocess, if still running)
+        down before returning, whichever branch this reached."""
+        script_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f16-"))
+        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f16"
+        lock = _claim_prefix_lock(prefix)
+        restored_handle: Optional[sh.UvicornSubprocessHandle] = None
+        try:
+            platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
+            app = _provision_app(platform, script_dir, "f16app")
+            surfaces = _run_ops(
+                _ops_env(platform), "declare-surfaces",
+                "--data-base-url", "http://127.0.0.1:1/v1",
+                "--control-base-url", "http://127.0.0.1:1/control/v1",
+            )
+            if surfaces.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
+            ceilings = _run_ops(
+                _ops_env(platform), "declare-process-ceilings", "--data", "1", "--control", "1",
+            )
+            if ceilings.returncode != 0:
+                raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings.stdout}\n{ceilings.stderr}")
+
+            runtime_role = f"{prefix}_app_{app.slug}_runtime"
+            slug_upper = app.slug.upper()
+            env = _scrub_peer_env_prefixes(os.environ)
+            env.update(_with_pythonpath({
+                "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
+                "R2DB_PLATFORM_DSN": platform.api_dsn,
+                "R2DB_PLATFORM_SCHEMA": platform.schema,
+                "R2DB_SERVE_APPS": app.slug,
+                f"R2DB_APP_{slug_upper}_RUNTIME_DSN": app.runtime_dsn,
+                f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": app.developer_dsn,
+                "R2DB_CONTROL_PLANE_STATUS": "enabled",
+            }))
+
+            admin = psycopg.connect(_admin_dsn(), autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 1").format(sql.Identifier(runtime_role)))
+            finally:
+                admin.close()
+
+            lowered_port = sh.free_port()
+            lowered_result = subprocess.run(
+                [sys.executable, "-m", "uvicorn", "r2db_api.main:app", "--host", "127.0.0.1", "--port", str(lowered_port)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            admin = psycopg.connect(_admin_dsn(), autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT -1").format(sql.Identifier(runtime_role)))
+            finally:
+                admin.close()
+
+            restored_port = sh.free_port()
+            with _peer_env_prefixes_removed_from_os_environ():
+                restored_handle = sh.start_uvicorn_subprocess(
+                    "r2db_api.main:app", pidfile=script_dir / "uvicorn-f16-restored.pid",
+                    port=restored_port, env=env,
+                )
+            restored_started = False
+            try:
+                sh.wait_until_ready(f"http://127.0.0.1:{restored_port}/v1/capabilities", label="r2db f16 restored")
+                restored_started = True
+            except Exception:  # noqa: BLE001 -- reported to the caller as `restored_started=False`, not raised
+                restored_started = False
+
+            return SimpleNamespace(lowered=lowered_result, restored_started=restored_started)
+        finally:
+            if restored_handle is not None:
+                restored_handle.stop()
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)
