@@ -545,9 +545,9 @@ class RealServerR2db:
     def _control_env(self) -> dict[str, str]:
         assert self._platform is not None
         return {
-            "R2DB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
-            "R2DB_CONTROL_CREDENTIAL_PEPPER": self._platform.control_pepper,
             "R2DB_CREDENTIAL_PEPPER": self._platform.app_pepper,
+            "R2DB_CONTROL_CREDENTIAL_PEPPER": self._platform.control_pepper,
+            "R2DB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
             "R2DB_PLATFORM_SCHEMA": self._platform.schema,
         }
 

@@ -1007,7 +1007,7 @@ def _f16_message(role: str, current_limit: int, required_floor: int, *, ops_modu
         f"connections for role' refusal instead of the declared 429/503 the contract promises. Raise it with "
         f"'ALTER ROLE {role} CONNECTION LIMIT {required_floor};' on the provision DSN for a throwaway/test "
         f"platform, or a new migration for an already-shipped deployment (never edit a shipped migration file) "
-        f"-- see {ops_module}'s own POSTGRES_PROVISIONING_RUNBOOK.md section 4."
+        f"-- see {ops_module}'s own provisioning runbook."
     )
 
 
