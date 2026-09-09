@@ -122,8 +122,11 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 33, (
-        f"expected exactly 33 ResourceLimitError(...) call sites (Phase 9 WP-3c adds 1 more, cell.py's own "
+    assert len(findings) == 35, (
+        f"expected exactly 35 ResourceLimitError(...) call sites (Phase 10 WP-6d-i review fix F2 adds 2 more, "
+        f"backend_postgres.py's own `idempotency_begin` / `idempotency_reserve` -- a `lock_timeout` / "
+        f"`statement_timeout` firing while waiting for the session advisory lock maps to `execution_ms`, "
+        f"design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-13; 33 + 2 = 35. Phase 9 WP-3c added 1, cell.py's own "
         f"`_idempotency_check` -- design docs/design/PHASE9_CONTRACT_170_DECLARATION_AND_VERIFICATION_V1.md D-5, "
         f"監督裁定集約 rulings-r5-r6.md I-6 -- refusing a new idempotency record once this Application's own "
         f"retained-record count, after reclaiming elapsed ones, meets `config.idempotency_entries`. 32 + 1 = 33. "
