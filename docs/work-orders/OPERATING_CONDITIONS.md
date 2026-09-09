@@ -21,12 +21,15 @@
 | `H0905F` | `HANDOVER_20260905_FABLE.md` (Q4 系列。「第14次」の一方) |
 | `H0906F` | `HANDOVER_20260906_FABLE.md` (フェーズ7 系列。「第14次」のもう一方) |
 | `H0907F` | `HANDOVER_20260907_FABLE.md` |
+| `H0908F` | `HANDOVER_20260908_FABLE.md` (第16次) |
 | `WO-P7` / `WO-P8` / `WO-P9` | `WORK_ORDER_PHASE7_EVIDENCE_AND_PUBLICATION_V1.md` / `WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` / `WORK_ORDER_PHASE9_CONTRACT_170_V1.md` |
 | `RM` | `docs/design/ROADMAP_POST_PHASE7_V1.md` |
 | `CI` | `.github/workflows/ci.yml` |
 | `CT-README` | `conformance-tests/README.md` |
 | `PERF-README` | `tools/PERF_BASELINE_README.md` |
 | `PRECOMMIT` | `.pre-commit-config.yaml` |
+| `DP10` | `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` |
+| `H0910F` | `HANDOVER_20260910_FABLE.md` |
 
 ---
 
@@ -144,6 +147,10 @@
 14. **配備前提** (開発機の条件ではなく、配備側の前提): 第10次 §2 の**運用前提 1〜4 は全て有効である** — 2 プロセス整合が未強制、容量算式に M を織り込む、`audit_requests_per_minute` の上限が peer 非対称、reader DSN 未設定なら `unavailable` 宣言のままで契約適合。前提 1 は Q4、前提 3 は Q3 として依頼者判断待ちへ整理された (付け替えであり失効ではない)。正本は各 peer の runbook と `docs/design/PHASE4_DURABLE_AUDIT_SINK_V1.md` §11.2 であり、本書は所在を指すのみである。(`H0903F2`:61、:63。原文照合 2026-09-07 で §4 から本節へ移した)
 15. Google Drive 同期は追跡中の `.md` を `.gdoc` ショートカットへ変換し、元の `.md` を **0 バイトで残す**ことがある。2026-09-08 に `docs/work-orders/PUBLICATION_GATE_20260906.md` がこの形で commit `4d4f1a5` に「637 行全削除」として入り、次のコミットで `966e0af` から復元した。`*.gdoc` は `.gitignore` 済み。**コミット前に `git diff --cached --stat` を読み、既存ファイルの全行削除が含まれていたら `git show <直前の commit>:<path>` で復元してからコミットする。** 機械検査 (追跡中の `.md` が 0 バイトなら赤) は `RM` §8 の R-17 で起票済み。(`RM` §8 R-17)
 16. 開発機 `.venv` は `constraints.txt` の exact-pin と**一致していない** (2026-09-08 実測: `psycopg` / `psycopg-binary` 3.3.4、constraints は 3.3.5)。完了ゲートの 4 数は CI と一致しているが、**開発機の suite 結果は exact-pin の証拠ではない**。解消 (`pip install -c constraints.txt -e './r2db-api[test]' -e './MitateDB-api[test]'` の再実行) は `RM` §8 の R-19 と併せて行う。(`RM` §8 R-19)
+17. worktree から起動する subprocess (C-26 の composition root、`ops` CLI、`deploy_smoke`) には `PYTHONPATH` を明示する。共有 `.venv` の `.pth` は **main checkout の `src` を指す**ので、明示しないと worktree の変更が反映されない実行になる。(`DP10` §10.4 の **L10-13**)
+18. 他の pytest の終了を待つループは、**python プロセスだけを数える形**で書く: `while ps -eo comm=,args= | awk '$1 ~ /python/ && $0 ~ /-m pytest/' | grep -q .; do sleep 5; done`。**`ps aux | grep pytest` 形は待機シェル自身に一致して永久待機になる。** **加えて、この開発機では `comm=` がパス切り詰めのため一致せず即抜けすることがある** — その場合は `ps -eo args= | grep -q '[-]m pytest'` を使い、**逸脱として報告する**。(`DP10` §10.4 の **L10-14**、`H0908F`:135)
+19. 性能計測 (`tools/perf_baseline.py`) の実行中は pytest と nginx を走らせない。**同一ローカル PostgreSQL クラスタと CPU を共有するので、他 worktree の suite が走っていると値が計測ではなく負荷の記録になる。** (`PERF-README`:8-19、`DP10` §9.1 の 6)
+20. **GitHub の課金上限が有効な間、本リポジトリでの push を行わない** (依頼者確認 2026-09-09)。**ローカルの commit と main へのマージは続ける。** **文書だけのコミットには `[skip ci]` を付ける。** **帰結として、その間のフェーズの CI 集計行は取得できない — 復旧後に main の先頭で 1 回 run を取る。** (`DP10` §5 の **U-21**、同 §10.4 の **L10-15**)
 
 ---
 
@@ -159,6 +166,8 @@
 8. `tools/check_collection_floor.py` を 3.11 / 3.12 の両 job が pytest の前段で走らせる。step は PG 起動と依存導入の後に置く。(`CI`:106-107、`CT-README`:171-177)
 9. CI のゲートは `python -m pytest -q -n 5 --dist loadgroup` を `pytest-output.log` に tee し、そこから集計行を抽出する。(`CI`:110-112)
 10. perf harness は基準値としては CI で回さない。完了ゲート後に監督がローカルで単独実行する。(`PERF-README`:8-19、`H0907F`:160)
+11. `tools-tests` job (`tools/tests` の自己検査) は常時実行であり、変更クラスに関わらず走る。(`CI`:470-490)
+12. `image-pins` job は本番 image の `pip freeze` が `constraints.txt` と一致することを検査する。**docker を要求するので開発機では走らず、証拠の場は CI だけである。** (`CI`:516-540、`RM` §8 R-19、`DP10` §10.2 の **L10-6**)
 
 ---
 
@@ -218,6 +227,7 @@
 
 | 日付 | 変更 | 根拠 |
 |---|---|---|
+| 2026-09-10 | §0 の出所キー表に `DP10` / `H0910F` を足し、**§2 に 17〜20** (worktree からの subprocess は `PYTHONPATH` を明示 / 待機ループは python プロセスだけを数える形 / perf 計測中は pytest・nginx を走らせない / 課金上限中の push 停止と `[skip ci]`) と、**§3 に 11〜12** (`tools-tests` job は常時実行 / `image-pins` job の証拠の場は CI だけ) を足した。**§1 (恒久の運用規律) は触っていない。** | フェーズ10 の実施 (`DP10` v1.6 §5 **U-21**、§10.3〜§10.4 の **L10-6** / **L10-13** / **L10-14** / **L10-15**、§9.1 の 6)。依頼者確認 2026-09-09 (GitHub の課金上限) |
 | 2026-09-08 | §1.1 に **12a** を足した (監督は `git add -A` を使わず `git status --short` に基づいて報告されたパスだけを add する / 実装担当が作業中の結合 worktree では commit しない)。**番号は 12a とし、既存の 1〜63 を振り直していない** — §5 の対応表と他文書からの参照 (「§1.3 の 22」等) が番号で結ばれているためである。 | フェーズ10 R-34 の実施中に監督が起こした取りこぼし (実装担当の作業中 worktree で `git add -A` を使い、変異検査用の scratch 複製を `12a7bd7` に巻き込み `5a59002` で削除した)。フェーズ10 設計 `PHASE10_DEPLOYMENT_EVIDENCE_V1.md` v1.4 §11.5、`RM` v1.9 §8 R-34 |
 | 2026-09-08 | §1.3 の 22 と 26 に、**CI が `xpassed` > 0 と `deselected` > 0 も赤として扱う**旨を足した (監督裁定 2026-09-08、CI 検査の拡張。**合格条件そのもの (failed / skipped / xfailed = 0) は変えていない**)。 | 監督裁定 2026-09-08。出所はフェーズ10 WP-1c (`5944013`)。フェーズ10 設計 `PHASE10_DEPLOYMENT_EVIDENCE_V1.md` v1.3 §3 D-14 / §5 U-11、`RM` v1.8 §8 R-26 |
 | 2026-09-08 | §1.3 の 22 に出所を 1 つ足した — 合格条件 (skipped = 0 / xfailed = 0) の **CI 上の強制がフェーズ10 WP-1c で入る**旨。**条件そのものは変えていない。** | 外部レビュー 2 (2026-09-08、依頼者提示) の監督検証。フェーズ10 設計 `PHASE10_DEPLOYMENT_EVIDENCE_V1.md` v1.3 §3 D-14 / §5 U-11、`RM` v1.8 §8 R-26 |
