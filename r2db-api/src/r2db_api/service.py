@@ -933,8 +933,8 @@ class DataService:
             )
             raise
 
-    def capabilities(self, context: AuthContext) -> dict[str, Any]:
-        with self._slot(context) as canonical:
+    def capabilities(self, context: AuthContext, *, concurrency_precharged: bool = False) -> dict[str, Any]:
+        with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
             # CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design
             # R2DB_CCR13_STORAGE_V1.md §3) is removed in this same commit
             # (see `query`/`mutate`/`schema`/`catalog` below) -- this
@@ -1119,7 +1119,7 @@ class DataService:
         """
         return list(self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=request_id).items)
 
-    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None, budget: dict[str, int] | None = None) -> "QueryPage":
+    def query_page(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None = None, page_size: int = 100, order_by: list[dict[str, Any]] | None = None, cursor: str | None = None, request_id: str | None = None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False) -> "QueryPage":
         """The HTTP-facing shape (`{items, next_page, revisions}`,
         `spec/data-service-api.v1.json`'s `QueryResult`) -- used by `http.
         post_query` instead of `query` above, since building a real
@@ -1146,13 +1146,13 @@ class DataService:
         # re-derived a second time for the response body (Q-1: "HTTP 層は
         # 再生成しない" generalizes to "no layer re-derives it").
         rid = request_id or str(uuid.uuid4())
-        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=rid, budget=budget)
+        outcome = self._query_outcome(context, entity, select=select, where=where, page_size=page_size, order_by=order_by, cursor=cursor, request_id=rid, budget=budget, concurrency_precharged=concurrency_precharged)
         return QueryPage(items=list(outcome.items), next_page=outcome.next_cursor, revisions=list(outcome.revisions or []), request_id=rid)
 
-    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None):
+    def _query_outcome(self, context: AuthContext, entity: str, *, select: list[str], where: list[dict[str, Any]] | None, page_size: int, order_by: list[dict[str, Any]] | None, cursor: str | None, request_id: str | None, budget: dict[str, int] | None = None, concurrency_precharged: bool = False):
         rid = request_id or str(uuid.uuid4())
         try:
-            with self._slot(context) as canonical:
+            with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
                 if not isinstance(select, list) or not isinstance(page_size, int) or isinstance(page_size, bool):
                     fail("VALIDATION_FAILED", "Projection and page size have invalid types.", details=violation("request_schema"))
                 if where is not None and not isinstance(where, list):
@@ -1195,7 +1195,7 @@ class DataService:
         """
         return self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id).affected
 
-    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None) -> "MutationResult":
+    def mutate_result(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None = None, request_id: str | None = None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None, concurrency_precharged: bool = False) -> "MutationResult":
         """The HTTP-facing shape (`{affected, assigned_addresses}`,
         `spec/data-service-api.v1.json`'s `MutationResult`) -- used by
         `http.post_mutate` instead of `mutate` above, mirroring the
@@ -1210,7 +1210,7 @@ class DataService:
         consults/records `idempotency_key` at exactly the request stages
         `narrow_limits_by_budget`'s/`transact`'s own comments describe.
         """
-        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget, idempotency_key=idempotency_key)
+        outcome = self._mutate_outcome(context, entity, operations, transaction=transaction, request_id=request_id, dry_run=dry_run, plan=plan, budget=budget, idempotency_key=idempotency_key, concurrency_precharged=concurrency_precharged)
         return MutationResult(
             # Contract 1.7.0 (D-7 (3), WP-2e): `outcome.request_id` -- THIS
             # execution's own value for a real commit/dry_run, or the
@@ -1232,10 +1232,10 @@ class DataService:
             plan=outcome.plan if dry_run else None,
         )
 
-    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None):
+    def _mutate_outcome(self, context: AuthContext, entity: str, operations: list[dict[str, Any]], *, transaction: str | None, request_id: str | None, dry_run: bool = False, plan: str | None = None, budget: dict[str, int] | None = None, idempotency_key: str | None = None, concurrency_precharged: bool = False):
         rid = request_id or str(uuid.uuid4())
         try:
-            with self._slot(context) as canonical:
+            with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
                 # G-1 (`{scratchpad}/rulings-r4.md` addendum): `transaction`
                 # is never a contract-level *default* -- `None` here means
                 # the caller's own request object never carried the key at
@@ -1359,7 +1359,7 @@ class DataService:
             self._event(context, operation="mutate", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="operation_denial", request_id=rid, details=exc.details)
             raise
 
-    def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None) -> "SchemaOutcome":
+    def schema(self, context: AuthContext, operation: dict[str, Any] | None, *, request_id: str | None = None, concurrency_precharged: bool = False) -> "SchemaOutcome":
         """Always returns `SchemaOutcome` (`.committed`/`.revision`/
         `.descriptor`/`.plan`, contract 1.7.0, D-4, WP-2b) -- a pure
         passthrough of `ApplicationCell.apply_schema`/`PostgresCell.
@@ -1388,7 +1388,7 @@ class DataService:
         dry_run = bool(isinstance(operation, dict) and operation.get("dry_run", False))
         plan = operation.get("plan") if isinstance(operation, dict) else None
         try:
-            with self._slot(context) as canonical:
+            with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
                 if not isinstance(operation, dict):
                     fail("VALIDATION_FAILED", "Schema operation must be an object.", details=violation("request_schema"))
                 # Authority is checked before touching request content at
@@ -1449,10 +1449,10 @@ class DataService:
             self._event(context, operation="schema", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="privilege_denial", request_id=rid, details=exc.details)
             raise
 
-    def catalog(self, context: AuthContext, *, request_id: str | None = None) -> dict[str, Any]:
+    def catalog(self, context: AuthContext, *, request_id: str | None = None, concurrency_precharged: bool = False) -> dict[str, Any]:
         rid = request_id or str(uuid.uuid4())
         try:
-            with self._slot(context) as canonical:
+            with self._slot(context, concurrency_precharged=concurrency_precharged) as canonical:
                 # The full CCR-13 `EntityDescriptor` shape (mutation_class/
                 # address_fields/address_reuse/unique_keys) -- `row_
                 # addressability` is now declared `enabled`, so this
@@ -1467,7 +1467,7 @@ class DataService:
             self._event(context, operation="catalog", outcome="deny", target_kind="entity", reason_code=exc.code, event_class="authorization_denial", request_id=rid, details=exc.details)
             raise
 
-    def deny_unsupported(self, context: AuthContext, *, operation: str, message: str, request_id: str | None = None) -> None:
+    def deny_unsupported(self, context: AuthContext, *, operation: str, message: str, request_id: str | None = None, concurrency_precharged: bool = False) -> None:
         """Refuse a capability this foundation does not implement, while
         still passing through `_slot`'s rate/concurrency accounting and
         emitting a denial audit event -- exactly like every other
@@ -1489,7 +1489,7 @@ class DataService:
         """
         rid = request_id or str(uuid.uuid4())
         try:
-            with self._slot(context):
+            with self._slot(context, concurrency_precharged=concurrency_precharged):
                 # D-3 (4): the request AS A WHOLE is what is unsupported
                 # here (this foundation has no execution path for the
                 # endpoint at all) -- `field` is omitted, matching
@@ -1502,15 +1502,103 @@ class DataService:
             raise
 
     @contextmanager
-    def _slot(self, context: AuthContext) -> Iterator[AuthContext]:
+    def _slot(self, context: AuthContext, *, concurrency_precharged: bool = False) -> Iterator[AuthContext]:
+        """Phase 10 WP-8c (design D-8 (3), review F-2): `concurrency_
+        precharged` mirrors `ControlPlaneService.check_rate()`'s own
+        `rate_precharged` parameter (`control_plane.py::check_rate`'s
+        docstring) -- an HTTP caller that already reserved this SAME
+        deployment's own concurrency slot BEFORE authentication (via
+        `acquire_concurrency_slot()` below, called from `http.py` ahead of
+        `_authenticate`) passes `concurrency_precharged=True` into the
+        eventual `DataService` call so this method does not reserve a
+        SECOND slot for the identical logical request -- otherwise every
+        HTTP request would cost 2 units of `limits.concurrency` instead of
+        1, halving the deployment's own real capacity relative to its
+        declaration (completion condition 3). Every OTHER caller (this
+        repository's own tests, the in-process conformance adapter, which
+        call a `DataService` method directly with no pre-auth reservation
+        of their own) keeps the default `False` -- unchanged from before
+        this WP: `_check`/`_acquire_rate` run exactly as before, and the
+        concurrency slot is still acquired HERE, inside this method, in
+        exactly the same relative position (after `_check`/`_acquire_rate`,
+        around the caller's own business logic) `hold_in_flight`'s own
+        stall point already depends on (`conformance-tests/adapter.py`'s
+        `hold_in_flight` docstring: "AFTER the concurrency counter is
+        acquired and BEFORE DB execution").
+
+        `_check`/`_acquire_rate` stay POST-authentication in every case:
+        `_acquire_rate` is keyed by `context.credential_id` (`_acquire_
+        rate`'s own signature), which does not exist before authentication
+        resolves one -- only the credential-independent concurrency bound
+        can be, and now is, taken before authentication.
+        """
         canonical = self._check(context)
         self._acquire_rate(canonical)
+        if concurrency_precharged:
+            yield canonical
+            return
         with self._active_lock:
             if self._active >= self.limits.concurrency:
                 fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
             self._active += 1
         try:
             yield canonical
+        finally:
+            with self._active_lock:
+                self._active -= 1
+
+    @contextmanager
+    def acquire_concurrency_slot(self) -> Iterator[None]:
+        """Phase 10 WP-8c (design D-8 (3), review F-2): pre-authentication
+        concurrency admission for the HTTP surface -- mirrors
+        `ControlPlaneService.check_rate()`'s own pre-auth admission shape
+        on the control plane (`control_http.py`'s module header: "charged
+        before anything else, including authentication"), applied here to
+        `concurrency` rather than `requests_per_minute` (this class alone
+        is credential-independent, so it alone can be evaluated before a
+        credential is known at all -- see `_slot`'s own docstring).
+
+        `http.py` enters this BEFORE calling `_authenticate`, and holds it
+        for the caller's own ENTIRE request -- authentication, body
+        parsing, and the eventual `DataService` business call, which
+        itself passes `concurrency_precharged=True` into `_slot` so the
+        SAME single reservation is never taken twice for one request
+        (`_slot`'s own docstring). This closes review F-2's own measured
+        gap: before this WP, an unauthenticated flood (invalid bearer
+        tokens) never touched `self._active` at all -- `_authenticate`
+        occupied a worker thread and the platform credential pool for
+        every concurrently in-flight request, up to anyio's own
+        thread-limiter ceiling (40), regardless of `limits.concurrency`
+        (32). With this reservation taken first, at most `limits.
+        concurrency` requests -- authenticated or not -- are ever
+        in-flight at once, so demand on `_authenticate`'s own platform
+        pool is bounded by the SAME declared class a caller's own
+        `capabilities()` document already advertises as `concurrency`.
+
+        A refusal here raises `fail()` directly, exactly like `_slot`'s
+        own concurrency branch did before this WP -- no `_event`/durable-
+        audit call runs between this raise and the ASGI layer's own
+        `except FoundationError` (`http.py::_endpoint`), so this denial is
+        never durably audited, the same "rate-class pre-auth denial is
+        never durably audited" rule `_acquire_rate`'s own denial already
+        followed (there is no `context`/`canonical` to attribute it to
+        yet in any case).
+
+        Deliberately its OWN copy of the check-then-increment block
+        `_slot` above also carries (not a shared helper the two call into)
+        -- `tests/test_threadpool_offload.py::test_slot_check_then_
+        increment_is_lexically_inside_the_active_lock` pins that exact
+        block LEXICALLY INSIDE `_slot` itself (an AST scan, WP-8a review
+        F-4), so factoring it out into a shared private method would have
+        turned that pre-existing, unrelated test red as a side effect of
+        this WP -- an acceptable small duplication (four lines) rather
+        than disturbing a pinned mutation-test shape this WP does not own."""
+        with self._active_lock:
+            if self._active >= self.limits.concurrency:
+                fail("LIMIT_EXCEEDED", "Concurrency limit exceeded.", status=429, details={"resource": "concurrency", "limit_class": "concurrency", "limit": self.limits.concurrency})
+            self._active += 1
+        try:
+            yield
         finally:
             with self._active_lock:
                 self._active -= 1

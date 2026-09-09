@@ -402,6 +402,39 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
 # right away waits for one to free up (the same fail-open-to-latency,
 # never-a-hang shape `_RolePool`'s own `acquire_timeout` already has), it
 # does not hang forever or crash the process.
+#
+# Phase 10 WP-8c (design D-8 (3), review F-2): every handler below now
+# enters `service.acquire_concurrency_slot()` as its OWN first statement,
+# before `_authenticate` -- the data-plane evaluation order is now BYTE
+# BOUND (RequestByteBoundMiddleware, defined above in this module and
+# applied by this module's own `create_app`, not `main.py`) -> CONCURRENCY
+# SLOT -> AUTHENTICATION -> body read -> rate/business (`DataService._slot`, still
+# entered post-authentication, via `concurrency_precharged=True` so the
+# same single reservation is never taken twice). This mirrors the control
+# plane's own pre-auth admission shape (`control_http.py`'s module header:
+# "check_rate() ... charged before anything else, including
+# authentication"), applied to `concurrency` rather than `requests_per_
+# minute` here -- `concurrency` alone is credential-independent, so it
+# alone can be evaluated before a credential is known at all; the rate
+# window stays keyed by `credential_id` and therefore stays post-auth
+# (`DataService._acquire_rate`, `DataService._slot`'s own docstring).
+# Closes review F-2's own measured gap: before this WP, an unauthenticated
+# flood of invalid bearer tokens never touched the concurrency counter at
+# all -- `_authenticate`'s own worker-thread and platform-credential-pool
+# demand grew unbounded by `limits.concurrency`, up to anyio's own
+# thread-limiter ceiling (40), while legitimate authenticated callers
+# could see `AUTH_STATE_UNAVAILABLE`/503 once the platform pool (default
+# size 4) was exhausted. `acquire_concurrency_slot()` is held for the
+# caller's own ENTIRE request -- across both `run_in_threadpool` calls a
+# body-carrying handler makes (`_authenticate`, then `_run`) -- via a
+# `with` statement that never returns control to this coroutine until the
+# whole request is done; Starlette's `run_in_threadpool` (`anyio.to_thread.
+# run_sync`) copies the CURRENT `contextvars.Context` into the worker
+# thread it runs on, so a plain synchronous `with` entered on the event-
+# loop thread, wrapping two SEPARATE `await run_in_threadpool(...)` calls
+# that may each land on a different physical OS thread, still correctly
+# spans both -- the lock this context manager holds is a `threading.Lock`
+# on the shared `DataService` instance, not anything thread-affine.
 # --------------------------------------------------------------------------
 
 
@@ -409,41 +442,43 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
 async def get_capabilities(request: Request) -> Response:
     service: DataService = request.app.state.service
 
-    def _run() -> dict[str, Any]:
-        context = _authenticate(request, service)
-        return service.capabilities(context)
+    with service.acquire_concurrency_slot():
+        def _run() -> dict[str, Any]:
+            context = _authenticate(request, service)
+            return service.capabilities(context, concurrency_precharged=True)
 
-    document = await run_in_threadpool(_run)
+        document = await run_in_threadpool(_run)
     return JSONResponse(document, status_code=200)
 
 
 @_endpoint
 async def post_query(request: Request) -> Response:
     service: DataService = request.app.state.service
-    context = await run_in_threadpool(_authenticate, request, service)
-    entity = request.path_params["entity"]
-    body = await _read_json_object(request)
+    with service.acquire_concurrency_slot():
+        context = await run_in_threadpool(_authenticate, request, service)
+        entity = request.path_params["entity"]
+        body = await _read_json_object(request)
 
-    def _run() -> "QueryPage":
-        _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
-        # CCR-13 WP-4/WP-5: `order_by`/`page.cursor` are delegated to
-        # `DataService.query_page`, which passes them to the underlying cell
-        # (`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`
-        # validate the shapes).
-        kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
-        page = body.get("page")
-        if page is not None:
-            _check_object_shape(page, _DEFINITIONS["Page"], label="page", own_path="page")
-            if "size" in page:
-                kwargs["page_size"] = page["size"]
-            if "cursor" in page:
-                kwargs["cursor"] = page["cursor"]
-        # Contract 1.7.0 (D-6, WP-2d): `budget` is real as of this commit
-        # (`capabilities().request_budget` is `enabled`) -- passed through to
-        # `query_page`, which narrows the deployed bound by it.
-        return service.query_page(context, entity, request_id=_request_id(request), budget=body.get("budget"), **kwargs)
+        def _run() -> "QueryPage":
+            _check_object_shape(body, _SCHEMAS["QueryRequest"], label="QueryRequest")
+            # CCR-13 WP-4/WP-5: `order_by`/`page.cursor` are delegated to
+            # `DataService.query_page`, which passes them to the underlying cell
+            # (`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`
+            # validate the shapes).
+            kwargs: dict[str, Any] = {"select": body.get("select"), "where": body.get("where"), "order_by": body.get("order_by")}
+            page = body.get("page")
+            if page is not None:
+                _check_object_shape(page, _DEFINITIONS["Page"], label="page", own_path="page")
+                if "size" in page:
+                    kwargs["page_size"] = page["size"]
+                if "cursor" in page:
+                    kwargs["cursor"] = page["cursor"]
+            # Contract 1.7.0 (D-6, WP-2d): `budget` is real as of this commit
+            # (`capabilities().request_budget` is `enabled`) -- passed through to
+            # `query_page`, which narrows the deployed bound by it.
+            return service.query_page(context, entity, request_id=_request_id(request), budget=body.get("budget"), concurrency_precharged=True, **kwargs)
 
-    result = await run_in_threadpool(_run)
+        result = await run_in_threadpool(_run)
     # CCR-13 WP-5: `revisions` (index-aligned with `items`) now reaches the
     # response -- `revision_preconditions` is declared `enabled`. Contract
     # 1.7.0 (D-7, WP-2e): `request_id` -- `result.request_id`, the SAME
@@ -458,45 +493,47 @@ async def post_query(request: Request) -> Response:
 @_endpoint
 async def post_mutate(request: Request) -> Response:
     service: DataService = request.app.state.service
-    context = await run_in_threadpool(_authenticate, request, service)
-    entity = request.path_params["entity"]
-    body = await _read_json_object(request)
+    with service.acquire_concurrency_slot():
+        context = await run_in_threadpool(_authenticate, request, service)
+        entity = request.path_params["entity"]
+        body = await _read_json_object(request)
 
-    def _run() -> "MutationResult":
-        _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
-        # G-1 (`{scratchpad}/rulings-r4.md` addendum): a `plan`'s digest
-        # commits to the request object exactly as received -- a body that
-        # omits `transaction` must digest differently from one that spells
-        # out `transaction: "atomic"` explicitly, even though both behave
-        # identically. So `transaction` is passed to `mutate_result` ONLY
-        # when the body actually carried the key (mirroring how the
-        # in-process port already omits its own `transaction` kwarg when
-        # the caller didn't supply one) -- never resolved to `"atomic"`
-        # here first.
-        mutate_kwargs: dict[str, Any] = {}
-        if "transaction" in body:
-            transaction = body["transaction"]
-            if transaction not in {"atomic", "best_effort"}:
-                fail("VALIDATION_FAILED", "Transaction mode is not supported.", details=violation("request_schema", field="transaction"))
-            mutate_kwargs["transaction"] = transaction
-        # Contract 1.7.0 (D-4/D-5/D-6, WP-2b/WP-2c/WP-2d): `dry_run`/`plan`/
-        # `budget`/`idempotency_key` are all real as of this commit
-        # (`capabilities().dry_run`/`.request_budget`/`.idempotency` are all
-        # `enabled`) -- passed through to `mutate_result`, which gives each
-        # its full effect.
-        return service.mutate_result(
-            context,
-            entity,
-            body.get("operations"),
-            request_id=_request_id(request),
-            dry_run=body.get("dry_run", False),
-            plan=body.get("plan"),
-            budget=body.get("budget"),
-            idempotency_key=body.get("idempotency_key"),
-            **mutate_kwargs,
-        )
+        def _run() -> "MutationResult":
+            _check_object_shape(body, _SCHEMAS["MutationRequest"], label="MutationRequest")
+            # G-1 (`{scratchpad}/rulings-r4.md` addendum): a `plan`'s digest
+            # commits to the request object exactly as received -- a body that
+            # omits `transaction` must digest differently from one that spells
+            # out `transaction: "atomic"` explicitly, even though both behave
+            # identically. So `transaction` is passed to `mutate_result` ONLY
+            # when the body actually carried the key (mirroring how the
+            # in-process port already omits its own `transaction` kwarg when
+            # the caller didn't supply one) -- never resolved to `"atomic"`
+            # here first.
+            mutate_kwargs: dict[str, Any] = {}
+            if "transaction" in body:
+                transaction = body["transaction"]
+                if transaction not in {"atomic", "best_effort"}:
+                    fail("VALIDATION_FAILED", "Transaction mode is not supported.", details=violation("request_schema", field="transaction"))
+                mutate_kwargs["transaction"] = transaction
+            # Contract 1.7.0 (D-4/D-5/D-6, WP-2b/WP-2c/WP-2d): `dry_run`/`plan`/
+            # `budget`/`idempotency_key` are all real as of this commit
+            # (`capabilities().dry_run`/`.request_budget`/`.idempotency` are all
+            # `enabled`) -- passed through to `mutate_result`, which gives each
+            # its full effect.
+            return service.mutate_result(
+                context,
+                entity,
+                body.get("operations"),
+                request_id=_request_id(request),
+                dry_run=body.get("dry_run", False),
+                plan=body.get("plan"),
+                budget=body.get("budget"),
+                idempotency_key=body.get("idempotency_key"),
+                concurrency_precharged=True,
+                **mutate_kwargs,
+            )
 
-    result = await run_in_threadpool(_run)
+        result = await run_in_threadpool(_run)
     # CCR-13 WP-5: `assigned_addresses` now reaches the response, in
     # operation order (insert, and insert-resolved upsert, only) -- the
     # per-entity endpoint's own elements never carry an `entity` key
@@ -528,25 +565,27 @@ async def post_mutate(request: Request) -> Response:
 async def get_catalog(request: Request) -> Response:
     service: DataService = request.app.state.service
 
-    def _run() -> dict[str, Any]:
-        context = _authenticate(request, service)
-        return service.catalog(context, request_id=_request_id(request))
+    with service.acquire_concurrency_slot():
+        def _run() -> dict[str, Any]:
+            context = _authenticate(request, service)
+            return service.catalog(context, request_id=_request_id(request), concurrency_precharged=True)
 
-    document = await run_in_threadpool(_run)
+        document = await run_in_threadpool(_run)
     return JSONResponse(document, status_code=200)
 
 
 @_endpoint
 async def post_schema(request: Request) -> Response:
     service: DataService = request.app.state.service
-    context = await run_in_threadpool(_authenticate, request, service)
-    body = await _read_json_object(request)
+    with service.acquire_concurrency_slot():
+        context = await run_in_threadpool(_authenticate, request, service)
+        body = await _read_json_object(request)
 
-    def _run() -> "SchemaOutcome":
-        _check_object_shape(body, _SCHEMAS["SchemaOperationRequest"], label="SchemaOperationRequest")
-        return service.schema(context, body, request_id=_request_id(request))
+        def _run() -> "SchemaOutcome":
+            _check_object_shape(body, _SCHEMAS["SchemaOperationRequest"], label="SchemaOperationRequest")
+            return service.schema(context, body, request_id=_request_id(request), concurrency_precharged=True)
 
-    outcome = await run_in_threadpool(_run)
+        outcome = await run_in_threadpool(_run)
     # Contract 1.7.0 (D-4, WP-2b): `service.schema` always returns
     # `SchemaOutcome` (review round F-8, `{scratchpad}/rulings-r4.md`
     # unified this away from a bare-`int`-or-`SchemaOutcome` dual shape).
@@ -591,16 +630,18 @@ async def post_cross_entity_mutate(request: Request) -> Response:
     # accounting and emits a denial audit event, exactly like every
     # executing endpoint (review R12) -- a caller cannot spend requests
     # against this stub for free just because it never executes anything.
-    def _run() -> None:
-        context = _authenticate(request, service)
-        service.deny_unsupported(
-            context,
-            operation="cross_entity_mutate",
-            message="Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
-            request_id=_request_id(request),
-        )
+    with service.acquire_concurrency_slot():
+        def _run() -> None:
+            context = _authenticate(request, service)
+            service.deny_unsupported(
+                context,
+                operation="cross_entity_mutate",
+                message="Cross-entity atomic mutation is not available; this foundation does not implement the cross_entity_mutation capability.",
+                request_id=_request_id(request),
+                concurrency_precharged=True,
+            )
 
-    await run_in_threadpool(_run)
+        await run_in_threadpool(_run)
     raise AssertionError("unreachable")
 
 
@@ -619,17 +660,19 @@ async def post_audit_query(request: Request) -> Response:
     # `post_cross_entity_mutate` above (review R12): this stub still counts
     # against the caller's rate/concurrency budget and emits a denial audit
     # event.
-    def _run() -> None:
-        context = _authenticate(request, service)
-        service.deny_unsupported(
-            context,
-            operation="audit_query",
-            message="Audit evidence query requires separately authenticated control/audit authority "
-            "that this foundation does not expose over the application-facing HTTP surface.",
-            request_id=_request_id(request),
-        )
+    with service.acquire_concurrency_slot():
+        def _run() -> None:
+            context = _authenticate(request, service)
+            service.deny_unsupported(
+                context,
+                operation="audit_query",
+                message="Audit evidence query requires separately authenticated control/audit authority "
+                "that this foundation does not expose over the application-facing HTTP surface.",
+                request_id=_request_id(request),
+                concurrency_precharged=True,
+            )
 
-    await run_in_threadpool(_run)
+        await run_in_threadpool(_run)
     raise AssertionError("unreachable")
 
 

@@ -21,6 +21,7 @@ WP wires into the public in-process composition -- or
 """
 
 from contextlib import contextmanager
+import contextvars
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
@@ -741,6 +742,41 @@ def _check_operation_depth(request, bound):
         stack.extend((child, next_depth, child_ancestors) for child in children)
 
 
+# Phase 10 WP-8c (design D-8 (3), review F-2, r2db `service.py::_slot`'s
+# own `concurrency_precharged` docstring): set for the duration of
+# `_LimitStateHolder.acquire_concurrency_slot` below (the pre-authentication
+# entry point `http.py` uses, BEFORE `_authenticate`) so that `concurrency_
+# slot` (the post-authentication entry point `ApplicationCell._limit_gate`
+# already called before this WP) does not reserve a SECOND slot for the
+# SAME logical request. A `ContextVar`, not an explicit parameter threaded
+# through every one of `ApplicationCell`'s ~10 gated methods and their
+# `ApplicationRuntime`/`ApplicationDeveloper` thin wrappers (the shape
+# `r2db`'s own flatter `DataService` uses, `concurrency_precharged`): this
+# peer's application-plane facade is a THREE-LEVEL chain (`http.py` ->
+# `ApplicationRuntime`/`ApplicationDeveloper` -> `ApplicationCell` ->
+# `_gate`/`_limit_gate`) with no single choke narrow enough to carry an
+# explicit parameter without touching every intermediate signature -- a
+# `ContextVar` set once, at the single call site that already spans both
+# `run_in_threadpool` calls one HTTP request makes (`http.py`'s own
+# comment on `acquire_concurrency_slot`), reaches `concurrency_slot` no
+# matter how many layers of pass-through sit in between, with zero
+# intermediate signature changes and therefore zero risk of a missed call
+# site. Correct across the thread hop: `starlette.concurrency.
+# run_in_threadpool` (`anyio.to_thread.run_sync`) copies the CALLING
+# coroutine's own `contextvars.Context` into whichever worker thread runs
+# the offloaded call, so a value set on the event-loop thread before
+# either `await run_in_threadpool(...)` call is visible inside both, even
+# when they land on two different physical OS threads (verified
+# empirically for this exact call shape). Every DIRECT/in-process caller
+# of `ApplicationCell`/`ApplicationRuntime` (this repository's own tests,
+# the in-process conformance adapter) never sets this at all, so `get()`
+# returns the default `False` for them and `concurrency_slot` behaves
+# exactly as it did before this WP -- unaffected, by construction.
+_CONCURRENCY_RESERVED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "mitatedb_api_concurrency_reserved", default=False
+)
+
+
 class _LimitStateHolder:
     """Phase 8 WP-1a (design D-1 "置き場は実装WPが新設する (1プロセス1個)"):
     the process-wide (one per composition root / one per isolated
@@ -783,6 +819,20 @@ class _LimitStateHolder:
 
     @contextmanager
     def concurrency_slot(self, bound):
+        # Phase 10 WP-8c: if the caller's own logical request already holds
+        # a pre-authentication reservation (`acquire_concurrency_slot`
+        # below), this is a no-op re-entry -- the slot is already held for
+        # the whole request, and a second increment here would cost this
+        # SAME request 2 units of `concurrency` instead of 1 (halving this
+        # deployment's own real capacity relative to its declaration).
+        # Every caller that never took such a reservation (unaffected by
+        # this WP: this repository's own tests, the in-process conformance
+        # adapter) sees `_CONCURRENCY_RESERVED.get()` return its default,
+        # `False`, and falls through to the unchanged check-then-increment
+        # below.
+        if _CONCURRENCY_RESERVED.get():
+            yield
+            return
         with self._active_lock:
             if self._active >= bound:
                 raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
@@ -790,6 +840,43 @@ class _LimitStateHolder:
         try:
             yield
         finally:
+            with self._active_lock:
+                self._active -= 1
+
+    @contextmanager
+    def acquire_concurrency_slot(self, bound):
+        """Phase 10 WP-8c (design D-8 (3), review F-2): pre-authentication
+        concurrency admission -- the entry point `http.py` calls BEFORE
+        `_authenticate`, mirroring r2db `service.py::DataService.
+        acquire_concurrency_slot`'s own identical purpose and this peer's
+        own control-plane precedent for a pre-auth admission check taken
+        ahead of everything else.
+
+        Performs the SAME check-then-increment `concurrency_slot` above
+        performs (own copy, not a shared helper -- kept trivially small
+        and independently readable, matching r2db `service.py::DataService.
+        acquire_concurrency_slot`'s own identical choice and reasoning),
+        and additionally sets `_CONCURRENCY_RESERVED` for the duration of
+        the `with` block so a NESTED call to `concurrency_slot` above (from
+        `ApplicationCell._limit_gate`, reached once authentication and the
+        rest of this request's own dispatch complete) recognizes the slot
+        is already held and does not reserve a second one.
+
+        A refusal here raises `ResourceLimitError` directly, exactly like
+        `concurrency_slot` above already does -- reaching `http.py`'s own
+        `except FoundationError`-equivalent handling with no `_event`/
+        durable-audit call in between, so this denial is never durably
+        audited (there is no authenticated principal to attribute it to
+        yet, in any case)."""
+        with self._active_lock:
+            if self._active >= bound:
+                raise ResourceLimitError("concurrency limit exceeded", limit_class="concurrency")
+            self._active += 1
+        token = _CONCURRENCY_RESERVED.set(True)
+        try:
+            yield
+        finally:
+            _CONCURRENCY_RESERVED.reset(token)
             with self._active_lock:
                 self._active -= 1
 

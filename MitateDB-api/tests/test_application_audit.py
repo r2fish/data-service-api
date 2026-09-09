@@ -55,7 +55,8 @@ from mitatedb_api.auth import CredentialStore, Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
 from mitatedb_api.backend_sqlite import SQLiteBackend
 from mitatedb_api.cell import (ApplicationCell, ApplicationDeveloper,
-                               ApplicationRuntime, Filter, _delete_confirmation_phrase)
+                               ApplicationRuntime, Filter, _delete_confirmation_phrase,
+                               _LimitStateHolder)
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import (AuditSinkUnavailable, AuthenticationError,
@@ -2538,7 +2539,16 @@ def test_auth_required_is_durably_recorded() -> None:
 
     sink = ApplicationAuditSink()
     router = make_router(sink)
-    service = HttpService(CredentialStore("x" * 16), lambda application_id: None, audit_router=router)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): `HttpService`
+    # now fails closed at construction time unless BOTH `limit_holder`/
+    # `max_concurrency` are supplied (`http.py::HttpService.__init__`'s own
+    # comment) -- this test never calls `acquire_concurrency_slot`, only
+    # `authenticate`, so the concrete values below are never exercised,
+    # but construction itself still requires them.
+    service = HttpService(
+        CredentialStore("x" * 16), lambda application_id: None, audit_router=router,
+        limit_holder=_LimitStateHolder(), max_concurrency=FoundationConfig().max_concurrency,
+    )
     with pytest.raises(Exception):  # `http._CredentialMissing`, a private class
         service.authenticate(None, request_id="req-probe")
     events = sink.events()

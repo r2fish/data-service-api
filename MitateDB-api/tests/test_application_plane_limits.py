@@ -38,7 +38,7 @@ import pytest
 
 from mitatedb_api.auth import Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
-from mitatedb_api.cell import ApplicationCell, Filter, _measure_request_bytes
+from mitatedb_api.cell import ApplicationCell, Filter, _LimitStateHolder, _measure_request_bytes
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import ResourceLimitError, ValidationError
@@ -107,7 +107,31 @@ def test_gate_denies_requests_per_minute_before_concurrency():
     both fully green (only `request_bytes`-vs-rate and `request_bytes`-
     vs-`operation_depth` were actually locked). Mutation (裁定 4 再実行
     instruction): swap the two lines `_limit_gate` checks in and this
-    test goes red (the denial flips to `concurrency`)."""
+    test goes red (the denial flips to `concurrency`).
+
+    Supervisor ruling 2026-09-09 update (Phase 10 WP-8c review F-3): this
+    ruling (裁定 4, 監督裁定 2026-09-06, restated verbatim above) governs
+    the CELL-LEVEL order this test itself exercises -- a direct, in-
+    process call into `cell._limit_gate`, reaching neither `http.py` nor
+    any HTTP boundary at all -- and that order is UNCHANGED by Phase 10
+    WP-8c: this test stays green, verbatim, with no edit to its own body.
+
+    On the HTTP PLANE specifically, WP-8c introduced a pre-authentication,
+    deployment-wide `concurrency` slot (`HttpService.acquire_concurrency_
+    slot()`, taken BEFORE `_authenticate`, `http.py`'s own module-header
+    comment) that is now evaluated ahead of the per-credential `requests_
+    per_minute` window, which stays keyed by credential and therefore
+    stays reachable only AFTER authentication succeeds. Consequently, ON
+    THE HTTP PLANE ONLY, a request that is BOTH rate-exhausted AND
+    concurrency-exhausted is now denied `concurrency`, NOT `requests_per_
+    minute` -- the OPPOSITE of 裁定 4's own cell-level order restated
+    above. This is not a contradiction of 裁定 4 (which remains fully
+    true for the cell-level call this test itself makes); it is a
+    SEPARATE, ADDITIONAL ruling that fixes the HTTP-plane order
+    specifically, pinned by `test_preauth_concurrency_bound.py::test_
+    http_plane_denies_concurrency_before_requests_per_minute` in THIS
+    peer's own test suite (and its isomorphic r2db counterpart, same
+    test name)."""
     config = FoundationConfig(max_requests_per_minute=1, max_concurrency=1, max_request_bytes=1_000_000, max_operation_depth=10)
     cell = ApplicationCell("app1", config)
     dev = _principal(credential_id="dev-rate-vs-conc", role=Role.DEVELOPER)
@@ -538,13 +562,21 @@ def test_request_bytes_dual_layer_responses_are_identical(platform, app_a):
     )
     config = FoundationConfig(max_request_bytes=400)
     backend = PostgresBackend(app_a.runtime_dsn, app_a.developer_dsn)
-    cell = ApplicationCell(app_a.app_id, config, backend=backend)
+    # Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09): `HttpService`
+    # now fails closed at construction time unless BOTH `limit_holder`/
+    # `max_concurrency` are supplied (`http.py::HttpService.__init__`'s own
+    # comment) -- an explicit `_LimitStateHolder`, shared with `cell` below,
+    # and this test's own `config.max_concurrency` (unset here, so the
+    # dataclass default, 32 -- irrelevant to what this test actually
+    # exercises, `request_bytes`, but still required to construct).
+    limit_holder = _LimitStateHolder()
+    cell = ApplicationCell(app_a.app_id, config, backend=backend, limit_holder=limit_holder)
 
     def _cell_factory(application_id: str) -> ApplicationCell:
         assert application_id == app_a.app_id
         return cell
 
-    service = HttpService(read_store, _cell_factory)
+    service = HttpService(read_store, _cell_factory, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
     # Deliberately LARGER than config.max_request_bytes=400 -- see this
     # test's own docstring for why the gap between the two bounds is what
     # makes both layers independently exercisable.
