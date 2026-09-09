@@ -21,14 +21,23 @@ an in-process peer with no cross-entity entry point at all; a real,
 present `CAPABILITY_UNSUPPORTED` denial for a peer whose wire dispatcher
 genuinely receives the request but refuses it uniformly).
 
-With the four currently-registered adapters: both `MitateDB-api` adapters
-declare `cross_entity_mutation: partial` (phase 3.5 WP-2 flip) and take the
-available branch for real; `r2db-api` (in-process) and `r2db-api-http`
-both stay `unavailable` (P35-D1 -- no real client demand on this peer) and
-take the absence branch -- in two DIFFERENT honest forms, pinned explicitly
-by V5 below (`r2db-api` = surface-absent, `r2db-api-http` =
-present-denial), the same two-form split C-14/C-15/C-17/C-06's own
-`drop_entity` row already establish elsewhere on this port.
+With the six currently-registered adapters: both `MitateDB-api` adapters
+(`MitateDB-api`, `MitateDB-api-http`) declare `cross_entity_mutation:
+partial` (phase 3.5 WP-2 flip) and take the available branch for real;
+`MitateDB-api-socket` (Phase 10 WP-4) subclasses `MitateDBHttpConformance
+Adapter` and never overrides `attempt_cross_entity_batch`/`capability_
+document`, so it inherits that same `partial` declaration and takes the
+available branch too -- confirmed by V5 below never observing it as
+unavailable. `r2db-api` (in-process) and `r2db-api-http` both stay
+`unavailable` (P35-D1 -- no real client demand on this peer) and take the
+absence branch -- in two DIFFERENT honest forms, pinned explicitly by V5
+below (`r2db-api` = surface-absent, `r2db-api-http` = present-denial), the
+same two-form split C-14/C-15/C-17/C-06's own `drop_entity` row already
+establish elsewhere on this port. `r2db-api-socket` (Phase 10 WP-4)
+likewise subclasses `R2DBHttpConformanceAdapter` with no override of
+either method, so it inherits `r2db-api-http`'s own `unavailable`
+declaration and its `present-denial` (`declared_unavailable`) evidence
+form verbatim -- pinned in `_EXPECTED_ABSENCE_FORM` below alongside it.
 """
 from __future__ import annotations
 
@@ -454,6 +463,14 @@ def test_c16_v4_destructive_delete_inside_the_unit(adapter, fx: Fixture):
 _EXPECTED_ABSENCE_FORM: dict[str, str] = {
     "r2db-api": "surface_absent",
     "r2db-api-http": "declared_unavailable",
+    # r2db-api-socket subclasses R2DBHttpConformanceAdapter with no
+    # override of capability_document()/attempt_cross_entity_batch, so it
+    # inherits r2db-api-http's own unavailable declaration and evidence
+    # form verbatim (Phase 10 WP-4). MitateDB-api-socket is the mirror
+    # case but is NOT listed here: it likewise inherits its http
+    # counterpart's declaration, which is `partial` (available), so it
+    # never reaches this dict's lookup in the first place.
+    "r2db-api-socket": "declared_unavailable",
 }
 
 

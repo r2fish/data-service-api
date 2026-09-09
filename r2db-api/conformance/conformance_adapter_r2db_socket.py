@@ -294,18 +294,43 @@ class _DeclaredSocketSurface:
                 raise socket_harness.HarnessStartupError(
                     f"{self._label} surface: startup budget exceeded before readiness checks began"
                 )
+            # Phase 10 WP-4d fix: a SINGLE readiness probe, not two. This
+            # surface's own rendered nginx conf (above) always points BOTH
+            # `location /v1/` and `location /control/v1/` at the SAME
+            # single uvicorn upstream -- nginx+uvicorn being up and
+            # answering on either path already proves both are up (there
+            # is no scenario where one location works and the other does
+            # not: same process, same conf, same upstream port).
+            # `socket_harness.wait_until_ready`'s own criterion is "status
+            # < 500" (its docstring: "期待は 401"), which a merely-
+            # unmatched route on a healthy app also satisfies via a clean
+            # 404 -- exactly the reasoning `conformance_adapter_mitatedb_
+            # socket.py`'s own `_AppSocketSurface._ensure_started` already
+            # documents for probing only `/v1/capabilities` regardless of
+            # whether the bound app is data- or control-shaped. This
+            # adapter used to probe BOTH `/v1/capabilities` and
+            # `/control/v1/capabilities` -- the second probe is not merely
+            # redundant: it is a REAL, unauthenticated `GET /control/v1/
+            # capabilities` round trip, and r2db's own `get_control_
+            # capabilities` handler charges `control_requests_per_minute`
+            # BEFORE reading the Authorization header (`control_http.py`
+            # `check_rate()` call, "MAJOR-1: charged before anything
+            # else") -- so every transient control surface this adapter's
+            # `isolated_control_surface()` builds (a fresh app, a fresh,
+            # otherwise-empty rate window, per call) started life with 1
+            # unit of that window already spent by this readiness probe
+            # alone. Measured directly (this WP): `test_c14_authority_
+            # boundary.py`'s own control_requests_per_minute drive, which
+            # asserts the declared bound predicts EXACTLY that many
+            # successes on a genuinely empty isolated window, observed
+            # exactly 199 successes at a declared bound of 200 -- an
+            # off-by-one entirely explained by, and only by, this second
+            # probe. Dropping it removes the hidden charge; the single
+            # remaining probe still proves the same liveness fact the two
+            # together did.
             socket_harness.wait_until_ready(
                 f"{self.declared_base_url}/v1/capabilities",
-                timeout_s=min(socket_harness.UPSTREAM_READY_TIMEOUT_S, remaining), label=f"{self._label}-v1",
-            )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise socket_harness.HarnessStartupError(
-                    f"{self._label} surface: startup budget exceeded between readiness checks"
-                )
-            socket_harness.wait_until_ready(
-                f"{self.declared_base_url}/control/v1/capabilities",
-                timeout_s=min(socket_harness.UPSTREAM_READY_TIMEOUT_S, remaining), label=f"{self._label}-control",
+                timeout_s=min(socket_harness.UPSTREAM_READY_TIMEOUT_S, remaining), label=f"{self._label}-ready",
             )
 
             self._uvicorn = uvicorn_handle
