@@ -148,7 +148,7 @@ from r2db_api.credential_store import (  # noqa: E402
 )
 from r2db_api.errors import FoundationError  # noqa: E402
 from r2db_api.http import PROBLEM_CONTENT_TYPE, create_app  # noqa: E402
-from r2db_api.limits import ControlPlaneLimits, ResourceLimits  # noqa: E402
+from r2db_api.limits import ControlPlaneLimits, ResourceLimits, role_pool_size  # noqa: E402
 from r2db_api.platform_declarations import VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS  # noqa: E402
 from r2db_api.postgres import PostgresCell  # noqa: E402
 
@@ -880,6 +880,36 @@ _ISOLATED_APPLICATION_LIMITS = ResourceLimits(
     idempotency_retention_ms=60_000,
 )
 
+# Phase 10 WP-4e (supervisor ruling 2026-09-09): the DATA-plane platform
+# pools this adapter constructs (`self._credentials`/`self._write_
+# credentials`/`self._application_durable_audit`, all against the
+# `<prefix>_api` role, migration `0005`) used to be sized `pool_size=2`
+# (or the credential store's own internal default of 4) -- a fixed figure
+# left over from before WP-8a's `run_in_threadpool` delegation (`r2db_api.
+# http`) let concurrent requests' authentication reads genuinely reach
+# these pools at once, exactly the F-1 shape `r2db_api.limits.role_pool_
+# size` already fixed for the per-application role pools. `_RolePool`
+# (`r2db_api.postgres`) creates connections LAZILY up to `maxconn` --
+# raising this ceiling does not itself open more real connections against
+# `<prefix>_api`'s own `CONNECTION LIMIT` (migration `0005`); it only
+# removes the artificial wait/timeout a genuine (if modest) burst of
+# concurrent auth traffic used to hit well under that real ceiling.
+# Derived from the SAME default `ResourceLimits()` profile `self._service`
+# is built against here (never the small `_ISOLATED_APPLICATION_LIMITS`
+# profile above, which governs a PostgresCell's own per-application pool
+# -- `_make_cell`'s pool_size=2 -- not this platform-plane one) via the
+# SAME `role_pool_size` production code (`r2db_api.main`) already uses,
+# so the two can never drift apart.
+#
+# Deliberately NOT reused for the control stack's own stores below
+# (`self._control_pool_size`, `r2dbsvc_controlplane`, migration `0006`)
+# -- WP-4e measured that separately and found raising it does not fix,
+# and actively worsens the exposure behind, a DIFFERENT, real bug (a hard
+# PostgreSQL `CONNECTION LIMIT` refusal, not a local pool timeout) -- see
+# `self._control_pool_size`'s own assignment below for the measured
+# detail and why it stays at its original value.
+_DEFAULT_PLATFORM_POOL_SIZE = role_pool_size(ResourceLimits())
+
 
 class R2DBHttpConformanceAdapter(ConformanceAdapter):
     """Connects the common conformance port to r2db-api's real HTTP +
@@ -1068,11 +1098,13 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
                 self._platform.api_dsn,
                 pepper="synthetic-conformance-pepper-r2db-http-0000",
                 schema=f"{prefix}_registry",
+                pool_size=_DEFAULT_PLATFORM_POOL_SIZE,
             )
             self._write_credentials = PostgresCredentialStore(
                 self._platform.control_dsn,
                 pepper="synthetic-conformance-pepper-r2db-http-0000",
                 schema=f"{prefix}_registry",
+                pool_size=_DEFAULT_PLATFORM_POOL_SIZE,
             )
             # Phase 4 WP-2(b) (design D-1/D-6): a REAL Postgres `application_
             # audit` writer -- the SAME `<prefix>_api` role/DSN `self.
@@ -1101,7 +1133,7 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # to be -- ordinary, since this adapter's own conformance
             # traffic never depends on either timeout actually firing.
             self._application_durable_audit = PostgresApplicationAuditSink(
-                self._platform.api_dsn, schema=self._platform.schema, pool_size=2,
+                self._platform.api_dsn, schema=self._platform.schema, pool_size=_DEFAULT_PLATFORM_POOL_SIZE,
             )
             self._service = DataService(
                 self._credentials, cell_factory=self._make_cell, control_plane_status="enabled",
@@ -1182,6 +1214,41 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
             # `R2DB_PLATFORM_POOL_SIZE`'s own default) would let 4 stores'
             # pools alone threaten that limit before even accounting for a
             # rebuild's old-and-new pools briefly coexisting.
+            #
+            # Phase 10 WP-4e (supervisor ruling 2026-09-09) investigated
+            # raising this the same way as the platform-plane pools above
+            # (`_DEFAULT_PLATFORM_POOL_SIZE`, derived from `role_pool_
+            # size`) and measured it directly against the real 6-plug
+            # conformance gate: it does NOT fix, and does not need to fix,
+            # the `AUTH_STATE_UNAVAILABLE`/`SERVICE_UNAVAILABLE` failures
+            # this WP was diagnosing (`test_c14_resource_bounds_published_
+            # and_enforced`/`test_c24_request_budget`/`test_c25_result_
+            # request_id`, all `[r2db-api-socket]`) -- debug instrumentation
+            # on `_RolePool._connect` (WP-4e report) caught the real
+            # underlying exception verbatim: `psycopg.OperationalError`
+            # "FATAL: too many connections for role
+            # \"<prefix>_controlplane\"", raised on the FIRST-ever
+            # connection attempt of a brand-new pool (`created=1`,
+            # `elapsed<0.01s`) -- a REAL PostgreSQL `CONNECTION LIMIT`
+            # refusal, never a local pool-acquire timeout (`_RolePool`'s
+            # own `acquire_timeout` path never fires here). This is a
+            # DIFFERENT failure mode from the one `role_pool_size` fixes
+            # (WP-8a's F-1: a LOCAL pool sized below declared `concurrency`
+            # timing out under genuine in-process contention) -- raising
+            # THIS pool's own `maxconn` cannot help, and actively worsens
+            # the real exposure: `_RolePool` never shrinks (no idle
+            # eviction, unlike `SharedPoolManager`), so a larger `maxconn`
+            # lets the SHARED stack's own 4 pools permanently retain more
+            # real, cached-idle connections after any historical burst,
+            # leaving LESS of the role's hard 10-connection budget for
+            # `isolated_control_surface`'s own fresh stack (4 MORE pools,
+            # briefly alive alongside the shared one) to open even its
+            # first connection. Kept at the original, deliberately small
+            # `2` -- a genuine fix needs either a higher `r2dbsvc_
+            # controlplane` `CONNECTION LIMIT` (migration change) or an
+            # idle-eviction mechanism on `_RolePool` itself, both outside
+            # this WP's own scope (pool SIZING/composition only, not pool
+            # LIFECYCLE) -- reported for a separate ruling.
             self._control_pool_size = 2
             self._control_app, self._control_stores = self._build_control_stack()
             self._control_client = self._build_client(self._control_app, BASE_URL)

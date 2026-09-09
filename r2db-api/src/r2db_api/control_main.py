@@ -431,6 +431,35 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
+    # Phase 10 WP-4e (supervisor ruling 2026-09-09) investigated deriving
+    # this default from a declared concurrency ceiling too (mirroring
+    # `r2db_api.main`'s data-plane platform pool fix, `role_pool_size`) --
+    # this process' own 4 platform-plane stores (`applications`/
+    # `credentials`/`control_credentials`/`audit`, all against the SAME
+    # `r2dbsvc_controlplane` role) share one hard PostgreSQL `CONNECTION
+    # LIMIT 10` (`0006_control_plane_http.sql`). Measured directly against
+    # the conformance HTTP adapter's own identical stores (`conformance_
+    # adapter_r2db_http.py::self._control_pool_size`, same 4-stores-one-
+    # role shape): raising this ceiling does NOT fix a pool-exhaustion
+    # timeout (`_RolePool`'s own `acquire_timeout` never fired) -- the
+    # measured failure was a REAL `psycopg.OperationalError` ("FATAL: too
+    # many connections for role"), a hard PostgreSQL refusal, on the
+    # FIRST-ever connection of a brand-new pool. `_RolePool` never shrinks
+    # (no idle eviction) -- a larger ceiling only lets this process
+    # permanently retain MORE real, cached-idle connections after any
+    # historical burst, worsening the real exposure against that same
+    # 10-connection budget rather than helping it. Left at the original
+    # fixed `4` for this reason -- unlike `r2db_api.main`'s data-plane
+    # platform pool (only 2 stores share `r2dbsvc_api`'s own CONNECTION
+    # LIMIT 10, and no second, concurrently-alive stack of stores exists
+    # for that role the way `isolated_control_surface` builds one here) --
+    # see the conformance adapter's own comment for the measured detail.
+    # A genuine fix needs either a higher `r2dbsvc_controlplane`
+    # `CONNECTION LIMIT` (migration change) or an idle-eviction mechanism
+    # on `_RolePool` itself, both outside this WP's own scope (pool
+    # SIZING/composition only, not pool LIFECYCLE) -- reported for a
+    # separate ruling. `R2DB_PLATFORM_POOL_SIZE` still wins outright when
+    # set explicitly.
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
 
     limits = ControlPlaneLimits(

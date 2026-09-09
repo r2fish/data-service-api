@@ -609,6 +609,91 @@ def test_authenticate_never_hangs_across_repeated_pool_exhaustion_and_recovers_o
         store.close()
 
 
+def test_platform_pool_sized_to_declared_concurrency_avoids_premature_503(
+    platform: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 10 WP-4e (supervisor ruling 2026-09-09): peer-local real-
+    PostgreSQL pin for the platform pool sizing fix `r2db_api.main.
+    build_app` and this adapter's own conformance composition now apply --
+    the SAME F-1 shape `r2db_api.limits.role_pool_size` already fixed for
+    the per-application role pools (`test_threadpool_offload.py::
+    test_role_pool_sized_to_declared_concurrency_avoids_premature_503`,
+    which uses a FAKE `_RolePool._connect` -- no live PostgreSQL needed).
+    This test exercises the same property one layer up, against a REAL
+    platform database: with `PostgresCredentialStore`'s own pool sized via
+    `role_pool_size` (the exact function `build_app` now calls),
+    `concurrency` genuinely concurrent `authenticate()` calls are all
+    served (0 x `AUTH_STATE_UNAVAILABLE`), even though each call holds its
+    checked-out connection for longer than the pool's own
+    `acquire_timeout`.
+
+    `_execute` (this module's own single execution choke point) is
+    monkeypatched to sleep for `hold_s` seconds AFTER the real query runs
+    but BEFORE returning -- the sleep happens while `_fetch_or_503`'s own
+    `with self._pool.connection()` block still holds the checked-out real
+    connection, so `concurrency` threads genuinely contend for the pool's
+    `maxconn` slots against a live PostgreSQL server, not a simulation.
+
+    Mutation: hardcoding `PostgresCredentialStore`'s own `pool_size=` back
+    to a fixed `2` (or `4`) regardless of the declared `concurrency=6`
+    this test configures turns this red -- the 3rd+ concurrent
+    `authenticate()` call then waits past `acquire_timeout` for a
+    connection none of the first two callers have released yet (still
+    sleeping), and fails closed with `AUTH_STATE_UNAVAILABLE` instead of
+    succeeding.
+    """
+    import concurrent.futures
+    import time
+
+    from r2db_api import credential_store as credential_store_module
+    from r2db_api.limits import ResourceLimits, role_pool_size
+
+    concurrency = 6
+    hold_s = 0.6
+    resource_limits = ResourceLimits(concurrency=concurrency, requests_per_minute=100_000)
+    platform_pool_size = role_pool_size(resource_limits)
+
+    slug = _fresh_slug("pp")
+    _register_application(platform, slug)
+    credential_id = "crd_" + secrets.token_hex(8)
+    writer = _write_store(platform)
+    try:
+        with writer.unit_of_work() as work:
+            writer.add(credential_id, slug, "runtime", "s3cret-pool-size", work=work)
+    finally:
+        writer.close()
+
+    store = PostgresCredentialStore(
+        platform.api_dsn, pepper=PEPPER, schema=platform.schema,
+        pool_size=platform_pool_size, acquire_timeout=0.3,
+    )
+
+    original_execute = credential_store_module._execute
+
+    def _slow_execute(cursor, statement, params=()):
+        original_execute(cursor, statement, params)
+        time.sleep(hold_s)
+
+    monkeypatch.setattr(credential_store_module, "_execute", _slow_execute)
+
+    try:
+        secret = compose_bearer_locator(credential_id, "s3cret-pool-size")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [executor.submit(store.authenticate, secret) for _ in range(concurrency)]
+            results = []
+            denials = []
+            for future in futures:
+                try:
+                    results.append(future.result(timeout=10))
+                except FoundationError as exc:
+                    denials.append(exc.code)
+        assert not denials, f"expected 0 AUTH_STATE_UNAVAILABLE denials at in-flight == declared concurrency, got: {denials}"
+        assert len(results) == concurrency
+        assert all(context.application_id == slug for context in results)
+    finally:
+        store.close()
+
+
 def test_canonical_context_and_application_id_for_degrade_to_none_on_db_error() -> None:
     """Unlike `authenticate`/`assert_active` (authorization gates,
     fail-closed to 503), `canonical_context`/`application_id_for` are

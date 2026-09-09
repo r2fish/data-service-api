@@ -337,12 +337,18 @@ configuration's own layout rather than assuming.)
       this host (e.g. a firewall rule blocking the platform DB's
       port/socket -- whichever is less disruptive to anything else sharing
       that cluster).
-   2. Send more requests than the platform pool can serve concurrently: with
-      `R2DB_PLATFORM_POOL_SIZE` at its default of `4` (or whatever value
-      this deployment's `EnvironmentFile` actually sets), send at least
-      `R2DB_PLATFORM_POOL_SIZE + 2` requests, e.g.:
+   2. Send more requests than the platform pool can serve concurrently:
+      `R2DB_PLATFORM_POOL_SIZE` (Phase 10 WP-4e) no longer defaults to a
+      fixed `4` -- unset, it derives from the declared `ResourceLimits.
+      concurrency` ceiling instead (default `32`, `role_pool_size`; both
+      the credential-store and durable-audit-sink platform pools share
+      this same value, `POSTGRES_PROVISIONING_RUNBOOK.md` §4's "+
+      platform pool" note). Send at least `R2DB_PLATFORM_POOL_SIZE + 2`
+      requests against whichever value this deployment's own
+      `EnvironmentFile`/derived default actually resolves to, e.g. (34 at
+      the shipped default of 32):
       ```
-      for i in $(seq 1 6); do
+      for i in $(seq 1 34); do
         curl -sk -o /dev/null -w '%{http_code} %{content_type}\n' \
           -H "Authorization: Bearer <issued secret>" \
           https://data.example.invalid:8443/v1/capabilities &

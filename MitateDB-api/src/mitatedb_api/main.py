@@ -126,7 +126,7 @@ from .audit import AuditSink
 from .audit_dispatch import AuditRouter
 from .backend_postgres import PostgresBackend
 from .cell import ApplicationCell, _LimitStateHolder
-from .config import FoundationConfig
+from .config import FoundationConfig, role_pool_size
 from .credential_store_postgres import DEFAULT_SCHEMA, PostgresCredentialStore
 from .http import HttpService, create_app
 from .identifiers import validate_identifier
@@ -288,7 +288,30 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         if not row["provisioned"]:
             raise RuntimeError(f"application {application_id!r} named in MITATEDB_SERVE_APPS is registered but not yet provisioned (migrations/0003_provision_application.sql)")
 
-    pool_size = pool_size_from_env(env.get("MITATEDB_PLATFORM_POOL_SIZE"))
+    # Phase 10 WP-4e (supervisor ruling 2026-09-09): the default used to be
+    # a fixed `pool.DEFAULT_MAX_SIZE` (20), entirely disconnected from the
+    # declared `max_concurrency` ceiling -- the same F-1 shape r2db-api's
+    # `role_pool_size` already fixed for its own per-application role
+    # pools (this peer has no per-application pool to match -- see `config.
+    # role_pool_size`'s own docstring). `FoundationConfig.from_env(env)`
+    # cannot be called this early -- it unconditionally requires
+    # `data_base_url` (raises `ValidationError` otherwise), which comes
+    # from `declarations`, read further below via `durable_audit.
+    # _connect()` -- so this reads `MITATEDB_MAX_CONCURRENCY` directly,
+    # the SAME lenient-degrade discipline `_optional_int` documents (an
+    # unset/unparsable value silently keeps the dataclass default, rather
+    # than raising here for what is only a pool-sizing floor; a genuinely
+    # invalid value still fails loudly later, when the REAL `config` below
+    # is built from this same `env` via `from_env`'s own strict parse).
+    # Routed through `role_pool_size` (not just `max_concurrency` inline)
+    # so the derivation itself, not merely the number, matches r2db-api's
+    # sibling. `MITATEDB_PLATFORM_POOL_SIZE` still wins outright when set
+    # explicitly (`pool_size_from_env`'s own `default=` is only the
+    # fallback).
+    _declared_concurrency = _optional_int(env, "MITATEDB_MAX_CONCURRENCY", FoundationConfig.max_concurrency)
+    pool_size = pool_size_from_env(
+        env.get("MITATEDB_PLATFORM_POOL_SIZE"), default=role_pool_size(FoundationConfig(max_concurrency=_declared_concurrency)),
+    )
     platform_pool = BoundedConnectionPool(platform_dsn, max_size=pool_size)
 
     # Q4 phase (design D-1(b), §3.7 data-plane steps 4-6): the single

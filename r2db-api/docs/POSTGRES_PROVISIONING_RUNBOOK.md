@@ -257,31 +257,47 @@ Concretely, before onboarding a new application:
    this runbook does not implement that; it only gives the operator the
    figure to decide with.
 
-**+ platform pool (fixed, additive).** `0005_credential_store.sql` (§9)
-adds one more consumer of connections that the arithmetic above does not
-yet account for: `r2db_api.credential_store.PostgresCredentialStore`, which
-the running API process uses to read credential/application state from
-`r2dbsvc_registry` on every request (design docs/design/
-R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md, P2-D4). This is a
-single, separate pool -- not registered with `SharedPoolManager`, not keyed
-by `(application_id, role)`, and not subject to the idle-eviction/LRU-cap
-sweep described above at all -- so it does not multiply with application
-count the way the per-application ceiling does. Its cap is fixed:
-`R2DB_PLATFORM_POOL_SIZE` (default `4`). The full cluster-wide ceiling,
-accounting for this process's platform pool alongside its per-application
+**+ platform pool (additive, two pools, one role).** `0005_credential_
+store.sql` (§9) adds two more consumers of connections that the
+arithmetic above does not yet account for, both against the SAME
+`r2dbsvc_api` role/DSN: `r2db_api.credential_store.PostgresCredential
+Store`, which the running API process uses to read credential/application
+state from `r2dbsvc_registry` on every request (design docs/design/
+R2DB_CREDENTIAL_PERSISTENCE_AND_COMPOSITION_ROOT_V1.md, P2-D4), and
+`r2db_api.credential_store.PostgresApplicationAuditSink` (Q4 phase D-1(b)),
+the durable `application_audit` writer. Each is a single, separate pool --
+neither is registered with `SharedPoolManager`, keyed by `(application_id,
+role)`, or subject to the idle-eviction/LRU-cap sweep described above --
+so neither multiplies with application count the way the per-application
+ceiling does; they multiply by exactly 2 (one pool each) instead.
+
+**Fact (Phase 10 WP-4e, supervisor ruling 2026-09-09):** `R2DB_PLATFORM_
+POOL_SIZE`'s own default is no longer a fixed `4` -- `r2db_api.main.
+build_app` now sizes BOTH platform-plane pools from the declared
+`ResourceLimits.concurrency` ceiling (default `32`, `role_pool_size`, the
+SAME function/value the per-application role pools below already use)
+unless the env var is set explicitly, for the same reason as the WP-8a
+fact below: once concurrent requests' authentication reads can genuinely
+reach this pool at once (`run_in_threadpool` delegation), a pool sized
+below the declared bound times out and fails closed with `AUTH_STATE_
+UNAVAILABLE` (503) well under that bound. The full cluster-wide ceiling,
+accounting for both platform-plane pools alongside the per-application
 one, is therefore:
 
 ```
-ceiling_connections = (cache_max × (pool_size + pool_max_overflow)) + platform_pool_size
-                     = (32 × 4) + 4                                  (worked example, all defaults)
-                     = 132
+ceiling_connections = (cache_max × (pool_size + pool_max_overflow)) + (2 × platform_pool_size)
+                     = (32 × 4) + (2 × 32)                           (worked example, current defaults)
+                     = 192
 ```
 
-Include this fixed `+ platform_pool_size` term in step 2 of the "before
-onboarding a new application" checklist above -- it does not change with
-the number of applications onboarded, but it is still real connection
-headroom to reserve alongside the control role, interactive/admin
-sessions, and `superuser_reserved_connections`.
+(The pre-WP-4e worked example -- `(32 × 4) + 4 = 132`, one pool only,
+fixed at `4` -- is superseded; kept out of this section so it is not
+mistaken for the current default.) Include this `+ (2 × platform_pool_
+size)` term in step 2 of the "before onboarding a new application"
+checklist above -- it does not change with the number of applications
+onboarded, but it is still real connection headroom to reserve alongside
+the control role, interactive/admin sessions, and `superuser_reserved_
+connections`.
 
 **Fact (Phase 10 WP-8a review F-1, supervisor ruling 2026-09-08):** since
 this fix, `r2db_api.main`'s composition root no longer sizes a served
@@ -292,10 +308,11 @@ sizes it from the declared `ResourceLimits.concurrency` ceiling instead
 _slot`'s own 429 LIMIT_EXCEEDED, not a pool-exhaustion 503, is what a
 client actually hits at the declared bound. `max_connections` must
 therefore exceed the total role-pool ceiling -- declared `concurrency` ×
-role count (runtime + developer) + the platform pool -- not the smaller,
-`pool_size`-based figure this section's arithmetic above still walks
-through (deployment-wide sizing across both role AND platform pools is
-R-31's own, broader, Phase 11 concern; this note records the fact only).
+role count (runtime + developer) + (2 × the platform pool, WP-4e above) --
+not the smaller, `pool_size`-based figure this section's arithmetic above
+still walks through (deployment-wide sizing across both role AND platform
+pools is R-31's own, broader, Phase 11 concern; this note records the
+fact only).
 
 ## 5. Order of operations
 
@@ -612,7 +629,7 @@ not a partial startup:
 | `R2DB_APP_<SLUG_UPPER>_RUNTIME_DSN` | yes, per served slug | That application's `runtime` role DSN (`PostgresCell`'s `runtime_dsn`). |
 | `R2DB_APP_<SLUG_UPPER>_DEVELOPER_DSN` | yes, per served slug | That application's `developer` role DSN (`PostgresCell`'s `developer_dsn`). |
 | `R2DB_POOL_*` | no | Existing per-application pool tuning -- see `SharedPoolManager` and §4. |
-| `R2DB_PLATFORM_POOL_SIZE` | no, default `4` | The platform pool's own cap -- see §4's "+ platform pool" note. |
+| `R2DB_PLATFORM_POOL_SIZE` | no, default derived from `ResourceLimits.concurrency` (32, WP-4e -- no longer a fixed `4`) | Caps BOTH platform-plane pools (credential store + durable audit sink) -- see §4's "+ platform pool" note. |
 | `R2DB_PLATFORM_SCHEMA` | no, default `r2dbsvc_registry` | **TEST-ONLY -- never set this in a real deployment.** Overrides the registry schema name `PostgresCredentialStore`/`r2db_api.main` look `applications`/`credentials` up under. Its only reason to exist is so this repository's own test suite and the conformance adapter -- which run the real migration files with `r2dbsvc` textually rewritten to a random throwaway prefix, to avoid colliding with anything else in a shared local cluster -- can point a built app at their own rewritten schema. A real deployment always uses the literal schema `0005_credential_store.sql` creates and must leave this unset. |
 | `R2DB_CONTROL_PLANE_STATUS` | no, default `unavailable` | CCR-14 (R-9, `docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md`). Allowed values are exactly `enabled`/`unavailable`; anything else is a startup failure, never a silent fallback. This is a **deployer declaration**, not a detected fact -- this process cannot verify on its own whether a `/control/v1` control-plane process (`r2db_api.control_main`) is actually reachable. Set it to `enabled` only once that process is genuinely deployed and reachable (`r2db-api/deploy/DEPLOYMENT_RUNBOOK.md` §7); the authoritative check for "is a control plane actually reachable" in a separated deployment is always the control plane's own `GET /control/v1/capabilities`, never this declaration. |
 | ~~`R2DB_DATA_BASE_URL`~~ | **REMOVED (Q4 phase WP-1, design `docs/design/Q4_DB_SIDE_SINGLE_TRUTH_V1.md` D-2)** | **No longer read. This process now REFUSES TO START whenever this variable is defined at all, whatever its value (an empty string included)** -- fail-fast F-2, which names the `ops` command below. `surfaces.data.base_url` (contract 1.6.0, unconditional obligation) is now the `surfaces` row of `r2dbsvc_registry.platform_declarations` (migration `0008`), a SINGLE row **both** this process and `r2db_api.control_main` read at startup. Declare it with `python -m r2db_api.ops declare-surfaces --data-base-url <URL> [--control-base-url <URL>]` and restart both processes -- §16 below. The same shape rules still apply, now checked on the declared value (absolute URL, ends `/v1`, no trailing slash) and on the write path as well as the read path. **Still a deployer-stated fact, never derived from a request's Host header.** |
