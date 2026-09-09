@@ -1210,6 +1210,14 @@ class PostgresCell:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    # Phase 10 WP-6a (design docs/design/
+                    # PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-5(ii) region
+                    # (iii)): `idempotency_entries` stays a declared DB-side
+                    # `enforced` class (region (iii)) via this count-then-
+                    # check, but the same-key serialization AND the count
+                    # lock that would close this count's TOCTOU window are
+                    # WP-6d-i's scope (both peers, one pass) -- not added
+                    # here. See supervisory ruling 2026-09-08.
                     _run(cur, sql.SQL("SELECT count(*) FROM public.{table}").format(table=table))
                     (count,) = cur.fetchone()
         except psycopg.errors.UndefinedTable:

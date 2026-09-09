@@ -74,7 +74,19 @@ re-verify them; it assumes they are already true.
    applying it, declare this deployment's own surfaces once** --
    `python -m r2db_api.ops declare-surfaces --data-base-url <URL>
    [--control-base-url <URL>]` -- since `0008` deliberately seeds no
-   `surfaces` row and neither process starts without one (F-3). Every
+   `surfaces` row and neither process starts without one (F-3). **Migration
+   `0012_process_ceilings.sql`** (Phase 10 WP-6a, `docs/design/
+   PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-5(ii)/(iii) -- widens
+   `platform_declarations_key_check` to admit `process_ceilings`;
+   `POSTGRES_PROVISIONING_RUNBOOK.md` §18) is likewise **required by BOTH
+   processes unconditionally**, and, like `0008`/`surfaces` above, must be
+   followed by declaring this deployment's own ceilings once --
+   `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
+   (single-uvicorn systemd units; §18) -- since `0012` also deliberately
+   seeds no `process_ceilings` row and neither process starts without one
+   (F-15). **The required order for an already-provisioned host is:
+   `0012` -> `ops declare-process-ceilings` -> restart both processes**
+   (ledger LQ4-24; `POSTGRES_PROVISIONING_RUNBOOK.md` §18). Every
    application
    slug this deployment will serve must already be provisioned (`0003`) and
    present in `r2dbsvc_registry.applications` with `enabled = true`, **and

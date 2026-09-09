@@ -289,17 +289,20 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     platform database without needing to reload this module or mutate
     `os.environ` for the whole test process.
 
-    Q4 phase WP-1 startup sequence (design §3.7, data-plane 1-8): (1) basic
-    env reads, (2) reject the four removed env vars (F-1/F-2) whatever
-    their value, (3) the platform connection this process already made
-    eagerly pre-Q4 (`_load_registry_rows`), (4) read `platform_
+    Q4 phase WP-1 startup sequence (design §3.7, data-plane 1-8; Phase 10
+    WP-6a folds `process_ceilings` into step 4/5, design D-5(ii)): (1)
+    basic env reads, (2) reject the four removed env vars (F-1/F-2)
+    whatever their value, (3) the platform connection this process already
+    made eagerly pre-Q4 (`_load_registry_rows`), (4) read `platform_
     declarations` (F-8 if the table itself is missing), (5) validate
-    `surfaces`/`audit_coalescing_window_ms` (F-3/F-4 if a row is missing,
-    F-5/F-4b/F-6 if a present value is malformed), (6) the writer-role
-    double-check (F-7/F-10/F-11 against `pg_db_role_setting`, F-9 against
-    this process' own writer pool's effective `pg_settings` value), (7)
-    build the audit sink (no SESSION `SET` -- design D-1(b)), (8) wire
-    `surfaces`/the coalescing window into `DataService`.
+    `surfaces`/`audit_coalescing_window_ms`/`process_ceilings` (F-3/F-4/
+    F-15 if a row is missing, F-5/F-4b/F-15 if a present value is
+    malformed, F-6 for surfaces/control-plane-status agreement), (6) the
+    writer-role double-check (F-7/F-10/F-11 against `pg_db_role_setting`,
+    F-9 against this process' own writer pool's effective `pg_settings`
+    value), (7) build the audit sink (no SESSION `SET` -- design D-1(b)),
+    (8) wire `surfaces`/the coalescing window/the data-plane's own
+    `process_ceilings.data` into `DataService`.
     """
     env = env if env is not None else os.environ
 
@@ -368,6 +371,14 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     if declarations.surfaces.control_base_url is not None:
         surfaces["control"] = {"base_url": declarations.surfaces.control_base_url}
     coalescing_window_ms = declarations.audit_coalescing_window_ms
+    # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the data-plane's own
+    # ceiling -- constructor-injected into `DataService` the same way
+    # `surfaces`/`control_plane_status` already are (deployer-declared, not
+    # derived). Drives `capabilities().limit_enforcement`'s own mapping for
+    # every in-memory-per-process-bound limit class (`requests_per_minute`/
+    # `concurrency`): `enforced` while this reads `1`, `deployment_required`
+    # once it reads `>= 2`.
+    process_ceiling = declarations.process_ceilings.data
 
     # Computed from `env` (this function's own parameter), and always
     # passed explicitly below -- not left as `None` for `PostgresCredential
@@ -471,6 +482,7 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         # second, independently-defaulted value that could silently stop
         # matching it.
         audit_alert_min_interval_s=audit_flush_interval_s,
+        process_ceiling=process_ceiling,
     )
     control = ControlAuthority(service)
     for slug in slugs:

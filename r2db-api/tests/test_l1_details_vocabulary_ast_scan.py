@@ -67,7 +67,7 @@ _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORT
 #: no in-memory sibling at all -- `test_backend_layer_allowlist_entries_
 #: have_no_in_memory_sibling_denial` below pins that.
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
-    ("postgres.py", 1621),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    ("postgres.py", 1629),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target; line shifted by Phase 10 WP-6a's own doc-comment addition in _idempotency_reserve, design D-5(ii) region (iii) -- the LOCK TABLE call itself was removed per supervisory ruling 2026-09-08, WP-6d-i's scope instead)
 })
 
 

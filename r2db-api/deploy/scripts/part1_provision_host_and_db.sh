@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # r2dbsvc stage-1 install, part 1 -- OS account, install directory, venv, the
 # PostgreSQL migrations through the credential store / control-plane storage
-# / audit sink / Q4 platform declarations (0001, 0002, 0005, 0006, 0007,
-# 0008) plus one application's onboarding (0003), then the two Q4 `ops`
-# steps every fresh host needs before either process will start: declaring
-# `surfaces` (0008 deliberately seeds no `surfaces` row, design D-2(c)) and
-# bringing every registered application's per-application platform-upgrade
-# ledger current (`ops upgrade-applications`, D-4 -- a no-op for THIS
-# script's own application, whose ledger the revised `0003` already seeds,
-# but idempotent and cheap to run every time regardless, and the one step
-# that also retrofits any other application already registered against this
-# platform database from an earlier run).
+# / audit sink / Q4 platform declarations / Phase 10 process-ceilings key
+# widening (0001, 0002, 0005, 0006, 0007, 0008, 0012) plus one application's
+# onboarding (0003), then the THREE declaration `ops` steps every fresh host
+# needs before either process will start: declaring `surfaces` (0008
+# deliberately seeds no `surfaces` row, design D-2(c)), declaring
+# `process_ceilings` (0012 likewise deliberately seeds no row, design
+# D-5(ii)/(iii)), and bringing every registered application's
+# per-application platform-upgrade ledger current (`ops upgrade-
+# applications`, D-4 -- a no-op for THIS script's own application, whose
+# ledger the revised `0003` already seeds, but idempotent and cheap to run
+# every time regardless, and the one step that also retrofits any other
+# application already registered against this platform database from an
+# earlier run).
 #
 # Companion documents: r2db-api/deploy/DEPLOYMENT_RUNBOOK.md §§1-2 (host
 # steps) and §7 (control-plane addition), r2db-api/docs/
@@ -271,13 +274,14 @@ sudo -u "${R2DBSVC_OS_USER}" "${R2DBSVC_INSTALL_ROOT}/.venv/bin/pip" install -c 
 
 # ---------------------------------------------------------------------------
 # Step 3 -- PostgreSQL migrations (POSTGRES_PROVISIONING_RUNBOOK.md §5/§9/
-# §11/§16/§17). Order: 0001 (cluster-admin bootstrap) -> 0002 (provisioning
-# functions) -> 0005 (credential store + api_password) -> 0006
+# §11/§16/§17/§18). Order: 0001 (cluster-admin bootstrap) -> 0002
+# (provisioning functions) -> 0005 (credential store + api_password) -> 0006
 # (control-plane storage) -> 0007 (audit sink) -> 0008 (Q4 platform
-# declarations + writer-role timeouts) -> 0003 (this deployment's first
-# application). 0005/0006/0007/0008 are platform-wide bootstrap and are
-# independent of any one application (§5/§9/§16's own note); 0003 is placed
-# last here so an operator who only wants the platform-wide objects can stop
+# declarations + writer-role timeouts) -> 0012 (Phase 10 process_ceilings
+# key widening) -> 0003 (this deployment's first application).
+# 0005/0006/0007/0008/0012 are platform-wide bootstrap and are independent
+# of any one application (§5/§9/§16/§18's own note); 0003 is placed last
+# here so an operator who only wants the platform-wide objects can stop
 # before it. `0004` (deprovision) is intentionally never invoked by this
 # script -- it is an operator-run teardown path, not part of onboarding.
 # `0009` (the per-application platform-upgrade ledger retrofit, §17) is
@@ -387,6 +391,23 @@ psql "${R2DBSVC_CONTROL_DSN}" \
     -v controlplane_role="${R2DBSVC_CONTROLPLANE_ROLE}" \
     -f "${R2DBSVC_MIGRATIONS_DIR}/0008_platform_declarations_and_writer_timeouts.sql"
 
+# Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+# D-5(ii)/(iii)): `0012` widens `platform_declarations_key_check` to admit
+# the new `process_ceilings` key -- a SEPARATE platform single-shot
+# migration from `0008` (the key set is a closed, named `CHECK`; an
+# already-shipped migration is never edited in place). Takes no `-v`
+# variables. Ledger LQ4-24 applies here too, the same way it did to `0008`
+# before this script's own earlier rework closed it: a host this script
+# provisions and never applies `0012`+`ops declare-process-ceilings`
+# against will have both processes refuse to start (F-15) the moment
+# either one is upgraded to a `r2db_api` release that requires
+# `process_ceilings` -- see the `ops declare-process-ceilings` step below,
+# run immediately after this migration and before either process starts.
+log "0012_process_ceilings.sql (r2dbsvc_control)"
+psql "${R2DBSVC_CONTROL_DSN}" \
+    -v ON_ERROR_STOP=1 \
+    -f "${R2DBSVC_MIGRATIONS_DIR}/0012_process_ceilings.sql"
+
 log "0003_provision_application.sql (r2dbsvc_control, application ${R2DB_APP_SLUG})"
 # `app_slug` is not a secret -- it stays a plain `-v` argument; only the
 # two passwords move to `\getenv`.
@@ -433,6 +454,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 control_surface_marker="${R2DBSVC_INSTALL_ROOT}/.r2dbsvc-control-surface-declared"
 control_surface_declared=$(sudo cat "$control_surface_marker")
+
+# ---------------------------------------------------------------------------
+# Step 4.5 -- Phase 10 WP-6a (design D-5(ii)/(iii), contract 1.8.0): declare
+# `process_ceilings`, the other row `0008`/`0012` above deliberately seed
+# NEITHER of (design D-2(c)'s own "surfaces is deployment-specific" applies
+# here identically) -- both processes refuse to start on this platform
+# database until it is declared (F-15), exactly like `surfaces`/F-3 above.
+#
+# `--data 1 --control 1`: this deployment's own systemd units each run
+# exactly one uvicorn process (`DEPLOYMENT_RUNBOOK.md` -- no `--workers`
+# flag anywhere in this script family), so both planes' own ceiling is `1`
+# (design D-5(iii): "r2db は単一 uvicorn（--workers なし）なので {"data": 1,
+# "control": 1} を宣言し"). A host that later moves to more than one
+# process serving the SAME base URL (e.g. a reverse-proxied pool of uvicorn
+# instances) must re-run `ops declare-process-ceilings` with the real
+# count and restart both processes -- see POSTGRES_PROVISIONING_RUNBOOK.md
+# §18 for the required upgrade order (migration -> declare -> restart).
+log "declaring process_ceilings (ops declare-process-ceilings --data 1 --control 1)"
+env R2DB_CONTROL_DSN="${R2DBSVC_CONTROL_DSN}" \
+    "${R2DBSVC_INSTALL_ROOT}/.venv/bin/python" -m r2db_api.ops declare-process-ceilings \
+    --data 1 --control 1
 
 # ---------------------------------------------------------------------------
 # Step 5 -- bring every registered application's per-application platform-
