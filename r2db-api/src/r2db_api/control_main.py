@@ -445,29 +445,42 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # this process' own 4 platform-plane stores (`applications`/
     # `credentials`/`control_credentials`/`audit`, all against the SAME
     # `r2dbsvc_controlplane` role) share one hard PostgreSQL `CONNECTION
-    # LIMIT 10` (`0006_control_plane_http.sql`). Measured directly against
-    # the conformance HTTP adapter's own identical stores (`conformance_
-    # adapter_r2db_http.py::self._control_pool_size`, same 4-stores-one-
-    # role shape): raising this ceiling does NOT fix a pool-exhaustion
-    # timeout (`_RolePool`'s own `acquire_timeout` never fired) -- the
-    # measured failure was a REAL `psycopg.OperationalError` ("FATAL: too
-    # many connections for role"), a hard PostgreSQL refusal, on the
-    # FIRST-ever connection of a brand-new pool. `_RolePool` never shrinks
-    # (no idle eviction) -- a larger ceiling only lets this process
-    # permanently retain MORE real, cached-idle connections after any
-    # historical burst, worsening the real exposure against that same
-    # 10-connection budget rather than helping it. Left at the original
-    # fixed `4` for this reason -- unlike `r2db_api.main`'s data-plane
-    # platform pool (only 2 stores share `r2dbsvc_api`'s own CONNECTION
-    # LIMIT 10, and no second, concurrently-alive stack of stores exists
-    # for that role the way `isolated_control_surface` builds one here) --
-    # see the conformance adapter's own comment for the measured detail.
-    # A genuine fix needs either a higher `r2dbsvc_controlplane`
-    # `CONNECTION LIMIT` (migration change) or an idle-eviction mechanism
-    # on `_RolePool` itself, both outside this WP's own scope (pool
-    # SIZING/composition only, not pool LIFECYCLE) -- reported for a
-    # separate ruling. `R2DB_PLATFORM_POOL_SIZE` still wins outright when
-    # set explicitly.
+    # LIMIT` -- 10 at the time of this measurement (`0006_control_plane_
+    # http.sql`'s own shipped value); WP-4f's own later migration
+    # (`0013_role_connection_limits.sql`, L-3 correction, WP-4 integration
+    # review 2026-09-10) has since raised this to 20 -- see that
+    # migration's own header for why (4 stores x this same fixed
+    # `pool_size` 4 = 16, already exceeding the pre-0013 limit of 10 with
+    # a SINGLE process, no test harness involved). The conclusion below
+    # (leave `pool_size` at the fixed `4`, do not derive it from declared
+    # concurrency) is UNCHANGED by that migration -- the actual failure
+    # mode this comment documents is about pool LIFECYCLE (connections
+    # never released), not the specific CONNECTION LIMIT number, and 0013
+    # raising the ceiling does not fix a lifecycle problem, only postpones
+    # when it bites. Measured directly against the conformance HTTP
+    # adapter's own identical stores (`conformance_adapter_r2db_http.py::
+    # self._control_pool_size`, same 4-stores-one-role shape): raising
+    # `pool_size` does NOT fix a pool-exhaustion timeout (`_RolePool`'s
+    # own `acquire_timeout` never fired) -- the measured failure was a
+    # REAL `psycopg.OperationalError` ("FATAL: too many connections for
+    # role"), a hard PostgreSQL refusal, on the FIRST-ever connection of a
+    # brand-new pool. `_RolePool` never shrinks (no idle eviction) -- a
+    # larger `pool_size` only lets this process permanently retain MORE
+    # real, cached-idle connections after any historical burst, worsening
+    # the real exposure against the role's own CONNECTION LIMIT (now 20,
+    # not 10) rather than helping it. Left at the original fixed `4` for
+    # this reason -- unlike `r2db_api.main`'s data-plane platform pool
+    # (only 2 stores share `r2dbsvc_api`'s own CONNECTION LIMIT, and no
+    # second, concurrently-alive stack of stores exists for that role the
+    # way `isolated_control_surface` builds one here) -- see the
+    # conformance adapter's own comment for the measured detail. A genuine
+    # fix needs either a higher `r2dbsvc_controlplane` `CONNECTION LIMIT`
+    # (0013 is exactly that, and does help in practice -- it just does not
+    # change the ANALYSIS above, which is about lifecycle, not headroom)
+    # or an idle-eviction mechanism on `_RolePool` itself, the latter
+    # outside this WP's own scope (pool SIZING/composition only, not pool
+    # LIFECYCLE) -- reported for a separate ruling. `R2DB_PLATFORM_
+    # POOL_SIZE` still wins outright when set explicitly.
     pool_size = _optional_int(env, "R2DB_PLATFORM_POOL_SIZE", 4)
 
     limits = ControlPlaneLimits(

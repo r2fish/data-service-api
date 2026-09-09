@@ -7,9 +7,20 @@
 --
 -- WHO RUNS THIS: the operator, connected to the `mitatedb_platform`
 -- database AS the `mitatedbsvc_provision` role -- the same role/connection
--- 0002/0005/0007/0011 already run as. Run once, after 0011 (order relative
--- to 0006/0008/0009/0010 does not matter -- this is a platform single-shot
--- migration, those are per-application upgrade scripts):
+-- 0002/0005/0007/0011 already run as. Run once, any time after `0002`
+-- exists (L-4 correction, WP-4 integration review 2026-09-10, peer-
+-- symmetric with r2db-api's own same-numbered correction) -- never on
+-- `0007`/`0011`, which this file neither reads nor writes: sections 1
+-- and 3 `ALTER`/replace against `mitatedbsvc_api`/`mitatedbsvc_
+-- controlplane` and `begin_provision_application` (all three created by
+-- `0002` itself), and section 2 reads that same migration's own
+-- `applications` table. `0005` has no object this file's own statements
+-- reference, but every fixture applies it in this position anyway
+-- (operator sequence parity); order relative to 0006/0007/0008/0009/
+-- 0010/0011 does not matter at all -- this is a platform single-shot
+-- migration, those are either platform declarations/process-ceiling
+-- migrations or per-application upgrade scripts. This header previously
+-- said "after 0011", which was never true):
 --
 --   psql "$MITATEDB_PROVISION_DSN" -v ON_ERROR_STOP=1 -f 0012_role_connection_limits.sql
 --
@@ -72,7 +83,14 @@
 -- `ops verify-declarations` (new check F-16, `mitatedb_api.platform_
 -- declarations.check_role_connection_limits`) reads each of these roles'
 -- OWN `pg_catalog.pg_roles.rolconnlimit` back and compares it against the
--- SAME floor arithmetic this migration bakes in.
+-- SAME pool-composition arithmetic this migration bakes in MINUS the
+-- fixed +4 operator-headroom margin (L-1, WP-4 integration review
+-- 2026-09-10, peer-symmetric with r2db-api's own same-numbered note):
+-- F-16 checks the bare "worst-case pool" floor -- e.g. 64 for
+-- `mitatedbsvc_api`, not this migration's own 68 -- a strictly WEAKER,
+-- never stronger, bound than what this migration bakes in; harmless in
+-- effect, since this migration's own +4 margin already clears F-16's
+-- floor with room to spare, but the two are not the identical formula.
 --
 -- IDEMPOTENCY: every `ALTER ROLE ... CONNECTION LIMIT <n>` re-applies to
 -- the same terminal state every time it runs. The per-application loop

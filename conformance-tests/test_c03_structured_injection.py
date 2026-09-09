@@ -52,8 +52,8 @@ WIRE_CARRIED_IDENTIFIER_POSITIONS = frozenset({"entity"})
 
 def _is_wire_rejection(adapter: ConformanceAdapter, position_name: str, exc: BaseException) -> bool:
     """WP-4c (design D-3, `security/THREAT_MODEL_V1.md`-adjacent wire
-    framing; 監督裁定 wp4b-rulings.md 項 4): true only when ALL of the
-    following hold --
+    framing; 監督裁定 wp4b-rulings.md 項 4); narrowed M-2 (WP-4 integration
+    review 2026-09-10): true only when ALL of the following hold --
 
     1. `adapter.transport_kind == "socket"` (a real TCP/HTTP-1.1 client
        through nginx + uvicorn; the in-process and ASGI plugs never see
@@ -61,15 +61,29 @@ def _is_wire_rejection(adapter: ConformanceAdapter, position_name: str, exc: Bas
     2. `position_name` is in `WIRE_CARRIED_IDENTIFIER_POSITIONS` (a URL
        path segment -- header-carried values, e.g. C-15's bearer corpus,
        are classified the same way at their own call sites).
-    3. `exc` is either (a) a raw `httpx.HTTPError` the CLIENT itself
-       raised before ever sending the request at all (h11's own local
-       request-line/header-value validation -- e.g. `httpx.
-       LocalProtocolError` for a control byte the URL-encoding step could
-       not make safe), or (b) a `ConformanceDenial` whose code is
-       `UNCLASSIFIED` -- this file's own adapters' `classify()` maps
-       exactly a non-`application/problem+json` HTTP failure (h11/
-       uvicorn's own generic 4xx page, emitted before the app ever runs)
-       to that code.
+    3. `exc` is either (a) a raw `httpx.LocalProtocolError` the CLIENT
+       ITSELF raised before ever sending the request at all (h11's own
+       local request-line/header-value validation -- e.g. for a control
+       byte the URL-encoding step could not make safe), or (b) a
+       `ConformanceDenial` whose code is `UNCLASSIFIED` -- this file's own
+       adapters' `classify()` maps exactly a non-`application/problem+json`
+       HTTP failure (h11/uvicorn's own generic 4xx page, emitted before
+       the app ever runs) to that code.
+
+    Deliberately NOT the broader `httpx.HTTPError` base class: that also
+    covers `httpx.ConnectError`/`httpx.ReadTimeout`/`httpx.
+    RemoteProtocolError` -- real network failures raised when the peer
+    (uvicorn/nginx) is unreachable or hangs, not a client-side framing
+    refusal. Unlike C-15's own guessed-secret loop (which has an
+    `adapter.reject()`/`reset()` call after it that happens to catch an
+    unreachable peer as an accidental side effect), this file's entity-
+    position corpus has NO such backstop: `denied_anywhere[index] = True`
+    is set unconditionally the instant this function returns `True`, so
+    the broader base class would let an entire corpus position pass
+    vacuously the moment the socket plug's own upstream goes down.
+    `httpx.LocalProtocolError` is raised by httpx's own h11 encoder before
+    any byte reaches the network, so it can never be confused with an
+    unreachable-peer condition.
 
     Neither shape is held to `IDENTIFIER_DENIAL_CODES`/contract-code
     membership or the payload-non-echo requirement immediately below in
@@ -80,7 +94,10 @@ def _is_wire_rejection(adapter: ConformanceAdapter, position_name: str, exc: Bas
     4's own text requires body-carried invalid values to keep demanding a
     genuine contract-coded denial on every plug, unchanged. See
     `test_c03_wire_rejection_never_applies_to_a_body_carried_position`
-    for the pin.
+    for that pin and `test_c03_wire_rejection_never_applies_to_a_
+    reachability_failure` for the M-2 pin (an upstream-down `httpx.
+    HTTPError` subclass other than `LocalProtocolError` must never take
+    this branch, even at the "entity" position on a socket adapter).
     """
     if getattr(adapter, "transport_kind", None) != "socket":
         return False
@@ -88,7 +105,7 @@ def _is_wire_rejection(adapter: ConformanceAdapter, position_name: str, exc: Bas
         return False
     if isinstance(exc, ConformanceDenial):
         return exc.code == UNCLASSIFIED
-    return isinstance(exc, httpx.HTTPError)
+    return isinstance(exc, httpx.LocalProtocolError)
 
 
 def _unclassified_hint(code: str) -> str:
@@ -486,7 +503,14 @@ def test_c03_wire_rejection_never_applies_to_a_body_carried_position() -> None:
     "insert_field"})` -> this test's first assertion goes red for
     `"insert_field"`.
     """
-    body_positions = {"select_field", "filter_field", "insert_field", "schema_entity", "schema_field"}
+    # L-6 (WP-4 integration review 2026-09-10): derived from the adapter's
+    # own declared position set rather than hand-listed, so a future
+    # identifier position added to `MUST_COVER_IDENTIFIER_POSITIONS` is
+    # automatically included in this scan (and, being outside
+    # `WIRE_CARRIED_IDENTIFIER_POSITIONS` unless a caller adds it there
+    # too, automatically pinned as body-carried) without this test file
+    # needing an update to keep covering it.
+    body_positions = MUST_COVER_IDENTIFIER_POSITIONS - WIRE_CARRIED_IDENTIFIER_POSITIONS
     assert body_positions, "corpus of body-carried positions is empty -- this scan would be vacuous"
     assert body_positions.isdisjoint(WIRE_CARRIED_IDENTIFIER_POSITIONS), (
         "WIRE_CARRIED_IDENTIFIER_POSITIONS must not overlap the body-carried positions it is "
@@ -513,4 +537,46 @@ def test_c03_wire_rejection_never_applies_to_a_body_carried_position() -> None:
         "the 'entity' position, on a fake socket-transport adapter, with an UNCLASSIFIED denial, "
         "must be classified as a wire rejection -- otherwise this whole test would trivially pass "
         "by _is_wire_rejection always returning False"
+    )
+
+
+def test_c03_wire_rejection_never_applies_to_a_reachability_failure() -> None:
+    """M-2 (WP-4 integration review 2026-09-10): `_is_wire_rejection`'s raw-
+    exception branch must accept only `httpx.LocalProtocolError` (a
+    client-side framing refusal, raised before any byte reaches the
+    network), never the broader `httpx.HTTPError` base class it used to
+    check -- which also covers `httpx.ConnectError`/`httpx.ReadTimeout`/
+    `httpx.RemoteProtocolError`, the exceptions httpx raises when the
+    socket plug's own upstream (uvicorn/nginx) is unreachable or hangs.
+    Unlike C-15's own guessed-secret loop, this file's entity-position
+    corpus has no `adapter.reject()`/`reset()` backstop after it:
+    `denied_anywhere[index] = True` is set unconditionally the instant
+    this function returns `True`, so without this narrowing an outage on
+    the peer would make the WHOLE entity-position corpus pass vacuously
+    instead of surfacing the real outage.
+
+    Mutation (M-2's own): widen the raw-exception check back to
+    `isinstance(exc, httpx.HTTPError)` -> the `httpx.ConnectError`
+    assertion below goes red (a real unreachable-port `httpx.ConnectError`
+    is exactly what an actual socket-plug outage raises), even though the
+    position under test ("entity") is genuinely wire-carried."""
+    class _FakeSocketAdapter:
+        transport_kind = "socket"
+
+    fake_adapter = _FakeSocketAdapter()
+    local_protocol_error = httpx.LocalProtocolError("Illegal header value")
+    connect_error = httpx.ConnectError("[Errno 61] Connection refused")
+    read_timeout = httpx.ReadTimeout("timed out")
+
+    assert _is_wire_rejection(fake_adapter, "entity", local_protocol_error), (
+        "a client-side framing refusal (LocalProtocolError) at the 'entity' position on a socket "
+        "adapter must still count as a wire rejection"
+    )
+    assert not _is_wire_rejection(fake_adapter, "entity", connect_error), (
+        "an unreachable peer (ConnectError) must never be classified as a wire rejection, even at "
+        "the 'entity' position -- it means the socket plug's own upstream is down, not that the peer "
+        "correctly refused a bad request"
+    )
+    assert not _is_wire_rejection(fake_adapter, "entity", read_timeout), (
+        "a hung peer (ReadTimeout) must never be classified as a wire rejection, for the same reason"
     )

@@ -286,33 +286,36 @@ one, is therefore:
 
 ```
 ceiling_connections = (cache_max × (pool_size + pool_max_overflow)) + (2 × platform_pool_size)
-                     = (32 × 4) + (2 × 32)                           (worked example, current defaults)
+                     = (32 × 4) + (2 × 32)                           (worked example, pre-WP-8a per-application pool model)
                      = 192
 ```
 
 (The pre-WP-4e worked example -- `(32 × 4) + 4 = 132`, one pool only,
 fixed at `4` -- is superseded; kept out of this section so it is not
-mistaken for the current default.) Include this `+ (2 × platform_pool_
-size)` term in step 2 of the "before onboarding a new application"
-checklist above -- it does not change with the number of applications
-onboarded, but it is still real connection headroom to reserve alongside
-the control role, interactive/admin sessions, and `superuser_reserved_
-connections`.
+mistaken for the current default.) **This 192 figure is itself superseded
+by the WP-8a fact immediately below** -- the per-application `cache_max ×
+(pool_size + pool_max_overflow)` term it is built on is no longer how a
+served application's own role pool is sized. It is kept here only as a
+snapshot of the pre-WP-8a model, the same treatment the 132 figure above
+already gets -- do not use it to size a real deployment; see "One
+formula, not three" below for the figure to actually use.
 
 **Fact (Phase 10 WP-8a review F-1, supervisor ruling 2026-09-08):** since
 this fix, `r2db_api.main`'s composition root no longer sizes a served
 application's role pool from `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW`
-(the `pool_size = 4` this section's worked example above still uses) -- it
-sizes it from the declared `ResourceLimits.concurrency` ceiling instead
-(default `32`, `r2db_api.main._role_pool_size`), so that `DataService.
-_slot`'s own 429 LIMIT_EXCEEDED, not a pool-exhaustion 503, is what a
-client actually hits at the declared bound. `max_connections` must
-therefore exceed the total role-pool ceiling -- declared `concurrency` ×
-role count (runtime + developer) + (2 × the platform pool, WP-4e above) --
-not the smaller, `pool_size`-based figure this section's arithmetic above
-still walks through (deployment-wide sizing across both role AND platform
-pools is R-31's own, broader, Phase 11 concern; this note records the
-fact only).
+(the `pool_size = 4` the superseded worked example above uses) -- it sizes
+it from the declared `ResourceLimits.concurrency` ceiling instead (default
+`32`, `r2db_api.main._role_pool_size`), so that `DataService._slot`'s own
+429 LIMIT_EXCEEDED, not a pool-exhaustion 503, is what a client actually
+hits at the declared bound. The real per-application connection demand is
+therefore declared `concurrency` × role count (runtime + developer) ×
+applications served by this process, plus `2 × platform_pool_size` (WP-4e
+above) for the two platform-plane pools -- see "One formula, not three"
+below for how this combines with `superuser_reserved_connections` into
+the actual `max_connections` requirement (deployment-wide sizing across
+both role AND platform pools, including any bound on applications served
+per process, is R-31's own, broader, Phase 11 concern; this note records
+the real per-role/per-pool figures only).
 
 **Fact (Phase 10 WP-4f, supervisor ruling 2026-09-09):** the arithmetic
 above assumed every role's own `CONNECTION LIMIT` (as shipped by
@@ -336,22 +339,47 @@ to (real pool composition) + 4 (a fixed operator-headroom margin):
 | `r2dbsvc_control` | short-lived, one-shot CLI/provisioning connections only -- no persistent pool | 5 | unchanged (already >= its own real pool composition) |
 | `r2dbsvc_auditreader` | 1 store, fixed `pool_size` 4 (`PostgresAuditQueryStore`'s own default) | 5 | unchanged (already >= its own real pool composition) |
 
-`max_connections` must therefore be >= the sum of every role's own
-`CONNECTION LIMIT` above (the four raised roles' new values, plus
-`r2dbsvc_control`/`r2dbsvc_auditreader`'s unchanged ones, plus every OTHER
-role this cluster hosts), PLUS however many interactive/diagnostic `psql`
-sessions an operator expects to hold open at once, PLUS `superuser_
-reserved_connections` (default 3) -- re-check this (`SHOW max_
-connections;`) before applying `0013` to a cluster already close to its
-own configured ceiling.
+**One formula, not three (L-2, WP-4 integration review 2026-09-10):** the
+CONNECTION LIMIT table above records each role's own real pool-composition
+floor plus headroom -- a PER-ROLE ceiling PostgreSQL enforces
+independently, capping how many connections THAT role may hold open at
+once. It is not an additional term to sum into `max_connections`, and
+PostgreSQL itself never requires `max_connections` to accommodate every
+role at its own `CONNECTION LIMIT` simultaneously -- roles may be
+deliberately over-subscribed relative to `max_connections` when an
+operator knows they never all peak together. The one PostgreSQL fact that
+actually governs `max_connections` is:
 
-`python -m r2db_api.ops verify-declarations` now also checks this (new
+```
+max_connections >= real simultaneous connections this deployment can produce at once
+                    + superuser_reserved_connections (default 3)
+```
+
+"real simultaneous connections this deployment can produce at once" is
+the WP-8a figure above -- declared `concurrency` × role count (runtime +
+developer) × applications served by this process, plus `2 ×
+platform_pool_size` for the two platform-plane pools -- plus however many
+interactive/diagnostic `psql` sessions an operator expects to hold open
+at once. Summing the CONNECTION LIMIT table instead is a conservative,
+easy-to-compute stand-in for that real figure (never smaller than it, by
+construction of the table's own +4 headroom margin) for an operator who
+has not derived it -- not a PostgreSQL requirement in its own right.
+Re-check the real figure against `SHOW max_connections;` before applying
+`0013` to a cluster already close to its own configured ceiling.
+
+`python -m r2db_api.ops verify-declarations` now also checks the
+CONNECTION LIMIT table above, independently of `max_connections` (new
 check `F-16`): each role's own `pg_roles.rolconnlimit` is `-1` or at least
-its own real pool-composition floor above (the SAME arithmetic this
-migration bakes in), run unconditionally alongside every other check that
-command already runs -- so a FUTURE deployment that raises `ResourceLimits.
-concurrency` without a follow-up migration like `0013` is caught at verify
-time instead of silently reopening this exact failure mode.
+its own real pool-composition floor -- the bare pool-composition figure
+in the table's own "Pool composition" column, WITHOUT the `+4` headroom
+margin `0013` bakes in (e.g. 64 for `r2dbsvc_api`, not 68) -- a strictly
+WEAKER, never stronger, bound than what this migration ships (L-1: the
+two are not the identical formula, though `0013`'s own +4 margin always
+clears F-16's floor with room to spare). Run unconditionally alongside
+every other check that command already runs, so a FUTURE deployment that
+raises `ResourceLimits.concurrency` without a follow-up migration like
+`0013` is caught at verify time instead of silently reopening this exact
+failure mode.
 
 ## 5. Order of operations
 

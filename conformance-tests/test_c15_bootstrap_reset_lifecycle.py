@@ -105,10 +105,11 @@ def _assert_is_contract_code(code: str) -> None:
 
 
 def _is_wire_rejection(adapter, exc: BaseException) -> bool:
-    """WP-4c (design D-3, 監督裁定 scratchpad/phase10/wp4b-rulings.md 項 4):
-    true only for a `transport_kind == "socket"` plug, when `exc` is
-    either (a) a raw `httpx.HTTPError` the CLIENT itself raised before
-    ever sending the request at all -- the motivating case is
+    """WP-4c (design D-3, 監督裁定 scratchpad/phase10/wp4b-rulings.md 項 4);
+    narrowed M-2 (WP-4 integration review 2026-09-10): true only for a
+    `transport_kind == "socket"` plug, when `exc` is either (a) a raw
+    `httpx.LocalProtocolError` the CLIENT ITSELF raised before ever
+    sending the request at all -- the motivating case is
     `test_c15_no_default_credential`'s own empty-string guessable secret
     below: an empty bearer makes the Authorization header value `"Bearer
     "` (trailing whitespace), which h11's own local header-value
@@ -118,6 +119,19 @@ def _is_wire_rejection(adapter, exc: BaseException) -> bool:
     failure: h11/uvicorn's own generic 4xx page, emitted before the app
     ever runs).
 
+    Deliberately NOT the broader `httpx.HTTPError` base class: that also
+    covers `httpx.ConnectError`/`httpx.ReadTimeout`/`httpx.
+    RemoteProtocolError` -- real network failures raised when the peer
+    (uvicorn/nginx) is unreachable or hangs, not a client-side framing
+    refusal. Treating those as a "wire rejection" would make an entire
+    guessed-secret probe loop pass vacuously the instant the socket plug's
+    upstream goes down, instead of surfacing the real outage as a test
+    failure (measured 2026-09-10: an unreachable port makes every
+    `httpx.ConnectError` in this file's own loops silently count as a
+    rejection). `httpx.LocalProtocolError` is raised by httpx's own h11
+    encoder before any byte reaches the network, so it can never be
+    confused with an unreachable-peer condition.
+
     Every bogus-secret probe in this file's own callers carries the
     secret in the Authorization HEADER, never in a JSON body field, so --
     unlike `test_c03_structured_injection.py`'s identically-named helper,
@@ -125,13 +139,15 @@ def _is_wire_rejection(adapter, exc: BaseException) -> bool:
     to check transport + exception shape. See `test_c15_wire_rejection_
     requires_socket_transport` for the mutation pin (a non-socket plug,
     or a `ConformanceDenial` with a real contract code, must never take
-    this branch).
+    this branch) and `test_c15_wire_rejection_never_applies_to_a_reachability_failure`
+    for the M-2 pin (an upstream-down `httpx.HTTPError` subclass other
+    than `LocalProtocolError` must never take this branch).
     """
     if getattr(adapter, "transport_kind", None) != "socket":
         return False
     if isinstance(exc, ConformanceDenial):
         return exc.code == UNCLASSIFIED
-    return isinstance(exc, httpx.HTTPError)
+    return isinstance(exc, httpx.LocalProtocolError)
 
 
 def _control_plane_status(adapter) -> str:
@@ -615,4 +631,41 @@ def test_c15_wire_rejection_requires_socket_transport() -> None:
     assert _is_wire_rejection(socket_adapter, unclassified_denial), (
         "a socket adapter with an UNCLASSIFIED denial must be classified as a wire rejection -- otherwise "
         "this whole test would trivially pass by _is_wire_rejection always returning False"
+    )
+
+
+def test_c15_wire_rejection_never_applies_to_a_reachability_failure() -> None:
+    """M-2 (WP-4 integration review 2026-09-10): `_is_wire_rejection`'s raw-
+    exception branch must accept only `httpx.LocalProtocolError` (a
+    client-side framing refusal, raised before any byte reaches the
+    network), never the broader `httpx.HTTPError` base class it used to
+    check -- which also covers `httpx.ConnectError`/`httpx.ReadTimeout`/
+    `httpx.RemoteProtocolError`, the exceptions httpx raises when the
+    socket plug's own upstream (uvicorn/nginx) is unreachable or hangs.
+    Without this narrowing, an outage on the peer would make every guessed-
+    secret probe in this file's own loops silently count as "the server
+    correctly rejected this", passing vacuously instead of surfacing the
+    real outage.
+
+    Mutation (M-2's own): widen the raw-exception check back to
+    `isinstance(exc, httpx.HTTPError)` -> the `httpx.ConnectError`
+    assertion below goes red (a real unreachable-port `httpx.ConnectError`
+    is exactly what an actual socket-plug outage raises)."""
+    class _FakeSocketAdapter:
+        transport_kind = "socket"
+
+    socket_adapter = _FakeSocketAdapter()
+    local_protocol_error = httpx.LocalProtocolError("Illegal header value b'Bearer '")
+    connect_error = httpx.ConnectError("[Errno 61] Connection refused")
+    read_timeout = httpx.ReadTimeout("timed out")
+
+    assert _is_wire_rejection(socket_adapter, local_protocol_error), (
+        "a client-side framing refusal (LocalProtocolError) on a socket adapter must still count as a wire rejection"
+    )
+    assert not _is_wire_rejection(socket_adapter, connect_error), (
+        "an unreachable peer (ConnectError) must never be classified as a wire rejection -- it means the "
+        "socket plug's own upstream is down, not that the peer correctly refused a bad request"
+    )
+    assert not _is_wire_rejection(socket_adapter, read_timeout), (
+        "a hung peer (ReadTimeout) must never be classified as a wire rejection, for the same reason"
     )

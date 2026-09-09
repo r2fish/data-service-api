@@ -451,19 +451,17 @@ def _drive_requests_per_minute(adapter: ConformanceAdapter) -> bool:
         # `_slot`/`_acquire_rate` path, which is a fact about the
         # adapter's TRANSPORT, not its name. `r2db-api-socket`/`MitateDB-
         # api-socket` (real TCP through nginx + uvicorn) make exactly the
-        # same real `GET /v1/capabilities` round trip an HTTP plug does --
-        # `"http" in adapter.name` happened to still read correctly for
-        # them only because their registry names both contain the
-        # substring `"http"`... no, they do not (`"r2db-api-socket"`
-        # contains no `"http"` substring at all) -- so the old proxy was
-        # ALREADY WRONG for the socket plugs (`already_consumed` silently
-        # stayed `0`, undercounting by exactly the 1 unit `authenticate()`
-        # really consumes, producing `expected 50, got 49` on socket
-        # plugs). The property that actually decides this is `adapter.
-        # transport_kind`: `"asgi"` (existing HTTP plugs) and `"socket"`
-        # (new real-TCP plugs) both go through real wire framing for
-        # `authenticate()`'s `GET /v1/capabilities`; `"in_process"` does
-        # not.
+        # same real `GET /v1/capabilities` round trip an HTTP plug does,
+        # but their registry names contain no `"http"` substring at all
+        # (`"r2db-api-socket"`, `"MitateDB-api-socket"`) -- so the old
+        # name-based proxy was ALREADY WRONG for the socket plugs
+        # (`already_consumed` silently stayed `0`, undercounting by
+        # exactly the 1 unit `authenticate()` really consumes, producing
+        # `expected 50, got 49` on socket plugs). The property that
+        # actually decides this is `adapter.transport_kind`: `"asgi"`
+        # (existing HTTP plugs) and `"socket"` (new real-TCP plugs) both
+        # go through real wire framing for `authenticate()`'s `GET /v1/
+        # capabilities`; `"in_process"` does not.
         already_consumed = 1 if adapter.transport_kind in ("asgi", "socket") else 0
         expected_successes = bound - already_consumed
 

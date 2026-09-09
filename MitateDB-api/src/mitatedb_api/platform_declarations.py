@@ -896,7 +896,16 @@ _CONTRACT_170_LIMIT_CLASSES: tuple = ("enum_members", "idempotency_entries", "id
 # Deliberately excludes `mitatedbsvc_provision` (short-lived, one-shot
 # CLI/provisioning connections only -- no persistent pool, and no stored
 # declaration this check could read to derive a floor for it, the same
-# "out of scope" category as F-1/F-2/F-12).
+# "out of scope" category as F-1/F-2/F-12). This is an EXPLICIT exclusion
+# (`_table_owner`, below), not merely "no grants match its identity" --
+# `mitatedbsvc_provision` is the role every migration in this set runs
+# `CREATE TABLE application_audit`/`CREATE TABLE control_audit` AS
+# (0005/0002's own "WHO RUNS THIS" headers), so as the OWNER of both
+# tables it implicitly holds INSERT and SELECT on both without ever
+# appearing as a `grantee` row -- meaning it would otherwise match all
+# three platform-plane role classes below at once (measured 2026-09-10,
+# WP-4 integration review M-1, peer-symmetric with r2db-api's own
+# `r2dbsvc_control`).
 # ---------------------------------------------------------------------------
 
 #: `mitatedb_api.main`'s own platform pool (`PostgresCredentialStore`'s
@@ -937,6 +946,30 @@ def _roles_with_table_privilege(conn: "psycopg.Connection", schema: str, table: 
             [schema, table, privilege],
         )
         return [row[0] for row in cur.fetchall()]
+
+
+def _table_owner(conn: "psycopg.Connection", schema: str, table: str) -> "str | None":
+    """The role that owns `<schema>.<table>` (`pg_tables.tableowner`) --
+    that role implicitly holds every privilege on the table (INSERT,
+    SELECT, ...) without ever appearing as a `grantee` row for a real
+    GRANT, which is exactly the shape `_roles_with_table_privilege` above
+    reads. Used below to keep that owner (the migration-running operator
+    role, e.g. `mitatedbsvc_provision`) from being misidentified as
+    matching every platform-plane role class at once (M-1, WP-4
+    integration review 2026-09-10, peer-symmetric with r2db-api's own
+    `_table_owner`). Returns `None` if the table does not exist (a caller
+    scoped to `role_classes={"api"}` or similar, e.g. `mitatedb_api.main`'s
+    own startup F-16 call, may run before `0005_application_audit.sql` is
+    guaranteed applied against the connection it happens to be given) --
+    exactly like `_roles_with_table_privilege` above, which already
+    tolerates a missing table by simply returning no rows. `None` never
+    equals a real role name, so the exclusion checks below simply never
+    match in that case, the same as if this function were never called at
+    all."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT tableowner FROM pg_tables WHERE schemaname = %s AND tablename = %s", [schema, table])
+        row = cur.fetchone()
+        return row[0] if row is not None else None
 
 
 def _f16_message(role: str, current_limit: int, required_floor: int, *, ops_module: str) -> str:
@@ -1003,17 +1036,32 @@ def check_role_connection_limits(
     if role_classes is None:
         role_classes = _ROLE_CLASSES
     floors: dict = {}
+    # M-1 (WP-4 integration review 2026-09-10): a role can legitimately
+    # match MORE than one platform-plane class below -- `max(...)` keeps
+    # the STRICTEST floor that role is actually subject to instead of
+    # whichever class happened to assign last. `_table_owner` exclusion
+    # keeps the table-owning operator role (`mitatedbsvc_provision`, never
+    # a real pooled role -- see the module header above) from being
+    # misidentified as matching all three via its implicit owner ACL.
+    application_audit_owner = _table_owner(conn, schema, "application_audit")
+    control_audit_owner = _table_owner(conn, schema, "control_audit")
     if "api" in role_classes:
         for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
-            floors[role] = _API_ROLE_STORE_COUNT * concurrency
+            if role == application_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _API_ROLE_STORE_COUNT * concurrency)
     if "controlplane" in role_classes:
         for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
-            floors[role] = _CONTROLPLANE_ROLE_POOL_FLOOR
+            if role == control_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _CONTROLPLANE_ROLE_POOL_FLOOR)
     if "auditreader" in role_classes:
         reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
         reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
         for role in sorted(reader_of_application_audit & reader_of_control_audit):
-            floors[role] = _AUDITREADER_ROLE_POOL_FLOOR
+            if role == application_audit_owner or role == control_audit_owner:
+                continue
+            floors[role] = max(floors.get(role, 0), _AUDITREADER_ROLE_POOL_FLOOR)
 
     # Two-state registry (0002's own header): a registered-but-never-
     # provisioned row has `runtime_role`/`developer_role` still NULL --

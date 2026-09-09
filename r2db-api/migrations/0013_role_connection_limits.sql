@@ -5,10 +5,19 @@
 --
 -- WHO RUNS THIS: the operator, connected to the `r2dbsvc_platform` database
 -- AS the `r2dbsvc_control` role -- the same role/connection 0002/0005/0006/
--- 0007/0008/0012 already run as. Run once, after 0012 (order relative to
--- 0009/0010/0011 does not matter -- this is a platform single-shot
--- migration, those are per-application upgrade scripts, design SS8.1 rule
--- 2):
+-- 0007/0008/0012 already run as. Run once, any time after `0002`/`0005`/
+-- `0006`/`0007` exist (L-4 correction, WP-4 integration review
+-- 2026-09-10) -- never on `0008`/`0012`, which this file neither reads
+-- nor writes: sections 1 and 3 `ALTER`/replace against `r2dbsvc_api`
+-- (0005) and `r2dbsvc_controlplane` (0006), section 2 reads `0002`'s own
+-- `applications` table, and every fixture and this runbook's own §5
+-- "Order of operations"/§4 apply this migration right after `0007` (the
+-- same four migrations, in the same order, every time) -- order relative
+-- to 0008/0009/0010/0011/0012 does not matter at all: this is a platform
+-- single-shot migration, those are either platform declarations/process-
+-- ceiling migrations or per-application upgrade scripts, design SS8.1
+-- rule 2. This header previously said "after 0012", which was never
+-- true:
 --
 --   psql "$R2DBSVC_CONTROL_DSN" -v ON_ERROR_STOP=1 -f 0013_role_connection_limits.sql
 --
@@ -63,10 +72,16 @@
 -- `ops verify-declarations` (new check F-16, `r2db_api.platform_
 -- declarations.check_role_connection_limits`) reads each of these roles'
 -- OWN `pg_catalog.pg_roles.rolconnlimit` back and compares it against the
--- SAME floor arithmetic this migration bakes in, so a future deployment
--- that raises `ResourceLimits.concurrency` without a follow-up migration
--- like this one is caught at verify time instead of silently reopening
--- this exact failure mode.
+-- SAME pool-composition arithmetic this migration bakes in MINUS the
+-- fixed +4 operator-headroom margin (L-1, WP-4 integration review
+-- 2026-09-10: F-16 checks the bare "worst-case pool" floor -- e.g. 64 for
+-- `r2dbsvc_api`, not this migration's own 68 -- a strictly WEAKER, never
+-- stronger, bound than what this migration bakes in; harmless in effect,
+-- since this migration's own +4 margin already clears F-16's floor with
+-- room to spare, but the two are not the identical formula), so a future
+-- deployment that raises `ResourceLimits.concurrency` without a follow-up
+-- migration like this one is caught at verify time instead of silently
+-- reopening this exact failure mode.
 --
 -- IDEMPOTENCY: every `ALTER ROLE ... CONNECTION LIMIT <n>` re-applies to
 -- the same terminal state every time it runs. The per-application loop
@@ -95,17 +110,24 @@ ALTER ROLE r2dbsvc_controlplane CONNECTION LIMIT 20;
 
 -- ===========================================================================
 -- 2: every ALREADY-PROVISIONED application's own runtime/developer roles.
--- `r2dbsvc_registry.applications` rows are only ever inserted by `finish_
--- provision_application` (0002/0006's own two-step provisioning, this
--- file's own header), by which point `runtime_role`/`developer_role` are
--- always populated (`NOT NULL` columns) -- no NULL guard needed.
+-- `r2dbsvc_registry.applications` is a two-state registry (0006's own
+-- header, section 1.1) -- a row registered via `register_application`
+-- but never (yet) provisioned has `runtime_role`/`developer_role` still
+-- NULL (0006 explicitly `DROP NOT NULL`s both columns), so this loop
+-- filters those out explicitly, the same way r2db-api's own F-16 query
+-- (`platform_declarations.py`) and MitateDB-api's `0012_role_connection_
+-- limits.sql` section 2 both already do.
 -- ===========================================================================
 
 DO $$
 DECLARE
     app record;
 BEGIN
-    FOR app IN SELECT runtime_role, developer_role FROM r2dbsvc_registry.applications LOOP
+    FOR app IN
+        SELECT runtime_role, developer_role
+        FROM r2dbsvc_registry.applications
+        WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL
+    LOOP
         EXECUTE format('ALTER ROLE %I CONNECTION LIMIT 36', app.runtime_role);
         EXECUTE format('ALTER ROLE %I CONNECTION LIMIT 36', app.developer_role);
     END LOOP;
