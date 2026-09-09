@@ -74,6 +74,15 @@ TABLE_NAME = "platform_declarations"
 MIGRATION_NUMBER = "0007"
 MIGRATION_FILENAME = "0007_platform_declarations.sql"
 
+#: Phase 10 WP-6b (design D-5 (ii)): the platform single-shot migration
+#: that widens `platform_declarations.key`'s own CHECK constraint to
+#: accept `'process_ceilings'` -- referenced by `_f15_missing_message`
+#: only (the row-missing F-15 message names the migration that made this
+#: KEY legal, not `MIGRATION_NUMBER` = 0007, which never mentions this
+#: key at all).
+PROCESS_CEILINGS_MIGRATION_NUMBER = "0011"
+PROCESS_CEILINGS_MIGRATION_FILENAME = "0011_process_ceilings.sql"
+
 #: `<peer>` in every fail-fast message's "next ops command" (design
 #: §3.8).
 PEER_MODULE = "mitatedb_api"
@@ -144,12 +153,26 @@ class Surfaces:
 
 
 @dataclass(frozen=True)
+class ProcessCeilings:
+    """F-15's own validated return shape (design D-5 (ii)): how many
+    processes may serve each plane's declared base URL at the same time.
+    The SAME shape `Surfaces` uses (`{"data": ..., "control": ...}`,
+    design U-5: "新しい形を発明しない") -- unlike `Surfaces.control_base_url`,
+    `control` here is never optional: this deployment's process topology
+    for the control plane is a fact of the deployment, not conditioned on
+    whether a control SURFACE is declared."""
+    data: int
+    control: int
+
+
+@dataclass(frozen=True)
 class PlatformDeclarations:
-    """`read_platform_declarations`'s own return shape -- the three rows
+    """`read_platform_declarations`'s own return shape -- the four rows
     of `<registry>.platform_declarations`, each already validated."""
     surfaces: Surfaces
     audit_coalescing_window_ms: int
     audit_writer_roles: tuple[str, ...]
+    process_ceilings: ProcessCeilings
 
 
 @dataclass(frozen=True)
@@ -372,6 +395,70 @@ def validate_surfaces_value(value: object, *, schema: str, ops_module: str) -> S
     return Surfaces(data_base_url=data_url, control_base_url=control_url)
 
 
+def _f15_missing_message(schema: str, *, ops_module: str) -> str:
+    return (
+        f"no 'process_ceilings' row in {schema}.platform_declarations: contract 1.8.0 defines the scope of "
+        f"every limit_enforcement value in terms of it unconditionally. Declare it with 'python -m "
+        f"{ops_module}.ops declare-process-ceilings --data <N> --control <N>' (requires migration "
+        f"{PROCESS_CEILINGS_MIGRATION_NUMBER} applied to this platform database), then restart both processes."
+    )
+
+
+def _f15_shape_message(schema: str, value: Any, *, ops_module: str) -> str:
+    return (
+        f"'process_ceilings' in {schema}.platform_declarations must be a JSON object with exactly the two "
+        f"keys 'data' and 'control', each a positive integer (the maximum number of processes that may "
+        f"serve that plane's declared surfaces base URL at the same time), got '{value}'. This table can be "
+        f"edited by hand, so the value is validated on every read as well as on write. Re-declare it with "
+        f"'python -m {ops_module}.ops declare-process-ceilings --data <N> --control <N>', then restart both "
+        f"processes."
+    )
+
+
+def _f15_value_message(schema: str, value: Any, *, ops_module: str) -> str:
+    return (
+        f"'process_ceilings' in {schema}.platform_declarations has the right keys but 'data' and 'control' "
+        f"must both be a positive integer (the maximum number of processes that may serve that plane's "
+        f"declared surfaces base URL at the same time), got '{value}'. This table can be edited by hand, so "
+        f"the value is validated on every read as well as on write. Re-declare it with 'python -m "
+        f"{ops_module}.ops declare-process-ceilings --data <N> --control <N>', then restart both processes."
+    )
+
+
+def validate_process_ceilings_value(value: object, *, schema: str, ops_module: str) -> ProcessCeilings:
+    """F-15's shape half (design D-5(ii)): `{"data": <int >= 1>, "control":
+    <int >= 1>}` -- exactly those two keys (no extra, none missing), each a
+    positive integer (`bool` is a Python `int` subclass, excluded
+    explicitly, same discipline as `validate_coalescing_window_value`). The
+    SAME function runs on the ops write path (`declare-process-ceilings`)
+    and every read path (Q4 D-2(d): "書き込み時と読み出し時の両方で行い、
+    両方が同じ Python の検証関数を通る").
+
+    Two SEPARATE checks, deliberately not folded into one `all(...)` (peer-
+    parity note, supervisor ruling `scratchpad/phase10/wp6-rulings.md` #4:
+    r2db's 2-stage form -- shape, then value -- is the form both peers
+    converge to): stage 1 rejects the wrong CONTAINER shape (not a dict, or
+    the wrong key set) with `_f15_shape_message`; stage 2, reached only
+    once stage 1 has already confirmed both keys are present, rejects a
+    present-but-out-of-range VALUE (wrong type, `bool`, non-positive) with
+    the separate `_f15_value_message` -- a distinct message per failure
+    kind, even though both stages raise the SAME `code="F-15"` (design
+    D-5(ii): existence and shape are one combined check, not two exit
+    codes; see this function's own callers in `read_platform_declarations`
+    below)."""
+    if not isinstance(value, dict) or set(value.keys()) != {"data", "control"}:
+        raise PlatformDeclarationError(_f15_shape_message(schema, value, ops_module=ops_module), code="F-15")
+    data_value = value["data"]
+    control_value = value["control"]
+    is_valid = (
+        not isinstance(data_value, bool) and isinstance(data_value, int) and data_value >= 1
+        and not isinstance(control_value, bool) and isinstance(control_value, int) and control_value >= 1
+    )
+    if not is_valid:
+        raise PlatformDeclarationError(_f15_value_message(schema, value, ops_module=ops_module), code="F-15")
+    return ProcessCeilings(data=data_value, control=control_value)
+
+
 def read_platform_declarations(conn: "psycopg.Connection", *, schema: str, ops_module: str, migration: str) -> PlatformDeclarations:
     """D-2, design §3.7 step 4's own required ORDER: (a) table existence
     (F-8) before (b) row existence (`surfaces` absent -> F-3,
@@ -399,6 +486,16 @@ def read_platform_declarations(conn: "psycopg.Connection", *, schema: str, ops_m
         raise PlatformDeclarationError(_f3_message(schema, ops_module=ops_module), code="F-3")
     if "audit_coalescing_window_ms" not in rows:
         raise PlatformDeclarationError(_f4_message(schema, ops_module=ops_module, migration=migration), code="F-4")
+    if "process_ceilings" not in rows:
+        raise PlatformDeclarationError(_f15_missing_message(schema, ops_module=ops_module), code="F-15")
+    # Existence and shape are both raised as F-15 (design D-5(ii): one
+    # combined check, unlike surfaces' F-3/F-5 split) -- validated here, in
+    # one contiguous step right after the existence check above and BEFORE
+    # surfaces'/the window's own value validation below, so `ops verify-
+    # declarations`' own fixed read order (`_VERIFY_DECLARATIONS_READ_
+    # ORDER`) never has to represent this row's two sub-checks at two
+    # different list positions.
+    process_ceilings = validate_process_ceilings_value(rows["process_ceilings"], schema=schema, ops_module=ops_module)
 
     surfaces = validate_surfaces_value(rows["surfaces"], schema=schema, ops_module=ops_module)
     window_ms = validate_coalescing_window_value(rows["audit_coalescing_window_ms"], schema=schema, ops_module=ops_module)
@@ -407,7 +504,10 @@ def read_platform_declarations(conn: "psycopg.Connection", *, schema: str, ops_m
     if "audit_writer_roles" in rows:
         writer_roles = validate_audit_writer_roles_value(rows["audit_writer_roles"], schema=schema, ops_module=ops_module)
 
-    return PlatformDeclarations(surfaces=surfaces, audit_coalescing_window_ms=window_ms, audit_writer_roles=writer_roles)
+    return PlatformDeclarations(
+        surfaces=surfaces, audit_coalescing_window_ms=window_ms, audit_writer_roles=writer_roles,
+        process_ceilings=process_ceilings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +889,8 @@ __all__ = [
     "MIGRATION_NUMBER",
     "PEER_DIR",
     "PEER_MODULE",
+    "PROCESS_CEILINGS_MIGRATION_FILENAME",
+    "PROCESS_CEILINGS_MIGRATION_NUMBER",
     "PROVISION_DSN_ENV",
     "REMOVED_SURFACE_ENV",
     "REMOVED_TIMEOUT_ENV",
@@ -796,6 +898,7 @@ __all__ = [
     "VISIBILITY_LAG_CLOCK_SKEW_MARGIN_MS",
     "PlatformDeclarationError",
     "PlatformDeclarations",
+    "ProcessCeilings",
     "RoleTimeoutCatalog",
     "Surfaces",
     "check_control_surface_consistency",
@@ -809,5 +912,6 @@ __all__ = [
     "require_control_surface_declared",
     "validate_audit_writer_roles_value",
     "validate_coalescing_window_value",
+    "validate_process_ceilings_value",
     "validate_surfaces_value",
 ]

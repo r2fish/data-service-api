@@ -301,6 +301,13 @@ def _bootstrap_platform(
         # Without this migration applied + a `surfaces` row seeded below,
         # `build_control_service` fails F-8/F-3 at construction time.
         "0007_platform_declarations.sql",
+        # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+        # key`'s own CHECK constraint to accept `process_ceilings` --
+        # without this migration applied + the row seeded below, BOTH
+        # `main.build_app` and `build_control_service` fail F-15 at
+        # construction time (design's own "宣言表を通る全経路で、宣言を
+        # 先に書く").
+        "0011_process_ceilings.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -325,6 +332,11 @@ def _bootstrap_platform(
     # depends on 0002's two roles, run here (before the password-ALTER
     # block below, order-independent either way).
     _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+    # Phase 10 WP-6b (design D-5 (ii)): widens the CHECK constraint --
+    # takes no psql variables (this migration only alters the key
+    # vocabulary; it seeds no row of its own, `process_ceilings` is
+    # deployment-specific just like `surfaces`, seeded below instead).
+    _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
     # `surfaces` (D-2(c)): BOTH `data`/`control` -- this adapter's own
     # `build_control_service` call requires `control` unconditionally
     # (design §3.7: "control プロセスは自らの control surface を必ず持
@@ -344,6 +356,22 @@ def _bootstrap_platform(
                 sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', {value})").format(
                     table=sql.Identifier(schema, "platform_declarations"),
                     value=sql.Literal(json.dumps(surfaces)),
+                ),
+            )
+            # Phase 10 WP-6b (design D-5 (ii)): seeded alongside `surfaces`
+            # -- both this HTTP plug's own `build_app`/`build_control_
+            # service` calls now require this row (F-15). `{"data": 1,
+            # "control": 1}` mirrors this plug's own single-process
+            # reality (one `main.build_app`/`build_control_service` call
+            # each, in-process, never more than one concurrently-serving
+            # process) -- `limit_enforcement` for `concurrency`/`requests_
+            # per_minute`/`control_requests_per_minute`/`audit_requests_
+            # per_minute` stays `enforced`, unchanged from before this WP.
+            # The socket subclass (WP-4b) inherits this seed unchanged.
+            cur.execute(
+                sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', {value})").format(
+                    table=sql.Identifier(schema, "platform_declarations"),
+                    value=sql.Literal(json.dumps({"data": 1, "control": 1})),
                 ),
             )
     finally:
