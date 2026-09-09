@@ -20,7 +20,7 @@ WP wires into the public in-process composition -- or
 `sqlite3`/`psycopg` or references either driver's own exception types.
 """
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
@@ -1227,39 +1227,48 @@ class ApplicationCell:
         self._backend.check_reserved(value, label)
         return value
 
-    def _idempotency_lock_scope(self, idempotency_key, *, dry_run):
-        """Code-review fix F5 (Opus review 2, WP-6d rework): the widened
-        `self._lock` acquisition at all 4 keyed entry points (`transact`,
-        `create_collection`, `add_field`, `alter_field`) is only correct
-        for a KEYED, real (non-dry-run) request -- that is the only case
-        `_idempotency_check`/`_idempotency_pg_scope` do anything at all
-        (I-7: a dry run or an unkeyed request never locks, never looks
-        up, never stores). Acquiring `self._lock` unconditionally, BEFORE
-        this check, serialized unkeyed and dry-run traffic over pass 1
-        too -- a real regression this WP never intended (pass 1 was, and
-        for unkeyed/dry-run traffic still is, lock-free by design, see
-        `_validate_delete_confirmation`'s own docstring on `transact`'s
-        two-pass split). Returns `self._lock` (an `RLock`) only when
-        `idempotency_key is not None and not dry_run`; `contextlib.
-        nullcontext()` otherwise -- a plain no-op context manager, so
-        every call site can use the identical `with self._idempotency_
-        lock_scope(...), self._idempotency_pg_scope(...):` shape
-        regardless of which branch this returns."""
-        if idempotency_key is not None and not dry_run:
-            return self._lock
-        return nullcontext()
+    # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
+    # `{scratchpad}/phase10/wp8b-review-2.md` §5 (A) / §7-1): この直前に
+    # あった `_idempotency_lock_scope` ヘルパーは削除した。全 4 入口
+    # (`create_collection`/`add_field`/`alter_field`/`transact`) は
+    # WP-8b 案 A の外側 `with self._lock:` (それぞれのメソッド本体の
+    # 冒頭、`_gate`/`_limit_gate` の直後) に既に包まれており、これは
+    # `idempotency_key`/`dry_run` の値に関わらず無条件・pass 1 全体を
+    # 含めて直列化する。旧ヘルパーが分岐で返していた「keyed かつ real
+    # のときだけ `self._lock`、それ以外は `contextlib.nullcontext()`」
+    # という部分直列化は、外側 lock が常にそれより広い直列化を先に
+    # 与えるため in-process では完全に冗長 (かつ `_idempotency_lock_
+    # scope` 自体を無効化する変異を当てても既存テストが一切赤化しない
+    # ことで確認済み -- 上記レビュー §5 (A))。削除により、この
+    # in-process 直列化の唯一の担い手は外側 `self._lock` になる
+    # (テストで直接 pin: `MitateDB-api/tests/test_idempotency_
+    # concurrency.py` の in-memory 同一キーテストは、外側 lock を
+    # `nullcontext` に差し替える変異で赤化することを実測)。
+    # 【WP-8b 案 A 以前の記述】旧 `_idempotency_lock_scope(idempotency_
+    # key, *, dry_run)` は `idempotency_key is not None and not dry_run`
+    # のときだけ `self._lock` (`RLock`) を返し、それ以外は
+    # `contextlib.nullcontext()` を返していた -- 当時はどの入口にも
+    # 外側 `self._lock` が存在せず、pass 1 を不必要に直列化しないための
+    # 唯一の安全弁だった (code-review fix F5, Opus review 2, WP-6d
+    # rework)。
 
     @contextmanager
     def _idempotency_pg_scope(self, idempotency_key, *, for_developer, dry_run):
         """Ruling U-7 (`{scratchpad}/review2/frame.md` F-①, WP-6d):
-        combined into the SAME `with self._idempotency_lock_scope(...),
-        self._idempotency_pg_scope(...) as conn:` statement at all 4
+        used via `with self._idempotency_pg_scope(...) as conn:` at all 4
         keyed entry points (`transact`, `create_collection`, `add_field`,
         `alter_field`) -- guarantees `self._backend.idempotency_unlock`
         runs on EVERY exit from the keyed critical section it wraps (a
         replay's early `return`, a CONFLICT/LIMIT_EXCEEDED raise, a
         pass-1-equivalent validation failure, an execution failure, or
         success), regardless of which one.
+
+        WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09): previously combined
+        into the SAME `with self._idempotency_lock_scope(...), self.
+        _idempotency_pg_scope(...) as conn:` statement -- that helper is
+        now removed (see the deletion note immediately above this
+        method); this method is unchanged otherwise, and every call site
+        now opens it alone.
 
         `conn` (code-review fix F6, Opus review 2, ruled in): resolved
         EXACTLY ONCE here, at scope-open, via `self._backend.idempotency_
@@ -1528,23 +1537,28 @@ class ApplicationCell:
                 idempotency_response_digest = None
                 idempotency_now_ms = None
                 # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): widened `self._lock`
-                # scope, but ONLY for a keyed, real request -- see `transact`'s
-                # identical comment above and `_idempotency_lock_scope`'s own
-                # docstring for the full rationale. Covers the idempotency
-                # lookup and the plan-precondition check below it, not only
-                # the backend DDL call, when `idempotency_key is not None and
-                # not dry_run`; a `contextlib.nullcontext()` (no lock at all
-                # over pass 1) otherwise. The separate inner `with self._lock:`
-                # around the DDL call itself is RESTORED below (F5), exactly
-                # as it was pre-WP-6d -- `self._lock` is an `RLock`, so a
-                # keyed request re-entering it there is safe, not a deadlock.
-                # 版フリップ merge 註 (phase10-wp8b x phase10-wp6d-i, 2026-09-09):
-                # 外側の `with self._lock:` (WP-8b 案 A) が lookup->pass-1->pass-2
-                # 全体を覆い、その内側で WP-6d-i の `_idempotency_lock_scope`/
-                # `_idempotency_pg_scope` スコープ (`RLock` 再入で無害) がそのまま
-                # 再入する。
-                with self._idempotency_lock_scope(idempotency_key, dry_run=dry_run), self._idempotency_pg_scope(
+                # code-review fix F5 (Opus review 2): originally widened
+                # `self._lock` around this scope via `_idempotency_lock_
+                # scope`, but ONLY for a keyed, real request. Covered the
+                # idempotency lookup and the plan-precondition check below
+                # it, not only the backend DDL call.
+                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
+                # 合意; `_idempotency_lock_scope`'s own deletion note
+                # immediately after `_identifier` above): `_idempotency_
+                # lock_scope` は削除した。外側の `with self._lock:` (1354 行、
+                # WP-8b 案 A) が `idempotency_key`/`dry_run` の値に関わらず
+                # 無条件にこのメソッド全体 (lookup・plan 前提条件チェック・
+                # 実行のすべて) を直列化しているため、ここで個別に部分直列化
+                # する意味は in-process には無い。残る `self._idempotency_pg_
+                # scope(...)` は PostgreSQL の session advisory lock 取得と
+                # 接続束縛 (F6) のみを担う。下の DDL 呼び出し周りの内側
+                # `with self._lock:` (F5 由来) は `RLock` の再入として無害な
+                # まま維持。
+                # 【WP-8b 案 A 以前の記述】旧文はここで
+                # `contextlib.nullcontext()` (no lock at all over pass 1) が
+                # 使われる場合を説明していた -- `idempotency_key is None or
+                # dry_run` のときの旧 `_idempotency_lock_scope` の返り値。
+                with self._idempotency_pg_scope(
                     idempotency_key, for_developer=True, dry_run=dry_run
                 ) as conn:
                     if idempotency_key is not None and not dry_run:
@@ -1807,23 +1821,24 @@ class ApplicationCell:
                 idempotency_response_digest = None
                 idempotency_now_ms = None
                 # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): widened `self._lock`
-                # scope, but ONLY for a keyed, real request -- see `transact`'s
-                # identical comment and `_idempotency_lock_scope`'s own
-                # docstring for the full rationale. Covers the idempotency
-                # lookup, target-existence (`field_domains`), and every other
-                # validation below it, when `idempotency_key is not None and
-                # not dry_run`; a `contextlib.nullcontext()` (no lock at all
-                # over pass 1) otherwise. The separate inner `with self._lock:`
-                # around the DDL call itself is RESTORED below (F5), exactly
-                # as it was pre-WP-6d -- `self._lock` is an `RLock`, so a
-                # keyed request re-entering it there is safe, not a deadlock.
-                # 版フリップ merge 註 (phase10-wp8b x phase10-wp6d-i, 2026-09-09):
-                # 外側の `with self._lock:` (WP-8b 案 A) が lookup->pass-1->pass-2
-                # 全体を覆い、その内側で WP-6d-i の `_idempotency_lock_scope`/
-                # `_idempotency_pg_scope` スコープ (`RLock` 再入で無害) がそのまま
-                # 再入する。
-                with self._idempotency_lock_scope(idempotency_key, dry_run=dry_run), self._idempotency_pg_scope(
+                # code-review fix F5 (Opus review 2): originally widened
+                # `self._lock` around this scope via `_idempotency_lock_
+                # scope`, but ONLY for a keyed, real request. Covered the
+                # idempotency lookup, target-existence (`field_domains`),
+                # and every other validation below it.
+                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
+                # 合意; `create_collection`'s own identical note above for
+                # the full rationale): `_idempotency_lock_scope` は削除した
+                # -- 外側の `with self._lock:` (1760 行、WP-8b 案 A) が
+                # `idempotency_key`/`dry_run` の値に関わらず無条件にこの
+                # メソッド全体を直列化しているため、個別の部分直列化は
+                # in-process には冗長。残る `self._idempotency_pg_scope(...)`
+                # は PostgreSQL の session advisory lock 取得と接続束縛 (F6)
+                # のみを担う。
+                # 【WP-8b 案 A 以前の記述】旧文はここで
+                # `contextlib.nullcontext()` (no lock at all over pass 1) が
+                # 使われる場合を説明していた。
+                with self._idempotency_pg_scope(
                     idempotency_key, for_developer=True, dry_run=dry_run
                 ) as conn:
                     if idempotency_key is not None and not dry_run:
@@ -2069,23 +2084,24 @@ class ApplicationCell:
                 idempotency_response_digest = None
                 idempotency_now_ms = None
                 # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
-                # code-review fix F5 (Opus review 2): widened `self._lock`
-                # scope, but ONLY for a keyed, real request -- see `transact`'s
-                # identical comment and `_idempotency_lock_scope`'s own
-                # docstring for the full rationale. Covers the idempotency
-                # lookup, target-existence (`field_domains`), and every other
-                # validation below it, when `idempotency_key is not None and
-                # not dry_run`; a `contextlib.nullcontext()` (no lock at all
-                # over pass 1) otherwise. The separate inner `with self._lock:`
-                # around the DDL call itself is RESTORED below (F5), exactly
-                # as it was pre-WP-6d -- `self._lock` is an `RLock`, so a
-                # keyed request re-entering it there is safe, not a deadlock.
-                # 版フリップ merge 註 (phase10-wp8b x phase10-wp6d-i, 2026-09-09):
-                # 外側の `with self._lock:` (WP-8b 案 A) が lookup->pass-1->pass-2
-                # 全体を覆い、その内側で WP-6d-i の `_idempotency_lock_scope`/
-                # `_idempotency_pg_scope` スコープ (`RLock` 再入で無害) がそのまま
-                # 再入する。
-                with self._idempotency_lock_scope(idempotency_key, dry_run=dry_run), self._idempotency_pg_scope(
+                # code-review fix F5 (Opus review 2): originally widened
+                # `self._lock` around this scope via `_idempotency_lock_
+                # scope`, but ONLY for a keyed, real request. Covered the
+                # idempotency lookup, target-existence (`field_domains`),
+                # and every other validation below it.
+                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
+                # 合意; `create_collection`'s own identical note above for
+                # the full rationale): `_idempotency_lock_scope` は削除した
+                # -- 外側の `with self._lock:` (2013 行、WP-8b 案 A) が
+                # `idempotency_key`/`dry_run` の値に関わらず無条件にこの
+                # メソッド全体を直列化しているため、個別の部分直列化は
+                # in-process には冗長。残る `self._idempotency_pg_scope(...)`
+                # は PostgreSQL の session advisory lock 取得と接続束縛 (F6)
+                # のみを担う。
+                # 【WP-8b 案 A 以前の記述】旧文はここで
+                # `contextlib.nullcontext()` (no lock at all over pass 1) が
+                # 使われる場合を説明していた。
+                with self._idempotency_pg_scope(
                     idempotency_key, for_developer=True, dry_run=dry_run
                 ) as conn:
                     if idempotency_key is not None and not dry_run:
@@ -2528,22 +2544,36 @@ class ApplicationCell:
         (no open batch transaction at that point). `transact()`'s own
         batch-embedded call site is DIFFERENT since P35 WP-2's two-pass
         restructuring (R-1): it now runs from `_plan_operation`, during
-        pass 1. For an UNKEYED or dry-run batch, pass 1 still runs
-        OUTSIDE `self._lock` entirely, exactly as this comment originally
-        said -- `self._lock` is only acquired afterward, once the whole
-        batch has planned successfully, at the start of pass 2 (`with
-        self._lock:` immediately around `self._backend.begin()`). For a
-        KEYED, real batch, `transact`'s own `_idempotency_lock_scope`
-        (F5, WP-6d rework) widens that acquisition to cover pass 1 too --
-        so `_plan_operation` DOES run inside `self._lock` in that one
-        case, re-entering it again (safely: `self._lock` is an `RLock`)
-        when pass 2's own inner `with self._lock:` is reached. This
-        method itself is unaffected by either change (it never touched
-        lock/transaction state either way), but the earlier claim that
-        `transact()` "is already holding `self._lock` and has already
-        called `begin()` before this is ever reached" describes the
-        pre-WP-2, single-pass call site and is no longer true of the
-        current one for any batch, keyed or not.
+        pass 1.
+
+        WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと合意;
+        `{scratchpad}/phase10/wp8b-review-2.md` §5 (B) / §7-2): `transact`
+        の外側 `with self._lock:` (WP-8b 案 A、`_gate`/`_limit_gate` の
+        直後) は KEYED/UNKEYED、real/dry-run のいずれであっても
+        `_plan_operation` (pass 1) を含むメソッド本体全体を無条件に
+        直列化する -- `_idempotency_lock_scope` はこの直列化を部分的に
+        再現する意味を失ったため削除済み (削除note: `_idempotency_pg_
+        scope` の直前)。したがって現在は、UNKEYED/dry-run のバッチも
+        含め、`_plan_operation` は常に `self._lock` の内側で走る。
+        pass 2 の開始点にある内側の `with self._lock:` (`self._backend.
+        begin()` の直前) への到達は、その時点で既に外側 lock を保持して
+        いる同一スレッドによる `RLock` の再入であり、無害。
+
+        【WP-8b 案 A 以前の記述】UNKEYED または dry-run のバッチでは、
+        pass 1 は `self._lock` の外で走っていた -- `self._lock` はバッチ
+        全体の計画が成功した後、pass 2 の開始点でのみ取得されていた
+        (`with self._lock:` immediately around `self._backend.begin()`)。
+        KEYED かつ real なバッチでは、`transact` 自身の (削除済み)
+        `_idempotency_lock_scope` (F5, WP-6d rework) がその取得を pass 1
+        にも広げていた -- その場合だけ `_plan_operation` が `self._lock`
+        の内側で走り (`RLock` の再入として安全)、pass 2 自身の内側
+        `with self._lock:` に到達していた。この docstring 自体が担う
+        `_validate_delete_confirmation` の挙動は、いずれの変更でも
+        影響を受けない (lock/transaction 状態に一切触れないため) が、
+        より古い「`transact()` is already holding `self._lock` and has
+        already called `begin()` before this is ever reached」という
+        主張は pre-WP-2 の単一パス呼び出し箇所を指しており、どのバッチ
+        (keyed かどうかを問わず) にも当てはまらない。
         """
         # WP-3e rework T2 (追補 L-3/M-4): every `field` this method raises
         # is derived from `path_prefix` -- `"operations/0/..."` for a
@@ -2966,35 +2996,45 @@ class ApplicationCell:
                 # Ruling U-7 (WP-6d, `{scratchpad}/review2/frame.md` F-①);
                 # code-review fix F5 (Opus review 2): this cell-wide `RLock`
                 # (`self._lock`, also used below for the begin/execute/commit
-                # envelope) additionally covers the idempotency lookup and
-                # pass 1 validation above it, but ONLY when this request is
-                # keyed and real (`idempotency_key is not None and not
-                # dry_run`) -- `_idempotency_lock_scope` below returns
-                # `contextlib.nullcontext()` for every other request, so
-                # unkeyed and dry-run traffic is NOT serialized over pass 1
-                # (an earlier version of this fix acquired `self._lock`
-                # unconditionally here, which over-serialized exactly that
-                # traffic -- see `_idempotency_lock_scope`'s own docstring).
-                # For a keyed real request, without this widened lock two
-                # threads sharing this SAME `ApplicationCell` (uvicorn's
-                # threadpool, or a future one, U-10) could both pass
-                # `_idempotency_check` (both see "no record yet") before
-                # either reached this lock, then both execute and both store
-                # -- the in-memory/SQLite counterpart of the PostgreSQL-side
-                # race this same ruling closes with `pg_advisory_xact_lock`
-                # (`backend_postgres.py`). The separate inner `with self.
-                # _lock:` immediately below `self._backend.begin(deadline=
-                # deadline)` is RESTORED (F5), exactly as it was pre-WP-6d --
-                # `self._lock` is an `RLock`, so a keyed request re-entering
-                # it there is safe, not a deadlock; for an unkeyed/dry-run
-                # request that inner acquisition is the ONLY one pass 2 ever
-                # takes, matching pre-WP-6d behavior exactly.
-                # 版フリップ merge 註 (phase10-wp8b x phase10-wp6d-i, 2026-09-09):
-                # 外側の `with self._lock:` (WP-8b 案 A) が lookup->pass-1->pass-2
-                # 全体を覆い、その内側で WP-6d-i の `_idempotency_lock_scope`/
-                # `_idempotency_pg_scope` スコープ (`RLock` 再入で無害) がそのまま
-                # 再入する。
-                with self._idempotency_lock_scope(idempotency_key, dry_run=dry_run), self._idempotency_pg_scope(
+                # envelope) additionally covered the idempotency lookup and
+                # pass 1 validation above it. For a keyed real request,
+                # without this widened lock two threads sharing this SAME
+                # `ApplicationCell` (uvicorn's threadpool, or a future one,
+                # U-10) could both pass `_idempotency_check` (both see "no
+                # record yet") before either reached this lock, then both
+                # execute and both store -- the in-memory/SQLite counterpart
+                # of the PostgreSQL-side race this same ruling closes with
+                # `pg_advisory_xact_lock` (`backend_postgres.py`). The
+                # separate inner `with self._lock:` immediately below
+                # `self._backend.begin(deadline=deadline)` is RESTORED (F5),
+                # exactly as it was pre-WP-6d -- `self._lock` is an `RLock`,
+                # so a keyed request re-entering it there is safe, not a
+                # deadlock.
+                # WP-8b 案 A 差し戻し 2 (監督裁定 2026-09-09、並行セッションと
+                # 合意; `create_collection`'s own identical note above,
+                # `wp8b-review-2.md` §5 (B) / §7-2): `_idempotency_lock_
+                # scope` は削除した。外側の `with self._lock:` (2907 行付近、
+                # WP-8b 案 A、`_gate` の直後) が `idempotency_key`/`dry_run`
+                # の値に関わらず無条件に lookup->pass-1->pass-2 全体を直列化
+                # しているため、この二重ガードは in-process には冗長 --
+                # 上記の「二スレッドが両方とも record なしを見る」races は、
+                # keyed/real かどうかを問わず、この外側 lock だけで既に閉じて
+                # いる。残る `self._idempotency_pg_scope(...)` は PostgreSQL
+                # の session advisory lock 取得と接続束縛 (F6) のみを担う。
+                # pass 2 の内側 `with self._lock:` への到達は、同一スレッドに
+                # よる `RLock` の再入として、keyed/unkeyed・real/dry-run の
+                # いずれでも無害。
+                # 【WP-8b 案 A 以前の記述】この widened lock は
+                # `idempotency_key is not None and not dry_run` のときだけ
+                # 適用され (`_idempotency_lock_scope` below returns
+                # `contextlib.nullcontext()` for every other request)、
+                # unkeyed/dry-run トラフィックは pass 1 上で直列化されて
+                # いなかった (an earlier version of this fix acquired
+                # `self._lock` unconditionally here, which over-serialized
+                # exactly that traffic)。unkeyed/dry-run request では、
+                # pass 2 の内側 acquisition だけが唯一の取得点で、pre-WP-6d
+                # の挙動と一致していた。
+                with self._idempotency_pg_scope(
                     idempotency_key, for_developer=False, dry_run=dry_run
                 ) as conn:
                     if idempotency_key is not None and not dry_run:
