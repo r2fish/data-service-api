@@ -128,3 +128,18 @@
 - **課金上限のような外部要因は、隠さず未達として残す。** **本フェーズは CI を 1 度も回せなかった。** **ローカルの単独ゲートは正本として有効だが、3.12 matrix の再現と `image-pins` の証拠はローカルには無い。** **「合格」と書けるのは測った項目だけであり、測れなかった項目は台帳 (L10-15) と完了ゲートの実測表に未達として残す。**
 - **実装担当が「壊れた状態」を報告してきたときは、それを設計判断として扱う。** **WP-8c の fail-closed 化は conformance adapter の構築を壊し、conformance 全件が収集不能になった。** **報告は隠さず出され、統合 branch の WP-4g で配線して解いた。** **「壊れているので緩める」の側に倒さなかったことが、`HttpService` の必須引数を守った。**
 - **同型性登録のために片側を寄せる判断は、記録に残す。** **`_surfaces_value` を登録するために MitateDB 側の inline dict を r2db と同じ module 定数に揃えた (値は不変)。** **逆に `cmd_declare_process_ceilings` は、正規化後も本物の差 (statement 順・例外処理の形) が残ったので登録しなかった。** **「同型性表に載せられるか」を実装の形の判断基準にしないこと** — **計画文書 §8 の R-32 が扱うのはこの境界である。**
+
+## 6. 追記 2026-09-10 (本書の記述後に WP-6d-ii が入った)
+
+**本節より上は 1 文字も書き換えていない** — **上の §1 / §4-1 (a) / §4-2 は本書を書いた時点 (WP-6d-ii の着手前) の記録である。以下がその現在形である。**
+
+- **WP-6d-ii は実施済みである。** **branch `phase10-wp6dii` の実装 `d97de35` → Opus のコードレビュー是正 `8425ef4` (判定「accept with fixes」、指摘 F1〜F7) → main 取り込み `05bc548`。main へのマージは `2455f96` (`[skip ci]`) であり、これが本フェーズの束 15 である** (設計 §11.7)。
+- **したがって §4-1 の残 2 件は 0 件である。** **(a) C-27 は `CONDITIONS.md` で `executable` になり、6 plug 全数で駆動する** (in-process 2 + ASGI 2 + socket 2。**socket 2 plug は hook を 1 行も書かずに継承する**)。**(b) PERF 行は設計 §11.10 に入った。**
+- **新しい正本の所在**: **conformance adapter port は v1.14 → **v1.15** (`docs/design/CONFORMANCE_ADAPTER_V1.md` §25)。** **新 hook は `hold_after_idempotency_lookup(session, idempotency_key)`** (`conformance-tests/adapter.py` の abstract method 1 個 + 非 normative handle `IdempotencyHold`)。**新しい共通テストは `conformance-tests/test_c27_concurrent_same_key.py`** (plug ごと 5 本 + registry guard 2 本 = **`32 passed`**)。
+- **契約 1.8.0 の条件付き義務 `idempotency_concurrent_same_key_sends_serialized` は、両 peer について共通 suite が観測している。** **本フェーズの新条件は C-26 と C-27 の 2 件で確定した。**
+- **`conformance-tests/COLLECTION_FLOOR` は本書 §1 の 3294 から `3326` へ監督が再更新する** (単独コミット。C-27 の 32 件ぶん増える)。**§1 の「着手時 2807」の記述はそのままである。**
+- **開示 1 件 (弱点ではなく観測限界)**: **`MitateDB-api-http` では PG session advisory lock を外しても C-27 は赤にならない** — **共通 suite は 1 application につき cell を 1 つしか張らず、その `RLock` が先に直列化するからである。** **非 vacuity は peer-local テスト (2 cell 構成、`MitateDB-api/tests/test_idempotency_concurrency.py`) が担う。C-27 行に開示済みである。**
+- **開示 1 件 (完了条件)**: **作業指示書 WP-6d-ii の完了条件 12 のうち「`wait_until_held` の戻り値を定数 1 にする」変異は反証不能である** (保持件数は常に 1)。**監督裁定 2026-09-10 は受理であり、測っている性質は「hook を no-op にすると保持待ちが全件で時間切れになる」変異が pin する** (設計 §9.1 の「未達の扱い」の追記)。
+- **残る未達は 1 種だけである** — **CI の集計行が課金上限で未取得であること** (台帳 **L10-15**、設計 §9.1 の項目 3 / 16)。**push は依然として停止中である** (§4-5 の手順は不変)。
+- **畳む worktree** (実数は `git worktree list` で確認する。`OPERATING_CONDITIONS.md` §1.2 の 18): **`phase10-wp1c` / `phase10-review2` / `phase10-wp3f` / `phase10-wp6d` / `phase10-r34` / `phase10-r35` / `phase10-wp6dii`。**
+- **更新した記録**: フェーズ10 設計 **v1.7** (§3 D-13 の実施註 (6d-ii)、§5 U-8 の実施註、§9.1 の項目 1 / 5 / 8 (f) / 14 への追記、§11.7 の束 15、§11.11)、作業指示書 **v1.5** (WP-6d-ii manifest の状態・実施の記録、§5 訂正註 7)、計画文書 **v1.11** (§1.0e / §5 / §8 の **R-24** 閉止)。**R-24 は 6d-i + 6d-ii の両方が入って完全に閉じた。**
