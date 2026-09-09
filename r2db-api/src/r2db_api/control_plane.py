@@ -803,7 +803,12 @@ class ControlPlaneService:
             # (5)): the SAME commit as `service.py`'s own data-plane flip
             # (C-19's control-plane/data-plane match assert) -- never ahead
             # of the R-3/R-7 behavior this data-plane host now implements.
-            "contract_version": "1.7.0",
+            #
+            # Flipped again to 1.8.0 in phase 10 WP-6a/pair-closing (design
+            # D-5 (v)): the SAME commit as `service.py`'s own data-plane
+            # flip and this host's own `process_ceilings` mapping (D-5
+            # (ii)) -- never ahead of the behavior it declares.
+            "contract_version": "1.8.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

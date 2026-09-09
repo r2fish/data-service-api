@@ -4091,7 +4091,12 @@ class ApplicationRuntime:
             # on this peer's 2 plugs; this flip landing in the SAME
             # commit as R-3/R-7 is what makes that measurement moot in
             # the delivered state).
-            "contract_version": "1.7.0",
+            #
+            # Flipped again to 1.8.0 in phase 10 WP-6b/pair-closing (design
+            # D-5 (v)): the SAME commit as this host's own `process_
+            # ceilings` mapping (D-5 (ii)) -- never ahead of the behavior
+            # it declares.
+            "contract_version": "1.8.0",
             "capabilities": {
                 "structured_query": {"status": "partial", "operators": list(SQL_OPERATOR_TOKENS), "unsupported": ["contains", "matches", "is_null"]},
                 "atomic_mutation": {"status": "partial", "operations": ["insert", "update", "delete"], "unsupported": ["upsert"]},

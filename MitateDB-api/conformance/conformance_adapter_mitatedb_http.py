@@ -128,6 +128,18 @@ BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 _DATA_SURFACE_BASE_URL = BASE_URL + "/v1"
 _CONTROL_SURFACE_BASE_URL = BASE_URL + "/control/v1"
 
+# Phase 10 WP-6 isomorphism pass: same shape as r2db-api's own
+# `conformance_adapter_r2db_http.py::_SURFACES` module constant (built
+# from the two base URLs directly above, never a second, independently-
+# chosen pair of strings) -- `_surfaces_value` below returns this
+# constant directly rather than constructing the dict inline, so its own
+# body is byte-identical to the sibling's after `_ISOMORPHIC_TARGETS`
+# normalization (`tests/test_audit_query.py`), not merely equal in value.
+_SURFACES = {
+    "data": {"base_url": _DATA_SURFACE_BASE_URL},
+    "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
+}
+
 # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): `isolated_
 # control_surface(limits_override=...)`'s only way to inject a small
 # control-plane limits profile on this plug -- unlike the in-process plug
@@ -794,18 +806,14 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
 
     def _surfaces_value(self) -> dict:
-        """Default: this module's own synthetic, non-dialable
-        `_DATA_SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL` constants
-        (unchanged behavior). Feeds BOTH the `platform_declarations` DB
-        row `_bootstrap_platform` seeds (the control-plane's own real
-        composition-root read, `build_control_service`) and this
-        adapter's own `FoundationConfig` (the data-plane's own capability
-        document) from the exact same values, so the two documents'
-        `surfaces` can never silently diverge."""
-        return {
-            "data": {"base_url": _DATA_SURFACE_BASE_URL},
-            "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
-        }
+        """Default: this module's own synthetic, non-dialable `_SURFACES`
+        constant (unchanged behavior). Feeds BOTH the `platform_
+        declarations` DB row `_bootstrap_platform` seeds (the control-
+        plane's own real composition-root read, `build_control_service`)
+        and this adapter's own `FoundationConfig` (the data-plane's own
+        capability document) from the exact same values, so the two
+        documents' `surfaces` can never silently diverge."""
+        return _SURFACES
 
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-

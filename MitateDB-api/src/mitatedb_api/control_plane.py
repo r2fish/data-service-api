@@ -1583,7 +1583,12 @@ class ControlPlaneService:
             # flip (`cell.py::ApplicationRuntime.capabilities`) -- C-19's
             # own data/control `contract_version` agreement assert is
             # what this pairing keeps green.
-            "contract_version": "1.7.0",
+            #
+            # Phase 10 WP-6b/pair-closing (design D-5 (v)): flipped again
+            # to 1.8.0 -- the SAME commit as the data-plane document's own
+            # identical flip and this host's own `process_ceilings`
+            # mapping (D-5 (ii)).
+            "contract_version": "1.8.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),

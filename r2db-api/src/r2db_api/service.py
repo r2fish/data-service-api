@@ -970,7 +970,14 @@ class DataService:
                 # of the behavior it declares (D-1 (7)'s xfail(strict=True)
                 # version gate is exactly what would catch that ordering
                 # mistake).
-                "contract_version": "1.7.0",
+                #
+                # Phase 10 WP-6a/pair-closing (design D-5 (v)): flipped
+                # again to 1.8.0 in the SAME commit as this host's own
+                # `process_ceilings` mapping (D-5 (ii)) -- the version's
+                # one unconditional obligation, `limit_enforcement_scoped_
+                # to_deployment_behind_base_url` -- never ahead of the
+                # behavior it declares.
+                "contract_version": "1.8.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
