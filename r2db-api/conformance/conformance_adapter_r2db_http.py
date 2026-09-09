@@ -837,7 +837,6 @@ def _hold_in_flight_via_http_requests(
 # `SharedPoolManager`, never the request path), so this real advisory
 # lock is what B actually waits on, not any Python-level state this
 # function holds.
-_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
 
 
 @contextmanager
@@ -1489,23 +1488,43 @@ class R2DBHttpConformanceAdapter(ConformanceAdapter):
 
     def _run(self, coro: Any) -> Any:
         if self._loop.is_running():
-            # WP-6d-ii (design D-13 "実装の形 (6d-ii) の確定" (2)): a
-            # second, genuinely concurrent OS thread reached here while
-            # this SAME shared adapter instance's own `self._loop` is
-            # already mid-flight on ANOTHER thread -- `hold_after_
-            # idempotency_lookup`'s own "B" probe, issued by a C-27 test
-            # while "A" is held. `asyncio` refuses to drive one loop
-            # object from two threads at once (`run_until_complete`
-            # raises `RuntimeError('This event loop is already
-            # running')` immediately, measured), so this call gets its
-            # OWN throwaway loop instead. Reusing `self._client` itself
-            # across loops here is safe: its transport is `httpx.
-            # ASGITransport`, an in-process function call into `app
-            # (scope, receive, send)` with no real socket and no per-loop
-            # connection pool to mismatch (unlike a real network
-            # transport) -- every PRE-EXISTING (sequential, single-
-            # thread) call path never takes this branch at all, since
-            # `self._loop` sits idle between calls.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                # Same-thread re-entrancy: THIS thread is already inside
+                # a running loop (necessarily `self._loop`, since a
+                # second, distinct loop cannot be running concurrently
+                # on the same thread) and a coroutine on it called back
+                # into `_run`. `asyncio` refuses to drive one loop object
+                # from within itself regardless of which loop object is
+                # named, so let the normal call below raise its loud,
+                # original `RuntimeError('This event loop is already
+                # running')` instead of masking it with a throwaway loop.
+                return self._loop.run_until_complete(coro)
+            # A genuinely different OS thread reached here while this
+            # SAME shared adapter instance's own `self._loop` is already
+            # mid-flight on ANOTHER thread -- `hold_after_idempotency_
+            # lookup`'s own "B" probe, issued by a C-27 test while "A" is
+            # held. `asyncio` refuses to drive one loop object from two
+            # threads at once (`run_until_complete` raises `RuntimeError
+            # ('This event loop is already running')` immediately,
+            # measured), so this call gets its OWN throwaway loop
+            # instead. Reusing `self._client` itself across loops here is
+            # safe on every plug this adapter builds: on the ASGI-
+            # transport plugs its transport is `httpx.ASGITransport`, an
+            # in-process function call into `app(scope, receive, send)`
+            # with no real socket and no per-loop connection pool to
+            # mismatch; on this repo's real-socket subclass (`R2DBSocket
+            # ConformanceAdapter`), `_LazySocketClient.send` (`conformance_
+            # adapter_r2db_socket.py:389-472`, WP-4a) opens a FRESH,
+            # one-shot `httpx.AsyncHTTPTransport` per call instead of
+            # holding a persistent pool on `self`, so there is likewise no
+            # loop-affine state to cross a loop boundary -- every PRE-
+            # EXISTING (sequential, single-thread) call path never takes
+            # this branch at all, since `self._loop` sits idle between
+            # calls.
             loop = asyncio.new_event_loop()
             try:
                 return loop.run_until_complete(coro)

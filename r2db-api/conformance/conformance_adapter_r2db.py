@@ -304,7 +304,6 @@ def _hold_in_flight_via_stalled_cell_method(cell_obj: object, method_name: str, 
 # returns -- the end of the admission window, after the count reservation,
 # before `_transact_locked`/`_apply_schema_locked` ever executes anything
 # (`structured.py:2269`/`:2294`, `:2697`/`:2718`).
-_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
 
 
 @contextmanager

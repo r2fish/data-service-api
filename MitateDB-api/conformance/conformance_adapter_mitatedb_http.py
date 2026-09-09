@@ -777,7 +777,6 @@ def _hold_in_flight_via_http_requests_over_stalled_gate(
 # realization needs no HTTP-specific plumbing beyond locating the cell.
 # `ApplicationCell._lock` (WP-8b 案 A) is what a concurrent second
 # request actually waits on, exactly as on the in-process plug.
-_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
 
 
 @contextmanager
@@ -1153,6 +1152,21 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
 
     def _run(self, coro: Any) -> Any:
         if self._loop.is_running():
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                # Same-thread re-entrancy: THIS thread is already inside
+                # a running loop (necessarily `self._loop`, since a
+                # second, distinct loop cannot be running concurrently on
+                # the same thread) and a coroutine on it called back into
+                # `_run`. `asyncio` refuses this regardless of which loop
+                # object is named, so let the normal call below raise its
+                # loud, original `RuntimeError('This event loop is
+                # already running')` instead of masking it with a
+                # throwaway loop.
+                return self._loop.run_until_complete(coro)
             # WP-6d-ii (design D-13 "実装の形 (6d-ii) の確定" (2)): see
             # `conformance_adapter_r2db_http.py`'s own identical fallback
             # for the full rationale -- a second, genuinely concurrent OS
@@ -1161,10 +1175,17 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
             # `self._loop` is already mid-flight on another thread; give
             # this call its own throwaway loop instead of raising
             # `RuntimeError('This event loop is already running')`.
-            # `self._client`'s transport is `httpx.ASGITransport`, with
-            # no per-loop connection state to mismatch. Every PRE-
-            # EXISTING (sequential, single-thread) call path never takes
-            # this branch.
+            # Reusing `self._client` itself across loops here is safe on
+            # every plug this adapter builds: on the ASGI-transport plugs
+            # its transport is `httpx.ASGITransport`, with no per-loop
+            # connection state to mismatch; on the real-socket subclass,
+            # `_LazyDialTransport.handle_async_request` (`conformance_
+            # adapter_mitatedb_socket.py`) opens a FRESH, one-shot
+            # `httpx.AsyncHTTPTransport` per request rather than holding
+            # a persistent pool on `self`, so there is likewise no loop-
+            # affine state to cross a loop boundary. Every PRE-EXISTING
+            # (sequential, single-thread) call path never takes this
+            # branch.
             loop = asyncio.new_event_loop()
             try:
                 return loop.run_until_complete(coro)

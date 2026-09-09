@@ -519,7 +519,6 @@ def _hold_in_flight_via_stalled_gate(cell_obj: object, make_request: Callable[[]
 # to recognize the ONE call that is both key-matching and a fresh
 # admission, and stall its RETURN -- the end of the admission window,
 # after the reservation, before the caller executes anything.
-_HOLD_AFTER_IDEMPOTENCY_LOOKUP_TIMEOUT_S = 30.0
 
 
 @contextmanager

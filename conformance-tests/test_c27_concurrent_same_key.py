@@ -368,7 +368,12 @@ def test_c27_same_digest_executes_once(adapter: ConformanceAdapter, isolated) ->
 
     with iso.hold_after_idempotency_lookup(runtime, key) as hold:
         a = _issue_on_thread(_issue)
-        hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S)
+        # The work order's mutation ("戻り値を定数 1 にする" -- hard-code
+        # the return value to the constant 1) is unfalsifiable at exactly
+        # one held request; the "measured, not echoed" property is
+        # instead pinned by the no-op-hook mutation M5, which fails at
+        # the timeout (supervisor ruling 2026-09-10: accepted).
+        assert hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S) == 1
         b = _issue_on_thread(_issue)
         _assert_not_yet_done(b, adapter_name=adapter.name, what="the same-key/same-body resend")
 
@@ -382,11 +387,10 @@ def test_c27_same_digest_executes_once(adapter: ConformanceAdapter, isolated) ->
         f"{adapter.name}: the concurrent same-key/same-body resend did not replay the same result -- "
         f"{a_result!r} vs {b_result!r}"
     )
-    if a_result.get("request_id") is not None:
-        assert b_result.get("request_id") == a_result.get("request_id"), (
-            f"{adapter.name}: the replay must carry the ORIGINAL execution's own request_id -- "
-            f"first={a_result.get('request_id')!r}, resend={b_result.get('request_id')!r}"
-        )
+    assert b_result.get("request_id") == a_result.get("request_id"), (
+        f"{adapter.name}: the replay must carry the ORIGINAL execution's own request_id -- "
+        f"first={a_result.get('request_id')!r}, resend={b_result.get('request_id')!r}"
+    )
     assert len(iso.select_eq(runtime, entity, ["label"], "label", marker)) == 1, (
         f"{adapter.name}: the concurrent same-key/same-body resend must not have executed a second insert"
     )
@@ -417,7 +421,7 @@ def test_c27_different_digest_conflicts(adapter: ConformanceAdapter, isolated) -
 
     with iso.hold_after_idempotency_lookup(runtime, key) as hold:
         a = _issue_on_thread(_issue_a)
-        hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S)
+        assert hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S) == 1
         b = _issue_on_thread(_issue_b)
         _assert_not_yet_done(b, adapter_name=adapter.name, what="the same-key/different-body resend")
 
@@ -453,11 +457,17 @@ def test_c27_entries_bound_holds_under_concurrency(adapter: ConformanceAdapter, 
         not isinstance(declared_entries, int)
         or not (1 <= declared_entries <= _MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES)
     ):
-        # Disclosed observation-scope limit (mirrors test_c23_idempotency_
-        # semantics.py's own identical narrowing): a plug declaring
-        # `idempotency` enabled without a real, small (int) `idempotency_
-        # entries` bound in `limits` leaves this leg unobserved on it.
-        return
+        # OPERATING_CONDITIONS.md item 26: skip turns "unverified" into
+        # "permitted"; a condition that cannot be verified fails, never
+        # skips. A plug declaring `idempotency` enabled without a real,
+        # small (int) `idempotency_entries` bound in `limits` cannot have
+        # this leg exercised at all, so it fails loudly rather than
+        # silently passing this test.
+        pytest.fail(
+            f"{adapter.name}: declared limits.idempotency_entries={declared_entries!r} is not a "
+            f"verifiable int in 1..{_MAX_EXERCISABLE_IDEMPOTENCY_ENTRIES} -- cannot exercise the "
+            "concurrent count-bound leg"
+        )
     developer, runtime, _app_id = provision_pair(iso, app_prefix="c27iii")
     entity = fresh_identifier("c27iii")
     iso.create_entity(developer, entity, {"label": "text"})
@@ -494,7 +504,7 @@ def test_c27_entries_bound_holds_under_concurrency(adapter: ConformanceAdapter, 
     # this leg would not actually exercise the count-bound lock at all).
     with iso.hold_after_idempotency_lookup(runtime, key_a) as hold:
         a = _issue_on_thread(_issue_a)
-        hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S)
+        assert hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S) == 1
         b = _issue_on_thread(_issue_b)
         _assert_not_yet_done(b, adapter_name=adapter.name, what="the concurrent, distinct-key request")
 
@@ -572,7 +582,7 @@ def test_c27_failed_first_attempt_lets_the_second_execute_as_new(adapter: Confor
 
     with iso.hold_after_idempotency_lookup(runtime, key) as hold:
         a = _issue_on_thread(_issue_failing)
-        hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S)
+        assert hold.wait_until_held(timeout_s=_HOLD_TIMEOUT_S) == 1
         b = _issue_on_thread(_issue_second)
         _assert_not_yet_done(b, adapter_name=adapter.name, what="the second, same-key request sent while the first was still held")
 
