@@ -132,6 +132,12 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         # been applied, or it fails startup with F-7/F-3/F-4 (by design --
         # `platform_declarations` is the single source those checks read).
         "0007_platform_declarations.sql",
+        # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+        # key`'s own CHECK constraint to accept `process_ceilings` -- every
+        # test that calls `build_control_service`/`main.build_app` now
+        # depends on this migration having been applied AND the row seeded
+        # below, or it fails startup with F-15.
+        "0011_process_ceilings.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -162,6 +168,7 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
         _run_psql(provision_dsn, rewritten["0002_registry_and_functions.sql"])
         _run_psql(provision_dsn, rewritten["0005_application_audit.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         admin = psycopg.connect(dsn, autocommit=True)
         try:
             with admin.cursor() as cur:
@@ -179,6 +186,20 @@ def bootstrap_control_platform(dsn: str, prefix: str, tmp_path_factory: pytest.T
                     sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', %s)").format(
                         table=sql.Identifier(registry_schema, "platform_declarations")),
                     [surfaces_json],
+                )
+                # Phase 10 WP-6b (design D-5 (ii)): seeded alongside
+                # `surfaces` -- `build_control_service`/`main.build_app`
+                # both now require this row too (F-15). `{"data": 1,
+                # "control": 1}` matches this harness's own single-process
+                # reality -- `limit_enforcement` for `control_requests_
+                # per_minute`/`audit_requests_per_minute` stays `enforced`,
+                # unchanged from before this WP. A test that needs the
+                # `deployment_required` mapping re-declares this row with
+                # a ceiling of 2 (`test_process_ceilings_declaration.py`).
+                cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', %s)").format(
+                        table=sql.Identifier(registry_schema, "platform_declarations")),
+                    ['{"data": 1, "control": 1}'],
                 )
         finally:
             provision_conn.close()

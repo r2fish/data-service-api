@@ -358,7 +358,10 @@ def test_capabilities_declares_request_bytes_enforced(app_a_stack):
     # Phase 4 WP-3(b): contract_version flip lands in the same commit as
     # the audit_query bundle it accompanies (design §5, P4-D4). Phase 5
     # WP-3: re-flipped to 1.5.0 (design D-1, subordinate ruling 10 item 1).
-    assert document["contract_version"] == "1.7.0"
+    # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
+    # commit as this host's own `process_ceilings` mapping (design D-5
+    # (v)).
+    assert document["contract_version"] == "1.8.0"
     assert document["application_scope"] == app_a_stack.app_id
     assert document["role"] == "runtime"
 

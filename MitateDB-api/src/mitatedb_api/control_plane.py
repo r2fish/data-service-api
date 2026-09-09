@@ -401,10 +401,49 @@ def _execute(cursor, statement, params=()):
     return cursor
 
 
+_BOUND_ADVISORY_LOCK_STATEMENT = sql.SQL("SELECT pg_advisory_xact_lock(hashtext(%s))")
+
+
+def _take_bound_advisory_lock(cursor: "psycopg.Cursor[Any]", *, schema: str, table: str) -> None:
+    """Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+    D-5(ii) addendum (2); supervisor ruling `scratchpad/phase10/wp6-
+    rulings.md` #1, closing review finding F1): the lock every region-(iii)
+    process-ceiling bound (`applications`, `credentials_per_application`)
+    takes immediately before its own count, in the SAME transaction that
+    then performs the INSERT -- `PostgresApplicationRegistry.count_locked`
+    and `PostgresCredentialRegistry.count_active_for_application_locked`
+    below are this function's only two callers.
+
+    This is `pg_advisory_xact_lock(hashtext(<key>))`, NOT `LOCK TABLE ...
+    IN SHARE MODE` (the form the design addendum names and forbids
+    explicitly; this peer's own pre-review-round-3 form was `SHARE ROW
+    EXCLUSIVE MODE`, which serializes correctly but is not the prescribed
+    idiom and was asymmetric with r2db): SHARE conflicts with
+    the ROW EXCLUSIVE the following INSERT needs, but SHARE never
+    conflicts with a concurrent SHARE, so two concurrent callers could
+    both acquire SHARE, both read a count one under the limit, and only
+    THEN each block on the other's INSERT -- a genuine deadlock, not
+    merely the widened TOCTOU window the pre-WP-6b code had.
+    `pg_advisory_xact_lock` is exclusive against itself instead: a second
+    caller taking the SAME key blocks until the first caller's
+    transaction commits or rolls back, so by the time it proceeds, its
+    own count is guaranteed to already reflect the first caller's INSERT
+    (or its absence, if the first rolled back) -- closing the TOCTOU
+    window without ever letting two holders past the count at once.
+
+    The key is a per-table *constant* -- `hashtext('<schema>.<table>')`,
+    one fixed 32-bit int per table -- never a per-row/per-key value.
+    Scoped per table, not one shared key for every bound, so concurrent
+    `applications` and `credentials_per_application` traffic never
+    contend with each other, only with itself."""
+    _execute(cursor, _BOUND_ADVISORY_LOCK_STATEMENT, [f"{schema}.{table}"])
+
+
 class _PostgresRegistryBase:
     def __init__(self, dsn: str, *, schema: str = DEFAULT_SCHEMA, connect_timeout: int = 5) -> None:
         validate_identifier(schema, "schema")
         self._dsn = dsn
+        self._schema = schema
         self._connect_timeout = connect_timeout
 
     def _connect(self) -> "psycopg.Connection":
@@ -456,6 +495,40 @@ class PostgresApplicationRegistry(_PostgresRegistryBase):
         finally:
             conn.close()
         return int(row[0])
+
+    def count_locked(self, work: Any) -> int:
+        """Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+        V1.md D-5(ii) addendum (2)): the row-locking counterpart to
+        `count` above, used exclusively by `ControlPlaneService.register_
+        application`'s own `applications` limit gate. Takes `_take_bound_
+        advisory_lock` (a table-scoped constant-key `pg_advisory_xact_
+        lock` -- see that function's own docstring for the full
+        rationale; `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE`, this
+        method's pre-review-round-3 form, self-conflicts and therefore
+        serializes writers correctly -- it was replaced for symmetry with
+        r2db and with the design's prescribed idiom, not because it
+        deadlocked) on `work`'s own connection (never a separate,
+        already-committed connection the way the pre-WP-6b `applications_
+        count()`-then-later-INSERT call sequence used), BEFORE the count:
+        a second concurrent `register_application` call's own `count_
+        locked` -- which takes the SAME key -- blocks until THIS
+        transaction commits or rolls back, at which point its count is
+        guaranteed to already reflect this call's INSERT (or its
+        absence) -- closing the TOCTOU window a standalone count, read on
+        a connection distinct from the one that later performs the
+        INSERT, would otherwise leave open (two concurrent calls could
+        each observe a count one under the limit and both proceed,
+        overshooting it)."""
+        try:
+            with work.cursor() as cur:
+                _take_bound_advisory_lock(cur, schema=self._schema, table="applications")
+                _execute(cur, sql.SQL("SELECT count(*) FROM {table}").format(table=self._table))
+                row = cur.fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        return int(row[0]) if row else 0
 
     def list_all(self) -> list[tuple[str, bool]]:
         conn = self._connect()
@@ -631,6 +704,40 @@ class PostgresCredentialRegistry(_PostgresRegistryBase):
         finally:
             conn.close()
         return int(row[0])
+
+    def count_active_for_application_locked(self, application_id: str, work: Any) -> int:
+        """Phase 10 WP-6b (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+        V1.md D-5(ii) addendum (2)): the row-locking counterpart to
+        `count_active_for_application` above, used exclusively by
+        `ControlPlaneService.issue_credential`'s own `credentials_per_
+        application` limit gate. Takes `_take_bound_advisory_lock` (a
+        table-scoped constant-key `pg_advisory_xact_lock` -- see that
+        function's own docstring for the full rationale, including why
+        `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE`, this method's
+        pre-review-round-3 form, self-conflicts and serializes writers
+        correctly; it was replaced for symmetry with r2db and the design's
+        prescribed idiom) on
+        `work`'s own connection, BEFORE the count: a second concurrent
+        `issue_credential` call's own `count_active_for_application_
+        locked` -- which takes the SAME key -- blocks until THIS
+        transaction commits or rolls back, at which point its count is
+        guaranteed to already reflect this call's INSERT (or its
+        absence)."""
+        try:
+            with work.cursor() as cur:
+                _take_bound_advisory_lock(cur, schema=self._schema, table="credentials")
+                _execute(
+                    cur,
+                    sql.SQL("SELECT count(*) FROM {table} WHERE application_id = {ph} AND NOT revoked").format(
+                        table=self._table, ph=sql.Placeholder()),
+                    [application_id],
+                )
+                row = cur.fetchone()
+        except psycopg.errors.InsufficientPrivilege as exc:
+            raise StorageConfigurationError("privilege/configuration defect") from exc
+        except psycopg.Error as exc:
+            raise AuthorizationStateUnavailable("authorization state unavailable") from exc
+        return int(row[0]) if row else 0
 
     def list_all(self) -> list[tuple[str, str, str, bool, bool]]:
         conn = self._connect()
@@ -837,6 +944,19 @@ class InMemoryControlBackend:
     def applications_count(self) -> int:
         return self._applications.count()
 
+    def applications_count_locked(self, work: Any) -> int:
+        # Phase 10 WP-6b (design D-5 (ii) region (iii)): this backend has
+        # no real store/lock to take -- `unit_of_work()` above already
+        # holds `self._lock` (a process-wide `threading.RLock`) for the
+        # WHOLE `with` block a caller opens it in, so the TOCTOU window a
+        # real, multi-process PostgreSQL deployment needs a table-scoped
+        # advisory lock to close (`PostgresControlBackend.applications_
+        # count_locked` below) does not exist here at all; `work` is
+        # accepted only to satisfy the shared call surface `Control
+        # PlaneService.register_application` uses against both backends.
+        del work
+        return self.applications_count()
+
     def list_applications(self):
         return self._applications.list_all()
 
@@ -857,6 +977,13 @@ class InMemoryControlBackend:
 
     def credentials_active_count(self, application_id: str) -> int:
         return self._credentials.count_active_for_application(application_id)
+
+    def credentials_active_count_locked(self, application_id: str, work: Any) -> int:
+        # Phase 10 WP-6b: same reasoning as `applications_count_locked`
+        # above -- no real lock to take for a single-process, in-memory
+        # backend.
+        del work
+        return self.credentials_active_count(application_id)
 
     def list_credentials(self):
         return self._credentials.list_all()
@@ -958,6 +1085,14 @@ class PostgresControlBackend:
     def applications_count(self) -> int:
         return self._applications.count()
 
+    def applications_count_locked(self, work: Any) -> int:
+        """Phase 10 WP-6b (design D-5 (ii)/(iii)): forwards to
+        `PostgresApplicationRegistry.count_locked` -- see that method's
+        own docstring for the full rationale (table-scoped constant-key
+        `pg_advisory_xact_lock`, closes the phantom-write window an
+        unlocked `applications_count() >= limit` pre-check cannot)."""
+        return self._applications.count_locked(work)
+
     def list_applications(self):
         return self._applications.list_all()
 
@@ -978,6 +1113,11 @@ class PostgresControlBackend:
 
     def credentials_active_count(self, application_id: str) -> int:
         return self._credentials.count_active_for_application(application_id)
+
+    def credentials_active_count_locked(self, application_id: str, work: Any) -> int:
+        """The `credentials_per_application` counterpart of
+        `applications_count_locked` above."""
+        return self._credentials.count_active_for_application_locked(application_id, work)
 
     def list_credentials(self):
         return self._credentials.list_all()
@@ -1099,7 +1239,7 @@ class ControlPlaneService:
                  audit_default_limit: int = _DEFAULT_AUDIT_QUERY_LIMIT,
                  audit_max_limit: int = _MAX_AUDIT_QUERY_LIMIT,
                  audit_coalescing_window_ms: int = DEFAULT_COALESCING_WINDOW_MS,
-                 surfaces: Optional[dict] = None) -> None:
+                 surfaces: Optional[dict] = None, process_ceiling: int = 1) -> None:
         self._backend = backend
         # Phase 6 WP-3 (design D-2): single source of truth for this
         # control-plane process' own `CapabilityDocument.surfaces` --
@@ -1135,6 +1275,16 @@ class ControlPlaneService:
         self._audit_coalescing_window_ms = audit_coalescing_window_ms
         self._audit_rate_lock = threading.Lock()
         self._audit_rate_window: list[float] = []
+        # Phase 10 WP-6b (design D-5 (ii)): the deployer's own declared
+        # `process_ceilings.control` (default 1, matching every pre-
+        # existing direct construction of this class -- this repository's
+        # own tests included -- `limit_enforcement` for `control_
+        # requests_per_minute`/`audit_requests_per_minute` stays
+        # `enforced`, unchanged). `control_composition.
+        # build_control_service` is the one real caller that passes a
+        # value read from the single source `platform_declarations.
+        # read_platform_declarations` returns.
+        self._process_ceiling = process_ceiling
 
     @property
     def limits(self) -> ControlPlaneLimits:
@@ -1401,6 +1551,22 @@ class ControlPlaneService:
         # mount) is added on top of this service-layer default -- this
         # process alone cannot enforce a byte bound with no HTTP boundary.
         limit_enforcement["request_bytes"] = "unavailable"
+        # Phase 10 WP-6b (design D-5 (ii)): region (ii) of the 3-region
+        # map -- `control_requests_per_minute`/`audit_requests_per_minute`
+        # are bound in this process' own in-memory sliding window
+        # (`_check_rate`/`_check_audit_rate` above, process-wide state,
+        # never per-application/per-request), so the `enforced` default
+        # above only describes the whole deployment while exactly one
+        # process may serve this base URL -- it degrades to `deployment_
+        # required` once the deployer declares more than one may.
+        # `applications`/`credentials_per_application` (region (iii),
+        # DB-side-bound) are UNAFFECTED -- they stay `enforced` above
+        # regardless of ceiling (see `applications_count_locked`/
+        # `credentials_active_count_locked` below for what makes that
+        # claim hold under concurrency).
+        if self._process_ceiling >= 2:
+            limit_enforcement["control_requests_per_minute"] = "deployment_required"
+            limit_enforcement["audit_requests_per_minute"] = "deployment_required"
         return {
             # Phase 4 WP-3(b) (P4-D4, contract `versioning.version_binding`),
             # flipped to 1.5.0 in Phase 5 WP-3 (design D-1, subordinate
@@ -1421,7 +1587,12 @@ class ControlPlaneService:
             # flip (`cell.py::ApplicationRuntime.capabilities`) -- C-19's
             # own data/control `contract_version` agreement assert is
             # what this pairing keeps green.
-            "contract_version": "1.7.0",
+            #
+            # Phase 10 WP-6b/pair-closing (design D-5 (v)): flipped again
+            # to 1.8.0 -- the SAME commit as the data-plane document's own
+            # identical flip and this host's own `process_ceilings`
+            # mapping (D-5 (ii)).
+            "contract_version": "1.8.0",
             "capabilities": {
                 "control_plane": {"status": "enabled"},
                 "audit_query": self._audit_capability_declaration(),
@@ -1508,12 +1679,28 @@ class ControlPlaneService:
         self._authorize_role(principal, operation="register_application", request_id=request_id)
         self._gate_must_rotate(principal, operation="register_application", request_id=request_id)
         self._validate_application_id(application_id)
-        if self._backend.application_exists(application_id):
-            raise ConflictError("application already exists")
-        if self._backend.applications_count() >= self._limits.applications:
-            raise ResourceLimitError("application registration limit exceeded", limit_class="applications")
 
+        # Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now
+        # runs INSIDE the SAME transaction that performs the write, via
+        # `applications_count_locked` -- for `PostgresControlBackend` that
+        # takes a table-scoped constant-key `pg_advisory_xact_lock` first
+        # (`control_plane._take_bound_advisory_lock`), which blocks a
+        # concurrent registration's own `applications_count_locked` (same
+        # key) until THIS transaction commits or rolls back. Before this
+        # WP, the count ran on its own, already-committed connection,
+        # entirely outside this transaction -- two concurrent `register_
+        # application` calls could each observe a count one under the
+        # limit and both proceed, overshooting it (the TOCTOU window
+        # design D-5(ii) requires closed, not weakened).
+        # `InMemoryControlBackend.applications_count_locked` is a plain
+        # forward to `applications_count` because that backend's own
+        # `unit_of_work()` already holds a process-wide lock for this
+        # whole block.
         with self._backend.unit_of_work() as work:
+            if self._backend.application_exists(application_id):
+                raise ConflictError("application already exists")
+            if self._backend.applications_count_locked(work) >= self._limits.applications:
+                raise ResourceLimitError("application registration limit exceeded", limit_class="applications")
             self._backend.register_application(application_id, work=work)
             self._backend.append_audit(
                 work=work, event_class="application_lifecycle", request_id=request_id, application_id=application_id,
@@ -1597,13 +1784,18 @@ class ControlPlaneService:
         # credential.semantics`'s own precedence sentence).
         if self._backend.application_issuance_frozen(application_id):
             self._deny_issuance_frozen(principal, application_id, request_id=request_id)
-        if self._backend.credentials_active_count(application_id) >= self._limits.credentials_per_application:
-            raise ResourceLimitError(
-                "credentials-per-application limit exceeded", limit_class="credentials_per_application")
 
         new_credential_id = _new_credential_id()
         new_secret = _new_secret()
+        # Phase 10 WP-6b (design D-5 (ii)/(iii)): the capacity check now
+        # runs INSIDE the SAME transaction that performs the write, via
+        # `credentials_active_count_locked` -- see `register_application`'s
+        # own identical-shaped comment above for the phantom-write window
+        # this closes (here: `credentials_active_count() >= limit`).
         with self._backend.unit_of_work() as work:
+            if self._backend.credentials_active_count_locked(application_id, work) >= self._limits.credentials_per_application:
+                raise ResourceLimitError(
+                    "credentials-per-application limit exceeded", limit_class="credentials_per_application")
             self._backend.issue_credential(application_id, role, credential_id=new_credential_id, secret=new_secret, work=work)
             self._backend.append_audit(
                 work=work, event_class="credential_lifecycle", request_id=request_id, application_id=application_id,

@@ -175,6 +175,62 @@ def _execute(cursor: "psycopg.Cursor[Any]", statement: sql.Composed | sql.SQL, p
     cursor.execute(statement, params if isinstance(params, Mapping) else list(params))
 
 
+_BOUND_ADVISORY_LOCK_STATEMENT = sql.SQL("SELECT pg_advisory_xact_lock(hashtext(%s))")
+
+
+def _take_bound_advisory_lock(cursor: "psycopg.Cursor[Any]", *, schema: str, table: str) -> None:
+    """Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+    D-5(ii) addendum (2); supervisor ruling `scratchpad/phase10/wp6-
+    rulings.md` #1, closing review finding F1): the lock every region-(iii)
+    process-ceiling bound (`applications`, `credentials_per_application`)
+    takes immediately before its own count, in the SAME transaction that
+    then performs the INSERT -- `PostgresApplicationRegistry.count_locked`
+    and `PostgresCredentialStore.count_active_for_application_locked`
+    below are this function's only two callers.
+
+    This is `pg_advisory_xact_lock(hashtext(<key>))`, NOT `LOCK TABLE ...
+    IN SHARE MODE` (this function's own pre-review-round-3 form, which the
+    design addendum names and forbids explicitly): SHARE conflicts with
+    the ROW EXCLUSIVE the following INSERT needs, but SHARE never
+    conflicts with a concurrent SHARE, so two concurrent callers could
+    both acquire SHARE, both read a count one under the limit, and only
+    THEN each block on the other's INSERT -- a genuine deadlock, not
+    merely the widened TOCTOU window the pre-WP-6a code had (reproduced
+    against a real PostgreSQL 16 running this exact idiom, barrier-
+    synchronized: `{1: 'DeadlockDetected', 2: 'OK'}`).
+    `pg_advisory_xact_lock` is exclusive against itself instead: a second
+    caller taking the SAME key blocks until the first caller's
+    transaction commits or rolls back, so by the time it proceeds, its
+    own count is guaranteed to already reflect the first caller's INSERT
+    (or its absence, if the first rolled back) -- closing the TOCTOU
+    window without ever letting two holders past the count at once.
+    (Phase 9 R-2's own `LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE` (SHARE
+    MODE until Phase 10 R-35), `postgres.py`'s
+    `add_field`/`alter_field`, is NOT a precedent for this idiom -- it
+    guards a read-then-DDL existence scan against a *concurrent schema
+    change*, not a count-then-INSERT bound; citing it as this idiom's
+    precedent, as an earlier version of this WP's own report did, was an
+    error. The actual precedent the design addendum points to is `ops.
+    py`'s `_RITUAL_ADVISORY_LOCK_KEY`/`_lock_ritual` -- a `pg_advisory_
+    xact_lock` on a fixed key, confirmed here to hold the same "exclusive
+    against itself, transaction-scoped, never leaked past one
+    transaction" contract this function relies on, and NOT the mistaken
+    "SHARE blocks a second SHARE" reasoning this function's own docstring
+    used to (incorrectly) claim.)
+
+    The key is a per-table *constant* -- `hashtext('<schema>.<table>')`,
+    the same string-keyed idiom this repository already uses for
+    `pg_advisory_lock(hashtext(%s))` in `conformance_adapter_r2db_http.
+    py`'s own prefix guard, here transaction-scoped instead of session-
+    scoped -- one fixed 32-bit int per table, in the same class as `ops.
+    py`'s own `_RITUAL_ADVISORY_LOCK_KEY`, never a per-row/per-key value
+    (unlike WP-6d-i's idempotency-key lock). Scoped per table, not one
+    shared key for every bound, so concurrent `applications` and
+    `credentials_per_application` traffic never contend with each other,
+    only with itself."""
+    _execute(cursor, _BOUND_ADVISORY_LOCK_STATEMENT, [f"{schema}.{table}"])
+
+
 class PostgresCredentialStore:
     """Same call surface as `r2db_api.auth.CredentialStore`
     (`authenticate`/`assert_active`/`canonical_context`/
@@ -427,6 +483,36 @@ class PostgresCredentialStore:
         statement = sql.SQL("SELECT count(*) FROM {table} WHERE application_slug = {ph} AND NOT revoked").format(table=self._credentials_table, ph=sql.Placeholder())
         row = self._fetch_or_503(statement, [application_id])
         return int(row[0]) if row is not None else 0
+
+    def count_active_for_application_locked(self, application_id: str, work: _PostgresWork) -> int:
+        """Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+        V1.md D-5(ii) addendum (2)): the row-locking counterpart to
+        `count_active_for_application` above, used exclusively by
+        `ControlPlaneService.issue_credential`'s own `credentials_per_
+        application` limit gate. Takes `_take_bound_advisory_lock` (a
+        table-scoped constant-key `pg_advisory_xact_lock` -- see that
+        function's own docstring for the full rationale, including why
+        `LOCK TABLE ... IN SHARE MODE`, this method's pre-review-round-3
+        form, deadlocks instead of merely widening the TOCTOU window) on
+        `work`'s own connection, BEFORE the count: a second concurrent
+        `issue_credential` call's own `count_active_for_application_
+        locked` -- which takes the SAME key -- blocks until THIS
+        transaction commits or rolls back, at which point its count is
+        guaranteed to already reflect this call's INSERT (or its
+        absence)."""
+        try:
+            with work.connection.cursor() as cur:
+                _take_bound_advisory_lock(cur, schema=self._schema, table="credentials")
+                _execute(
+                    cur,
+                    sql.SQL("SELECT count(*) FROM {table} WHERE application_slug = {ph} AND NOT revoked").format(table=self._credentials_table, ph=sql.Placeholder()),
+                    [application_id],
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
 
     # ---- write path (P2-D6: reused directly by `python -m r2db_api.ops`) --
 
@@ -1097,6 +1183,37 @@ class PostgresApplicationRegistry:
                     _execute(cur, statement, [])
                     row = cur.fetchone()
                     return int(row[0]) if row else 0
+        except psycopg.Error:
+            fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
+            raise  # unreachable; fail() always raises
+
+    def count_locked(self, work: _PostgresWork) -> int:
+        """Phase 10 WP-6a (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_
+        V1.md D-5(ii) addendum (2)): the row-locking counterpart to `count`
+        above, used exclusively by `ControlPlaneService.register_
+        application`'s own `applications` limit gate. Takes `_take_bound_
+        advisory_lock` (a table-scoped constant-key `pg_advisory_xact_
+        lock` -- see that function's own docstring for the full
+        rationale, including why `LOCK TABLE ... IN SHARE MODE`, this
+        method's pre-review-round-3 form, deadlocks instead of merely
+        widening the TOCTOU window) on `work`'s own connection (never a
+        separate, already-committed connection the way the pre-WP-6a
+        `applications_count()`-then-later-INSERT call sequence used),
+        BEFORE the count: a second concurrent `register_application`
+        call's own `count_locked` -- which takes the SAME key -- blocks
+        until THIS transaction commits or rolls back, at which point its
+        count is guaranteed to already reflect this call's INSERT (or its
+        absence) -- closing the TOCTOU window a standalone count, read on
+        a connection distinct from the one that later performs the
+        INSERT, would otherwise leave open (two concurrent calls could
+        each observe a count one under the limit and both proceed,
+        overshooting it)."""
+        try:
+            with work.connection.cursor() as cur:
+                _take_bound_advisory_lock(cur, schema=self._schema, table="applications")
+                _execute(cur, sql.SQL("SELECT count(*) FROM {table}").format(table=self._table), [])
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
         except psycopg.Error:
             fail("SERVICE_UNAVAILABLE", "The database could not complete the request.", status=503)
             raise  # unreachable; fail() always raises

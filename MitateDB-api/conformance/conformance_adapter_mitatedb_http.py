@@ -128,6 +128,18 @@ BASE_URL = "http://mitatedb-http-pg.conformance.invalid"
 _DATA_SURFACE_BASE_URL = BASE_URL + "/v1"
 _CONTROL_SURFACE_BASE_URL = BASE_URL + "/control/v1"
 
+# Phase 10 WP-6 isomorphism pass: same shape as r2db-api's own
+# `conformance_adapter_r2db_http.py::_SURFACES` module constant (built
+# from the two base URLs directly above, never a second, independently-
+# chosen pair of strings) -- `_surfaces_value` below returns this
+# constant directly rather than constructing the dict inline, so its own
+# body is byte-identical to the sibling's after `_ISOMORPHIC_TARGETS`
+# normalization (`tests/test_audit_query.py`), not merely equal in value.
+_SURFACES = {
+    "data": {"base_url": _DATA_SURFACE_BASE_URL},
+    "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
+}
+
 # port v1.11 addendum (supervisor ruling 2026-09-06 item 1): `isolated_
 # control_surface(limits_override=...)`'s only way to inject a small
 # control-plane limits profile on this plug -- unlike the in-process plug
@@ -301,6 +313,13 @@ def _bootstrap_platform(
         # Without this migration applied + a `surfaces` row seeded below,
         # `build_control_service` fails F-8/F-3 at construction time.
         "0007_platform_declarations.sql",
+        # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+        # key`'s own CHECK constraint to accept `process_ceilings` --
+        # without this migration applied + the row seeded below, BOTH
+        # `main.build_app` and `build_control_service` fail F-15 at
+        # construction time (design's own "宣言表を通る全経路で、宣言を
+        # 先に書く").
+        "0011_process_ceilings.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = script_dir / name
@@ -325,6 +344,11 @@ def _bootstrap_platform(
     # depends on 0002's two roles, run here (before the password-ALTER
     # block below, order-independent either way).
     _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+    # Phase 10 WP-6b (design D-5 (ii)): widens the CHECK constraint --
+    # takes no psql variables (this migration only alters the key
+    # vocabulary; it seeds no row of its own, `process_ceilings` is
+    # deployment-specific just like `surfaces`, seeded below instead).
+    _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
     # `surfaces` (D-2(c)): BOTH `data`/`control` -- this adapter's own
     # `build_control_service` call requires `control` unconditionally
     # (design §3.7: "control プロセスは自らの control surface を必ず持
@@ -344,6 +368,22 @@ def _bootstrap_platform(
                 sql.SQL("INSERT INTO {table} (key, value) VALUES ('surfaces', {value})").format(
                     table=sql.Identifier(schema, "platform_declarations"),
                     value=sql.Literal(json.dumps(surfaces)),
+                ),
+            )
+            # Phase 10 WP-6b (design D-5 (ii)): seeded alongside `surfaces`
+            # -- both this HTTP plug's own `build_app`/`build_control_
+            # service` calls now require this row (F-15). `{"data": 1,
+            # "control": 1}` mirrors this plug's own single-process
+            # reality (one `main.build_app`/`build_control_service` call
+            # each, in-process, never more than one concurrently-serving
+            # process) -- `limit_enforcement` for `concurrency`/`requests_
+            # per_minute`/`control_requests_per_minute`/`audit_requests_
+            # per_minute` stays `enforced`, unchanged from before this WP.
+            # The socket subclass (WP-4b) inherits this seed unchanged.
+            cur.execute(
+                sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', {value})").format(
+                    table=sql.Identifier(schema, "platform_declarations"),
+                    value=sql.Literal(json.dumps({"data": 1, "control": 1})),
                 ),
             )
     finally:
@@ -766,18 +806,14 @@ class MitateDBHttpConformanceAdapter(ConformanceAdapter):
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
 
     def _surfaces_value(self) -> dict:
-        """Default: this module's own synthetic, non-dialable
-        `_DATA_SURFACE_BASE_URL`/`_CONTROL_SURFACE_BASE_URL` constants
-        (unchanged behavior). Feeds BOTH the `platform_declarations` DB
-        row `_bootstrap_platform` seeds (the control-plane's own real
-        composition-root read, `build_control_service`) and this
-        adapter's own `FoundationConfig` (the data-plane's own capability
-        document) from the exact same values, so the two documents'
-        `surfaces` can never silently diverge."""
-        return {
-            "data": {"base_url": _DATA_SURFACE_BASE_URL},
-            "control": {"base_url": _CONTROL_SURFACE_BASE_URL},
-        }
+        """Default: this module's own synthetic, non-dialable `_SURFACES`
+        constant (unchanged behavior). Feeds BOTH the `platform_
+        declarations` DB row `_bootstrap_platform` seeds (the control-
+        plane's own real composition-root read, `build_control_service`)
+        and this adapter's own `FoundationConfig` (the data-plane's own
+        capability document) from the exact same values, so the two
+        documents' `surfaces` can never silently diverge."""
+        return _SURFACES
 
     def _reset_surface_state(self) -> None:
         """Hook (monitor 裁定 2026-09-08, F-2 (b)) -- see the identically-

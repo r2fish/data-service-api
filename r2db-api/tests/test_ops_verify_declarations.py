@@ -46,11 +46,21 @@ MIGRATION_NAMES = (
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
+    # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
+    # check` to admit `process_ceilings`. `_bootstrap` below auto-seeds a
+    # default `{"data": 1, "control": 1}` row whenever this migration ran
+    # (mirroring `0008`'s own auto-seed of `audit_coalescing_window_ms`/
+    # `audit_writer_roles`) -- none of this file's own tests are ABOUT
+    # `process_ceilings` (that is `test_process_ceilings_declaration.py`'s
+    # job), so every test here needs it present and out of the way, not
+    # set individually.
+    "0012_process_ceilings.sql",
 )
-#: F-8's own fixture omits the last entry above -- this is that same
-#: sequence minus migration 0008 (the migration that creates
-#: `platform_declarations` in the first place).
-MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-1]
+#: F-8's own fixture omits the last two entries above -- this is that same
+#: sequence minus migrations 0008/0012 (0008 creates `platform_
+#: declarations` in the first place; 0012 widens a CHECK on a table that,
+#: on this fixture, does not exist at all).
+MIGRATION_NAMES_WITHOUT_DECLARATIONS = MIGRATION_NAMES[:-2]
 
 _DATA_URL = "https://ops-verify-test.example.invalid/v1"
 _CONTROL_URL = "https://ops-verify-test.example.invalid/control/v1"
@@ -147,6 +157,20 @@ def _bootstrap(prefix: str, migration_names: tuple[str, ...]) -> types.SimpleNam
             rewritten["0008_platform_declarations_and_writer_timeouts.sql"],
             {"api_role": api_role, "controlplane_role": controlplane_role},
         )
+    if "0012_process_ceilings.sql" in rewritten:
+        _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
+        # Phase 10 WP-6a: auto-seed the default ceiling row -- see
+        # `MIGRATION_NAMES`'s own comment above for why every test in this
+        # file needs it present unconditionally.
+        with psycopg.connect(control_dsn) as _seed_conn:
+            with _seed_conn.cursor() as _seed_cur:
+                _seed_cur.execute(
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', %s) ON CONFLICT (key) DO NOTHING").format(
+                        table=sql.Identifier(schema, "platform_declarations")
+                    ),
+                    [Json({"data": 1, "control": 1})],
+                )
+            _seed_conn.commit()
 
     return types.SimpleNamespace(
         prefix=prefix, admin_dsn=admin_dsn, control_dsn=control_dsn, control_role=control_role,

@@ -900,6 +900,37 @@ def cmd_declare_surfaces(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_declare_process_ceilings(args: argparse.Namespace) -> int:
+    """Phase 10 WP-6b (design D-5 (ii)): writes the single `process_
+    ceilings` row both processes read -- REPLACES the entire row, same
+    convention as `cmd_declare_surfaces`. Validated through the SAME
+    function (`platform_declarations.validate_process_ceilings_value`)
+    the read path uses (D-2(d)'s own regularity, applied to this new
+    key)."""
+    value = {"data": args.data, "control": args.control}
+    schema = _schema()
+    try:
+        platform_declarations.validate_process_ceilings_value(value, schema=schema, ops_module=platform_declarations.PEER_MODULE)
+    except platform_declarations.PlatformDeclarationError as exc:
+        _die(str(exc))
+    dsn = _provision_dsn()
+    conn = psycopg.connect(dsn)
+    try:
+        _upsert_declaration(conn, schema=schema, key="process_ceilings", value=value)
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print(f"process_ceilings declared: {json.dumps(value, sort_keys=True)}")
+    print(
+        "Restart both processes for this to take effect (design D-5 (ii): startup snapshot). If this "
+        "platform database was provisioned before migration 0011, apply it first -- the migration → "
+        "declare-process-ceilings → restart order is required (LQ4-24)."
+    )
+    return 0
+
+
 def cmd_declare_coalescing_window(args: argparse.Namespace) -> int:
     """D-2(c)/(d): writes `audit_coalescing_window_ms`. Validated through
     the SAME function the read path uses."""
@@ -1021,6 +1052,9 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # out of scope for this command, `_verify_declarations_checks`'s own
     # docstring / the trailing disclosure line below).
     "F-14": 13,
+    # Phase 10 WP-6a (design D-5(ii)): `process_ceilings` row present and
+    # well-formed -- the next unused exit code.
+    "F-15": 14,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1032,6 +1066,12 @@ _VERIFY_DECLARATIONS_READ_ORDER = (
     ("F-8", "declaration table present"),
     ("F-3", "surfaces row present"),
     ("F-4", "audit_coalescing_window_ms row present"),
+    # Phase 10 WP-6a (design D-5(ii)): one combined entry -- `read_platform_
+    # declarations` raises F-15 for BOTH the missing-row and the malformed-
+    # value case for this key (unlike surfaces' F-3/F-5 split), and checks
+    # both right after the window row-existence check above, before
+    # surfaces/window VALUE validation runs.
+    ("F-15", "process_ceilings row present and valid"),
     ("F-5", "surfaces value valid"),
     ("F-4b", "audit_coalescing_window_ms / audit_writer_roles value valid"),
 )
@@ -1832,6 +1872,17 @@ def _build_parser() -> argparse.ArgumentParser:
     control_group.add_argument("--control-base-url", default=None, metavar="URL")
     control_group.add_argument("--no-control", dest="control_base_url", action="store_const", const=None)
     p.set_defaults(func=cmd_declare_surfaces)
+
+    p = sub.add_parser(
+        "declare-process-ceilings",
+        help="declare the single, shared `process_ceilings` row both processes read (design D-5 (ii)) -- "
+             "REPLACES the entire row. Both --data and --control are required positive integers: how many "
+             "processes may serve the data / control plane's own base URL at the same time. Requires "
+             "MITATEDB_PROVISION_DSN. Restart both processes afterward (startup snapshot)",
+    )
+    p.add_argument("--data", type=int, required=True, metavar="N")
+    p.add_argument("--control", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_declare_process_ceilings)
 
     p = sub.add_parser(
         "declare-coalescing-window",

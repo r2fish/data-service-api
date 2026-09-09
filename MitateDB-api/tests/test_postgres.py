@@ -168,6 +168,13 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         # or via this shared `platform` fixture) now depends on this
         # migration having been applied (F-3/F-7 otherwise).
         "0007_platform_declarations.sql",
+        # Phase 10 WP-6b (design D-5 (ii)): widens `platform_declarations.
+        # key`'s own CHECK constraint to accept `process_ceilings` --
+        # every test that calls `main.build_app`/`control_composition.
+        # build_control_service` (directly or via this shared `platform`
+        # fixture) now depends on this migration + the row seeded below,
+        # or it fails startup with F-15.
+        "0011_process_ceilings.sql",
     ):
         text = (MIGRATIONS_DIR / name).read_text().replace("mitatedb", prefix)
         out = rewritten_dir / name
@@ -199,6 +206,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         finally:
             admin.close()
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --
         # a real deployment declares this with `ops declare-surfaces`.
         # DATA ONLY (no `control` key) -- this shared fixture's own
@@ -221,6 +229,20 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
                         value=sql.Literal(
                             '{"data":{"base_url":"https://data.mitatedb-postgres-test.example.invalid/v1"}}'
                         ),
+                    ),
+                )
+                # Phase 10 WP-6b (design D-5 (ii)): seeded alongside
+                # `surfaces` -- `main.build_app`/`build_control_service`
+                # both now require this row too (F-15). `{"data": 1,
+                # "control": 1}` matches this fixture's own single-process
+                # reality -- `limit_enforcement` for `concurrency`/
+                # `requests_per_minute` stays `enforced`, unchanged from
+                # before this WP.
+                _execute(
+                    cur,
+                    sql.SQL("INSERT INTO {table} (key, value) VALUES ('process_ceilings', {value})").format(
+                        table=sql.Identifier(registry_schema, "platform_declarations"),
+                        value=sql.Literal('{"data": 1, "control": 1}'),
                     ),
                 )
         finally:

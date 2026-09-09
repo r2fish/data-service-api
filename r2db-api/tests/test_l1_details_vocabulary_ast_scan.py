@@ -76,7 +76,11 @@ _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
     # correcting `_IDEMPOTENCY_KEY_LOCK_NAMESPACE`'s own false collision
     # rationale lengthened that comment block by 12 lines; the call site
     # itself is still otherwise unchanged.
-    ("postgres.py", 1744),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
+    # Phase 10 WP-6a merge with main (2026-09-09): line shift only (1744 ->
+    # 1752) -- WP-6a's own doc comment in _idempotency_reserve (the LOCK
+    # TABLE it once carried was removed; WP-6d-i owns that lock) lengthens the
+    # file by 8 lines above this call site.
+    ("postgres.py", 1752),  # _fail_client_value: generic psycopg.errors.DataError catch, cannot attribute to one field -- a storage-rejection translation with no in-memory equivalent (this WP's own I-6 pin target)
 })
 
 
