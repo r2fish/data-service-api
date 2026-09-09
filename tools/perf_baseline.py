@@ -4,6 +4,32 @@
 design: docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md D-6.
 work order: docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md WP-5.
 
+Phase 10 WP-7 (design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-8 /
+D-12, work order docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_EVIDENCE_V1.md
+WP-7) adds `--concurrency K`: every measured sample becomes a GROUP of `K`
+requests dispatched together via a single `asyncio.gather` call on the
+plug's own event loop (never OS threads -- threads would mix client-side
+GIL contention into a measurement whose whole point is server-side event
+loop serialization) and timed as one group (start of the gather to the
+last member's own completion). `K == 1` walks this identical code path
+with singleton groups -- there is no separate, bypassing sequential
+branch for it. Defaults are `--n 100 --warmup 10` (WP-7; lowered from the
+prior `--n 200 --warmup 20` default -- see `main()`'s own argparse help
+and D-8 (1) for why: at `--concurrency 3`, `(n + warmup) * concurrency`
+real requests land on ONE credential, and the prior default would put
+that past the shared surface's default `requests_per_minute` bound).
+
+**Judgement rule (fixed BEFORE any measurement is taken, design D-8 (2),
+U-2; WP-7 completion condition 6)**: if a socket-transport plug's own
+`K=3` `p50_ms` exceeds 2x its own `K=1` `p50_ms` for the SAME (peer,
+plug, op), that is treated as evidence of server-side event-loop
+serialization under concurrent load, and WP-8 (threadpool delegation) is
+warranted in this phase; otherwise the measurement is recorded only. This
+script does not evaluate or print that comparison itself (P-8: no
+thresholds anywhere in this tool) -- applying the rule to two runs' own
+`PERF` lines is the supervisor's own recorded judgement. See also
+`tools/PERF_BASELINE_README.md`'s own copy of this same rule.
+
 Imports each registered peer's own conformance adapter (`conformance-tests/
 registry.json`, read the same way `conformance-tests/conftest.py`'s own
 `_load_registry`/`_discover_and_build` do -- this file never hardcodes a
@@ -15,7 +41,8 @@ exactly 5 operations) -- warmup + N times each, reporting p50/p95 latency
 (ms) and the mean number of backend calls per request (`backend_calls`).
 A fourth operation, `cross_entity` (`attempt_cross_entity_batch`), is only
 measured for a plug that declares `cross_entity_mutation` as something
-other than `unavailable` -- currently the two MitateDB peer plugs; a
+other than `unavailable` -- currently the three MitateDB-api plugs
+(in-process, `-http`, `-socket`); a
 plug declaring it `unavailable` (currently both r2db peer plugs) never
 gets a `cross_entity` row, because the cost of a request that is refused
 before any real work happens is not a performance number (decision 1).
@@ -47,6 +74,7 @@ as a new dependency of this file itself.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import datetime
 import importlib
@@ -56,6 +84,7 @@ import math
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -84,6 +113,18 @@ class SelfCheckFailure(RuntimeError):
     a `query` request -- the one non-emptiness self-check this tool
     performs (work order WP-5 completion condition 1). `main()` turns
     this into a non-zero exit, never a silent pass."""
+
+
+class _CapturedRequest(Exception):
+    """Internal control-flow signal, never surfaced past `_capture_one_
+    request` (below): raised by the stub this tool temporarily installs
+    over an adapter's own `httpx.AsyncClient.send` to grab the exact
+    `httpx.Request` object a single op call was about to send, WITHOUT
+    sending it -- see `_capture_one_request`'s own docstring for why."""
+
+    def __init__(self, request: Any) -> None:
+        super().__init__("internal: a real httpx.Request was captured, not an error")
+        self.request = request
 
 
 class UnknownAdapterShape(RuntimeError):
@@ -424,31 +465,238 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
     return sorted_values[f] * (c - k) + sorted_values[c] * (k - f)
 
 
-def _measure(fn: Callable[[], None], *, warmup: int, n: int, counter: _CallCounter) -> tuple[list[float], list[int]]:
-    import time
+# ---------------------------------------------------------------------
+# concurrency dispatch (Phase 10 WP-7, design D-8 (1)/(2)).
+#
+# A "sample" this tool measures is now a GROUP of `concurrency` requests
+# fired together; `_run_concurrent` is the ONE place that ever calls
+# `asyncio.gather` -- every group, at every `concurrency` value including
+# 1, goes through it (WP-7 completion condition 2: no separate
+# sequential branch for the singleton case). Real per-request overlap
+# only actually occurs for a plug with a real event loop of its own
+# (`adapter_obj._loop`/`_client`, i.e. `transport_kind` in
+# {"asgi", "socket"}) -- an `in_process` plug has no async boundary
+# anywhere in its own call chain to overlap on at all, so its own groups
+# reduce to running their `concurrency` members one after another
+# regardless of the value (documented, not a bug: see
+# `tools/PERF_BASELINE_README.md`).
+# ---------------------------------------------------------------------
 
-    for _ in range(warmup):
-        fn()
-    durations_ms: list[float] = []
-    call_counts: list[int] = []
-    for _ in range(n):
-        before = counter.count
+
+def _run_concurrent(
+    loop: "asyncio.AbstractEventLoop", groups: list[list[Callable[[], Any]]], *, counter: "_CallCounter | None" = None,
+) -> tuple[list[float], list[float]]:
+    """Runs each group of zero-arg coroutine factories via exactly ONE
+    `asyncio.gather` call on `loop`, timing the GROUP's own wall-clock
+    span (from just before the `gather` call to every member of it
+    completing) -- never a per-member time, and never a sequential
+    `await` of the group's own members one at a time (WP-7 completion
+    condition 1). A group of size 1 walks this identical call (condition
+    2).
+
+    When `counter` is given, `calls[i]` is the raw `counter` delta
+    observed strictly around group `i`'s own `gather` call -- exact and
+    attributable to that group alone only when nothing else touches
+    `counter` concurrently with it (always true for a singleton group,
+    or for a group with no real async I/O to overlap with at all; see
+    call sites in `_measure_op` for how each case is actually used).
+    Without a `counter`, `calls` is a same-length list of zeros.
+    """
+    async def _gather_group(group: list[Callable[[], Any]]) -> None:
+        # `asyncio.gather` is called from INSIDE a coroutine that is
+        # itself already running on `loop` (via `run_until_complete`
+        # below) -- never at module level before the loop is running --
+        # so it always binds to the SAME `loop` this function was handed,
+        # never an ambient "current" loop resolved some other way.
+        await asyncio.gather(*(factory() for factory in group))
+
+    durations: list[float] = []
+    calls: list[float] = []
+    for group in groups:
+        before = counter.count if counter is not None else 0
         t0 = time.perf_counter()
+        loop.run_until_complete(_gather_group(group))
+        durations.append((time.perf_counter() - t0) * 1000.0)
+        calls.append(float(counter.count - before) if counter is not None else 0.0)
+    return durations, calls
+
+
+def _rows_from_groups(durations: list[float], group_calls: list[float], concurrency: int) -> tuple[list[float], list[float]]:
+    """`durations`/`group_calls` carry one entry per SAMPLE (a group of
+    `concurrency` simultaneous requests). Returns `durations` unchanged
+    and a same-length `calls` list holding the PER-REQUEST average
+    (never the per-group raw total), so a printed row's `backend_calls`
+    means the same thing at every `--concurrency` value: calls per ONE
+    logical request, not per `concurrency` of them fired at once.
+
+    At `concurrency == 1` each group already IS exactly one request, so
+    `group_calls` is already an exact per-request value -- unchanged from
+    the pre-WP-7 per-sample semantics `_run_self_check` relies on (WP-5
+    rework ruling item 5). At `concurrency > 1`, a single group's own
+    `group_calls[i]` cannot be safely divided among that group's own
+    `concurrency` constituent requests -- they genuinely overlap in time
+    by design, which is the entire point of this measurement -- so this
+    instead spreads the RUN'S OWN total observed calls evenly across
+    every sample: a documented relaxation of the per-sample self-check's
+    precision for `concurrency > 1` only (see `_run_self_check`'s own
+    docstring and `tools/PERF_BASELINE_README.md`)."""
+    if concurrency == 1:
+        return durations, list(group_calls)
+    total = sum(group_calls)
+    avg_per_request = (total / (len(durations) * concurrency)) if durations else 0.0
+    return durations, [avg_per_request] * len(durations)
+
+
+def _check_response(adapter_obj: "ConformanceAdapter", response: Any, request: Any) -> None:
+    """The one correctness check this tool's own concurrent replay makes
+    on a real response (below the level of `ConformanceAdapter._send`'s
+    own `ConformanceDenial` machinery, which this tool deliberately does
+    not reconstruct here -- see `_capture_one_request`'s own docstring):
+    a non-2xx/3xx status means this run is not measuring the happy path
+    it claims to, so it aborts loudly rather than silently timing a
+    denial."""
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"{adapter_obj.name}: concurrent replay got HTTP {response.status_code} for "
+            f"{request.method} {request.url} -- perf_baseline measures the happy path only"
+        )
+
+
+def _capture_one_request(adapter_obj: "ConformanceAdapter", fn: Callable[[], None]) -> Any:
+    """Calls `fn()` (one of `_measure_plug`'s own `_do_query`/`_do_mutate`
+    /`_do_batch`/`_do_cross_entity` closures) exactly once, with `adapter_
+    obj._client.send` temporarily swapped for a stub that raises `_
+    CapturedRequest(request)` the instant it is reached INSTEAD of
+    sending it, and returns that captured `httpx.Request` object.
+
+    Every op this tool measures reaches `ConformanceAdapter._send` (r2db/
+    MitateDB HTTP adapters, `conformance/conformance_adapter_*_http.py`)
+    -- and therefore `self._client.send(...)` -- exactly once per call
+    (`_query_request`/`_mutate_request`/`_cross_mutate` each make exactly
+    one `self._send(...)` call), so this always raises before `fn()`
+    would return normally. This is what makes `--concurrency K > 1`
+    possible at all for a plug backed by a real `httpx.AsyncClient`: the
+    adapter's own single, shared `self._loop.run_until_complete` call
+    inside `_run` cannot itself hold more than one request in flight
+    (design D-2, the SAME constraint documented on `hold_in_flight`'s own
+    real-HTTP realization in those same adapter files) -- capturing the
+    already-built `httpx.Request` FIRST and dispatching several of them
+    together afterward, via `_run_concurrent`, is what sidesteps that
+    single-call-at-a-time shape without touching the adapter's own
+    source (WP-7 触らないファイル).
+
+    This never touches adapter SOURCE: it swaps an INSTANCE attribute on
+    the `httpx.AsyncClient` object the adapter itself already
+    constructed, restored unconditionally in `finally` -- the same "wrap
+    the object the plug itself built, never its class or its source"
+    discipline `_wrap_all_public_methods`/`_count_psycopg_cursor_calls`
+    (above) already use for backend-call counting.
+
+    A `fn()` that returns normally without ever reaching `_client.send`
+    would be a real bug in this tool's own op closures (every one of them
+    is written to make exactly one such call) -- raising `RuntimeError`
+    rather than returning `None` keeps that failure loud, not silent."""
+    client = adapter_obj._client  # noqa: SLF001 -- see docstring
+    original_send = client.send
+
+    async def _stub_send(request: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _CapturedRequest(request)
+
+    client.send = _stub_send
+    try:
         fn()
-        t1 = time.perf_counter()
-        durations_ms.append((t1 - t0) * 1000.0)
-        call_counts.append(counter.count - before)
-    return durations_ms, call_counts
+    except _CapturedRequest as captured:
+        return captured.request
+    else:
+        raise RuntimeError(
+            f"{adapter_obj.name}: op closure returned without ever calling _client.send() -- "
+            "cannot capture a request to replay concurrently"
+        )
+    finally:
+        client.send = original_send
 
 
-def _row(peer: str, plug: str, transport: str, op: str, durations_ms: list[float], calls: list[int]) -> dict:
-    """`n` is the ACTUAL number of samples `_measure` collected
+def _replay_factory(adapter_obj: "ConformanceAdapter", request: Any) -> Callable[[], Any]:
+    """Builds the zero-arg coroutine factory `_run_concurrent` calls once
+    per group member: sends the ALREADY-CAPTURED `request` for real, via
+    the adapter's own (by now restored to original) `_client.send`, and
+    applies `_check_response`. A fresh coroutine object is returned on
+    every call (never a single, once-awaitable coroutine reused across
+    groups)."""
+
+    async def _send_one() -> None:
+        response = await adapter_obj._client.send(request)  # noqa: SLF001 -- see _capture_one_request
+        _check_response(adapter_obj, response, request)
+
+    return _send_one
+
+
+def _measure_op(
+    fn: Callable[[], None], *, warmup: int, n: int, concurrency: int, counter: _CallCounter, adapter_obj: "ConformanceAdapter",
+) -> tuple[list[float], list[float]]:
+    """Measures one (plug, op): `n` samples, each a GROUP of `concurrency`
+    simultaneous requests dispatched via `_run_concurrent`, preceded by
+    `warmup` such groups (not timed, not counted). Returns `(durations_
+    ms, calls)`, one entry per sample -- `n` of each, never the raw `--n`/
+    `--warmup` CLI arguments echoed through (WP-5 rework ruling item 1,
+    unchanged by WP-7: `len(durations_ms)` IS the `n=` a printed row
+    carries).
+
+    Two dispatch shapes, chosen by whether `adapter_obj` has a real event
+    loop of its own (see this section's own module-level comment):
+    `_capture_one_request`/`_replay_factory` (real `httpx.AsyncClient`
+    plugs) or a trivial same-loop wrapper around `fn()` itself
+    (`in_process` plugs, no real I/O to overlap regardless of
+    `concurrency`)."""
+    has_real_loop = getattr(adapter_obj, "_loop", None) is not None and getattr(adapter_obj, "_client", None) is not None
+    if has_real_loop:
+        warmup_requests = [_capture_one_request(adapter_obj, fn) for _ in range(warmup * concurrency)]
+        warmup_groups = [
+            [_replay_factory(adapter_obj, r) for r in warmup_requests[i : i + concurrency]]
+            for i in range(0, len(warmup_requests), concurrency)
+        ]
+        _run_concurrent(adapter_obj._loop, warmup_groups)  # noqa: SLF001 -- discard timings/calls
+
+        measured_requests = [_capture_one_request(adapter_obj, fn) for _ in range(n * concurrency)]
+        measured_groups = [
+            [_replay_factory(adapter_obj, r) for r in measured_requests[i : i + concurrency]]
+            for i in range(0, len(measured_requests), concurrency)
+        ]
+        durations, group_calls = _run_concurrent(adapter_obj._loop, measured_groups, counter=counter)  # noqa: SLF001
+    else:
+
+        def _trivial_factory() -> Any:
+            async def _one() -> None:
+                fn()
+
+            return _one()
+
+        loop = asyncio.new_event_loop()
+        try:
+            warmup_groups = [[_trivial_factory for _ in range(concurrency)] for _ in range(warmup)]
+            _run_concurrent(loop, warmup_groups)
+            measured_groups = [[_trivial_factory for _ in range(concurrency)] for _ in range(n)]
+            durations, group_calls = _run_concurrent(loop, measured_groups, counter=counter)
+        finally:
+            loop.close()
+    return _rows_from_groups(durations, group_calls, concurrency)
+
+
+def _row(
+    peer: str, plug: str, transport: str, op: str, durations_ms: list[float], calls: list[float], concurrency: int,
+) -> dict:
+    """`n` is the ACTUAL number of samples measured
     (`len(durations_ms)`), never the raw `--n` CLI argument passed
     straight through -- WP-5 rework ruling item 1. A CLI-argument
-    pass-through cannot detect a `_measure` change (e.g. warmup samples
+    pass-through cannot detect a measurement change (e.g. warmup samples
     leaking into the measured set) that shifts the real sample count,
     because the printed `n=` would stay whatever `--n` said regardless of
-    what was actually aggregated."""
+    what was actually aggregated.
+
+    `concurrency` (Phase 10 WP-7, design D-8/D-12) is the `--concurrency`
+    value every sample this row summarizes was measured at -- see
+    `_format_row`'s own docstring for where it lands on the printed
+    line."""
     sorted_durations = sorted(durations_ms)
     avg_calls = (sum(calls) / len(calls)) if calls else 0.0
     return {
@@ -460,14 +708,21 @@ def _row(peer: str, plug: str, transport: str, op: str, durations_ms: list[float
         "p50_ms": _percentile(sorted_durations, 50),
         "p95_ms": _percentile(sorted_durations, 95),
         "backend_calls": avg_calls,
+        "concurrency": concurrency,
     }
 
 
 def _format_row(row: dict) -> str:
+    """WP-7 completion condition 4: every column this function printed
+    before WP-7 (`peer`/`plug`/`transport`/`op`/`n`/`p50_ms`/`p95_ms`/
+    `backend_calls`) keeps its exact name, order, and `:.3f`/`:.2f`
+    formatting -- `concurrency` is appended as a NEW, final column, never
+    inserted between existing ones."""
     return (
         f"PERF peer={row['peer']} plug={row['plug']} transport={row['transport']} "
         f"op={row['op']} n={row['n']} p50_ms={row['p50_ms']:.3f} "
-        f"p95_ms={row['p95_ms']:.3f} backend_calls={row['backend_calls']:.2f}"
+        f"p95_ms={row['p95_ms']:.3f} backend_calls={row['backend_calls']:.2f} "
+        f"concurrency={row['concurrency']}"
     )
 
 
@@ -476,7 +731,9 @@ def _format_row(row: dict) -> str:
 # ---------------------------------------------------------------------
 
 
-def _measure_plug(name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n: int) -> list[dict]:
+def _measure_plug(
+    name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n: int, concurrency: int,
+) -> list[dict]:
     peer, transport = _classify_plug(name, adapter_obj)
     app_id = fresh_identifier("perfbase")
     adapter_obj.provision_application(app_id)
@@ -497,50 +754,64 @@ def _measure_plug(name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n:
             def _do_query() -> None:
                 adapter_obj.select_eq(query_runtime, entity, ["label"], "label", "perf-seed")
 
-            durations, calls = _measure(_do_query, warmup=warmup, n=n, counter=counter)
-            query_row = _row(peer, name, transport, "query", durations, calls)
+            durations, calls = _measure_op(
+                _do_query, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            )
+            query_row = _row(peer, name, transport, "query", durations, calls, concurrency)
             rows.append(query_row)
             _run_self_check(name, calls)
 
             # --- mutate ---
             # WP-5 rework ruling item 2: every value `fresh_identifier`
             # would generate is materialized into a plain list BEFORE
-            # `_measure` starts timing anything -- the measured closure
+            # `_measure_op` starts timing anything -- the measured closure
             # below only indexes into it. A generator expression handed
             # straight to `iter()` looks pre-built but is not: its body
             # (the `fresh_identifier()` call) still runs lazily on each
             # `next()`, i.e. inside the timed window, which is exactly the
             # defect this ruling item corrects.
+            #
+            # WP-7: sized `(warmup + n) * concurrency`, not `warmup + n` --
+            # at `concurrency > 1` every one of the `warmup + n` SAMPLES is
+            # itself a group of `concurrency` real, distinct requests (design
+            # D-8 (1)'s own "(n + warmup) * concurrency" accounting, the same
+            # arithmetic that rules out the pre-WP-7 `--n 200 --warmup 20`
+            # default at `--concurrency 3`), each needing its own fresh value.
             mutate_runtime = adapter_obj.authenticate(adapter_obj.issue_credential(app_id, "runtime"))
-            mutate_values = [fresh_identifier("perfmv") for _ in range(warmup + n)]
+            mutate_values = [fresh_identifier("perfmv") for _ in range((warmup + n) * concurrency)]
             mutate_values_iter = iter(mutate_values)
 
             def _do_mutate() -> None:
                 adapter_obj.insert(mutate_runtime, entity, {"label": next(mutate_values_iter)})
 
-            durations, calls = _measure(_do_mutate, warmup=warmup, n=n, counter=counter)
-            rows.append(_row(peer, name, transport, "mutate", durations, calls))
+            durations, calls = _measure_op(
+                _do_mutate, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            )
+            rows.append(_row(peer, name, transport, "mutate", durations, calls, concurrency))
 
             # --- batch (5 operations, design D-6 decision 1) ---
             batch_runtime = adapter_obj.authenticate(adapter_obj.issue_credential(app_id, "runtime"))
             # Pre-build every operation list OUTSIDE the timed window (audit
             # WP-5 finding: constructing the BatchOperation objects inside the
             # closure cost 2.4-4.7% of the in-process p50) -- the timed region
-            # is the adapter call alone.
+            # is the adapter call alone. WP-7: `(warmup + n) * concurrency`
+            # entries, same reason as `mutate_values` above.
             batch_ops_per_call = [
                 [
                     BatchOperation(operation="insert", values={"label": fresh_identifier("perfbv")})
                     for _ in range(_BATCH_OPS)
                 ]
-                for _ in range(warmup + n)
+                for _ in range((warmup + n) * concurrency)
             ]
             batch_ops_iter = iter(batch_ops_per_call)
 
             def _do_batch() -> None:
                 adapter_obj.attempt_batch_with_addresses(batch_runtime, entity, next(batch_ops_iter))
 
-            durations, calls = _measure(_do_batch, warmup=warmup, n=n, counter=counter)
-            rows.append(_row(peer, name, transport, "batch", durations, calls))
+            durations, calls = _measure_op(
+                _do_batch, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+            )
+            rows.append(_row(peer, name, transport, "batch", durations, calls, concurrency))
 
             # --- cross_entity (MitateDB 2 plug only; design D-6 decision 1) ---
             capabilities = adapter_obj.capability_document().get("capabilities", {})
@@ -554,22 +825,24 @@ def _measure_plug(name: str, adapter_obj: ConformanceAdapter, *, warmup: int, n:
                         ScopedBatchOperation(operation="insert", entity=entity, values={"label": fresh_identifier("perfcv")}),
                         ScopedBatchOperation(operation="insert", entity=entity_b, values={"label": fresh_identifier("perfcv")}),
                     ]
-                    for _ in range(warmup + n)
+                    for _ in range((warmup + n) * concurrency)
                 ]
                 cross_ops_iter = iter(cross_ops_per_call)
 
                 def _do_cross_entity() -> None:
                     adapter_obj.attempt_cross_entity_batch(cross_runtime, next(cross_ops_iter))
 
-                durations, calls = _measure(_do_cross_entity, warmup=warmup, n=n, counter=counter)
-                rows.append(_row(peer, name, transport, "cross_entity", durations, calls))
+                durations, calls = _measure_op(
+                    _do_cross_entity, warmup=warmup, n=n, concurrency=concurrency, counter=counter, adapter_obj=adapter_obj,
+                )
+                rows.append(_row(peer, name, transport, "cross_entity", durations, calls, concurrency))
         return rows
     finally:
         with contextlib.suppress(Exception):
             adapter_obj.deprovision_application(app_id)
 
 
-def _run_self_check(plug_name: str, query_calls: list[int]) -> None:
+def _run_self_check(plug_name: str, query_calls: list[float]) -> None:
     """Work order WP-5 completion condition 1, per WP-5 rework ruling item
     5: the requirement's own words are 'query 1回に対して backend_calls
     >= 1' -- EVERY individual `query` sample's own observed call count,
@@ -640,15 +913,39 @@ def _perfrun_line() -> str:
     return f"PERFRUN host={host} python={py} commit={commit} date={date}"
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Split out of `main()` so `tools/tests/test_perf_baseline.py` can
+    assert the default `--n`/`--warmup` values (WP-7 completion condition
+    3) without running the tool end-to-end against the real registry."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    parser.add_argument("--n", type=int, default=200, help="measured iterations per (plug, op) (default: 200)")
-    parser.add_argument("--warmup", type=int, default=20, help="warmup iterations per (plug, op), not measured (default: 20)")
+    # WP-7 (design D-8 (1)): lowered from the pre-Phase-10 200/20 default --
+    # at `--concurrency 3`, `(n + warmup) * concurrency` real requests land
+    # on ONE credential; 200/20 would put that at 660, past the shared
+    # surface's default `requests_per_minute` bound of 600
+    # (`r2db-api/src/r2db_api/limits.py:18`; the effective bound in play is
+    # the shared surface's own default `concurrency=32` at `:17`, not any
+    # isolated-profile value). 100/10 stays at 330, safely under it.
+    parser.add_argument("--n", type=int, default=100, help="measured samples per (plug, op) (default: 100)")
+    parser.add_argument("--warmup", type=int, default=10, help="warmup samples per (plug, op), not measured (default: 10)")
+    parser.add_argument(
+        "--concurrency", type=int, default=1,
+        help=(
+            "requests fired together (via asyncio.gather, on the plug's own event loop) per measured "
+            "sample; K=1 (default) and K>1 walk the identical dispatch path (design D-8 (1)/(2), WP-7)"
+        ),
+    )
     parser.add_argument(
         "--registry", type=Path, default=REGISTRY_PATH,
         help="override registry.json path (scratchpad testing only -- conformance-tests/registry.json itself is never written by this tool)",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be >= 1")
 
     print(_perfrun_line())
 
@@ -657,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for name, adapter_obj in built:
             try:
-                for row in _measure_plug(name, adapter_obj, warmup=args.warmup, n=args.n):
+                for row in _measure_plug(name, adapter_obj, warmup=args.warmup, n=args.n, concurrency=args.concurrency):
                     print(_format_row(row))
             except (SelfCheckFailure, UnknownAdapterShape) as exc:
                 print(f"perf_baseline: {exc}", file=sys.stderr)

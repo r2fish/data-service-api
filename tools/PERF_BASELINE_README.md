@@ -3,6 +3,10 @@
 design: `docs/design/PHASE8_EFFECTIVE_BOUNDS_AND_HYGIENE_V1.md` D-6.
 work order: `docs/work-orders/WORK_ORDER_PHASE8_EFFECTIVE_BOUNDS_V1.md` WP-5.
 
+Phase 10 WP-7 (design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-8 /
+D-12, work order `docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_EVIDENCE_V1.md`
+WP-7) added `--concurrency K` -- see "Concurrency (`--concurrency K`)" below.
+
 ## What this is, and is not
 
 This is a **measurement tool, not a test and not a gate**. It places **no
@@ -24,7 +28,9 @@ are not the baseline.
 ./.venv/bin/python tools/perf_baseline.py
 ```
 
-Defaults: `--warmup 20 --n 200` (design D-6, U-3). Override either:
+Defaults: `--warmup 10 --n 100` (Phase 10 WP-7, design D-8 (1); lowered from
+the pre-Phase-10 `--warmup 20 --n 200`, design D-6/U-3 -- see "Concurrency"
+below for why). Override either:
 
 ```
 ./.venv/bin/python tools/perf_baseline.py --warmup 2 --n 5
@@ -33,6 +39,48 @@ Defaults: `--warmup 20 --n 200` (design D-6, U-3). Override either:
 Only the measured sample count is echoed back, as every `PERF` line's own
 `n=` field; the warm-up count is NOT recoverable from the output, so record
 the exact command line (including `--warmup`) next to any baseline table.
+
+## Concurrency (`--concurrency K`)
+
+**Mechanism**: at `--concurrency K` (default 1), every measured sample
+becomes a GROUP of `K` requests fired together via exactly one
+`asyncio.gather` call on the plug's own event loop, timed as one group (from
+just before the `gather` call to every member of it completing) -- never `K`
+separate per-request times, and never OS threads (threads would mix
+client-side GIL contention into a measurement whose whole point is
+server-side event loop serialization). `K == 1` walks the identical dispatch
+call with singleton groups -- there is no separate, sequential-`await`
+branch for it. For an `asgi`/`socket`-transport plug (a real
+`httpx.AsyncClient`), this genuinely overlaps `K` in-flight requests on the
+wire; for an `in_process` plug (no event loop anywhere in its own call
+chain) it necessarily reduces to running `K` calls one after another
+regardless of `K`, since there is no real I/O to overlap with in the first
+place -- not a bug, just nothing to measure there.
+
+Because each SAMPLE now fires `K` real requests, `(n + warmup) * K` requests
+land on a single measured op's own credential -- this is why the default
+`--n`/`--warmup` dropped from 200/20 to 100/10 (see above): at `--concurrency
+3` with the OLD defaults, `(200 + 20) * 3 = 660` would exceed the shared
+surface's default `requests_per_minute` bound of 600
+(`r2db-api/src/r2db_api/limits.py:18`; the bound actually in play is the
+shared surface's own default `concurrency=32`, `:17`, not any isolated-
+profile value) -- the new defaults keep this at `(100 + 10) * 3 = 330`.
+
+**Judgement rule (fixed BEFORE any measurement is taken -- design D-8 (2),
+U-2)**: if a socket-transport plug's own `K=3` `p50_ms` exceeds 2x its own
+`K=1` `p50_ms` for the SAME (peer, plug, op), that is treated as evidence of
+server-side event-loop serialization under concurrent load, and WP-8
+(threadpool delegation) is warranted in that phase; otherwise the
+measurement is recorded only. This script never evaluates or prints that
+comparison itself (no thresholds anywhere in this tool, P-8) -- applying the
+rule to two runs' own `PERF` lines is the supervisor's own recorded
+judgement, comparing the SAME (peer, plug, op) row across a `--concurrency
+1` run and a `--concurrency 3` run.
+
+```
+./.venv/bin/python tools/perf_baseline.py --n 100 --warmup 10 --concurrency 1
+./.venv/bin/python tools/perf_baseline.py --n 100 --warmup 10 --concurrency 3
+```
 
 ## Environment
 
@@ -64,8 +112,13 @@ One `PERFRUN` line, then one `PERF` line per (peer, plug, op):
 
 ```
 PERFRUN host=<OS/arch> python=<version> commit=<short sha> date=<YYYY-MM-DD>
-PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess|socket> op=<query|mutate|batch|cross_entity> n=<N> p50_ms=<x.xxx> p95_ms=<x.xxx> backend_calls=<n.nn>
+PERF peer=<peer> plug=<plug> transport=<in-process|asgi-inprocess|socket> op=<query|mutate|batch|cross_entity> n=<N> p50_ms=<x.xxx> p95_ms=<x.xxx> backend_calls=<n.nn> concurrency=<K>
 ```
+
+`concurrency=<K>` (Phase 10 WP-7, design D-8/D-12) is the ONLY column added
+to this line since the format above -- every other column keeps its exact
+pre-WP-7 name, order, and formatting; see "Concurrency (`--concurrency K`)"
+above for what `K` means.
 
 Three operations are measured on every plug: `query` (`select_eq`, one
 predicate), `mutate` (`insert`, one operation), `batch` (a single-entity
@@ -76,40 +129,53 @@ for a plug that declares `cross_entity_mutation` as something other than
 declares `cross_entity_mutation: unavailable`, so neither `r2db-api` row
 carries a `cross_entity` line: the cost of a request that is refused
 before any real work happens is not a performance number. A full run
-against the 4 currently-registered plugs therefore prints **14** `PERF`
-lines (4 plugs x 3 ops, plus 2 plugs x 1 `cross_entity` op).
+against the 6 currently-registered plugs (Phase 10 WP-4 added the two
+`-socket` plugs to the original 4) therefore prints **21** `PERF` lines (6
+plugs x 3 ops, plus the 3 `MitateDB-api` plugs -- in-process, `-http`, and
+`-socket`, all three declaring `cross_entity_mutation: partial` -- x 1
+`cross_entity` op; the two `r2db-api` plugs still declare it `unavailable`).
+This row count is per invocation regardless of `--concurrency`: a
+`--concurrency 1` run and a `--concurrency 3` run each print 21 lines on
+their own -- comparing the two is what the judgement rule above is for
+(the three `r2db-api` plugs -- in-process, `-http`, `-socket` -- still
+declare `cross_entity_mutation: unavailable`, so none of them ever carries
+a `cross_entity` line).
 
 ## The limits of what these numbers mean
 
-- **In-process / ASGI-in-process, until a socket plug is registered.**
-  Every number from the 4 currently-registered plugs is an in-process (or,
-  for the two HTTP plugs, ASGI-in-process -- `httpx.ASGITransport`, no
-  real socket, no TLS, no reverse proxy) measurement. `_classify_plug`
-  (Phase 10 WP-3, design D-12) reads each adapter's own DECLARED
-  `transport_kind` (`conformance-tests/adapter.py` port v1.14 -- one of
-  `"in_process"`/`"asgi"`/`"socket"`), never the built object's own
-  attribute shape or its registry name alone (a proxy indicator this tool
-  used to rely on, `OPERATING_CONDITIONS.md` section 1.7 item 52), and
-  cross-checks the declaration against the registry name's own suffix
-  convention (`-http` for `asgi`, `-socket` for `socket`, no suffix for
-  `in_process`) -- a plug whose name and declaration disagree, or whose
-  declared value falls outside this 3-word vocabulary, still refuses to
-  run (non-zero exit, no guessed row) rather than printing a wrong label.
+- **In-process / ASGI-in-process / real socket.** `_classify_plug` (Phase
+  10 WP-3, design D-12) reads each adapter's own DECLARED `transport_kind`
+  (`conformance-tests/adapter.py` port v1.14 -- one of `"in_process"`/
+  `"asgi"`/`"socket"`), never the built object's own attribute shape or its
+  registry name alone (a proxy indicator this tool used to rely on,
+  `OPERATING_CONDITIONS.md` section 1.7 item 52), and cross-checks the
+  declaration against the registry name's own suffix convention (`-http`
+  for `asgi`, `-socket` for `socket`, no suffix for `in_process`) -- a plug
+  whose name and declaration disagree, or whose declared value falls
+  outside this 3-word vocabulary, still refuses to run (non-zero exit, no
+  guessed row) rather than printing a wrong label.
   `transport=in-process`/`transport=asgi-inprocess` are the SAME literal
-  labels this tool printed before this revision; `transport=socket` is
-  the one genuinely new label it adds, for the real-socket + reverse-proxy
-  plugs (`r2db-api-socket`/`MitateDB-api-socket`, phase 10's own L7-2)
-  WP-4 registers -- not yet registered as of this WP, so no `PERF` line
-  carries it yet. `backend_calls` stays available for a socket plug too
-  (it holds its own composition in-process, unlike a launched-elsewhere
-  composition root, design D-12) -- only the transport itself is real.
+  labels this tool printed before Phase 10; `transport=socket`
+  (`r2db-api-socket`/`MitateDB-api-socket`, Phase 10 WP-4, design D-1 (A))
+  is the one genuinely new label, for a REAL loopback socket + reverse
+  proxy (nginx) in front of the same composition the other two transports
+  hold in-process -- no ASGI transport, no in-process function call.
+  `backend_calls` stays available for a socket plug too (it holds its own
+  composition in-process, unlike a launched-elsewhere composition root,
+  design D-12) -- only the transport itself is real. A socket-transport
+  plug's own numbers are the ONLY ones in this tool's output measuring a
+  real wire round trip end to end (TCP + nginx + the peer's own HTTP
+  stack); every other plug's numbers stay in-process or ASGI-in-process as
+  described above.
 - **`backend_calls` is a call count, not a round-trip count, and its
   granularity differs by plug on purpose:**
-  - For the two PostgreSQL-backed plugs (`r2db-api-http`,
-    `MitateDB-api-http`), it counts real `psycopg.Cursor.execute`/
-    `.executemany` calls -- one logical request can, and often does, issue
-    more than one (a `batch` request's own multiple operations inside one
-    transaction, for instance).
+  - For the four PostgreSQL-backed plugs (`r2db-api-http`,
+    `r2db-api-socket`, `MitateDB-api-http`, `MitateDB-api-socket` -- a
+    `-socket` plug holds the identical PostgreSQL-backed composition its
+    own `-http` counterpart does, design D-1 (A)), it counts real
+    `psycopg.Cursor.execute`/`.executemany` calls -- one logical request
+    can, and often does, issue more than one (a `batch` request's own
+    multiple operations inside one transaction, for instance).
   - For the two in-process plugs (`r2db-api`'s in-memory cell, `MitateDB-
     api`'s SQLite-backed cell), there is no lower-level "statement" layer
     to count, so it counts calls to the backend/cell object's own public
@@ -142,7 +208,7 @@ lines (4 plugs x 3 ops, plus 2 plugs x 1 `cross_entity` op).
   ONE shared entity that keeps growing.** `mutate`, `batch`, and
   `cross_entity` each insert new rows into the same seeded entity/entities
   before the next op runs, so `query`'s own `select_eq` is measured
-  against a 1-row table while `cross_entity` (on the two MitateDB plugs)
+  against a 1-row table while `cross_entity` (on the three MitateDB plugs)
   is measured against a table that has already absorbed every prior op's
   own inserts for that run. Changing `--n` changes not only the sample
   count but the size of the state every later op is measured against --
@@ -152,19 +218,32 @@ lines (4 plugs x 3 ops, plus 2 plugs x 1 `cross_entity` op).
 - **`p50_ms`/`p95_ms` are linear-interpolation percentiles, and the
   measured window is never just the product backend.** It always includes
   whatever the conformance adapter (the port) itself does to translate a
-  call into a backend operation; for the two HTTP plugs it additionally
-  includes `loop.run_until_complete` and the ASGI transport layer itself.
-  A sub-0.1ms in-process number is therefore a peer-vs-peer comparison of
-  "adapter call + backend call", not of the backend alone -- read the
+  call into a backend operation; for the `-http`/`-socket` plugs it
+  additionally includes `loop.run_until_complete` and either the ASGI
+  transport layer (`-http`) or the real TCP + nginx + HTTP stack round
+  trip (`-socket`). A sub-0.1ms in-process number is therefore a
+  peer-vs-peer comparison of "adapter call + backend call", not of the
+  backend alone -- read the
   peer comparisons in design section 11.2 with that in mind.
 
 ## The one self-check this tool performs
 
 Before printing a plug's own `query` row, this tool asserts that EVERY
 individual `query` sample it just measured observed at least 1 backend
-call (`min(query_calls) >= 1`, not the N-sample average), and exits
-non-zero (printing the failure to stderr) if even one sample is 0. This is
-**not** a claim about what the "right" call count is -- only that the
-counting proxy is not silently wired to nothing for any of the samples
-that make up the printed row. See `tools/perf_baseline.py`'s own
-`_run_self_check` docstring.
+call (`min(query_calls) >= 1`), and exits non-zero (printing the failure to
+stderr) if even one sample is 0. This is **not** a claim about what the
+"right" call count is -- only that the counting proxy is not silently wired
+to nothing for any of the samples that make up the printed row. See
+`tools/perf_baseline.py`'s own `_run_self_check` docstring.
+
+**At `--concurrency 1`** this check is exact per sample, unchanged from
+before Phase 10 WP-7 (an average can be >= 1 while individual samples are
+actually 0; checking the minimum cannot be fooled that way). **At
+`--concurrency K > 1`**, a single sample's own `K` constituent requests
+genuinely overlap in time by design (that overlap is the entire point of
+this measurement), so their backend calls cannot be safely attributed to
+one request or another; this tool instead spreads the WHOLE measured
+phase's own total observed calls evenly across every sample before running
+the same `>= 1` check -- a documented, coarser relaxation of the check's
+precision that only applies when `--concurrency > 1` (`_rows_from_groups`'
+own docstring).
