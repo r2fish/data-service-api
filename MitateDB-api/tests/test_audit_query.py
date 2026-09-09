@@ -1697,7 +1697,7 @@ def test_control_capabilities_operation_has_no_reachable_deny_branch() -> None:
         cid, bearer = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     secret = bearer
     document = service.control_capabilities(secret)  # must NOT raise -- the observable half of _gate_must_rotate's early return
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
     assert document["capabilities"]["audit_query"]["status"] == "unavailable"
 
 
@@ -1727,7 +1727,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     regardless of role, and this omission does not weaken the proof."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
 
     fresh_backend = InMemoryControlBackend(app_pepper=_APP_PEPPER, control_pepper=_CONTROL_PEPPER)
     with fresh_backend.unit_of_work() as work:
@@ -1739,7 +1739,7 @@ def test_operation_and_target_kind_non_durable_exclusions_never_reach_the_durabl
     fresh_secret = fresh_bearer
     fresh_service = ControlPlaneService(fresh_backend, limits=_GENEROUS_LIMITS)
     fresh_document = fresh_service.control_capabilities(fresh_secret)  # must_rotate=True path
-    assert fresh_document["contract_version"] == "1.7.0"
+    assert fresh_document["contract_version"] == "1.8.0"
 
     durable_operations = {event.operation for event in h.control_audit.snapshot()}
     durable_operations |= {event.operation for event in fresh_backend.audit_sink.snapshot()}
@@ -2199,7 +2199,7 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # 2026-09-04): the mechanism's own row resolver and pin test, so the
     # generalized mechanism is itself pinned isomorphic, not exempt.
     ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_97_rows"),
+    ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_105_rows"),
     # Phase 6 WP-3 追補 additions (supervisor ruling 2026-09-04, contract
     # 1.6.0 subordinate ruling 11 item 1's bearer-locator realization and
     # coordinator item 7(i)'s timing-pin test):
@@ -2536,12 +2536,42 @@ _ISOMORPHIC_TARGETS: tuple[tuple[str, str, str], ...] = (
     # keeps each peer's own real construction path (r2db-api's plain
     # `DataService`, this peer's own `FoundationConfig`-fronted
     # `ApplicationCell`) and is not, and was never meant to be, isomorphic.
+    # Phase 10 WP-6 pair-closing (design D-5 (ii), work order §4/WP-6a/
+    # WP-6b): the `process_ceilings` declaration mechanism's own peer-
+    # duplicated pure-Python pieces (`platform_declarations.py`'s
+    # `ProcessCeilings` shape, its `validate_process_ceilings_value` shape
+    # check, and the two F-15 message builders it calls), the region-(iii)
+    # advisory-lock helper (`credential_store.py` on this peer, `control_
+    # plane.py` on MitateDB-api -- same purpose, different module split,
+    # same triple form the bearer-locator row above already uses), and
+    # the HTTP conformance adapter's own `_build_client`/`_surfaces_value`/
+    # `_reset_surface_state` hooks (WP-3) -- verified normalize-and-diff
+    # equal (`_isomorphic_symbol_source` + `_normalize`, both sides)
+    # before adding; MitateDB-api's own `_surfaces_value` body was
+    # refactored to return a module-level `_SURFACES` constant (same
+    # shape as this peer's own, no value change) so the two bodies match
+    # after normalization rather than merely returning the same value.
+    # `cmd_declare_process_ceilings` was NOT added: beyond the DSN-helper-
+    # name difference (`_control_dsn` here, `_provision_dsn` on
+    # MitateDB-api) that normalization does not fold away on its own, the
+    # two bodies differ in statement order, exception handling shape (this
+    # peer's context-managed `psycopg.connect`, MitateDB-api's explicit
+    # try/except/finally with rollback), and the printed restart message
+    # -- real structural differences, not addressed by this WP.
     ("src/r2db_api/errors.py", "src/mitatedb_api/errors.py", "violation"),
     ("src/r2db_api/errors.py", "src/mitatedb_api/errors.py", "observed_type_of"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "ProcessCeilings"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_process_ceilings_value"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f15_shape_message"),
+    ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f15_value_message"),
+    ("src/r2db_api/credential_store.py", "src/mitatedb_api/control_plane.py", "_take_bound_advisory_lock"),
+    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_build_client"),
+    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_surfaces_value"),
+    ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_reset_surface_state"),
 )
 
 
-def test_isomorphic_target_table_is_pinned_to_its_current_97_rows() -> None:
+def test_isomorphic_target_table_is_pinned_to_its_current_105_rows() -> None:
     """WP-0 completion condition 8 (widened by the WP-3 追補, supervisor
     ruling 2026-09-04; widened again by Q4 phase WP-0, supervisor ruling
     2026-09-05, first pass and 差し戻し round / 裁定 A; widened a third
@@ -2568,7 +2598,14 @@ def test_isomorphic_target_table_is_pinned_to_its_current_97_rows() -> None:
     追補4 O-7), once WP-2e and WP-3e's own same-named `errors.violation`/
     `observed_type_of` had both merged to main (this peer's own copy also
     gained `platform_declarations.check_contract_170_declarations`/`ops_
-    module_hint`, already rows on r2db-api's own copy of this table):
+    module_hint`, already rows on r2db-api's own copy of this table);
+    widened a tenth time by the phase 10 WP-6 pair-closing commit (design
+    D-5 (ii), work order §4/WP-6a/WP-6b), once WP-6a and WP-6b's own
+    same-named `process_ceilings` declaration mechanism (`ProcessCeilings`,
+    `validate_process_ceilings_value`, `_f15_shape_message`, `_f15_value_
+    message`, `_take_bound_advisory_lock`) and WP-3's own same-named HTTP
+    conformance adapter hooks (`_build_client`, `_surfaces_value`,
+    `_reset_surface_state`) had all merged to main on both peers:
     a bare `len(_ISOMORPHIC_TARGETS) == 57` check would not
     catch a row silently DROPPED and a different, coincidentally-same-
     length row added in its place -- only pinning the table's own full
@@ -2600,7 +2637,7 @@ def test_isomorphic_target_table_is_pinned_to_its_current_97_rows() -> None:
         ("src/r2db_api/main.py", "src/mitatedb_api/main.py", "_optional_float"),
         ("tests/test_http.py", "tests/test_http.py", "test_packaged_contract_copy_is_byte_identical_to_spec_source_of_truth"),
         ("tests/test_audit_query.py", "tests/test_audit_query.py", "_isomorphic_symbol_source"),
-        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_97_rows"),
+        ("tests/test_audit_query.py", "tests/test_audit_query.py", "test_isomorphic_target_table_is_pinned_to_its_current_105_rows"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "compose_bearer_locator"),
         ("src/r2db_api/auth.py", "src/mitatedb_api/credential_wire.py", "split_bearer_locator"),
         (
@@ -2739,8 +2776,16 @@ def test_isomorphic_target_table_is_pinned_to_its_current_97_rows() -> None:
         ("src/r2db_api/limits.py", "src/mitatedb_api/config.py", "narrow_limits_by_budget"),
         ("src/r2db_api/errors.py", "src/mitatedb_api/errors.py", "violation"),
         ("src/r2db_api/errors.py", "src/mitatedb_api/errors.py", "observed_type_of"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "ProcessCeilings"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "validate_process_ceilings_value"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f15_shape_message"),
+        ("src/r2db_api/platform_declarations.py", "src/mitatedb_api/platform_declarations.py", "_f15_value_message"),
+        ("src/r2db_api/credential_store.py", "src/mitatedb_api/control_plane.py", "_take_bound_advisory_lock"),
+        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_build_client"),
+        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_surfaces_value"),
+        ("conformance/conformance_adapter_r2db_http.py", "conformance/conformance_adapter_mitatedb_http.py", "_reset_surface_state"),
     )
-    assert len(_ISOMORPHIC_TARGETS) == 97
+    assert len(_ISOMORPHIC_TARGETS) == 105
 
 
 def _isomorphic_symbol_source(peer_root: Path, relative_path: str, symbol: str) -> str | None:
@@ -3186,10 +3231,15 @@ def test_audit_requests_per_minute_is_declared_enforced_in_control_capabilities(
 def test_control_capabilities_declares_contract_version_1_5_0() -> None:
     """Phase 5 WP-3 (design D-4/§8, subordinate ruling 10): re-flipped to
     1.5.0 in the same commit as the `operations`/`target_kinds`
-    declaration keys (flip and behavior land together, never separately)."""
+    declaration keys (flip and behavior land together, never separately).
+
+    Phase 10 WP-6b/pair-closing (design D-5 (v)): re-flipped again to
+    1.8.0 in the same commit as this host's own `process_ceilings`
+    mapping -- function name kept, same precedent as the sibling peer's
+    own re-flipped pins."""
     h = _memory_harness()
     document = h.service.control_capabilities(h.control_credential_secret)
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
 
 
 # ---------------------------------------------------------------------------

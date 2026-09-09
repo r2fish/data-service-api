@@ -312,7 +312,10 @@ def test_show_declarations_reports_rows_and_role_settings(control_platform) -> N
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     keys = {row["key"] for row in payload["platform_declarations"]}
-    assert keys == {"surfaces", "audit_coalescing_window_ms", "audit_writer_roles"}
+    # Phase 10 WP-6b (design D-5 (ii)): `control_plane_harness.
+    # bootstrap_control_platform` now seeds `process_ceilings` alongside
+    # `surfaces` (this fixture's own docstring update).
+    assert keys == {"surfaces", "audit_coalescing_window_ms", "audit_writer_roles", "process_ceilings"}
     assert control_platform.api_role in payload["role_settings"]
     assert control_platform.controlplane_role in payload["role_settings"]
     api_setting = payload["role_settings"][control_platform.api_role][0]

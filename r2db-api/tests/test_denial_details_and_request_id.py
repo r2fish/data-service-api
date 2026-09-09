@@ -491,8 +491,12 @@ def test_http_query_and_schema_responses_never_regenerate_request_id(service, de
 
 
 def test_contract_version_is_1_7_0_on_data_plane(service, runtime):
+    """Phase 10 WP-6a/pair-closing (design D-5 (v)): re-flipped again to
+    1.8.0 in the same commit as the `process_ceilings` mapping this WP
+    ships -- function name kept, same precedent as `test_foundation.py`'s
+    own re-flipped pin."""
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
 
 
 # ---------------------------------------------------------------------------

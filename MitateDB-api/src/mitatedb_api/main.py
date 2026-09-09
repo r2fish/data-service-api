@@ -429,6 +429,12 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         cells[application_id] = ApplicationCell(
             application_id, config, audit, guard=credentials.assert_active, backend=backend,
             audit_router=audit_router, limit_holder=limit_holder,
+            # Phase 10 WP-6b (design D-5 (ii)): the single source
+            # (`platform_declarations.read_platform_declarations`, already
+            # read above) for how many processes may serve THIS
+            # deployment's data-plane base URL at the same time -- never
+            # re-derived, never an env var of its own.
+            process_ceiling=declarations.process_ceilings.data,
         )
 
     def _cell_factory(application_id: str) -> ApplicationCell:

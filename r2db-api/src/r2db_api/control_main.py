@@ -265,6 +265,7 @@ def assemble_control_stack(
     audit_visibility_lag_ms: int = 0,
     audit_coalescing_window_ms: int = DECLARED_COALESCING_WINDOW_MS,
     audit: "PostgresControlAuditSink | None" = None,
+    process_ceiling: int = 1,
 ) -> tuple[ControlPlaneService, tuple[PostgresApplicationRegistry, PostgresCredentialStore, PostgresControlCredentialStore, PostgresControlAuditSink, PostgresAuditQueryStore | None]]:
     """WP-5 round-2 review (MINOR-3): the 4-Postgres-store + `ControlPlaneService`
     assembly core, shared by `build_control_app` below AND the WP-5
@@ -351,6 +352,7 @@ def assemble_control_stack(
         audit_reader=audit_reader, audit_visibility_lag_ms=effective_visibility_lag_ms,
         audit_coalescing_window_ms=audit_coalescing_window_ms,
         surfaces=surfaces,
+        process_ceiling=process_ceiling,
     )
     return service, (applications, credentials, control_credentials, audit, audit_reader)
 
@@ -375,11 +377,12 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
 
     1. required env reads;
     2. reject the four removed env vars (F-1/F-2), whatever their value;
-    3. read `platform_declarations` (F-8/F-3/F-4/F-4b/F-5), then require
-       `surfaces.control` unconditionally (F-3c: this process, by
-       definition, always has a control surface to declare -- unlike the
-       data-plane process, whose equivalent requirement is conditional on
-       `R2DB_CONTROL_PLANE_STATUS`, F-6, `r2db_api.main`-only);
+    3. read `platform_declarations` (F-8/F-3/F-4/F-4b/F-5, and, Phase 10
+       WP-6a, F-15 for `process_ceilings`), then require `surfaces.control`
+       unconditionally (F-3c: this process, by definition, always has a
+       control surface to declare -- unlike the data-plane process, whose
+       equivalent requirement is conditional on `R2DB_CONTROL_PLANE_
+       STATUS`, F-6, `r2db_api.main`-only);
     4. construct the `control_audit` writer sink, then run the writer-role
        dual check on a connection BORROWED FROM THAT SINK'S OWN POOL (login
        role = the actual writer role, design D-1(c)) -- self-role inclusion
@@ -516,6 +519,13 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         audit_dsn=audit_dsn, audit=audit,
         surfaces=surfaces, audit_visibility_lag_ms=visibility_lag_ms,
         audit_coalescing_window_ms=declarations.audit_coalescing_window_ms,
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the CONTROL
+        # plane's own ceiling -- `declarations.process_ceilings.control`,
+        # never `.data` (that one is `r2db_api.main`'s own, a separate
+        # process/plane). Drives `ControlPlaneService.capabilities()`'s
+        # own `limit_enforcement` mapping for `control_requests_per_
+        # minute`/`audit_requests_per_minute`.
+        process_ceiling=declarations.process_ceilings.control,
     )
 
     @asynccontextmanager

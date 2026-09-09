@@ -234,10 +234,14 @@ def test_data_plane_capabilities_declares_contract_1_6_0(service):
     this file's own precedent of retaining an earlier version's name on a
     since-re-flipped pin, e.g. `test_control_capabilities_declares_
     contract_version_1_5_0` in `test_audit_query.py`, which already
-    asserted 1.6.0 before this WP)."""
+    asserted 1.6.0 before this WP).
+
+    Phase 10 WP-6a/pair-closing (design D-5 (v)): re-flipped again to
+    1.8.0 in the same commit as the `process_ceilings` mapping this WP
+    ships -- function name kept, same precedent."""
     runtime = service.authenticate("cred-a.secret-a")
     document = service.capabilities(runtime)
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
 
 
 def test_catalog_returns_shaped_document_scoped_to_application(service):
