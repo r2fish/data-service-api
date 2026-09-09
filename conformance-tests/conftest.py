@@ -110,6 +110,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list) -> None:
         # one group onto the SAME worker, exactly like the `adapter`
         # branch below does for each adapter's own session-scoped state.
         launcher_param = callspec.params.get("launcher_class") if callspec is not None else None
+        # F9 (WP-6c review 2026-09-09): `launcher_param` is checked BEFORE
+        # `adapter_param` on purpose -- no currently-collected item ever
+        # carries both (a `launcher_class`-parametrized item takes no
+        # `adapter` fixture, and vice versa, by construction of every
+        # fixture in this file today), so this ordering is unreachable
+        # code today, not a live behavior choice. If a FUTURE item ever
+        # parametrized over both, a real per-process composition-root
+        # launcher (an expensive, foreground-blocking OS process start)
+        # should take priority over the lighter, already-amortized
+        # session-scoped `adapter` state for xdist-group placement -- so
+        # this order (`launcher_param` first) is deliberately kept in the
+        # unreachable case too, rather than swapped, and this comment
+        # records that choice instead of leaving it to be re-derived.
         if launcher_param:
             group = f"c26-{launcher_param}"
         elif adapter_param:

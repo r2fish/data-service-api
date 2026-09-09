@@ -304,6 +304,12 @@ not yet executable -- phase 10 WP-6c lands the per-peer launchers, the registry'
 
 The two launchers (`r2db-api/conformance/real_server_r2db.py::RealServerR2db`, `MitateDB-api/conformance/real_server_mitatedb.py::RealServerMitateDB`), the `composition_roots` registry section, `conformance-tests/conftest.py`'s per-launcher `c26-<peer>` xdist grouping, and `conformance-tests/test_c26_composition_root.py` now exist and this condition is executable, so the row is rewritten to state the now-obtaining, executable form -- see the current row for the corresponding text and `conformance-tests/test_c26_composition_root.py` for the test.
 
+**F5 correction (WP-6c review 2026-09-09):** the Status cell above was rewritten to `executable` in the same edit that landed WP-6c, but the row's own Evidence cell was left unedited by oversight and kept stating the file did not exist yet. The Evidence cell (verbatim, moved here in this same edit) previously read:
+
+real-startup observation of the documented composition root -- `conformance-tests/test_c26_composition_root.py` (not yet created), driven over every launcher registered in `conformance-tests/registry.json`'s own `composition_roots` section
+
+The current row's Evidence cell now names the file without the stale "(not yet created)" qualifier, and names both launcher classes explicitly.
+
 ---
 
 ## C-27

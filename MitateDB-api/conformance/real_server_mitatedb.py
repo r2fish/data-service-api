@@ -30,6 +30,8 @@ new capability this launcher invents, and never a change to `src/`.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import secrets
 import shutil
@@ -39,7 +41,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 import psycopg
 from psycopg import sql
@@ -54,13 +56,29 @@ if "socket_harness" not in sys.modules:
 
 import socket_harness as sh  # noqa: E402
 
-# Load-bearing (measured directly): the shared `.venv`'s editable install
-# of `mitatedb_api` points at the SHARED CHECKOUT's own `MitateDB-api/src`
-# (a `.pth` file in `site-packages`), which an ordinary `import mitatedb_
-# api` in THIS process would silently prefer over this worktree's own copy
-# unless this worktree's `src` is placed ahead of `site-packages` on `sys.
-# path` first -- see `_WORKTREE_SRC`/`_with_pythonpath` below for the
-# identical problem and fix for the SUBPROCESSES this module starts.
+# F7 correction (WP-6c review 2026-09-09): this comment previously
+# claimed (unmeasured, under this module's OWN prior docstring) that an
+# ordinary `import mitatedb_api` in THIS process would silently prefer
+# the shared checkout's editable install over this worktree's own copy.
+# Measured directly under the actual `pytest` invocation this module is
+# always imported through: `pyproject.toml`'s own `[tool.pytest.ini_
+# options] pythonpath = ["r2db-api/src", "MitateDB-api/src", "conformance-
+# tests"]` already prepends THIS worktree's `MitateDB-api/src` ahead of
+# the shared `.venv`'s `site-packages` (where the editable install's own
+# `.pth` file lives) at session start, so `import mitatedb_api.credential_
+# store_postgres` below already resolves against this worktree's own copy
+# WITHOUT the explicit `sys.path.insert` this block performs -- confirmed
+# by reading back `mitatedb_api.__file__` under a real collection of this
+# suite. This insert is therefore redundant under every actual pytest run
+# of this module and is kept ONLY as a defensive fallback for a
+# hypothetical import of this module OUTSIDE that pytest session (e.g. a
+# bare `python -c "import real_server_mitatedb"` with no `pythonpath` ini
+# option in effect) -- never "load-bearing" the way the prior text of this
+# comment claimed. `_WORKTREE_SRC`/`_with_pythonpath` below remain the
+# genuinely load-bearing half of this same concern: pytest's own
+# `pythonpath` option affects only THIS process' `sys.path`, never a
+# freshly spawned SUBPROCESS's, which starts from `site-packages` outward
+# and has never heard of this worktree at all.
 _worktree_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if _worktree_src not in sys.path:
     sys.path.insert(0, _worktree_src)
@@ -86,10 +104,55 @@ def _with_pythonpath(env: dict[str, str]) -> dict[str, str]:
     merged["PYTHONPATH"] = _WORKTREE_SRC if not existing else f"{_WORKTREE_SRC}{os.pathsep}{existing}"
     return merged
 
+
+# Both peers' own env-var prefixes -- stripped from whatever this launcher
+# inherits from ITS OWN OS environment before layering its own explicit,
+# fully-documented dict on top (F6, WP-6c review 2026-09-09). This
+# module's own docstring claims each subprocess starts "from a documented
+# environment ALONE"; an ambient `R2DB_*`/`MITATEDB_*` value already set
+# in the shell that launched this test suite (a leftover from an
+# operator's own manual testing, or the OTHER peer's own value on a
+# shared dev host) would otherwise silently satisfy a key this launcher's
+# own dict below forgot to pass, making that gap invisible instead of
+# failing loudly.
+_PEER_ENV_PREFIXES = ("R2DB_", "MITATEDB_")
+
+
+def _scrub_peer_env_prefixes(env: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not key.startswith(_PEER_ENV_PREFIXES)}
+
+
+@contextlib.contextmanager
+def _peer_env_prefixes_removed_from_os_environ():
+    """Temporarily removes every ambient `R2DB_*`/`MITATEDB_*` key from
+    THIS process' own `os.environ` for the duration of the `with` block --
+    `socket_harness.start_uvicorn_subprocess` (outside this WP's own 7
+    touched files, never edited here) always merges a fresh `dict(os.
+    environ)` under its own caller-supplied `env=` mapping, so this is the
+    only lever available to keep an ambient value under either prefix from
+    reaching a uvicorn subprocess this launcher starts (see
+    `_scrub_peer_env_prefixes`'s own docstring for why that matters).
+    `subprocess.Popen` (which `start_uvicorn_subprocess` calls) copies its
+    `env=` mapping at call time, so restoring the removed keys immediately
+    after it returns cannot affect the already-spawned child."""
+    removed = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith(_PEER_ENV_PREFIXES)}
+    try:
+        yield
+    finally:
+        os.environ.update(removed)
+
+
 # Distinct from "mitatedbtest*"/"mitatedbhttp*" (this repository's other
 # throwaway-prefix conventions) so this launcher's own startup sweep can
 # never collide with a concurrently-running sibling's platform.
 _PREFIX_TAG = "mtdbc26"
+
+# Cross-process advisory-lock directory for `_claim_prefix_lock`/`_release_
+# prefix_lock` below (F2, WP-6c review 2026-09-09) -- peer-scoped so this
+# launcher's own lock files can never collide with r2db-api's own, even
+# though `_PREFIX_TAG` already makes that collision impossible on its own
+# (belt-and-suspenders, negligible cost).
+_LOCK_DIR = Path(tempfile.gettempdir()) / f"conformance-{_PREFIX_TAG}-locks"
 
 
 class LauncherStartupError(RuntimeError):
@@ -107,6 +170,45 @@ def _dsn_with(base_dsn: str, **overrides: str) -> str:
     return make_conninfo(**params)
 
 
+def _lock_path(prefix: str) -> Path:
+    return _LOCK_DIR / f"{prefix}.lock"
+
+
+def _claim_prefix_lock(prefix: str):
+    """Best-effort, cross-process advisory lock (`fcntl.flock`, non-
+    blocking) proving no OTHER live process is currently using `prefix`
+    (F2, WP-6c review 2026-09-09): `_sweep_stale` must drop ONLY genuinely
+    orphaned residue -- a run that crashed without ever calling `stop()`
+    -- never a SIBLING launcher instance's own currently-alive platform,
+    just because both happen to share this launcher's own `_PREFIX_TAG`.
+    Held from the moment a fresh prefix is minted (`_ensure_provisioned`/
+    `attempt_start_without_process_ceilings`) until `stop()` releases it;
+    the OS releases the flock automatically even if this process is
+    SIGKILLed, so a prefix left behind by a crash is always claimable
+    again by the next sweep. Returns the open file handle (kept open --
+    closing it releases the lock) on success, `None` if another live
+    process already holds it."""
+    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    handle = open(_lock_path(prefix), "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def _release_prefix_lock(prefix: str, handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    with contextlib.suppress(OSError):
+        _lock_path(prefix).unlink()
+
+
 def _run_psql(dsn: str, path: Path, variables: Optional[dict[str, str]] = None) -> None:
     command = ["psql", dsn, "-v", "ON_ERROR_STOP=1"]
     for key, value in (variables or {}).items():
@@ -119,9 +221,12 @@ def _run_psql(dsn: str, path: Path, variables: Optional[dict[str, str]] = None) 
 
 def _run_ops(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
     """Real `python -m mitatedb_api.ops` subprocess (design D-1 (B) 1:
-    "実 CLI で") -- never raises on non-zero exit, the fail-fast test needs
-    the raw result."""
-    full_env = dict(os.environ)
+    "実 CLI で") -- `env` is merged over a copy of this launcher process'
+    own OS environment, with both peers' own env-var prefixes scrubbed
+    first (F6, WP-6c review 2026-09-09; see `_scrub_peer_env_prefixes`'s
+    own docstring). Never raises on non-zero exit, the fail-fast test
+    needs the raw result."""
+    full_env = _scrub_peer_env_prefixes(os.environ)
     full_env.update(_with_pythonpath(dict(env)))
     return subprocess.run(
         [sys.executable, "-m", "mitatedb_api.ops", *args],
@@ -158,6 +263,23 @@ def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
 
 
 def _sweep_stale(admin_dsn: str) -> None:
+    """Startup-time sweep of a PREVIOUS run's residue (this launcher's own
+    prefix pattern only -- never a bare wildcard). F2 correction (WP-6c
+    review 2026-09-09): every prefix this launcher generates DOES carry
+    its own fresh `secrets.token_hex`, so two launcher instances never
+    generate the SAME prefix -- but that alone does not stop this sweep
+    from dropping a DIFFERENT, still-alive prefix it happens to find
+    already sitting in `pg_database` (e.g. a sibling launcher instance
+    provisioned moments earlier and not yet stopped, on a shared local
+    cluster): the query below matches on `_PREFIX_TAG` alone, with no way
+    to tell "mine, not yet created" apart from "a live sibling's, already
+    running" from the database's own point of view. `_claim_prefix_lock`
+    resolves that: a prefix currently held by a live process (anywhere on
+    this machine, from the moment it is minted in `_ensure_provisioned`/
+    `attempt_start_without_process_ceilings` until `stop()` releases it)
+    is skipped here, never swept -- only a prefix whose OWN lock is
+    claimable (its holder already exited, crashed or otherwise) is
+    genuine residue."""
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -166,7 +288,16 @@ def _sweep_stale(admin_dsn: str) -> None:
     finally:
         admin.close()
     for prefix in stale_prefixes:
-        _sweep_prefix(admin_dsn, prefix)
+        lock = _claim_prefix_lock(prefix)
+        if lock is None:
+            # A live process still holds this prefix's own lock -- it is
+            # currently in use by a sibling launcher instance, never
+            # stale (F2).
+            continue
+        try:
+            _sweep_prefix(admin_dsn, prefix)
+        finally:
+            _release_prefix_lock(prefix, lock)
 
 
 @dataclass(frozen=True)
@@ -305,6 +436,8 @@ class RealServerMitateDB:
 
     def __init__(self) -> None:
         self._script_dir: Optional[Path] = None
+        self._prefix: Optional[str] = None
+        self._prefix_lock = None
         self._platform: Optional[_Platform] = None
         self._app: Optional[_AppInfo] = None
         self._control_secret: Optional[str] = None
@@ -322,8 +455,9 @@ class RealServerMitateDB:
             return
         _sweep_stale(_admin_dsn())
         self._script_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-scripts-"))
-        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}"
-        self._platform = _bootstrap_platform(prefix, _admin_dsn(), self._script_dir)
+        self._prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}"
+        self._prefix_lock = _claim_prefix_lock(self._prefix)
+        self._platform = _bootstrap_platform(self._prefix, _admin_dsn(), self._script_dir)
         self._app = _provision_app(self._platform, self._script_dir, "c26app")
         self._runtime_secret = _issue_runtime_credential(self._platform, self._app.application_id)
         bootstrapped = _run_ops(_ops_env(self._platform), "bootstrap")
@@ -336,6 +470,25 @@ class RealServerMitateDB:
 
     def _record(self, label: str) -> None:
         self._events.append((label, time.monotonic()))
+
+    # -- SQL read-back of what was actually declared (F1, WP-6c review
+    # 2026-09-09) -- see `RealServerR2db.read_declared_surfaces`'s
+    # identical docstring; this peer's own owner connection is `provision_
+    # dsn`, not `control_dsn`. -----------------------------------------
+
+    def read_declared_surfaces(self) -> dict[str, Any]:
+        assert self._platform is not None
+        with psycopg.connect(self._platform.provision_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT value FROM {}.platform_declarations WHERE key = 'surfaces'").format(
+                        sql.Identifier(self._platform.schema)
+                    )
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise LauncherStartupError("no 'surfaces' row found in platform_declarations")
+        return row[0]
 
     def _app_env(self) -> dict[str, str]:
         assert self._platform is not None and self._app is not None
@@ -362,44 +515,50 @@ class RealServerMitateDB:
     def start(self, *, ceilings: Mapping[str, int]) -> None:
         if self._started:
             raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
-        self._ensure_provisioned()
         self._events = []
-        assert self._platform is not None
-
-        reservation = sh.reserve_port()
-        listen_port = reservation.port
-        data_base_url = f"http://127.0.0.1:{listen_port}/v1"
-        control_base_url = f"http://127.0.0.1:{listen_port}/control/v1"
-
-        surfaces_result = _run_ops(
-            _ops_env(self._platform), "declare-surfaces",
-            "--data-base-url", data_base_url, "--control-base-url", control_base_url,
-        )
-        if surfaces_result.returncode != 0:
-            reservation.close()
-            raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces_result.stdout}\n{surfaces_result.stderr}")
-        self._record("declare_surfaces")
-
-        ceilings_result = _run_ops(
-            _ops_env(self._platform), "declare-process-ceilings",
-            "--data", str(ceilings["data"]), "--control", str(ceilings["control"]),
-        )
-        if ceilings_result.returncode != 0:
-            reservation.close()
-            raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
-        self._record("declare_process_ceilings")
-
-        assert self._script_dir is not None
-        self._data_handle = sh.start_uvicorn_subprocess(
-            "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", env=_with_pythonpath(self._app_env()),
-        )
-        self._record("uvicorn_data_start")
-        self._control_handle = sh.start_uvicorn_subprocess(
-            "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", env=_with_pythonpath(self._control_env()),
-        )
-        self._record("uvicorn_control_start")
-
+        # F3 correction (WP-6c review 2026-09-09): see `RealServerR2db.
+        # start`'s identical comment -- the ENTIRE body below is now
+        # inside this one `try`, so ANY failure anywhere in `start()` runs
+        # the FULL `self.stop()`, never just `_best_effort_stop_
+        # processes()`.
+        reservation: Optional[sh.ReservedPort] = None
         try:
+            self._ensure_provisioned()
+            assert self._platform is not None
+
+            reservation = sh.reserve_port()
+            listen_port = reservation.port
+            data_base_url = f"http://127.0.0.1:{listen_port}/v1"
+            control_base_url = f"http://127.0.0.1:{listen_port}/control/v1"
+
+            surfaces_result = _run_ops(
+                _ops_env(self._platform), "declare-surfaces",
+                "--data-base-url", data_base_url, "--control-base-url", control_base_url,
+            )
+            if surfaces_result.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces_result.stdout}\n{surfaces_result.stderr}")
+            self._record("declare_surfaces")
+
+            ceilings_result = _run_ops(
+                _ops_env(self._platform), "declare-process-ceilings",
+                "--data", str(ceilings["data"]), "--control", str(ceilings["control"]),
+            )
+            if ceilings_result.returncode != 0:
+                raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
+            self._record("declare_process_ceilings")
+
+            assert self._script_dir is not None
+            with _peer_env_prefixes_removed_from_os_environ():
+                self._data_handle = sh.start_uvicorn_subprocess(
+                    "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", env=_with_pythonpath(self._app_env()),
+                )
+            self._record("uvicorn_data_start")
+            with _peer_env_prefixes_removed_from_os_environ():
+                self._control_handle = sh.start_uvicorn_subprocess(
+                    "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", env=_with_pythonpath(self._control_env()),
+                )
+            self._record("uvicorn_control_start")
+
             nginx_bin = sh.find_nginx_binary()
             nginx_dir = Path(tempfile.mkdtemp(prefix="conf-socket-"))
             prefix_dir = nginx_dir / sh.NGINX_PREFIX_MARKER
@@ -408,6 +567,7 @@ class RealServerMitateDB:
             (prefix_dir / "proxy_temp").mkdir(parents=True, exist_ok=True)
             self._nginx_prefix_dir = nginx_dir
             reservation.close()
+            reservation = None
             conf_path = prefix_dir / "nginx.conf"
             conf_path.write_text(sh.render_nginx_conf(
                 prefix=prefix_dir, listen_port=listen_port,
@@ -423,13 +583,8 @@ class RealServerMitateDB:
             sh.wait_until_ready(f"{control_base_url}/capabilities", label="mitatedb control")
             self._record("readiness_control")
         except BaseException:
-            # Full `stop()` (never just `_best_effort_stop_processes()`) --
-            # a failed `start()` can leave the throwaway platform database
-            # this call's own `_ensure_provisioned()` already created; a
-            # caller that only sees an exception out of `start()` never
-            # calls `stop()` itself (there is nothing "started" to stop,
-            # from its own point of view), so this is the only place that
-            # residue is ever swept.
+            if reservation is not None:
+                reservation.close()
             self.stop()
             raise
 
@@ -455,13 +610,15 @@ class RealServerMitateDB:
         self._control_handle.stop()
 
         assert self._script_dir is not None
-        self._data_handle = sh.start_uvicorn_subprocess(
-            "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", port=data_port, env=_with_pythonpath(self._app_env()),
-        )
+        with _peer_env_prefixes_removed_from_os_environ():
+            self._data_handle = sh.start_uvicorn_subprocess(
+                "mitatedb_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", port=data_port, env=_with_pythonpath(self._app_env()),
+            )
         self._record("uvicorn_data_restart")
-        self._control_handle = sh.start_uvicorn_subprocess(
-            "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", port=control_port, env=_with_pythonpath(self._control_env()),
-        )
+        with _peer_env_prefixes_removed_from_os_environ():
+            self._control_handle = sh.start_uvicorn_subprocess(
+                "mitatedb_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", port=control_port, env=_with_pythonpath(self._control_env()),
+            )
         self._record("uvicorn_control_restart")
 
         sh.wait_until_ready(f"{self.data_base_url}/capabilities", label="mitatedb data (restart)")
@@ -481,6 +638,13 @@ class RealServerMitateDB:
                 pass
 
     def stop(self) -> None:
+        """F3 correction (WP-6c review 2026-09-09): see `RealServerR2db.
+        stop`'s identical docstring -- sweeps by `self._prefix` (set the
+        moment a prefix is minted, before `_bootstrap_platform` even
+        runs) via the module-level `_admin_dsn()`, so a `start()` that
+        failed while `_bootstrap_platform` itself was still running
+        (leaving `self._platform` unset) still gets its partial residue
+        swept and its own prefix lock released here."""
         self._best_effort_stop_processes()
         self._data_handle = None
         self._control_handle = None
@@ -488,8 +652,11 @@ class RealServerMitateDB:
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
             self._nginx_prefix_dir = None
-        if self._platform is not None:
-            _sweep_prefix(self._platform.admin_dsn, self._platform.prefix)
+        if self._prefix is not None:
+            _sweep_prefix(_admin_dsn(), self._prefix)
+            _release_prefix_lock(self._prefix, self._prefix_lock)
+        self._prefix = None
+        self._prefix_lock = None
         if self._script_dir is not None:
             shutil.rmtree(self._script_dir, ignore_errors=True)
             self._script_dir = None
@@ -523,6 +690,7 @@ class RealServerMitateDB:
         attempt_start_without_process_ceilings`'s identical docstring."""
         script_dir = Path(tempfile.mkdtemp(prefix="mitatedb-c26-f15-"))
         prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15"
+        lock = _claim_prefix_lock(prefix)
         try:
             platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
             app = _provision_app(platform, script_dir, "f15app")
@@ -534,7 +702,7 @@ class RealServerMitateDB:
             if surfaces.returncode != 0:
                 raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
             app_id_upper = app.application_id.upper()
-            env = dict(os.environ)
+            env = _scrub_peer_env_prefixes(os.environ)
             env.update(_with_pythonpath({
                 "MITATEDB_CREDENTIAL_PEPPER": platform.app_pepper,
                 "MITATEDB_PLATFORM_DSN": platform.api_dsn,
@@ -552,4 +720,5 @@ class RealServerMitateDB:
             return result
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)

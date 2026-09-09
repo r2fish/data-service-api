@@ -54,6 +54,8 @@ own.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import secrets
@@ -105,6 +107,44 @@ def _with_pythonpath(env: dict[str, str]) -> dict[str, str]:
     merged["PYTHONPATH"] = _WORKTREE_SRC if not existing else f"{_WORKTREE_SRC}{os.pathsep}{existing}"
     return merged
 
+
+# Both peers' own env-var prefixes -- stripped from whatever this launcher
+# inherits from ITS OWN OS environment before layering its own explicit,
+# fully-documented dict on top (F6, WP-6c review 2026-09-09). This
+# module's own docstring claims each subprocess starts "from a documented
+# environment ALONE"; an ambient `R2DB_*`/`MITATEDB_*` value already set
+# in the shell that launched this test suite (a leftover from an
+# operator's own manual testing, or the OTHER peer's own value on a
+# shared dev host) would otherwise silently satisfy a key this launcher's
+# own dict below forgot to pass, making that gap invisible instead of
+# failing loudly.
+_PEER_ENV_PREFIXES = ("R2DB_", "MITATEDB_")
+
+
+def _scrub_peer_env_prefixes(env: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not key.startswith(_PEER_ENV_PREFIXES)}
+
+
+@contextlib.contextmanager
+def _peer_env_prefixes_removed_from_os_environ():
+    """Temporarily removes every ambient `R2DB_*`/`MITATEDB_*` key from
+    THIS process' own `os.environ` for the duration of the `with` block --
+    `socket_harness.start_uvicorn_subprocess` (outside this WP's own 7
+    touched files, never edited here) always merges a fresh `dict(os.
+    environ)` under its own caller-supplied `env=` mapping, so this is the
+    only lever available to keep an ambient value under either prefix from
+    reaching a uvicorn subprocess this launcher starts (see
+    `_scrub_peer_env_prefixes`'s own docstring for why that matters).
+    `subprocess.Popen` (which `start_uvicorn_subprocess` calls) copies its
+    `env=` mapping at call time, so restoring the removed keys immediately
+    after it returns cannot affect the already-spawned child."""
+    removed = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith(_PEER_ENV_PREFIXES)}
+    try:
+        yield
+    finally:
+        os.environ.update(removed)
+
+
 # Same knob `conformance_adapter_r2db_http.py`/`tests/test_postgres.py`
 # already use for "where is the admin/superuser PostgreSQL connection for
 # this repository's own throwaway-provisioning tests" -- deliberately
@@ -118,6 +158,13 @@ ADMIN_DSN_DEFAULT = "host=/tmp port=5432 dbname=postgres"
 # can never collide with (and drop) a concurrently-running sibling
 # adapter's own throwaway platform on a shared local cluster.
 _PREFIX_TAG = "r2dbc26"
+
+# Cross-process advisory-lock directory for `_claim_prefix_lock`/`_release_
+# prefix_lock` below (F2, WP-6c review 2026-09-09) -- peer-scoped so this
+# launcher's own lock files can never collide with MitateDB-api's own,
+# even though `_PREFIX_TAG` already makes that collision impossible on its
+# own (belt-and-suspenders, negligible cost).
+_LOCK_DIR = Path(tempfile.gettempdir()) / f"conformance-{_PREFIX_TAG}-locks"
 
 
 class LauncherStartupError(RuntimeError):
@@ -136,6 +183,45 @@ def _dsn_with(base_dsn: str, **overrides: str) -> str:
     return make_conninfo(**params)
 
 
+def _lock_path(prefix: str) -> Path:
+    return _LOCK_DIR / f"{prefix}.lock"
+
+
+def _claim_prefix_lock(prefix: str):
+    """Best-effort, cross-process advisory lock (`fcntl.flock`, non-
+    blocking) proving no OTHER live process is currently using `prefix`
+    (F2, WP-6c review 2026-09-09): `_sweep_stale` must drop ONLY genuinely
+    orphaned residue -- a run that crashed without ever calling `stop()`
+    -- never a SIBLING launcher instance's own currently-alive platform,
+    just because both happen to share this launcher's own `_PREFIX_TAG`.
+    Held from the moment a fresh prefix is minted (`_ensure_provisioned`/
+    `attempt_start_without_process_ceilings`) until `stop()` releases it;
+    the OS releases the flock automatically even if this process is
+    SIGKILLed, so a prefix left behind by a crash is always claimable
+    again by the next sweep. Returns the open file handle (kept open --
+    closing it releases the lock) on success, `None` if another live
+    process already holds it."""
+    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    handle = open(_lock_path(prefix), "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def _release_prefix_lock(prefix: str, handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    with contextlib.suppress(OSError):
+        _lock_path(prefix).unlink()
+
+
 def _run_psql(dsn: str, path: Path, variables: Optional[dict[str, str]] = None) -> None:
     command = ["psql", dsn, "-v", "ON_ERROR_STOP=1"]
     for key, value in (variables or {}).items():
@@ -149,12 +235,15 @@ def _run_psql(dsn: str, path: Path, variables: Optional[dict[str, str]] = None) 
 def _run_ops(env: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
     """Runs the REAL `python -m r2db_api.ops` CLI as a real subprocess
     (design D-1 (B) 1: "実 CLI で") -- `env` is merged over a copy of this
-    launcher process' own OS environment (mirrors `socket_harness.start_
-    uvicorn_subprocess`'s identical merge, so this CLI invocation sees the
-    same PATH/venv-derived environment the eventual app subprocess will).
-    Never raises on a non-zero exit -- the fail-fast test needs the raw
-    `CompletedProcess` to inspect `returncode`/`stderr` itself."""
-    full_env = dict(os.environ)
+    launcher process' own OS environment, with both peers' own env-var
+    prefixes scrubbed first (F6, WP-6c review 2026-09-09; see
+    `_scrub_peer_env_prefixes`'s own docstring), so this CLI invocation
+    sees the same PATH/venv-derived environment the eventual app
+    subprocess will, but none of either peer's own ambient config leaking
+    in from the operator's shell. Never raises on a non-zero exit -- the
+    fail-fast test needs the raw `CompletedProcess` to inspect `returncode`
+    /`stderr` itself."""
+    full_env = _scrub_peer_env_prefixes(os.environ)
     full_env.update(_with_pythonpath(dict(env)))
     return subprocess.run(
         [sys.executable, "-m", "r2db_api.ops", *args],
@@ -200,14 +289,22 @@ def _sweep_prefix(admin_dsn: str, prefix: str) -> None:
 
 def _sweep_stale(admin_dsn: str) -> None:
     """Startup-time sweep of a PREVIOUS run's residue (this launcher's own
-    prefix pattern only -- never a bare wildcard). No advisory-lock guard
-    against a genuinely-concurrent sibling run is needed here (unlike
-    `conformance_adapter_r2db_http.py`'s own `_sweep_stale_artifacts`):
-    every prefix this launcher ever generates carries its own fresh
-    `secrets.token_hex`, so two launcher instances never share one, and
-    `test_c26_composition_root.py` runs each launcher's own tests in its
-    own dedicated `xdist_group` (never two workers touching the SAME
-    launcher instance's platform at once)."""
+    prefix pattern only -- never a bare wildcard). F2 correction (WP-6c
+    review 2026-09-09): every prefix this launcher generates DOES carry
+    its own fresh `secrets.token_hex`, so two launcher instances never
+    generate the SAME prefix -- but that alone does not stop this sweep
+    from dropping a DIFFERENT, still-alive prefix it happens to find
+    already sitting in `pg_database` (e.g. a sibling launcher instance
+    provisioned moments earlier and not yet stopped, on a shared local
+    cluster): the query below matches on `_PREFIX_TAG` alone, with no way
+    to tell "mine, not yet created" apart from "a live sibling's, already
+    running" from the database's own point of view. `_claim_prefix_lock`
+    resolves that: a prefix currently held by a live process (anywhere on
+    this machine, from the moment it is minted in `_ensure_provisioned`/
+    `attempt_start_without_process_ceilings` until `stop()` releases it)
+    is skipped here, never swept -- only a prefix whose OWN lock is
+    claimable (its holder already exited, crashed or otherwise) is
+    genuine residue."""
     admin = psycopg.connect(admin_dsn, autocommit=True)
     try:
         with admin.cursor() as cur:
@@ -216,7 +313,16 @@ def _sweep_stale(admin_dsn: str) -> None:
     finally:
         admin.close()
     for prefix in stale_prefixes:
-        _sweep_prefix(admin_dsn, prefix)
+        lock = _claim_prefix_lock(prefix)
+        if lock is None:
+            # A live process still holds this prefix's own lock -- it is
+            # currently in use by a sibling launcher instance, never
+            # stale (F2).
+            continue
+        try:
+            _sweep_prefix(admin_dsn, prefix)
+        finally:
+            _release_prefix_lock(prefix, lock)
 
 
 @dataclass(frozen=True)
@@ -351,6 +457,8 @@ class RealServerR2db:
 
     def __init__(self) -> None:
         self._script_dir: Optional[Path] = None
+        self._prefix: Optional[str] = None
+        self._prefix_lock = None
         self._platform: Optional[_Platform] = None
         self._app: Optional[_AppInfo] = None
         self._control_credential_id: Optional[str] = None
@@ -371,8 +479,9 @@ class RealServerR2db:
             return
         _sweep_stale(_admin_dsn())
         self._script_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-scripts-"))
-        prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}"
-        self._platform = _bootstrap_platform(prefix, _admin_dsn(), self._script_dir)
+        self._prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}"
+        self._prefix_lock = _claim_prefix_lock(self._prefix)
+        self._platform = _bootstrap_platform(self._prefix, _admin_dsn(), self._script_dir)
         self._app = _provision_app(self._platform, self._script_dir, "c26app")
         issued = _run_ops(_ops_env(self._platform), "issue-credential", self._app.slug, "runtime")
         if issued.returncode != 0:
@@ -391,40 +500,15 @@ class RealServerR2db:
     def _record(self, label: str) -> None:
         self._events.append((label, time.monotonic()))
 
-    # -- start/restart/stop --------------------------------------------
+    # -- per-process env (F8, WP-6c review 2026-09-09: `start()` and
+    # `restart()` build the IDENTICAL two dicts -- a single place for each
+    # avoids the drift risk of fixing one copy and not the other; mirrors
+    # MitateDB-api's own `_app_env`/`_control_env` shape) ----------------
 
-    def start(self, *, ceilings: Mapping[str, int]) -> None:
-        if self._started:
-            raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
-        self._ensure_provisioned()
-        self._events = []
+    def _app_env(self) -> dict[str, str]:
         assert self._platform is not None and self._app is not None
-
-        reservation = sh.reserve_port()
-        listen_port = reservation.port
-        data_base_url = f"http://127.0.0.1:{listen_port}/v1"
-        control_base_url = f"http://127.0.0.1:{listen_port}/control/v1"
-
-        surfaces_result = _run_ops(
-            _ops_env(self._platform), "declare-surfaces",
-            "--data-base-url", data_base_url, "--control-base-url", control_base_url,
-        )
-        if surfaces_result.returncode != 0:
-            reservation.close()
-            raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces_result.stdout}\n{surfaces_result.stderr}")
-        self._record("declare_surfaces")
-
-        ceilings_result = _run_ops(
-            _ops_env(self._platform), "declare-process-ceilings",
-            "--data", str(ceilings["data"]), "--control", str(ceilings["control"]),
-        )
-        if ceilings_result.returncode != 0:
-            reservation.close()
-            raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
-        self._record("declare_process_ceilings")
-
         slug_upper = self._app.slug.upper()
-        app_env = {
+        return {
             "R2DB_CREDENTIAL_PEPPER": self._platform.app_pepper,
             "R2DB_PLATFORM_DSN": self._platform.api_dsn,
             "R2DB_PLATFORM_SCHEMA": self._platform.schema,
@@ -433,26 +517,103 @@ class RealServerR2db:
             f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": self._app.developer_dsn,
             "R2DB_CONTROL_PLANE_STATUS": "enabled",
         }
-        control_env = {
+
+    def _control_env(self) -> dict[str, str]:
+        assert self._platform is not None
+        return {
             "R2DB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
             "R2DB_CONTROL_CREDENTIAL_PEPPER": self._platform.control_pepper,
             "R2DB_CREDENTIAL_PEPPER": self._platform.app_pepper,
             "R2DB_PLATFORM_SCHEMA": self._platform.schema,
         }
 
-        assert self._script_dir is not None
-        pidfile_data = self._script_dir / "uvicorn-data.pid"
-        pidfile_control = self._script_dir / "uvicorn-control.pid"
-        self._data_handle = sh.start_uvicorn_subprocess(
-            "r2db_api.main:app", pidfile=pidfile_data, env=_with_pythonpath(app_env),
-        )
-        self._record("uvicorn_data_start")
-        self._control_handle = sh.start_uvicorn_subprocess(
-            "r2db_api.control_main:app", pidfile=pidfile_control, env=_with_pythonpath(control_env),
-        )
-        self._record("uvicorn_control_start")
+    # -- SQL read-back of what was actually declared (F1, WP-6c review
+    # 2026-09-09) -----------------------------------------------------
 
+    def read_declared_surfaces(self) -> dict[str, Any]:
+        """Reads the `surfaces` row directly from `platform_declarations`
+        over SQL -- never through the served capabilities document --
+        using the SAME `control_dsn` connection `_bootstrap_platform`
+        itself used to create that table (schema owner, so no separate
+        GRANT bookkeeping is needed here). This is completion condition
+        2's own decisive cross-check (design D-1 (B) 2): the value a
+        served capabilities document reports for `surfaces` must not only
+        be self-consistent between planes but must actually MATCH what
+        `ops declare-surfaces` persisted, not something the launcher's
+        own `data_base_url`/`control_base_url` PROPERTIES independently
+        computed."""
+        assert self._platform is not None
+        with psycopg.connect(self._platform.control_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("SELECT value FROM {}.platform_declarations WHERE key = 'surfaces'").format(
+                        sql.Identifier(self._platform.schema)
+                    )
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise LauncherStartupError("no 'surfaces' row found in platform_declarations")
+        return row[0]
+
+    # -- start/restart/stop --------------------------------------------
+
+    def start(self, *, ceilings: Mapping[str, int]) -> None:
+        if self._started:
+            raise LauncherStartupError("start() called while already started -- call stop() or restart() first")
+        self._events = []
+        # F3 correction (WP-6c review 2026-09-09): the ENTIRE body below
+        # -- `_ensure_provisioned()` (which can itself leave a throwaway
+        # platform DB/role behind if it fails partway), the port
+        # reservation, both `declare-*` CLI calls, both uvicorn
+        # subprocess starts, and the nginx/readiness sequence -- is now
+        # inside this one `try`, so ANY failure anywhere in `start()`
+        # (not merely the previous nginx-onward slice) runs the FULL
+        # `self.stop()` (never just `_best_effort_stop_processes()`): a
+        # caller that only sees an exception out of `start()` never calls
+        # `stop()` itself (there is nothing "started" to stop, from its
+        # own point of view), so this is the only place such residue is
+        # ever swept. `reservation` is tracked outside the `try` so the
+        # `except` clause can always close it, however far execution got.
+        reservation: Optional[sh.ReservedPort] = None
         try:
+            self._ensure_provisioned()
+            assert self._platform is not None and self._app is not None
+
+            reservation = sh.reserve_port()
+            listen_port = reservation.port
+            data_base_url = f"http://127.0.0.1:{listen_port}/v1"
+            control_base_url = f"http://127.0.0.1:{listen_port}/control/v1"
+
+            surfaces_result = _run_ops(
+                _ops_env(self._platform), "declare-surfaces",
+                "--data-base-url", data_base_url, "--control-base-url", control_base_url,
+            )
+            if surfaces_result.returncode != 0:
+                raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces_result.stdout}\n{surfaces_result.stderr}")
+            self._record("declare_surfaces")
+
+            ceilings_result = _run_ops(
+                _ops_env(self._platform), "declare-process-ceilings",
+                "--data", str(ceilings["data"]), "--control", str(ceilings["control"]),
+            )
+            if ceilings_result.returncode != 0:
+                raise LauncherStartupError(f"declare-process-ceilings failed:\n{ceilings_result.stdout}\n{ceilings_result.stderr}")
+            self._record("declare_process_ceilings")
+
+            assert self._script_dir is not None
+            pidfile_data = self._script_dir / "uvicorn-data.pid"
+            pidfile_control = self._script_dir / "uvicorn-control.pid"
+            with _peer_env_prefixes_removed_from_os_environ():
+                self._data_handle = sh.start_uvicorn_subprocess(
+                    "r2db_api.main:app", pidfile=pidfile_data, env=_with_pythonpath(self._app_env()),
+                )
+            self._record("uvicorn_data_start")
+            with _peer_env_prefixes_removed_from_os_environ():
+                self._control_handle = sh.start_uvicorn_subprocess(
+                    "r2db_api.control_main:app", pidfile=pidfile_control, env=_with_pythonpath(self._control_env()),
+                )
+            self._record("uvicorn_control_start")
+
             nginx_bin = sh.find_nginx_binary()
             nginx_dir = Path(tempfile.mkdtemp(prefix="conf-socket-"))
             prefix_dir = nginx_dir / sh.NGINX_PREFIX_MARKER
@@ -461,6 +622,7 @@ class RealServerR2db:
             (prefix_dir / "proxy_temp").mkdir(parents=True, exist_ok=True)
             self._nginx_prefix_dir = nginx_dir
             reservation.close()
+            reservation = None
             conf_path = prefix_dir / "nginx.conf"
             conf_path.write_text(sh.render_nginx_conf(
                 prefix=prefix_dir, listen_port=listen_port,
@@ -476,13 +638,8 @@ class RealServerR2db:
             sh.wait_until_ready(f"{control_base_url}/capabilities", label="r2db control")
             self._record("readiness_control")
         except BaseException:
-            # Full `stop()` (never just `_best_effort_stop_processes()`) --
-            # a failed `start()` can leave the throwaway platform database
-            # this call's own `_ensure_provisioned()` already created; a
-            # caller that only sees an exception out of `start()` never
-            # calls `stop()` itself (there is nothing "started" to stop,
-            # from its own point of view), so this is the only place that
-            # residue is ever swept.
+            if reservation is not None:
+                reservation.close()
             self.stop()
             raise
 
@@ -516,30 +673,16 @@ class RealServerR2db:
         self._data_handle.stop()
         self._control_handle.stop()
 
-        slug_upper = self._app.slug.upper()
-        app_env = {
-            "R2DB_CREDENTIAL_PEPPER": self._platform.app_pepper,
-            "R2DB_PLATFORM_DSN": self._platform.api_dsn,
-            "R2DB_PLATFORM_SCHEMA": self._platform.schema,
-            "R2DB_SERVE_APPS": self._app.slug,
-            f"R2DB_APP_{slug_upper}_RUNTIME_DSN": self._app.runtime_dsn,
-            f"R2DB_APP_{slug_upper}_DEVELOPER_DSN": self._app.developer_dsn,
-            "R2DB_CONTROL_PLANE_STATUS": "enabled",
-        }
-        control_env = {
-            "R2DB_CONTROLPLANE_DSN": self._platform.controlplane_dsn,
-            "R2DB_CONTROL_CREDENTIAL_PEPPER": self._platform.control_pepper,
-            "R2DB_CREDENTIAL_PEPPER": self._platform.app_pepper,
-            "R2DB_PLATFORM_SCHEMA": self._platform.schema,
-        }
         assert self._script_dir is not None
-        self._data_handle = sh.start_uvicorn_subprocess(
-            "r2db_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", port=data_port, env=_with_pythonpath(app_env),
-        )
+        with _peer_env_prefixes_removed_from_os_environ():
+            self._data_handle = sh.start_uvicorn_subprocess(
+                "r2db_api.main:app", pidfile=self._script_dir / "uvicorn-data.pid", port=data_port, env=_with_pythonpath(self._app_env()),
+            )
         self._record("uvicorn_data_restart")
-        self._control_handle = sh.start_uvicorn_subprocess(
-            "r2db_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", port=control_port, env=_with_pythonpath(control_env),
-        )
+        with _peer_env_prefixes_removed_from_os_environ():
+            self._control_handle = sh.start_uvicorn_subprocess(
+                "r2db_api.control_main:app", pidfile=self._script_dir / "uvicorn-control.pid", port=control_port, env=_with_pythonpath(self._control_env()),
+            )
         self._record("uvicorn_control_restart")
 
         sh.wait_until_ready(f"{self.data_base_url}/capabilities", label="r2db data (restart)")
@@ -562,7 +705,14 @@ class RealServerR2db:
         """Stops both uvicorn subprocesses and nginx, then drops the
         throwaway platform (every database/role under this run's own
         prefix). Idempotent -- a second call with nothing left running is
-        a no-op."""
+        a no-op. F3 correction (WP-6c review 2026-09-09): sweeps by
+        `self._prefix` (set the moment a prefix is minted in `_ensure_
+        provisioned`, before `_bootstrap_platform` even runs) rather than
+        `self._platform.prefix`, and always via the module-level `_admin_
+        dsn()` -- so a `start()` that failed WHILE `_bootstrap_platform`
+        itself was still running (leaving `self._platform` unset) still
+        gets its partial DB/role residue swept and its own prefix lock
+        released here, not left behind."""
         self._best_effort_stop_processes()
         self._data_handle = None
         self._control_handle = None
@@ -570,8 +720,11 @@ class RealServerR2db:
         if self._nginx_prefix_dir is not None:
             shutil.rmtree(self._nginx_prefix_dir, ignore_errors=True)
             self._nginx_prefix_dir = None
-        if self._platform is not None:
-            _sweep_prefix(self._platform.admin_dsn, self._platform.prefix)
+        if self._prefix is not None:
+            _sweep_prefix(_admin_dsn(), self._prefix)
+            _release_prefix_lock(self._prefix, self._prefix_lock)
+        self._prefix = None
+        self._prefix_lock = None
         if self._script_dir is not None:
             shutil.rmtree(self._script_dir, ignore_errors=True)
             self._script_dir = None
@@ -613,6 +766,7 @@ class RealServerR2db:
         down again before returning, success or failure alike."""
         script_dir = Path(tempfile.mkdtemp(prefix="r2db-c26-f15-"))
         prefix = f"{_PREFIX_TAG}{secrets.token_hex(8)}f15"
+        lock = _claim_prefix_lock(prefix)
         try:
             platform = _bootstrap_platform(prefix, _admin_dsn(), script_dir)
             app = _provision_app(platform, script_dir, "f15app")
@@ -624,7 +778,7 @@ class RealServerR2db:
             if surfaces.returncode != 0:
                 raise LauncherStartupError(f"declare-surfaces failed:\n{surfaces.stdout}\n{surfaces.stderr}")
             slug_upper = app.slug.upper()
-            env = dict(os.environ)
+            env = _scrub_peer_env_prefixes(os.environ)
             env.update(_with_pythonpath({
                 "R2DB_CREDENTIAL_PEPPER": platform.app_pepper,
                 "R2DB_PLATFORM_DSN": platform.api_dsn,
@@ -648,4 +802,5 @@ class RealServerR2db:
             return result
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
+            _release_prefix_lock(prefix, lock)
             shutil.rmtree(script_dir, ignore_errors=True)
