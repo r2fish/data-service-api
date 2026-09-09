@@ -283,6 +283,20 @@ the number of applications onboarded, but it is still real connection
 headroom to reserve alongside the control role, interactive/admin
 sessions, and `superuser_reserved_connections`.
 
+**Fact (Phase 10 WP-8a review F-1, supervisor ruling 2026-09-08):** since
+this fix, `r2db_api.main`'s composition root no longer sizes a served
+application's role pool from `R2DB_POOL_SIZE + R2DB_POOL_MAX_OVERFLOW`
+(the `pool_size = 4` this section's worked example above still uses) -- it
+sizes it from the declared `ResourceLimits.concurrency` ceiling instead
+(default `32`, `r2db_api.main._role_pool_size`), so that `DataService.
+_slot`'s own 429 LIMIT_EXCEEDED, not a pool-exhaustion 503, is what a
+client actually hits at the declared bound. `max_connections` must
+therefore exceed the total role-pool ceiling -- declared `concurrency` ×
+role count (runtime + developer) + the platform pool -- not the smaller,
+`pool_size`-based figure this section's arithmetic above still walks
+through (deployment-wide sizing across both role AND platform pools is
+R-31's own, broader, Phase 11 concern; this note records the fact only).
+
 ## 5. Order of operations
 
 ```

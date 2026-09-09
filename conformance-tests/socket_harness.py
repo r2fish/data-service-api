@@ -774,12 +774,18 @@ def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Se
     behind: a live process (still carrying this harness's own marker
     somewhere in its argv -- `NGINX_PREFIX_MARKER` for nginx, the default)
     and a pidfile naming it, both still under a prefix directory a fresh
-    run is about to reuse or has just created. Tolerates a pid that no
-    longer exists (already dead -- `_process_cmdline` returns `""`, which
-    never contains a non-empty `marker`, so this is handled by the SAME
-    owner-check branch, not a separate code path) and a pidfile that races
-    out from under this function. Returns the pids this call actually
-    signalled (for tests to observe)."""
+    run is about to reuse or has just created. A parsed pid `<= 0` is
+    treated as never ours, explicitly and before any owner check
+    (監督裁定 2026-09-08 U-12 / external review 2 R-27): `os.kill(0, ...)`
+    signals this whole process group and `os.kill(-1, ...)` every process
+    this user may signal, so such a value is neither looked up via
+    `_process_cmdline` nor ever passed to `os.kill` -- only the stale
+    pidfile record is removed. Tolerates a pid that no longer exists
+    (already dead -- `_process_cmdline` returns `""`, which never contains
+    a non-empty `marker`, so this is handled by the SAME owner-check
+    branch, not a separate code path) and a pidfile that races out from
+    under this function. Returns the pids this call actually signalled
+    (for tests to observe)."""
     killed: list[int] = []
     if not prefix_root.exists():
         return killed
@@ -796,6 +802,14 @@ def sweep_orphans(prefix_root: Path, *, marker: str = NGINX_PREFIX_MARKER) -> Se
         try:
             pid = int(pid_text.split()[0])
         except ValueError:
+            with _suppress(FileNotFoundError):
+                pidfile.unlink()
+            continue
+        if pid <= 0:
+            # Never ours by construction: os.kill(0, ...) hits this whole
+            # process group and os.kill(-1, ...) every process this user
+            # may signal. Skip the owner check entirely -- do not even
+            # look up its command line -- and just drop the stale record.
             with _suppress(FileNotFoundError):
                 pidfile.unlink()
             continue

@@ -11,6 +11,8 @@
 
 **フェーズ9 は WP-4 (完了ゲートと記録) をもって閉じた。フェーズ7 の残は依然として WP-9 (公開ゲート) だけであり、着手条件は依頼者の実行合図である。**
 
+> **訂正註 (2026-09-08、外部レビュー 2 対応)**: 上の一文は執筆時点 (本書冒頭の記録範囲、WP-4 まで) では真であった。**同日後刻、WP-9 は実行された** — 手順 0〜6.5 完了 (履歴書換、リポジトリ再作成、credential 再発行を含む)、手順 7 (visibility の切替) のみ依頼者判断で保留 (`docs/work-orders/PUBLICATION_GATE_20260906.md` §3.2、commit `966e0af`)。本節の原文は書き換えない (執筆時点の記録として残す) — 現在地は `966e0af` 以降の記録 (`HANDOVER_20260906_FABLE.md`、`docs/design/ROADMAP_POST_PHASE7_V1.md`) を参照すること。
+
 | コミット (実装 → merge) | WP | 内容 | 集計行 |
 |---|---|---|---|
 | `95b57bf` → `dd635b0` | WP-0 | 設計 v1.3 + 作業指示書 v1.0 (完了条件 130 件 / 変異 130 件の 1 対 1) | 文書のみ |
@@ -50,7 +52,7 @@
 
 ### 2.1 エージェントが「宣言だけを読んで 1 周できる」ようになった (R-2 / R-3 / R-4 / R-5 / R-6 / R-7)
 
-- **catalog を読む → 要求を作る**: **`field_constraints` (enum / nullable) を schema 操作で宣言でき、サーバが値検証の choke point で強制し、`EntityDescriptor` が同じ版で総計として報告する** (R-2)。**`alter_field` は本フェーズの新設である** — 既存行が反する `alter_field` と `add_field(nullable: false)` は、同一 tx 内で `LOCK TABLE ... IN SHARE MODE` を取ってから走査し、1 行でも反すれば `CONFLICT` で全体を拒否して行も catalog も revision も動かさない。**「制約は書き込みだけを縛る」** — 集合外の値を使った query predicate は拒否されず、単に 0 行に一致する。
+- **catalog を読む → 要求を作る**: **`field_constraints` (enum / nullable) を schema 操作で宣言でき、サーバが値検証の choke point で強制し、`EntityDescriptor` が同じ版で総計として報告する** (R-2)。**`alter_field` は本フェーズの新設である** — 既存行が反する `alter_field` と `add_field(nullable: false)` は、同一 tx 内で `LOCK TABLE ... IN SHARE MODE` を取ってから走査し、1 行でも反すれば `CONFLICT` で全体を拒否して行も catalog も revision も動かさない。**「制約は書き込みだけを縛る」** — 集合外の値を使った query predicate は拒否されず、単に 0 行に一致する。 【訂正註 2026-09-08 (フェーズ10 R-35)】lock mode `SHARE MODE` は同一 tx の後続 `ALTER TABLE` (ACCESS EXCLUSIVE) と組み合わさると、同じ表への並行 schema 変更同士が deadlock する形だった。フェーズ10 R-35 で両 peer とも `SHARE ROW EXCLUSIVE MODE` (自己衝突。行書き込みの排除は同じ) に改めた。本文は当時の記録として残す。
 - **判定を受ける**: **`VALIDATION_FAILED` / `IDENTIFIER_INVALID` / `CAPABILITY_UNSUPPORTED` が 4 key (`field` / `declared_type` / `observed_type` / `violated_declaration`) を持ち、`violated_declaration` は 11 語の閉じた語彙である** (R-3)。**`field` は要求内パス**であり (`operations/1/values/status`、`field_constraints/status/enum`、`budget/result_items`)、**batch の index を反映する**。**行値・SQL・内部名・修正動作は載せない** (SI-10)。**「宣言を読む層が先に走ったこと」を機械が固定する** — 両 peer に AST 全数走査のテストがあり、choke point / request-shape 層に details 無しの発行箇所が 0 件であることと、型対規則 (`field_type` / `nullable` なら型の対、`enum` / `constraint_declaration` なら宣言型のみ) を静的に検査する。**control 面にも同じ規則を適用した** (裁定 O-1)。
 - **安全に再送する**: **`idempotency` が両 peer で `enabled` になった** (R-5)。**記録は application DB の side table に data tx と同一 tx で書く** — 記録が存在するのは要求が commit したときだけであり、失敗した試行は記録を残さない。**照会は認証・認可・bound の後、target-existence / 破壊確認 / precondition の前**なので、**確認つきで実行した破壊 `delete` の再送は、対象がもう無くても確認 phrase が無くても元の結果を返す**。**同 key 異 body は `CONFLICT`。replay は監査行を 1 行 (`outcome: replayed`) 残す** — 破壊操作の再送が「成功応答を返しつつ証拠ゼロ」にならないためである (SI-14)。
 - **試してから実行する**: **`dry_run` が実呼びとまったく同じ判定 (認可・破壊確認・precondition・bound) を返し、外部から見える状態変化を 0 にする** (R-4)。**plan は無状態トークン `"<sha256hex>.<application schema revision>"`** であり、要求 body が変わっても schema が変わっても `PRECONDITION_FAILED` になる。**サーバは往復をまたぐ状態を 1 バイトも持たない** (P-1)。**schema の dry_run は変更後の `descriptor` と変更前の `revision` を返す** — 確定していない値は返さない。

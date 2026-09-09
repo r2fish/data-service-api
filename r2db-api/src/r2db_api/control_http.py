@@ -85,6 +85,7 @@ from contextlib import AbstractAsyncContextManager
 from typing import Any, Callable
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -192,6 +193,19 @@ async def _read_json_object_or_empty(request: Request) -> dict[str, Any]:
 # `_endpoint` decorator, imported from `.http`, turns any of them into
 # `application/problem+json` with the service's own `details` transcribed
 # unchanged, exactly like the data plane).
+#
+# Phase 10 WP-8a (design D-8 (3), same discipline as `http.py`): the one
+# `ControlPlaneService` call each handler makes -- the real psycopg-backed
+# authenticate+gate+execute round trip -- runs via `run_in_threadpool`,
+# never on the event-loop thread; `_check_response_shape` (in-memory) is
+# bundled into the same offloaded call for the handlers that need it.
+# `check_rate()`/`check_audit_rate()` and `_extract_bearer` stay directly on
+# the loop -- both are in-memory-only (a `threading.Lock`-guarded sliding
+# window, a header split) with no I/O of their own, and `check_rate()` must
+# structurally precede the body read for every body-carrying endpoint here
+# (MAJOR-1, this module's own header) -- moving it off the loop would not
+# change what it blocks on (nothing) and would only add a thread hop ahead
+# of the byte-bound-guarded body read.
 # --------------------------------------------------------------------------
 
 
@@ -200,20 +214,25 @@ async def get_control_capabilities(request: Request) -> Response:
     service: ControlPlaneService = request.app.state.control_service
     service.check_rate()  # MAJOR-1 (round-2 review): charged before anything else, see module header
     secret = _extract_bearer(request)
-    document = service.capabilities(secret, request_id=_request_id(request), rate_precharged=True)
-    # Phase 3.5 WP-4 (design §4 "L4", MitateDB-parity two-layer form): the
-    # HTTP-layer enforcement fact, added on top of the service-layer default
-    # (`"unavailable"`) in the same commit as the real enforcement it
-    # declares (`RequestByteBoundMiddleware`, mounted by `create_control_app`
-    # below with this exact same service's own `limits.request_bytes`).
-    # `isinstance`/`.get(...)` guarded rather than a bare `document[...]`
-    # subscript: a malformed response from a broken/stub service (this
-    # module's own `_check_response_shape` backstop below is what is
-    # actually supposed to catch that) must still reach that shape check --
-    # never raise a fresh, unrelated `KeyError` from this override first.
-    if isinstance(document, dict) and isinstance(document.get("limit_enforcement"), dict):
-        document = {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
-    _check_response_shape(document, _SCHEMAS["CapabilityDocument"], label="CapabilityDocument")
+
+    def _run() -> dict[str, Any]:
+        document = service.capabilities(secret, request_id=_request_id(request), rate_precharged=True)
+        # Phase 3.5 WP-4 (design §4 "L4", MitateDB-parity two-layer form): the
+        # HTTP-layer enforcement fact, added on top of the service-layer default
+        # (`"unavailable"`) in the same commit as the real enforcement it
+        # declares (`RequestByteBoundMiddleware`, mounted by `create_control_app`
+        # below with this exact same service's own `limits.request_bytes`).
+        # `isinstance`/`.get(...)` guarded rather than a bare `document[...]`
+        # subscript: a malformed response from a broken/stub service (this
+        # module's own `_check_response_shape` backstop below is what is
+        # actually supposed to catch that) must still reach that shape check --
+        # never raise a fresh, unrelated `KeyError` from this override first.
+        if isinstance(document, dict) and isinstance(document.get("limit_enforcement"), dict):
+            document = {**document, "limit_enforcement": {**document["limit_enforcement"], "request_bytes": "enforced"}}
+        _check_response_shape(document, _SCHEMAS["CapabilityDocument"], label="CapabilityDocument")
+        return document
+
+    document = await run_in_threadpool(_run)
     return JSONResponse(document, status_code=200)
 
 
@@ -223,9 +242,14 @@ async def post_register_application(request: Request) -> Response:
     service.check_rate()  # MAJOR-1: before the body is even read -- see module header
     secret = _extract_bearer(request)
     body = await _read_json_object(request)
-    _check_object_shape(body, _SCHEMAS["ApplicationRegistrationRequest"], label="ApplicationRegistrationRequest")
-    result = service.register_application(secret, body.get("application_id"), request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["ApplicationStateResult"], label="ApplicationStateResult")
+
+    def _run() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["ApplicationRegistrationRequest"], label="ApplicationRegistrationRequest")
+        result = service.register_application(secret, body.get("application_id"), request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["ApplicationStateResult"], label="ApplicationStateResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -234,8 +258,13 @@ async def get_list_applications(request: Request) -> Response:
     service: ControlPlaneService = request.app.state.control_service
     service.check_rate()  # MAJOR-1
     secret = _extract_bearer(request)
-    result = service.list_applications(secret, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["ApplicationsResult"], label="ApplicationsResult")
+
+    def _run() -> dict[str, Any]:
+        result = service.list_applications(secret, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["ApplicationsResult"], label="ApplicationsResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -244,8 +273,13 @@ async def _set_application_enabled(request: Request, enabled: bool) -> Response:
     service.check_rate()  # MAJOR-1
     secret = _extract_bearer(request)
     application_id = request.path_params["application_id"]
-    result = service.set_application_enabled(secret, application_id, enabled, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["ApplicationStateResult"], label="ApplicationStateResult")
+
+    def _run() -> dict[str, Any]:
+        result = service.set_application_enabled(secret, application_id, enabled, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["ApplicationStateResult"], label="ApplicationStateResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -265,9 +299,14 @@ async def post_issue_credential(request: Request) -> Response:
     service.check_rate()  # MAJOR-1: before the body is even read -- see module header
     secret = _extract_bearer(request)
     body = await _read_json_object(request)
-    _check_object_shape(body, _SCHEMAS["CredentialIssueRequest"], label="CredentialIssueRequest")
-    result = service.issue_credential(secret, body.get("application_id"), body.get("role"), request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["CredentialIssued"], label="CredentialIssued")
+
+    def _run() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["CredentialIssueRequest"], label="CredentialIssueRequest")
+        result = service.issue_credential(secret, body.get("application_id"), body.get("role"), request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["CredentialIssued"], label="CredentialIssued")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -276,8 +315,13 @@ async def get_list_credentials(request: Request) -> Response:
     service: ControlPlaneService = request.app.state.control_service
     service.check_rate()  # MAJOR-1
     secret = _extract_bearer(request)
-    result = service.list_credentials(secret, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["CredentialsResult"], label="CredentialsResult")
+
+    def _run() -> dict[str, Any]:
+        result = service.list_credentials(secret, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["CredentialsResult"], label="CredentialsResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -287,8 +331,13 @@ async def post_rotate_credential(request: Request) -> Response:
     service.check_rate()  # MAJOR-1
     secret = _extract_bearer(request)
     credential_id = request.path_params["credential_id"]
-    result = service.rotate_credential(secret, credential_id, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["CredentialRotated"], label="CredentialRotated")
+
+    def _run() -> dict[str, Any]:
+        result = service.rotate_credential(secret, credential_id, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["CredentialRotated"], label="CredentialRotated")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -299,11 +348,16 @@ async def post_revoke_credential(request: Request) -> Response:
     secret = _extract_bearer(request)
     credential_id = request.path_params["credential_id"]
     body = await _read_json_object_or_empty(request)
-    _check_object_shape(body, _SCHEMAS["CredentialRevokeRequest"], label="CredentialRevokeRequest")
-    result = service.revoke_credential(
-        secret, credential_id, destructive=body.get("destructive"), confirmation=body.get("confirmation"), request_id=_request_id(request), rate_precharged=True
-    )
-    _check_response_shape(result, _SCHEMAS["CredentialStateResult"], label="CredentialStateResult")
+
+    def _run() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["CredentialRevokeRequest"], label="CredentialRevokeRequest")
+        result = service.revoke_credential(
+            secret, credential_id, destructive=body.get("destructive"), confirmation=body.get("confirmation"), request_id=_request_id(request), rate_precharged=True
+        )
+        _check_response_shape(result, _SCHEMAS["CredentialStateResult"], label="CredentialStateResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -312,8 +366,13 @@ async def _set_credential_enabled(request: Request, enabled: bool) -> Response:
     service.check_rate()  # MAJOR-1
     secret = _extract_bearer(request)
     credential_id = request.path_params["credential_id"]
-    result = service.set_credential_enabled(secret, credential_id, enabled, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["CredentialStateResult"], label="CredentialStateResult")
+
+    def _run() -> dict[str, Any]:
+        result = service.set_credential_enabled(secret, credential_id, enabled, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["CredentialStateResult"], label="CredentialStateResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 
@@ -360,9 +419,14 @@ async def post_audit_query(request: Request) -> Response:
     # `CredentialRevokeRequest` has, so an absent body is read the same way
     # (`_read_json_object_or_empty`, this module's own helper above).
     body = await _read_json_object_or_empty(request)
-    _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
-    result = service.audit_query(secret, body, request_id=_request_id(request), rate_precharged=True)
-    _check_response_shape(result, _SCHEMAS["AuditResult"], label="AuditResult")
+
+    def _run() -> dict[str, Any]:
+        _check_object_shape(body, _SCHEMAS["AuditQueryRequest"], label="AuditQueryRequest")
+        result = service.audit_query(secret, body, request_id=_request_id(request), rate_precharged=True)
+        _check_response_shape(result, _SCHEMAS["AuditResult"], label="AuditResult")
+        return result
+
+    result = await run_in_threadpool(_run)
     return JSONResponse(result, status_code=200)
 
 

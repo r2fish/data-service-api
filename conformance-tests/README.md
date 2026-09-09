@@ -169,7 +169,9 @@ repository root, not just this directory) collects. `tools/check_collection_floo
 (standard library only) re-runs `python -m pytest --collect-only -q` from
 the repository root, reads pytest's own trailing `<N> tests collected`
 line, and compares it against that floor. CI (`.github/workflows/ci.yml`,
-`conformance` job) runs this check in both the 3.11 and 3.12 matrix jobs,
+`conformance` job) runs this check in both the 3.11 and 3.12 matrix jobs
+(on `main`; since the requester ruling of 2026-09-08 a push to any other
+branch runs only the 3.11 job -- see the workflow's file header),
 after PostgreSQL is up and dependencies are installed but before the
 conformance gate itself -- `--collect-only` builds all four adapters at
 collection time (`conftest.py`'s `_discover_and_build`) and performs
