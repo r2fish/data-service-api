@@ -4,5 +4,9 @@
     {"name": "MitateDB-api", "module": "conformance_adapter_mitatedb", "required": true},
     {"name": "r2db-api-http", "module": "conformance_adapter_r2db_http", "required": true},
     {"name": "MitateDB-api-http", "module": "conformance_adapter_mitatedb_http", "required": true}
+  ],
+  "composition_roots": [
+    {"name": "r2db-api", "module": "real_server_r2db", "launcher_class": "RealServerR2db"},
+    {"name": "MitateDB-api", "module": "real_server_mitatedb", "launcher_class": "RealServerMitateDB"}
   ]
 }
