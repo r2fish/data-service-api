@@ -500,12 +500,26 @@ def test_control_audit_row_from_a_delayed_control_tx_returns_on_the_next_page(co
 
 
 def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql: str) -> None:
+    """R-34 (mirrors r2db-api's own `test_audit_query.py` fix, same
+    semantics, no shared code): wall-clock `hold_s`/`probe_at_s` sleeps
+    replaced with explicit synchronization, because under machine load
+    the writer thread's INSERT could be delayed or the main thread's
+    probe could slip independently, producing a spurious red ("the row
+    became visible before its writer transaction committed") even though
+    the row was still genuinely invisible at the intended probe point.
+
+    The writer signals `inserted` right after its INSERT executes (tx
+    open, and the main thread now knows the INSERT's own wall-clock
+    time); the main thread waits on it, sleeps only `lag_s + 0.2`
+    measured from that INSERT time, probes, asserts invisibility, and
+    only then sets `release` so the writer may commit -- "still open" is
+    thus guaranteed by the writer never having been told it may commit,
+    not by a hold duration guessed in advance.
+    """
     h = _postgres_harness(control_platform, audit_statement_timeout_ms=1_000, audit_idle_timeout_ms=1_000)
     try:
         lag_s = h.visibility_lag_ms / 1000  # ~3s at these timeouts
-        hold_s = lag_s + 0.5
-        probe_at_s = lag_s + 0.2
-        assert probe_at_s < hold_s, "test's own timing assumption does not hold"
+        probe_delay_s = lag_s + 0.2
         marker = "delaytx" + secrets.token_hex(6)
 
         # WP-3(b) review finding C (supervisor-forwarded fix): a BASELINE
@@ -521,7 +535,8 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
         baseline_cursor = baseline_events[-1]["cursor"] if baseline_events else None
 
         result_holder: dict = {}
-        start = time.monotonic()
+        inserted = threading.Event()
+        release = threading.Event()
 
         def _hold_and_write() -> None:
             conn = psycopg.connect(dsn, autocommit=False)
@@ -535,7 +550,7 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
                 # EVERY connection made as this role -- this test's own
                 # simulated "held open" writer connection included, which
                 # would otherwise be killed by PostgreSQL itself well
-                # before `hold_s` (~lag_s + 0.5s) elapses, never reaching
+                # before the release event is ever set, never reaching
                 # `conn.commit()` at all. This SESSION-level override is
                 # test-only scaffolding for one ad hoc connection this
                 # test constructs to simulate a slow writer -- not the
@@ -544,7 +559,12 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
                     cur.execute("SET idle_in_transaction_session_timeout = 0")
                 with conn.cursor() as cur:
                     cur.execute(sql.SQL(insert_sql).format(table=sql.Identifier(control_platform.registry_schema, table)), [marker])
-                time.sleep(hold_s)
+                result_holder["inserted_at"] = time.monotonic()
+                inserted.set()
+                # Bounded wait: if the main thread's probe assertion
+                # fails (raises) before calling release.set(), do not
+                # hang forever.
+                release.wait(timeout=30)
                 conn.commit()
             finally:
                 conn.close()
@@ -552,12 +572,22 @@ def _run_delayed_tx_vector(control_platform, *, dsn: str, table: str, insert_sql
 
         writer = threading.Thread(target=_hold_and_write)
         writer.start()
-        time.sleep(max(0.0, probe_at_s - (time.monotonic() - start)))
-        assert writer.is_alive(), "writer already finished before the load-bearing probe point"
-        probe = h.service.audit_query(h.control_credential_secret, {"limit": 1000, "after": baseline_cursor})
-        assert not any(e.get("request_id") == marker for e in probe["events"]), (
-            "the row became visible before its writer transaction committed -- load-bearing assertion"
+        assert inserted.wait(timeout=10), "writer did not signal after INSERT in time"
+        inserted_at = result_holder["inserted_at"]
+        time.sleep(max(0.0, (inserted_at + probe_delay_s) - time.monotonic()))
+        assert writer.is_alive() and not release.is_set(), (
+            "writer already released/finished before the load-bearing probe point -- "
+            "the transaction must still be open (not yet told to commit) at probe time"
         )
+        try:
+            probe = h.service.audit_query(h.control_credential_secret, {"limit": 1000, "after": baseline_cursor})
+            assert not any(e.get("request_id") == marker for e in probe["events"]), (
+                "the row became visible before its writer transaction committed -- load-bearing assertion"
+            )
+        finally:
+            # Always release the writer so it can commit and the thread
+            # can exit, even if the assertion above raised.
+            release.set()
         writer.join(timeout=15)
         assert result_holder.get("done"), "writer thread did not finish in time"
         time.sleep(0.5)

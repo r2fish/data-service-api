@@ -128,28 +128,54 @@ _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
 #: real input this allowlist entry's own site can be driven by that the
 #: in-memory layer would treat differently") is the surviving check for
 #: what remains).
+#: WP-6d (`{scratchpad}/review2/frame.md` F-①, ruling U-7) line-number
+#: shift: `idempotency_begin`/`idempotency_reserve` (2 bare sites) REPLACE
+#: the pre-WP-6d `idempotency_get`/`idempotency_reap_expired`/
+#: `idempotency_count` (3 bare sites) -- one fewer generic-driver-
+#: exception-translation site overall (21 -> 20), and every entry from
+#: `schema_count` onward shifted +22 lines (the new `_IDEMPOTENCY_KEY_
+#: LOCK_NAMESPACE`/`_IDEMPOTENCY_COUNT_ADVISORY_LOCK_KEY` module-level
+#: constants + their comments, inserted above `schema_count`). Recomputed
+#: from the real file via `_fail_call_sites`, not hand-counted.
+#: `phase10-r35` merge (WP-6d line-number shift, 2026-09-08): the two
+#: `LOCK TABLE ... IN SHARE MODE` -> `... IN SHARE ROW EXCLUSIVE MODE`
+#: comment rewrites (`alter_field_constraints`, `add_field`) inserted
+#: +16 lines then +17 more lines (net +33 for everything after the
+#: second rewrite, +16 only for the three sites between the two
+#: rewrites) -- NOT a uniform offset, so every entry below is
+#: re-verified against the current file via `_fail_call_sites`, not
+#: hand-shifted. Entry count unchanged (20): no site was added or
+#: removed, only comment/lock-clause text.
 _BACKEND_LAYER_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({
-    ("backend_postgres.py", 578),   # schema_count: except psycopg.Error -- generic driver-exception translation
-    ("backend_postgres.py", 635),   # generic driver-exception translation
-    ("backend_postgres.py", 684),   # generic driver-exception translation
-    ("backend_postgres.py", 711),   # generic driver-exception translation
-    ("backend_postgres.py", 768),   # generic driver-exception translation
-    ("backend_postgres.py", 820),   # generic driver-exception translation
-    ("backend_postgres.py", 845),   # generic driver-exception translation
-    ("backend_postgres.py", 1007),  # generic driver-exception translation
-    ("backend_postgres.py", 1024),  # generic driver-exception translation
-    ("backend_postgres.py", 1155),  # generic driver-exception translation
-    ("backend_postgres.py", 1296),  # generic driver-exception translation
-    ("backend_postgres.py", 1382),  # generic driver-exception translation
-    ("backend_postgres.py", 1434),  # generic driver-exception translation
-    ("backend_postgres.py", 1467),  # generic driver-exception translation
-    ("backend_postgres.py", 1493),  # generic driver-exception translation
-    ("backend_postgres.py", 1560),  # generic driver-exception translation
-    ("backend_postgres.py", 1588),  # generic driver-exception translation
-    ("backend_postgres.py", 1629),  # generic driver-exception translation
-    ("backend_postgres.py", 1724),  # generic driver-exception translation
-    ("backend_postgres.py", 1740),  # generic driver-exception translation
-    ("backend_postgres.py", 1752),  # generic driver-exception translation
+    # Code-review fix F1/F2/F6 (Opus review 2, WP-6d rework): every line
+    # number below shifted when `idempotency_begin`/`idempotency_reserve`
+    # gained a `conn.commit()` (F1), a `SET LOCAL lock_timeout` + a new
+    # `except (QueryCanceled, LockNotAvailable):` clause (F2), and longer
+    # docstrings threading `conn` through explicitly instead of resolving
+    # `for_developer` internally (F6) -- re-verified against the current
+    # file, not merely offset by a constant (the two idempotency sites
+    # near the bottom moved by MORE than every site above them, since the
+    # added code sits between them and the earlier sites).
+    ("backend_postgres.py", 613),   # schema_count: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 670),   # generic driver-exception translation
+    ("backend_postgres.py", 719),   # generic driver-exception translation
+    ("backend_postgres.py", 746),   # generic driver-exception translation
+    ("backend_postgres.py", 803),   # generic driver-exception translation
+    ("backend_postgres.py", 855),   # generic driver-exception translation
+    ("backend_postgres.py", 880),   # generic driver-exception translation
+    ("backend_postgres.py", 1058),  # generic driver-exception translation
+    ("backend_postgres.py", 1075),  # generic driver-exception translation
+    ("backend_postgres.py", 1206),  # generic driver-exception translation
+    ("backend_postgres.py", 1364),  # generic driver-exception translation
+    ("backend_postgres.py", 1450),  # generic driver-exception translation
+    ("backend_postgres.py", 1502),  # generic driver-exception translation
+    ("backend_postgres.py", 1535),  # generic driver-exception translation
+    ("backend_postgres.py", 1561),  # generic driver-exception translation
+    ("backend_postgres.py", 1628),  # generic driver-exception translation
+    ("backend_postgres.py", 1656),  # generic driver-exception translation
+    ("backend_postgres.py", 1697),  # generic driver-exception translation
+    ("backend_postgres.py", 1966),  # idempotency_begin: except psycopg.Error -- generic driver-exception translation
+    ("backend_postgres.py", 2035),  # idempotency_reserve: except psycopg.Error -- generic driver-exception translation
 })
 
 #: 追補 4 O-1 left `control_plane.py`'s own ONE remaining bare site --
@@ -382,7 +408,11 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         "http.py": 27,
         "field_types.py": 4,
         "identifiers.py": 1,
-        "backend_postgres.py": 29,
+        # WP-6d (ruling U-7): -1 -- `idempotency_begin`/`idempotency_
+        # reserve` (2 bare `ValidationError` sites) replace the pre-WP-6d
+        # `idempotency_get`/`idempotency_reap_expired`/`idempotency_count`
+        # (3 bare sites); `idempotency_unlock` (new) raises nothing.
+        "backend_postgres.py": 28,
         "backend_sqlite.py": 4,
         # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
         # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
