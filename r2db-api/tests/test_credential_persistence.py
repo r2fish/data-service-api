@@ -176,6 +176,17 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         "0005_credential_store.sql",
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09): `r2db_api.main.
+        # build_app`/`r2db_api.control_main.build_control_app` now run
+        # F-16 (this process' own role CONNECTION LIMIT) unconditionally
+        # at startup, on every real launch this file's own `platform`
+        # fixture drives (`main_module`, below, and every file that
+        # imports this fixture) -- this migration must run BEFORE the
+        # api/controlplane roles' own pre-WP-4f `CONNECTION LIMIT` (10)
+        # would otherwise sit below F-16's own real pool-composition
+        # floor and fail every test that touches `main_module` at
+        # fixture setup, not just the ones actually about F-16.
+        "0013_role_connection_limits.sql",
         "0008_platform_declarations_and_writer_timeouts.sql",
         # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_
         # key_check` to admit `process_ceilings` -- required so this
@@ -202,6 +213,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         # (and the `auditreader` role) to exist, exactly as it already
         # needed `0006`'s `control_audit`/`r2dbsvc_controlplane`.
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         # Q4 phase WP-1 (design D-1/D-2): platform single-shot migration --
         # ALTER ROLE writer-timeout role settings + the platform_
         # declarations table (seeds only audit_coalescing_window_ms; see
@@ -1609,6 +1621,49 @@ def test_nul_locator_over_real_http_is_401_and_durably_audited_not_503_silent(
             cur.execute(f"SELECT count(*) FROM {table} WHERE reason_code = 'AUTH_INVALID' AND operation = 'authenticate'")
             (count,) = cur.fetchone()
     assert count >= 1, "NUL-locator AUTH_INVALID denial did not reach the durable application_audit sink"
+
+
+def test_build_app_fails_fast_when_its_own_api_role_connection_limit_is_lowered_below_the_pool_composition_floor(
+    platform: types.SimpleNamespace, provisioned_app: types.SimpleNamespace, main_module: types.ModuleType,
+) -> None:
+    """Phase 10 WP-4g (supervisor ruling 2026-09-09): F-16 is not only an
+    `ops verify-declarations` check (WP-4f) -- `r2db_api.main.build_app`
+    itself now fails fast on the SAME condition at real startup, scoped to
+    exactly the role THIS process' own pool composition uses
+    (`platform.api_role`, the `r2dbsvc_api`-class role `main_module`'s own
+    `credentials`/`durable_audit` stores both pool connections against).
+    Lowering it back below its own real floor (2 stores x concurrency 32 =
+    64) -- exactly the pre-`0013_role_connection_limits.sql` state every
+    platform was in before Phase 10 WP-4f -- must raise, never silently
+    start a process that can hit PostgreSQL's own hard 'too many
+    connections for role' refusal under real concurrent traffic. Restores
+    the migration-seeded limit (68) in a `finally` so this shared,
+    module-scoped `platform` fixture is left healthy for every other test
+    in this file."""
+    with psycopg.connect(platform.admin_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 10").format(sql.Identifier(platform.api_role)))
+        conn.commit()
+    try:
+        with pytest.raises(RuntimeError, match="F-16|CONNECTION LIMIT"):
+            main_module.build_app(env=_main_env(platform, provisioned_app))
+    finally:
+        with psycopg.connect(platform.admin_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("ALTER ROLE {} CONNECTION LIMIT 68").format(sql.Identifier(platform.api_role)))
+            conn.commit()
+        # Non-空振り: proves the restore above is really what makes
+        # `build_app` healthy again, not some other side effect of this
+        # test -- a mutation that silently drops the new startup check
+        # would make BOTH the `pytest.raises` above AND this call succeed,
+        # but a mutation that left the check permanently broken (e.g.
+        # caching the FIRST observed limit) would fail here instead.
+        # `TestClient` as a context manager drives the real ASGI lifespan
+        # protocol (startup+shutdown), the same established convention
+        # every other real-`build_app` test in this file already uses.
+        asgi_app = main_module.build_app(env=_main_env(platform, provisioned_app))
+        with TestClient(asgi_app):
+            pass
 
 
 def test_build_app_missing_required_env_var_raises(main_module: types.ModuleType) -> None:

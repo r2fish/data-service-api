@@ -161,6 +161,17 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
         "0002_registry_and_functions.sql",
         "0003_provision_application.sql",
         "0004_deprovision_application.sql",
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09): `mitatedb_api.
+        # main.build_app`/`mitatedb_api.control_composition.build_control_
+        # service` now run F-16 (this process' own role CONNECTION LIMIT)
+        # unconditionally at startup -- every test in this repository that
+        # calls either (directly or via this shared `platform` fixture)
+        # now depends on this migration too, or the api/controlplane
+        # roles' own pre-WP-4f `CONNECTION LIMIT` (20/10, `0002_registry_
+        # and_functions.sql`) sits below F-16's own real pool-composition
+        # floor and fails startup for every consumer, not just the ones
+        # actually about F-16.
+        "0012_role_connection_limits.sql",
         # Q4 phase (design D-1/D-2, work order §4 WP-2): platform
         # declarations table + the two service writer roles' timeout role
         # settings -- every test in this repository that calls `main.
@@ -205,6 +216,7 @@ def _bootstrap_platform(admin_dsn: str, prefix: str, tmp_path_factory: pytest.Te
                 _execute(cur, sql.SQL("ALTER ROLE {} PASSWORD {}").format(sql.Identifier(controlplane_role), sql.Literal(controlplane_password)))
         finally:
             admin.close()
+        _run_psql(provision_dsn, rewritten["0012_role_connection_limits.sql"])
         _run_psql(provision_dsn, rewritten["0007_platform_declarations.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(provision_dsn, rewritten["0011_process_ceilings.sql"])
         # Q4 phase (design D-2(c)): synthetic example.invalid `surfaces` --

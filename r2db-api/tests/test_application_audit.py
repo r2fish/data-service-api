@@ -65,6 +65,14 @@ MIGRATION_NAMES = (
     "0005_credential_store.sql",
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
+    # Phase 10 WP-4g (supervisor ruling 2026-09-09): `r2db_api.main.build_
+    # app` now runs F-16 (this process' own role CONNECTION LIMIT)
+    # unconditionally at startup, on every real launch this file's own
+    # `platform` fixture drives -- this migration must run BEFORE the api
+    # role's own pre-WP-4f `CONNECTION LIMIT` (10) would otherwise sit
+    # below F-16's own real pool-composition floor and fail every test in
+    # this file at fixture setup, not just the ones actually about F-16.
+    "0013_role_connection_limits.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
     # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
     # check` to admit `process_ceilings` -- required so this file's own
@@ -198,6 +206,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0005_credential_store.sql"], {"api_password": api_password})
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
+        _run_psql(control_dsn, rewritten["0013_role_connection_limits.sql"])
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
         _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:

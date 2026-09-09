@@ -950,7 +950,18 @@ def _f16_message(role: str, current_limit: int, required_floor: int, *, ops_modu
     )
 
 
-def check_role_connection_limits(conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int) -> None:
+#: The three platform-plane role classes `check_role_connection_limits`
+#: knows how to identify -- a caller narrowing `role_classes` below passes
+#: any subset of this set. Peer-symmetric with r2db-api's own `_ROLE_
+#: CLASSES`.
+_ROLE_CLASSES = frozenset({"api", "controlplane", "auditreader"})
+
+
+def check_role_connection_limits(
+    conn: "psycopg.Connection", *, schema: str, ops_module: str, concurrency: int,
+    role_classes: "frozenset[str] | None" = None,
+    application_ids: "Sequence[str] | None" = None,
+) -> None:
     """F-16: raises `PlatformDeclarationError(code="F-16")` for the FIRST
     role (in the deterministic order built below) whose `pg_roles.
     rolconnlimit` is neither `-1` nor at least its own computed floor.
@@ -968,32 +979,60 @@ def check_role_connection_limits(conn: "psycopg.Connection", *, schema: str, ops
     (floor = `concurrency`, Phase 10 WP-4f peer-symmetric with r2db-api's
     own WP-8a). A role with no grants matching any of the three
     platform-plane shapes above (identity unknown to this check) is
-    silently skipped, never flagged."""
+    silently skipped, never flagged.
+
+    Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric with
+    r2db-api's own same-numbered addition): `role_classes`/
+    `application_ids` let a caller narrow this check to exactly the
+    role(s) ITS OWN process pools connections against, instead of every
+    role this whole platform has -- `ops verify-declarations`'s own
+    aggregate call (the pre-existing, unchanged default: both `None`)
+    still checks everything platform-wide, but `mitatedb_api.main`/
+    `mitatedb_api.control_composition`'s own startup fail-fast calls
+    (added this WP) pass these so an UNRELATED application's or the
+    SIBLING plane's own misconfigured role never blocks a process that
+    never pools a connection against it at all. `role_classes`, when
+    given, is any subset of `{"api", "controlplane", "auditreader"}`
+    (`None` -- the default -- means all three, unchanged pre-existing
+    behavior). `application_ids`, when given (not `None`), restricts the
+    runtime/developer role check to exactly the named ids -- an EMPTY
+    sequence means "check no application role at all"
+    (`control_composition`'s own case: that process serves no
+    application); `None` (the default) means every registered
+    application, unchanged pre-existing behavior."""
+    if role_classes is None:
+        role_classes = _ROLE_CLASSES
     floors: dict = {}
-    for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
-        floors[role] = _API_ROLE_STORE_COUNT * concurrency
-    for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
-        floors[role] = _CONTROLPLANE_ROLE_POOL_FLOOR
-    reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
-    reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
-    for role in sorted(reader_of_application_audit & reader_of_control_audit):
-        floors[role] = _AUDITREADER_ROLE_POOL_FLOOR
+    if "api" in role_classes:
+        for role in _roles_with_table_privilege(conn, schema, "application_audit", "INSERT"):
+            floors[role] = _API_ROLE_STORE_COUNT * concurrency
+    if "controlplane" in role_classes:
+        for role in _roles_with_table_privilege(conn, schema, "control_audit", "INSERT"):
+            floors[role] = _CONTROLPLANE_ROLE_POOL_FLOOR
+    if "auditreader" in role_classes:
+        reader_of_application_audit = set(_roles_with_table_privilege(conn, schema, "application_audit", "SELECT"))
+        reader_of_control_audit = set(_roles_with_table_privilege(conn, schema, "control_audit", "SELECT"))
+        for role in sorted(reader_of_application_audit & reader_of_control_audit):
+            floors[role] = _AUDITREADER_ROLE_POOL_FLOOR
 
     # Two-state registry (0002's own header): a registered-but-never-
     # provisioned row has `runtime_role`/`developer_role` still NULL --
     # excluded here the same way `0012_role_connection_limits.sql`'s own
     # migration-time loop excludes it.
-    applications_table = sql.Identifier(schema, "applications")
-    with conn.cursor() as cur:
-        cur.execute(
-            sql.SQL(
-                "SELECT runtime_role, developer_role FROM {table} "
-                "WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL ORDER BY application_id"
-            ).format(table=applications_table)
-        )
-        for runtime_role, developer_role in cur.fetchall():
-            floors[runtime_role] = concurrency
-            floors[developer_role] = concurrency
+    if application_ids is None or len(application_ids) > 0:
+        applications_table = sql.Identifier(schema, "applications")
+        base_statement = "SELECT runtime_role, developer_role FROM {table} WHERE runtime_role IS NOT NULL AND developer_role IS NOT NULL"
+        with conn.cursor() as cur:
+            if application_ids is None:
+                cur.execute(sql.SQL(base_statement + " ORDER BY application_id").format(table=applications_table))
+            else:
+                cur.execute(
+                    sql.SQL(base_statement + " AND application_id = ANY(%s) ORDER BY application_id").format(table=applications_table),
+                    [list(application_ids)],
+                )
+            for runtime_role, developer_role in cur.fetchall():
+                floors[runtime_role] = concurrency
+                floors[developer_role] = concurrency
 
     if not floors:
         return

@@ -213,9 +213,10 @@ from .credential_store import (
     PostgresCredentialStore,
     validate_control_pepper_separation,
 )
-from .limits import ControlPlaneLimits
+from .limits import ControlPlaneLimits, ResourceLimits
 from . import platform_declarations
 from .platform_declarations import (
+    check_role_connection_limits,
     check_writer_role_timeouts,
     derive_visibility_lag_ms,
     read_declared_role_timeouts,
@@ -393,6 +394,13 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
        (rulings-q4-wp12-rework.md sec.2: "control の sibling role catalog
        検査は audit_reader の有無に依らず無条件"), regardless of whether
        `R2DB_AUDIT_DSN` is even configured on this process;
+    5b. (Phase 10 WP-4g, supervisor ruling 2026-09-09) F-16, on the same
+       borrowed connection: this process' own `r2dbsvc_controlplane` role
+       (plus `r2dbsvc_auditreader` too when `R2DB_AUDIT_DSN` is
+       configured) must have a real `CONNECTION LIMIT` of `-1` or at
+       least its own pool-composition floor -- scoped to exactly the
+       role(s) THIS process pools connections against, never the sibling
+       data-plane process' own role or any application's;
     6. assemble the rest of the stack via `assemble_control_stack(...)`,
        passing the already-built audit sink and the fully-resolved
        `surfaces`/`audit_visibility_lag_ms`/`audit_coalescing_window_ms` as
@@ -536,6 +544,28 @@ def build_control_app(env: Mapping[str, str] | None = None) -> ASGIApp:
                 )
             )
         visibility_lag_ms = derive_visibility_lag_ms(all_catalogs)
+
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's
+        # own `ops verify-declarations` F-16 aggregate check): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # `r2dbsvc_controlplane` always (`role_classes` always contains
+        # `"controlplane"`), plus `r2dbsvc_auditreader` too whenever
+        # `R2DB_AUDIT_DSN` is configured (this process then genuinely
+        # pools a connection against that role too, via `audit_reader`
+        # below) -- never the sibling data-plane process' own `r2dbsvc_
+        # api` role, and never any application's runtime/developer role
+        # (`application_slugs=()`: this process serves no application at
+        # all). Run on this same borrowed connection (login role = the
+        # real `r2dbsvc_controlplane` writer role).
+        _own_role_classes = {"controlplane"}
+        if audit_dsn:
+            _own_role_classes.add("auditreader")
+        check_role_connection_limits(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=ResourceLimits().concurrency,
+            role_classes=frozenset(_own_role_classes), application_slugs=(),
+        )
 
     # Step 6: assemble the rest of the stack -- `surfaces`/`audit_
     # visibility_lag_ms`/`audit_coalescing_window_ms` are already fully

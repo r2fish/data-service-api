@@ -132,6 +132,7 @@ from .http import HttpService, create_app
 from .identifiers import validate_identifier
 from . import platform_declarations
 from .platform_declarations import (check_control_surface_consistency,
+                                    check_role_connection_limits,
                                     check_writer_role_timeouts, read_platform_declarations,
                                     reject_removed_surface_env, reject_removed_timeout_env)
 from .pool import BoundedConnectionPool, pool_size_from_env
@@ -360,6 +361,24 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         check_writer_role_timeouts(
             declarations_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
             ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, peer-symmetric
+        # with r2db-api's own same-numbered startup addition): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # the `mitatedbsvc_api`-class role (`role_classes={"api"}`) plus
+        # only the applications THIS process actually serves
+        # (`application_ids=ids`), never the sibling control-plane
+        # process' own `mitatedbsvc_controlplane`/`mitatedbsvc_
+        # auditreader` roles (this process never pools a connection
+        # against either) nor an application registered on this platform
+        # but served by some OTHER process. Run on this same connection
+        # (login role = the real `mitatedbsvc_api` writer role), right
+        # after the writer-role dual check above.
+        check_role_connection_limits(
+            declarations_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=_declared_concurrency,
+            role_classes=frozenset({"api"}), application_ids=ids,
         )
     finally:
         declarations_conn.close()

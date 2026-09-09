@@ -149,6 +149,7 @@ from .http import create_app
 from . import platform_declarations
 from .platform_declarations import (
     check_control_surface_consistency,
+    check_role_connection_limits,
     check_writer_role_timeouts,
     read_platform_declarations,
     reject_removed_surface_env,
@@ -308,9 +309,13 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     malformed, F-6 for surfaces/control-plane-status agreement), (6) the
     writer-role double-check (F-7/F-10/F-11 against `pg_db_role_setting`,
     F-9 against this process' own writer pool's effective `pg_settings`
-    value), (7) build the audit sink (no SESSION `SET` -- design D-1(b)),
-    (8) wire `surfaces`/the coalescing window/the data-plane's own
-    `process_ceilings.data` into `DataService`.
+    value), (6b) Phase 10 WP-4g: F-16, this process' own role(s)' real
+    `CONNECTION LIMIT` against their own pool-composition floor (scoped to
+    the `r2dbsvc_api` role plus only the applications THIS process
+    serves), on the SAME borrowed writer connection, (7) build the audit
+    sink (no SESSION `SET` -- design D-1(b)), (8) wire `surfaces`/the
+    coalescing window/the data-plane's own `process_ceilings.data` into
+    `DataService`.
     """
     env = env if env is not None else os.environ
 
@@ -447,6 +452,26 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
         check_writer_role_timeouts(
             _writer_conn, declared_roles=declarations.audit_writer_roles, schema=schema,
             ops_module=platform_declarations.PEER_MODULE, migration=platform_declarations.MIGRATION_NUMBER,
+        )
+        # Phase 10 WP-4g (supervisor ruling 2026-09-09, following WP-4f's
+        # own `ops verify-declarations` F-16 aggregate check, and that
+        # WP's own investigated-and-fixed conformance finding): this
+        # process' own startup now ALSO fails fast on F-16, scoped to
+        # exactly the role(s) THIS process' own pool composition uses --
+        # the `r2dbsvc_api`-class role (`role_classes={"api"}`) plus only
+        # the applications THIS process actually serves
+        # (`application_slugs=slugs`), never the sibling control-plane
+        # process' own `r2dbsvc_controlplane`/`r2dbsvc_auditreader` roles
+        # (this process never pools a connection against either) nor an
+        # application registered on this platform but served by some
+        # OTHER process -- see `check_role_connection_limits`'s own
+        # docstring for what each parameter narrows. Run on this same
+        # borrowed connection (login role = the real `r2dbsvc_api` writer
+        # role, D-1(c)), right after the writer-role dual check above.
+        check_role_connection_limits(
+            _writer_conn, schema=schema, ops_module=platform_declarations.PEER_MODULE,
+            concurrency=resource_limits.concurrency,
+            role_classes=frozenset({"api"}), application_slugs=slugs,
         )
 
     audit_buffer_capacity = _optional_int(env, "R2DB_AUDIT_BUFFER_CAPACITY", 1000)
