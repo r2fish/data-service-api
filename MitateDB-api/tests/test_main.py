@@ -603,6 +603,54 @@ def test_build_app_control_plane_status_env_flip_is_reflected_in_a_real_request(
     assert response.json()["capabilities"]["control_plane"]["status"] == "enabled"
 
 
+def test_build_app_wires_the_preauth_concurrency_slot(main_module, platform) -> None:
+    """Phase 10 WP-8c review F-2 (supervisor ruling 2026-09-09, review
+    round 2): `build_app` must wire `HttpService`'s own `limit_holder`/
+    `max_concurrency` (`main.py`'s own `HttpService(...)` call, `:474`)
+    onto the SAME `_LimitStateHolder` every served `ApplicationCell`
+    shares, and this deployment's own real declared `max_concurrency` --
+    not merely SOME non-`None` values `HttpService.__init__`'s own
+    fail-closed guard happens to accept.
+
+    Builds a SEPARATE, dedicated application (mirrors this file's own
+    `main_control_plane_flip_probe` reasoning immediately above: this
+    test's own persistent connections must not interfere with `main_
+    module.app`'s already-built probe) with `MITATEDB_MAX_CONCURRENCY` set
+    to a value (7) distinct from `FoundationConfig`'s own dataclass
+    default (32), so a coincidental match against the untouched default
+    cannot pass this test by accident.
+
+    Mutation (review F-2's own pinned mutation, restated for the
+    fail-closed constructor this round introduces): removing the `limit_
+    holder=limit_holder, max_concurrency=config.max_concurrency` keywords
+    from `main.py`'s own `HttpService(...)` call now turns this red at
+    `build_app(...)` itself -- `HttpService.__init__`'s own fail-closed
+    guard (`http.py`) raises `RuntimeError` before this function can even
+    return an app to assert against, since a silent no-op is no longer
+    accepted at construction time. This is a STRONGER red than round 1's
+    own pinned shape (a passing-but-behaviorally-wrong app): the whole
+    process now refuses to start.
+    """
+    wiring_app = provision_app(platform, "main_preauth_concurrency_probe")
+    env = {
+        "MITATEDB_CREDENTIAL_PEPPER": _PEPPER,
+        "MITATEDB_CONTROL_CREDENTIAL_PEPPER": _CONTROL_PEPPER,
+        "MITATEDB_PLATFORM_DSN": platform.api_dsn,
+        "MITATEDB_PLATFORM_SCHEMA": platform.registry_schema,
+        "MITATEDB_SERVE_APPS": wiring_app.app_id,
+        f"MITATEDB_APP_{wiring_app.app_id.upper()}_RUNTIME_DSN": wiring_app.runtime_dsn,
+        f"MITATEDB_APP_{wiring_app.app_id.upper()}_DEVELOPER_DSN": wiring_app.developer_dsn,
+        "MITATEDB_MAX_CONCURRENCY": "7",
+    }
+    app = main_module.build_app(env)
+    inner_app = app.app  # unwrap RequestByteBoundMiddleware -> the wrapped Starlette app
+    service = inner_app.state.service
+    assert service._limit_holder is not None
+    assert service._max_concurrency == 7
+    cell = service._cell_factory(wiring_app.app_id)
+    assert cell._ApplicationCell__limit_holder is service._limit_holder
+
+
 # --------------------------------------------------------------------------
 # WP-4 (design v1.2 R-7): the control plane is built (`control_plane.py`/
 # `control_http.py`) but must NEVER be mounted anywhere in this WP's public

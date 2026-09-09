@@ -500,7 +500,20 @@ def build_app(env: Mapping[str, str] | None = None) -> ASGIApp:
     # already receives -- `HttpService.authenticate` is the ONLY call
     # site that can ever durably record `AUTH_REQUIRED` (no bearer token
     # presented at all).
-    service = HttpService(credentials, _cell_factory, audit_router=audit_router)
+    #
+    # Phase 10 WP-8c (design D-8 (3), review F-2): `limit_holder` -- the
+    # SAME instance every `ApplicationCell` built above already shares --
+    # and `max_concurrency` -- this deployment's own single, uniform
+    # `config.max_concurrency` (every cell above is built from the SAME
+    # `config`) -- let `http.py`'s route handlers reserve a concurrency
+    # slot on this EXACT counter, using this deployment's own real
+    # declared bound, BEFORE `_authenticate` runs (`HttpService.
+    # acquire_concurrency_slot`'s own docstring). Without these two, an
+    # unauthenticated flood of invalid bearer tokens never touches this
+    # counter at all, so `_authenticate`'s own `PostgresCredentialStore`
+    # round trip absorbs unbounded concurrent demand instead of being
+    # bounded by this deployment's own declared `concurrency` class.
+    service = HttpService(credentials, _cell_factory, audit_router=audit_router, limit_holder=limit_holder, max_concurrency=config.max_concurrency)
 
     # Phase 4 (design D-4, "実装裁量" -- periodic flush trigger): a daemon
     # thread that calls `audit_router.flush()` on a fixed interval for

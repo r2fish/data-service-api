@@ -122,8 +122,13 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
     # was removed, either of which this test must notice rather than
     # vacuously pass.
     assert findings, "found zero ResourceLimitError(...) call sites in mitatedb_api -- scanner or package changed"
-    assert len(findings) == 35, (
-        f"expected exactly 35 ResourceLimitError(...) call sites (Phase 10 WP-6d-i review fix F2 adds 2 more, "
+    assert len(findings) == 36, (
+        f"expected exactly 36 ResourceLimitError(...) call sites (Phase 10 WP-8c, design D-8 (3), review F-2 adds "
+        f"1 more, cell.py's own `_LimitStateHolder.acquire_concurrency_slot` -- the pre-authentication concurrency "
+        f"admission `http.py`'s route handlers now enter BEFORE `_authenticate`; its own check-then-increment is a "
+        f"deliberate second copy of `concurrency_slot`'s own check (not a shared helper -- see `acquire_concurrency_"
+        f"slot`'s own docstring for why), so it is its own, additional `ResourceLimitError(..., limit_class="
+        f"\"concurrency\")` call site. 35 + 1 = 36. Phase 10 WP-6d-i review fix F2 adds 2 more, "
         f"backend_postgres.py's own `idempotency_begin` / `idempotency_reserve` -- a `lock_timeout` / "
         f"`statement_timeout` firing while waiting for the session advisory lock maps to `execution_ms`, "
         f"design docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md D-13; 33 + 2 = 35. Phase 9 WP-3c added 1, cell.py's own "
@@ -151,7 +156,8 @@ def test_every_resource_limit_error_call_site_declares_a_contract_limit_class() 
         f"member count exceeds this deployment's own `config.max_enum_members` before anything is created or "
         f"altered -- plus 1 more, backend_postgres.py's own `alter_field_constraints` (design D-2 実装の形 4): the "
         f"SAME `QueryCanceled`/`LockNotAvailable` -> `execution_ms` mapping `create_collection`/`add_field` "
-        f"already have, on this new schema-mutating method. 28 + 3 + 1 = 32, found {len(findings)}: {findings!r} -- "
+        f"already have, on this new schema-mutating method. 28 + 3 + 1 = 32, 32 + 1 (WP-3c) = 33, "
+        f"33 + 2 (WP-6d-i F2) = 35, 35 + 1 (WP-8c) = 36, found {len(findings)}: {findings!r} -- "
         f"if a new call site was added or removed intentionally, update this count in the same commit"
     )
 
