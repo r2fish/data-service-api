@@ -514,11 +514,18 @@ def test_idempotency_record_without_request_id_on_schema_op_is_treated_as_absent
 
 
 def test_contract_version_is_1_7_0_on_data_plane(service):
+    """Phase 10 WP-6b/pair-closing (design D-5 (v)): re-flipped again to
+    1.8.0 in the same commit as this host's own `process_ceilings`
+    mapping -- function name kept, same precedent as the sibling peer's
+    own re-flipped pins."""
     _, _, _dev, runtime = service
-    assert runtime.capabilities()["contract_version"] == "1.7.0"
+    assert runtime.capabilities()["contract_version"] == "1.8.0"
 
 
 def test_contract_version_is_1_7_0_on_control_plane():
+    """Phase 10 WP-6b/pair-closing (design D-5 (v)): re-flipped again to
+    1.8.0, same commit and same reason as
+    `test_contract_version_is_1_7_0_on_data_plane` above."""
     from mitatedb_api.control_plane import ControlPlaneService, InMemoryControlBackend, bootstrap_control_credential
 
     backend = InMemoryControlBackend(app_pepper="p" * 20, control_pepper="c" * 20)
@@ -526,7 +533,7 @@ def test_contract_version_is_1_7_0_on_control_plane():
     with backend.unit_of_work() as work:
         _cid, secret = bootstrap_control_credential(backend.control_credential_store, backend.append_audit, work=work)
     document = service.control_capabilities(secret)
-    assert document["contract_version"] == "1.7.0"
+    assert document["contract_version"] == "1.8.0"
 
 
 def test_flip_target_capabilities_are_all_enabled(service):

@@ -1673,3 +1673,106 @@ add that number to BOTH the `0003` template's seed list and the package
 constant, in the same commit. A static test holds those three sets equal, so
 forgetting one of them fails CI instead of shipping a deployment whose
 cell-open check silently does not require the new number.
+
+## 18. `process_ceilings` (`0012_process_ceilings.sql`, Phase 10 WP-6a)
+
+Design `docs/design/PHASE10_DEPLOYMENT_EVIDENCE_V1.md` D-5(ii)/(iii) (work
+order `docs/work-orders/WORK_ORDER_PHASE10_DEPLOYMENT_EVIDENCE_V1.md`
+WP-6a). Contract 1.8.0 defines `limit_enforcement`'s scope as **the
+deployment reachable at a plane's declared `surfaces` base URL**, never one
+process alone -- `process_ceilings` is the deployer's own declaration of how
+many processes may serve that base URL at the same time, and is what
+`limit_enforcement` is computed from at every startup.
+
+**Mechanism -- same as `surfaces`/§16 above:** a single-source declaration
+table (`r2dbsvc_registry.platform_declarations`), written only through `ops`
+against the provision DSN, read at startup by both processes, and validated
+by the identical Python function on both the write path and every read
+path. `0012` is a SEPARATE platform single-shot migration from `0008` (§16)
+-- it only widens `platform_declarations_key_check` (a closed, named
+`CHECK`) to admit the new key; it does not touch role settings, timeouts, or
+the `surfaces`/`audit_coalescing_window_ms`/`audit_writer_roles` rows `0008`
+already manages.
+
+**Run once, after `0008`, as `r2dbsvc_control` against `r2dbsvc_platform`**
+(idempotent -- safe to re-run, takes no `-v` variables):
+
+```
+psql "$R2DBSVC_CONTROL_DSN" -f r2db-api/migrations/0012_process_ceilings.sql
+```
+
+Like `surfaces`, `0012` deliberately seeds NO `process_ceilings` row
+(deployment-specific) -- declare it before either process's next start:
+
+```
+python -m r2db_api.ops declare-process-ceilings --data 1 --control 1
+```
+
+`--data`/`--control` are each the maximum number of processes that may serve
+that plane's `surfaces` base URL at the same time, and must each be a
+positive integer. **This deployment's own systemd units each run exactly one
+uvicorn process** (no `--workers` flag anywhere in this script family), so
+`1`/`1` is the correct value here and is what `part1_provision_host_and_db.sh`
+declares. A deployment that later fronts more than one process behind the
+same base URL (a reverse-proxied pool, for example) must declare the real
+count -- see "What changes when you raise a ceiling above 1" below.
+
+**Required upgrade order for an EXISTING host** (ledger LQ4-24: the same gap
+`0008`+`ops declare-surfaces` closed for `surfaces` in §16 re-opens for
+`process_ceilings` -- a script-provisioned host upgraded to a `r2db_api`
+release that requires `process_ceilings` (this one) must run these three
+steps, in this exact order, before restarting either process, or both will
+refuse to start (F-15) with no `process_ceilings` row to read yet):
+
+1. `psql "$R2DBSVC_CONTROL_DSN" -f r2db-api/migrations/0012_process_ceilings.sql`
+2. `python -m r2db_api.ops declare-process-ceilings --data 1 --control 1`
+   (or the deployment's real ceilings, if not the single-uvicorn default)
+3. Restart both `r2dbsvc-api.service` and `r2dbsvc-control.service` --
+   **every declaration in this phase is a startup-time snapshot** (requester
+   ruling U-3, unchanged from §16): nothing re-reads the table per request.
+
+**Startup fail-fast**: F-15 -- the `process_ceilings` row is missing, or its
+value is not a JSON object with exactly the two positive-integer keys
+`data`/`control`. The message names the `ops declare-process-ceilings`
+command to run. `ops verify-declarations` reports this as `F-15`, exit code
+`14`.
+
+**What `process_ceilings` actually changes.** `GET /v1/capabilities` and
+`GET /control/v1/capabilities` both report `limit_enforcement` per class,
+computed from the DECLARED ceiling, not from any live process count this
+deployment cannot observe from inside a single process:
+
+- `requests_per_minute`/`concurrency` (data-plane), `control_requests_per_
+  minute`/`audit_requests_per_minute` (control-plane) -- bound by
+  in-memory, per-process state: `enforced` while the relevant ceiling is
+  `1`, `deployment_required` once it is `2` or more (contract 1.8.0's own
+  enforcement-scope definition: a per-process bound is `enforced` for the
+  WHOLE deployment only while exactly one process may serve that plane's
+  base URL).
+- `applications`/`credentials_per_application` (control-plane) -- bound in
+  PostgreSQL under a same-transaction table lock: `enforced` regardless of
+  the declared ceiling. `idempotency_entries` (data-plane) is also bound
+  in PostgreSQL and also `enforced` regardless of the declared ceiling,
+  but its own count lock is out of this WP's scope (WP-6d-i, both peers,
+  supervisory ruling 2026-09-08) -- not yet added as of this document.
+- Every other class (`request_bytes`, `batch_items`, `result_items`,
+  `query_complexity`, `execution_ms`, `schema_objects`, `operation_depth`,
+  `enum_members`, `idempotency_retention_ms`) is request-scoped and
+  unaffected by `process_ceilings` either way.
+
+**What this does NOT verify (same limit as §16's own two, extended here):**
+neither process can observe how many instances of itself, or of the sibling
+plane, are actually running behind the declared base URL -- the declared
+ceiling and the real process topology are an operator responsibility, kept
+in agreement by deployment discipline (runbook + a post-deploy check), not
+by anything either process can check from inside itself.
+
+**What changes when you raise a ceiling above 1.** Declaring `--data 2` (or
+higher) is honest, not silently unsafe: `limit_enforcement.requests_per_
+minute`/`.concurrency` immediately reports `deployment_required` instead of
+`enforced`, telling a client this deployment's own in-memory rate/
+concurrency bounds no longer hold across the whole deployment -- the
+deployer is expected to enforce them another way (a reverse proxy, a shared
+external limiter) if that class's bound still matters to them. Nothing in
+this package refuses to start or serve at a ceiling above 1; the honest
+declaration is the entire point.

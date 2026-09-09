@@ -195,6 +195,23 @@ class _ReconciledControlBackend:
     def applications_count(self) -> int:
         return self._control.credentials.applications_count()
 
+    def applications_count_locked(self, work) -> int:
+        """Phase 10 WP-6b (design D-5 (ii) region (iii)): a plain forward
+        to `applications_count` -- this adapter's own `unit_of_work()`
+        above (unlike `control_plane.InMemoryControlBackend`'s) takes NO
+        lock at all: it yields a bare `_InMemoryWork()` with no
+        `threading.Lock`/`RLock` of its own. This is disclosed, not
+        asserted safe -- the C-05 conformance harness's own bound tests
+        (`hold_in_flight`) currently drive this adapter's plug in-process,
+        single-threaded, per its own isolation profile, so the absence of
+        a lock here has not caused an observed race; it has not been
+        exercised under genuine multi-threaded contention either. `work`
+        is accepted only so `ControlPlaneService.register_application`'s
+        single, backend-agnostic call site works against every backend,
+        this one included."""
+        del work
+        return self.applications_count()
+
     def list_applications(self):
         return self._control.credentials.list_applications()
 
@@ -250,6 +267,13 @@ class _ReconciledControlBackend:
 
     def credentials_active_count(self, application_id: str) -> int:
         return self._control.credentials.credentials_active_count(application_id)
+
+    def credentials_active_count_locked(self, application_id: str, work) -> int:
+        """The `credentials_per_application` counterpart of
+        `applications_count_locked` above -- same disclosure, same
+        no-lock `unit_of_work()`."""
+        del work
+        return self.credentials_active_count(application_id)
 
     def list_credentials(self):
         return self._control.credentials.list_credentials()

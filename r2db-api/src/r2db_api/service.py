@@ -79,6 +79,17 @@ _DEFAULT_AUDIT_BUFFER_CAPACITY = 1000
 # thread uses (imports this name directly rather than defining its own).
 _DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 
+# Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region
+# (ii) -- limit classes bound by in-memory, per-process state (`self.
+# _rate_windows`/`self._active`, both below), the only classes whose
+# `limit_enforcement` mapping actually depends on `process_ceiling`. Every
+# other `ResourceLimits` class is either region (i) (request-scoped,
+# unaffected regardless of process count) or region (iii)
+# (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of
+# `process_ceiling`, design D-5(ii); the count lock itself is WP-6d-i's
+# scope, supervisory ruling 2026-09-08, not this WP's).
+_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concurrency"})
+
 # Phase 4 WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): the
 # durable `count` column's own semantics -- "the number of occurrences this
 # ONE row represents; when that number is 1, the column is absent (NULL)"
@@ -818,7 +829,7 @@ class _DenialCoalescer:
 class DataService:
     """Public application facade; control state is deliberately private."""
 
-    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None) -> None:
+    def __init__(self, credentials: CredentialStore, limits: ResourceLimits | None = None, topology: AuthorityTopology | None = None, audit: AuditSink | None = None, initial_cells: dict[str, StorageBackend] | None = None, clock: Callable[[], float] | None = None, cell_factory: CellFactory | None = None, control_plane_status: str = "unavailable", durable_audit: Any | None = None, audit_buffer_capacity: int = _DEFAULT_AUDIT_BUFFER_CAPACITY, denial_coalesce_window_s: float = _DENIAL_COALESCE_WINDOW_S, audit_alert_min_interval_s: float = _DEFAULT_AUDIT_FLUSH_INTERVAL_S, surfaces: dict[str, Any] | None = None, process_ceiling: int = 1) -> None:
         # R-9 (CCR-14 WP-5, design docs/design/R2DB_CCR14_CONTROL_PLANE_V1.md
         # §1: "capability 申告は環境変数由来で composition root 注入"):
         # whether this application-plane process' own `capabilities()`
@@ -851,6 +862,26 @@ class DataService:
         # entirely, never a `"surfaces": None` value (contract `Capability
         # Document.surfaces` is an optional key, not a nullable one).
         self._surfaces = surfaces
+        # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): the deployer's
+        # own declared ceiling on how many processes may serve THIS
+        # plane's `surfaces` base URL at the same time -- constructor-
+        # injected, same "deployer-declared, not derived" discipline as
+        # `control_plane_status`/`surfaces` above. `main.py` (the real
+        # composition root) is the one caller that resolves this from the
+        # DB-side `process_ceilings` declaration (`platform_declarations.
+        # read_platform_declarations(...).process_ceilings.data`) at
+        # startup; every other caller (this repository's own unit tests,
+        # the in-process conformance adapter) keeps the default `1` --
+        # the single-process assumption every pre-Phase-10 caller already
+        # made implicitly, so this default changes no existing behavior.
+        # Validated here (not only at `main.py`'s own read/validate
+        # boundary via `platform_declarations.validate_process_ceilings_
+        # value`) so any other direct caller gets the same fail-loud guard
+        # against a non-positive value, rather than silently publishing a
+        # nonsensical `limit_enforcement` mapping.
+        if isinstance(process_ceiling, bool) or not isinstance(process_ceiling, int) or process_ceiling < 1:
+            raise ValueError("process_ceiling must be a positive integer")
+        self._process_ceiling = process_ceiling
         self._credentials = credentials
         self.limits = limits or ResourceLimits()
         self.topology = topology or AuthorityTopology()
@@ -939,7 +970,14 @@ class DataService:
                 # of the behavior it declares (D-1 (7)'s xfail(strict=True)
                 # version gate is exactly what would catch that ordering
                 # mistake).
-                "contract_version": "1.7.0",
+                #
+                # Phase 10 WP-6a/pair-closing (design D-5 (v)): flipped
+                # again to 1.8.0 in the SAME commit as this host's own
+                # `process_ceilings` mapping (D-5 (ii)) -- the version's
+                # one unconditional obligation, `limit_enforcement_scoped_
+                # to_deployment_behind_base_url` -- never ahead of the
+                # behavior it declares.
+                "contract_version": "1.8.0",
                 "capabilities": {
                     "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
                     # Contract 1.1.0 (CCR-13, `structured_operations.
@@ -1025,8 +1063,30 @@ class DataService:
                 # entries` included, which genuinely IS `enforced`: a
                 # record's own retention window is checked lazily, against
                 # real elapsed time, not a request-counted budget).
+                # Phase 10 WP-6a (design D-5(ii), contract 1.8.0): three
+                # regions, not two. Region (i) (request-scoped: every class
+                # below not named in the other two sets) is unaffected by
+                # `process_ceiling` -- unchanged from before this WP.
+                # Region (ii) (`requests_per_minute`/`concurrency` --
+                # bound by in-memory, per-process state, `self._rate_
+                # windows`/`self._active`) reads `enforced` only while
+                # `process_ceiling == 1` and `deployment_required` once it
+                # is `>= 2` (contract 1.8.0's own enforcement-scope
+                # definition: a per-process bound is `enforced` for the
+                # whole deployment only while exactly one process may
+                # serve this plane's base URL). Region (iii)
+                # (`idempotency_entries` -- bound in PostgreSQL,
+                # `postgres.py`'s own `_idempotency_reserve`) stays
+                # `enforced` regardless of `process_ceiling` -- this class
+                # does not resolve within one request. Its own count lock
+                # is WP-6d-i's scope (supervisory ruling 2026-09-08), not
+                # this WP's.
                 "limit_enforcement": {
-                    name: "reference_wall_clock" if name in ("execution_ms", "idempotency_retention_ms") else "enforced"
+                    name: (
+                        "reference_wall_clock" if name in ("execution_ms", "idempotency_retention_ms")
+                        else ("enforced" if self._process_ceiling <= 1 else "deployment_required") if name in _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES
+                        else "enforced"
+                    )
                     for name in self.limits.as_dict()
                 },
                 # `_check()` (called by `_slot()` above) re-validates

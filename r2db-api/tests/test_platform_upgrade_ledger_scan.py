@@ -638,9 +638,14 @@ def test_real_migrations_dir_has_zero_violations_and_the_expected_exemptions():
 
     Phase 9 WP-2c で `0011_idempotency_records_upgrade.sql` が加わり、実測
     は `{'適合': 3, '違反': 0, '免除': 0, '対象外': 8}` に更新された
-    (`0009`/`0010`/`0011` の 3 本が適合)。"""
+    (`0009`/`0010`/`0011` の 3 本が適合)。
+
+    Phase 10 WP-6a で `0012_process_ceilings.sql` が加わり (platform 単発
+    -- `_upgrade.sql` で終わらない命名、design D-5(ii))、実測は
+    `{'適合': 3, '違反': 0, '免除': 0, '対象外': 9}` に更新された (対象外が
+    8 -> 9; 適合の 3 本は不変)。"""
     result = _classify_migrations_dir(MIGRATIONS_DIR, ALLOW_LIST_NUMBERS, LEDGER_TABLE_NAME)
-    assert result.tally == {"適合": 3, "違反": 0, "免除": 0, "対象外": 8}
+    assert result.tally == {"適合": 3, "違反": 0, "免除": 0, "対象外": 9}
     assert result.exempted_numbers == ALLOW_LIST_NUMBERS == frozenset()
 
 
@@ -648,10 +653,10 @@ def test_naming_convention_excludes_every_current_platform_single_shot_migration
     """完了条件 5 (WP-3 で改訂 -- `0009_platform_upgrades_ledger_upgrade.
     sql` が実 per-application upgrade script として加わったため、「`NAME_
     RE` に一致するファイルが 1 つも無い」という WP-0 時点の主張はもう成立
-    しない): platform 単発 migration (`0001`-`0008`) はどれもこの命名を
-    使っていないこと -- `NAME_RE` に一致するのは正当な per-application
-    upgrade script (`0009`、Phase 9 WP-2a で加わった `0010`、WP-2c で加わっ
-    た `0011`) だけであること。"""
+    しない): platform 単発 migration (`0001`-`0008`、Phase 10 WP-6a で加
+    わった `0012`) はどれもこの命名を使っていないこと -- `NAME_RE` に一致
+    するのは正当な per-application upgrade script (`0009`、Phase 9 WP-2a
+    で加わった `0010`、WP-2c で加わった `0011`) だけであること。"""
     matching = {p.name for p in MIGRATIONS_DIR.glob("*.sql") if NAME_RE.match(p.name)}
     assert matching == {"0009_platform_upgrades_ledger_upgrade.sql", "0010_field_constraints_upgrade.sql", "0011_idempotency_records_upgrade.sql"}
     platform_single_shot_migrations = (
@@ -663,6 +668,7 @@ def test_naming_convention_excludes_every_current_platform_single_shot_migration
         "0006_control_plane_http.sql",
         "0007_application_audit.sql",
         "0008_platform_declarations_and_writer_timeouts.sql",
+        "0012_process_ceilings.sql",
     )
     for name in platform_single_shot_migrations:
         assert name not in matching, f"{name} incorrectly matches the per-application upgrade naming convention"

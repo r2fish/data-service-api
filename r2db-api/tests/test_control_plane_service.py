@@ -1796,8 +1796,10 @@ def test_capabilities_document_shape_and_injected_limits(kind, platform):
         # 1.6.0 in the same commit as the locator-credential/`surfaces`
         # behavior this WP ships. Phase 9 WP-2e: re-flipped again to 1.7.0
         # in the same commit as the R-3/R-7 behavior this WP ships (D-1
-        # (5)).
-        assert caps["contract_version"] == "1.7.0"
+        # (5)). Phase 10 WP-6a/pair-closing: re-flipped again to 1.8.0 in
+        # the same commit as the `process_ceilings` mapping this WP ships
+        # (design D-5 (v)).
+        assert caps["contract_version"] == "1.8.0"
         assert caps["capabilities"]["control_plane"]["status"] == "enabled"
         # This harness's `ControlPlaneService` is built with no `audit_
         # reader` (AUDIT DSN unconfigured) -- `audit_query` stays declared

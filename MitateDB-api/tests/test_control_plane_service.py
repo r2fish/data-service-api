@@ -568,7 +568,10 @@ def test_control_capabilities_result_matches_schema_exactly_and_declares_request
     # control plane, so the flip lands in this same commit as the audit_
     # query bundle it accompanies. Phase 5 WP-3: re-flipped to 1.5.0 in the
     # same commit as the `operations`/`target_kinds` declaration keys.
-    assert result["contract_version"] == "1.7.0"
+    # Phase 10 WP-6b/pair-closing: re-flipped again to 1.8.0 in the same
+    # commit as this host's own `process_ceilings` mapping (design D-5
+    # (v)).
+    assert result["contract_version"] == "1.8.0"
     assert result["role"] == "control"
 
 

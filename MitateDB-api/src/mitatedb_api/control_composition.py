@@ -228,6 +228,11 @@ def build_control_service(env: Mapping[str, str] | None = None) -> ControlPlaneS
         # describe the SAME window, closing the drift design §1.2
         # describes ("別プロセスだから読めない").
         audit_coalescing_window_ms=declarations.audit_coalescing_window_ms,
+        # Phase 10 WP-6b (design D-5 (ii)): the single source (already
+        # read above) for how many processes may serve THIS deployment's
+        # control-plane base URL at the same time -- never re-derived,
+        # never an env var of its own.
+        process_ceiling=declarations.process_ceilings.control,
     )
 
 
