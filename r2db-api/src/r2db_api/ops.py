@@ -109,6 +109,7 @@ from .platform_declarations import (
     read_declared_role_timeouts,
     validate_audit_writer_roles_value,
     validate_coalescing_window_value,
+    validate_process_ceilings_value,
     validate_surfaces_value,
 )
 from .structured import RESET_CONTROL_CREDENTIALS, delete_credential_confirmation_phrase
@@ -1252,6 +1253,27 @@ def cmd_declare_coalescing_window(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_declare_process_ceilings(args: argparse.Namespace) -> int:
+    """Phase 10 WP-6a (design D-5(ii), Q4 D-2 mechanism): writes the
+    `process_ceilings` row through the SAME validation function
+    (`validate_process_ceilings_value`, `r2db_api.platform_declarations`)
+    both composition roots run on READ -- a value this command itself
+    would reject can never enter the table, and the table (never an env
+    var -- design D-5(ii) never adds a fallback) is the sole source
+    `limit_enforcement`'s in-memory-per-process classes are derived from."""
+    schema = _schema()
+    value = {"data": args.data, "control": args.control}
+    try:
+        validate_process_ceilings_value(value, schema=schema, ops_module=PEER_MODULE)
+    except PlatformDeclarationError as exc:
+        _die(str(exc))
+    with psycopg.connect(_control_dsn()) as conn:
+        _upsert_declaration(conn, schema=schema, key="process_ceilings", value=value)
+    print(f"process_ceilings declared: {json.dumps(value)}")
+    print("restart both r2db_api.main and r2db_api.control_main for the new value to take effect (U-3, startup snapshot)")
+    return 0
+
+
 def cmd_show_declarations(_args: argparse.Namespace) -> int:
     """D-1/D-2 (design §3, WP-1 change table C; rework D-2(h)): a read-only
     diagnostic -- the current `platform_declarations` rows and every
@@ -1349,6 +1371,9 @@ _VERIFY_DECLARATIONS_EXIT_CODES = {
     # out of scope for this command, `_verify_declarations_checks`'s own
     # docstring / the trailing disclosure line below).
     "F-14": 13,
+    # Phase 10 WP-6a (design D-5(ii)): `process_ceilings` row present and
+    # well-formed -- the next unused exit code.
+    "F-15": 14,
 }
 
 #: `read_platform_declarations`'s own fixed internal order (that function's
@@ -1360,6 +1385,12 @@ _VERIFY_DECLARATIONS_READ_ORDER = (
     ("F-8", "declaration table present"),
     ("F-3", "surfaces row present"),
     ("F-4", "audit_coalescing_window_ms row present"),
+    # Phase 10 WP-6a (design D-5(ii)): one combined entry -- `read_platform_
+    # declarations` raises F-15 for BOTH the missing-row and the malformed-
+    # value case for this key (unlike surfaces' F-3/F-5 split), and checks
+    # both right after the window row-existence check above, before
+    # surfaces/window VALUE validation runs.
+    ("F-15", "process_ceilings row present and valid"),
     ("F-5", "surfaces value valid"),
     ("F-4b", "audit_coalescing_window_ms / audit_writer_roles value valid"),
 )
@@ -1542,8 +1573,9 @@ def cmd_verify_declarations(args: argparse.Namespace) -> int:
     connection) and F-12 (cell-open-time only, design D-5 "対象外の3条件")
     are out of this command's reach -- named, with the reason, on the last
     output line, printed for every code `_verify_declarations_checks`
-    returns (0 through 13 alike -- F-14's own exit code, contract 1.7.0),
-    never only on the 0 path."""
+    returns (0 through 14 alike -- F-14's own exit code (contract 1.7.0)
+    and F-15's own (Phase 10 WP-6a, contract 1.8.0) included), never only
+    on the 0 path."""
     schema = _schema()
     dsn = os.environ.get(platform_declarations.PROVISION_DSN_ENV)
     if not dsn:
@@ -2059,6 +2091,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--ms", type=int, required=True, metavar="N")
     p.set_defaults(func=cmd_declare_coalescing_window)
+
+    p = sub.add_parser(
+        "declare-process-ceilings",
+        help=(
+            "Phase 10 WP-6a (design D-5(ii), contract 1.8.0): declare the maximum number of processes that "
+            "may serve each plane's surfaces base URL at the same time (data/control, each >= 1). "
+            "Restart both r2db_api.main and r2db_api.control_main afterward"
+        ),
+    )
+    p.add_argument("--data", type=int, required=True, metavar="N")
+    p.add_argument("--control", type=int, required=True, metavar="N")
+    p.set_defaults(func=cmd_declare_process_ceilings)
 
     p = sub.add_parser(
         "show-declarations",

@@ -82,6 +82,11 @@ MIGRATION_NAMES = (
     "0006_control_plane_http.sql",
     "0007_application_audit.sql",
     "0008_platform_declarations_and_writer_timeouts.sql",
+    # Phase 10 WP-6a (design D-5(ii)): widens `platform_declarations_key_
+    # check` to admit `process_ceilings` -- required so this file's own
+    # `platform` fixture can seed that row below (F-15 is unconditional,
+    # like F-3 for `surfaces`, since WP-6a).
+    "0012_process_ceilings.sql",
 )
 
 # Q4 phase WP-1 (design D-2(c)): this file's own `platform` fixture seeds a
@@ -204,6 +209,7 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
         _run_psql(control_dsn, rewritten["0006_control_plane_http.sql"], {"controlplane_password": controlplane_password})
         _run_psql(control_dsn, rewritten["0007_application_audit.sql"], {"auditreader_password": auditreader_password})
         _run_psql(control_dsn, rewritten["0008_platform_declarations_and_writer_timeouts.sql"], {"api_role": api_role, "controlplane_role": controlplane_role})
+        _run_psql(control_dsn, rewritten["0012_process_ceilings.sql"])
         with psycopg.connect(control_dsn) as _seed_conn:
             with _seed_conn.cursor() as _seed_cur:
                 _seed_cur.execute(
@@ -212,6 +218,18 @@ def platform(tmp_path_factory: pytest.TempPathFactory) -> Iterator[types.SimpleN
                         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
                     ).format(table=sql.Identifier(schema, "platform_declarations")),
                     [json.dumps(_DEFAULT_SURFACES_VALUE)],
+                )
+                # Phase 10 WP-6a (design D-5(ii)): `process_ceilings` is
+                # unconditionally required, like `surfaces` above (F-15) --
+                # single-process ceiling for both planes, matching every
+                # `build_app`/`build_control_app` this fixture drives
+                # (neither uses `--workers`).
+                _seed_cur.execute(
+                    sql.SQL(
+                        "INSERT INTO {table} (key, value, updated_at) VALUES ('process_ceilings', %s, now()) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ).format(table=sql.Identifier(schema, "platform_declarations")),
+                    [json.dumps({"data": 1, "control": 1})],
                 )
             _seed_conn.commit()
     except Exception:
