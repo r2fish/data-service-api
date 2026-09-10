@@ -827,6 +827,7 @@ class RealServerR2db:
         finally:
             _sweep_prefix(_admin_dsn(), prefix)
             _release_prefix_lock(prefix, lock)
+            shutil.rmtree(script_dir, ignore_errors=True)
 
     def attempt_start_with_lowered_role_limit(self) -> SimpleNamespace:
         """F-16 observation (Phase 10 WP-4g, supervisor ruling 2026-09-09):
