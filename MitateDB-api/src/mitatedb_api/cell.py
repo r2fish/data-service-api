@@ -22,7 +22,7 @@ WP wires into the public in-process composition -- or
 
 from contextlib import contextmanager
 import contextvars
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 import hashlib
 import json
 import time
@@ -48,6 +48,7 @@ from .field_types import (
     validate_enum_declaration,
 )
 from .identifiers import validate_identifier, is_identifier_syntax
+from .request_traversal import _as_traversable
 from .surfaces import build_surfaces
 
 # The common contract's own mutation vocabulary
@@ -617,25 +618,6 @@ class Filter:
     field: str
     operator: str
     value: object
-
-
-def _as_traversable(item):
-    """Phase 8 WP-1a (design D-1): `_measure_request_bytes`/`_check_
-    operation_depth` below traverse the JSON-safe request structures this
-    module's own gate builds internally (a plain dict of the method's own
-    arguments) -- but those arguments legitimately carry this module's own
-    `Filter` frozen dataclass (both `read`/`update`/`delete`/`transact`
-    reach the gate with `filters` already bound to `Filter` instances,
-    never plain dicts -- see `http.py::_predicate_to_filter`/the
-    in-process conformance adapter, both of which construct `Filter`
-    objects before calling into this module). A generic dataclass ->
-    dict conversion here (rather than a `Filter`-specific special case)
-    keeps both traversal functions correct for any dataclass value a
-    future request shape might carry, with no second, type-specific
-    branch to keep in sync."""
-    if is_dataclass(item) and not isinstance(item, type):
-        return asdict(item)
-    return item
 
 
 def _measure_request_bytes(request, bound):

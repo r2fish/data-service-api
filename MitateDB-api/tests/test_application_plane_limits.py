@@ -38,7 +38,7 @@ import pytest
 
 from mitatedb_api.auth import Principal, Role
 from mitatedb_api.backend_postgres import PostgresBackend
-from mitatedb_api.cell import ApplicationCell, Filter, _LimitStateHolder, _measure_request_bytes
+from mitatedb_api.cell import ApplicationCell, Filter, _LimitStateHolder, _as_traversable, _measure_request_bytes
 from mitatedb_api.config import FoundationConfig
 from mitatedb_api.credential_store_postgres import PostgresCredentialStore
 from mitatedb_api.errors import ResourceLimitError, ValidationError
@@ -304,6 +304,16 @@ def test_measure_request_bytes_rejects_a_container_with_too_many_elements_before
     with pytest.raises(ResourceLimitError) as excinfo:
         _measure_request_bytes(request, bound)
     assert excinfo.value.details == {"limit_class": "request_bytes"}
+
+
+def test_as_traversable_leaf_preserves_cell_facade_and_dataclass_normalization():
+    from mitatedb_api.request_traversal import _as_traversable as leaf_as_traversable
+
+    filter_value = Filter(field="state", operator="eq", value="active")
+    plain_value = {"safe": [1, 2]}
+    assert _as_traversable is leaf_as_traversable
+    assert _as_traversable(filter_value) == {"field": "state", "operator": "eq", "value": "active"}
+    assert _as_traversable(plain_value) is plain_value
 
 
 # ---------------------------------------------------------------------------
