@@ -15,6 +15,7 @@ from typing import Any, Callable
 from .audit_hook import ApplicationAuditHook
 from .errors import fail, observed_type_of, violation
 from .limits import ResourceLimits
+from .value_nul import _contains_nul
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # PostgreSQL's own identifier limit, and the bound MitateDB-api already
@@ -1378,23 +1379,6 @@ class MutationOutcome:
 # client bug that must not surface as a retryable-looking server failure.
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
-
-
-def _contains_nul(value: Any) -> bool:
-    """`True` if `value` (or, recursively, any string nested inside a
-    dict/list) contains a U+0000 (NUL) character. PostgreSQL's `text`/
-    `jsonb` storage cannot hold a NUL byte at all (`invalid byte sequence
-    for encoding`/`unsupported Unicode escape sequence`) -- another
-    decisive client bug (R-7 addendum, WP-3 review blocker-2) that must be
-    refused deterministically here, not discovered as a database error.
-    """
-    if isinstance(value, str):
-        return "\x00" in value
-    if isinstance(value, dict):
-        return any(_contains_nul(key) or _contains_nul(item) for key, item in value.items())
-    if isinstance(value, list):
-        return any(_contains_nul(item) for item in value)
-    return False
 
 
 def _declared_type_label(field_type: str | None) -> str:

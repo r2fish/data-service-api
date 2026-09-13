@@ -1541,6 +1541,15 @@ def test_nul_byte_is_rejected_in_string_object_array_and_untyped_values():
     assert exc.value.code == "VALIDATION_FAILED"
 
 
+def test_contains_nul_leaf_preserves_structured_facade_and_nested_detection():
+    from r2db_api.structured import _contains_nul
+    from r2db_api.value_nul import _contains_nul as leaf_contains_nul
+
+    assert _contains_nul is leaf_contains_nul
+    assert _contains_nul({"safe": ["also safe", {"bad\x00key": None}]})
+    assert not _contains_nul({"safe": ["also safe", {"nested": None}]})
+
+
 def test_expected_revision_containing_nul_is_validation_failed():
     cell = _cell()
     _create_entity(cell, "docs")
