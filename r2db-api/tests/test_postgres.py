@@ -1172,6 +1172,14 @@ def test_query_operators_in_and_contains_and_is_null(app_a: types.SimpleNamespac
 # and non-disclosure of PostgreSQL's LIKE-escaping mechanics ---------------
 
 
+def test_escape_like_literal_leaf_preserves_facade_and_escape_order() -> None:
+    from r2db_api.postgres import _escape_like_literal
+    from r2db_api.postgres_like import _escape_like_literal as leaf_escape_like_literal
+
+    assert _escape_like_literal is leaf_escape_like_literal
+    assert _escape_like_literal(r"a\\%_b") == "a" + "\\" * 5 + "%" + "\\" + "_b"
+
+
 def test_contains_is_a_literal_substring_and_never_interprets_wildcards(app_a: types.SimpleNamespace) -> None:
     """Q-2 (案i): `%`/`_`/`\\` in the *value* must never be interpreted as a
     LIKE wildcard -- a row literally containing a percent sign must be

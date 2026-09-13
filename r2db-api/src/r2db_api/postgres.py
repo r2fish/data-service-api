@@ -113,6 +113,7 @@ from .backend import StorageBackend as _StorageBackend
 from .errors import fail, violation
 from .limits import ResourceLimits
 from . import platform_upgrades
+from .postgres_like import _escape_like_literal
 from .postgres_types import _FIELD_TYPE_SQL, _JSONB_SQL, _column_type_sql
 from .structured import (
     BoundMutation,
@@ -263,16 +264,6 @@ _COMPARISON_OPERATORS: dict[str, sql.SQL] = {
     "gt": sql.SQL(">"),
     "gte": sql.SQL(">="),
 }
-
-
-def _escape_like_literal(value: str) -> str:
-    """Q-2 (案i): `contains` is literal substring containment -- no
-    character of the value is ever interpreted as a `LIKE` wildcard. `\\`
-    must be escaped first, before `%`/`_`, so a value already containing a
-    backslash does not have that backslash re-interpreted as escaping the
-    `%`/`_` markers this function itself inserts.
-    """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @dataclass
