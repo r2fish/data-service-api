@@ -2144,6 +2144,17 @@ def test_repeated_invalid_secret_adds_exactly_one_coalesced_row_with_count_n() -
     assert summary["reason_code"] == "AUTH_INVALID"
 
 
+def test_coalesced_count_leaf_preserves_the_service_facade() -> None:
+    from r2db_api.audit_counts import _coalesced_count as leaf_coalesced_count
+    from r2db_api.service import _coalesced_count
+
+    assert _coalesced_count is leaf_coalesced_count
+    assert _coalesced_count(0) is None
+    assert _coalesced_count(1) is None
+    assert _coalesced_count(2) == 2
+    assert _coalesced_count(7) == 7
+
+
 def test_coalesced_summary_row_with_exactly_one_repeat_writes_no_literal_count_of_one() -> None:
     """WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): a window
     with exactly ONE repeat (2 total occurrences: the first-occurrence row

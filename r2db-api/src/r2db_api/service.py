@@ -12,6 +12,7 @@ import uuid
 
 from .audit import ApplicationAuditSink, AuditEvent, AuditSink
 from .audit_hook import ApplicationAuditHook
+from .audit_counts import _coalesced_count
 from .auth import AuthContext, CredentialStore
 from .backend import StorageBackend
 from .errors import FoundationError, fail, observed_type_of, violation
@@ -101,9 +102,6 @@ _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concu
 # instead of writing it verbatim, so "exactly one repeat/one drop" always
 # renders as an ordinary NULL-count row, never a literal `count=1` a reader
 # would have to special-case.
-def _coalesced_count(occurrences: int) -> int | None:
-    return occurrences if occurrences >= 2 else None
-
 # Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
 # design's own instruction ("可変部に実データを載せない"). A fixed string
 # also means these two call sites can never accidentally leak a client-
