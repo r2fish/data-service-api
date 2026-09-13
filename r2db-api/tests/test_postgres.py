@@ -1411,13 +1411,26 @@ def test_field_type_sql_json_entry_maps_to_jsonb_without_keyerror() -> None:
     own G11 decision) -- this is what guards against a `KeyError` if a
     caller ever DOES look "json" up here directly (`_column_type_sql`'s own
     docstring)."""
+    from psycopg import sql
+
     from r2db_api.postgres import _JSONB_SQL, _column_type_sql
     from r2db_api.postgres import _FIELD_TYPE_SQL
+    from r2db_api.postgres_types import _FIELD_TYPE_SQL as leaf_field_type_sql
+    from r2db_api.postgres_types import _JSONB_SQL as leaf_jsonb_sql
+    from r2db_api.postgres_types import _column_type_sql as leaf_column_type_sql
 
+    # `postgres` remains the compatibility facade for current callers.
+    assert _FIELD_TYPE_SQL is leaf_field_type_sql
+    assert _JSONB_SQL is leaf_jsonb_sql
+    assert _column_type_sql is leaf_column_type_sql
     assert "json" in _FIELD_TYPE_SQL
     assert _FIELD_TYPE_SQL["json"] is _JSONB_SQL
+    assert set(_FIELD_TYPE_SQL) == {"string", "integer", "number", "boolean", "object", "array", "json"}
+    assert all(isinstance(_FIELD_TYPE_SQL[field_type], sql.SQL) for field_type in ("string", "integer", "number", "boolean", "json"))
+    assert all(isinstance(_FIELD_TYPE_SQL[field_type], sql.Identifier) for field_type in ("object", "array"))
     assert _column_type_sql("json") is _JSONB_SQL
     assert _column_type_sql(None) is _JSONB_SQL  # untyped -- same physical type
+    assert _column_type_sql("not-a-contract-field-type") is _JSONB_SQL
 
 
 def test_field_type_null_is_allowed_for_any_declared_type(app_a: types.SimpleNamespace) -> None:
