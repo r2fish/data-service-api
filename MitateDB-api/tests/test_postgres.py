@@ -1495,6 +1495,9 @@ def test_check_domain_type_mismatches_are_rejected_at_the_mechanism_level() -> N
     the layer-(ii) backstop), which is a hard failure at the mechanism
     level, not merely a differently-worded one."""
     from mitatedb_api.backend_postgres import _check_domain
+    from mitatedb_api.postgres_value_domain import _check_domain as leaf_check_domain
+
+    assert _check_domain is leaf_check_domain
 
     with pytest.raises(ValidationError, match="does not match the declared field type"):
         _check_domain("not-a-number", "int64")
@@ -1523,7 +1526,10 @@ def test_check_domain_range_boundaries_at_the_mechanism_level() -> None:
     (unlike the full integration path, where PostgreSQL's own driver
     would still raise SOME error the layer-(ii) backstop reclassifies
     into an indistinguishable `ValidationError`)."""
-    from mitatedb_api.backend_postgres import _check_domain
+    from mitatedb_api.backend_postgres import _INT_DOMAIN_RANGES, _check_domain
+    from mitatedb_api.postgres_value_domain import _INT_DOMAIN_RANGES as leaf_int_domain_ranges
+
+    assert _INT_DOMAIN_RANGES is leaf_int_domain_ranges
 
     # int64 (this foundation's own `integer` field type): exactly at the
     # bigint boundary succeeds (negative control); one past it fails.
