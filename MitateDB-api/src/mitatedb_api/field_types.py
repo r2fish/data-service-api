@@ -9,7 +9,7 @@ peer, and the ONE place a value is checked against a DECLARED member of it
 style: this is the same kind of backend-independent, single-point
 validation `r2db_api.structured._check_type` already is for that peer,
 independently arrived at here, R-2's own closing paragraph). Backend
-domain checks (`backend_postgres.py`) stay as defence-in-depth UNDER this
+domain checks (`backend_postgres.py`) (in `postgres_value_domain.py`) stay as defence-in-depth UNDER this
 layer, never instead of it.
 
 ``CONTRACT_TYPES`` is this peer's own copy of the contract's

@@ -1481,6 +1481,37 @@ def test_validate_value_domain_actually_invokes_the_domain_check() -> None:
     assert _validate_value_domain(None, domain="float") is None
 
 
+# --- BP2 (R-37 WP-1n): PostgreSQL value-domain gate, connection- ----------
+# --- independent unit tests of the mechanism itself -------------------------
+
+
+def test_postgres_value_domain_leaf_preserves_backend_postgres_facade() -> None:
+    """Pins that `backend_postgres._validate_value_domain` is the same
+    object as `postgres_value_domain._validate_value_domain` -- no live
+    PostgreSQL server needed. `_check_domain`/`_INT_DOMAIN_RANGES`
+    are already pinned as facade names by `test_check_domain_type_
+    mismatches_are_rejected_at_the_mechanism_level`/`test_check_domain_
+    range_boundaries_at_the_mechanism_level` below (Y-3), so this test
+    does not repeat them."""
+    from mitatedb_api import backend_postgres
+    from mitatedb_api.postgres_value_domain import _validate_value_domain
+
+    assert backend_postgres._validate_value_domain is _validate_value_domain
+
+
+def test_validate_value_domain_converts_bool_to_int_before_the_domain_check() -> None:
+    """Mechanism-level pin for the `bool`-before-domain-check conversion
+    (`isinstance(True, int)` is `True` in Python, which would otherwise
+    let a stray `bool` slip through an `int` domain check unconverted,
+    see `_validate_value_domain`'s own comment) -- the converted value is
+    a plain `int`, not `bool`, and compares equal to `1`."""
+    from mitatedb_api.backend_postgres import _validate_value_domain
+
+    converted = _validate_value_domain(True, domain="int32")
+    assert converted == 1
+    assert type(converted) is int
+
+
 # --- m-8 (i, independent review round 2): connection-independent unit -----
 # --- tests of the domain-validation MECHANISM itself ------------------------
 

@@ -685,7 +685,7 @@ class SQLiteBackend:
         # PostgreSQL -- the encoding failure happens in the SAME place
         # (UTF-8 encoding at bind time) on both backends' own drivers, so
         # this backend needs the identical deterministic, validation-time
-        # rejection `backend_postgres.py::_validate_value_domain` now
+        # rejection `backend_postgres.py::_validate_value_domain` (in `postgres_value_domain.py`) now
         # applies. Only a plain `str` can carry one through to this point
         # (a dict/list value already became NUL/surrogate-escaped JSON
         # text via `json.dumps` in `cell.ApplicationCell._normalize_
