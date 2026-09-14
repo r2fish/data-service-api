@@ -2171,6 +2171,28 @@ def test_paging_leaf_preserves_structured_facade():
         assert getattr(structured, name) is getattr(paging, name), name
 
 
+def test_value_types_leaf_preserves_structured_facade():
+    """R-37 WP-1i (ST6): `structured.py` re-exports all 6 value-type/
+    domain names plus `_TEXT_ONLY_OPERATORS` from the new leaf
+    `value_types.py` as the exact same objects -- this checks facade
+    identity only, not behaviour (the dedicated tests around this one
+    exercise behaviour)."""
+    from r2db_api import structured
+    from r2db_api import value_types
+
+    names = [
+        "_INT64_MIN",
+        "_INT64_MAX",
+        "_declared_type_label",
+        "_check_type",
+        "_validate_wildcard_pattern",
+        "_validate_predicate_types",
+        "_TEXT_ONLY_OPERATORS",
+    ]
+    for name in names:
+        assert getattr(structured, name) is getattr(value_types, name), name
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
