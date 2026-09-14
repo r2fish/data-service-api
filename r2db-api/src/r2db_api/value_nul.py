@@ -5,7 +5,13 @@ from typing import Any
 
 
 def _contains_nul(value: Any) -> bool:
-    """Return whether a string, dict, or list recursively contains U+0000."""
+    """`True` if `value` (or, recursively, any string nested inside a
+    dict/list) contains a U+0000 (NUL) character. PostgreSQL's `text`/
+    `jsonb` storage cannot hold a NUL byte at all (`invalid byte sequence
+    for encoding`/`unsupported Unicode escape sequence`) -- another
+    decisive client bug (R-7 addendum, WP-3 review blocker-2) that must be
+    refused deterministically here, not discovered as a database error.
+    """
     if isinstance(value, str):
         return "\x00" in value
     if isinstance(value, dict):

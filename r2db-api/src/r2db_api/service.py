@@ -91,17 +91,9 @@ _DEFAULT_AUDIT_FLUSH_INTERVAL_S = 2.0
 # scope, supervisory ruling 2026-09-08, not this WP's).
 _IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES = frozenset({"requests_per_minute", "concurrency"})
 
-# Phase 4 WP-2(b) review B-1 (major, supervisor ruling 2026-09-03): the
-# durable `count` column's own semantics -- "the number of occurrences this
-# ONE row represents; when that number is 1, the column is absent (NULL)"
-# (contract `audit.query_event_fields_note`: "present only on an event
-# representing more than one coalesced occurrence, absent -- never zero or
-# one -- otherwise"). Both call sites that can ever pass a real integer here
-# -- `_DenialCoalescer`'s aggregate (repeat-count) row and `_AuditBuffer`'s
-# overflow-alert row -- route the raw tally through this one function
-# instead of writing it verbatim, so "exactly one repeat/one drop" always
-# renders as an ordinary NULL-count row, never a literal `count=1` a reader
-# would have to special-case.
+# `_coalesced_count`'s own comment (Phase 4 WP-2(b) review B-1) moved with
+# it to `audit_counts.py` when that helper was extracted.
+
 # Phase 4 (design §7.4/D-4): fixed, no-interpolation log messages -- the
 # design's own instruction ("可変部に実データを載せない"). A fixed string
 # also means these two call sites can never accidentally leak a client-

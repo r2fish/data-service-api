@@ -95,6 +95,8 @@ from .errors import (AuditSinkUnavailable, ConflictError, NotFoundError,
 from .identifiers import validate_identifier
 from .field_types import CONTRACT_TYPES, FOUNDATION_TYPE_TO_CONTRACT_TYPE as _FOUNDATION_TYPE_TO_CONTRACT_TYPE
 from . import platform_upgrades
+# `_INT_DOMAIN_RANGES` is re-exported for facade compatibility (design
+# D-2); not referenced elsewhere in this module.
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _check_domain
 
 
@@ -198,6 +200,8 @@ _TEXT_DOMAIN_BY_DECLARED_TYPE = {
     "array": "array",
     "json": "json",
 }
+
+
 def _validate_value_domain(value, domain=None, *, field=None, declared_type=None):
     """B-1 value-domain gate (independent review, both rounds). A pure,
     connection-independent function (m-8, round 2: "layer (i) 単体テスト
@@ -1315,7 +1319,8 @@ class PostgresBackend:
 
     # ------------------------------------------------------------------
     # values (R-2/B-1 value-domain gate) -- see the module-level
-    # `_validate_value_domain`/`_check_domain` functions below, which hold
+    # `_validate_value_domain`/`_check_domain` functions below (`_check_
+    # domain` now in `postgres_value_domain.py`), which hold
     # ALL of the actual logic. `encode_value` is a thin instance-method
     # wrapper only so it satisfies the shared `StorageBackend.encode_value`
     # call shape (`cell.py` always calls it as `self._backend.
