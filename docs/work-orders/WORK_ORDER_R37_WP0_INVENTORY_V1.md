@@ -2,6 +2,8 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.6 (2026-09-14)。** W-1〜W-3 と既知の穴の追跡先への監督裁定を反映した (§5.11 の 14、§5.13 の追加行・23・24、§5.14 の裁定表)。独立レビューの指摘 (監督裁定) も反映した。v1.5 以降の未コミット分だけを直し、それ以前の行は書き換えていない。
+- **v1.5 (2026-09-14)。** 基点 main `4fc5517` (WP-1d / 1e / 1f 統合済み)。§6 に U-2 の追記行 (r2db `service.py` は変更セット 2 が先)、§5.10〜§5.14 に WP-1g / 1h / 1i の manifest を追記した。既存の行は書き換えていない。**独立レビュー待ち。**
 - **v1.4 (2026-09-14)。** 独立レビューの minor 5 件 (監督裁定、全件採用) を §5.5〜§5.9 に反映した: 共通の完了条件 C-1〜C-3 を §5.5 へ集約、§5.6 の変異 3b・5b と位置参照、§5.7 の `__future__` 必須と既知の穴、§5.9 の未確定表を削除して裁定表だけ残した。
 - **v1.3 (2026-09-14)。** 基点 `fbf45cb` (対象ファイルは main `944e86b` と同一)。v1.2 からの変更: WP-1 後続 3 件 (CE2、ST3、ST4) の manifest、重なり、未確定点を §5.5〜§5.9 に追記した。既存の行は書き換えていない (§5 見出しの「4 件」と §5 共通表の「順序」は v1.2 時点の記述)。**独立レビュー待ち。**
 - **v1.2 (2026-09-14)。** 基点 main `a0e2a82`。v1.1 からの変更: 独立レビューの指摘 (M1、M2、m1〜m8) と U-3・m5 への監督裁定 (同日) を反映した (§6)。
@@ -482,6 +484,189 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | V-3 | WP 名は 1d / 1e / 1f で確定 | §5.6〜§5.8 |
 | V-4 | 移動前から古い、又は移動で古くなるが直すと Class C になる参照は、本範囲で直さない。一覧: `cell.py` L4395 の「(`:531`)」、`conformance-tests/test_c05_limit_declaration_agreement.py` L1184-1185 の「`cell.py`'s own `_LimitStateHolder`/`_measure_request_bytes`」と L1197 の `cell.py:531`、`MitateDB-api/tests/test_limit_class_vocabulary.py` L143 の件数説明の文字列 (「cell.py x6」)。WP-1d の既知の穴として完了時の実施記録に書く | §5.6 の 17 |
 
+### 5.10 WP-1f の次の 3 件の共通 (v1.5 追記、**独立レビュー待ち**)
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | §4 の「4〜」行で WP-1f に続く 3 件 (ST5 → ST7 → ST6)。飛ばした候補は無い (3 件とも `service.py` を触らない) |
+| 行番号 | `4fc5517` の実測。WP-1h / 1i の行番号は先行 WP の統合でずれるので、着手時に取り直す |
+| 変更クラス、テンプレート、検証コマンド | §5 の共通表と §5.5 のとおり。各表の末尾に §5.5 の C-1〜C-3 を付ける。C-2 の「新規 1 件」は各 WP の新規テスト本数と読み替える |
+| 読む正本 | §5.5 に加え、設計 §10.4 |
+| 「赤になる test id」 | 予想である。既存の id は `4fc5517` の collect-only で存在を確認済み。予想に挙げた既存テストは本体を読み、変異で壊す性質を通ることを確かめた |
+
+**WP-1d〜1f のレビューから足す規律** (§5.5 の 1〜5 の続き):
+
+| # | 規律 |
+|---|---|
+| 6 | 新規テストの本数と名前は中身に合わせる (1 本に詰めない。名前が検査内容を表す) |
+| 7 | 予想の赤テストは、変異で壊す性質を実際に通るものを選ぶ |
+| 8 | sib 集合は固定 tuple に module を足す |
+| 9 | 移動で未使用になった import は同じ WP で削除する。facade テストが移動元から読む名前は残す |
+| 10 | 位置参照の括弧書きは指示語の直後に置く。`structured.X` のような qualified name は facade で成り立つので直さない |
+| 11 | 裸の名前の注釈を持つ関数を移すときは、leaf に `from __future__ import annotations` を置き、注釈の型を import しない (V-2) |
+
+### 5.11 WP-1g — r2db 破壊的操作の確認 phrase (ST5、**独立レビュー待ち**)
+
+**目的**: `structured.py` の確認 phrase の構成と SI-09 gate (11 名と節見出しコメント) を leaf `r2db-api/src/r2db_api/delete_confirmation.py` へ移す (U-3)。
+
+| 項目 | 実測 (`4fc5517`) |
+|---|---|
+| 移動範囲 | `structured.py` L287-549 (L287-303 の節見出しコメント、L305-307・L309-313・L443-450 の説明コメント、`RESET_CONTROL_CREDENTIALS` の docstring L453-470 を含む。L279-284 は `bind_mutation` の末尾なので含めず、件数 pin は 88 のまま) |
+| 呼出し元 | `ApplicationCell` の delete / drop_entity / drop_index、`postgres.py`、`control_plane.py`、`ops.py` (いずれも facade 経由) |
+| leaf の import | `hashlib`、`json`、`typing`、`.errors` (`fail`)、`.identifier_rules` (`MAX_IDENTIFIER_LENGTH`)。注釈 `"list[Predicate]"` は文字列なので import しない |
+| facade | 11 名を import する。`structured.py` 側で未使用になる import は無い |
+| denial | `fail("DESTRUCTIVE_CONFIRMATION_REQUIRED", message, …)` 1 件。語彙 code ではなく文言も引数なので、L1 scan (件数 pin、`SCANNED_MODULES`、sib、allowlist) は変わらない |
+| 移動範囲外の位置参照 (40c) | `ops.py` L138 の「`structured.py`'s own header comment」、`r2db-api/tests/test_control_plane_store.py` L1292 の「the exact same module (`structured.py`)」 |
+| 範囲内で指す先が残る参照 | L309 の「`_INT64_MAX` below in this same module」(`_INT64_MAX` は `structured.py` に残る。W-2)、L292 の「(data/schema plane here, …)」の here (data/schema plane は `structured.py` に残る) |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/structured.py` (移動範囲を除き import 1 行)、新規 `r2db-api/src/r2db_api/delete_confirmation.py`、`r2db-api/tests/test_foundation.py` (新規テスト 4 本)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `hashlib`・`json`・`typing`・`.errors`・`.identifier_rules`)、`r2db-api/src/r2db_api/ops.py` (L138 の括弧書きだけ)、`r2db-api/tests/test_control_plane_store.py` (L1292 の括弧書きだけ) | `r2db-api/src/r2db_api/postgres.py`・`service.py` (変更セット 2)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、`control_plane.py`、MitateDB-api 全部 (同名 `_canonical_where_json` は WP-2)、`conformance-tests/`、両 peer の `tests/test_audit_query.py` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `structured.py`: import から `_canonical_where_json` を外す (他 module は import していない) | `r2db-api/tests/test_foundation.py::test_delete_confirmation_leaf_preserves_structured_facade` (新規。11 名の同一性だけを確かめる) |
+| 2 | canonical JSON は入れ子の key も並べる | `delete_confirmation.py`: `sort_keys=True` を `False` にする | `r2db-api/tests/test_foundation.py::test_canonical_where_json_sorts_nested_keys_and_escapes_non_ascii` (新規。値に `{"z": 1, "a": 2}` を持つ `Predicate` の canonical JSON を literal で固定する) |
+| 3 | canonical JSON は非 ASCII を escape する | `delete_confirmation.py`: `ensure_ascii=True` を `False` にする | 同上 (値 `"é"` の canonical JSON を literal で固定する) |
+| 4 | delete phrase は digest 16 桁を持つ | `delete_confirmation.py`: `_where_digest16` の `[:16]` を `[:15]` にする | `r2db-api/tests/test_foundation.py::test_delete_confirmation_phrases_have_fixed_literal_shapes` (新規。固定入力の phrase を literal で固定する) |
+| 5 | delete phrase は schema_revision で無効になる | `delete_confirmation.py`: `delete_confirmation_phrase` の f-string から ` @schema_revision={schema_revision}` を削る | `r2db-api/tests/test_foundation.py::test_delete_phrase_invalidated_by_drop_recreate_of_the_same_entity_under_the_same_name` |
+| 6 | drop / revoke / CLI の phrase の綴り | `delete_confirmation.py`: `drop_entity_confirmation_phrase` の `DROP_ENTITY` を `DROP_TABLE` にする | `r2db-api/tests/test_foundation.py::test_delete_confirmation_phrases_have_fixed_literal_shapes` (4 関数と `RESET_CONTROL_CREDENTIALS` の出力を literal で固定する) |
+| 7 | gate は destructive が真で確認文が完全一致のときだけ通す | `delete_confirmation.py`: `require_destructive_confirmation` の `not destructive or ` を削る | `r2db-api/tests/test_foundation.py::test_require_destructive_confirmation_needs_destructive_true_and_the_exact_phrase` (新規。`destructive=False` と正しい phrase で拒否される) |
+| 8 | denial の details は 4 key | `delete_confirmation.py`: `"recovery": recovery,` の行を削る | 同上 (details を literal で固定する) |
+| 9 | L1 scan は変わらない | **監査照合**: `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` の差分 0 で緑 | — |
+| 10 | leaf の import が許可リストの内だけ | `delete_confirmation.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 11 | 新 leaf が分類される | 一覧から `delete_confirmation.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 12 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 節見出しと説明コメント、docstring が逐語。範囲内の「this module's header comment」「the other three」「`*_confirmation_phrase` functions above」は同じ leaf の中で成り立つ。括弧書きは `ops.py` L138、`test_control_plane_store.py` L1292、L292 の here の直後 (「(in `structured.py`)」)、L309 (W-2) の 4 箇所だけ | — |
+| 13 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。MitateDB `delete_confirmation._canonical_where_json(filters)` は署名が違う (WP-2) | — |
+| 14 | マージ時点で `_INT64_MAX` の参照が正しい (W-2 裁定) | **監査照合**: 移した文の「`_INT64_MAX` below in this same module」の直後に `(in \`structured.py\`)` があり、`_INT64_MAX` が `structured.py` に在ること | — |
+
+### 5.12 WP-1h — r2db page size・order_by・cursor (ST7、**独立レビュー待ち**)
+
+**目的**: `structured.py` の page size・order_by・cursor の検査と組立 (8 名と節見出し 2 行) を leaf `r2db-api/src/r2db_api/paging.py` へ移す。**変更セット 2 と WP-1g の統合後に着手する** (§5.14)。
+
+| 項目 | 実測 (`4fc5517`) |
+|---|---|
+| 移動範囲 | `structured.py` L1514-1616 (L1514・L1533 の節見出し、L1516-1522 の説明コメント、関数内のコメントを含む) |
+| 呼出し元 | `ApplicationCell.query`、`postgres.py` (`validate_page_size`・`_resolve_order_by`・`_shape_hash`・`_encode_cursor`・`_decode_cursor`。facade 経由) |
+| leaf の import | `__future__` (**必須**)、`base64`、`hashlib`、`json`、`typing`、`.errors` (`fail`・`violation`)、`.identifier_rules` (`validate_identifier`)、`.limits` (`ResourceLimits`。`limits.py` は `.errors` だけを import するので循環しない) |
+| 型注釈 `Predicate` | `_shape_hash` の `list[Predicate]` は裸の名前の注釈。逐語で残し import しない (V-2 と同じ) |
+| facade | 8 名を import する。`import base64` は `structured.py` で未使用になるので削除する |
+| denial | 語彙 code の `fail` 10 件 (4-key)、ほかに `LIMIT_EXCEEDED` 1 件と `NOT_FOUND` 1 件 |
+| 件数 pin | `structured.py` 88 → 78、`paging.py` 10 (module tuple と dict の両方に足す) |
+| 行番号 allowlist | 対象は `postgres.py` だけなので、本 WP による差分 0 |
+| sib 集合 | 固定 tuple (`structured.py`, `inmemory_predicate.py`, `identifier_rules.py`) に `paging.py` を足す |
+| 移動範囲外の位置参照 (40c) | `http.py` L466 の「`structured.py`'s shared `_resolve_order_by`/`_decode_cursor`」。`test_http.py` L498 の `r2db_api.structured._shape_hash` は facade で成り立つので直さない |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/structured.py` (移動範囲を除き、import 1 行と `import base64` の削除)、新規 `r2db-api/src/r2db_api/paging.py`、`r2db-api/tests/test_foundation.py` (新規テスト 3 本)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`SCANNED_MODULES`、件数 pin、sib tuple)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `base64`・`hashlib`・`json`・`typing`・`.errors`・`.identifier_rules`・`.limits`)、`r2db-api/src/r2db_api/http.py` (L466 の括弧書きだけ) | `r2db-api/src/r2db_api/postgres.py`・`service.py` (変更セット 2)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` の `_BACKEND_LAYER_ALLOWLIST`、`r2db-api/tests/test_http.py`、MitateDB-api 全部、`conformance-tests/`、両 peer の `tests/test_audit_query.py` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `structured.py`: import から `MAX_CURSOR_OFFSET` を外す (他 module は import していない) | `r2db-api/tests/test_foundation.py::test_paging_leaf_preserves_structured_facade` (新規) |
+| 2 | page size は 1000 を含み、1001 を拒否する | `paging.py`: `page_size > MAX_PAGE_SIZE` を `>=` にする | `r2db-api/tests/test_foundation.py::test_page_size_over_the_contract_maximum_is_validation_failed` |
+| 3 | page size 0 は `LIMIT_EXCEEDED` | `paging.py`: `page_size <= 0` を `page_size < 0` にする | `r2db-api/tests/test_foundation.py::test_validate_page_size_refuses_zero_as_limit_exceeded` (新規。既存の `r2db-api/tests/test_foundation.py::test_finite_limits_are_enforced_and_discoverable` も赤になるかは実測で確定する) |
+| 4 | order_by は 10 個まで | `paging.py`: `len(order_by) > MAX_ORDER_BY_FIELDS` を `>=` にする | `r2db-api/tests/test_foundation.py::test_resolve_order_by_bounds_fields_and_appends_id_last` (新規。10 個を通し 11 個を拒否する) |
+| 5 | `id` が無ければ末尾に昇順で足す | `paging.py`: `spec.append(("id", "asc"))` を `pass` にする | 同上 (`_resolve_order_by(None, set())` が `[("id", "asc")]`。既存の `::test_order_by_sorts_and_appends_id_when_absent` は挿入順と一致するので緑のまま) |
+| 6 | 同じ field を 2 度指定できない | `paging.py`: `field_name in seen_fields` の条件を `False and field_name in seen_fields` にする | `r2db-api/tests/test_foundation.py::test_order_by_rejects_a_repeated_field` |
+| 7 | cursor の offset は 10^9 まで | `paging.py`: `or offset > MAX_CURSOR_OFFSET` を削る | `r2db-api/tests/test_foundation.py::test_cursor_rejects_negative_offset_overflow_and_non_dict_payload` |
+| 8 | cursor は同じ形の問い合わせにだけ使える | `paging.py`: `shape != expected_shape` を `False` にする | `r2db-api/tests/test_foundation.py::test_cursor_shape_mismatch_and_malformed_cursor_are_rejected` |
+| 9 | shape hash は application に結び付く | `paging.py`: `"application": application_id,` の行を削る | `r2db-api/tests/test_foundation.py::test_cursor_shape_hash_is_bound_to_application_and_entity` |
+| 10 | 移動先が `SCANNED_MODULES` に入る (40b) | `test_l1_details_vocabulary_ast_scan.py`: `SCANNED_MODULES` から `paging.py` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for` |
+| 11 | 件数 pin (`structured.py` 78、`paging.py` 10) | `paging.py`: 4-key の `fail("VALIDATION_FAILED", "x", details=violation("request_schema"))` を呼ぶ関数を 1 つ足す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_the_audit_site_count` |
+| 12 | 移した denial が 4-key のまま | `paging.py`: `_decode_cursor` の最初の `fail` から `details=` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 13 | 行番号 allowlist が実測と一致 | **監査照合**: 本 WP による `_BACKEND_LAYER_ALLOWLIST` の差分 0 | — |
+| 14 | sib tuple に移動先が入る | `paging.py`: `"Cursor is not valid."` を allowlist の文言 `"A value in this request is not acceptable to the underlying storage."` にする | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial` (tuple を更新しないと緑のまま) |
+| 15 | leaf の import が許可リストの内だけ | `paging.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 16 | 新 leaf が分類される | 一覧から `paging.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 17 | `_shape_hash` は AST 同一 (注釈の名前も同一) で、leaf は `Predicate` を import しない | `paging.py`: `if TYPE_CHECKING: from .structured import Predicate` を足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` (AST 同一は監査照合) |
+| 18 | leaf に `from __future__ import annotations` がある | `paging.py`: その行を消す | `r2db-api/tests/test_foundation.py` の収集エラー (`_shape_hash` の定義時に NameError。Python 3.11) |
+| 19 | 未使用になった import を削除した | **監査照合**: `structured.py` に `import base64` が無く、`base64` の参照も 0 件 | — |
+| 20 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 節見出し、説明コメント、関数内のコメントが逐語。範囲外の差分は `http.py` L466 の括弧書きだけ | — |
+| 21 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名 def 0 件 | — |
+| 22 | 既知の穴を記録する | **監査照合**: `Predicate` の裸の注釈が型検査器で F821 になることが、完了時の実施記録に載る | — |
+
+### 5.13 WP-1i — r2db 値の型検査 (ST6、**独立レビュー待ち**)
+
+**目的**: `structured.py` の値の型・domain 検査と述語値の検査 (6 名) を、それだけが読む `_TEXT_ONLY_OPERATORS` と一緒に leaf `r2db-api/src/r2db_api/value_types.py` へ移す (W-1)。**変更セット 2 と WP-1h の統合後に着手する** (§5.14)。
+
+| 項目 | 実測 (`4fc5517`) |
+|---|---|
+| 移動範囲 | `structured.py` L33-41 (`_TEXT_ONLY_OPERATORS` と説明コメント) と L1318-1511 (L1318 の節見出し、L1320-1324 の説明コメント、関数内のコメントを含む) |
+| `_TEXT_ONLY_OPERATORS` | 読み手は `_validate_predicate_types` だけ (他 module とテストの参照 0 件)。`structured.py` に残すと、leaf が `.structured` を import する循環になる |
+| 呼出し元 | `structured.py` 内 (write 経路、`query`、`_fail_constraint_declaration`)、`postgres.py` (`_check_type`・`_declared_type_label`・`_validate_predicate_types`。facade 経由) |
+| leaf の import | `typing`、`.errors` (`fail`・`observed_type_of`・`violation`)、`.value_nul` (`_contains_nul`)。注釈 `"FieldConstraints \| None"`・`list["Predicate"]` は文字列なので import しない |
+| facade | 6 名と `_TEXT_ONLY_OPERATORS` を import する。`_contains_nul` は `structured.py` で未使用になるが、`test_contains_nul_leaf_preserves_structured_facade_and_nested_detection` が `structured` から読むので残す |
+| denial | 語彙 code の `fail` 11 件 (4-key) |
+| 件数 pin | `structured.py` 78 → 67、`value_types.py` 11 |
+| 行番号 allowlist | 本 WP による差分 0 |
+| sib 集合 | 固定 tuple に `value_types.py` を足す |
+| 移動範囲外の位置参照 (40c) | `structured.py` L555「`_check_type` below」、L561「this file's own `_check_type`」、L596「(`_check_type` below)」、L763「`_declared_type_label` below」、L2296「(`_validate_predicate_types`, below and in `query`)」、L2312「`_check_type` below」、WP-1g の leaf の「`_INT64_MAX` below in this same module」(W-2)。範囲内の L1383「`_ENUM_ELIGIBLE_TYPES` gate above」は指す先が `structured.py` に残るので、leaf 側で「above」の直後に「(in `structured.py`)」を付ける。`postgres.py` L1559 の `r2db_api.structured._check_type` は facade で成り立つので直さない |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/structured.py` (移動範囲を除き、import 1 行と括弧書き 6 箇所)、新規 `r2db-api/src/r2db_api/value_types.py`、`r2db-api/tests/test_foundation.py` (新規テスト 1 本)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`SCANNED_MODULES`、件数 pin、sib tuple)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `typing`・`.errors`・`.value_nul`)、`r2db-api/src/r2db_api/delete_confirmation.py` (括弧書き 1 箇所。W-2) | `r2db-api/src/r2db_api/postgres.py`・`service.py` (変更セット 2)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` の `_BACKEND_LAYER_ALLOWLIST`、`r2db-api/tests/test_constraints_declaration.py`、`r2db-api/tests/test_denial_details_and_request_id.py`、MitateDB-api 全部、`conformance-tests/`、両 peer の `tests/test_audit_query.py` |
+| (W-1 裁定) `structured.py` の L33-41 (`_TEXT_ONLY_OPERATORS` と説明コメント) を移し、facade import に `_TEXT_ONLY_OPERATORS` を足す | — |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `structured.py`: import から `_INT64_MAX` を外す (他 module は import していない) | `r2db-api/tests/test_foundation.py::test_value_types_leaf_preserves_structured_facade` (新規) |
+| 2 | int64 の両端を受け入れる | `value_types.py`: `_INT64_MIN <= value <= _INT64_MAX` を `_INT64_MIN < value < _INT64_MAX` にする | `r2db-api/tests/test_foundation.py::test_integer_field_value_out_of_bigint_range_is_validation_failed` (`test_foundation.py:1566`。赤になるかは実測で確定する) |
+| 3 | int64 の外は `field_type` 違反 | `value_types.py`: 範囲検査の条件を `False and not (…)` にする | `r2db-api/tests/test_foundation.py::test_integer_field_value_out_of_bigint_range_is_validation_failed` |
+| 4 | bool は integer にならない | `value_types.py`: integer 分岐の `and not isinstance(value, bool)` を削る | `r2db-api/tests/test_foundation.py::test_typed_integer_and_number_columns_reject_boolean_values` |
+| 5 | 型なし値の NUL を拒否する | `value_types.py`: 型なし分岐の `_contains_nul(value)` の条件を `False and _contains_nul(value)` にする | `r2db-api/tests/test_foundation.py::test_nul_byte_is_rejected_in_string_object_array_and_untyped_values` |
+| 6 | `nullable: false` は null を拒否する | `value_types.py`: `not constraints.nullable` を `constraints.nullable` にする | `r2db-api/tests/test_constraints_declaration.py::test_memory_nullable_false_refuses_explicit_null[insert]` |
+| 7 | enum 違反は `observed_type` を持たない | `value_types.py`: enum 分岐の details に `"observed_type": observed_type_of(value)` を足す | `r2db-api/tests/test_denial_details_and_request_id.py::test_enum_violation_carries_declared_type_never_observed_type`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_type_pair_rule_is_respected_at_every_violated_declaration_site` |
+| 8 | 型の不一致は `declared_type` と `observed_type` を持つ | `value_types.py`: 型不一致の `fail` の `observed_type=observed_type_of(value)` を `observed_type=None` にする | `r2db-api/tests/test_denial_details_and_request_id.py::test_field_type_violation_carries_both_declared_and_observed_type`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_type_pair_rule_is_respected_at_every_violated_declaration_site` |
+| 9 | contains / matches の値は str だけ | `value_types.py`: `not isinstance(predicate.value, str)` の条件を `False and …` にする | `r2db-api/tests/test_foundation.py::test_contains_and_matches_reject_non_string_values` |
+| 10 | eq / ne は null を拒否する | `value_types.py`: `predicate.value is None` の条件を `False and …` にする | `r2db-api/tests/test_foundation.py::test_eq_and_ne_reject_a_null_predicate_value` |
+| 11 | `in` は空 list を拒否する | `value_types.py`: `or not predicate.value` を削る | `r2db-api/tests/test_foundation.py::test_in_operator_rejects_an_empty_list` |
+| 12 | 末尾の backslash は奇数個のときだけ拒否する | `value_types.py`: `% 2 == 1` を `> 0` にする | `r2db-api/tests/test_foundation.py::test_matches_pattern_ending_in_an_unescaped_backslash_is_validation_failed` (偶数個を通す部分) |
+| 13 | 移動先が `SCANNED_MODULES` に入る (40b) | `test_l1_details_vocabulary_ast_scan.py`: `SCANNED_MODULES` から `value_types.py` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for` |
+| 14 | 件数 pin (`structured.py` 67、`value_types.py` 11) | `value_types.py`: 4-key の `fail("VALIDATION_FAILED", "x", details=violation("request_schema"))` を呼ぶ関数を 1 つ足す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_the_audit_site_count` |
+| 15 | 移した denial が 4-key のまま | `value_types.py`: `_validate_wildcard_pattern` の `fail` から `details=` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 16 | 行番号 allowlist が実測と一致 | **監査照合**: 本 WP による `_BACKEND_LAYER_ALLOWLIST` の差分 0 | — |
+| 17 | sib tuple に移動先が入る | `value_types.py`: `_validate_wildcard_pattern` の文言を allowlist の文言 `"A value in this request is not acceptable to the underlying storage."` にする | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial` (tuple を更新しないと緑のまま) |
+| 18 | leaf の import が許可リストの内だけ | `value_types.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 19 | 新 leaf が分類される | 一覧から `value_types.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 20 | 未使用になった import の扱い | **監査照合**: `structured.py` で未使用になる名前は `_contains_nul` だけで、facade テストのために残したこと | — |
+| 21 | 逐語移動と位置参照の括弧書き (40c) | **監査照合**: 説明コメント、節見出し、docstring が逐語。括弧書きは `structured.py` の 6 箇所 (L555、L561、L596、L763、L2296、L2312)、`delete_confirmation.py` の 1 箇所 (W-2)、leaf 内の L1383 の 1 箇所の計 8 箇所だけ | — |
+| 22 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名 def 0 件 | — |
+| 23 | `_TEXT_ONLY_OPERATORS` は facade 経由で同じ object (W-1 裁定) | `structured.py`: import から `_TEXT_ONLY_OPERATORS` を外す | `r2db-api/tests/test_foundation.py::test_value_types_leaf_preserves_structured_facade` (新規。`structured._TEXT_ONLY_OPERATORS is value_types._TEXT_ONLY_OPERATORS` を確かめる) |
+| 24 | マージ時点で `_INT64_MAX` の参照が正しい (W-2 裁定) | **監査照合**: `delete_confirmation.py` の括弧書きが `(in \`value_types.py\`)` に直り、`_INT64_MAX` が `value_types.py` に在ること | — |
+
+### 5.14 重なり・順序・未確定 (v1.5 追記)
+
+**触るパスの重なり** (L = `tools/tests/test_leaf_import_direction.py`、S = `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、T = `r2db-api/src/r2db_api/structured.py`、F = `r2db-api/tests/test_foundation.py`):
+
+| | WP-1g (ST5) | WP-1h (ST7) | WP-1i (ST6) | 変更セット 2 |
+|---|---|---|---|---|
+| WP-1g | — | × L、T、F | × L、T、F、`delete_confirmation.py` | ○ |
+| WP-1h | × | — | × L、S、T、F | × S |
+| WP-1i | × | × | — | × S |
+
+- **順序**: WP-1g → WP-1h → WP-1i の直列。WP-1g は変更セット 2 と重ならないので、その統合を待たずに着手できる。1g が触る `ops.py`・`r2db-api/tests/test_control_plane_store.py`・`r2db-api/tests/test_foundation.py` は、変更セット 2 が触る r2db `service.py`・`postgres.py`・`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`・`docs/code-history/r2db-api/` と重ならない (監督確認済み)。
+- **WP-1h と WP-1i は S を触るので、変更セット 2 の統合後に直列で行う。** 変更セット 2 はほかに r2db `service.py`・`postgres.py`・`docs/code-history/r2db-api/` を触るが、3 件はそれらに触れない。
+- `service.py` を触る候補 (SV1〜SV3) は変更セット 2 の後に回す (§6 の U-2 追記)。
+
+**未確定 (監督判断待ち)**:
+
+| # | 点 |
+|---|---|
+| W-1 | WP-1i で `_TEXT_ONLY_OPERATORS` と説明コメントを一緒に移すか。§2.1 は leaf の import を「+ `_TEXT_ONLY_OPERATORS`」と書いたが、`structured.py` から import すると循環になる |
+| W-2 | `structured.py` L309 の「`_INT64_MAX` below in this same module」は WP-1g で leaf へ移り、指す先は `structured.py` に残り、WP-1i で `value_types.py` に変わる。括弧書きを WP-1g で付けて WP-1i で差し替えるか、WP-1i で 1 回だけ付けるか |
+| W-3 | 変更セット 2 の作業指示書は `4fc5517` の worktree に無い。重なり表は監督の示した触るファイルによる |
+
+**監督裁定 (2026-09-14、W-1〜W-3)**:
+
+| # | 裁定 | 反映先 |
+|---|---|---|
+| W-1 | `_TEXT_ONLY_OPERATORS` は WP-1i で `value_types.py` へ一緒に移し、`structured.py` には facade として残す (残すと循環 import) | §5.13 の触るファイル (追加行)、23 |
+| W-2 | WP-1g で移す文の「`_INT64_MAX` below in this same module」に `(in \`structured.py\`)` を補い、WP-1i で `(in \`value_types.py\`)` に直す。各 WP のマージ時点で参照が正しいこと | §5.11 の 14、§5.13 の 24 |
+| W-3 | 変更セット 2 との重なり表は、監督の示したファイル一覧のままでよい | §5.14 |
+| 既知の穴 | 設計 §10.4 の #5・#7・#8 と §10.2 の 1〜3 は roadmap §8 R-39 で追跡する。#6 (F821) は型検査器の既知事項として設計 §10.4 に残す | 設計 §10.4、roadmap R-38・R-39 |
+| 独立レビュー | 1g の移動範囲を L287-549 に訂正、40c の一覧 (1g の L292、1i の L561・L1383)、1g の新規テストを性質ごとに分割 (計 4 本)、1i の新規テストを 1 本に、1h の変異 3 の注記、1g と変更セット 2 の非重複 | §5.11〜§5.14 |
+
 ## 6. 重なり表と監督裁定
 
 **触るパスの重なり** (○ = 重なりなし。× = 重なりあり、直列。L = `tools/tests/test_leaf_import_direction.py`):
@@ -501,6 +686,7 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | # | 裁定 | 反映先 |
 |---|---|---|
 | U-1 / U-2 | 同じファイルで抽出とコメント整理の変更セットを同時に行わない。r2db `postgres.py` はコメント整理 (変更セット 1) が先。`structured.py`・`cell.py`・MitateDB `backend_postgres.py` は抽出が先で、コメント整理は後にファイル単位で行う。抽出で移す docstring・コメントは 40c で逐語に移し、経緯の整理は後の変更セットで行う | §1、§2.3、§2.5、§4、§5 |
+| U-2 (追記 2026-09-14) | r2db `service.py` はコメント整理 (変更セット 2) を先に行い、R-37 WP-3 (SV1〜SV3) は後にする。並行しない (監督裁定、変更セット 2 の作業指示書 §5.1 と対) | §2.4、§4、§5.14 |
 | U-3 | ST1 は `pg_text_format.py` (float8out を含むため)。削除確認 phrase の helper は両 peer とも `delete_confirmation.py` (CE1 と後の ST5)。他は提案名で進め、独立レビューで確認する | §2、§5 |
 | U-4 | `fold_operation_idempotency_keys` と `check_plan_precondition` は設計 §3.2 (idempotency、plan) の副作用境界なので除外する。結果型 (dataclass) は純粋なので WP-3 の候補にする | §2、§3、§4 |
 | U-5 / m5 | import 方向はテストで機械化する。`tools/tests/test_leaf_import_direction.py` の 1 file に leaf 一覧 (peer・パス・許可リスト) を持たせ、両 peer に同名 helper を置かない。独立した変更セット WP-1-0 (1a の前) とし、既存 6 leaf の登録と全 module の分類を含める。WP-1-0 以降の全 WP の検証とゲートに `pytest -q tools/tests` を入れる。以後 module を足す WP は同じ変更で一覧を更新する | §4、§5.1〜§5.4 |
