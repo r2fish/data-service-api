@@ -456,34 +456,137 @@ def extract_all_blocks(source: str) -> list[Block]:
 # docstring line) is a paragraph break, preserved here as a blank line so
 # `split_sentences` can also break there -- never on a bare line wrap.
 # ---------------------------------------------------------------------------
-# change set 0d review round (item 3): a line-wrap that splits an ID mid-
-# token (e.g. `SI-` at the end of one comment/docstring line, `08` at the
-# start of the next) must rejoin WITHOUT the usual single space, so the
-# flattened text reads "SI-08" and the protected-reference / (4)/(6)
-# machinery -- all of which run on this SAME flattened text -- see it as
-# one token, not two. Scoped NARROWLY to an ID-shaped split (the
-# accumulated text ends in an ID PREFIX -- 1-6 uppercase letters then a
-# hyphen -- and the next line starts with a digit): a real-corpus check
-# (r2db `postgres.py`, e.g. "confirmed-\ndestructive", "table-\nlevel")
-# showed an ordinary lowercase, hyphenated English compound word wrapped
-# across lines is deliberately rendered with A SPACE after the hyphen in
-# this corpus's own "retained" (single-line) form -- joining EVERY
-# trailing hyphen without a space would silently break those, matching
-# neither the old nor the intended behavior for prose.
-_HYPHEN_ID_WRAP_RE = re.compile(r"\b[A-Z]{1,6}-$")
+# change set 0e (supervisor ruling, corrects change set 0d review round
+# item 3): a line-wrap that splits an identifier/path/compound word mid-
+# token must rejoin WITHOUT the usual single space, so the flattened text
+# reads e.g. "control_main.py" / "violated_declaration" / "already-
+# committed", never "control_main. py" / "violated_ declaration" /
+# "already- committed" -- and the protected-reference / (4)/(6) machinery
+# -- all of which run on this SAME flattened text -- sees one token, not
+# two. The change-set-0d-era hypothesis that an ordinary hyphenated
+# English compound (e.g. "confirmed-\ndestructive", "table-\nlevel")
+# deliberately keeps its space was WRONG: real-corpus review (change set
+# 3 re-review, 2026-09-14) found `postgres.py` itself already carrying
+# the broken "confirmed- destructive" / "table- level" forms -- these are
+# instances of the SAME bug, not a deliberately-spaced style. The rule is
+# now general (§9e below), not scoped to ID-shaped splits.
+_JOIN_EXTENSIONS = frozenset(
+    {"py", "md", "sql", "json", "toml", "yaml", "yml", "txt", "sh", "tsv", "html", "js", "ts"}
+)
+_JOIN_EXTENSION_RE = re.compile(r"[A-Za-z]+")
 
 
-def _join_wrapped_lines(group: list[str]) -> str:
+def _is_word_char(c: str) -> bool:
+    return c.isalnum() or c == "_"
+
+
+def _joined_identifier_at_boundary(accumulated: str, next_line: str) -> str:
+    """The candidate CamelCase identifier formed by concatenating the
+    identifier-shaped run ending `accumulated` with the identifier-
+    shaped run starting `next_line` -- used ONLY by predicate B's rule
+    5 to check against `_tracked_identifier_set`."""
+    left_m = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", accumulated)
+    right_m = re.search(r"^[A-Za-z0-9_]*", next_line)
+    left = left_m.group(0) if left_m else ""
+    right = right_m.group(0) if right_m else ""
+    return left + right
+
+
+def _is_join_sensitive_boundary(accumulated: str, next_line: str, identifier_set: frozenset[str]) -> bool:
+    """change set 0e, predicate B (supervisor ruling 2026-09-15, final
+    unification): is the whitespace/line-wrap BETWEEN `accumulated`
+    (everything flattened so far in this paragraph) and `next_line`
+    actually spurious -- i.e. should this boundary join with ZERO space
+    instead? THE SAME predicate is used for normalization (comparison),
+    detection, and joining a fresh multi-line wrap -- no separate
+    broader/narrower variants (an earlier round's split between a broad
+    "collapse all backtick-internal whitespace" normalization and a
+    narrow detection rule produced both false greens, e.g. `` `conn.
+    transaction()` ``/`self. _rate_windows` staying undetected because
+    normalization silently absorbed the mismatch, and false reds, e.g.
+    `` `except FoundationError` ``/`is None` being forced together
+    because a bare lowercase-to-uppercase check had no way to tell a
+    genuine CamelCase split from two ordinary separate words). Checked
+    against the text immediately either side of the boundary, and
+    against whether the boundary sits inside an OPEN backtick span (odd
+    backtick count in `accumulated`). Exactly five triggers:
+    (1) `accumulated` ends `<word char>_` and `next_line` starts with a
+        word character -- regardless of backtick state;
+    (2) `accumulated` ends `<word char>-` (a SINGLE hyphen, not part of
+        `--`) and `next_line` starts with a word character --
+        regardless of backtick state;
+    (3) INSIDE an open backtick span, `accumulated` ends `.` and
+        `next_line` starts with a word character -- backtick content is
+        code, where `.` is always attribute/method/path access, never a
+        sentence-ending period;
+    (4) OUTSIDE any backtick span, `accumulated` ends `.` and
+        `next_line` starts with one of `_JOIN_EXTENSIONS` -- a file
+        extension split right after the dot, deliberately NOT triggered
+        by an ordinary sentence-final `.` followed by a new sentence;
+    (5) INSIDE an open backtick span, `accumulated` ends with a
+        LOWERCASE English letter and `next_line` starts with an
+        UPPERCASE English letter, AND ONLY IF the identifier formed by
+        joining the two sides (`_joined_identifier_at_boundary`) is
+        itself a member of `identifier_set` (every identifier-shaped
+        token the basis tree's own tracked `src`/`spec`/`docs` files
+        contain, from `_tracked_identifier_set`) -- a CamelCase/
+        PascalCase split (`` `Application Cell.transact` `` ->
+        `` `ApplicationCell.transact` `` since `ApplicationCell` is a
+        real class in this codebase). The identifier-set guard is what
+        keeps two genuinely separate words that merely happen to sit
+        lowercase-then-uppercase across a wrap -- `id ASC`, `except
+        FoundationError`, `is None` -- from being folded into a token
+        (`idASC`, `exceptFoundationError`, `isNone`) that never actually
+        occurs as one identifier anywhere in the tree: none of those
+        joined forms are real tracked identifiers, so rule 5 does not
+        fire for them and the space stays REQUIRED, exactly like any
+        other real word boundary (`` `SHARE MODE` ``, `` `foo bar` ``,
+        an ALL-CAPS pair or two lowercase words, which never satisfy
+        "lowercase-then-uppercase" in the first place).
+    Deliberately NOT a trigger: any other backtick-internal boundary
+    with no marker at all (a multi-word SQL/expression fragment quoted
+    whole in backticks, e.g. `` `<predicate> AND _r2db_revision::text =
+    $expected` `` wrapped mid-phrase) -- confirmed by the requirement
+    that `--base HEAD` stays green on unchanged, already-correct
+    source."""
+    if not accumulated or not next_line:
+        return False
+    inside_backticks = accumulated.count("`") % 2 == 1
+    last = accumulated[-1]
+    prev = accumulated[-2] if len(accumulated) >= 2 else ""
+    nxt = next_line[0]
+    if last == "_" and _is_word_char(prev) and _is_word_char(nxt):
+        return True
+    if last == "-" and prev != "-" and _is_word_char(prev) and _is_word_char(nxt):
+        return True
+    if last == "." and inside_backticks and _is_word_char(nxt):
+        return True
+    if last == "." and not inside_backticks:
+        m = _JOIN_EXTENSION_RE.match(next_line)
+        if m and m.group(0).lower() in _JOIN_EXTENSIONS:
+            return True
+    if inside_backticks and last.isalpha() and last.islower() and nxt.isalpha() and nxt.isupper():
+        joined = _joined_identifier_at_boundary(accumulated, next_line)
+        if joined in identifier_set:
+            return True
+    return False
+
+
+def _join_wrapped_lines(group: list[str], identifier_set: frozenset[str]) -> str:
     result = group[0]
     for line in group[1:]:
-        if _HYPHEN_ID_WRAP_RE.search(result) and line[:1].isdigit():
+        if _is_join_sensitive_boundary(result, line, identifier_set):
             result += line
         else:
             result += " " + line
     return result
 
 
-def _flatten_comment(text: str) -> str:
+def _comment_line_groups(text: str) -> list[list[str]]:
+    """Paragraphs of per-line content for a comment block -- the SAME
+    per-line stripping `_flatten_comment` uses, factored out so change
+    set 0e's detection pass (`find_broken_line_wrap_joins`) walks
+    line-by-line boundaries identically to how flattening joins them."""
     groups: list[list[str]] = [[]]
     for line in text.splitlines():
         stripped = line.strip()
@@ -496,11 +599,16 @@ def _flatten_comment(text: str) -> str:
                 groups.append([])
         else:
             groups[-1].append(content)
-    groups = [g for g in groups if g]
-    return "\n\n".join(_join_wrapped_lines(g) for g in groups)
+    return [g for g in groups if g]
 
 
-def _flatten_docstring(text: str) -> str:
+def _flatten_comment(text: str, identifier_set: frozenset[str] = frozenset()) -> str:
+    return "\n\n".join(_join_wrapped_lines(g, identifier_set) for g in _comment_line_groups(text))
+
+
+def _docstring_line_groups(text: str) -> list[list[str]]:
+    """Paragraphs of per-line content for a docstring block -- see
+    `_comment_line_groups`."""
     groups: list[list[str]] = [[]]
     for line in text.splitlines():
         stripped = line.strip()
@@ -509,12 +617,84 @@ def _flatten_docstring(text: str) -> str:
                 groups.append([])
         else:
             groups[-1].append(stripped)
-    groups = [g for g in groups if g]
-    return "\n\n".join(_join_wrapped_lines(g) for g in groups)
+    return [g for g in groups if g]
 
 
-def _flatten(kind: str, text: str) -> str:
-    return _flatten_comment(text) if kind == "comment" else _flatten_docstring(text)
+def _flatten_docstring(text: str, identifier_set: frozenset[str] = frozenset()) -> str:
+    return "\n\n".join(_join_wrapped_lines(g, identifier_set) for g in _docstring_line_groups(text))
+
+
+def _line_groups(kind: str, text: str) -> list[list[str]]:
+    return _comment_line_groups(text) if kind == "comment" else _docstring_line_groups(text)
+
+
+def find_broken_line_wrap_joins(
+    kind: str, basis_dedented: str, new_dedented: str, identifier_set: frozenset[str] = frozenset()
+) -> list[tuple[str, str]]:
+    """change set 0e (detection): walk `basis_dedented` (the pristine
+    companion text, or the immediate basis block's own dedented text)
+    paragraph by paragraph, exactly as `_flatten_comment`/
+    `_flatten_docstring` do, and find every line-wrap boundary predicate
+    B (`_is_join_sensitive_boundary`) says must join with ZERO space (a
+    genuine mid-token wrap in the basis). For each, build the CORRECT
+    (zero-space) and BROKEN (one-space) short context strings and check
+    whether `new_dedented` -- the current code, wherever it stands in
+    its own reduction -- contains the BROKEN form as a literal
+    substring. A hit means somewhere along the way (a rewrite, a partial
+    reduction) the mid-token wrap got flattened with a naive single
+    space instead of zero, corrupting the identifier/path/word. Returns
+    (correct, broken) pairs actually found broken; empty if none."""
+    hits: list[tuple[str, str]] = []
+    for group in _line_groups(kind, basis_dedented):
+        accumulated = group[0]
+        for line in group[1:]:
+            if _is_join_sensitive_boundary(accumulated, line, identifier_set):
+                ltok_m = re.search(r"\S+$", accumulated)
+                rtok_m = re.search(r"^\S+", line)
+                ltok = ltok_m.group(0) if ltok_m else accumulated
+                rtok = rtok_m.group(0) if rtok_m else line
+                correct = ltok + rtok
+                broken = ltok + " " + rtok
+                if broken in new_dedented:
+                    hits.append((correct, broken))
+                accumulated += line
+            else:
+                accumulated += " " + line
+    return hits
+
+
+def _normalize_join_whitespace(flat_text: str, identifier_set: frozenset[str] = frozenset()) -> str:
+    """change set 0e (comparison normalization): applied to ALREADY-
+    flattened text (single space within a paragraph, a blank line --
+    i.e. "\\n\\n" -- between paragraphs), collapse a SINGLE SPACE at
+    each boundary predicate B (`_is_join_sensitive_boundary` -- the SAME
+    predicate used for detection and for a fresh join, per the
+    2026-09-15 unification ruling) recognizes. This makes a "broken"
+    form (a stray single space already baked in as literal text -- from
+    an older round's own flatten-time mistake, frozen in git history,
+    or a companion/source edited by hand) and its "fixed" (zero-space)
+    form compare EQUAL for every existing derivability check, while a
+    genuine word boundary (`id ASC`, `except FoundationError`) is left
+    alone -- an over-eager over-join of one of THOSE now correctly
+    fails to compare equal to the basis, since B is false there and the
+    space is required. Never touches a paragraph break: only a literal
+    single SPACE character is ever a removal candidate."""
+    out: list[str] = []
+    i = 0
+    n = len(flat_text)
+    while i < n:
+        ch = flat_text[i]
+        if ch == " " and out and _is_join_sensitive_boundary("".join(out), flat_text[i + 1 :], identifier_set):
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _flatten(kind: str, text: str, identifier_set: frozenset[str] = frozenset()) -> str:
+    flat = _flatten_comment(text, identifier_set) if kind == "comment" else _flatten_docstring(text, identifier_set)
+    return _normalize_join_whitespace(flat, identifier_set)
 
 
 def split_sentences(flattened_text: str) -> list[str]:
@@ -1203,7 +1383,9 @@ def _sentence_has_protected_reference(sentence: str, real_paths: frozenset[str])
     return False
 
 
-def _first_protected_sentence(text: str, kind: str, real_paths: frozenset[str]) -> str | None:
+def _first_protected_sentence(
+    text: str, kind: str, real_paths: frozenset[str], identifier_set: frozenset[str] = frozenset()
+) -> str | None:
     """change set 0d review round (item 1): when a WHOLE block is moved
     away with nothing retained in code (`retained_text` empty), the
     entire source text -- every sentence of it -- disappears from the
@@ -1211,14 +1393,18 @@ def _first_protected_sentence(text: str, kind: str, real_paths: frozenset[str]) 
     check it the SAME way, sentence by sentence, rather than skipping
     the check entirely just because there is no `_is_allowed_reduction`
     call to hang it on."""
-    for sentence in split_sentences(_flatten(kind, text)):
+    for sentence in split_sentences(_flatten(kind, text, identifier_set)):
         if _sentence_has_protected_reference(sentence, real_paths):
             return sentence
     return None
 
 
 def _is_allowed_reduction(
-    kind: str, old_full_text: str, new_retained_text: str, real_paths: frozenset[str]
+    kind: str,
+    old_full_text: str,
+    new_retained_text: str,
+    real_paths: frozenset[str],
+    identifier_set: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
     """design §4.1 (3)+(4)+(6)+§9: `new_retained_text` must be reachable
     from `old_full_text` by deleting whole sentences (order preserved)
@@ -1240,8 +1426,8 @@ def _is_allowed_reduction(
     of this capped parenthetical size to avoid a combinatorial blow-up,
     which wrongly rejected a valid partial reduction once a sentence had
     enough removable words)."""
-    old_sentences = split_sentences(_flatten(kind, old_full_text))
-    new_sentences = split_sentences(_flatten(kind, new_retained_text))
+    old_sentences = split_sentences(_flatten(kind, old_full_text, identifier_set))
+    new_sentences = split_sentences(_flatten(kind, new_retained_text, identifier_set))
     j = 0
     for ns in new_sentences:
         found = False
@@ -1452,6 +1638,45 @@ def _tree_paths(repo_root: Path, rev: str) -> frozenset[str]:
     return frozenset(n for n in names if n)
 
 
+_IDENTIFIER_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _tracked_identifier_set(repo_root: Path, rev: str) -> frozenset[str]:
+    """change set 0e §9e rule 5 (supervisor ruling 2026-09-15, unified
+    predicate B): every identifier-shaped token (`[A-Za-z_][A-Za-z0-9_]*`)
+    that appears ANYWHERE in the tracked `src`/`spec`/`docs` files at
+    `rev`'s tree -- the basis for "is this really an identifier this
+    codebase uses" for the CamelCase-inside-backtick join trigger,
+    guarding it against joining two genuinely separate words that merely
+    happen to sit lowercase-then-uppercase across a line wrap (`id ASC`,
+    `except FoundationError`, `is None`) into a token that is not
+    actually a real identifier anywhere in the tree. One `git grep`
+    across the whole tree at `rev` (never the working tree, for the
+    same reason `_tree_paths` reads from `rev`) -- built ONCE per
+    `--base`/`--register` invocation, not once per boundary check. An
+    unreadable/absent tree yields an EMPTY set (fails toward "not a
+    real identifier", i.e. toward requiring the space, never toward
+    silently permitting an over-join that cannot be confirmed)."""
+    try:
+        proc = subprocess.run(
+            ["git", "grep", "-I", "-h", "-o", "-E", _IDENTIFIER_TOKEN_RE.pattern, rev,
+             "--", "r2db-api/src", "MitateDB-api/src", "spec", "docs"],
+            cwd=repo_root,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    # git grep exits 1 when there are simply no matches (not an error).
+    if proc.returncode not in (0, 1):
+        return frozenset()
+    try:
+        text = proc.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return frozenset()
+    return frozenset(text.splitlines())
+
+
 _SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -1510,7 +1735,8 @@ def _block_positions(source: str, blocks: list[Block]) -> list[tuple[str, str]]:
 def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                                 old_blocks: list[Block], new_blocks: list[Block],
                                 companion_lookup: dict[str, str],
-                                real_paths: frozenset[str]) -> list[str]:
+                                real_paths: frozenset[str],
+                                identifier_set: frozenset[str] = frozenset()) -> list[str]:
     """design §4.1 (2)+(3)+(4), correspondence taken via CH-ID (v0.3).
 
     v0.4 P3 (review rounds 2-3): a new block WITHOUT a CH-ID is compared
@@ -1583,7 +1809,7 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             # DERIVABLE from the companion via the same allowed-reduction
             # machinery, not that every sentence appear byte-for-byte.
             if ob.retained_text:
-                ok, reason = _is_allowed_reduction(ob.kind, companion_text, ob.retained_text, real_paths)
+                ok, reason = _is_allowed_reduction(ob.kind, companion_text, ob.retained_text, real_paths, identifier_set)
                 if not ok:
                     errors.append(
                         f"FAIL (§4.1 (2)) {rel_path}:{nb.start_line} basis block for {ch_id} is "
@@ -1591,7 +1817,7 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                     )
                     continue
             if nb.retained_text:
-                ok, reason = _is_allowed_reduction(nb.kind, ob.retained_text, nb.retained_text, real_paths)
+                ok, reason = _is_allowed_reduction(nb.kind, ob.retained_text, nb.retained_text, real_paths, identifier_set)
                 if not ok:
                     errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
             elif ob.retained_text:
@@ -1599,7 +1825,7 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                 # code at all -- the basis's own retained text (already
                 # itself a reduction) is being moved away in full; every
                 # one of ITS sentences must be checked too.
-                protected = _first_protected_sentence(ob.retained_text, ob.kind, real_paths)
+                protected = _first_protected_sentence(ob.retained_text, ob.kind, real_paths, identifier_set)
                 if protected is not None:
                     errors.append(
                         f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
@@ -1631,14 +1857,14 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             continue
         consumed[match_idx] = True
         if nb.retained_text:
-            ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text, real_paths)
+            ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text, real_paths, identifier_set)
             if not ok:
                 errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
         else:
             # change set 0d review round (item 1): first move, nothing
             # kept in code -- check the FULL companion text (everything
             # that is disappearing from the source) sentence by sentence.
-            protected = _first_protected_sentence(companion_text, nb.kind, real_paths)
+            protected = _first_protected_sentence(companion_text, nb.kind, real_paths, identifier_set)
             if protected is not None:
                 errors.append(
                     f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
@@ -1693,6 +1919,9 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
     # design §9 rule 2: real-path membership is read from the BASIS
     # revision's own tree, once per invocation (never the working tree).
     real_paths = _tree_paths(repo_root, rev)
+    # change set 0e predicate B rule 5: identifier membership is read
+    # from the BASIS revision's tree too, once per invocation.
+    identifier_set = _tracked_identifier_set(repo_root, rev)
 
     for rel_path in rel_paths:
         old_source = _git_show(repo_root, rev, rel_path)
@@ -1737,10 +1966,28 @@ def run_base(repo_root: Path, rev: str, rel_paths: list[str], out=sys.stdout, er
         total_new_blocks += len(new_blocks)
 
         for msg in check_provenance_semantics(
-            rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths
+            rel_path, old_source, new_source, old_blocks, new_blocks, companion_lookup, real_paths,
+            identifier_set,
         ):
             print(msg, file=out)
             had_failure = True
+
+        # change set 0e §2: for every block with a companion (moved or
+        # reused), the companion is the pristine basis with the ORIGINAL
+        # line wrapping -- check it for broken line-wrap joins.
+        for nb in new_blocks:
+            if nb.history_id is None:
+                continue
+            basis_text = companion_lookup.get(nb.history_id)
+            if basis_text is None:
+                continue
+            for correct, broken in find_broken_line_wrap_joins(nb.kind, basis_text, nb.dedented, identifier_set):
+                print(
+                    f"FAIL (§9e) {rel_path}:{nb.start_line} broken line-wrap join for "
+                    f"{nb.history_id}: {broken!r} should be {correct!r} (zero space)",
+                    file=out,
+                )
+                had_failure = True
 
     if had_failure:
         return 1
