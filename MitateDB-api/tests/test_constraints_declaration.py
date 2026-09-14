@@ -76,6 +76,25 @@ def _make_entity(dev, entity="widgets"):
     return entity
 
 
+def test_constraint_resolution_leaf_preserves_cell_facade():
+    """R-37 WP-1j (CE3): `_validate_enum_declaration_with_path`/`_resolve_
+    field_constraints` moved from `cell.py` to the new leaf `constraint_
+    resolution.py` -- `cell.py` keeps a facade import of both (the SAME
+    function objects, not a copy), so `ApplicationCell.create_collection`/
+    `add_field`/`alter_field`'s own bare calls to them (`cell.py`) keep
+    working with no change to their own call sites. Dropping either name
+    from `cell.py`'s own facade import breaks this identity check."""
+    from mitatedb_api.cell import _resolve_field_constraints as cell_resolve_field_constraints
+    from mitatedb_api.cell import _validate_enum_declaration_with_path as cell_validate_enum_declaration_with_path
+    from mitatedb_api.constraint_resolution import (
+        _resolve_field_constraints as leaf_resolve_field_constraints,
+        _validate_enum_declaration_with_path as leaf_validate_enum_declaration_with_path,
+    )
+
+    assert cell_resolve_field_constraints is leaf_resolve_field_constraints
+    assert cell_validate_enum_declaration_with_path is leaf_validate_enum_declaration_with_path
+
+
 # --- completion condition 1/2: enum enforced on insert/update, positive control ---
 
 
@@ -624,6 +643,30 @@ def test_enum_members_limit_exceeded_on_add_field_and_alter_field(sessions) -> N
     assert excinfo2.value.details.get("limit_class") == "enum_members"
     row = {r["entity"]: r for r in small_dev.catalog()}["capped2"]
     assert row["field_constraints"]["status2"]["enum"] == ["a", "b"], "a LIMIT_EXCEEDED alter_field must change nothing"
+
+
+def test_create_entity_enum_at_exactly_max_enum_members_is_accepted(sessions) -> None:
+    """R-37 WP-1j completion condition 7 (§5.16): `enum_members` refuses
+    strictly MORE than `max_enum_members`, not AT it -- an `enum` with
+    exactly `max_enum_members` members is accepted, distinguishing `>`
+    from `>=` in `_resolve_field_constraints`'s own bound check (the
+    sibling test above, `test_enum_members_limit_exceeded_refuses_
+    before_anything_is_created`, uses 4 members against the same
+    `max_enum_members=3` and stays green either way, so it alone cannot
+    catch a `>` -> `>=` regression)."""
+    dev, runtime = sessions
+    small_control = ControlPlane("synthetic-test-pepper-0123456789", config=FoundationConfig(max_enum_members=3))
+    small_control.provision_application("app_small3")
+    _, dev_secret = small_control.issue_credential("app_small3", Role.DEVELOPER)
+    service = MitateDataService(small_control)
+    small_dev = service.open_session(dev_secret)
+    entity = "atcap"
+    small_dev.create_entity(
+        entity, fields={"status": "text"}, field_types={"status": "string"},
+        field_constraints={"status": {"enum": ["a", "b", "c"]}},
+    )
+    row = {r["entity"]: r for r in small_dev.catalog()}[entity]
+    assert row["field_constraints"]["status"]["enum"] == ["a", "b", "c"]
 
 
 # --- completion condition 12: capability enabled (peer-local companion to C-20) ---

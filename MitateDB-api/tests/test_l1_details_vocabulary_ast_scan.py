@@ -82,9 +82,16 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: carries the 2 `ValidationError` call sites those functions moved with
 #: (both already 4-key, moved verbatim) and must stay in `SCANNED_
 #: MODULES` for the same reason `postgres_value_domain.py` does above.
+#: R-37 WP-1j (2026-09-15): `constraint_resolution.py` holds
+#: `_validate_enum_declaration_with_path`/`_resolve_field_constraints`,
+#: extracted from `cell.py` -- it carries the 3 `ValidationError` call
+#: sites those functions moved with (all already 4-key, moved verbatim;
+#: a 4th moved denial, a bare `ResourceLimitError`, is outside this
+#: scan's `_VOCAB_CLASSES`) and must stay in `SCANNED_MODULES` for the
+#: same reason `postgres_value_domain.py` does above.
 SCANNED_MODULES = (
     "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
-    "postgres_value_domain.py", "request_limits.py",
+    "postgres_value_domain.py", "request_limits.py", "constraint_resolution.py",
     "control_plane.py", "control_http.py", "audit_query.py",
 )
 
@@ -437,7 +444,12 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # `_check_operation_depth`'s own bare-cycle `ValidationError`
         # sites (both already 4-key) moved verbatim to `request_
         # limits.py` (49 -> 47); see that module's own count below.
-        "cell.py": 47,
+        # R-37 WP-1j (2026-09-15): -3 -- `_validate_enum_declaration_
+        # with_path`'s and `_resolve_field_constraints`'s own 3
+        # `ValidationError` sites (all already 4-key) moved verbatim to
+        # `constraint_resolution.py` (47 -> 44); see that module's own
+        # count below.
+        "cell.py": 44,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).
@@ -462,6 +474,13 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # `_check_operation_depth` carried in `cell.py` before the move,
         # unchanged in wording or `details=` shape.
         "request_limits.py": 2,
+        # R-37 WP-1j (2026-09-15): the 3 `ValidationError` sites
+        # `_validate_enum_declaration_with_path`/`_resolve_field_
+        # constraints` carried in `cell.py` before the move, unchanged in
+        # wording or `details=` shape. A 4th moved denial (a bare
+        # `ResourceLimitError` in `_resolve_field_constraints`) is
+        # outside `_VOCAB_CLASSES` and not counted here.
+        "constraint_resolution.py": 3,
         # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
         # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
         # WP's fix); the total CALL-SITE count (bare + already-had-
@@ -555,7 +574,7 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     just the 2 in-scope classes), so a match against a differently-coded
     denial would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py", "request_limits.py"):
+    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py", "request_limits.py", "constraint_resolution.py"):
         in_memory_messages |= _all_denial_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):

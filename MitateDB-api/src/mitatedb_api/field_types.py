@@ -254,7 +254,7 @@ class _ConstraintDeclarationError(Exception):
     12 / §6 訂正註 10): internal-only signal `validate_enum_declaration`
     below raises when an `enum` declaration is itself invalid -- never
     surfaced outside this module. `cell.py`'s own
-    `_validate_enum_declaration_with_path` catches this at every one of
+    `_validate_enum_declaration_with_path` (in `constraint_resolution.py`) catches this at every one of
     `validate_enum_declaration`'s 3 call sites and re-raises `errors.
     ValidationError` with the `details` shape (`field` as the request-
     relative PATH, `violated_declaration: "constraint_declaration"`,
@@ -285,7 +285,7 @@ def validate_enum_declaration(enum_values: Any, declared_type: str | None) -> tu
     paths, for the identical malformed declaration) -- so it raises
     `_ConstraintDeclarationError` (never `errors.ValidationError`
     directly -- see that class' own docstring) for each of the three
-    checks below; `cell.py`'s own `_validate_enum_declaration_with_path`
+    checks below; `cell.py`'s own `_validate_enum_declaration_with_path` (in `constraint_resolution.py`)
     wraps every call site and attaches the actual `details` shape (`{"
     violated_declaration": "constraint_declaration", "field": <path>,
     "declared_type": declared_type}` -- errors.details_vocabulary's own
