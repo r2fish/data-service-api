@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.9 (2026-09-15)。** 基点 main `13241c2` (WP-1m・1n・1k を統合済み)。§5.25・§5.26 に WP-2a (Y-6・Y-8、削除確認 phrase の契約規則のテスト) の manifest と未確定 Z-1〜Z-3 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: Z-2・Z-3 の裁定、型区別の assert、規則 5 と R-41 の注記。**独立レビュー待ち。**
 - **v1.8 (2026-09-15)。** 基点 main `f70afb0` (WP-1j・1l と記録を統合済み)。§5.20〜§5.24 に WP-1m / 1n (BP1、BP2) の manifest、WP-2 (CE1) の判断材料、未確定 Y-1〜Y-6 を追記した。既存の行は書き換えていない。独立レビュー (軽微な差し戻し) 反映: 監督裁定 Y-7〜Y-9、1n の変異 6、S_M の監査照合の範囲、§5.23 の事実。**独立レビュー待ち。**
 - **v1.7 (2026-09-14)。** 基点 main `2fde59a` (WP-1g / 1h / 1i 統合済み。worktree `r37-wp0` の `dad3c35` と同一 tree)。§5.15〜§5.19 に WP-1j / 1k / 1l (CE3 → CE4 → BP4) の manifest と未確定 X-1〜X-4 を追記した。既存の行は書き換えていない。独立レビュー反映: 監督裁定 X-1〜X-5 (§5.19)、1k の括弧書きと順序、1l の allowlist 実測値。**独立レビュー済み。**
 - **v1.6 (2026-09-14)。** W-1〜W-3 と既知の穴の追跡先への監督裁定を反映した (§5.11 の 14、§5.13 の追加行・23・24、§5.14 の裁定表)。独立レビューの指摘 (監督裁定) も反映した。v1.5 以降の未コミット分だけを直し、それ以前の行は書き換えていない。
@@ -985,6 +986,90 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | Y-4 | 提案どおり「(both in `postgres_value_domain.py`)」に書き換える |
 | Y-5 | `backend_postgres.py` のコメント整理は WP-1n の後、WP-4 の前に置く。WP-4 と並行しない |
 | Y-6 | 案 C。性質のテストは WP-1n と WP-1k の後に、Class B の小さな WP (WP-2a) として両 peer に足す。同型性表は増やさない |
+
+### 5.25 WP-2a — 削除確認 phrase の契約規則をテストで固定 (Y-6・Y-8、v1.9 追記、**独立レビュー待ち**)
+
+**目的**: コードは変えず、両 peer の `delete_confirmation.py` (`_canonical_where_json` と delete phrase の組立) について、契約 `spec/data-service-api.v1.json` L578-583 の規則のうち未固定の性質をテストで固定する。綴りは契約上実装定義 (`phrase_construction.spelling`) なので、テストは綴りを比べず、等しい・違う・長さ・部分文字列の関係で固定する。両 peer に同名の helper を足さず、`_ISOMORPHIC_TARGETS` も増やさない。
+
+| 項目 | 内容 |
+|---|---|
+| 変更クラス | **B** (両 peer の `tests/` だけ。`src/`・`conformance-tests/` は変えない) |
+| 着手条件 | WP-1n・WP-1k が main に統合済み (`13241c2`。Y-6 の条件)。R-39 行の更新は、同じ worktree で設計書とロードマップを編集している別担当の統合後に、監督の記録コミットで行う |
+| baseline (導出) | root 3,375 (`r2db-api/tests` 1,275 / `MitateDB-api/tests` 1,105 / `conformance-tests` 995)、`tools/tests` 109。設計 §10.7 の WP-1k の root ゲート 3375 と一致する。着手時に collect-only で確かめる |
+| 変異の規律 | 変異は helper の本体に一時的に当て、復元を sha256 で照合する (§5 共通表)。既存テストでも赤になる変異は新規テストの証拠にならない (偽の緑を隠す) ので、**既存テストが緑のまま新規テストだけが赤になる変異**を選ぶ |
+| 綴りの差 | 両 peer の phrase は同じ形 (`DELETE <対象> @where=<16 桁> @schema_revision=<n>`) だが、canonical JSON の区切りが違う (MitateDB `","`・`":"`、r2db は既定の `", "`・`": "`) ので、同じ where でも digest は違う。契約上の実装定義なので、テストはこの差を固定しない |
+
+**既存テストが固定している性質** (`13241c2` の実測):
+
+| 性質 (契約の規則) | MitateDB | r2db | 本 WP |
+|---|---|---|---|
+| 入れ子の key 順 (決定性) | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_delete_confirmation_leaf_preserves_cell_facade_and_phrase_shape` | `r2db-api/tests/test_foundation.py::test_canonical_where_json_sorts_nested_keys_and_escapes_non_ascii` | 足さない |
+| list 順の保持 | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_canonical_where_json_key_sorts_each_filter_preserves_list_order_never_stringifies` | 上記 r2db テストの literal が付随的に固定するだけ | r2db に足す (Z-2 裁定) |
+| 非 ASCII の escape | **無い** (R-39 (1b)) | 上記 r2db テスト | MitateDB に足す |
+| scope が違えば phrase が違う (規則 3) | `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v3_confirmation_exact_match_required` (entity 違いと where 違い。両 peer の adapter で走る) | 同左 | 足さない |
+| schema_revision が変われば phrase が変わる (規則 4) | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_delete_confirmation_phrase_is_invalidated_by_a_subsequent_add_field` | `r2db-api/tests/test_foundation.py::test_delete_phrase_invalidated_by_drop_recreate_of_the_same_entity_under_the_same_name` | 足さない |
+| 256 以内 (規則 6) | 本体 L83 の `assert` だけで、境界を固定するテストは無い | `_PHRASE_MAX_LENGTH` は guard としてだけ使われる (R-39 (1g)) | 両 peer に足す |
+| per-request の値が入らない (規則 1) | `conformance-tests/test_c06_destructive_confirmation.py::test_c06_v4_phrase_is_deterministic_and_requester_independent` (同じ要求の 2 回、別 role の credential)。helper の引数に request 由来の値は無い | 同左 | 足さない (request_id と `confirmation` の値の違いは Z-1) |
+| 値の型の区別 (`1`・`"1"`・`true`) | **無い** | **無い** | 両 peer に足す |
+
+**足すテスト** (6 本。名前は検査内容に合わせる。`bound` は 同梱の契約 (`resources.files("<pkg>.contract").joinpath("data-service-api.v1.json")`。既存の `r2db-api/tests/test_http.py` L287・`MitateDB-api/tests/test_http.py` L229 と同じ読み方で、`mitatedb_api.http` は import しない) の `definitions.Mutation.properties.confirmation.maxLength`。同じテストで `definitions.ScopedMutation`・`schemas.SchemaOperationRequest`・`schemas.CredentialRevokeRequest` の値と等しいことも検査する。Z-3 裁定):
+
+| peer | 配置 | 名前 | 内容 |
+|---|---|---|---|
+| MitateDB | `MitateDB-api/tests/test_foundation.py` の `FoundationTests` | `test_canonical_where_json_escapes_non_ascii_filter_values` | 値 `"é"` の canonical JSON が escape 形 `\u00e9` を含み、`é` そのものを含まない |
+| MitateDB | 同上 | `test_delete_confirmation_phrase_distinguishes_value_types` | 値 `1`・`"1"`・`True` の phrase が互いに違う (対象・field・revision は同じ)。assert は `len({phrase(v) for v in (1, "1", True)}) == 3` とする (`1 == True` で hash も等しいので、値を dict・set のキーにしない) |
+| MitateDB | 同上 | `test_delete_confirmation_phrase_is_bounded_by_the_confirmation_max_length` | `bound` を読み、対象 `"w"` で revision の桁数を `bound - 50` にした phrase が長さ `bound` で返り、1 桁増やすと `AssertionError` (桁数は literal にしない) |
+| r2db | `r2db-api/tests/test_foundation.py` (module 関数) | `test_delete_confirmation_phrase_distinguishes_value_types` | MitateDB と同じ性質と assert |
+| r2db | 同上 | `test_canonical_where_json_preserves_predicate_order` | operator を非昇順 (`lt` → `eq`) に並べた 2 述語の canonical JSON で、`lt` の述語が `eq` の述語より前に出る (部分文字列の位置で比べる。Z-2 裁定) |
+| r2db | 同上 | `test_delete_confirmation_phrase_is_bounded_by_the_phrase_max_length` | `bound` を読み、`_PHRASE_MAX_LENGTH == bound` と、上と同じ `bound` / `bound + 1` の境界 |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/tests/test_foundation.py` (新規テスト 3 本)、`r2db-api/tests/test_foundation.py` (新規テスト 3 本)。記録 (監督、別担当の編集の統合後): `docs/design/ROADMAP_POST_PHASE7_V1.md` の R-39 行への【追記】と設計 §10 の実施記録 | 両 peer の `src/` (`delete_confirmation.py` を含む。変異は一時コピーだけ)、`conformance-tests/` (Z-1)、両 peer の `tests/test_audit_query.py` と L1 scan、`tools/`、`spec/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | MitateDB の canonical JSON は非 ASCII を escape する (R-39 (1b)) | `MitateDB-api/src/mitatedb_api/delete_confirmation.py`: L42 の `json.dumps` に `ensure_ascii=False` を足す | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_canonical_where_json_escapes_non_ascii_filter_values` (新規) |
+| 2 | MitateDB は `true` と `1` を区別する | 同 L41: `"value": f.value` を `"value": int(f.value) if isinstance(f.value, bool) else f.value` にする | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_delete_confirmation_phrase_distinguishes_value_types` (新規) |
+| 3 | MitateDB は `"1"` と `1` を区別する | 同 L41: `"value": f.value` を `"value": int(f.value) if isinstance(f.value, str) and f.value.isdigit() else f.value` にする | 同上 |
+| 4 | MitateDB の phrase は契約の `confirmation.maxLength` 以内で、境界ちょうどは通る | 同 L83: `<= 256` を `<= 257` にする | `MitateDB-api/tests/test_foundation.py::FoundationTests::test_delete_confirmation_phrase_is_bounded_by_the_confirmation_max_length` (新規) |
+| 5 | r2db は `true` と `1` を区別する | `r2db-api/src/r2db_api/delete_confirmation.py`: L79 の `"value": p.value` を `"value": int(p.value) if isinstance(p.value, bool) else p.value` にする | `r2db-api/tests/test_foundation.py::test_delete_confirmation_phrase_distinguishes_value_types` (新規) |
+| 6 | r2db は `"1"` と `1` を区別する | 同 L79: `"value": p.value` を `"value": int(p.value) if isinstance(p.value, str) and p.value.isdigit() else p.value` にする | 同上 |
+| 7 | r2db の上限値は同梱の契約の `confirmation.maxLength` (R-39 (1g)) | 同 L49: `_PHRASE_MAX_LENGTH = 256` を `257` にする | `r2db-api/tests/test_foundation.py::test_delete_confirmation_phrase_is_bounded_by_the_phrase_max_length` (新規) |
+| 8 | r2db は実際の phrase の長さを検査する | 同 L128: `assert len(phrase) <= _PHRASE_MAX_LENGTH, …` の行を削る | 同上 |
+| 9 | 変異 1〜8・13 で赤になるのは新規テストだけ (偽の緑の排除と重複の回避) | **監査照合**: 各変異の実行ログで、上表の既存テスト (key 順・list 順・scope・schema_revision・per-request) と両 peer の既存 phrase テストが緑のままであること | — |
+| 10 | 綴りを固定しない | **監査照合**: 新規テストに phrase 全体・canonical JSON 全体の literal が無い (等値・不等・長さ・部分文字列だけ) | — |
+| 11 | コードと同型性表を変えない | **監査照合**: 両 peer の `src/` の差分 0、`_ISOMORPHIC_TARGETS` の差分 0 | — |
+| 12 | R-39 の (1b) と (1g) を閉じ、R-39 行を更新する (Y-8) | **監査照合**: 完了時の記録コミットで R-39 行に (1b)・(1g) を閉じた旨の【追記】があり、設計 §10 の実施記録に載ること | — |
+
+| 13 | r2db は述語の list 順を保つ (Z-2 裁定) | `r2db-api/src/r2db_api/delete_confirmation.py`: L79 の `for p in where` を `for p in sorted(where, key=lambda p: p.operator)` にする (field 順のソートや逆順は既存の `r2db-api/tests/test_foundation.py::test_canonical_where_json_sorts_nested_keys_and_escapes_non_ascii` (L650) も赤にし、9 に反する) | `r2db-api/tests/test_foundation.py::test_canonical_where_json_preserves_predicate_order` (新規) |
+| 14 | 上限は契約から読み、4 か所の値が等しい (Z-3 裁定) | **監査照合**: 新規の境界テスト 2 本が `bound` を同梱の契約から読み、4 か所の等値を assert し、256 と revision の桁数を literal で持たないこと | — |
+
+- 共通の C-1〜C-3 (§5.5) を末尾に付ける。C-2 の新規は 6 件 (MitateDB 3、r2db 3)。
+
+### 5.26 WP-2a の重なり・別案・未確定 (v1.9 追記)
+
+- **重なり**: 触るのは両 peer の `tests/test_foundation.py` だけ。コメント変更セット (変更セット 3 以降、`backend_postgres.py` の整理 Y-5) とは重ならない。同じ 2 file を触る R-37 の WP (WP-3 以降) とは直列にする。
+- **範囲外**: 規則 5 (identifier 検証済みの名前だけ) と、規則 1 の `destructive` 値からの独立は本 WP で固定せず、R-41 に追記する予定 (ロードマップは別担当が直す)。
+- **Class C の別案 (本 WP に入れない)**: C-06 に次の vector を足せば、adapter 経由で両 peer に同じ規則を掛けられる。(a) request_id と `confirmation` の値だけが違う 2 つの probe が同じ `required_confirmation` を得る (規則 1。adapter が request_id を渡せるかは着手時に確かめる)、(b) where の値が `1` と `"1"` の probe で phrase が違う、(c) `required_confirmation` が 256 以内 (規則 6)、(d) delete phrase が add_field の後に変わる (規則 4。V6 は drop_entity だけ)。
+
+**未確定 (監督判断待ち)**:
+
+| # | 点 |
+|---|---|
+| Z-1 | 上の Class C の別案を起票するか。起票先は R-39 か新しい R 行か |
+| Z-2 | r2db の list 順は既存テストの literal が付随的に固定しているだけ。明示のテストを足すか (本案は足さない) |
+| Z-3 | 256 を literal で固定するか、同梱の契約 JSON の `confirmation.maxLength` から読むか (本案は literal) |
+
+**監督裁定 (2026-09-15、独立レビュー)**: Z-2 は r2db に明示のテストを足す (§5.25 の 13)。Z-3 は同梱の契約から読む (§5.25 の足すテストと 14)。Z-1 は未確定のまま。
+
+**監督裁定 (2026-09-15)**:
+
+| # | 裁定 |
+|---|---|
+| Z-1 | Class C の案 (C-06 に request_id / `confirmation` 値からの独立、1 と "1"、256 以内、add_field 後に phrase が変わる、のベクトルを足す) は本 WP に入れず、ロードマップに R-41 として起票する (フェーズ11、Class C) |
+| Z-2 | r2db にも list 順を明示的に固定するテストを足す (既存の literal に偶然含まれることに頼らない) |
+| Z-3 | 256 は literal ではなく、同梱の契約から上限を読み、`_PHRASE_MAX_LENGTH` がそれと一致すること、及び境界 256/257 を固定する (契約が正) |
 
 ## 6. 重なり表と監督裁定
 
