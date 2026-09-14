@@ -136,7 +136,7 @@ _ACTOR_TYPE = "operator_cli"
 # reaching `delete_credential_confirmation_phrase` with unvalidated input.
 # This is the CLI's own equivalent of `validate_identifier` gating every
 # data-plane phrase-construction call (`structured.py`'s own header
-# comment, rule (c): a phrase never reflects unvalidated client input back
+# comment (now in `delete_confirmation.py`), rule (c): a phrase never reflects unvalidated client input back
 # to the client) and closes rule (d) (bounded length) the same way: a
 # format-validated id is always exactly 20 characters, so no digest escape
 # hatch is needed for this phrase the way `delete`/`drop_entity`/
