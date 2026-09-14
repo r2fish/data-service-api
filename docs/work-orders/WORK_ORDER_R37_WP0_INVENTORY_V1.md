@@ -311,6 +311,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | C-2 | node id の差分 | root は直前の統合後との差が新規 1 件、`tools/tests` は着手時の基点との差 0 |
 | C-3 | 対応の無い行が無い | §1.5 の 40 |
 
+**監督裁定 (WP-1d コードレビュー)**: WP-1d は dict 分岐・循環検出を直接呼ぶテストに価値があるとして新規テスト 6 本を残した (facade 1、変異 2・3b・4・5a・5b の各 1)。C-2 の「新規 1 件」は WP-1d には適用されず、root の差は新規 6 件である。§5.6 の完了条件表・実測はこの前提で読む。
+
 ### 5.6 WP-1d — MitateDB 要求の大きさと深さの検査 (CE2)
 
 **目的**: `cell.py` の `_measure_request_bytes` と `_check_operation_depth` を leaf `MitateDB-api/src/mitatedb_api/request_limits.py` へ移す。`_limit_gate` の呼出し順と facade は変えない。
@@ -353,6 +355,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 15 | テストの位置参照を移動先に直す (40c) | **監査照合**: `test_application_plane_limits.py` L553 の「`cell.py::_measure_request_bytes`」が移動先を指し、新規テスト以外の差分はそこだけであること | — |
 | 16 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。r2db 側の対応物は `limits.py::ResourceLimits.check_request` / `check_depth` で、同名ではない | — |
 | 17 | 既知の穴を記録する (V-4) | **監査照合**: V-4 の一覧が差分 0 のままで、完了時の実施記録 (設計の追記) に既知の穴として載っていること | — |
+
+**監督裁定 (WP-1d コードレビュー)**: 完了条件 1 の facade テストは facade のみを検査する内容に合わせ `test_request_limits_leaf_preserves_cell_facade` (新規) に改名した。行 1 の test id はこの名前で読む。新規テストは合計 6 本 (facade 1、変異 2・3b・4・5a・5b の各 1)。
 
 - 5a / 5b の新規テストは関数を直接呼ぶ。gate を通すと、先に走る検査が同じ例外を出して変異を隠すためである。
 - 共通の C-1〜C-3 (§5.5) を末尾に付ける。
