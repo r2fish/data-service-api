@@ -456,6 +456,33 @@ def extract_all_blocks(source: str) -> list[Block]:
 # docstring line) is a paragraph break, preserved here as a blank line so
 # `split_sentences` can also break there -- never on a bare line wrap.
 # ---------------------------------------------------------------------------
+# change set 0d review round (item 3): a line-wrap that splits an ID mid-
+# token (e.g. `SI-` at the end of one comment/docstring line, `08` at the
+# start of the next) must rejoin WITHOUT the usual single space, so the
+# flattened text reads "SI-08" and the protected-reference / (4)/(6)
+# machinery -- all of which run on this SAME flattened text -- see it as
+# one token, not two. Scoped NARROWLY to an ID-shaped split (the
+# accumulated text ends in an ID PREFIX -- 1-6 uppercase letters then a
+# hyphen -- and the next line starts with a digit): a real-corpus check
+# (r2db `postgres.py`, e.g. "confirmed-\ndestructive", "table-\nlevel")
+# showed an ordinary lowercase, hyphenated English compound word wrapped
+# across lines is deliberately rendered with A SPACE after the hyphen in
+# this corpus's own "retained" (single-line) form -- joining EVERY
+# trailing hyphen without a space would silently break those, matching
+# neither the old nor the intended behavior for prose.
+_HYPHEN_ID_WRAP_RE = re.compile(r"\b[A-Z]{1,6}-$")
+
+
+def _join_wrapped_lines(group: list[str]) -> str:
+    result = group[0]
+    for line in group[1:]:
+        if _HYPHEN_ID_WRAP_RE.search(result) and line[:1].isdigit():
+            result += line
+        else:
+            result += " " + line
+    return result
+
+
 def _flatten_comment(text: str) -> str:
     groups: list[list[str]] = [[]]
     for line in text.splitlines():
@@ -470,7 +497,7 @@ def _flatten_comment(text: str) -> str:
         else:
             groups[-1].append(content)
     groups = [g for g in groups if g]
-    return "\n\n".join(" ".join(g) for g in groups)
+    return "\n\n".join(_join_wrapped_lines(g) for g in groups)
 
 
 def _flatten_docstring(text: str) -> str:
@@ -483,7 +510,7 @@ def _flatten_docstring(text: str) -> str:
         else:
             groups[-1].append(stripped)
     groups = [g for g in groups if g]
-    return "\n\n".join(" ".join(g) for g in groups)
+    return "\n\n".join(_join_wrapped_lines(g) for g in groups)
 
 
 def _flatten(kind: str, text: str) -> str:
@@ -1149,6 +1176,47 @@ def _strip_leading_label(sentence: str, real_paths: frozenset[str]) -> str:
     return sentence
 
 
+_SPEC_SECTION_RE = re.compile(r"\bspec\s*§", re.IGNORECASE)
+
+
+def _sentence_has_protected_reference(sentence: str, real_paths: frozenset[str]) -> bool:
+    """design §4.1 (3), change set 0d (supervisor ruling): a whole
+    sentence may never be deleted outright if it carries a protected
+    reference -- an SI-/C-/CCR- id, a `spec §` reference, a versioned
+    document name (§3), or a path that really exists in the basis tree
+    (basename-unique match included, §9 rule 2). Reuses the SAME
+    protected-reference detection already used elsewhere in this file --
+    no new judgment logic. Mechanically removing a history token from
+    WITHIN a KEPT sentence via (4)/(6) is unaffected by this (only whole-
+    sentence deletion is restricted). HTTP status codes and error-code
+    vocabulary are deliberately NOT protected here -- left to audit/
+    conformance review, not this tool."""
+    ids = _ANY_ID_RE.findall(sentence)
+    if any(i.startswith(_PROTECTED_ID_PREFIXES) for i in ids):
+        return True
+    if _SPEC_SECTION_RE.search(sentence):
+        return True
+    if _has_versioned_document_reference(sentence):
+        return True
+    if _has_real_filename_reference(sentence, real_paths):
+        return True
+    return False
+
+
+def _first_protected_sentence(text: str, kind: str, real_paths: frozenset[str]) -> str | None:
+    """change set 0d review round (item 1): when a WHOLE block is moved
+    away with nothing retained in code (`retained_text` empty), the
+    entire source text -- every sentence of it -- disappears from the
+    code just as surely as an in-place whole-sentence deletion would;
+    check it the SAME way, sentence by sentence, rather than skipping
+    the check entirely just because there is no `_is_allowed_reduction`
+    call to hang it on."""
+    for sentence in split_sentences(_flatten(kind, text)):
+        if _sentence_has_protected_reference(sentence, real_paths):
+            return sentence
+    return None
+
+
 def _is_allowed_reduction(
     kind: str, old_full_text: str, new_retained_text: str, real_paths: frozenset[str]
 ) -> tuple[bool, str]:
@@ -1186,8 +1254,16 @@ def _is_allowed_reduction(
             ):
                 found = True
                 break
+            # `candidate` is being deleted WHOLE (change set 0d, design
+            # §4.1 (3) supervisor ruling): never allowed if it carries a
+            # protected reference.
+            if _sentence_has_protected_reference(candidate, real_paths):
+                return False, f"cannot delete a whole sentence carrying a protected reference: {candidate!r}"
         if not found:
             return False, f"retained text has no order-preserving match in the original block for: {ns!r}"
+    for candidate in old_sentences[j:]:
+        if _sentence_has_protected_reference(candidate, real_paths):
+            return False, f"cannot delete a whole sentence carrying a protected reference: {candidate!r}"
     return True, ""
 
 
@@ -1518,6 +1594,17 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
                 ok, reason = _is_allowed_reduction(nb.kind, ob.retained_text, nb.retained_text, real_paths)
                 if not ok:
                     errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
+            elif ob.retained_text:
+                # change set 0d review round (item 1): nothing kept in
+                # code at all -- the basis's own retained text (already
+                # itself a reduction) is being moved away in full; every
+                # one of ITS sentences must be checked too.
+                protected = _first_protected_sentence(ob.retained_text, ob.kind, real_paths)
+                if protected is not None:
+                    errors.append(
+                        f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
+                        f"-- it still carries a protected reference: {protected!r}"
+                    )
             continue
 
         same_scope = [
@@ -1547,6 +1634,16 @@ def check_provenance_semantics(rel_path: str, old_source: str, new_source: str,
             ok, reason = _is_allowed_reduction(nb.kind, companion_text, nb.retained_text, real_paths)
             if not ok:
                 errors.append(f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} {reason}")
+        else:
+            # change set 0d review round (item 1): first move, nothing
+            # kept in code -- check the FULL companion text (everything
+            # that is disappearing from the source) sentence by sentence.
+            protected = _first_protected_sentence(companion_text, nb.kind, real_paths)
+            if protected is not None:
+                errors.append(
+                    f"FAIL (§4.1 (3)) {rel_path}:{nb.start_line} cannot move the whole block away "
+                    f"-- it still carries a protected reference: {protected!r}"
+                )
 
     # Q-4: an old block that carried its OWN CH-ID and was never consumed
     # (no new block claimed it -- e.g. its id was swapped for a different

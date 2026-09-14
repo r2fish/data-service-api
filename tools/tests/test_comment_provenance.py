@@ -2309,3 +2309,291 @@ def test_review_slash_path_basename_match_not_real_is_green(tmp_path):
     )
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 0, output
+
+
+# ===========================================================================
+# Change set 0d (supervisor ruling): design §4.1 (3) whole-sentence
+# deletion may never drop a sentence carrying a protected reference
+# (SI-/C-/CCR- id, `spec §`, a versioned document name, or a real path in
+# the basis tree). Mechanically stripping a history token from WITHIN a
+# KEPT sentence via (4)/(6) is unaffected. HTTP status codes and error-
+# code vocabulary are deliberately NOT protected by this tool. Cross-
+# checked against the reviewer's probe12.py (scratchpad rev-ccp0/).
+# ===========================================================================
+
+def test_0d_delete_sentence_with_si_id_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Status 409 maps to CONFLICT (SI-08).\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Status 409 maps to CONFLICT (SI-08).\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_delete_sentence_with_spec_section_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Error codes follow spec §7.3 exactly.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Error codes follow spec §7.3 exactly.\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_delete_negation_sentence_with_c_id_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Never retry a 503 here (C-12).\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Never retry a 503 here (C-12).\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_delete_sentence_with_real_path_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    _write(repo, "docs/design/X_V1.md", "stub\n")
+    old = "# See `docs/design/X_V1.md` for details.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# See `docs/design/X_V1.md` for details.\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_delete_sentence_with_versioned_doc_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Contract 1.7.0 governs this.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Contract 1.7.0 governs this.\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_paren_only_wp3_removal_kept_sentence_is_green(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Rules (SI-08, WP-3) apply.", "Rules (SI-08) apply.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0d_delete_plain_history_sentence_is_green(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Phase 4 (design D-4) notes this.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Phase 4 (design D-4) notes this.\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0d_delete_http_status_only_sentence_is_green(tmp_path):
+    # HTTP status codes and error-code vocabulary are NOT protected by
+    # this tool (left to audit/conformance review).
+    repo = _init_repo(tmp_path)
+    old = "# Status 409 maps to CONFLICT.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Status 409 maps to CONFLICT.\n# The body is JSON."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# ===========================================================================
+# Change set 0d code review round: (1) whole-block-moved-away must also
+# check EVERY sentence for a protected reference, even when nothing at
+# all is retained in code; (2) a trailing (tail-of-block) whole-sentence
+# deletion needs its own fixture; (3) a line-wrap that splits an ID
+# (`SI-` / `08`) must rejoin without a space before judgment, narrowly
+# scoped to an ID-shaped split (not ordinary hyphenated English prose
+# wraps -- confirmed against the real r2db `postgres.py` corpus).
+# Cross-checked against the reviewer's probe13.py (scratchpad rev-ccp0/).
+# ===========================================================================
+
+def test_0d_whole_block_moved_with_protected_ref_is_red(tmp_path):
+    # First-move (case A): nothing kept in code at all (`nb.retained_text`
+    # empty) -- but the companion text being moved away still carries
+    # SI-08, which must never fully disappear from the source silently.
+    repo = _init_repo(tmp_path)
+    old = "# Guarded by SI-08.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Guarded by SI-08."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_whole_docstring_block_moved_with_protected_ref_is_red(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = 'def f():\n    """Guarded by SI-08."""\n    return 1\n'
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = 'def f():\n    """History: CH-0001"""\n    return 1\n'
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "Guarded by SI-08.", kind="docstring"),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_whole_block_moved_without_protected_ref_is_green(tmp_path):
+    repo = _init_repo(tmp_path)
+    old = "# Phase 4 (design D-4) notes this.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# Phase 4 (design D-4) notes this."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_0d_delete_trailing_protected_sentence_is_red(tmp_path):
+    # Keep the FIRST sentence, delete a protected-reference sentence at
+    # the TAIL of the block (old_sentences[j:], not a mid-block gap).
+    repo = _init_repo(tmp_path)
+    old = "# The body is JSON. Guarded by SI-08.\n# Moved.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "# The body is JSON. Guarded by SI-08.\n# Moved."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_hyphen_wrapped_id_sentence_deleted_is_red(tmp_path):
+    # "SI-" at the end of one comment line, "08" at the start of the
+    # next -- must rejoin as "SI-08" BEFORE judgment, so the whole
+    # sentence carrying it cannot be deleted.
+    repo = _init_repo(tmp_path)
+    old = (
+        "# Status 409 maps to CONFLICT per SI-\n"
+        "# 08 here.\n"
+        "# The body is JSON.\n"
+        "# Moved.\n"
+        "def f():\n    return 1\n"
+    )
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section(
+            "CH-0001",
+            "# Status 409 maps to CONFLICT per SI-\n# 08 here.\n# The body is JSON.\n# Moved.",
+        ),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_join_wrapped_lines_ordinary_hyphenated_prose_keeps_space():
+    # White-box, pinned directly against the real-corpus discovery: an
+    # ordinary lowercase, hyphenated English compound word wrapped across
+    # lines keeps its space (not ID-shaped), while an uppercase ID prefix
+    # followed by a digit-starting continuation does not.
+    assert cp._flatten_comment("# confirmed-\n# destructive") == "confirmed- destructive"
+    assert cp._flatten_comment("# SI-\n# 08") == "SI-08"
+
+
+def test_0d_q4_reedit_to_empty_with_protected_ref_is_red(tmp_path):
+    # Q-4 reedit path specifically (basis already carries CH-0001 with
+    # SOME retained text) reduced all the way down to NOTHING but the
+    # marker -- distinct from the first-move (case A) fixture above,
+    # which never allocates a CH-ID in the basis at all.
+    repo = _init_repo(tmp_path)
+    old = "# Guarded by SI-08.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "Guarded by SI-08."),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_0d_bare_real_path_mention_not_citation_shaped_is_red(tmp_path):
+    # Supervisor ruling: a real-path mention protects a whole sentence
+    # from deletion regardless of whether it's citation-shaped (e.g. in
+    # parens alongside an id) -- an ordinary prose mention of where code
+    # moved to is still a live signpost for the reader.
+    repo = _init_repo(tmp_path)
+    _write(repo, "r2db-api/src/r2db_api/audit_counts.py", "stub\n")
+    old = "# The helper moved to `audit_counts.py`.\n# The body is JSON.\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = "# The body is JSON.\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section(
+            "CH-0001", "# The helper moved to `audit_counts.py`.\n# The body is JSON."
+        ),
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
