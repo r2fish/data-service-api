@@ -11,7 +11,7 @@ Two backend implementations share one call surface (`ControlBackend`, below), th
 
 Both backends are deliberately dumb: everything a backend method raises (`NOT_FOUND`/`CONFLICT`/`VALIDATION_FAILED` from the underlying stores) is allowed to surface through unchanged; `ControlPlaneService` never asks a backend "is this allowed" -- it decides that itself, then tells the backend what to persist.
 
-This module connects to no HTTP surface, ASGI app, or composition root; `control_http.py`/`control_main.py` do not exist yet.
+This module connects to no HTTP surface, ASGI app, or composition root itself: `control_http.py` is the ASGI boundary over `ControlPlaneService`, and `control_main.py` constructs it.
 
 History: CH-0239
 """

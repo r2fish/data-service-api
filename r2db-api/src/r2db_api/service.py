@@ -818,7 +818,7 @@ class DataService:
                     # reflects this instance's own constructor-injected deployer declaration -- never hardcoded (see __init__'s comment on this field).
                     # history: CH-0140
                     "control_plane": {"status": self._control_plane_status},
-                    # Contract 1.7.0 (subordinate ruling 12): three new capabilities, honestly declared `unavailable` until each one's own capability WP flips it, in the SAME commit as the provisional gate that rejects every field it governs (`schema`/`mutate_result`/`_query_outcome` above, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
+                    # Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is declared `enabled` in the same commit that removes the provisional gate rejecting every field it governs (`schema`/`mutate_result`/`_query_outcome` below, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
                     #
                     # `constraint_declarations` is `enabled` -- `field_constraints`/`enum`/`nullable`/`alter_field` are no longer in `_PROVISIONAL_UNSUPPORTED_SCHEMA_FIELDS` (removed in this same commit) and are now enforced (`structured.py`/`postgres.py`).
                     # history: CH-0139
