@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from .audit_hook import ApplicationAuditHook
 from .errors import fail, observed_type_of, violation
+from .inmemory_sort import _JSON_TYPE_RANK, _sort_key, _sort_rows
 from .limits import ResourceLimits
 from .pg_text_format import _float8out_text, _jsonb_numeric_text, _jsonb_scalar_text, _jsonb_text
 from .value_nul import _contains_nul
@@ -1590,12 +1591,6 @@ def validate_page_size(page_size: int, limits: ResourceLimits) -> None:
 
 MAX_ORDER_BY_FIELDS = 10
 MAX_CURSOR_OFFSET = 10**9
-# PostgreSQL's own jsonb cross-type ordering (ascending: String < Number <
-# Boolean < Array < Object), used by `_sort_key` below for an untyped
-# (JSONB-equivalent) column whose stored values happen to differ in JSON
-# type (WP-2 review M-6). Typed columns never exercise more than one of
-# these ranks, since R-7 already guarantees a uniform type there.
-_JSON_TYPE_RANK = {"string": 0, "number": 1, "boolean": 2, "array": 3, "object": 4}
 
 
 def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, str]]:
@@ -1630,39 +1625,6 @@ def _resolve_order_by(order_by: Any, known_fields: set[str]) -> list[tuple[str, 
         # whenever the caller's own order_by does not already mention it.
         spec.append(("id", "asc"))
     return spec
-
-
-def _sort_key(value: Any) -> tuple[Any, ...]:
-    """A total ordering key matching PostgreSQL's own defaults (WP-2 review
-    M-6): a `NULL` sorts as if larger than any non-null value (`NULLS LAST`
-    for ascending, `NULLS FIRST` for descending -- both fall out of giving
-    it the single highest rank here and reusing `_sort_rows`'s existing
-    per-field `reverse=(direction == "desc")`, with no direction-specific
-    branch needed in this function). Non-null values are additionally
-    grouped by jsonb type rank first, so two rows whose values for the same
-    untyped (JSONB-equivalent) column differ in JSON type never reach a
-    native `<` comparison between incompatible Python types.
-    """
-    if value is None:
-        return (1, 0, "")
-    if isinstance(value, bool):
-        return (0, _JSON_TYPE_RANK["boolean"], int(value))
-    if isinstance(value, (int, float)):
-        return (0, _JSON_TYPE_RANK["number"], value)
-    if isinstance(value, str):
-        return (0, _JSON_TYPE_RANK["string"], value)
-    if isinstance(value, list):
-        return (0, _JSON_TYPE_RANK["array"], json.dumps(value, sort_keys=True, default=str))
-    if isinstance(value, dict):
-        return (0, _JSON_TYPE_RANK["object"], json.dumps(value, sort_keys=True, default=str))
-    return (0, _JSON_TYPE_RANK["string"], str(value))  # pragma: no cover - values are always JSON-shaped
-
-
-def _sort_rows(rows: list[dict[str, Any]], spec: list[tuple[str, str]]) -> list[dict[str, Any]]:
-    result = list(rows)
-    for field_name, direction in reversed(spec):
-        result.sort(key=lambda row, f=field_name: _sort_key(row.get(f)), reverse=(direction == "desc"))
-    return result
 
 
 def _shape_hash(application_id: str, entity: str, select: list[str], where: list[Predicate], order_spec: list[tuple[str, str]], size: int) -> str:
