@@ -405,6 +405,7 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 | 22 | 集計行と経緯トークン数の前後 | **監査照合** (§5.4 の記録と実行ログ。数え方は §2.3 末尾) | — |
 | 23 | 対応の無い行が無い | **監査照合** (§1.5 の 40) | — |
 | 24 | Q-4: 再利用した ID の塊は、削除した分が既存節に逐語で含まれる | 再利用した塊に、変更セット 1 で削除した文を受け皿の節から書き戻す | P1 exit 1 (Q-4 の照合だけ)。R は exit 0 |
+| 24 (訂正, 2026-09-14 監督裁定) | 上と同じ完了条件。変異の対象を訂正: 「書き戻す」はソース側 (`postgres.py`) の CH-0002 の塊に、受け皿 (`postgres.md`) の CH-0002 節にある「that still import them from `postgres`.」を追加行として書き戻すこと (受け皿の書き換えではない)。実測は `rev-cs2b/q4repo/` (レビュアー) および本ラウンドの再実施 (`ccp-cs2-mutations.log` の「round 3 correction」項) の双方で確認済み | P1 exit 1 (§4.1 (3)、postgres.py:108「retained text has no order-preserving match... 'that still import them from `postgres`.'」)。R は exit 0。訂正前の解釈で実施していた「受け皿を切り詰める」変異 (§4.1 (2) で赤) は (2) の代用として別途保持 |
 | 25 | §9 の 4: `/` 結合 ID は ID ごとに扱う | `postgres.py`: L1594 の `M-3/D` から `M-3` だけを消す | P1 exit 1 |
 | 26 | Q-4 の照合は正しい変更を赤にしない | 変異なし — **監査照合**: 親コミットのまま `--base <親コミット>` で再照合し、exit 0 を記録 | — |
 
@@ -428,6 +429,8 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 
 **指示語チェックの候補一覧** (削除した文 1 つにつき 1 行)
 
+本ラウンドは (3) の文削除を 1 件も行っていない (すべて (4)/(6)/§9 の機械的なラベル・括弧削除のみ、`_sentence_reachable`/`_is_allowed_reduction` によりツール自身で逐一検証済み)。よって指示語チェックの対象文は無い。
+
 | # | ファイル / 塊 | 削除した文 (先頭の数語) | 直後の残す文 1 | 直後の残す文 2 | 指示語・定冠詞の参照 | 結果 (該当なし / 参照あり → 残した) |
 |---|---|---|---|---|---|---|
 
@@ -435,11 +438,355 @@ python3 tools/public_value_scan.py <触ったファイル>    → total_flagged=
 
 | ファイル / 塊 (旧行範囲 / qualname) | 判定 (残す / 移す `CH-NNNN` / 再利用 `CH-NNNN` / 対象外) | 根拠 (設計の節) | 指示語チェック (候補一覧の #) |
 |---|---|---|---|
+| postgres.py L1-86 / <module> (docstring) | 再利用 `CH-0001` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L108-109 / <module> (comment) | 再利用 `CH-0002` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L146-164 / <module> (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L166-170 / <module> (comment) | 移す `CH-0102` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L173-190 / <module> (comment) | 再利用 `CH-0003` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L192-193 / <module> (comment) | 再利用 `CH-0004` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L195-199 / <module> (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L204-205 / <module> (comment) | 再利用 `CH-0005` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L211-219 / <module> (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L227-235 / <module> (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L251-266 / _TableInfo (docstring) | 再利用 `CH-0006` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L270-278 / _TableInfo (comment) | 移す `CH-0101` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L283-286 / _run (docstring) | 再利用 `CH-0007` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L293-313 / _RolePool (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L324-341 / _RolePool.__init__ (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L345-354 / _RolePool._connect (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L366-382 / _RolePool._acquire (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L395-404 / _RolePool._acquire (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L413-424 / _RolePool._liveness_check (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L428-431 / _RolePool._liveness_check (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L449-457 / _RolePool.connection (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L463-466 / _RolePool.connection (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L501-513 / _RolePool.retire (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L520-529 / _env_int (docstring) | 移す `CH-0100` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L546-585 / SharedPoolManager (docstring) | 移す `CH-0099` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L597-608 / SharedPoolManager._evict_locked (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L620-627 / SharedPoolManager.get_pool (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L640-647 / SharedPoolManager.release (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L654-656 / SharedPoolManager.dispose_all (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L665-676 / _PoolHandle (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L695-700 / <module> (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L705-747 / PostgresCell (docstring) | 移す `CH-0098` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L753-758 / PostgresCell.__init__ (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L763-772 / PostgresCell.__init__ (comment) | 再利用 `CH-0008` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L780-789 / PostgresCell.close (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L794-820 / PostgresCell.verify_platform_upgrades_applied (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L838 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L841-844 / PostgresCell._describe_table (docstring) | 再利用 `CH-0009` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L850-854 / PostgresCell._describe_table (comment) | 移す `CH-0097` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L865-866 / PostgresCell._describe_table (comment) | 再利用 `CH-0010` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L869-873 / PostgresCell._describe_table (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L887-908 / PostgresCell._load_catalog (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L916-925 / PostgresCell._load_catalog (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L952-953 / PostgresCell._load_catalog (comment) | 再利用 `CH-0011` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L957-963 / PostgresCell._load_catalog (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L989-991 / PostgresCell._load_catalog (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L996-1002 / PostgresCell._load_catalog (comment) | 再利用 `CH-0012` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1010-1024 / PostgresCell._load_field_constraints (docstring) | 再利用 `CH-0013` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1041-1053 / PostgresCell._write_field_constraints (docstring) | 移す `CH-0096` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1074-1089 / PostgresCell._clear_field_constraints (docstring) | 再利用 `CH-0014` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1101-1124 / PostgresCell (comment) | 再利用 `CH-0015` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1127-1155 / PostgresCell._idempotency_key_lock (docstring) | 再利用 `CH-0016` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1160-1175 / PostgresCell._idempotency_reserve_lock (docstring) | 再利用 `CH-0017` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1194-1195 / PostgresCell._idempotency_reserve (comment) | 再利用 `CH-0018` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1199-1207 / PostgresCell._idempotency_reserve (comment) | 再利用 `CH-0085` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1212-1213 / PostgresCell._idempotency_reserve (comment) | 再利用 `CH-0019` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1217-1229 / PostgresCell._idempotency_store (comment) | 再利用 `CH-0020` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1244 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1269-1270 / PostgresCell.query (comment) | 再利用 `CH-0021` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1278-1279 / PostgresCell.query (comment) | 再利用 `CH-0022` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1283-1284 / PostgresCell.query (comment) | 再利用 `CH-0023` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1286-1287 / PostgresCell.query (comment) | 再利用 `CH-0024` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1303-1304 / PostgresCell.query (comment) | 再利用 `CH-0025` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1310-1314 / PostgresCell.query (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1335-1344 / PostgresCell._select_statement (comment) | 再利用 `CH-0026` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1354 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1371-1381 / PostgresCell.transact (docstring) | 再利用 `CH-0027` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1391-1393 / PostgresCell.transact (comment) | 移す `CH-0095` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1396-1402 / PostgresCell.transact (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1410-1414 / PostgresCell.transact (comment) | 再利用 `CH-0028` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1418-1419 / PostgresCell.transact (comment) | 再利用 `CH-0029` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1422-1423 / PostgresCell.transact (comment) | 再利用 `CH-0030` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1431-1432 / PostgresCell.transact (comment) | 再利用 `CH-0031` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1436-1437 / PostgresCell.transact (comment) | 再利用 `CH-0032` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1440-1441 / PostgresCell.transact (comment) | 再利用 `CH-0033` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1448-1455 / PostgresCell.transact (comment) | 再利用 `CH-0034` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1463-1464 / PostgresCell.transact (comment) | 再利用 `CH-0035` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1466-1467 / PostgresCell.transact (comment) | 再利用 `CH-0036` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1476-1482 / PostgresCell.transact (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1491-1492 / PostgresCell.transact (comment) | 再利用 `CH-0037` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1496-1502 / PostgresCell.transact (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1518-1526 / PostgresCell.transact (comment) | 移す `CH-0094` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1530-1534 / PostgresCell.transact (comment) | 再利用 `CH-0038` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1541-1548 / PostgresCell._fail_unique_conflict (docstring) | 再利用 `CH-0039` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1557-1571 / PostgresCell._fail_client_value (docstring) | 再利用 `CH-0040` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1575-1578 / PostgresCell._bind_value (docstring) | 再利用 `CH-0041` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1589-1592 / PostgresCell._apply (comment) | 移す `CH-0093` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1594-1596 / PostgresCell._apply (comment) | 移す `CH-0092` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1600-1604 / PostgresCell._apply (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1613-1614 / PostgresCell._apply (comment) | 再利用 `CH-0042` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1624-1627 / PostgresCell._apply (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1636-1637 / PostgresCell._apply (comment) | 再利用 `CH-0043` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1646-1647 / PostgresCell._apply (comment) | 再利用 `CH-0044` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1655-1672 / PostgresCell._append_revision_predicate (docstring) | 再利用 `CH-0045` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1680-1683 / PostgresCell._resolve_precondition_miss (docstring) | 再利用 `CH-0046` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1725-1726 / PostgresCell._update (comment) | 再利用 `CH-0047` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1768-1775 / PostgresCell._apply_upsert (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1794-1795 / PostgresCell._apply_upsert (comment) | 移す `CH-0091` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1797-1798 / PostgresCell._apply_upsert (comment) | 再利用 `CH-0048` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1807-1810 / PostgresCell._apply_upsert (comment) | 再利用 `CH-0049` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1814-1829 / PostgresCell._apply_upsert (comment) | 再利用 `CH-0050` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1850-1851 / PostgresCell._apply_upsert (comment) | 再利用 `CH-0051` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1879-1880 / PostgresCell._apply_upsert (comment) | 再利用 `CH-0052` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1884 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1898-1916 / PostgresCell._text_expression (docstring) | 再利用 `CH-0053` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1926-1933 / PostgresCell._predicate_sql (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1937-1938 / PostgresCell._predicate_sql (comment) | 再利用 `CH-0054` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1943-1946 / PostgresCell._predicate_sql (comment) | 再利用 `CH-0055` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1950-1951 / PostgresCell._predicate_sql (comment) | 再利用 `CH-0056` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1956-1962 / PostgresCell._predicate_sql (comment) | 再利用 `CH-0057` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1966 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1983-1990 / PostgresCell.apply_schema (docstring) | 再利用 `CH-0058` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1992-1996 / PostgresCell.apply_schema (comment) | 移す `CH-0090` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L1998-1999 / PostgresCell.apply_schema (comment) | 再利用 `CH-0059` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2011-2023 / PostgresCell.apply_schema (comment) | 再利用 `CH-0060` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2027-2028 / PostgresCell.apply_schema (comment) | 再利用 `CH-0061` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2031-2032 / PostgresCell.apply_schema (comment) | 再利用 `CH-0062` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2040-2041 / PostgresCell.apply_schema (comment) | 再利用 `CH-0063` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2044-2045 / PostgresCell.apply_schema (comment) | 再利用 `CH-0064` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2048-2049 / PostgresCell.apply_schema (comment) | 再利用 `CH-0065` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2052-2059 / PostgresCell.apply_schema (comment) | 再利用 `CH-0066` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2066-2072 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2086-2090 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2098-2099 / PostgresCell.apply_schema (comment) | 再利用 `CH-0067` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2103-2112 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2117-2119 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2135-2149 / PostgresCell.apply_schema (comment) | 再利用 `CH-0068` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2156-2161 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2164-2182 / PostgresCell.apply_schema (comment) | 再利用 `CH-0069` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2200-2203 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2212-2216 / PostgresCell.apply_schema (comment) | 再利用 `CH-0070` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2230-2243 / PostgresCell.apply_schema (comment) | 移す `CH-0089` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2246-2265 / PostgresCell.apply_schema (comment) | 再利用 `CH-0071` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2274-2282 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2307-2308 / PostgresCell.apply_schema (comment) | 再利用 `CH-0072` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2318-2330 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2337-2340 / PostgresCell.apply_schema (comment) | 再利用 `CH-0073` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2348-2351 / PostgresCell.apply_schema (comment) | 移す `CH-0088` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2355-2358 / PostgresCell.apply_schema (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2370-2371 / PostgresCell.apply_schema (comment) | 再利用 `CH-0074` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2376-2377 / PostgresCell.apply_schema (comment) | 移す `CH-0087` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2381-2382 / PostgresCell.apply_schema (comment) | 再利用 `CH-0075` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2386-2399 / PostgresCell._create_entity (comment) | 再利用 `CH-0076` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2412-2425 / PostgresCell._create_entity (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2436-2445 / PostgresCell._apply_row_level_security (docstring) | 再利用 `CH-0077` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2461-2472 / PostgresCell._rls_offenders (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2484-2499 / PostgresCell.verify_row_level_security (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2518-2519 / PostgresCell._add_field (comment) | 再利用 `CH-0078` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2525-2530 / PostgresCell._create_index (comment) | 再利用 `CH-0079` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2544-2553 / PostgresCell._read_schema_revision (docstring) | 再利用 `CH-0080` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2573 / PostgresCell (comment) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2583-2591 / PostgresCell._set_timeouts (docstring) | 再利用 `CH-0081` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2600-2621 / _RefusingPlatformUpgradeCell (docstring) | 再利用 `CH-0082` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2631-2634 / _RefusingPlatformUpgradeCell.close (docstring) | 残す | 設計 §9 で再判定したが、経緯トークン・出所なし裸ID を含まないか、出所付き参照のみ、または機械的操作が届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2649-2651 / <module> (comment) | 再利用 `CH-0083` | 設計 §9 (既存 CH-ID の塊をさらに機械的に削減。Q-4 により ID 再利用、受け皿の既存節は書き換えず) | 該当なし(本ラウンドは文削除なし) |
+| postgres.py L2653-2654 / <module> (comment) | 再利用 `CH-0084` (変更なし) | 設計 §9 で再判定したが、これ以上の機械的削除は届かず現状維持 | 該当なし(本ラウンドは文削除なし) |
+| service.py L25-44 / <module> (comment) | 移す `CH-0178` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L54-64 / <module> (comment) | 移す `CH-0177` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L67 / <module> (comment) | 移す `CH-0176` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L70-71 / <module> (comment) | 移す `CH-0175` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L83-91 / <module> (comment) | 移す `CH-0174` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L106-110 / <module> (comment) | 移す `CH-0173` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L114-121 / <module> (comment) | 移す `CH-0172` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L132-139 / <module> (comment) | 移す `CH-0171` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L149-155 / QueryPage (docstring) | 移す `CH-0170` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L160-163 / QueryPage (comment) | 移す `CH-0169` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L169-197 / MutationResult (docstring) | 移す `CH-0168` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L203-206 / MutationResult (comment) | 移す `CH-0167` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L211-220 / _PreCommitHook (docstring) | 移す `CH-0166` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L240-245 / _PreCommitHook.commit_failed (comment) | 移す `CH-0165` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L253-316 / _AuditBuffer (docstring) | 移す `CH-0164` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L334-337 / _AuditBuffer.__init__ (comment) | 移す `CH-0163` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L359-360 / _AuditBuffer.push (comment) | 移す `CH-0162` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L368-421 / _AuditBuffer.flush (docstring) | 移す `CH-0161` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L432-438 / _AuditBuffer.flush (comment) | 移す `CH-0160` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L440-445 / _AuditBuffer.flush (comment) | 移す `CH-0159` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L458-494 / _AuditBuffer.flush (comment) | 移す `CH-0158` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L527-531 / _AuditBuffer._retry_alert (comment) | 移す `CH-0157` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L547-555 / _AuditBuffer._retry_alert (comment) | 移す `CH-0156` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L567-628 / _DenialCoalescer (docstring) | 移す `CH-0155` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L638-642 / _DenialCoalescer.__init__ (comment) | 移す `CH-0154` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L652-655 / _DenialCoalescer._release_key_lock_ref (docstring) | 移す `CH-0153` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L666-686 / _DenialCoalescer._requeue_failed_aggregate (docstring) | 移す `CH-0152` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L695-698 / _DenialCoalescer._note_aggregate_write_result (docstring) | 移す `CH-0151` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L777-784 / _DenialCoalescer.flush_all (docstring) | 移す `CH-0150` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L804-811 / _DenialCoalescer._flush_keys (comment) | 移す `CH-0149` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L823-838 / DataService.__init__ (comment) | 移す `CH-0148` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L842-853 / DataService.__init__ (comment) | 移す `CH-0147` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L855-871 / DataService.__init__ (comment) | 移す `CH-0146` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L879-887 / DataService.__init__ (comment) | 移す `CH-0145` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L910-917 / DataService.authenticate (comment) | 移す `CH-0144` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L928-937 / DataService.capabilities (comment) | 移す `CH-0143` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L940-969 / DataService.capabilities (comment) | 移す `CH-0142` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1001-1010 / DataService.capabilities (comment) | 移す `CH-0141` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1012-1014 / DataService.capabilities (comment) | 移す `CH-0140` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1016-1028 / DataService.capabilities (comment) | 移す `CH-0139` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1030-1037 / DataService.capabilities (comment) | 移す `CH-0138` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1048-1073 / DataService.capabilities (comment) | 移す `CH-0137` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1093-1096 / DataService.capabilities (comment) | 移す `CH-0136` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1102-1109 / DataService.query (docstring) | 移す `CH-0135` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1113-1131 / DataService.query_page (docstring) | 移す `CH-0134` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1132-1137 / DataService.query_page (comment) | 移す `CH-0133` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1157-1164 / DataService._query_outcome (comment) | 移す `CH-0132` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1171-1172 / DataService._query_outcome (comment) | 移す `CH-0131` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1180-1185 / DataService.mutate (docstring) | 移す `CH-0130` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1189-1202 / DataService.mutate_result (docstring) | 移す `CH-0129` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1205-1210 / DataService.mutate_result (comment) | 移す `CH-0128` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1213-1219 / DataService.mutate_result (comment) | 移す `CH-0127` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1229-1240 / DataService._mutate_outcome (comment) | 移す `CH-0126` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1259-1263 / DataService._mutate_outcome (comment) | 移す `CH-0125` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1266-1283 / DataService._mutate_outcome (comment) | 移す `CH-0124` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1289-1297 / DataService._mutate_outcome (comment) | 移す `CH-0123` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1300-1311 / DataService._mutate_outcome (comment) | 移す `CH-0122` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1318-1341 / DataService._mutate_outcome (comment) | 移す `CH-0121` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1353-1370 / DataService.schema (docstring) | 移す `CH-0120` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1372-1377 / DataService.schema (comment) | 移す `CH-0119` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1384-1389 / DataService.schema (comment) | 移す `CH-0118` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1394-1395 / DataService.schema (comment) | 移す `CH-0117` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1398-1406 / DataService.schema (comment) | 移す `CH-0116` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1409-1414 / DataService.schema (comment) | 移す `CH-0115` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1452-1453 / DataService.catalog (comment) | 移す `CH-0114` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1461-1479 / DataService.deny_unsupported (docstring) | 移す `CH-0113` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1483-1488 / DataService.deny_unsupported (comment) | 移す `CH-0112` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1496-1524 / DataService._slot (docstring) | 移す `CH-0111` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1542-1585 / DataService.acquire_concurrency_slot (docstring) | 移す `CH-0110` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1616-1645 / DataService._event (docstring) | 移す `CH-0109` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1688-1693 / DataService._denial_event (docstring) | 移す `CH-0108` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1707-1712 / DataService._make_audit_hook (docstring) | 移す `CH-0107` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1721-1742 / DataService.flush_audit_buffer (docstring) | 移す `CH-0106` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1788-1802 / ControlAuthority.set_credential_state (docstring) | 移す `CH-0105` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1807-1813 / ControlAuthority.set_credential_state (comment) | 移す `CH-0104` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
+| service.py L1822-1838 / ControlAuthority.issue_credential (docstring) | 移す `CH-0103` | 設計 §9 (機械的なラベル/括弧削除) | 該当なし(本ラウンドは文削除なし) |
 
 | 記録 | 前 | 後 |
 |---|---|---|
-| 経緯トークン数 `postgres.py` / `service.py` (§2.3 末尾の数え方) | | |
-| r2db / MitateDB / conformance / tools/tests の集計行 | | |
+| 経緯トークン数 `postgres.py` (ツールの `_HISTORY_TOKEN_PATTERNS`、塊の中) | 72 | 37 |
+| 経緯トークン数 `service.py` (同上) | 174 | 70 |
+| r2db / MitateDB / conformance / tools/tests の集計行 | (本ラウンド前の単独スナップショットは未取得。並行 R-37 作業により前回ラウンドの値との単純比較はできない) | r2db 1265 passed / MitateDB 1096 passed,2 subtests passed / conformance 995 passed / tools/tests 256 passed。failed/skipped/xfailed は全て 0 |
+
+#### 5.4.1 変更セット2 3回目レビュー: 32文の判定 (2026-09-14)
+
+**指示語チェックの標準規律** (設計 §3「削除前の確認」、CS1 2回目差し戻し以降すべての判定表冒頭に掲出): 文を (3) で削除する前に、直後に残る文が指示語・定冠詞 (「such」「this」「that」「instead」「exactly as」「その」「これ」等) でその文を参照していないか確認する。参照していれば削除しない。
+
+レビュアー抽出 `rev-cs2b/sweep.txt` の NARR 32 件 (postgres.py 17, service.py 15) 全件を全文再読の上で判定した。加えて監督メッセージが個別に指示した `service.py:768`(CH-0142、版数変遷の文) は sweep の NARR 一覧には無いが、監督の明示指示により本ラウンドの対象に含めた (合計 34 文相当、L768 は 2 文)。
+
+**postgres.py (17文、実削除は1件のみ)**
+
+| # | 位置 | 判定 | 根拠 |
+|---|---|---|---|
+| 1 | L224 (CH無し) | 残す | 括弧「(review fix: neither of these existed before...)」は経緯語・実在パス・kind語のいずれでもない自由文であり `_strip_allowed_parens` の機械的削除対象外(ツールで実測確認)。文ごと削除も次文「Both are constructor parameters...」の "Both" がこの文の "bounded-wait defaults" を指すため不可(指示語チェック) |
+| 2 | L267/CH-0101 | 残す | 括弧「(there are none left after this WP, but a future one)」も同様に `_strip_allowed_parens` 非対応の自由文(実測確認)。機械的操作の範囲外なので不可 |
+| 3 | L316 (CH無し, Q4 phase WP-1) | 残す | 監査ライター2系統の二重管理を廃止したという現在の安全性説明と同居。ラベルは実在パス `Q4_DB_SIDE_SINGLE_TRUTH_V1.md` を含み保護対象(0c §9-2) |
+| 4 | L358 文A (ロック解放順序の理由) | 残す | 現在のロック確保順序(先に予約、次に解放、その後 `_connect()`)の理由と同居 |
+| 5 | L358 文B (「maxconn consecutive failures...blocked forever...queue.」) | **移す `CH-0181`(新規)** | 経緯のみの叙述(旧不具合の帰結を過去形で説明)。直後の残す文はテスト名の列挙で「this fix」が文Aの修正を指すのみ、文Bへの指示語なし(指示語チェック候補一覧の#1) |
+| 6 | L535/CH-0099 文1 (LRUキャップ) | 残す | 現在の設計特性(接続上限とアプリ数の分離)の説明 |
+| 7 | L535/CH-0099 文2 (上限計算) | 残す | 現在の挙動(上限値の算出根拠)の説明 |
+| 8 | L759 (close() docstring) | 残す | 現在の安全上の理由(同一 application_id の再利用時に古いプールを渡さない) |
+| 9 | L1009/CH-0096 | 残す | 現在のフィールド制約DELETE挙動の説明 |
+| 10 | L1061/CH-0015 | 残す | 現在の防御的実装(二重ガードを残す)の理由と同居 |
+| 11 | L1120/CH-0017 | 残す | 2巡目レビューで確定済み。続く文の指示語「such」が本文の内容を参照 |
+| 12 | L1154/CH-0018 | 残す | 二重DELETEが0行no-opになるという現在の理由と同居 |
+| 13 | L1762/CH-0050 | 残す | FOR UPDATE ロックの現在の安全上の理由 |
+| 14 | L1818/CH-0052 | 残す | 現在の並行更新時ロールバック挙動の説明 |
+| 15 | L2147/CH-0071 | 残す | 2巡目レビューで確定済み。続く文の指示語「exactly as」が本文の内容を参照 |
+| 16 | L2229/CH-0073 | 残す | `descriptor` の現在の算出方法の説明 |
+| 17 | L2436/CH-0080 | 残す | 現在のメソッド目的の説明。ラベルは実在の design 参照で保護対象 |
+
+**service.py (15文 + 監督追加指示のL768、実削除は5箇所6文)**
+
+| # | 位置 | 判定 | 根拠 |
+|---|---|---|---|
+| 18 | L25/CH-0178 (「An exclusion-list reading...begin with).」) | **移す (再利用 `CH-0178`)** | 経緯のみの叙述(旧実装とレビューB-1指摘の説明)。直後の残す文「`test_durable_denial_codes_match_the_design_d3_table` fixes this set...」の "this set" は `_DURABLE_DENIAL_CODES` 変数自体を指し、削除文への指示語なし(候補一覧#2) |
+| 19 | L68/CH-0174 (末尾「; the count lock itself is scope, not this WP's」) | 残す | 自由文であり `_strip_allowed_parens` 機械的削除の対象外(実測確認、#26と同一文言だが埋め込み位置が括弧の入れ子内で独立の(3)文にならない) |
+| 20 | L442/CH-0156 | 残す | 現在のバックオフ挙動の理由と同居 |
+| 21 | L759/CH-0143 | 残す (監督指示のKEEP例) | Contract 1.7.0 現在の宣言理由 |
+| 22 | L768/CH-0142 文1・文2 (1.5.0/1.6.0/1.7.0 の版数変遷) | **移す (再利用 `CH-0142`)** | 経緯のみの版数変遷の叙述。残す文(1.8.0 段落)が独立して現在値を説明しており指示語なし(候補一覧#3) |
+| 23 | L823/CH-0139 | 残す (監督指示のKEEP例) | `constraint_declarations` 現在の状態説明 |
+| 24 | L828/CH-0138 | 残す (監督指示のKEEP例) | `dry_run` 現在の状態説明 |
+| 25 | L842/CH-0137 文1 (Region i, unchanged from before this WP) | 残す | 現在のリージョン分類の説明 |
+| 26 | L842/CH-0137 文2 (「Its own count lock is WP-6d-i's scope, not this WP's.」) | **移す (再利用 `CH-0137`)** | 監督指示のDELETE例。塊末尾の文であり後続の残す文なし、指示語チェック対象外(候補一覧#4は該当なしとして記録) |
+| 27 | L1057/CH-0120 | 残す (監督指示のKEEP例) | `budget`/`idempotency_key` 現在の宣言理由 |
+| 28 | L1137/CH-0113 | 残す | 現在の分岐理由と同居 |
+| 29 | L1161/CH-0111 | 残す (監督指示のKEEP例) | `concurrency_precharged` 現在の理由 |
+| 30 | L1198/CH-0110 文1 (review F-2 gap の経緯) | **移す (再利用 `CH-0110`)** | 経緯のみの叙述。直後2文=「With this reservation...」(前段落で導入済みの予約概念を指し文1への指示語なし)/「A refusal here raises `fail()`...」(exactly like...before this WP は `_slot` との比較でこの文の内容へは無指示)(候補一覧#5) |
+| 31 | L1198/CH-0110 文2 (A refusal here raises fail()...) | 残す | 現在の挙動+一貫性理由と同居 |
+| 32 | L1198/CH-0110 文3 (Deliberately its OWN copy...) | 残す | 現在の設計判断(重複を許容する理由) |
+| 33 | L1260/CH-0109 | 残す | 現在のディスパッチ挙動の説明 |
+| 34 | L72 (CH無し、「`_coalesced_count`'s own comment...moved with it...」) | **移す (新規 `CH-0179`)** | 監督指示のDELETE例。塊全体が本文のみで削除後は空(`# history: CH-0179` のみを残置)。前後に隣接する残す文なし、指示語チェック対象外 |
+
+**指示語チェックの候補一覧** (削除した文ごとに1行、直後の残す文2つを掲出)
+
+| # | 削除した文 | 直後の残す文1 | 直後の残す文2 | 判定 |
+|---|---|---|---|---|
+| 1 | postgres.py L358 文B「`maxconn` consecutive failures...blocked forever...queue.」 | 「`r2db_api/tests/test_postgres.py::...` and `test_credential_persistence.py::...` are the executable checks for **this fix**.」 | (同一文のみ、次は関数末尾) | 「this fix」は文A(ロック順序の修正)を指す。削除対象の文Bへの指示語なし → 削除可 |
+| 2 | service.py L25「An exclusion-list reading...begin with).」 | 「`test_durable_denial_codes_match_the_design_d3_table` fixes **this set** against D-3's table by name.」 | (次は `_DURABLE_DENIAL_CODES = frozenset({...` のコード行) | 「this set」は変数 `_DURABLE_DENIAL_CODES` 自体を指す。削除対象文への指示語なし → 削除可 |
+| 3 | service.py L768 文1・文2 (1.5.0/1.6.0/1.7.0 の変遷) | 「Phase 10 WP-6a/pair-closing: flipped again to 1.8.0 in the SAME commit as...never ahead of the behavior it declares.」 | (次は `"contract_version": "1.8.0",` のコード行) | 残す文は独立して1.8.0の現在理由を説明し、削除した旧版数への指示語なし → 削除可 |
+| 4 | service.py L842 文2「Its own count lock is WP-6d-i's scope, not this WP's.」 | (`# history: CH-0137` の次はコード行 `"limit_enforcement": {`) | — | 塊末尾の文で後続の残す散文なし → 削除可 |
+| 5 | service.py L1198 文1 (review F-2 gap の経緯) | 「With **this reservation** taken first, at most `limits.concurrency` requests...」 | 「A refusal here raises `fail()` directly, **exactly like** `_slot`'s own concurrency branch did before this WP...」 | 「this reservation」は前段落で導入済みの予約概念を指し、削除対象文自体への指示語ではない。「exactly like」は `_slot` との比較で削除対象文へは無関係 → 削除可 |
+
+**訂正**: 記録行の経緯トークン数を本ラウンド実施後の値に更新する。
+
+| 記録 | 前 (3a4c018) | 後 (本ラウンド後) |
+|---|---|---|
+| 経緯トークン数 `postgres.py` | 72 | 37 (本ラウンドの唯一の実削除文は経緯トークンを含まない叙述のため不変) |
+| 経緯トークン数 `service.py` | 174 | 56 (前ラウンド末の70から本ラウンドで14減) |
+| tools/tests | — | 256 passed |
+| r2db-api/tests (peer suite) | — | 1265 passed |
+| L1 (r2db-api) | — | 10 passed (`_BACKEND_LAYER_ALLOWLIST` の `postgres.py` pin を 1523→1519 に実測更新) |
+| L1 (MitateDB-api) | — | 12 passed (無変更、回帰なしを確認) |
+| `check_comment_provenance.py --base 3a4c018 postgres.py service.py` | — | exit 0 (256 blocks checked) |
+| `check_comment_provenance.py --register` | — | exit 0 (69 files, 179 CH-IDs) |
+| `check_doc_refs.py` | — | exit 0 |
+| `public_value_scan.py` (対象2ファイル) | — | exit 0 (total_flagged=0) |
+
+#### 5.4.2 変更セット2 3回目レビューの再差し戻し (2026-09-14 監督裁定)
+
+**指示語チェックの点検語を拡張**: 「such」「this」「that」「instead」「exactly as」「その」「これ」に加え、副詞 `again` / `still` / `also` / `instead` / `otherwise` / `then` / 「再び」「なお」を対象語に加える (`instead` は既存語と重複)。
+
+**訂正1 (#18, service.py:25/CH-0178)**: 削除した文を全文復元 (残す に変更)。この文は経緯 (最初の実装がexclusion-list方式だった) と現在の安全上の理由 (inclusion方式にすることでaudit pipeline自身のSERVICE_UNAVAILABLEがnew denialとして再入し1操作にD-10禁止ケース(ii)の3行目durable行を書くのを構造的に防ぐ) が同一文に同居しており、5.4.1時点の判定は誤り。ブロックはCS2由来の他の機械的削減(`review`/`D-3`括弧内トークン削除、`test_..._d3_table`直後のファイル名括弧削除)を保持したまま再利用 `CH-0178` を継続。
+
+**訂正2 (#22, service.py:768/CH-0142)**: 削除文の数を1(誤)から3(正)に訂正 (`split_sentences` で実測: index0/1/2 の3文)。index0(「Phase 4 WP-2(b)...D-5's own declaration = real behavior rule).」)と index2(「Flipped to 1.7.0 in phase 9 WP-2e...ordering mistake).」)を全文復元。理由: 残す文(index3)の「flipped **again** to 1.8.0」の "again" は先行する複数回の flip 言及に依存する指示語相当であり、拡張チェック語 `again` に該当。index0・index2 の両方を削除すると "again" の参照先(1.5.0/1.6.0/1.7.0 という先行の flip 履歴)が消え、拡張後の指示語チェックで不可と判定されるため復元する。index1(「This same commit ships every 1.6.0 behavioral obligation this host owns...the flip is never ahead of the behavior it declares.」)のみ削除のまま維持 (版数そのものへの言及が無く、"again" 等の対象語にも当たらない、経緯のみの叙述のため)。`CH-0142` は再利用のまま、実質的な削除文数は1(index1のみ)に縮小。
+
+**今回削除した8文 (5.4.1時点の数え上げ、CH-0142は1→3に訂正後の内訳) を拡張チェック語で再点検**:
+
+| # | 削除した文 | 直後の残す文(最大2つ)に `again`/`still`/`also`/`instead`/`otherwise`/`then`/「再び」/「なお」があるか | 判定 |
+|---|---|---|---|
+| 1 | postgres.py L358 文B | 無し (「are the executable checks for this fix.」) | 削除のまま可 |
+| 2 | service.py L25/CH-0178 「An exclusion-list reading...begin with).」 | (該当なし — 訂正1により復元済み) | **復元** |
+| 3a | service.py L768/CH-0142 index0 (1.5.0/1.6.0 段落) | (該当なし — 訂正2により復元済み) | **復元** |
+| 3b | service.py L768/CH-0142 index1 (「This same commit ships...」) | 直後の残す文(index2復元後)に無し。ただしindex2自体を残す根拠は index3 の "again" 依存のため、index1 は独立して削除可と再確認 | 削除のまま可 |
+| 3c | service.py L768/CH-0142 index2 (1.7.0 段落) | 直後の残す文(index3)に **`again`** あり (「flipped again to 1.8.0」)。this/that 等は無いが `again` が先行の flip 言及(index0・index2)に依存 | **復元**(訂正2で対応済み) |
+| 4 | service.py L842/CH-0137 「Its own count lock...」 | 塊末尾でコード行が続くのみ、無し | 削除のまま可 |
+| 5 | service.py L1198/CH-0110 文1 (review F-2 gap) | 直後2文に無し (「already」はあるが対象語に非該当) | 削除のまま可 |
+| 6 | service.py L72 「`_coalesced_count`'s own comment...」 | 塊全体が本文のみで直後の残す散文なし | 削除のまま可 |
+
+**訂正後の記録**:
+
+| 記録 | 前 (3a4c018) | 後 (本訂正後) |
+|---|---|---|
+| 経緯トークン数 `postgres.py` | 72 | 37 (不変) |
+| 経緯トークン数 `service.py` | 174 | 65 (訂正1・2の復元により56から9増) |
+| `check_comment_provenance.py --base 3a4c018 postgres.py service.py` | — | exit 0 (256 blocks) |
+| `check_comment_provenance.py --register` | — | exit 0 (179 CH-IDs) |
+| `check_doc_refs.py` | — | exit 0 |
+| `public_value_scan.py` | — | exit 0 (total_flagged=0) |
+| tools/tests | — | 256 passed |
+| r2db-api/tests (peer suite) | — | 1265 passed |
+| L1 (r2db-api) | — | 10 passed (pin 1519 のまま、本訂正では postgres.py の行番号は不変) |
+| L1 (MitateDB-api) | — | 12 passed (無変更) |
 
 ### 5.5 監督裁定 (2026-09-14。疑義はすべて解決)
 
