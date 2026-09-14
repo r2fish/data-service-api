@@ -614,3 +614,146 @@ def test_finalize_merge_conflict_is_aborted(isolated_git, tmp_path):
     assert code == dl.PARTIAL and "merge failed and was aborted" in text and "merged=no" in text
     assert _git(main_root, "rev-parse", "HEAD") == main_head
     assert _git(main_root, "status", "--porcelain") == ""
+
+
+# ---------------------------------------------------------------------------
+# turn_budget_hook
+# ---------------------------------------------------------------------------
+
+hook = _load("turn_budget_hook")
+ready = _load("handover_ready")
+
+
+def _rec(mid, blocks=None):
+    return json.dumps({"type": "assistant", "message": {"id": mid, "content": blocks or [{"type": "text", "text": "x"}]}})
+
+
+class _Hook:
+    def __init__(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TURN_BUDGET_STATE_DIR", str(tmp_path / "state"))
+        self.root = tmp_path / "root"
+        (self.root / ".claude/worktrees/wt").mkdir(parents=True)
+        self.transcript = tmp_path / "sess-1.jsonl"
+        self.transcript.write_text("")
+
+    def append(self, *lines, raw=""):
+        with open(self.transcript, "a") as fh:
+            fh.write("".join(l + "\n" for l in lines) + raw)
+
+    def fire(self, threshold=3, every=2, **payload):
+        body = {"session_id": "sess-1", "transcript_path": str(self.transcript), "cwd": str(self.root), **payload}
+        out = io.StringIO()
+        assert hook.main(["--project-root", str(self.root), "--threshold", str(threshold), "--every", str(every)],
+                         stdin=io.StringIO(json.dumps(body)), out=out) == 0
+        return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"] if out.getvalue() else None
+
+
+def test_hook_counts_unique_calls_and_notifies_at_threshold_then_every(tmp_path, monkeypatch):
+    h = _Hook(tmp_path, monkeypatch)
+    h.append(_rec("m1"), _rec("m1", [{"type": "tool_use", "name": "Bash", "input": {}}]),
+             json.dumps({"type": "user", "message": {"content": "r"}}), _rec("m2"))
+    assert h.fire() is None
+    h.append(_rec("m3"))
+    first = h.fire()
+    assert first is not None and "3 回" in first and "handover_ready.py" in first
+    assert h.fire() is None
+    h.append(_rec("m4"))
+    assert h.fire() is None
+    h.append(_rec("m5"))
+    assert "5 回" in h.fire()
+
+
+def test_hook_waits_for_a_complete_line(tmp_path, monkeypatch):
+    h = _Hook(tmp_path, monkeypatch)
+    h.append(_rec("m1"), _rec("m2"), raw=_rec("m3")[:20])
+    assert h.fire() is None
+    h.append(raw=_rec("m3")[20:] + "\n")
+    assert h.fire() is not None
+
+
+def test_hook_stops_after_the_handover_chip(tmp_path, monkeypatch):
+    h = _Hook(tmp_path, monkeypatch)
+    plain = {"type": "tool_use", "name": "mcp__ccd_session__spawn_task", "input": {"prompt": "fix a typo"}}
+    chip = {"type": "tool_use", "name": "mcp__ccd_session__spawn_task", "input": {"prompt": hook.HANDOVER_MARKER + "\n..."}}
+    h.append(_rec("m1"), _rec("m2"), _rec("m3", [plain]))
+    assert h.fire() is not None
+    h.append(_rec("m4", [chip]), _rec("m5"), _rec("m6"), _rec("m7"))
+    assert h.fire() is None
+
+
+def test_hook_scope_worktree_yes_outside_or_subagent_no(tmp_path, monkeypatch):
+    h = _Hook(tmp_path, monkeypatch)
+    h.append(_rec("m1"), _rec("m2"), _rec("m3"))
+    assert h.fire(cwd=str(tmp_path)) is None
+    assert h.fire(agent_id="a1") is None
+    assert h.fire(session_id="other") is None
+    assert not (tmp_path / "state").exists()
+    assert h.fire(cwd=str(h.root / ".claude/worktrees/wt")) is not None
+
+
+def test_hook_never_fails_the_session(tmp_path):
+    out = io.StringIO()
+    assert hook.main(["--project-root", str(tmp_path)], stdin=io.StringIO("not json"), out=out) == 0
+    assert hook.main([], stdin=io.StringIO("{}"), out=out) == 0
+    assert out.getvalue() == ""
+
+
+# ---------------------------------------------------------------------------
+# handover_ready
+# ---------------------------------------------------------------------------
+
+def _ready_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "current_other_pytest", lambda: [])
+    main_root, wt = _repo_with_worktree(tmp_path)
+    (main_root / "docs/HANDOVER_X.md").write_text("next: WP-9\n")
+    _git(main_root, "add", "docs/HANDOVER_X.md")
+    _git(main_root, "commit", "-qm", "handover")
+    return main_root, wt
+
+
+def test_handover_ready_prints_continuation_prompt(isolated_git, tmp_path, monkeypatch):
+    main_root, wt = _ready_repo(tmp_path, monkeypatch)
+    buf = io.StringIO()
+    code = ready.check(wt, True, [str(wt)], None, "docs/HANDOVER_X.md", out=buf)
+    text = buf.getvalue()
+    assert code == 0, text
+    assert "READY" in text and "NOT READY" not in text
+    prompt = text.split("----- BEGIN CONTINUATION PROMPT -----\n")[1].split("\n----- END")[0]
+    assert prompt.startswith(hook.HANDOVER_MARKER) and ready.HANDOVER_MARKER == hook.HANDOVER_MARKER
+    assert f"{main_root}/docs/HANDOVER_X.md" in prompt
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("agents", "NG  no running subagents"),
+    ("flag", "NG  gate-hold flag absent"),
+    ("main_dirty", "NG  main checkout on main and clean"),
+    ("journal", "NG  no unfinished mutation journal"),
+    ("wt_dirty", "clean=False"),
+    ("wt_unmerged", "merged=False"),
+    ("handover_missing", "NG  handover committed on main"),
+    ("pytest", "NG  no pytest process"),
+])
+def test_handover_ready_not_ready(isolated_git, tmp_path, monkeypatch, case, needle):
+    main_root, wt = _ready_repo(tmp_path, monkeypatch)
+    denied, flag, handover = True, None, "docs/HANDOVER_X.md"
+    if case == "agents":
+        denied = False
+    elif case == "flag":
+        flag = tmp_path / "gate-hold.flag"
+        flag.touch()
+    elif case == "main_dirty":
+        (main_root / "stray.txt").write_text("x")
+    elif case == "journal":
+        dl.journal_path(wt).write_text("{}")
+    elif case == "wt_dirty":
+        (wt / "stray.txt").write_text("x")
+    elif case == "wt_unmerged":
+        _git(wt, "commit", "-q", "--allow-empty", "-m", "unmerged")
+    elif case == "handover_missing":
+        handover = "docs/NOPE.md"
+    elif case == "pytest":
+        monkeypatch.setattr(dl, "current_other_pytest", lambda: [(4242, "python -m pytest")])
+    buf = io.StringIO()
+    assert ready.check(wt, denied, [str(wt)], flag, handover, out=buf) == 1
+    text = buf.getvalue()
+    assert needle in text and "NOT READY" in text and "BEGIN CONTINUATION" not in text

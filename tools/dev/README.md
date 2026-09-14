@@ -9,6 +9,15 @@ Single-command versions of procedures that `docs/work-orders/OPERATING_CONDITION
 | `section.py` | paging a long document with `sed -n` / repeated reads | — |
 | `gate.py` | touch hold flag → wait → catalog snapshot → root suite → judge → remove flag | 1.3-19..23 |
 | `finalize.py` | per-change `finalize_*.sh`: allowlist → checks → commit → merge into main | 1.1-12a, 1.2, 1.9, 2-15 |
+| `handover_ready.py` | judging whether this is a safe boundary to move to a new chat; prints the continuation prompt | 1.10-67 |
+| `turn_budget_hook.py` | (PostToolUse hook) counting a chat's model calls; reminds it to hand over past the threshold | 1.10-67 |
+
+The hook is registered in user settings, not in the gitignored `.claude/settings.local.json`, because a handover chip starts the next chat in a fresh worktree that has no local settings; `--project-root` keeps it silent outside this checkout:
+
+```json
+{"matcher": "*", "hooks": [{"type": "command", "timeout": 10,
+  "command": "python3 -B \"<main checkout>/tools/dev/turn_budget_hook.py\" --project-root \"<main checkout>\" --threshold 300 --every 50"}]}
+```
 
 Common behaviour:
 
