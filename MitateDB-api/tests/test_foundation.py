@@ -867,6 +867,76 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             _canonical_where_json([Filter("f", "eq", _Unserializable())])
 
+    def test_canonical_where_json_escapes_non_ascii_filter_values(self):
+        # `_canonical_where_json` calls `json.dumps` with no `ensure_ascii`
+        # argument, so the default `ensure_ascii=True` applies: a non-ASCII
+        # character in a filter value is escaped to its `\uXXXX` form, never
+        # emitted as a literal UTF-8 byte.
+        result = _canonical_where_json([Filter("name", "eq", "é")])
+        self.assertIn("\\u00e9", result)
+        self.assertNotIn("é", result)
+
+    def test_canonical_where_json_preserves_list_order_with_three_or_more_filters(self):
+        # The outer list's own order is preserved for 3+ filters too -- a
+        # 2-element check alone cannot catch a mutation that only reorders
+        # once 3 or more filters are present. A non-monotonic operator order
+        # (`gt`, `lt`, `eq` -- neither ascending nor descending by name)
+        # must come out in that same relative order; compared by each
+        # operator's own quoted value, not by the surrounding separator
+        # spelling.
+        filters = [
+            Filter("id", "gt", 1),
+            Filter("id", "lt", 10),
+            Filter("id", "eq", 5),
+        ]
+        result = _canonical_where_json(filters)
+        self.assertTrue(result.index('"gt"') < result.index('"lt"') < result.index('"eq"'))
+
+    def test_delete_confirmation_phrase_distinguishes_value_types(self):
+        # The where-clause VALUE's own type is part of the derived scope
+        # (contract `phrase_construction` rule "scope-included") -- int
+        # `1`, str `"1"`, and bool `True` must never collide onto the same
+        # phrase even though `1 == True` in Python (and their hashes are
+        # equal), so the three values are never used as a dict/set key
+        # here, only as a `Filter.value` argument to the real function.
+        from mitatedb_api.delete_confirmation import _delete_confirmation_phrase
+
+        def phrase(value):
+            return _delete_confirmation_phrase("things", [Filter("id", "eq", value)], 3)
+
+        self.assertEqual(len({phrase(v) for v in (1, "1", True)}), 3)
+
+    def test_delete_confirmation_phrase_is_bounded_by_the_confirmation_max_length(self):
+        # The bound is read from the packaged contract copy (same pattern
+        # as `test_http.py`'s own `test_packaged_contract_copy_is_byte_
+        # identical_to_spec_source_of_truth`), never a local literal -- and
+        # all four `confirmation` occurrences in the contract must agree.
+        # A single-character target ("w") with an empty `filters` list
+        # fixes the phrase's own fixed-width portion at 50 characters
+        # (`"DELETE " + "w" + " @where=" + digest16(16) + " @schema_
+        # revision="`), so the schema_revision's own decimal digit count
+        # must be exactly `bound - 50` for the phrase to land exactly at
+        # the bound.
+        from importlib import resources
+        import json as _json
+
+        from mitatedb_api.delete_confirmation import _delete_confirmation_phrase
+
+        contract = _json.loads(
+            resources.files("mitatedb_api.contract").joinpath("data-service-api.v1.json").read_bytes()
+        )
+        bound = contract["definitions"]["Mutation"]["properties"]["confirmation"]["maxLength"]
+        self.assertEqual(contract["definitions"]["ScopedMutation"]["properties"]["confirmation"]["maxLength"], bound)
+        self.assertEqual(contract["schemas"]["SchemaOperationRequest"]["properties"]["confirmation"]["maxLength"], bound)
+        self.assertEqual(contract["schemas"]["CredentialRevokeRequest"]["properties"]["confirmation"]["maxLength"], bound)
+
+        digits = bound - 50
+        phrase = _delete_confirmation_phrase("w", [], int("1" * digits))
+        self.assertEqual(len(phrase), bound)
+
+        with self.assertRaises(AssertionError):
+            _delete_confirmation_phrase("w", [], int("1" * (digits + 1)))
+
     def test_delete_confirmation_leaf_preserves_cell_facade_and_phrase_shape(self):
         # R-37 WP-1b (work order docs/work-orders/
         # WORK_ORDER_R37_WP0_INVENTORY_V1.md §5.3, CE1): `_canonical_where_
