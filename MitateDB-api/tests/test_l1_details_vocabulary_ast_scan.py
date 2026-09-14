@@ -94,10 +94,15 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mitatedb_api"
 #: carries the 1 `ValidationError` call site that function moved with
 #: (already 4-key, moved verbatim) and must stay in `SCANNED_MODULES`
 #: for the same reason `postgres_value_domain.py` does above.
+#: R-37 WP-1k (2026-09-15): `provisional_gate.py` holds
+#: `_deny_provisional_field`, extracted from `cell.py` -- it carries the
+#: 1 `CapabilityError` call site that function moved with (already
+#: 4-key, moved verbatim) and must stay in `SCANNED_MODULES` for the
+#: same reason `postgres_value_domain.py` does above.
 SCANNED_MODULES = (
     "cell.py", "http.py", "field_types.py", "identifiers.py", "backend_postgres.py", "backend_sqlite.py",
     "postgres_value_domain.py", "request_limits.py", "constraint_resolution.py", "postgres_reserved_names.py",
-    "control_plane.py", "control_http.py", "audit_query.py",
+    "provisional_gate.py", "control_plane.py", "control_http.py", "audit_query.py",
 )
 
 _VOCAB_CLASSES = {"ValidationError", "CapabilityError"}
@@ -482,7 +487,11 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # `ValidationError` sites (all already 4-key) moved verbatim to
         # `constraint_resolution.py` (47 -> 44); see that module's own
         # count below.
-        "cell.py": 44,
+        # R-37 WP-1k (2026-09-15): -1 -- `_deny_provisional_field`'s own
+        # `CapabilityError` site (already 4-key) moved verbatim to
+        # `provisional_gate.py` (44 -> 43); see that module's own count
+        # below.
+        "cell.py": 43,
         # WP-3e rework T2 (追補 L-4): +1 -- `_check_object_shape`'s own
         # new "present but wrong type" leg (a genuine new choke-point
         # call site, not a relabeling of an existing one).
@@ -530,6 +539,10 @@ def test_ast_full_count_matches_a_non_trivial_floor():
         # `ResourceLimitError` in `_resolve_field_constraints`) is
         # outside `_VOCAB_CLASSES` and not counted here.
         "constraint_resolution.py": 3,
+        # R-37 WP-1k (2026-09-15): the 1 `CapabilityError` site
+        # `_deny_provisional_field` carried in `cell.py` before the move,
+        # unchanged in wording or `details=` shape.
+        "provisional_gate.py": 1,
         # 追補 4 O-1: the 3 control-plane modules this WP newly scans --
         # "12 + 4 + 3" is the AUDIT's own bare-site count (before this
         # WP's fix); the total CALL-SITE count (bare + already-had-
@@ -623,7 +636,7 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     just the 2 in-scope classes), so a match against a differently-coded
     denial would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py", "request_limits.py", "constraint_resolution.py"):
+    for module in ("cell.py", "field_types.py", "http.py", "identifiers.py", "request_limits.py", "constraint_resolution.py", "provisional_gate.py"):
         in_memory_messages |= _all_denial_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):

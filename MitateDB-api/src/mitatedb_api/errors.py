@@ -281,7 +281,7 @@ class CapabilityError(FoundationError):
     operation/field occupies a determinate request position). Before
     this WP this class had no `__init__` override at all (14 call sites,
     0 of them carrying `details`) -- the two that DID attach `details`
-    (`cell.py`/`http.py`'s own `_deny_provisional_field`) did so by
+    (`cell.py`/`http.py`'s own `_deny_provisional_field`; the `cell.py` one is in `provisional_gate.py`) did so by
     setting `.details` on the raised instance directly, the same escape
     hatch `ValidationError`'s own docstring describes removing; both now
     pass `details=` here instead.

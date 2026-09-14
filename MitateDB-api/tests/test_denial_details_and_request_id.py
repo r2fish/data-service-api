@@ -955,3 +955,36 @@ def test_non_list_in_filter_value_is_also_rejected_with_where_value_path(service
         runtime.read("widgets", filters=[Filter("count", "in", "not-a-list")])
     details = ctx.value.details
     assert details == {"violated_declaration": "request_schema", "field": "where/0/value"}
+
+
+# ---------------------------------------------------------------------------
+# R-37 WP-1k (CE4): `_deny_provisional_field` moved from `cell.py` to the
+# new leaf `provisional_gate.py`.
+# ---------------------------------------------------------------------------
+
+
+def test_provisional_gate_leaf_preserves_cell_facade():
+    """`cell.py` re-exports `provisional_gate._deny_provisional_field`
+    (the SAME function object, not a copy), so a future
+    caller reaching it through `cell.py` keeps working with no change to
+    its own call site. Dropping the name from `cell.py`'s own facade
+    import breaks this identity check."""
+    from mitatedb_api.cell import _deny_provisional_field as cell_deny_provisional_field
+    from mitatedb_api.provisional_gate import _deny_provisional_field as leaf_deny_provisional_field
+
+    assert cell_deny_provisional_field is leaf_deny_provisional_field
+
+
+def test_deny_provisional_field_raises_capability_unsupported_naming_the_field():
+    """`provisional_gate._deny_provisional_field` is
+    unreachable from any live request path (design docstring: every
+    1.7.0 capability it ever covered is `enabled`), so this is the ONLY
+    place its exception type, message, and `details` shape are pinned --
+    fixed as literals so a future edit cannot silently narrow the
+    4-key `details` form or change the `violated_declaration` value."""
+    from mitatedb_api.provisional_gate import _deny_provisional_field
+
+    with pytest.raises(CapabilityError) as ctx:
+        _deny_provisional_field("budget")
+    assert str(ctx.value) == "budget is not supported by this peer"
+    assert ctx.value.details == {"violated_declaration": "capability", "field": "budget"}
