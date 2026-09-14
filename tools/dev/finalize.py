@@ -15,6 +15,8 @@ Usage:
     -m MSGFILE     full commit message; its Co-Authored-By lines are copied to the merge commit
     --check        extra shell command run in the worktree before committing; non-zero stops
     --tools-tests  run `pytest -q tools/tests` (guarded, as pt.py) at the new HEAD before merging
+    --leave GLOB   changed paths matching GLOB stay uncommitted (to split one worktree's changes
+                   into several commits: e.g. `--no-merge --leave 'r2db-api/*'`, then a second call)
 
 Only the listed paths are added (never `git add -A`). Author and committer
 (`git var`) must use GitHub noreply addresses. The branch and HEAD are checked
@@ -64,7 +66,7 @@ def run_check(wt: Path, argv: list[str] | str, label: str, out) -> None:
 
 def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: list[str],
              tools_tests: bool, flag: Path | None, merge: bool, python: str, out=sys.stdout,
-             repo_checks: bool = True) -> int:
+             repo_checks: bool = True, leave: list[str] = ()) -> int:
     wt = dl.worktree_root(wt)
     if dl.journal_path(wt).exists():
         raise dl.DevError(f"unfinished mutation run in this worktree ({dl.journal_path(wt)}); run mutate.py --recover")
@@ -79,9 +81,13 @@ def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: lis
     if not message.strip():
         raise dl.DevError("commit message file is empty")
 
-    paths = changed_paths(wt)
+    all_paths = changed_paths(wt)
+    left = [p for p in all_paths if any(fnmatch.fnmatch(p, g) for g in leave)]
+    paths = [p for p in all_paths if p not in left]
     if not paths:
         raise dl.DevError("nothing to commit")
+    if left:
+        print(f"finalize: left uncommitted by --leave: {len(left)} paths", file=out)
     outside = [p for p in paths if not any(fnmatch.fnmatch(p, g) for g in allow)]
     for p in outside:
         print(f"finalize: not allowed: {p}", file=out)
@@ -108,11 +114,12 @@ def finalize(wt: Path, branch: str, allow: list[str], msgfile: Path, checks: lis
     # Shared-checkout rule: confirm branch and HEAD again immediately before committing.
     if dl.git(wt, "symbolic-ref", "--short", "HEAD").strip() != branch or dl.git(wt, "rev-parse", "HEAD").strip() != head:
         raise dl.DevError("branch or HEAD moved during the checks; nothing committed")
-    if changed_paths(wt) != paths:
+    if changed_paths(wt) != all_paths:
         print("finalize: STOP -- the changed-path set moved during the checks; nothing committed", file=out)
         return 1
     dl.git(wt, "add", "--", *paths)
-    if dl.git(wt, "diff", "--name-only").strip() or dl.git(wt, "ls-files", "--others", "--exclude-standard").strip():
+    unstaged = dl.git(wt, "diff", "--name-only").splitlines() + dl.git(wt, "ls-files", "--others", "--exclude-standard").splitlines()
+    if [p for p in unstaged if p not in left]:
         print("finalize: STOP -- changes outside the staged set; paths are staged, nothing committed", file=out)
         return 1
     stat = dl.git(wt, "diff", "--cached", "--stat").strip().splitlines()
@@ -177,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tools-tests", action="store_true")
     parser.add_argument("--hold")
     parser.add_argument("--no-merge", action="store_true")
+    parser.add_argument("--leave", action="append", default=[])
     parser.add_argument("--python")
     ns = parser.parse_args(argv)
     try:
@@ -184,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         flag = dl.hold_flag(ns.hold) if ns.tools_tests else None
         python = ns.python or dl.venv_python(wt)
         return finalize(wt, ns.branch, ns.allow, Path(ns.msgfile), ns.check, ns.tools_tests, flag,
-                        not ns.no_merge, python)
+                        not ns.no_merge, python, leave=ns.leave)
     except dl.DevError as exc:
         print(f"finalize: ERROR -- {exc}")
         return dl.ERROR
