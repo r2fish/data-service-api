@@ -315,6 +315,8 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 
 **監督裁定 (WP-1e コードレビュー)**: §5.7 の完了条件 7 の予想 test id は float を経由せず赤にならないため、実装担当が新規テスト `test_matches_applies_float8out_formatting_to_a_typed_number_column` を足した。新規テストは合計 2 本 (facade 1、上記 1)。C-2 の「新規 1 件」は WP-1e には適用されず、root の差は新規 2 件である。§5.7 の完了条件表・実測はこの前提で読む。
 
+**監督裁定 (WP-1f コードレビュー)**: 新規テストは合計 4 本 (facade と長さの境界を兼ねる 1、先頭の数字 1、末尾の改行 1、str でない値 1)。C-2 の「新規 1 件」は WP-1f には適用されず、root の差は新規 4 件である。§5.8 の完了条件表・実測はこの前提で読む。
+
 ### 5.6 WP-1d — MitateDB 要求の大きさと深さの検査 (CE2)
 
 **目的**: `cell.py` の `_measure_request_bytes` と `_check_operation_depth` を leaf `MitateDB-api/src/mitatedb_api/request_limits.py` へ移す。`_limit_gate` の呼出し順と facade は変えない。
@@ -448,6 +450,12 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | 13 | 新 leaf が分類される | 一覧から `identifier_rules.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
 | 14 | docstring とコメントの逐語移動と、位置参照の括弧書き (40c) | **監査照合**: L23-28、L41-48、L52-61、L82-93 の説明コメントと `_reject_reserved_prefix` の docstring が逐語であること。範囲外の括弧書きは L363 の 1 箇所 | — |
 | 15 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。MitateDB `identifiers.py:22` に同名の `validate_identifier` があるが署名が違う (`label` 位置引数と、keyword 必須の `field`)。登録するかは WP-2 で決める | — |
+
+**監督裁定 (WP-1f コードレビュー)**: 新規テストは合計 4 本 (facade と長さの境界を兼ねる 1 [完了条件 1・2]、先頭の数字 1 [完了条件 3]、末尾の改行 1、str でない値 1)。root の差は新規 4 件である (§5.5 の C-2 はこの WP には適用されない)。追加の 2 本は SI-05 の既知の穴を塞ぐ:
+- `validate_identifier` は末尾に改行の付いた識別子 (`"name\n"`) を拒否する。`IDENTIFIER.fullmatch` を `.match` にする変異で赤になることを実測で確認した。
+- `validate_identifier` は str でない値 (`123`、`None`) を拒否する。`isinstance(value, str)` の検査を外す変異 (`TypeError` が `FoundationError` を隠す) で赤になることを実測で確認した。
+
+`structured.py` の `import re` は、識別子規則の移動により参照が 0 件になったため、同じ WP で削除した (先例 `2a20d33`)。完了条件 3 の「赤になる test id」は `r2db-api/tests/test_postgres.py::test_injection_payloads_in_identifier_positions_are_rejected[starts_with_digit]` と、新規の先頭数字テスト (`test_identifier_rejects_a_name_starting_with_a_digit`) の 2 件である。
 
 - 共通の C-1〜C-3 (§5.5) を末尾に付ける。
 

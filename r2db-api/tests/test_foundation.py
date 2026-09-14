@@ -795,6 +795,91 @@ def test_audit_events_is_reserved_at_every_entity_identifier_position(service):
     assert exc.value.code == "IDENTIFIER_INVALID"
 
 
+def test_identifier_rules_leaf_preserves_structured_facade_and_length_bound():
+    from r2db_api.structured import (
+        IDENTIFIER,
+        MAX_IDENTIFIER_LENGTH,
+        _RESERVED_ENTITY_NAMES,
+        _RESERVED_PREFIX,
+        _reject_reserved_entity_name,
+        _reject_reserved_field,
+        _reject_reserved_prefix,
+        validate_identifier,
+    )
+    from r2db_api.identifier_rules import (
+        IDENTIFIER as leaf_identifier,
+        MAX_IDENTIFIER_LENGTH as leaf_max_identifier_length,
+        _RESERVED_ENTITY_NAMES as leaf_reserved_entity_names,
+        _RESERVED_PREFIX as leaf_reserved_prefix,
+        _reject_reserved_entity_name as leaf_reject_reserved_entity_name,
+        _reject_reserved_field as leaf_reject_reserved_field,
+        _reject_reserved_prefix as leaf_reject_reserved_prefix,
+        validate_identifier as leaf_validate_identifier,
+    )
+
+    assert IDENTIFIER is leaf_identifier
+    assert MAX_IDENTIFIER_LENGTH is leaf_max_identifier_length
+    assert _RESERVED_ENTITY_NAMES is leaf_reserved_entity_names
+    assert _RESERVED_PREFIX is leaf_reserved_prefix
+    assert _reject_reserved_entity_name is leaf_reject_reserved_entity_name
+    assert _reject_reserved_field is leaf_reject_reserved_field
+    assert _reject_reserved_prefix is leaf_reject_reserved_prefix
+    assert validate_identifier is leaf_validate_identifier
+
+    # PostgreSQL's own identifier limit (63) -- exactly at the bound is
+    # accepted, one character over is rejected.
+    assert validate_identifier("a" * 63, field="entity") == "a" * 63
+    with pytest.raises(FoundationError) as exc:
+        validate_identifier("a" * 64, field="entity")
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+
+def test_identifier_rejects_a_name_starting_with_a_digit():
+    """`IDENTIFIER`'s first character class is `[A-Za-z_]`, not `[A-Za-z0-9_]`
+    -- a leading digit is rejected even though every other character in the
+    same name is otherwise valid. See also `test_postgres.py::test_
+    injection_payloads_in_identifier_positions_are_rejected[starts_with_
+    digit]`, which confirms the same rule on the DDL path through a real
+    PostgreSQL catalog."""
+    from r2db_api.structured import validate_identifier
+
+    with pytest.raises(FoundationError) as exc:
+        validate_identifier("1a", field="entity")
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+
+def test_identifier_rejects_a_trailing_newline():
+    """`IDENTIFIER` is checked with `.fullmatch`, not `.match` -- a bare
+    `$` anchor (no `re.MULTILINE`) matches either at the true end of the
+    string or at a position just before a single trailing newline, so
+    `.match` would wrongly accept `"name\\n"` as if it were the plain
+    identifier `"name"`. `.fullmatch` requires the ENTIRE string to be
+    consumed by the pattern, and the character class here has no way to
+    consume the newline itself, so the whole value is correctly
+    refused."""
+    from r2db_api.structured import validate_identifier
+
+    with pytest.raises(FoundationError) as exc:
+        validate_identifier("name\n", field="entity")
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+
+def test_identifier_rejects_a_non_string_value():
+    """A non-`str` value (an `int`, `None`, ...) must be rejected with the
+    same `IDENTIFIER_INVALID` denial as a malformed string -- not let a
+    `TypeError` from `IDENTIFIER.fullmatch(value)` (which requires a
+    string or bytes-like object) escape uncaught."""
+    from r2db_api.structured import validate_identifier
+
+    with pytest.raises(FoundationError) as exc:
+        validate_identifier(123, field="entity")
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+    with pytest.raises(FoundationError) as exc:
+        validate_identifier(None, field="entity")
+    assert exc.value.code == "IDENTIFIER_INVALID"
+
+
 # ==========================================================================
 # CCR-13 (docs/design/R2DB_CCR13_STORAGE_V1.md, work package WP-2, plus its
 # review corrigenda in §9): typed columns, reserved names, indexes/

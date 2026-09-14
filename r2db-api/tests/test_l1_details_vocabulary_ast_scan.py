@@ -52,7 +52,13 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "r2db_api"
 #: reason `postgres_value_domain.py`/`request_limits.py` do on the
 #: MitateDB side (this was the exact gap the R-37 WP-1 fix closed: a leaf
 #: extracted without being added here).
-SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py")
+#: R-37 WP-1f (2026-09-14): `identifier_rules.py` holds `validate_
+#: identifier`/`_reject_reserved_field`/`_reject_reserved_prefix`/
+#: `_reject_reserved_entity_name`, extracted from `structured.py` -- it
+#: carries the 4 `fail("IDENTIFIER_INVALID", ...)` call sites those
+#: functions moved with (already 4-key, moved verbatim) and must stay in
+#: `SCANNED_MODULES` for the same reason as `inmemory_predicate.py` above.
+SCANNED_MODULES = ("structured.py", "service.py", "limits.py", "http.py", "postgres.py", "control_plane.py", "control_http.py", "audit_query.py", "inmemory_predicate.py", "identifier_rules.py")
 
 _VOCAB_CODES = {"VALIDATION_FAILED", "IDENTIFIER_INVALID", "CAPABILITY_UNSUPPORTED"}
 
@@ -323,7 +329,7 @@ def test_every_choke_point_denial_carries_details_ast_full_count():
 def test_ast_full_count_matches_the_audit_site_count():
     """Non-空振り: the scan actually visits at least the 76 sites D-1
     counted (plus every VALIDATION_FAILED/IDENTIFIER_INVALID/
-    CAPABILITY_UNSUPPORTED site in these 5 files that already carried
+    CAPABILITY_UNSUPPORTED site in these 6 files that already carried
     `violated_declaration` before this rework -- the audit's own 76 was
     only the GAP count, not the total) -- a scanner that silently matched
     0 calls (e.g. because `fail` were imported under an alias, or the
@@ -334,17 +340,27 @@ def test_ast_full_count_matches_the_audit_site_count():
     R-8/M-8: re-pinned to the measured post-merge count (`limits.py`'s
     4 inline budget denials were folded into 1 `_budget_denied` helper by
     the R-5/R-6 pair-closing merge, `violated_declaration` preserved)."""
-    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py")}
+    counts = {module: len(_fail_call_sites(SRC / module)) for module in ("structured.py", "service.py", "limits.py", "http.py", "inmemory_predicate.py", "identifier_rules.py")}
     assert counts == {
         # R-37 WP-1e (2026-09-14): -1 -- `_wildcard_pattern`'s own bare
         # trailing-backslash `fail("VALIDATION_FAILED", ...)` site
         # (already 4-key) moved verbatim to `inmemory_predicate.py`
         # (93 -> 92); see that module's own count below.
-        "structured.py": 92, "service.py": 10, "limits.py": 5, "http.py": 8,
+        # R-37 WP-1f (2026-09-14): -4 -- `validate_identifier`/
+        # `_reject_reserved_field`/`_reject_reserved_prefix`/`_reject_
+        # reserved_entity_name`'s own `fail("IDENTIFIER_INVALID", ...)`
+        # sites (already 4-key) moved verbatim to `identifier_rules.py`
+        # (92 -> 88); see that module's own count below.
+        "structured.py": 88, "service.py": 10, "limits.py": 5, "http.py": 8,
         # R-37 WP-1e (2026-09-14): the 1 site `_wildcard_pattern` carried
         # in `structured.py` before the move, unchanged in wording or
         # `details=` shape.
         "inmemory_predicate.py": 1,
+        # R-37 WP-1f (2026-09-14): the 4 sites `validate_identifier`/
+        # `_reject_reserved_field`/`_reject_reserved_prefix`/`_reject_
+        # reserved_entity_name` carried in `structured.py` before the
+        # move, unchanged in wording or `details=` shape.
+        "identifier_rules.py": 4,
     }, counts
     assert sum(counts.values()) >= 76, counts
 
@@ -414,12 +430,13 @@ def test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial():
     legitimately sit on this allowlist; it belongs at the choke-point/
     request-shape layer with the same 4-key `details` its sibling already
     carries (exactly what R-2 did for the 5 former allowlist entries this
-    left behind). This scans `structured.py`'s and `inmemory_predicate.py`'s
-    (its extracted leaf, R-37 WP-1e) FULL fail-message vocabulary (any
-    code, not just the 3 in-scope ones -- see `_all_fail_messages`), so a
-    match against a `NOT_FOUND`/`CONFLICT` message would be caught too."""
+    left behind). This scans `structured.py`'s and its extracted leaves'
+    (`inmemory_predicate.py`, R-37 WP-1e; `identifier_rules.py`, R-37
+    WP-1f) FULL fail-message vocabulary (any code, not just the 3
+    in-scope ones -- see `_all_fail_messages`), so a match against a
+    `NOT_FOUND`/`CONFLICT` message would be caught too."""
     in_memory_messages: set[str] = set()
-    for module in ("structured.py", "inmemory_predicate.py"):
+    for module in ("structured.py", "inmemory_predicate.py", "identifier_rules.py"):
         in_memory_messages |= _all_fail_messages(SRC / module)
     shared = []
     for module, lineno in sorted(_BACKEND_LAYER_ALLOWLIST):
