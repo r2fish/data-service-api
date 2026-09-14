@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.9 (2026-09-15)。** 直後の v1.8 行は当時の改版履歴として保存する。v1.9 は既存の本文を書き換えず、末尾に **§10.6 (WP-1j / 1l 実施記録)** を追記した記録である。
 - **現行版: v1.8 (2026-09-14)。** 直後の v1.7 行は当時の改版履歴として保存する。v1.8 は既存の本文を書き換えず、§10.3 に【追記】を 1 件足し、末尾に **§10.5 (WP-1g / 1h / 1i 実施記録)** を追記した記録である。
 - **現行版: v1.7 (2026-09-14)。** 直後の v1.6 行は当時の改版履歴として保存する。v1.7 は §10.3 以前を書き換えず、未コミットの §10.4 に既知の穴の追跡先 (roadmap R-39) と #6 の扱い (型検査器の既知事項) を反映した記録である。
 - **現行版: v1.6 (2026-09-14)。** 直後の v1.5 行は当時の改版履歴として保存する。v1.6 は既存の本文 (§0〜§10.3) を 1 文字も書き換えず、末尾に **§10.4 (WP-1d / 1e / 1f 実施記録)** を追記した記録である。
@@ -353,3 +354,23 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 | 10 | r2db `paging.py` | 次を固定するテストが無い: bool の offset の受入れ、cursor / order_by の余分なキー、不正な direction、id を補うのは不在時だけであること | R-39 |
 | 11 | r2db `value_types.py` | enum 宣言の field への型違いの値が enum ではなく field_type で報告されること、`in` の要素の `/value/<j>` path を固定するテストが無い | R-39 |
 | 12 | r2db `value_types.py` (MitateDB `field_types.py` も同じ) | `number` の field が NaN / ±Infinity を受け入れる | R-40 (共通契約の決定) |
+
+### 10.6 WP-1j / 1l 実施記録 (2026-09-15、v1.9 追記)
+
+| WP | 抽出 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-1j | MitateDB `cell.py` → `constraint_resolution.py` (CE3: `_validate_enum_declaration_with_path`、`_resolve_field_constraints`) | `df9d81f` | 3368 | 件数 pin `cell.py` 47 → 44 (新 module 3)。未使用になった import 2 件を削除。括弧書きは `field_types.py` 2 箇所と `cell.py` 2 箇所 (X-4)。レビューの訂正: スキャンテストの既存コメントから誤って削った一文を戻した |
+| WP-1l | MitateDB `backend_postgres.py` → `postgres_reserved_names.py` (BP4: 予約名の定数 2 つと検査本体) | `b0c1a8b` | 3370 | method は 1 行の委譲で残す (X-3)。件数 pin 24 → 23 (新 module 1)、allowlist の 20 行は −14。`pg_` の接頭辞と `audit_events` の完全一致を初めて固定するテストを追加。レビューで `audit_event` を受け入れる確認を 1 行追加 |
+
+- 2 件とも、関数本体は AST で同一、facade 経由で同じ object、docstring は逐語 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40c)、独立コードレビュー済み、root ゲートの前後の `pg_database` 差分 0。
+- **WP-1k (CE4) はコメント変更セット 3 の統合を待つ** (作業指示書 §5.19 の X-1)。
+
+**既知の穴** (移動前から存在し、各 WP の範囲外。§10.5 の続き):
+
+| # | 対象 | 穴 | 追跡 |
+| --- | --- | --- | --- |
+| 13 | MitateDB `constraint_resolution.py` | 未知の field_constraints キーが複数あるとき、どのキーを報告するかを固定するテストが無い | R-39 |
+| 14 | MitateDB `constraint_resolution.py` | bool でない整数の `nullable` (例 `1`) の拒否を固定するテストが無い | R-39 |
+| 15 | `MitateDB-api/tests/test_limit_class_vocabulary.py` | L154 の件数説明が `_resolve_field_constraints` の箇所を今も `cell.py` としている (作業指示書 §5.16 の 19) | R-39 |
+| 16 | MitateDB `postgres_reserved_names.py` | 予約名の拒否メッセージの文言を固定するテストが無い | R-39 |
+| 17 | MitateDB `postgres_reserved_names.py` | `pg_` の大文字小文字の区別を固定するテストが無い (`identifiers.py` の小文字限定の正規表現が先に弾くので、外からは到達しない) | R-39 |
