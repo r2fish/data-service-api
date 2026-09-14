@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.5 (2026-09-14)。** 直後の v1.4 行は当時の改版履歴として保存する。v1.5 は既存の本文 (§0〜§9) を 1 文字も書き換えず、末尾に **§10 (WP-1 実施記録)** を追記した記録である。
 - **現行版: v1.4 (2026-09-14)。** 直後の v1.3 行は当時の改版履歴として保存する。v1.4 は既存の本文 (§0〜§8) を 1 文字も書き換えず、末尾に **§9 (R-22 裁定の反映)** を追記した記録である。
 - **現行版: v1.3 (2026-09-14)。** 直後の v1.2 行は当時の改版履歴として保存する。v1.3 は既存の本文 (§0〜§8) を 1 文字も書き換えず、§8.4 冒頭の段落の直後に、依頼者裁定 (2026-09-14) により (a)〜(c) を `docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40a〜40c へ昇格した旨の追記を 1 件足した記録である。
 - **現行版: v1.2 (2026-09-14)。** 直後の v1.1 行は当時の改版履歴として保存する。v1.2 は §0〜§7 の本文を 1 文字も書き換えず、末尾に **§8 (実施記録)** を追記した記録である — 同日に main へ入った WP-1 相当の片側 leaf 抽出 6 件の遡及 inventory (§8.1)、その逸脱の記録 (§8.2)、是正変更セットとその変異・ゲート結果 (§8.3)、以後の WP への追加規律 (§8.4、§5.1 への追補) である。
@@ -275,3 +276,32 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 ### 9.3 R-32 を WP-3 の前提条件に加える (§7 への追補)
 
 **§7 の本文は書き換えない。** 依頼者裁定 (問い 4) により、WP-3 が `cell.py` の `_gate` 又はその呼出し経路を移動・変更する前に R-32 (roadmap §8) を片付けることを WP-3 の着手条件に加える。§3.2 の最終項はこの順序で満たす。
+
+## 10. WP-1 実施記録 (2026-09-14)
+
+**本節は v1.5 の追記である。§0〜§9 は書き換えていない。** 作業指示書は `docs/work-orders/WORK_ORDER_R37_WP0_INVENTORY_V1.md` (v1.2)。§8.1 の遡及 inventory 6 件とは別の記録である。
+
+### 10.1 WP と統合
+
+| WP | 内容 | merge | root ゲート |
+| --- | --- | --- | --- |
+| WP-0 | inventory・baseline・manifest。独立レビューで「着手可」 | `de5ffd1` | — |
+| WP-1-0 | `tools/tests/test_leaf_import_direction.py`: 両 peer の全 src module を leaf / 理由付き非 leaf に分類。レビューで偽の緑 8 件を閉じた | `cffbbef` | 不要 (root の収集件数 3,341 は不変。`tools/tests` は `109 passed`) |
+| WP-1a | r2db `structured.py` → `pg_text_format.py` | `20ed7ab` | `3342 passed` |
+| WP-1b | MitateDB `cell.py` → `delete_confirmation.py` | `2e4bf36` | `3343 passed` |
+| WP-1c | r2db `structured.py` → `inmemory_sort.py` | `b54721e` | `3344 passed` |
+
+- WP-1a / 1b / 1c はいずれも、関数本体が AST で同一、facade 経由で同じ object、docstring は逐語で移動 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40c)、変異はすべて赤、独立コードレビュー承認である。root ゲートの前後の `pg_database` 差分は 0。
+
+### 10.2 既知の穴 (移動前から存在し、各 WP の範囲外)
+
+| # | 対象 | 穴 | 追跡 |
+| --- | --- | --- | --- |
+| 1 | r2db `pg_text_format.py` | 出力を実 PostgreSQL の text 形と照合するテストが無い (負の指数、`-0.0`、非 ASCII キー) | roadmap §8 R-38 に添える |
+| 2 | MitateDB `delete_confirmation.py` | 非 ASCII filter 値の canonical JSON を固定するテストが無い。変わっても古い phrase が拒否されるだけなので、安全側に倒れる | 同上 |
+| 3 | r2db `inmemory_sort.py` | 降順の同値行と `false < true` を固定するテストが無い | 同上 |
+| 4 | r2db `inmemory_sort.py` | **挙動の食い違い。** in-memory の ORDER BY は、同じ型の array / object を canonical JSON テキストで比較する。PostgreSQL の jsonb の順序 (要素数が先、その後に要素ごと) と一致しない。例: `[1,2] < [3]`、`[10] < [9]` が真になる | roadmap §8 R-38 |
+
+### 10.3 次の WP
+
+作業指示書 §4 の順に、WP-1 後続 (同表「4〜」行: CE2 → ST3 → ST4 → ST5 → ST7 → ST6 → CE3 → CE4 → BP4)、request binding の WP-3 などへ進む。着手条件は §7 と作業指示書どおりである。
