@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **現行版: v1.8 (2026-09-14)。** 直後の v1.7 行は当時の改版履歴として保存する。v1.8 は既存の本文を書き換えず、§10.3 に【追記】を 1 件足し、末尾に **§10.5 (WP-1g / 1h / 1i 実施記録)** を追記した記録である。
 - **現行版: v1.7 (2026-09-14)。** 直後の v1.6 行は当時の改版履歴として保存する。v1.7 は §10.3 以前を書き換えず、未コミットの §10.4 に既知の穴の追跡先 (roadmap R-39) と #6 の扱い (型検査器の既知事項) を反映した記録である。
 - **現行版: v1.6 (2026-09-14)。** 直後の v1.5 行は当時の改版履歴として保存する。v1.6 は既存の本文 (§0〜§10.3) を 1 文字も書き換えず、末尾に **§10.4 (WP-1d / 1e / 1f 実施記録)** を追記した記録である。
 - **現行版: v1.5 (2026-09-14)。** 直後の v1.4 行は当時の改版履歴として保存する。v1.5 は既存の本文 (§0〜§9) を 1 文字も書き換えず、末尾に **§10 (WP-1 実施記録)** を追記した記録である。
@@ -308,6 +309,8 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 
 作業指示書 §4 の順に、WP-1 後続 (同表「4〜」行: CE2 → ST3 → ST4 → ST5 → ST7 → ST6 → CE3 → CE4 → BP4)、request binding の WP-3 などへ進む。着手条件は §7 と作業指示書どおりである。
 
+**【追記 2026-09-14、v1.8】** ST6 (WP-1i) までを終えた (§10.5)。残りは作業指示書 §4 の「4〜」行の CE3 → CE4 → BP4、続いて順番の付かない行 (BP1・BP2、WP-2 の CE1 ↔ r2db `_canonical_where_json` の判断、WP-3、WP-4) である。
+
 ### 10.4 WP-1d / 1e / 1f 実施記録 (2026-09-14、v1.6 追記)
 
 | WP | 抽出 | merge | root ゲート (passed) | 備考 |
@@ -330,3 +333,23 @@ WP-3 と独立に、単一 backend の狭い DDL / query assembly を D-4 に従
 - **R-38 との関係**: 1e が移した述語評価 (`_matches` / `_predicate_text` / `_wildcard_pattern`) は、§10.2 の 4 (in-memory の ORDER BY) と同じく、in-memory の比較の意味を PostgreSQL に合わせる箇所である。#7 はその一致を固定するテストの欠落であり、R-38 と同じ論点に属する。
 - 次の WP は作業指示書 §5.10〜§5.14 (WP-1g / 1h / 1i)。
 - **追跡 (2026-09-14、監督裁定、v1.7)**: テストの穴の追跡は roadmap §8 R-39 に一本化した (§10.2 の 1〜3 を含む)。
+
+### 10.5 WP-1g / 1h / 1i 実施記録 (2026-09-14、v1.8 追記)
+
+| WP | 抽出 | merge | root ゲート (passed) | 備考 |
+| --- | --- | --- | --- | --- |
+| WP-1g | r2db `structured.py` → `delete_confirmation.py` (ST5) | `f249ed5` | 3360 | — |
+| WP-1h | r2db `structured.py` → `paging.py` (ST7) | `9e82d57` | 3365 | 未使用になった `import base64` を削除。件数 pin 88 → 78 (`paging` 10)。監督裁定 W-2 に従い `_shape_hash` の「immediately above」参照を修正。レビューで SI-08 のテスト 2 本を追加 (where の値又は page size が異なる cursor を拒否) |
+| WP-1i | r2db `structured.py` → `value_types.py` (ST6 と `_TEXT_ONLY_OPERATORS`、W-1) | `868e7fd` | 3366 | 件数 pin 78 → 67 (`value_types` 11)。W-2 の `_INT64_MAX` 参照を `value_types.py` に更新 |
+
+- 3 件とも、関数本体は AST で同一、facade 経由で同じ object、docstring は逐語 (`docs/work-orders/OPERATING_CONDITIONS.md` §1.5 の 40c)、独立コードレビュー済み、root ゲートの前後の `pg_database` 差分 0。
+- **コードレビューの訂正 (WP-1i)**: `structured.py` 旧 L2296 / L2312 の「below」は、`structured.py` に残る `_apply` 内の呼出しを指すので括弧書きを付けない。作業指示書 §5.13 の括弧書きは 8 箇所ではなく 6 箇所である。
+
+**既知の穴** (移動前から存在し、各 WP の範囲外。§10.4 の続き):
+
+| # | 対象 | 穴 | 追跡 |
+| --- | --- | --- | --- |
+| 9 | r2db `delete_confirmation.py` | `_PHRASE_MAX_LENGTH` の値は長さの guard としてしか検査されていない | R-39 |
+| 10 | r2db `paging.py` | 次を固定するテストが無い: bool の offset の受入れ、cursor / order_by の余分なキー、不正な direction、id を補うのは不在時だけであること | R-39 |
+| 11 | r2db `value_types.py` | enum 宣言の field への型違いの値が enum ではなく field_type で報告されること、`in` の要素の `/value/<j>` path を固定するテストが無い | R-39 |
+| 12 | r2db `value_types.py` (MitateDB `field_types.py` も同じ) | `number` の field が NaN / ±Infinity を受け入れる | R-40 (共通契約の決定) |
