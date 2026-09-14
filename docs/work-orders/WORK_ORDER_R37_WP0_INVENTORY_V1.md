@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.8 (2026-09-15)。** 基点 main `f70afb0` (WP-1j・1l と記録を統合済み)。§5.20〜§5.24 に WP-1m / 1n (BP1、BP2) の manifest、WP-2 (CE1) の判断材料、未確定 Y-1〜Y-6 を追記した。既存の行は書き換えていない。独立レビュー (軽微な差し戻し) 反映: 監督裁定 Y-7〜Y-9、1n の変異 6、S_M の監査照合の範囲、§5.23 の事実。**独立レビュー待ち。**
 - **v1.7 (2026-09-14)。** 基点 main `2fde59a` (WP-1g / 1h / 1i 統合済み。worktree `r37-wp0` の `dad3c35` と同一 tree)。§5.15〜§5.19 に WP-1j / 1k / 1l (CE3 → CE4 → BP4) の manifest と未確定 X-1〜X-4 を追記した。既存の行は書き換えていない。独立レビュー反映: 監督裁定 X-1〜X-5 (§5.19)、1k の括弧書きと順序、1l の allowlist 実測値。**独立レビュー済み。**
 - **v1.6 (2026-09-14)。** W-1〜W-3 と既知の穴の追跡先への監督裁定を反映した (§5.11 の 14、§5.13 の追加行・23・24、§5.14 の裁定表)。独立レビューの指摘 (監督裁定) も反映した。v1.5 以降の未コミット分だけを直し、それ以前の行は書き換えていない。
 - **v1.5 (2026-09-14)。** 基点 main `4fc5517` (WP-1d / 1e / 1f 統合済み)。§6 に U-2 の追記行 (r2db `service.py` は変更セット 2 が先)、§5.10〜§5.14 に WP-1g / 1h / 1i の manifest を追記した。既存の行は書き換えていない。**独立レビュー待ち。**
@@ -846,6 +847,144 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | X-3 | 提案どおり。検査本体を leaf に移し、method は委譲で残す。sib tuple に足さない理由は独立レビューで確かめる |
 | X-4 | 「above」の直後に「(`_resolve_field_constraints` in `constraint_resolution.py`)」を付ける。残る 2 名には付けない。「now」などの経緯語は使わない |
 | X-5 | CE4 (`_deny_provisional_field`) は到達不能だが、docstring の記録どおり次の provisional capability 用の仕組みとして残す。削除せずに抽出する |
+
+### 5.20 BP1・BP2 と WP-2 判断材料の共通 (v1.8 追記、**独立レビュー待ち**)
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | §4 の順番の付かない行から BP1 → BP2 (WP-1m / 1n、MitateDB `backend_postgres.py`) と、WP-2 の CE1 ↔ r2db `_canonical_where_json` の判断材料 (§5.23) |
+| 行番号 | `f70afb0` の実測。1n の行は 1m の統合でずれる。allowlist の値は、各節の前提どおりの移動を写しに当て、S_M と同じ AST 走査で数えた値 |
+| baseline (導出) | root 3,370 (`r2db-api/tests` 1,275 / `MitateDB-api/tests` 1,100 / `conformance-tests` 995)、`tools/tests` 109。設計 §10.6 の WP-1l の root ゲート 3370 と一致する。着手時に collect-only で確かめる |
+| 変更クラス、テンプレート、検証コマンド | §5.15 と同じ。C-1〜C-3 を各表の末尾に付ける |
+| 設計 §3 の禁止境界 | BP1 は固定の `sql.SQL` 定数と dict だけで execute しない (設計 §3.1 の「SQL object の組立」。先例 r2db `postgres_types.py`、設計 §8.1 の 1)。BP2 は値の検査だけ。connection / cursor、transaction、lock、`SET LOCAL` timeout、driver exception mapping (layer (ii) の `except psycopg.Error`)、`_execute`、DDL 文の組立 (`create_collection` L1030・`add_field` L1164)、`field_domains` の catalog 読取は `backend_postgres.py` に残す。WP-4 へ回すものは、既に WP-4 の BP3 以外に無い |
+| sib tuple | 2 件とも足さない (backend 層。X-3 と `postgres_value_domain.py` の先例) |
+
+### 5.21 WP-1m — MitateDB PostgreSQL の型写像 (BP1、**独立レビュー待ち**)
+
+**目的**: `backend_postgres.py` の型写像の定数 4 つ (説明コメントを含む) を leaf `MitateDB-api/src/mitatedb_api/postgres_types.py` (§2.5 の名前。r2db に同名 file があるが中身は別) へ移す。
+
+| 項目 | 実測 (`f70afb0`) |
+|---|---|
+| 移動範囲 | `backend_postgres.py` L130-192 (`_TYPES`・`_TYPE_SQL`・`_DOMAIN_BY_DATA_TYPE`・`_TEXT_DOMAIN_BY_DECLARED_TYPE` と、L130-146・L151-167・L174-186 の説明コメント)。直後の空行 L193-194 も除く |
+| 呼出し元 | `_TYPE_SQL`: `create_collection` (L1030)・`add_field` (L1164)。domain 表: `field_domains` (L613-616)。`_TYPES` は `_TYPE_SQL` の組立にだけ使う |
+| leaf の import | `psycopg` (`from psycopg import sql`)。§2.5 の `field_types` は使わない |
+| facade | コードから読む 3 名 (`_TYPE_SQL`・`_DOMAIN_BY_DATA_TYPE`・`_TEXT_DOMAIN_BY_DECLARED_TYPE`) を import 1 行で読む。`_TYPES` はコードからの参照が 0 なので facade に残さず、import にも入れない (Y-7)。未使用になる import は無い |
+| denial | 無い。件数 pin・`SCANNED_MODULES`・sib は差分 0 |
+| 行番号 allowlist | 20 件すべてが 64 行上へ: 485, 542, 591, 618, 675, 727, 752, 930, 947, 1078, 1236, 1323, 1375, 1408, 1434, 1501, 1529, 1570, 1839, 1908。前提は import 1 行 (facade の説明コメントなし) と、括弧書きで行が増えないこと。行が増えればずれ幅が変わる |
+| 範囲内の位置参照 (40c) | 付ける: L134「this module's own `encode_value` below」の below、L145「no method in this module」の this module、L161「see `field_domains` below」の below の直後に「(in `backend_postgres.py`)」。付けない: L175「this backend's own `_check_domain` category」(this backend は PostgreSQL backend 層を指す。WP-1l の先例) |
+| 範囲外の位置参照 (40c) | 付ける: `backend_postgres.py` L297「See this module's own `_TYPES` comment」と L566「(`_DOMAIN_BY_DATA_TYPE`'s own corrected comment above)」の直後と、`cell.py` L157・`MitateDB-api/tests/test_postgres.py` L1227 のコメントが名指す `_TYPES` の直後に「(in `postgres_types.py`)」(Y-7)。書き換える (W-2): `postgres_value_domain.py` L29-30 の「(in `backend_postgres.py`)」を「(in `postgres_types.py`)」。直さない: L41「this backend's own `_TYPES`」(this backend)、`docs/design/` の記録 |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/backend_postgres.py` (移動範囲を除き、import 1 行と括弧書き 2 箇所)、新規 `MitateDB-api/src/mitatedb_api/postgres_types.py`、`MitateDB-api/src/mitatedb_api/postgres_value_domain.py` (L29-30 の括弧書きの書換えだけ)、`MitateDB-api/src/mitatedb_api/cell.py` (L157 の括弧書きだけ。WP-1k と重なるが 1m → 1n → 1k の直列なので問題ない)、`MitateDB-api/tests/test_postgres.py` (新規テスト 1 本と L1227 の括弧書き。接続しない)、S_M (allowlist 20 件と移動記録のコメント)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `psycopg`) | `backend_sqlite.py` (`_TYPES` は別物)、`http.py`、S_M の件数 pin・`SCANNED_MODULES`・sib、両 peer の `tests/test_audit_query.py`、r2db-api 全部、`conformance-tests/`、`docs/design/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | (欠番。`_TYPES` を facade に残さないので facade テストと変異を置かない。Y-7) | — | — |
+| 2 | `boolean` は物理 `INTEGER` | `postgres_types.py`: `"boolean": "INTEGER"` を `"BOOLEAN"` にする | `MitateDB-api/tests/test_postgres.py::test_postgres_types_pin_native_column_types_and_domains` (新規。4 表を literal で固定する)、`::test_declared_type_registry_round_trips_every_contract_type` (**後者は実測で確定する**) |
+| 3 | `_TYPE_SQL` は `sql.SQL` の定数 (m-7) | `postgres_types.py`: `sql.SQL(native)` を `sql.Identifier(native)` にする | `MitateDB-api/tests/test_postgres.py::test_postgres_types_pin_native_column_types_and_domains` |
+| 4 | 物理型から domain への逆写像 | `postgres_types.py`: `"bigint": "int64"` を `"int32"` にする | 同上 |
+| 5 | text 系の宣言型は 4 つの別 domain | `postgres_types.py`: `"object": "object"` を `"string"` にする | 同上 (挙動は変わらないので既存テストは緑のまま) |
+| 6 | 行番号 allowlist 20 件が実測と一致 (40b) | S_M: 1 件を移動前の値に戻す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` |
+| 7 | S_M の他の値は不変 | **監査照合**: S_M の差分が allowlist 20 件と、その移動記録のコメント (WP-1l の先例 S_M L193-200) だけ | — |
+| 8 | leaf の import が許可リストの内だけ | `postgres_types.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 9 | 新 leaf が分類される | 一覧から `postgres_types.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 10 | 逐語移動と位置参照 (40c) | **監査照合**: 説明コメントが逐語。括弧書きは leaf の L134・L145・L161、`backend_postgres.py` の L297・L566、`cell.py` L157、`test_postgres.py` L1227 の 7 箇所、書換えは `postgres_value_domain.py` L29-30 の 1 箇所だけ | — |
+| 11 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、r2db `src/` の同名定義 0 件。`backend_sqlite._TYPES` は変えない | — |
+
+### 5.22 WP-1n — MitateDB PostgreSQL の値 domain gate (BP2、**独立レビュー待ち**)
+
+**目的**: `backend_postgres.py` の `_validate_value_domain` を既存 leaf `MitateDB-api/src/mitatedb_api/postgres_value_domain.py` の `_check_domain` の直前へ移す (§2.5)。`PostgresBackend.encode_value` は呼出しのまま残す。**WP-1m の統合後に着手する。**
+
+| 項目 | 実測 (`f70afb0`。1m の統合後に取り直す) |
+|---|---|
+| 移動範囲 | `backend_postgres.py` L195-309 (docstring と関数内コメントを含む) と直後の空行 L310-311 |
+| 呼出し元 | `PostgresBackend.encode_value` (L1320)。テストは `backend_postgres` から読む (`MitateDB-api/tests/test_postgres.py` L1444、L1463) |
+| leaf の import | 変わらない (`.errors` の `ValidationError`・`observed_type_of`・`violation`)。`_check_domain` は同じ module |
+| facade | L100 の import に `_validate_value_domain` を足す。移動で未使用になる `observed_type_of` を L91-94 の import から削除する (1 行減る)。`_check_domain` もコードからは参照されなくなる (残るのはコメント L1308 だけ) が、`MitateDB-api/tests/test_postgres.py` L1497・L1529 が `_check_domain`・`_INT_DOMAIN_RANGES` を `backend_postgres` から import するので facade に残す (Y-3)。L98-99 のコメントは facade で成り立つので直さない。import の行数は変わらないので allowlist の値は下記のまま |
+| denial | `ValidationError` 2 件 (L267 NUL、L293 lone surrogate。4-key) |
+| 件数 pin | `backend_postgres.py` 23 → 21、`postgres_value_domain.py` 4 → 6 |
+| `SCANNED_MODULES`・sib・L | 差分 0 (移動先は走査済みの backend 層 leaf、許可リストも不変) |
+| 行番号 allowlist | 1m の値からさらに 118 行上へ: 367, 424, 473, 500, 557, 609, 634, 812, 829, 960, 1118, 1205, 1257, 1290, 1316, 1383, 1411, 1452, 1721, 1790。前提は 1m の前提に加え、import の変更が上記 2 つだけで、括弧書きで行が増えないこと |
+| 範囲内の位置参照 (40c) | 付ける: L280「this module's own layer (ii) backstop」と L281「this module's per-DML-method final clause」の直後に「(in `backend_postgres.py`)」。L297 の括弧書きは 1m で付けたまま移る。付けない: L272「immediately above」、L285「above」、L301「below」(同じ関数の中)、L198 の `PostgresBackend.encode_value`、L217 の `cell.py::_prepare_values` (指す先は動かない) |
+| 範囲外の位置参照 (40c) | 書き換える (W-2): `backend_postgres.py` L1308-1309「functions below (`_check_domain` now in `postgres_value_domain.py`)」は 2 関数とも移るので 2 名を覆う形に (Y-4)。`postgres_value_domain.py` L25-27「above (in `backend_postgres.py`; this is …)」から「in `backend_postgres.py`; 」を除く (Y-2)。付ける: `backend_sqlite.py` L688「`backend_postgres.py::_validate_value_domain`」の直後に「(in `postgres_value_domain.py`)」(§5.6 の `cell.py::_measure_request_bytes` の先例)。`field_types.py` L12「Backend domain checks (`backend_postgres.py`)」の既存の括弧の直後に、入れ子にせず「 (in `postgres_value_domain.py`)」(Y-9)。直さない: `MitateDB-api/tests/test_http.py` L815・`field_types.py` L188 の `backend_postgres._validate_value_domain` (facade)、`test_postgres.py` の名前だけの言及、`docs/design/` の記録 |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `MitateDB-api/src/mitatedb_api/backend_postgres.py` (移動範囲を除き、import 2 箇所と L1309 の書換え)、`MitateDB-api/src/mitatedb_api/postgres_value_domain.py` (関数の追加、括弧書き 2 箇所、L26 の書換え)、`MitateDB-api/src/mitatedb_api/backend_sqlite.py` (L688 の括弧書きだけ)、`MitateDB-api/src/mitatedb_api/field_types.py` (L12 の括弧書きだけ)、`MitateDB-api/tests/test_postgres.py` (新規テスト 2 本)、S_M (件数 pin、allowlist 20 件、移動記録のコメント、L75 の「carries 4」を 6 に) | `cell.py`、`http.py`、`MitateDB-api/tests/test_http.py`、S_M の `SCANNED_MODULES`・sib、`tools/tests/test_leaf_import_direction.py`、両 peer の `tests/test_audit_query.py`、r2db-api 全部、`conformance-tests/` |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `backend_postgres.py`: L100 の import から `_validate_value_domain` を外す | `MitateDB-api/tests/test_postgres.py::test_postgres_value_domain_leaf_preserves_backend_postgres_facade` (新規。`_validate_value_domain` の `is`。`_check_domain`・`_INT_DOMAIN_RANGES` は L1497・L1529 の既存テストが `backend_postgres` から読む)、`::test_validate_value_domain_accepts_none_for_every_domain` |
+| 2 | NULL は全 domain で通す (M-5) | `postgres_value_domain.py`: `if value is None: return None` を削る | `MitateDB-api/tests/test_postgres.py::test_validate_value_domain_accepts_none_for_every_domain` |
+| 3 | NUL を 4-key で拒否する | `postgres_value_domain.py`: NUL の条件を `False and …` にする | `MitateDB-api/tests/test_postgres.py::test_postgres_only_value_domain_denials_reachable_from_a_normal_client_request_carry_the_4_key_form` (layer (ii) の denial は details を持たない) |
+| 4 | lone surrogate を拒否する | `postgres_value_domain.py`: surrogate の条件を `False and …` にする | 同上、`::test_transact_lone_surrogate_value_is_deterministic_validation_failure_and_earlier_entity_unchanged` |
+| 5 | bool は domain 検査の前に int にする | `postgres_value_domain.py`: `value = int(value)` を `pass` にする | `MitateDB-api/tests/test_postgres.py::test_validate_value_domain_converts_bool_to_int_before_the_domain_check` (新規。`_validate_value_domain(True, domain="int32")` が `1` で型が `int`) |
+| 6 | domain 検査を呼ぶ | `postgres_value_domain.py`: `_check_domain` を呼ぶ代入行を `pass` に置き換える (削ると `if` の中身が空になり SyntaxError) | `MitateDB-api/tests/test_postgres.py::test_validate_value_domain_actually_invokes_the_domain_check` |
+| 7 | details の `field` は呼出し側の path | `postgres_value_domain.py`: NUL の `field=field` を `field=None` にする | `MitateDB-api/tests/test_postgres.py::test_postgres_only_value_domain_denials_reachable_from_a_normal_client_request_carry_the_4_key_form` |
+| 8 | 件数 pin (`backend_postgres.py` 21、`postgres_value_domain.py` 6) | `postgres_value_domain.py`: `ValidationError("x", details=violation("request_schema"))` を raise する関数を 1 つ足す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_a_non_trivial_floor` |
+| 9 | 移した denial が 4-key のまま | `postgres_value_domain.py`: surrogate の `details=` を外す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 10 | 行番号 allowlist 20 件が実測と一致 (40b) | S_M: 1 件を 1m の値に戻す | `MitateDB-api/tests/test_l1_details_vocabulary_ast_scan.py::test_allowlist_entries_match_real_bare_call_sites` |
+| 11 | leaf の import が許可リストの内だけ | `postgres_value_domain.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 12 | 未使用になった import を削除した | **監査照合**: `backend_postgres.py` の import と本文に `observed_type_of` が無い | — |
+| 13 | `SCANNED_MODULES`・sib・L は不変 | **監査照合**: 3 つの差分 0。S_M の差分は件数 pin、allowlist 20 件、移動記録のコメント (WP-1l の先例 S_M L193-200)、L75 の「carries 4」→ 6 だけ | — |
+| 14 | 逐語移動と位置参照 (40c) | **監査照合**: docstring と関数内コメントが逐語。括弧書きは leaf の L280・L281、`backend_sqlite.py` L688、`field_types.py` L12 の 4 箇所、書換えは `backend_postgres.py` L1309 と `postgres_value_domain.py` L26 の 2 箇所だけ | — |
+| 15 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、r2db `src/` の同名 def 0 件 | — |
+
+### 5.23 WP-2 判断材料 — CE1 ↔ r2db `_canonical_where_json` (v1.8 追記)
+
+| 事実 | 内容 |
+|---|---|
+| 同型性テスト | 両 peer の `tests/test_audit_query.py` の `_ISOMORPHIC_TARGETS` (137 行、行数 pin あり) と `test_peer_local_helpers_are_isomorphic_to_the_sibling_peer`。normalizer (`_normalize`) が吸収するのは docstring、package 名、型名 `ResourceLimits`/`FoundationConfig`、env 接頭辞 `R2DB_`/`MITATEDB_`、行末空白、空行だけ。`tools/tests` に同型性テストは無い |
+| 本文 | MitateDB `delete_confirmation.py:18` は `def _canonical_where_json(filters)` で `json.dumps(payload, sort_keys=True, separators=(",", ":"))`。r2db `delete_confirmation.py:58` は `def _canonical_where_json(where: "list[Predicate]") -> str` で `json.dumps(payload, sort_keys=True, ensure_ascii=True)` (区切りは既定)。引数名・注釈・区切り文字が違い、正規化後も一致しない。出力の byte 列も違う |
+| 契約 | `destructive_confirmation.phrase_construction.spelling` は綴りを実装定義とし、peer 間の互換面ではないとする。規範は `spec/data-service-api.v1.json` L578-583 の規則 (per-request の値を入れない、決定性、scope を含み衝突しない、再作成可能な対象の state fingerprint、identifier 検証済みの名前だけ、有界) |
+| 変更クラス | 登録は `_ISOMORPHIC_TARGETS` の増加で Class D (設計 §6)。本文を揃えると片側の digest が変わり、配備時に発行済みの phrase が一度無効になる |
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| A | 登録しない。差の理由を WP-2 の記録に残す (設計 §4 WP-2 の「片側固有」) | 変更なし。未固定の性質は穴のまま |
+| B | 片側の本文を他方へ揃えて登録し、両表・full-content pin・行数 pin を同時に更新する | Class D。契約は綴りの一致を求めず、本文同型を保つ合理的な理由が無い (設計 §3.1 末尾、D-3) |
+| C | A に加え、契約の規則に揃えた性質を各 peer のテストで literal に固定する。コードは共有しない。性質: 入れ子の key 順、list 順の保持、非 ASCII の escape、scope が違えば phrase が違う、値の型の区別 (`1`・`"1"`・`true` で digest が別)、schema_revision が変われば phrase が変わる (state fingerprint)、per-request の値 (request_id など) が入らない、256 文字以内 (Bounded) | Class B。MitateDB の非 ASCII の穴 (設計 §10.2 の 2) を塞ぐ。WP-2a の完了条件に「R-39 の (1b) と (1g) を閉じ、R-39 行を更新する」を入れる (Y-8) |
+
+**推奨: C。** 共通なのは契約 `phrase_construction` の規則であって本文ではなく、綴りは契約上実装定義である。性質は peer ごとのテストで固定し、同型性表は増やさない。
+
+### 5.24 重なり・順序・未確定 (v1.8 追記)
+
+**触るパスの重なり** (L・S_M は §5.15、P = `MitateDB-api/src/mitatedb_api/backend_postgres.py`、V = `MitateDB-api/src/mitatedb_api/postgres_value_domain.py`、T = `MitateDB-api/tests/test_postgres.py`、C = `MitateDB-api/src/mitatedb_api/cell.py`):
+
+| | WP-1m (BP1) | WP-1n (BP2) | WP-1k (CE4) | 変更セット 3 |
+|---|---|---|---|---|
+| WP-1m | — | × S_M、P、V、T | × L、S_M、C (L157 のコメント) | ○ |
+| WP-1n | × | — | × S_M | ○ |
+
+- **順序**: WP-1m → WP-1n の直列。WP-1k とは S_M (1m は L と C も) を共有するので直列にする。1k は変更セット 3 を待つので **1m → 1n → 1k** を推奨する。1k が先に着手できても値は衝突しない (1k は `cell.py` の件数 pin・`SCANNED_MODULES`・sib を、BP 系は `backend_postgres.py`・`postgres_value_domain.py` の件数 pin と allowlist を書く)。
+- **U-1 / U-2**: 2 件とも変更セット 3 のファイル (MitateDB `http.py`、r2db `control_plane.py`・`service.py`) を触らない。§5.19 の「`backend_postgres.py` の整理は BP 系の抽出がすべて済んでから」は、BP3 が WP-4 (manifest 未作成) なので整理を WP-4 まで延ばす。1n の後・WP-4 の前に置き、WP-4 と並行しなければ U-1 は守れる (Y-5)。整理の変更セットは allowlist の行を動かすので S_M の数値を触る (変更セット 2 の先例)。
+- **設計 §3**: §5.20。**設計 §9.3**: 1m が触る `cell.py` は L157 のコメントだけで、`_gate` とその呼出し経路を動かさない。1n は `cell.py` を触らない。
+
+**未確定 (監督判断待ち)**:
+
+| # | 点 |
+|---|---|
+| Y-1 | BP1 を WP-1 で行う (§2.5 は「1 後続 又は 4」)。execute しない定数だけの leaf で、r2db の先例 `postgres_types.py` も WP-1 相当 (設計 §8.1 の 1) |
+| Y-2 | BP2 の置き場所を `_check_domain` の直前にし、`postgres_value_domain.py` L26 の括弧書きから「in `backend_postgres.py`; 」を除く (W-2 の書換え) |
+| Y-3 | `_check_domain` は 1n の後に `backend_postgres.py` のコードから参照されなくなるが、facade に残す。L98-99 のコメントは直さない |
+| Y-4 | `backend_postgres.py` L1309 の既存の括弧書き「(`_check_domain` now in `postgres_value_domain.py`)」を「(both in `postgres_value_domain.py`)」に書き換える (X-4 により「now」は使わない) |
+| Y-5 | `backend_postgres.py` のコメント整理を 1n の後、WP-4 の前に置く (§2.5・§4・§5.19 の U-2 の読替え) |
+| Y-6 | WP-2 の CE1 は §5.23 の案 C |
+| Y-7 | (監督裁定) Y-3 を `_TYPES` にも当てる。コードからの参照が 0 なので facade に残さず import にも入れない。facade テストと §5.21 の変異 1 は置かず、`cell.py` L157・`test_postgres.py` L1227 の `_TYPES` に「(in `postgres_types.py`)」を付ける |
+| Y-8 | (監督裁定) §5.23 案 C の性質を契約 L578-583 の規則に揃え、WP-2a の完了条件に「R-39 の (1b) と (1g) を閉じ、R-39 行を更新する」を入れる |
+| Y-9 | (監督裁定) 1n で `field_types.py` L12 の「Backend domain checks (`backend_postgres.py`)」の括弧の直後に、入れ子にせず「 (in `postgres_value_domain.py`)」を付ける |
+
+**監督裁定 (2026-09-15)**:
+
+| # | 裁定 |
+|---|---|
+| Y-1 | BP1 は WP-1 で行う (WP-1m) |
+| Y-2 | 提案どおり。BP2 は `_check_domain` の直前に置き、L26 の括弧書きは W-2 で書き換える |
+| Y-3 | `_check_domain` の facade 名は、1n の後も tests 又は他 module が `backend_postgres` から読むときだけ残す。読む箇所が無ければ、未使用 import として同じ WP で削除する (L98-99 のコメントも合わせて判断する) |
+| Y-4 | 提案どおり「(both in `postgres_value_domain.py`)」に書き換える |
+| Y-5 | `backend_postgres.py` のコメント整理は WP-1n の後、WP-4 の前に置く。WP-4 と並行しない |
+| Y-6 | 案 C。性質のテストは WP-1n と WP-1k の後に、Class B の小さな WP (WP-2a) として両 peer に足す。同型性表は増やさない |
 
 ## 6. 重なり表と監督裁定
 
