@@ -191,6 +191,43 @@ class BudgetWiringTests(unittest.TestCase):
                 [{"type": "delete", "collection": "notes",
                   "filters": [Filter("title", "in", ["del-0", "del-1", "del-2"])]}])
 
+    def test_gate_forwards_budget_and_endpoint_kind_to_limit_gate_on_query_and_mutate(self):
+        """R-32 レビュー是正 (監督裁定): `_gate` が受け取った `budget`/
+        `endpoint_kind` を `_limit_gate` へそのまま転送する配線そのものを
+        query (`read`)/mutate (`transact`) の両経路で固定する -- `_limit_
+        gate` をインスタンス属性として記録用 wrapper に monkeypatch し
+        (`conformance/conformance_adapter_mitatedb.py`/`_http.py` 自身の
+        `*args, **kwargs` 転送 wrapper と同じ convention)、元の実装へ転送
+        したうえで、wrapper 自身が受け取った引数を検査する。製品コードは
+        変更しない -- テストのみのインストルメンテーション。"""
+        cell = self.runtime._ApplicationRuntime__cell  # noqa: SLF001 -- test-only instrumentation, same convention the conformance adapters use.
+        original_limit_gate = cell._limit_gate  # noqa: SLF001
+        for endpoint_kind in ("query", "mutate"):
+            with self.subTest(endpoint_kind=endpoint_kind):
+                recorded = []
+
+                def _recording_limit_gate(*args, _orig=original_limit_gate, **kwargs):
+                    recorded.append((kwargs.get("budget"), kwargs.get("endpoint_kind")))
+                    return _orig(*args, **kwargs)
+
+                cell._limit_gate = _recording_limit_gate  # noqa: SLF001
+                try:
+                    budget = {"execution_ms": 5000}
+                    if endpoint_kind == "query":
+                        self.runtime.read("notes", budget=budget)
+                    else:
+                        self.runtime.transact(
+                            [{"type": "insert", "collection": "notes", "values": {"title": "wiring"}}],
+                            budget=budget,
+                        )
+                finally:
+                    cell._limit_gate = original_limit_gate  # noqa: SLF001
+                # Non-vacuity: at least one call actually reached the wrapper.
+                self.assertGreaterEqual(len(recorded), 1)
+                observed_budget, observed_endpoint_kind = recorded[0]
+                self.assertEqual(observed_budget, budget)
+                self.assertEqual(observed_endpoint_kind, endpoint_kind)
+
 
 if __name__ == "__main__":
     unittest.main()

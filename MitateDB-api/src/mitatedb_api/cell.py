@@ -1052,49 +1052,16 @@ class ApplicationCell:
             yield deadline
 
     def _gate(self, principal, request=None, *, request_id=None, budget=None, endpoint_kind=None):
-        """Phase 9 WP-3cd C-05 fix (rulings-r5-r6.md B-2/B-3), rebased onto
-        the WP-3cd closure's K-1 rework of `_limit_gate` above (`budget`/
-        `endpoint_kind` replace the WP-3d `effective_limits` parameter
-        this method used to forward). The ONLY caller of `_limit_gate` for
-        the 5 call sites this WP touched (`create_collection`/`add_field`/
-        `alter_field`/`read`/`transact`). Forwards to `self._limit_gate`
-        -- looked up EACH call, through `self`, so any monkeypatch
-        replacing the *instance* attribute (as opposed to the class
-        method) is still honored -- but OMITS the `budget`/`endpoint_kind`
-        keywords entirely whenever `budget` itself is falsy (`None` or
-        `{}`), rather than always passing them explicitly.
+        """The common path from `create_collection`/`add_field`/
+        `alter_field`/`read`/`transact` into `_limit_gate`, forwarding
+        `budget`/`endpoint_kind` through unconditionally, in a single
+        call. Reference: `docs/design/ROADMAP_POST_PHASE7_V1.md` R-32.
 
-        Measured root cause (C-05, probe transcript `{scratchpad}/
-        c05_probe.log`/`{scratchpad}/c05_probe2.log`, reproducing
-        `test_c05_v2_declaration_and_position_agree[MitateDB-api-http]`'s
-        own full `_V2_DRIVERS` sweep): `conformance/conformance_adapter_
-        mitatedb_http.py::_hold_in_flight_via_http_requests_over_stalled_
-        gate` monkeypatches `ApplicationCell._limit_gate` (an INSTANCE
-        attribute, `cell_obj._limit_gate = _stalled_limit_gate`) for the
-        duration of `hold_in_flight`, with a frozen wrapper
-        (`_stalled_limit_gate(principal, request=None, *, request_id=
-        None)`) that has no `**kwargs` catch-all and no room for either
-        `effective_limits` (WP-3d's own shape) or `budget`/`endpoint_kind`
-        (this closure's K-1 rework). Every one of the 5 facade call sites
-        (`ApplicationRuntime.transact`/`.read`, `ApplicationDeveloper.
-        create_entity`/`add_field`/`alter_field`) forwards its own raw
-        `budget` argument here UNCHANGED now (K-1: `narrow_limits_by_
-        budget` itself moved inside `_limit_gate`, no longer called at the
-        facade layer at all) -- `None` for the overwhelming majority of
-        requests that never present one, and the falsy-`budget` skip below
-        is exactly what keeps THOSE requests reaching the frozen adapter's
-        3-argument monkeypatch unchanged (no C-05 driver combines a real
-        `budget` with concurrency-holding, so a request that DOES present
-        one never needs to reach `_stalled_limit_gate` at all -- the
-        `budget`/`endpoint_kind` keywords are safe to omit here on exactly
-        the same condition `narrow_limits_by_budget`'s own `if not budget:
-        return deployed` short-circuit uses, so this skip changes nothing
-        `_limit_gate` itself would not already have resolved to `self.
-        config` unchanged)."""
-        if budget:
-            return self._limit_gate(
-                principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
-        return self._limit_gate(principal, request, request_id=request_id)
+        Forwards to `self._limit_gate` -- looked up EACH call, through
+        `self`, so any monkeypatch replacing the *instance* attribute (as
+        opposed to the class method) is still honored."""
+        return self._limit_gate(
+            principal, request, request_id=request_id, budget=budget, endpoint_kind=endpoint_kind)
 
     def _make_audit_hook(self, principal, *, event_class, operation, target_kind, target_id=None, request_id=None):
         """Phase 4 (design D-2): builds the `audit_hook.ApplicationAuditHook`
