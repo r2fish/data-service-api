@@ -2,6 +2,7 @@
 
 ## 0. 版数・位置づけ
 
+- **v1.10 (2026-09-15)。** 基点 main `b45312d` (WP-2a を統合済み)。§5.27〜§5.31 に WP-3 (SV1〜SV3) の実測、WP-3a / 3b / 3c の manifest、未確定 W3-1〜W3-5 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: facade テスト、訂正の記録の赤テスト、評価順の変異、W3-4、範囲外の位置参照、CH-0126 の扱い。**独立レビュー待ち。**
 - **v1.9 (2026-09-15)。** 基点 main `13241c2` (WP-1m・1n・1k を統合済み)。§5.25・§5.26 に WP-2a (Y-6・Y-8、削除確認 phrase の契約規則のテスト) の manifest と未確定 Z-1〜Z-3 を追記した。既存の行は書き換えていない。独立レビュー (差し戻し) 反映: Z-2・Z-3 の裁定、型区別の assert、規則 5 と R-41 の注記。**独立レビュー待ち。**
 - **v1.8 (2026-09-15)。** 基点 main `f70afb0` (WP-1j・1l と記録を統合済み)。§5.20〜§5.24 に WP-1m / 1n (BP1、BP2) の manifest、WP-2 (CE1) の判断材料、未確定 Y-1〜Y-6 を追記した。既存の行は書き換えていない。独立レビュー (軽微な差し戻し) 反映: 監督裁定 Y-7〜Y-9、1n の変異 6、S_M の監査照合の範囲、§5.23 の事実。**独立レビュー待ち。**
 - **v1.7 (2026-09-14)。** 基点 main `2fde59a` (WP-1g / 1h / 1i 統合済み。worktree `r37-wp0` の `dad3c35` と同一 tree)。§5.15〜§5.19 に WP-1j / 1k / 1l (CE3 → CE4 → BP4) の manifest と未確定 X-1〜X-4 を追記した。既存の行は書き換えていない。独立レビュー反映: 監督裁定 X-1〜X-5 (§5.19)、1k の括弧書きと順序、1l の allowlist 実測値。**独立レビュー済み。**
@@ -1070,6 +1071,159 @@ python3 tools/public_value_scan.py <触ったファイル> → total_flagged=0
 | Z-1 | Class C の案 (C-06 に request_id / `confirmation` 値からの独立、1 と "1"、256 以内、add_field 後に phrase が変わる、のベクトルを足す) は本 WP に入れず、ロードマップに R-41 として起票する (フェーズ11、Class C) |
 | Z-2 | r2db にも list 順を明示的に固定するテストを足す (既存の literal に偶然含まれることに頼らない) |
 | Z-3 | 256 は literal ではなく、同梱の契約から上限を読み、`_PHRASE_MAX_LENGTH` がそれと一致すること、及び境界 256/257 を固定する (契約が正) |
+
+### 5.27 WP-3 の実測と分け方 (v1.10 追記、**独立レビュー待ち**)
+
+**対象**: §2.4 の SV1〜SV3 (r2db `service.py`)。§4 の WP-3 行の ST8〜ST10 (`structured.py`) と CE5〜CE7 (MitateDB `cell.py`) は本書では実測せず、後の WP-3d 以降に回す (W3-1)。
+
+| ID | 実測 (`b45312d`) | 読む module レベルの名前・状態 | 呼出し元 | 例外・`details` | MitateDB の対応 |
+|---|---|---|---|---|---|
+| SV1 | `service.py` L120-165 (`QueryPage`・`MutationResult`、frozen dataclass) | `dataclass`、`Any` だけ | `DataService.query_page` (L907)・`mutate_result` (L956)。`http.py` L462・L501 は文字列注釈、conformance-tests は契約の schema 名としての言及だけ | なし | 無い (MitateDB は dict を返し、`http.py` が応答を組む) |
+| SV2 | `DataService.capabilities` L758-881 の文書組立 (L760-880) と `_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES` (L68-70) | 暗黙に読む: `canonical.role`・`canonical.application_id` (principal)、`self.limits`、`self._control_plane_status`、`self._process_ceiling`、`self._surfaces`。**6 つとも値又は `limits` object を引数で渡せる** | `http.py` の capabilities、両 conformance adapter | なし (`_slot` の中) | `cell.py` L3883 `ApplicationRuntime.__build_capabilities_document(principal)`。本体の構造が違うので対にしない (CE7 として別 WP) |
+| SV3 | `_query_outcome` L913-920 (型検査 4 件)、`_mutate_outcome` L980-984 (`transaction` の解決と検査 2 件) | 引数だけ (`select`・`where`・`page_size`・`order_by`・`cursor`・`transaction`・`operations`)。limits・capability・schema revision は読まない | `query`・`query_page`・`mutate`・`mutate_result` | 語彙 code の `fail` 6 件 (L914・L916・L918・L920 `VALIDATION_FAILED`、L982 `CAPABILITY_UNSUPPORTED`、L984 `VALIDATION_FAILED`)。いずれも `violation(...)` の 4-key | `http.py` の shape 検査と `cell.py` の `_gate` 後の検査 (CE6)。単位が違う |
+
+- **片側か両 peer か**: 3 件とも **r2db だけ** (WP-1 と同じ片側抽出)。MitateDB に同じ公開意味で本文を揃える合理的な単位が無く (§5.23 と同じ判断)、WP-2 の対応抽出は起こさない。
+- **禁止境界として WP-3 から外すもの (設計 §3.2)**: `_slot`・`_check`・`_acquire_rate` (認証・認可・rate・concurrency)、`_event`・`_denial_event`・`_make_audit_hook` と `except FoundationError` の deny 監査 (audit)、`fold_operation_idempotency_keys`・`effective_idempotency_key` (idempotency、U-4)、`plan_request` の組立と `dry_run` による `hook`・`assigned_addresses`・`plan` の分岐 (plan / dry-run)、`uuid` による request_id の生成、`self._clock` の deadline、`self.limits.check_request`・`check_depth`・`narrow_limits_by_budget` (limits を読むので facade に残す)、`self._cells[...]` の実行、`schema`・`catalog`・`deny_unsupported`。評価順 (`_slot` → 形の検査 → limits → budget → 実行) と例外型は facade が持つ。
+- **分け方**: 3 単位の直列 (§5.28〜§5.30)。3 件とも `service.py`・`r2db-api/tests/test_foundation.py`・`tools/tests/test_leaf_import_direction.py`・`docs/code-history/r2db-api/service.md` を触る。
+- **baseline (導出)**: root 3,382 (`r2db-api/tests` 1,278 / `MitateDB-api/tests` 1,109 / `conformance-tests` 995)、`tools/tests` 109。設計 §10.8 の WP-2a の root ゲート 3382 と一致する。着手時に collect-only で確かめる。
+- **静的な pin**: `service.py` に行番号 allowlist は無い (r2db の `_BACKEND_LAYER_ALLOWLIST` は `postgres.py` だけ)。`r2db-api/tests/test_threadpool_offload.py` の getsource は `DataService._slot`・`_acquire_rate` だけで、3 件とも動かさない。L1 scan の件数 pin (`service.py` 10) が変わるのは 3c だけ。
+- **CH-ID の付いた塊 (変更セット 2)**: 3a で 4 塊を移し (CH-0167〜0170)、3b で 9 塊を移す (CH-0136〜0143、CH-0174)。3c は CH-0126 を leaf へ移す (3c の後、facade に `resolved_transaction` の読み手が無いため。W3-5)。計 14 塊。括弧書きを足す塊は、同じ変更で `docs/code-history/r2db-api/service.md` の該当節に訂正の記録 (旧文 → 新文) を追記する (コメント出所の設計 v0.13 §9 0g の 4)。訂正は 3a 1 件 (CH-0168)、3b 5 件 (CH-0143・CH-0140・CH-0139・CH-0136・CH-0174)、3c 1 件 (CH-0126) の計 7 件。節は動かさない (受け皿 README「後の抽出で symbol が移っても節は動かさない」)。`--register` は CH-ID を peer 単位で引くので、別ファイルへの移動はそのまま解決する。
+- **統合の手順**: src の行数が変わるので、各単位は root ゲートを通してから統合する。コミットした後の HEAD で `pytest -q tools/tests` を流す (`tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` が HEAD のコードと受け皿を照合するため。`test_repository_register_passes` は形式しか見ない)。
+- **重なり**: コメント変更セット 5 (`ccp-cs0`、r2db `credential_store.py`・MitateDB `ops.py` と各受け皿) と触るファイルは重ならない。変更セット 5 が `tools/` や `docs/code-history/r2db-api/service.md` を触らないことを着手時に確かめる。設計書・ロードマップは触らない (記録は監督)。
+
+### 5.28 WP-3a — r2db 応答の結果型 (SV1、**独立レビュー待ち**)
+
+**目的**: `service.py` の `QueryPage`・`MutationResult` を leaf `r2db-api/src/r2db_api/service_results.py` (§2.4 の名前) へ移す。
+
+| 項目 | 実測 (`b45312d`) |
+|---|---|
+| 移動範囲 | `service.py` L120-165 (2 つの dataclass と docstring・コメント) と直後の空行 |
+| leaf の import | `__future__` (移動元と同じく注釈を文字列のままにする)、`dataclasses`、`typing` |
+| facade | `service.py` が 2 名を import 1 行で読む (L907・L956 が組み立てる)。移動で未使用になる `from dataclasses import dataclass` (L5) を削除する |
+| denial・件数 pin・`SCANNED_MODULES`・allowlist | 無い。L1 scan は差分 0 |
+| 範囲内の位置参照 (40c) | 付ける: CH-0168 (`MutationResult` の docstring) の「`mutate` below」の直後に「(in `service.py`)」(訂正の記録 1 件)。付けない: CH-0169 の `_query_outcome`・`query_page`、CH-0167 の `MutationOutcome.request_id`、`http.post_mutate`・`DataService.mutate_result` (名前だけで位置語が無い) |
+| 範囲外の位置参照 (40c) | CH-0133 (L903)「reaches `QueryPage.request_id` below」は L907 の呼出しを指し、動かないので付けない。`http.py` L554 の `MutationResult.request_id`'s own comment は名前だけ |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/service.py` (移動範囲、import 1 行、L5 の削除)、新規 `r2db-api/src/r2db_api/service_results.py`、`docs/code-history/r2db-api/service.md` (CH-0168 の訂正の記録だけ)、`r2db-api/tests/test_foundation.py` (新規テスト 2 本)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `dataclasses`・`typing`) | `r2db-api/src/r2db_api/http.py`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、`conformance-tests/`、`r2db-api/src/r2db_api/credential_store.py` (変更セット 5)、MitateDB-api 全部、`docs/design/`、roadmap |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | facade 互換 | `service.py`: import から `MutationResult` を外す | `r2db-api/tests/test_foundation.py::test_service_results_leaf_preserves_service_facade` (新規。2 名の `is`) |
+| 2 | 結果型は frozen | `service_results.py`: `MutationResult` の `frozen=True` を外す | `r2db-api/tests/test_foundation.py::test_service_results_are_frozen_with_contract_defaults` (新規。代入で `FrozenInstanceError`、`dataclasses.fields` の名前と既定値を固定する) |
+| 3 | 既定値は変わらない | `service_results.py`: `committed: bool = True` を `False` にする | 同上 |
+| 4 | leaf の import が許可リストの内だけ | `service_results.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 5 | 新 leaf が分類される | 一覧から `service_results.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 6 | 括弧書きを足した CH-ID 塊に訂正の記録がある (0g の 4) | `service.md`: CH-0168 の訂正の記録を書かない | `tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` (HEAD を読むので、変異を使い捨ての clone にコミットして実行する。`--register` の `test_repository_register_passes` は形式しか見ず赤にならない) |
+| 7 | 未使用になった import を削除した | **監査照合**: `service.py` に `dataclass` の import と参照が無い | — |
+| 8 | 逐語移動と位置参照 (40c) | **監査照合**: docstring とコメントが逐語。括弧書きは CH-0168 の 1 箇所だけ。CH-0167〜0170 の 4 塊が leaf にある | — |
+| 9 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0、MitateDB `src/` の同名定義 0 件 | — |
+| 10 | 統合の手順 | **監査照合**: 統合前の root ゲートの集計行と、コミット後の HEAD の `tools/tests` の集計行 | — |
+
+### 5.29 WP-3b — r2db capabilities 文書の組立 (SV2、**独立レビュー待ち**)
+
+**目的**: `DataService.capabilities` の文書組立を leaf `r2db-api/src/r2db_api/capabilities_document.py` の関数 `build_capabilities_document(*, role, application_id, limits, control_plane_status, process_ceiling, surfaces)` へ移し、暗黙に読んでいた principal と deployment の値を引数で渡す (設計 §4 WP-3)。`_slot` (認可・rate・concurrency) は method に残す。**WP-3a の統合後に着手する。**
+
+| 項目 | 実測 (`b45312d`。3a の統合後に取り直す) |
+|---|---|
+| 移動範囲 | `service.py` L760-881 (`schema_ops` から `return document` まで。コメントを含む) と、L68-70 (`_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES` と CH-0174 の説明コメント。読み手は L860 だけ) |
+| method に残すもの | L758-759 (`def` と `with self._slot(...) as canonical:`) と、関数を呼んで返す 1 行 |
+| 本体の変更 | 6 つの名前の置換だけ: `canonical.role` → `role`、`canonical.application_id` → `application_id`、`self.limits` → `limits` (L839・L863)、`self._control_plane_status` → `control_plane_status`、`self._process_ceiling` → `process_ceiling`、`self._surfaces` → `surfaces` (W3-3) |
+| leaf の import | `__future__`、`typing`。`limits` は `as_dict()` を呼ぶだけで `.limits` を import しない |
+| facade | `service.py` が `build_capabilities_document` を読む。`_IN_MEMORY_PROCESS_WIDE_LIMIT_CLASSES` は `service.py` から読む箇所が 0 (tests も読まない) なので facade に残さない (Y-3・Y-7 と同じ) |
+| denial・件数 pin・allowlist | 無い。L1 scan は差分 0 |
+| 範囲内の位置参照 (40c) | 付ける (「(in `service.py`)」): L762「(see `query`/`mutate`/`schema`/`catalog` below)」の below (CH-0143)、L818「(see __init__'s comment on this field)」の __init__'s (CH-0140)、L821「(`schema`/`mutate_result`/`_query_outcome` below」の below (CH-0139)、L865「`_slot()` above」の above (CH なし)、L876「`__init__`'s own comment」の `__init__`'s (CH-0136)、L68「(`self._rate_windows`/`self._active`, both below)」の below (CH-0174)。付けない: L765・L776・L790・L809・L815・L821 前半・L842 の below と L815・L840 の here (指す先も leaf に移る) |
+| 範囲外の位置参照 (40c) | 付けない: `http.py` L613「(service.py's `capabilities()`)」と `ops.py` L1149 (CH-0323)「what `service.py` is expected to declare」。どちらも宣言を返す `DataService.capabilities()` を指し、その method は `service.py` に残るので指す先は変わらない (`ops.py` は CH-ID の塊で、付ければ受け皿の訂正も要る) |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/service.py` (移動範囲、method の 1 行、import 1 行)、新規 `r2db-api/src/r2db_api/capabilities_document.py`、`docs/code-history/r2db-api/service.md` (CH-0143・CH-0140・CH-0139・CH-0136・CH-0174 の訂正の記録だけ)、`r2db-api/tests/test_foundation.py` (新規テスト 2 本)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `typing`) | `r2db-api/src/r2db_api/http.py`、`limits.py`、`main.py`、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py`、`conformance-tests/`、MitateDB-api 全部 (CE7 は別 WP)、`credential_store.py`、`docs/design/`、roadmap |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | 文書は引数だけから組み立てる | `capabilities_document.py`: `role == "developer"` を `role != "developer"` にする | `r2db-api/tests/test_foundation.py::test_capabilities_document_is_built_only_from_explicit_arguments` (新規。leaf を直接呼び、developer は 6 つの schema 操作・runtime は空 list、`process_ceiling` 2 で `requests_per_minute`・`concurrency` が `deployment_required`、`control_plane_status`・`surfaces` の反映を literal で固定する。`DataService.capabilities` との比較は同じ leaf を通るので赤にならず、使わない) |
+| 2 | method は deployment の値を渡す | `service.py`: 呼出しの `process_ceiling=self._process_ceiling` を `process_ceiling=1` にする | `r2db-api/tests/test_foundation.py::test_data_service_capabilities_passes_deployment_values_to_the_document` (新規。既定でない limits、`control_plane_status="enabled"`、surfaces、`process_ceiling=2` で `DataService.capabilities` を呼び literal と比べる)、`r2db-api/tests/test_process_ceilings_declaration.py::test_ceiling_two_maps_in_memory_classes_to_deployment_required` |
+| 3 | 同上 (surfaces) | `service.py`: `surfaces=self._surfaces` を `surfaces=None` にする | `r2db-api/tests/test_foundation.py::test_data_service_capabilities_passes_deployment_values_to_the_document`、`r2db-api/tests/test_surfaces_env.py::test_build_app_control_plane_enabled_publishes_both_surfaces` |
+| 4 | 同上 (limits) | `service.py`: `limits=self.limits` を `limits=ResourceLimits()` にする | `r2db-api/tests/test_foundation.py::test_data_service_capabilities_passes_deployment_values_to_the_document` (`r2db-api/tests/test_control_plane_service.py` L1781 は `ControlPlaneService` のテストで、leaf を直接呼ぶテストと同じく赤にならない) |
+| 5 | 同上 (control_plane) | `service.py`: `control_plane_status=self._control_plane_status` を `"unavailable"` にする | `r2db-api/tests/test_foundation.py::test_data_service_capabilities_passes_deployment_values_to_the_document`、`r2db-api/tests/test_credential_persistence.py::test_build_app_control_plane_status_enabled_is_declared` |
+| 6 | 認可と slot を通る | **監査照合**: `with self._slot(...)` が method に残り、leaf は `_slot`・`AuthContext` を参照しない (設計 §3.2)。呼出しが `with` の本体の中にある。leaf の 6 つの引数は keyword-only で既定値を持たない | — |
+| 7 | leaf の import が許可リストの内だけ | `capabilities_document.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 8 | 新 leaf が分類される | 一覧から `capabilities_document.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 9 | 訂正の記録 5 件 (0g の 4) | `service.md`: CH-0139 の訂正の記録を書かない | `tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` (HEAD を読むので、変異を使い捨ての clone にコミットして実行する。`--register` の `test_repository_register_passes` は形式しか見ず赤にならない) |
+| 10 | 本体は 6 つの置換を除き同一 | **監査照合**: 置換を戻した leaf の本体と移動前の L760-881 が AST で一致する | — |
+| 11 | 逐語移動と位置参照 (40c) | **監査照合**: コメントが逐語 (置換は識別子だけ)。括弧書きは上表の 6 箇所だけ。9 塊が leaf にある | — |
+| 12 | 公開の宣言は変わらない | **監査照合**: 既存の capabilities テストと conformance (C-05・C-17 など) の集計行が前後で一致 | — |
+| 13 | 同型性を登録しない | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。MitateDB CE7 とは対にしない | — |
+| 14 | 統合の手順 | **監査照合**: 3a の 10 と同じ | — |
+
+### 5.30 WP-3c — r2db query / mutate の形の検査 (SV3、**独立レビュー待ち**)
+
+**目的**: `_query_outcome` と `_mutate_outcome` の型・capability の検査を leaf `r2db-api/src/r2db_api/request_shape.py` の `_check_query_request_shape(select, where, page_size, order_by, cursor)` と `_check_mutation_request_shape(transaction, operations)` (値を返さない。facade は解決済みの transaction を読まない) へ移す。呼出しは同じ位置 (`_slot` の中、limits 検査の前) に置き、評価順と例外型を変えない。**WP-3b の統合後に着手する。**
+
+| 項目 | 実測 (`b45312d`。3b の統合後に取り直す) |
+|---|---|
+| 移動範囲 | `service.py` L913-920 (4 検査) と L972-984 (CH-0126 の塊、`resolved_transaction` の解決、capability 検査、operations 検査) |
+| 残すもの | L985 以降 (idempotency key の折畳み、`request`、limits、budget、`plan_request`)。`resolved_transaction` の読み手は L981 だけなので、3c の後 facade に読み手が無くなる。代入が leaf へ移るので、その説明の CH-0126 の塊も leaf へ移す (W3-5) |
+| leaf の import | `__future__`、`typing`、`.errors` (`fail`・`observed_type_of`・`violation`) |
+| facade | 2 関数を import 1 行で読む。`fail`・`observed_type_of`・`violation` は `service.py` の他の箇所が使うので残す |
+| denial | 語彙 code の `fail` 6 件 (4-key) |
+| 件数 pin | `service.py` 10 → 4、`request_shape.py` 6 (`test_ast_full_count_matches_the_audit_site_count` の module tuple と dict の両方に足す) |
+| 行番号 allowlist | 対象は `postgres.py` だけなので差分 0 |
+| sib tuple | 固定 tuple (`structured.py`, `inmemory_predicate.py`, `identifier_rules.py`, `paging.py`, `value_types.py`) に `request_shape.py` を足し、テストの docstring の module 一覧も合わせる (W3-4 裁定) |
+| 既存テスト | `select` が list でない: `r2db-api/tests/test_foundation.py::test_malformed_inputs_fail_with_safe_foundation_errors`、`r2db-api/tests/test_application_audit.py::test_validation_failed_denials_add_no_durable_row_and_no_buffer_entry`。`best_effort`: `r2db-api/tests/test_denial_details_and_request_id.py::test_capability_unsupported_carries_violated_declaration`。`cursor`・`order_by` が dict: `r2db-api/tests/test_l5_si10_details_leak_scan.py::test_si10_scan_finds_no_leaked_value_sql_dsn_internal_name_or_stack_trace` (文言の漏洩だけ)。`where` が list でない、`page_size` が bool、6 件の details の literal は固定されていない |
+| 位置参照 (40c) | 付ける: leaf へ移る CH-0126 の「what `plan_request` below reflects」の below の直後に「(in `service.py`)」(訂正の記録 1 件)。同じ塊の「(the capability gate below)」は leaf の中で成り立つので付けない |
+
+| 触るファイル | 触らないファイル |
+|---|---|
+| `r2db-api/src/r2db_api/service.py` (移動範囲、呼出し 2 行、import 1 行)、新規 `r2db-api/src/r2db_api/request_shape.py`、`docs/code-history/r2db-api/service.md` (CH-0126 の訂正の記録だけ)、`r2db-api/tests/test_foundation.py` (新規テスト 2 本)、`r2db-api/tests/test_l1_details_vocabulary_ast_scan.py` (`SCANNED_MODULES`、件数 pin、sib tuple とその docstring)、`tools/tests/test_leaf_import_direction.py` (leaf 1 行、許可 `typing`・`.errors`) | `r2db-api/src/r2db_api/http.py` (HTTP の shape 検査は別)、`structured.py`、`limits.py`、同 L1 scan の `_BACKEND_LAYER_ALLOWLIST`、`conformance-tests/`、MitateDB-api 全部、`credential_store.py`、`docs/design/`、roadmap |
+
+| # | 完了条件 | 変異 (`file:操作`) | 赤になる test id (予想) |
+|---|---|---|---|
+| 1 | `page_size` は bool を拒否する | `request_shape.py`: `or isinstance(page_size, bool)` を削る | `r2db-api/tests/test_foundation.py::test_request_shape_denials_carry_code_details_and_order` (新規。6 つの不正入力の code と details を literal で固定する) |
+| 2 | `where` は list | `request_shape.py`: `where` の条件を `False and …` にする | 同上 |
+| 3 | `cursor` は str | `request_shape.py`: `cursor` の条件を `False and …` にする | 同上 |
+| 4 | capability の検査が operations の検査より先 | `request_shape.py`: 2 つの検査の順を入れ替える | 同上 (`transaction="best_effort"` と `operations="x"` で `CAPABILITY_UNSUPPORTED`) |
+| 5 | `atomic` 以外を拒否する | `request_shape.py`: `!= "atomic"` を `not in ("atomic", "best_effort")` にする | `r2db-api/tests/test_denial_details_and_request_id.py::test_capability_unsupported_carries_violated_declaration` |
+| 6 | 形の検査は認可の後に走り、deny が監査される (評価順) | `service.py`: `_check_query_request_shape(...)` の呼出しを `with self._slot(...)` の外 (前) へ出す | `r2db-api/tests/test_foundation.py::test_request_shape_checks_run_after_authorization_and_are_audited` (新規。無効な context と不正な `select` の組で `AUTH_INVALID`、不正な `select` だけのときはメモリ内の監査 (`ControlAuthority.audit_events()`) に `VALIDATION_FAILED` の deny が残る) |
+| 6b | facade の差分は呼出しだけ | **監査照合**: 2 つの呼出しが `with` の本体の中、`self.limits.check_request` の前にあり、facade の差分は呼出し 2 行・import・移動範囲の削除だけ | — |
+| 7 | 移動先が `SCANNED_MODULES` に入る (40b) | L1 scan: `SCANNED_MODULES` から `request_shape.py` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_module_with_a_vocabulary_denial_is_accounted_for` |
+| 8 | 件数 pin (`service.py` 4、`request_shape.py` 6) | `request_shape.py`: 4-key の `fail("VALIDATION_FAILED", "x", details=violation("request_schema"))` を呼ぶ関数を 1 つ足す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_ast_full_count_matches_the_audit_site_count` |
+| 9 | 移した denial が 4-key のまま | `request_shape.py`: `cursor` の `fail` から `details=` を外す | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_every_choke_point_denial_carries_details_ast_full_count`、`::test_allowlist_entries_match_real_bare_call_sites` |
+| 9b | sib tuple に移動先が入る (W3-4) | `request_shape.py`: `"Cursor must be a string."` を allowlist の文言 `"A value in this request is not acceptable to the underlying storage."` にする | `r2db-api/tests/test_l1_details_vocabulary_ast_scan.py::test_backend_layer_allowlist_entries_have_no_in_memory_sibling_denial` (tuple を更新しないと緑のまま) |
+| 10 | leaf の import が許可リストの内だけ | `request_shape.py`: `import os` を 1 行足す | `tools/tests/test_leaf_import_direction.py::test_leaf_modules_import_only_their_allowlisted_modules` |
+| 11 | 新 leaf が分類される | 一覧から `request_shape.py` の行を消す | `tools/tests/test_leaf_import_direction.py::test_every_src_module_is_classified` |
+| 12 | 訂正の記録 (0g の 4) | `service.md`: CH-0126 の訂正の記録を書かない | `tools/tests/test_comment_provenance.py::test_0f_both_peers_all_src_rev_vs_itself_is_green` (HEAD を読むので、変異を使い捨ての clone にコミットして実行する。`--register` の `test_repository_register_passes` は形式しか見ず赤にならない) |
+| 13 | 移した文は同一 | **監査照合**: leaf の検査文が移動前の L913-920・L980-984 と AST で一致し、CH-0126 のコメントが逐語 (関数の引数名は移動前の変数名のまま) | — |
+| 14 | 同型性を登録しない・統合の手順 | **監査照合**: `_ISOMORPHIC_TARGETS` の差分 0。3a の 10 と同じ手順 | — |
+
+### 5.31 WP-3 の順序と未確定 (v1.10 追記)
+
+- **順序**: WP-3a → 3b → 3c の直列 (共通に `service.py`・`r2db-api/tests/test_foundation.py`・L・`service.md` を触る)。3c だけが r2db の L1 scan を触る。
+- 各単位の新規テストは 3a 2 本、3b 2 本、3c 2 本。§5.5 の C-1〜C-3 を末尾に付ける。
+- 設計 §9.3: 3 件とも MitateDB `cell.py` の `_gate` とその呼出し経路を触らない。U-2: r2db `service.py` のコメント整理 (変更セット 2、変更セット 3 の 0d の戻し) は統合済み。
+
+**未確定 (監督判断待ち)**:
+
+| # | 点 |
+|---|---|
+| W3-1 | WP-3 の範囲。本書は SV1〜SV3 (3a〜3c) だけを起草した。ST8〜ST10 (r2db `structured.py`) と CE5〜CE7 (MitateDB `cell.py`) を WP-3d 以降として実測するか、別の段階にするか |
+| W3-2 | leaf 名。`service_results.py` (§2.4)、`capabilities_document.py` の `build_capabilities_document`、`request_shape.py` の `_check_query_request_shape`・`_check_mutation_request_shape` |
+| W3-3 | 3b は本体の AST が 6 つの名前の置換だけ変わる (これまでの「AST 同一」の例外)。設計 §4 WP-3 の「暗黙に読ませない」に従う形として認めるか |
+| W3-4 | 3c の leaf を r2db の L1 scan の sib tuple に足すか (本案は足さない) |
+| W3-5 | CH-0126 は `resolved_transaction` の説明で、3c の後 facade にその読み手が無い (代入も leaf へ移る)。塊を leaf へ移し「`plan_request` below」に括弧書きを付ける (本案) か、facade に残すか |
+
+**監督裁定 (2026-09-15、独立レビュー)**: 指摘をすべて採用した。W3-4 は足す (§5.30)。3b・3c の facade テスト、訂正の記録の赤テスト、評価順の変異、3b の範囲 (L760-881) と範囲外の位置参照は §5.27・§5.29・§5.30 に反映した。
+
+**監督裁定 (2026-09-15)**:
+
+| # | 裁定 |
+|---|---|
+| W3-1 | ST8〜ST10 と CE5〜CE7 は、WP-3a〜3c の統合後に WP-3d 以降として実測・起草する (本 manifest には入れない) |
+| W3-2 | 提案の leaf 名 (`service_results.py`、`capabilities_document.py`、`request_shape.py`) で進める |
+| W3-3 | 認める。ただし 3b の実装の検証で、移した本体と元の本体の AST の差が、その 6 つの名前を引数の名前に置き換えた箇所だけであることを機械的に示す (差分の列挙をログに残す)。能力文書は literal の期待値のテストで固定する |
+| W3-4 | 先例 (m6、`request_limits.py`・`constraint_resolution.py`) に揃えて sib tuple に足す。足すと検査が空振りになる、又は偽の赤になる根拠が独立レビューで示された場合だけ、足さない案に戻す |
+| W3-5 | 独立レビュー後の本案に改める: 3c で `resolved_transaction` の代入も leaf へ移り facade に読み手が残らないので、CH-0126 の塊は leaf へ移し、「`plan_request` below」に括弧書きを付けて受け皿に訂正の記録を足す |
 
 ## 6. 重なり表と監督裁定
 
