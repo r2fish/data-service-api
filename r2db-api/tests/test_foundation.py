@@ -1459,6 +1459,25 @@ def test_matches_pattern_ending_in_an_unescaped_backslash_is_validation_failed()
     assert rows.items == []
 
 
+def test_inmemory_predicate_leaf_preserves_structured_facade_and_wildcard_escape():
+    from r2db_api.structured import _matches, _predicate_text, _wildcard_pattern
+    from r2db_api.inmemory_predicate import (
+        _matches as leaf_matches,
+        _predicate_text as leaf_predicate_text,
+        _wildcard_pattern as leaf_wildcard_pattern,
+    )
+
+    assert _matches is leaf_matches
+    assert _predicate_text is leaf_predicate_text
+    assert _wildcard_pattern is leaf_wildcard_pattern
+
+    # `\` escapes exactly the next character as a literal -- `\_` matches
+    # only a literal "_", never "any single character" the way an
+    # unescaped `_` would.
+    assert _wildcard_pattern(r"a\_b").match("a_b") is not None
+    assert _wildcard_pattern(r"a\_b").match("axb") is None
+
+
 def test_integer_field_value_out_of_bigint_range_is_validation_failed():
     """R-7 addendum (WP-3 review blocker-2): a JSON integer with no
     fixed width passes a bare `isinstance(int)` check but PostgreSQL's
@@ -1657,6 +1676,21 @@ def test_contains_and_matches_apply_to_typed_non_string_columns_via_text_form():
     assert rows.items == [{"n": 12345}]
     rows = cell.query("readings", select=["flag"], where=[Predicate("flag", "matches", "tr%")], page_size=10, limits=LIMITS)
     assert rows.items == [{"flag": True}]
+
+
+def test_matches_applies_float8out_formatting_to_a_typed_number_column():
+    """WP-3 confirmation review N-1 correction: a typed `"number"`
+    column's float value is rendered with `float8out` formatting
+    (`100.0` -> `"100"`, dropping the trailing `.0`) for `contains`/
+    `matches` -- an untyped column's jsonb numeric rules would instead
+    keep it as `"100.0"`, which a full-match `matches` pattern of `"100"`
+    (no trailing `.0`) would then reject."""
+    cell = _cell()
+    _create_entity(cell, "numeric")
+    _add_field(cell, "numeric", "n", "number")
+    cell.transact("numeric", [{"operation": "insert", "values": {"n": 100.0}}], LIMITS)
+    rows = cell.query("numeric", select=["n"], where=[Predicate("n", "matches", "100")], page_size=10, limits=LIMITS)
+    assert rows.items == [{"n": 100.0}]
 
 
 def test_ne_excludes_null_rows_per_sql_three_valued_logic():
