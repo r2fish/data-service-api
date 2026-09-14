@@ -515,6 +515,26 @@ def test_finalize_commits_allowed_paths_and_merges(isolated_git, tmp_path):
     assert _git(wt, "rev-parse", "HEAD") == _git(main_root, "rev-parse", "HEAD")
 
 
+def test_finalize_splits_commits_with_leave(isolated_git, tmp_path):
+    main_root, wt = _repo_with_worktree(tmp_path)
+    main_head = _git(main_root, "rev-parse", "HEAD")
+    (wt / "docs/a.md").write_text("a2\n")
+    (wt / "src/x.py").write_text("x = 2\n")
+    (wt / "src/new.py").write_text("y = 1\n")
+    buf = io.StringIO()
+    code = finalize.finalize(wt, "wp", ["docs/*"], _msg(tmp_path, "docs first\n"), [], False, None, False,
+                             sys.executable, out=buf, repo_checks=False, leave=["src/*"])
+    assert code == 0, buf.getvalue()
+    assert "left uncommitted by --leave: 2 paths" in buf.getvalue()
+    assert _git(wt, "show", "--name-only", "--format=", "HEAD").split() == ["docs/a.md"]
+    assert sorted(_git(wt, "status", "--porcelain", "--untracked-files=all").split()) == ["??", "M", "src/new.py", "src/x.py"]
+    assert _git(main_root, "rev-parse", "HEAD") == main_head
+    code, text = _finalize(wt, tmp_path, ["src/*"], msg="code second\n")
+    assert code == 0, text
+    assert _git(main_root, "log", "-1", "--format=%s").strip() == "Merge wp: code second"
+    assert "docs/a.md" in _git(main_root, "diff", "--name-only", f"{main_head.strip()}..HEAD")
+
+
 def test_finalize_rejects_path_outside_allowlist(isolated_git, tmp_path):
     _, wt = _repo_with_worktree(tmp_path)
     (wt / "docs/a.md").write_text("a2\n")
