@@ -706,6 +706,20 @@ caller through `query_page` below, which `http.post_query` uses.
 # `"surfaces": None` entry.
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3b -- capability-document assembly moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+`surfaces` is an optional key -- present only when this instance was constructed with one (`__init__`'s own comment on `self._surfaces`). Never a `"surfaces": None` entry.
+```
+
+new:
+```
+`surfaces` is an optional key -- present only when this instance was constructed with one (`__init__`'s own comment on `self._surfaces`) (in `service.py`). Never a `"surfaces": None` entry.
+```
+
 ## CH-0137
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
@@ -794,6 +808,20 @@ new:
 Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is declared `enabled` in the same commit that removes the provisional gate rejecting every field it governs (`schema`/`mutate_result`/`_query_outcome` below, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
 ```
 
+### correction: 2026-09-15
+
+- reason: R-37 WP-3b -- capability-document assembly moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is declared `enabled` in the same commit that removes the provisional gate rejecting every field it governs (`schema`/`mutate_result`/`_query_outcome` below, `http.py`'s `post_mutate`/`post_query`) -- P-3 (宣言と挙動は同一コミット).
+```
+
+new:
+```
+Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is declared `enabled` in the same commit that removes the provisional gate rejecting every field it governs (`schema`/`mutate_result`/`_query_outcome` below, `http.py`'s `post_mutate`/`post_query`) (in `service.py`) -- P-3 (宣言と挙動は同一コミット).
+```
+
 ## CH-0140
 
 - moved from: `src/r2db_api/service.py` (`DataService.capabilities`)
@@ -804,6 +832,20 @@ Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is 
 # R-9: reflects this instance's own constructor-injected
 # deployer declaration -- never hardcoded (see __init__'s
 # comment on this field).
+```
+
+### correction: 2026-09-15
+
+- reason: R-37 WP-3b -- capability-document assembly moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+reflects this instance's own constructor-injected deployer declaration -- never hardcoded (see __init__'s comment on this field).
+```
+
+new:
+```
+reflects this instance's own constructor-injected deployer declaration -- never hardcoded (see __init__'s comment on this field) (in `service.py`).
 ```
 
 ## CH-0141
@@ -881,6 +923,20 @@ Contract 1.7.0 (subordinate ruling 12): each of the three capabilities below is 
 # declarations are enforced now (see `constraint_declarations`
 # below), so it is no longer accurate to list it under
 # `unsupported`.
+```
+
+### correction: 2026-09-15
+
+- reason: R-37 WP-3b -- capability-document assembly moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design R2DB_CCR13_STORAGE_V1.md §3) is removed in this same commit (see `query`/`mutate`/`schema`/`catalog` below) -- this declaration update is what makes that removal honest rather than a new C-12 "declared unavailable, executes anyway" gap.
+```
+
+new:
+```
+CCR-13 WP-5b: the WP-2-through-WP-5 provisional gate (design R2DB_CCR13_STORAGE_V1.md §3) is removed in this same commit (see `query`/`mutate`/`schema`/`catalog` below) (in `service.py`) -- this declaration update is what makes that removal honest rather than a new C-12 "declared unavailable, executes anyway" gap.
 ```
 
 ## CH-0144
@@ -1619,6 +1675,20 @@ is the opaque cursor for the next page (`QueryOutcome.next_cursor`,
 # (`idempotency_entries`, bound in PostgreSQL -- `enforced` regardless of
 # `process_ceiling`, design D-5(ii); the count lock itself is WP-6d-i's
 # scope, supervisory ruling 2026-09-08, not this WP's).
+```
+
+### correction: 2026-09-15
+
+- reason: R-37 WP-3b -- capability-document assembly moved to `capabilities_document.py`; the pointer gets a 40c position bracket
+
+old:
+```
+Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`.
+```
+
+new:
+```
+Phase 10 WP-6a (design D-5(ii), contract 1.8.0): this plane's own region (ii) -- limit classes bound by in-memory, per-process state (`self._rate_windows`/`self._active`, both below) (in `service.py`), the only classes whose `limit_enforcement` mapping actually depends on `process_ceiling`.
 ```
 
 ## CH-0175

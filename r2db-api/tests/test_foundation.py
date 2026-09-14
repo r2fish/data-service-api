@@ -2304,6 +2304,187 @@ def test_service_results_are_frozen_with_contract_defaults():
     ]
 
 
+def test_capabilities_document_is_built_only_from_explicit_arguments():
+    """R-37 WP-3b (SV2): `build_capabilities_document` (`capabilities_
+    document.py`) takes every principal/deployment value as an explicit
+    keyword argument and reads no `self`/`AuthContext` -- called directly
+    here (not through `DataService.capabilities`), with `process_ceiling=2`
+    (`requests_per_minute`/`concurrency` both `deployment_required`) and a
+    non-default `control_plane_status`/`surfaces`, fixed against literal
+    expected values for both `developer` (6 schema operations) and a
+    non-developer role (none)."""
+    from r2db_api.capabilities_document import build_capabilities_document
+    from r2db_api.limits import ResourceLimits
+
+    limits = ResourceLimits(concurrency=5, requests_per_minute=9)
+    common = dict(
+        limits=limits,
+        control_plane_status="enabled",
+        process_ceiling=2,
+        surfaces={"control_plane_base_url": "https://control.example.invalid"},
+    )
+    expected_capabilities = {
+        "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
+        "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
+        "application_catalog": {"status": "enabled"},
+        "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
+        "best_effort_transactions": {"status": "unavailable"},
+        "idempotency": {"status": "enabled"},
+        "revision_preconditions": {"status": "enabled"},
+        "row_addressability": {"status": "enabled"},
+        "cross_entity_mutation": {"status": "unavailable"},
+        "control_plane": {"status": "enabled"},
+        "constraint_declarations": {"status": "enabled"},
+        "dry_run": {"status": "enabled"},
+        "request_budget": {"status": "enabled"},
+    }
+    expected_limits = {
+        "request_bytes": 1048576, "batch_items": 100, "result_items": 1000, "query_complexity": 50,
+        "execution_ms": 5000, "concurrency": 5, "requests_per_minute": 9, "schema_objects": 1000,
+        "operation_depth": 8, "enum_members": 64, "idempotency_entries": 10000, "idempotency_retention_ms": 86400000,
+    }
+    expected_limit_enforcement = {
+        "request_bytes": "enforced", "batch_items": "enforced", "result_items": "enforced",
+        "query_complexity": "enforced", "execution_ms": "reference_wall_clock", "concurrency": "deployment_required",
+        "requests_per_minute": "deployment_required", "schema_objects": "enforced", "operation_depth": "enforced",
+        "enum_members": "enforced", "idempotency_entries": "enforced", "idempotency_retention_ms": "reference_wall_clock",
+    }
+
+    developer_doc = build_capabilities_document(role="developer", application_id="app-x", **common)
+    assert developer_doc == {
+        "contract_version": "1.8.0",
+        "capabilities": {
+            **expected_capabilities,
+            "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"], "unsupported": ["jobs"]},
+        },
+        "limits": expected_limits,
+        "limit_enforcement": expected_limit_enforcement,
+        "authorization_propagation_bound_ms": 0,
+        "application_scope": "app-x",
+        "role": "developer",
+        "surfaces": {"control_plane_base_url": "https://control.example.invalid"},
+    }
+
+    runtime_doc = build_capabilities_document(role="runtime", application_id="app-x", **common)
+    assert runtime_doc == {
+        "contract_version": "1.8.0",
+        "capabilities": {
+            **expected_capabilities,
+            "schema_operations": {"status": "partial", "operations": [], "unsupported": ["jobs"]},
+        },
+        "limits": expected_limits,
+        "limit_enforcement": expected_limit_enforcement,
+        "authorization_propagation_bound_ms": 0,
+        "application_scope": "app-x",
+        "role": "runtime",
+        "surfaces": {"control_plane_base_url": "https://control.example.invalid"},
+    }
+
+
+def test_data_service_capabilities_passes_deployment_values_to_the_document():
+    """R-37 WP-3b (SV2): `DataService.capabilities` passes its own
+    constructor-injected deployment values (`self.limits`, `self.
+    _control_plane_status`, `self._process_ceiling`, `self._surfaces`) and
+    the authenticated principal (`canonical.role`/`canonical.
+    application_id`) straight through to `build_capabilities_document`,
+    inside the `with self._slot(...)` body -- fixed against a literal
+    expected document, with non-default limits/control_plane_status/
+    surfaces/process_ceiling so a mutation that drops any one of them
+    through a hardcoded or wrong value is caught. A second, runtime-role
+    call is compared against its own literal too, so a mutation that
+    hardcodes `role="developer"` at the facade's call site (rather than
+    passing `canonical.role` through) is also caught -- the developer-only
+    case above alone cannot distinguish the two."""
+    from r2db_api.limits import ResourceLimits
+
+    credentials = CredentialStore(pepper="wp3b-caps-pepper")
+    with credentials.unit_of_work() as work:
+        credentials.add("wp3b-dev", "wp3b-app", "developer", "wp3b-dev-secret", work=work)
+    with credentials.unit_of_work() as work:
+        credentials.add("wp3b-user", "wp3b-app", "runtime", "wp3b-user-secret", work=work)
+    limits = ResourceLimits(concurrency=5, requests_per_minute=9)
+    service = DataService(
+        credentials,
+        limits=limits,
+        control_plane_status="enabled",
+        surfaces={"control_plane_base_url": "https://control.example.invalid"},
+        process_ceiling=2,
+    )
+    ControlAuthority(service).register_application("wp3b-app", entities={})
+    developer = service.authenticate("wp3b-dev.wp3b-dev-secret")
+    runtime = service.authenticate("wp3b-user.wp3b-user-secret")
+
+    assert service.capabilities(developer) == {
+        "contract_version": "1.8.0",
+        "capabilities": {
+            "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
+            "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
+            "application_catalog": {"status": "enabled"},
+            "schema_operations": {"status": "partial", "operations": ["create_entity", "add_field", "alter_field", "create_index", "drop_index", "drop_entity"], "unsupported": ["jobs"]},
+            "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
+            "best_effort_transactions": {"status": "unavailable"},
+            "idempotency": {"status": "enabled"},
+            "revision_preconditions": {"status": "enabled"},
+            "row_addressability": {"status": "enabled"},
+            "cross_entity_mutation": {"status": "unavailable"},
+            "control_plane": {"status": "enabled"},
+            "constraint_declarations": {"status": "enabled"},
+            "dry_run": {"status": "enabled"},
+            "request_budget": {"status": "enabled"},
+        },
+        "limits": {
+            "request_bytes": 1048576, "batch_items": 100, "result_items": 1000, "query_complexity": 50,
+            "execution_ms": 5000, "concurrency": 5, "requests_per_minute": 9, "schema_objects": 1000,
+            "operation_depth": 8, "enum_members": 64, "idempotency_entries": 10000, "idempotency_retention_ms": 86400000,
+        },
+        "limit_enforcement": {
+            "request_bytes": "enforced", "batch_items": "enforced", "result_items": "enforced",
+            "query_complexity": "enforced", "execution_ms": "reference_wall_clock", "concurrency": "deployment_required",
+            "requests_per_minute": "deployment_required", "schema_objects": "enforced", "operation_depth": "enforced",
+            "enum_members": "enforced", "idempotency_entries": "enforced", "idempotency_retention_ms": "reference_wall_clock",
+        },
+        "authorization_propagation_bound_ms": 0,
+        "application_scope": "wp3b-app",
+        "role": "developer",
+        "surfaces": {"control_plane_base_url": "https://control.example.invalid"},
+    }
+
+    assert service.capabilities(runtime) == {
+        "contract_version": "1.8.0",
+        "capabilities": {
+            "structured_query": {"status": "enabled", "operators": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "matches", "is_null"]},
+            "atomic_mutation": {"status": "enabled", "operations": ["insert", "update", "upsert", "delete"]},
+            "application_catalog": {"status": "enabled"},
+            "schema_operations": {"status": "partial", "operations": [], "unsupported": ["jobs"]},
+            "audit_query": {"status": "unavailable", "authority": "control_or_audit"},
+            "best_effort_transactions": {"status": "unavailable"},
+            "idempotency": {"status": "enabled"},
+            "revision_preconditions": {"status": "enabled"},
+            "row_addressability": {"status": "enabled"},
+            "cross_entity_mutation": {"status": "unavailable"},
+            "control_plane": {"status": "enabled"},
+            "constraint_declarations": {"status": "enabled"},
+            "dry_run": {"status": "enabled"},
+            "request_budget": {"status": "enabled"},
+        },
+        "limits": {
+            "request_bytes": 1048576, "batch_items": 100, "result_items": 1000, "query_complexity": 50,
+            "execution_ms": 5000, "concurrency": 5, "requests_per_minute": 9, "schema_objects": 1000,
+            "operation_depth": 8, "enum_members": 64, "idempotency_entries": 10000, "idempotency_retention_ms": 86400000,
+        },
+        "limit_enforcement": {
+            "request_bytes": "enforced", "batch_items": "enforced", "result_items": "enforced",
+            "query_complexity": "enforced", "execution_ms": "reference_wall_clock", "concurrency": "deployment_required",
+            "requests_per_minute": "deployment_required", "schema_objects": "enforced", "operation_depth": "enforced",
+            "enum_members": "enforced", "idempotency_entries": "enforced", "idempotency_retention_ms": "reference_wall_clock",
+        },
+        "authorization_propagation_bound_ms": 0,
+        "application_scope": "wp3b-app",
+        "role": "runtime",
+        "surfaces": {"control_plane_base_url": "https://control.example.invalid"},
+    }
+
+
 def test_order_by_sorts_and_appends_id_when_absent():
     cell = _numbered_cell(3)  # n = 0, 1, 2 with id = 1, 2, 3 respectively
     descending = cell.query("items", select=["n"], where=[], page_size=10, limits=LIMITS, order_by=[{"field": "n", "direction": "desc"}])
