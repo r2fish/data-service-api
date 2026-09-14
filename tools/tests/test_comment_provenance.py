@@ -1213,3 +1213,344 @@ def test_reference_in_wrong_scope_is_red(tmp_path):
     code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
     assert code == 1
     assert "§4.1 (2)" in output
+
+
+# ===========================================================================
+# Change set 0b: §4.1 (6), leading history-label removal (design v0.5).
+# ===========================================================================
+
+def _label_scenario(tmp_path, old_first_sentence: str, new_first_sentence: str):
+    """Old block: `old_first_sentence` plus a second sentence that always
+    moves away (justifying the CH-ID + companion, byte-identical to the
+    full original block). New block retains `new_first_sentence` plus the
+    `# history: CH-0001` marker."""
+    repo = _init_repo(tmp_path)
+    old_block_lines = [f"# {old_first_sentence}", "# Moved."]
+    old = "\n".join(old_block_lines) + "\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", old)
+    rev = _commit_all(repo, "old")
+    new = f"# {new_first_sentence}\n# history: CH-0001\ndef f():\n    return 1\n"
+    _write(repo, "r2db-api/src/r2db_api/mod.py", new)
+    _write(
+        repo, "docs/code-history/r2db-api/mod.md",
+        _companion_section("CH-0001", "\n".join(old_block_lines)),
+    )
+    return repo, rev
+
+
+# --- green ------------------------------------------------------------
+
+def test_label_removal_basic_is_green(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Ruling U-7 (WP-6d): reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_label_removal_with_branch_number_is_green(tmp_path):
+    # Without merging "WP-6d" with its branch number "(ii)", "ii" would
+    # stand alone as a 4th content word (Ruling, ii), pushing content
+    # words to 2 -- still under the limit here, so the exact-count
+    # white-box test below is what actually pins the merge's necessity.
+    repo, rev = _label_scenario(tmp_path, "Ruling U-7 (WP-6d (ii)): reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_label_word_tokens_merges_history_token_branch():
+    # White-box (0b review round 4 supervisor ruling): the branch-number
+    # merge applies to a §4.1 (5) history token too, not only a bare ID.
+    # "Ruling U-7 (WP-6d (ii))" must count as exactly 3 words / 1 content
+    # word (Ruling); without the WP- merge, "ii" stands alone as a 2nd
+    # content word and the total climbs to 4.
+    tokens = cp._label_word_tokens("Ruling U-7 (WP-6d (ii))")
+    assert len(tokens) == 3
+    assert sum(1 for _t, is_content in tokens if is_content) == 1
+
+
+def test_label_removal_content_words_exactly_three_is_green(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool lock order (WP-3): reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_label_removal_twelve_words_is_green(tmp_path):
+    label = " ".join(f"WP-{i}" for i in range(1, 12)) + " x"
+    repo, rev = _label_scenario(tmp_path, f"{label}: reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_label_removal_combined_with_paren_removal_is_green(tmp_path):
+    # (6) removes the leading label, then (4) removes the now-fully-
+    # removable trailing "(R-2)" (a lone unprotected bare ID).
+    repo, rev = _label_scenario(tmp_path, "Ruling X (WP-3): reason (R-2).", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+def test_label_removal_japanese_is_green(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path,
+        "監督裁定 (WP-6d): 現在も成り立つ理由のみ残す。",
+        "現在も成り立つ理由のみ残す。",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 0, output
+
+
+# --- red ----------------------------------------------------------------
+
+def test_label_removal_too_many_content_words_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Because the pool is shared (WP-3): reason.", "reason."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_separator_mid_sentence_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "The lock is taken before the read per WP-3: reason.", "reason."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_then_word_change_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "Ruling U-7 (WP-6d): reason is clear.", "reason is different."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_thirteen_words_is_red(tmp_path):
+    # 13 words (>12), but content words = 1 (<=3) -- isolates the word-
+    # count condition from the content-word condition, so this fixture
+    # specifically pins the 12-word limit.
+    label = " ".join(f"WP-{i}" for i in range(1, 13)) + " x"
+    repo, rev = _label_scenario(tmp_path, f"{label}: reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_content_words_exactly_four_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Pool lock order rule (WP-3): reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_japanese_twenty_five_chars_is_red(tmp_path):
+    repo, rev = _label_scenario(
+        tmp_path, "経" * 25 + " (WP-3)：本文です。", "本文です。"
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_japanese_over_word_limit_is_red(tmp_path):
+    # The 12-word limit applies EVEN when the label contains Japanese and
+    # would otherwise pass the (separate) 24-character check.
+    label = " ".join(f"WP-{i}" for i in range(1, 13)) + " 経"
+    repo, rev = _label_scenario(tmp_path, f"{label}：本文です。", "本文です。")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_japanese_thirty_char_paren_is_red(tmp_path):
+    # The parenthetical's CONTENT counts toward the 24-char limit (only
+    # the bracket characters themselves are excluded) -- this 30+
+    # character note pushes the label over the limit.
+    repo, rev = _label_scenario(
+        tmp_path,
+        "WP-3 (この規則は現在も有効な安全上の理由を説明する長い注記です)：本文です。",
+        "本文です。",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_separator_inside_code_span_is_red(tmp_path):
+    # The ": " inside the backtick span is not a valid separator; the
+    # actual (invalid) edit below assumes it was.
+    repo, rev = _label_scenario(
+        tmp_path, "WP-3 `x: y` more: body stays.", "y` more: body stays."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_invariant_branch_protected_is_red(tmp_path):
+    # SI-08 is protected -- it may never merge with a following branch
+    # number, and (being the only marker) this label has no qualifying
+    # unprotected marker either.
+    repo, rev = _label_scenario(tmp_path, "Invariant SI-08 (2): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_word_tokens_does_not_merge_protected_id_branch():
+    # White-box: rule (c)'s hard exclusion (any protected reference
+    # disqualifies the whole label outright) makes it impossible to
+    # observe the branch-merge restriction end-to-end through
+    # `_run_base` -- a label with a protected ID is always rejected
+    # regardless of how it tokenizes. So this pins the tokenizer directly:
+    # SI-08 (protected) must NOT merge with a following "(2)" branch the
+    # way an unprotected ID would.
+    tokens = cp._label_word_tokens("Invariant SI-08 (2) rule")
+    content_words = [t for t, is_content in tokens if is_content]
+    assert "SI-08" in content_words
+
+
+def test_label_removal_roadmap_tagged_id_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "roadmap R-22: body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_has_provenance_marker_ignores_tagged_bare_id():
+    # White-box: same reasoning as above -- rule (c) ALSO independently
+    # rejects "roadmap R-22" (a provenance-tagged bare ID is itself a
+    # "protected reference" per the supervisor ruling), so condition (1)'s
+    # own tag-check can't be isolated end-to-end either.
+    assert cp._label_has_provenance_marker("roadmap R-22") is False
+
+
+def test_label_removal_negation_word_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Never (WP-3): retry.", "retry.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_protected_plus_token_is_red(tmp_path):
+    # SI-08 (a protected reference) co-occurs with WP-3 (a real token) --
+    # the protected reference still disqualifies the whole label.
+    repo, rev = _label_scenario(tmp_path, "SI-08 WP-3: body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+# ===========================================================================
+# Change set 0b, review round 3 (monitor ruling, final/small): (a) revert
+# _FILENAME_EXT_RE + versioned-document-name provenance tag, applied to
+# both (4) and (6); (b)/(c) e2e fixtures.
+# ===========================================================================
+
+def test_label_removal_japanese_forbidden_word_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "これは禁止 (WP-3)：本文。", "本文。")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_english_no_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "No retry (WP-3): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_extensionless_path_word_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "(docs/x R-2, WP-3): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_roadmap_tagged_id_with_token_is_red(tmp_path):
+    # Unlike the plain "roadmap R-22: body." case, WP-3 alone would
+    # satisfy condition (1) -- the roadmap tag must still block R-22 and
+    # disqualify the whole label via the protected-reference rule.
+    repo, rev = _label_scenario(tmp_path, "roadmap R-22 (WP-3): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_contract_version_tagged_is_red(tmp_path):
+    # "Contract 1.7.0" is a versioned document name -- D-2 is tagged by
+    # it and may not be removed, even with the branch number merged.
+    repo, rev = _label_scenario(
+        tmp_path, "Contract 1.7.0 (D-2 (4), WP-2a): body.", "body."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_design_version_tagged_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "design v1.2 R-4 (WP-1): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_design_version_tagged_no_dot_is_red(tmp_path):
+    # Same as above but with a dot-less version ("v12"), so the (reverted,
+    # wide) _FILENAME_EXT_RE has no "." to coincidentally latch onto --
+    # this isolates the versioned-document-name check specifically.
+    repo, rev = _label_scenario(tmp_path, "design v12 R-4 (WP-1): body.", "body.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_lowercased_remainder_is_red(tmp_path):
+    # §8.3 (3): the remainder must stay byte-for-byte -- no reshaping.
+    repo, rev = _label_scenario(tmp_path, "Ruling U-7 (WP-6d): Reason stays.", "reason stays.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_separator_kept_is_red(tmp_path):
+    # §8.3 (4): only the label itself may be removed, not the separator.
+    repo, rev = _label_scenario(
+        tmp_path, "Ruling U-7 (WP-6d): reason stays.", ": reason stays."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_extra_word_deleted_is_red(tmp_path):
+    # §8.3 (5): the remainder itself must not lose an extra word.
+    repo, rev = _label_scenario(
+        tmp_path, "Ruling U-7 (WP-6d): the reason stays clear.", "the reason stays."
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_no_provenance_marker_is_red(tmp_path):
+    repo, rev = _label_scenario(tmp_path, "Note carefully: reason.", "reason.")
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
+
+
+def test_label_removal_no_real_separator_is_red(tmp_path):
+    # No `: ` / `：` / ` -- ` / ` — ` anywhere -- the whole sentence must
+    # stay verbatim; a single hyphen is NOT a recognized separator.
+    repo, rev = _label_scenario(
+        tmp_path,
+        "WP-4 forever - stays the same reasoning.",
+        "stays the same reasoning.",
+    )
+    code, output = _run_base(repo, rev, "r2db-api/src/r2db_api/mod.py")
+    assert code == 1
+    assert "§4.1 (3)" in output
