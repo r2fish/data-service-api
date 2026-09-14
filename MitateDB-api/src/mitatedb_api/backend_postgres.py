@@ -98,6 +98,7 @@ from . import platform_upgrades
 # `_INT_DOMAIN_RANGES` is re-exported for facade compatibility (design
 # D-2); not referenced elsewhere in this module.
 from .postgres_value_domain import _INT_DOMAIN_RANGES, _check_domain
+from .postgres_reserved_names import _RESERVED_EXACT, _RESERVED_PREFIX, _check_reserved_name
 
 
 def _guard_pending_platform_upgrades(method):
@@ -125,17 +126,6 @@ def _guard_pending_platform_upgrades(method):
         return method(self, *args, **kwargs)
     return _wrapped
 
-
-# R-3 (design v1.1 §0/R-4 WP-0 m-7): backend-specific reserved names.
-# `audit_events` mirrors the SQLite backend's own defensive reservation
-# (against a future local audit-table name collision); the `pg_` PREFIX
-# rule is PostgreSQL-specific -- every name PostgreSQL's own system
-# catalog uses starts with it (`pg_class`, `pg_attribute`, ...), and it is
-# not expressible as a plain set-membership check, which is why
-# `check_reserved` is a method rather than a published `frozenset` (unlike
-# the exact-match-only SQLite backend).
-_RESERVED_EXACT = frozenset({"audit_events"})
-_RESERVED_PREFIX = "pg_"
 
 # Foundation field-type vocabulary -> this backend's own native column
 # type. `boolean` maps to `INTEGER`, not PostgreSQL's native `BOOLEAN`
@@ -540,11 +530,7 @@ class PostgresBackend:
         # same `identifier_syntax` vocabulary `validate_identifier`
         # itself uses, `field` = `label` (the same per-call-site request
         # position `_identifier` already passes to both stages).
-        if value in _RESERVED_EXACT or value.startswith(_RESERVED_PREFIX):
-            raise ValidationError(
-                "reserved " + label,
-                details=violation("identifier_syntax", field=label),
-            )
+        _check_reserved_name(value, label)
 
     # ------------------------------------------------------------------
     # catalog (developer connection -- schema owner)

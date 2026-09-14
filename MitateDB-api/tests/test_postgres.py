@@ -1568,6 +1568,47 @@ def test_check_domain_range_boundaries_at_the_mechanism_level() -> None:
     assert _check_domain("anything", "not-a-real-domain") == "anything"
 
 
+# --- BP4 (R-37 WP-1l): PostgreSQL reserved-name checks, connection- --------
+# --- independent unit tests of the mechanism itself -------------------------
+
+
+def test_postgres_reserved_names_leaf_preserves_backend_postgres_facade() -> None:
+    """WP-1l facade compatibility: `_RESERVED_EXACT`/`_RESERVED_PREFIX`/
+    `_check_reserved_name` are re-exported, unchanged, from `backend_
+    postgres.py` after their extraction into `postgres_reserved_names.py`
+    -- no live PostgreSQL server needed."""
+    from mitatedb_api import backend_postgres
+    from mitatedb_api.postgres_reserved_names import (_RESERVED_EXACT, _RESERVED_PREFIX,
+                                                       _check_reserved_name)
+
+    assert backend_postgres._RESERVED_EXACT is _RESERVED_EXACT
+    assert backend_postgres._RESERVED_PREFIX is _RESERVED_PREFIX
+    assert backend_postgres._check_reserved_name is _check_reserved_name
+
+
+def test_postgres_backend_check_reserved_refuses_pg_prefix_and_audit_events_exactly() -> None:
+    """BP4: `PostgresBackend.check_reserved` does not read `self` (m-8),
+    so this pins the reserved-name check directly, without a live
+    PostgreSQL server -- closing the SI-04 gap this WP found (no existing
+    test fixed the `pg_`-prefix / `audit_events`-exact-match behaviour):
+    the `pg_` prefix and the exact name `audit_events` are refused, a
+    name that merely starts with `audit_events` or merely ends with
+    `pg_` is not, and the denial `details` are exactly the
+    `identifier_syntax` violation form (`field` = the caller's own
+    `label`, no `declared_type`/`observed_type`)."""
+    with pytest.raises(ValidationError) as excinfo:
+        PostgresBackend.check_reserved(None, "pg_x", "collection")
+    assert excinfo.value.details == {"violated_declaration": "identifier_syntax", "field": "collection"}
+
+    with pytest.raises(ValidationError) as excinfo:
+        PostgresBackend.check_reserved(None, "audit_events", "entity")
+    assert excinfo.value.details == {"violated_declaration": "identifier_syntax", "field": "entity"}
+
+    assert PostgresBackend.check_reserved(None, "audit_events2", "entity") is None
+    assert PostgresBackend.check_reserved(None, "audit_event", "entity") is None
+    assert PostgresBackend.check_reserved(None, "xpg_", "entity") is None
+
+
 # --- m-1 (independent review correction): _mdb_schema_revision's real ------
 # --- defenses ----------------------------------------------------------------
 
